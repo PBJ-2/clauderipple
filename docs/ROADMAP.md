@@ -3,6 +3,10 @@
 Language: TypeScript, single repository, Node 24. No runtime dependency on any
 third-party translator binary.
 
+Status 2026-09-11: M1 done and live on the author's machine (cut over from the
+Python prototype). M2 adapter implemented and unit/integration tested; live
+streamed answer pending quota reset. M3 in progress (local GUI + Electron tray).
+
 ## M1 — Router + installer (replaces the Python prototype)
 
 - `packages/router`: CONNECT proxy, TLS termination for `api.anthropic.com`,
@@ -31,8 +35,11 @@ third-party translator binary.
 
 ## M3 — GUI
 
-- Menu-bar app: slot mapping (which picker entry → which provider model),
-  chain health (router, adapters, remote workers), request log, quota.
+- The router serves a local GUI (`packages/ui`) and an admin API on
+  127.0.0.1:(port+1): slot mapping (which picker entry → which provider model),
+  providers, chain health, request log, quota, about.
+- `packages/app`: Electron menu-bar shell that hosts that GUI in a window and
+  shows health in the tray (ok / attention / down), with restart, login, logs.
 - Ships the installer inside; the CLI remains for headless use.
 
 ## Later

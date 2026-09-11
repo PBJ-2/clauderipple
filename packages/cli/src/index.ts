@@ -12,6 +12,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { ConfigStore, DEFAULTS, homeDir, configPath } from "../../router/src/config.ts";
+import { adminPort } from "../../router/src/admin.ts";
 import { certsExist, certPaths, generateCerts } from "./certs.ts";
 import { applyProxyEnv, currentProxyEnv, removeProxyEnv, settingsPath } from "./settings.ts";
 import { agentState, installAgent, kickstart, plistPath, removeAgent, stopAgent } from "./launchd.ts";
@@ -130,7 +131,7 @@ async function status(): Promise<void> {
   const p = await probe({ host: cfg.listen.host, port: cfg.listen.port, caPem: caPath, upstream: cfg.upstream });
   rows.push(["probe", `${p.ok ? "ok" : "FAIL"}: ${p.detail} (${p.ms}ms)`]);
   for (const [name, p2] of Object.entries(cfg.providers)) {
-    const u = new URL(p2.url);
+    const u = new URL(p2.type === "chatgpt" ? (p2.url ?? "https://chatgpt.com") : p2.url);
     rows.push([`provider ${name}`, await tcpCheck(u.hostname, Number(u.port) || (u.protocol === "https:" ? 443 : 80))]);
   }
   rows.push(["claude code cli", cliVersions()]);
@@ -168,6 +169,18 @@ function cliVersions(): string {
   }
 }
 
+function ui(): void {
+  const cfg = new ConfigStore(configPath()).get();
+  const port = adminPort(cfg);
+  const url = `http://127.0.0.1:${port}/`;
+  try {
+    execFileSync("open", [url], { stdio: "ignore" });
+    console.log(`opened ${url}`);
+  } catch (e) {
+    console.log(`could not open a browser automatically (${(e as Error).message}); open this URL yourself: ${url}`);
+  }
+}
+
 function logs(): void {
   const file = path.join(homeDir(), "logs", "router.log");
   if (!fs.existsSync(file)) {
@@ -191,6 +204,9 @@ function help(): void {
   start | stop | restart
   logs [-n N] [-f]
   config            print the config file path
+  ui                open the admin GUI in your browser
+  login             sign in to ChatGPT (opens your browser; tokens stay in the home dir)
+  logout            forget the ChatGPT login made with "login"
 
 Home directory: ${homeDir()}  (override with CLAUDERIPPLE_HOME)`);
 }
@@ -220,6 +236,27 @@ try {
       break;
     case "config":
       console.log(configPath());
+      break;
+    case "login": {
+      const { login } = await import("../../router/src/providers/chatgpt/auth.ts");
+      console.log("Opening your browser to sign in to ChatGPT. Sign in there; this window waits up to 5 minutes.");
+      const t = await login(homeDir(), (url) => {
+        try {
+          execFileSync("open", [url], { stdio: "ignore" });
+        } catch {
+          console.log(`Open this URL manually:\n${url}`);
+        }
+      });
+      console.log(`✓ signed in (account ${t.accountId.slice(0, 8)}…, token valid until ${new Date(t.expiresAt).toLocaleString()}). Stored in ${homeDir()}/chatgpt-auth.json`);
+      break;
+    }
+    case "logout": {
+      const { logout } = await import("../../router/src/providers/chatgpt/auth.ts");
+      console.log(logout(homeDir()) ? "✓ ChatGPT login removed" : "no ChatGPT login stored");
+      break;
+    }
+    case "ui":
+      ui();
       break;
     default:
       help();

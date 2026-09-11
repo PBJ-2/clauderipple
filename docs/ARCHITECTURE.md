@@ -107,6 +107,23 @@ chat is out of reach for every approach, ours included.
     rejected (luna accepts it). Clamp `ultra` → `max`.
   - Model self-introduction is not evidence of routing. Verify by upstream
     usage records.
+  - **Implemented 2026-09-11** in `packages/router/src/providers/chatgpt/`.
+    Wire facts used: endpoint `POST {base}/codex/responses` with base
+    `https://chatgpt.com/backend-api`; headers `authorization: Bearer`,
+    `chatgpt-account-id`, `OpenAI-Beta: responses=experimental`,
+    `originator: codex_cli_rs`; body fields `model, instructions, input, tools,
+    tool_choice, parallel_tool_calls, reasoning{effort,summary}, text{verbosity},
+    store:false, stream:true, prompt_cache_key`. OAuth: `auth.openai.com/oauth/
+    authorize|token`, client `app_EMoamEEZ73f0CkXaXp7hrann`, redirect
+    `http://localhost:1455/auth/callback`, PKCE S256, account id from the access
+    token claim `https://api.openai.com/auth.chatgpt_account_id`. Verified live:
+    a request with borrowed Codex CLI credentials was accepted by the backend
+    (answered 429 usage-limit, not 401/400). Streaming translation verified
+    against a fake backend replaying captured event shapes; a real streamed
+    answer is still to be verified once the weekly quota resets (2026-09-15).
+  - Cache-safety decisions: thinking blocks are dropped from replayed history;
+    no reasoning `include`; identity line and `instructionsAppend` are constant
+    text; `prompt_cache_key` = sha256(metadata.user_id + first user message).
 
 ## 5. Failure modes that must not exist in the product (all observed)
 

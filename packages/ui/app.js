@@ -1,0 +1,465 @@
+"use strict";
+
+// ---- tiny helpers -----------------------------------------------------------------
+
+function $(sel, root) { return (root || document).querySelector(sel); }
+function $all(sel, root) { return Array.from((root || document).querySelectorAll(sel)); }
+function el(tag, attrs, children) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") n.className = v;
+    else if (k.startsWith("on") && typeof v === "function") n.addEventListener(k.slice(2), v);
+    else if (v !== undefined && v !== null) n.setAttribute(k, v);
+  }
+  for (const c of children || []) {
+    if (c === null || c === undefined) continue;
+    n.appendChild(c instanceof Node ? c : document.createTextNode(String(c)));
+  }
+  return n;
+}
+
+let toastTimer = null;
+function toast(msg, isError) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.classList.toggle("error", !!isError);
+  t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 3200);
+}
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  const text = await res.text();
+  let body;
+  try { body = text ? JSON.parse(text) : {}; } catch { body = { raw: text }; }
+  if (!res.ok) {
+    const err = new Error((body && (body.error || (body.errors || []).join("; "))) || `HTTP ${res.status}`);
+    err.body = body;
+    throw err;
+  }
+  return body;
+}
+
+// ---- navigation ---------------------------------------------------------------------
+
+const DEFAULT_SLOTS = ["claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6"];
+
+// Declared before the first showView() call below: `let` bindings are in the temporal dead zone
+// until their declaration runs, and loading the page at #slots used to throw here.
+let slotsLoaded = false;
+let providersLoaded = false;
+let currentConfig = null;
+
+function showView(name) {
+  for (const b of $all(".nav-btn")) b.classList.toggle("active", b.dataset.view === name);
+  for (const v of $all(".view")) v.classList.toggle("active", v.id === `view-${name}`);
+  location.hash = name;
+  if (name === "slots" && !slotsLoaded) loadSlots();
+  if (name === "providers" && !providersLoaded) loadProviders();
+}
+
+for (const b of $all(".nav-btn")) b.addEventListener("click", () => showView(b.dataset.view));
+showView((location.hash || "#health").slice(1) || "health");
+window.addEventListener("hashchange", () => showView((location.hash || "#health").slice(1) || "health"));
+
+// ---- Health ---------------------------------------------------------------------------
+
+function badge(ok, textOk, textBad) {
+  const b = el("span", { class: `badge ${ok ? "ok" : "bad"} dot` }, [ok ? textOk : textBad]);
+  return b;
+}
+
+async function refreshHealth() {
+  let s;
+  try {
+    s = await api("/api/status");
+  } catch (e) {
+    $("#health-router").innerHTML = "";
+    $("#health-router").appendChild(el("div", { class: "row" }, [el("span", { class: "k" }, ["router"]), badge(false, "up", "unreachable")]));
+    return;
+  }
+
+  const router = $("#health-router");
+  router.innerHTML = "";
+  const rows = [
+    ["status", badge(true, "running", "")],
+    ["version", s.version],
+    ["listening on", `${s.listen.host}:${s.listen.port}`],
+    ["admin GUI port", s.adminPort],
+    ["upstream", s.upstream],
+    ["routes configured", String(s.routes)],
+    ["requests", `${s.stats.started} started · ${s.stats.completed} ok · ${s.stats.failed} failed · ${s.stats.inFlight} in flight`],
+    ["consecutive upstream failures", el("span", {}, [
+      String(s.consecutiveUpstreamFailures),
+      s.consecutiveUpstreamFailures > 0 ? badge(false, "", "elevated") : null,
+    ])],
+  ];
+  for (const [k, v] of rows) {
+    const valueSpan = el("span", { class: "v" }, [v]);
+    router.appendChild(el("div", { class: "row" }, [el("span", { class: "k" }, [k]), valueSpan]));
+  }
+
+  const settings = $("#health-settings");
+  settings.innerHTML = "";
+  settings.appendChild(el("div", { class: "row" }, [el("span", { class: "k" }, ["points at this router"]), s.settings.pointsAtRouter ? badge(true, "yes", "") : badge(false, "", "no — run `clauderipple install`")]));
+  settings.appendChild(el("div", { class: "row" }, [el("span", { class: "k" }, ["HTTPS_PROXY"]), el("span", { class: "v" }, [s.settings.HTTPS_PROXY || "(unset)"])]));
+  settings.appendChild(el("div", { class: "row" }, [el("span", { class: "k" }, ["NODE_EXTRA_CA_CERTS"]), el("span", { class: "v" }, [s.settings.NODE_EXTRA_CA_CERTS || "(unset)"])]));
+
+  const tbody = $("#health-providers tbody");
+  tbody.innerHTML = "";
+  const names = Object.keys(s.providers);
+  if (names.length === 0) {
+    tbody.appendChild(el("tr", {}, [el("td", { colspan: "3", class: "small" }, ["No providers configured yet — add one under Providers."])]));
+  }
+  for (const name of names) {
+    const p = s.providers[name];
+    const quota = s.chatgpt && s.chatgpt.quota && s.chatgpt.quota[name];
+    const auth = s.chatgpt && s.chatgpt.auth && s.chatgpt.auth[name];
+    const details = [p.type === "chatgpt" ? "ChatGPT subscription" : p.url];
+    if (p.type === "chatgpt" && auth) details.push(`credentials: ${auth}`);
+    if (quota && quota.rate_limits && quota.rate_limits.primary) {
+      const pr = quota.rate_limits.primary;
+      const hours = pr.reset_after_seconds ? Math.round(pr.reset_after_seconds / 3600) : null;
+      details.push(`${quota.plan_type || "plan"}: ${pr.used_percent}% of ${pr.window_minutes === 10080 ? "weekly" : (pr.window_minutes / 60) + "h"} limit used${hours !== null ? `, resets in ${hours}h` : ""}`);
+    }
+    tbody.appendChild(el("tr", {}, [
+      el("td", {}, [name, el("div", { class: "small" }, [p.type])]),
+      el("td", { class: "small" }, details.flatMap((d, i) => (i ? [el("br"), d] : [d]))),
+      el("td", {}, [p.reachable ? badge(true, "reachable", "") : badge(false, "", "unreachable")]),
+    ]));
+  }
+
+  const cli = $("#health-cli");
+  cli.innerHTML = "";
+  cli.appendChild(el("div", { class: "row" }, [el("span", { class: "k" }, ["cached version"]), el("span", { class: "v" }, [s.cliVersion])]));
+
+  $("#about-home").textContent = `Home directory: ${s.home}`;
+}
+
+refreshHealth();
+setInterval(refreshHealth, 5000);
+
+// ---- Slots ----------------------------------------------------------------------------
+
+function providerOptions(selected) {
+  const sel = el("select", {});
+  sel.appendChild(el("option", { value: "" }, ["Passthrough (Anthropic)"]));
+  for (const name of Object.keys(currentConfig.providers)) {
+    sel.appendChild(el("option", { value: name }, [name]));
+  }
+  sel.value = selected || "";
+  return sel;
+}
+
+function effortSelect(selected) {
+  const sel = el("select", {});
+  for (const v of ["", "low", "medium", "high", "xhigh", "max"]) {
+    sel.appendChild(el("option", { value: v }, [v === "" ? "(none)" : v]));
+  }
+  sel.value = selected || "";
+  return sel;
+}
+
+function slotRow(id, route) {
+  const tr = el("tr", {});
+  const idInput = el("input", { value: id, placeholder: "claude-..." });
+  const provSel = providerOptions(route ? route.provider : "");
+  const modelInput = el("input", { value: route ? route.model : "", placeholder: "model id", list: "model-suggestions-inline" });
+  const effSel = effortSelect(route ? route.effort : "");
+  const dl = el("datalist", { id: `dl-${Math.random().toString(36).slice(2)}` });
+  modelInput.setAttribute("list", dl.id);
+
+  function updateSuggestions() {
+    dl.innerHTML = "";
+    const p = currentConfig.providers[provSel.value];
+    for (const m of (p && p.models) || []) dl.appendChild(el("option", { value: m }));
+    modelInput.disabled = !provSel.value;
+    effSel.disabled = !provSel.value;
+    if (!provSel.value) { modelInput.value = ""; effSel.value = ""; }
+  }
+  provSel.addEventListener("change", updateSuggestions);
+  updateSuggestions();
+
+  const isDefault = DEFAULT_SLOTS.includes(id);
+  const del = el("button", { class: "icon-btn", title: "Remove slot", onclick: () => { tr.remove(); } }, ["✕"]);
+  if (isDefault) del.style.visibility = "hidden";
+
+  tr.appendChild(el("td", {}, [idInput]));
+  tr.appendChild(el("td", {}, [provSel]));
+  tr.appendChild(el("td", {}, [modelInput, dl]));
+  tr.appendChild(el("td", {}, [effSel]));
+  tr.appendChild(el("td", {}, [del]));
+  tr._get = () => ({ id: idInput.value.trim(), provider: provSel.value, model: modelInput.value.trim(), effort: effSel.value });
+  return tr;
+}
+
+async function loadSlots() {
+  slotsLoaded = true;
+  try {
+    currentConfig = await api("/api/config");
+  } catch (e) {
+    toast(`Failed to load config: ${e.message}`, true);
+    return;
+  }
+  const tbody = $("#slots-table tbody");
+  tbody.innerHTML = "";
+  const seen = new Set();
+  for (const id of DEFAULT_SLOTS) {
+    seen.add(id);
+    tbody.appendChild(slotRow(id, currentConfig.routes[id]));
+  }
+  for (const [id, route] of Object.entries(currentConfig.routes)) {
+    if (seen.has(id)) continue;
+    tbody.appendChild(slotRow(id, route));
+  }
+}
+
+$("#slots-add").addEventListener("click", () => {
+  $("#slots-table tbody").appendChild(slotRow("", null));
+});
+
+$("#slots-save").addEventListener("click", async () => {
+  if (!currentConfig) return;
+  const rows = $all("#slots-table tbody tr").map((tr) => tr._get());
+  const routes = {};
+  const errors = [];
+  const seenIds = new Set();
+  for (const r of rows) {
+    if (!r.id) continue;
+    if (seenIds.has(r.id)) { errors.push(`duplicate slot id "${r.id}"`); continue; }
+    seenIds.add(r.id);
+    if (!r.provider) continue; // passthrough
+    if (!r.model) { errors.push(`slot "${r.id}": model is required when a provider is set`); continue; }
+    routes[r.id] = { provider: r.provider, model: r.model, ...(r.effort ? { effort: r.effort } : {}) };
+  }
+  if (errors.length) { toast(errors.join("; "), true); return; }
+  const next = { ...currentConfig, routes };
+  try {
+    await api("/api/config", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(next) });
+    currentConfig = next;
+    toast("Slots saved.");
+  } catch (e) {
+    toast(`Save failed: ${e.message}`, true);
+  }
+});
+
+// ---- Providers --------------------------------------------------------------------------
+
+function headerRow(key, value, onRemove) {
+  const row = el("div", { class: "headers-row" });
+  const k = el("input", { value: key || "", placeholder: "Header name" });
+  const v = el("input", { value: value || "", placeholder: "Value" });
+  const del = el("button", { class: "icon-btn", onclick: onRemove }, ["✕"]);
+  row.appendChild(k); row.appendChild(v); row.appendChild(del);
+  row._get = () => [k.value.trim(), v.value];
+  return row;
+}
+
+function providerCard(name, p) {
+  const card = el("div", { class: "card" });
+  const nameInput = el("input", { value: name || "", placeholder: "provider-name", style: "font-weight:600;max-width:220px;" });
+  const typeSel = el("select", { style: "max-width:220px;" }, [
+    el("option", { value: "anthropic-compatible" }, ["anthropic-compatible (URL that speaks Anthropic Messages)"]),
+    el("option", { value: "chatgpt" }, ["chatgpt (your ChatGPT subscription)"]),
+  ]);
+  typeSel.value = (p && p.type) || "anthropic-compatible";
+  const urlInput = el("input", { value: (p && p.url) || "", placeholder: "https://api.example.com/anthropic" });
+  const modelsInput = el("input", { value: (p && p.models && p.models.join(", ")) || "", placeholder: "model-a, model-b (optional, for slot suggestions)" });
+
+  // chatgpt-only fields
+  const authSel = el("select", { style: "max-width:320px;" }, [
+    el("option", { value: "auto" }, ["auto — own login if present, else borrow the Codex CLI's"]),
+    el("option", { value: "own" }, ["own — tokens from `clauderipple login`"]),
+    el("option", { value: "borrow-codex" }, ["borrow-codex — read ~/.codex/auth.json (never refreshed by us)"]),
+  ]);
+  authSel.value = (p && p.auth) || "auto";
+  const identityChk = el("input", { type: "checkbox" });
+  identityChk.checked = !(p && p.identity === false);
+  const effortSel = el("select", { style: "max-width:220px;" }, ["low", "medium", "high", "xhigh", "max"].map((v) => el("option", { value: v }, [v])));
+  effortSel.value = (p && p.defaultEffort) || "high";
+  const appendTa = el("textarea", { rows: "4", placeholder: "Fixed text appended to every system prompt. Keep it constant: changing it breaks the prompt cache." });
+  appendTa.value = (p && p.instructionsAppend) || "";
+
+  const headersWrap = el("div", { class: "headers-list" });
+  const initialHeaders = (p && p.headers) || {};
+  let maskExisting = Object.keys(initialHeaders).length > 0;
+  for (const [k, v] of Object.entries(initialHeaders)) {
+    const row = headerRow(k, maskExisting ? "••••••••" : v, () => row.remove());
+    row._unmasked = false;
+    row._get = () => {
+      const kk = row.querySelector("input").value.trim();
+      const vv = row.querySelectorAll("input")[1].value;
+      return [kk, vv === "••••••••" ? initialHeaders[k] : vv];
+    };
+    headersWrap.appendChild(row);
+  }
+  const addHeaderBtn = el("button", { class: "btn secondary", type: "button" }, ["+ Header"]);
+  addHeaderBtn.addEventListener("click", () => {
+    const row = headerRow("", "", () => row.remove());
+    headersWrap.appendChild(row);
+  });
+
+  const delProviderBtn = el("button", { class: "btn danger", type: "button" }, ["Remove provider"]);
+  delProviderBtn.addEventListener("click", () => card.remove());
+
+  card.appendChild(el("div", { class: "toolbar" }, [nameInput, el("div", { class: "right" }, [delProviderBtn])]));
+  const urlRow = el("div", { class: "row" }, [el("span", { class: "k" }, ["URL"]), urlInput]);
+  const compatBlock = el("div", {}, [
+    el("div", { style: "margin-top:10px;" }, [el("span", { class: "small" }, ["Headers (e.g. x-api-key)"])]),
+    headersWrap,
+    el("div", { style: "margin-top:6px;" }, [addHeaderBtn]),
+  ]);
+  const chatgptBlock = el("div", { class: "rows" }, [
+    el("div", { class: "row" }, [el("span", { class: "k" }, ["Credentials"]), authSel]),
+    el("div", { class: "row" }, [el("span", { class: "k" }, ["Default effort"]), effortSel]),
+    el("div", { class: "row" }, [el("span", { class: "k" }, ["Identity line"]), el("label", { class: "small" }, [identityChk, " prefix the system prompt with “You are <model>, answering through Claude Code”"])]),
+    el("div", { class: "row" }, [el("span", { class: "k" }, ["Append"]), appendTa]),
+    el("div", { class: "small" }, ["Sign in with ", el("code", {}, ["clauderipple login"]), " (or the tray menu). Credentials never leave this machine."]),
+  ]);
+  card.appendChild(el("div", { class: "rows" }, [
+    el("div", { class: "row" }, [el("span", { class: "k" }, ["Type"]), typeSel]),
+    urlRow,
+    el("div", { class: "row" }, [el("span", { class: "k" }, ["Models"]), modelsInput]),
+  ]));
+  card.appendChild(compatBlock);
+  card.appendChild(chatgptBlock);
+
+  function syncType() {
+    const gpt = typeSel.value === "chatgpt";
+    compatBlock.style.display = gpt ? "none" : "";
+    chatgptBlock.style.display = gpt ? "" : "none";
+    urlInput.placeholder = gpt ? "optional — override https://chatgpt.com/backend-api" : "https://api.example.com/anthropic";
+    if (gpt && !modelsInput.value) modelsInput.value = "gpt-5.6-terra, gpt-5.6-sol, gpt-5.6-luna, gpt-6-astra";
+  }
+  typeSel.addEventListener("change", syncType);
+  syncType();
+
+  card._get = () => {
+    const models = modelsInput.value.split(",").map((s) => s.trim()).filter(Boolean);
+    if (typeSel.value === "chatgpt") {
+      const url = urlInput.value.trim();
+      const append = appendTa.value;
+      return {
+        name: nameInput.value.trim(),
+        provider: {
+          type: "chatgpt",
+          auth: authSel.value,
+          defaultEffort: effortSel.value,
+          identity: identityChk.checked,
+          ...(url ? { url } : {}),
+          ...(append ? { instructionsAppend: append } : {}),
+          ...(models.length ? { models } : {}),
+        },
+      };
+    }
+    const headers = {};
+    for (const row of $all(".headers-row", headersWrap)) {
+      const [k, v] = row._get();
+      if (k) headers[k] = v;
+    }
+    return {
+      name: nameInput.value.trim(),
+      provider: {
+        type: "anthropic-compatible",
+        url: urlInput.value.trim(),
+        ...(Object.keys(headers).length ? { headers } : {}),
+        ...(models.length ? { models } : {}),
+      },
+    };
+  };
+  return card;
+}
+
+function directRow(prefix, provider) {
+  const tr = el("tr", {});
+  const prefixInput = el("input", { value: prefix || "", placeholder: "gpt-" });
+  const provSel = providerOptions(provider || "");
+  provSel.querySelector('option[value=""]').remove();
+  const del = el("button", { class: "icon-btn", onclick: () => tr.remove() }, ["✕"]);
+  tr.appendChild(el("td", {}, [prefixInput]));
+  tr.appendChild(el("td", {}, [provSel]));
+  tr.appendChild(el("td", {}, [del]));
+  tr._get = () => ({ prefix: prefixInput.value.trim(), provider: provSel.value });
+  return tr;
+}
+
+async function loadProviders() {
+  providersLoaded = true;
+  try {
+    currentConfig = currentConfig || (await api("/api/config"));
+  } catch (e) {
+    toast(`Failed to load config: ${e.message}`, true);
+    return;
+  }
+  const list = $("#providers-list");
+  list.innerHTML = "";
+  for (const [name, p] of Object.entries(currentConfig.providers)) {
+    list.appendChild(providerCard(name, p));
+  }
+  const tbody = $("#direct-table tbody");
+  tbody.innerHTML = "";
+  for (const d of currentConfig.direct) tbody.appendChild(directRow(d.prefix, d.provider));
+}
+
+$("#providers-add").addEventListener("click", () => {
+  $("#providers-list").appendChild(providerCard("", null));
+});
+
+$("#direct-add").addEventListener("click", () => {
+  $("#direct-table tbody").appendChild(directRow("", ""));
+});
+
+$("#providers-save").addEventListener("click", async () => {
+  if (!currentConfig) return;
+  const providers = {};
+  const errors = [];
+  for (const card of $all("#providers-list .card")) {
+    const { name, provider } = card._get();
+    if (!name) { errors.push("a provider is missing a name"); continue; }
+    if (provider.type === "anthropic-compatible" && !provider.url) { errors.push(`provider "${name}": URL is required`); continue; }
+    providers[name] = provider;
+  }
+  const direct = $all("#direct-table tbody tr").map((tr) => tr._get()).filter((d) => d.prefix && d.provider);
+  if (errors.length) { toast(errors.join("; "), true); return; }
+  const next = { ...currentConfig, providers, direct };
+  try {
+    await api("/api/config", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(next) });
+    currentConfig = next;
+    slotsLoaded = false; // provider list changed; reload next time Slots is opened
+    toast("Providers saved.");
+  } catch (e) {
+    toast(`Save failed: ${e.message}`, true);
+  }
+});
+
+// ---- Logs -----------------------------------------------------------------------------
+
+function colorizeLogLine(line) {
+  let cls = "tag-PASS";
+  if (/^\S+\s\S+\s(ERROR|error)/.test(line) || / ERROR /.test(line)) cls = "tag-ERR";
+  else if (/ WARN /.test(line)) cls = "tag-WARN";
+  else if (/^\S+ \S+ [A-Z][A-Z0-9._-]+ /.test(line) && !/^\S+ \S+ PASS /.test(line)) cls = "tag-PROVIDER";
+  return el("div", { class: cls }, [line]);
+}
+
+let logsTimer = null;
+async function refreshLogs() {
+  const box = $("#logbox");
+  if (!box) return;
+  try {
+    const res = await fetch("/api/logs?n=200");
+    const text = await res.text();
+    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
+    box.innerHTML = "";
+    for (const line of text.split("\n")) {
+      if (line === "") continue;
+      box.appendChild(colorizeLogLine(line));
+    }
+    if ($("#logs-autoscroll").checked || atBottom) box.scrollTop = box.scrollHeight;
+  } catch {
+    /* keep last good content */
+  }
+}
+refreshLogs();
+logsTimer = setInterval(refreshLogs, 3000);

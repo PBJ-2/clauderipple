@@ -8,10 +8,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import tls from "node:tls";
-import { ConfigStore, homeDir } from "./config.ts";
+import { ConfigStore, configPath, homeDir } from "./config.ts";
 import { Logger } from "./log.ts";
 import { UpstreamHealth, EXIT_UPSTREAM_UNREACHABLE } from "./health.ts";
 import { Proxy } from "./proxy.ts";
+import { startAdmin } from "./admin.ts";
 
 const home = homeDir();
 const logFile = process.env.CLAUDERIPPLE_NO_LOGFILE ? null : path.join(home, "logs", "router.log");
@@ -43,7 +44,7 @@ const health = new UpstreamHealth(
   },
 );
 
-const proxy = new Proxy({ config: () => store.get(), log, secureContext, health });
+const proxy = new Proxy({ config: () => store.get(), log, secureContext, health, home });
 
 process.on("uncaughtException", (e) => log!.error(`uncaught ${(e as Error).stack ?? e}`));
 process.on("unhandledRejection", (e) => log!.error(`unhandled ${(e as Error)?.stack ?? e}`));
@@ -63,9 +64,19 @@ setInterval(() => {
 
 proxy
   .listen()
-  .then(() => {
+  .then(async () => {
     const c = store.get();
     log!.info(`clauderipple router listening on ${c.listen.host}:${c.listen.port} upstream=${c.upstream} home=${home}`);
+    const admin = await startAdmin({
+      config: () => store.get(),
+      configFile: configPath(),
+      log: log!,
+      stats: () => proxy.stats,
+      health: () => health.consecutiveFailures,
+      version: "0.1.0",
+      chatgpt: () => ({ quota: proxy.chatgptRateLimits, auth: proxy.chatgptAuthStatus() }),
+    });
+    log!.info(`clauderipple admin GUI on http://127.0.0.1:${admin.port}/`);
   })
   .catch((e) => {
     log!.error(`listen failed: ${(e as Error).message}`);

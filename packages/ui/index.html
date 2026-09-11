@@ -1,0 +1,116 @@
+<title>ClaudeRipple</title>
+<link rel="stylesheet" href="style.css" />
+
+<nav>
+  <div class="brand">ClaudeRipple</div>
+  <button data-view="health" class="nav-btn">Health</button>
+  <button data-view="slots" class="nav-btn">Slots</button>
+  <button data-view="providers" class="nav-btn">Providers</button>
+  <button data-view="logs" class="nav-btn">Logs</button>
+  <button data-view="about" class="nav-btn">About</button>
+</nav>
+
+<main>
+  <!-- Health -->
+  <section id="view-health" class="view">
+    <h1>Health</h1>
+    <p class="subtitle">Live status of the router, settings.json, and every provider. Refreshes every 5s.</p>
+
+    <div class="card">
+      <h2>Router</h2>
+      <div class="rows" id="health-router"></div>
+    </div>
+
+    <div class="card">
+      <h2>settings.json</h2>
+      <div class="rows" id="health-settings"></div>
+    </div>
+
+    <div class="card">
+      <h2>Providers</h2>
+      <table id="health-providers">
+        <thead><tr><th>Provider</th><th>URL</th><th>Status</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>Claude Code CLI</h2>
+      <div class="rows" id="health-cli"></div>
+    </div>
+  </section>
+
+  <!-- Slots -->
+  <section id="view-slots" class="view">
+    <h1>Slots</h1>
+    <p class="subtitle">Map each app-picker model id to a provider, model, and effort. Rows set to "Passthrough" go straight to Anthropic.</p>
+
+    <div class="toolbar">
+      <button class="btn secondary" id="slots-add">+ Add slot</button>
+      <div class="right">
+        <span class="small" id="slots-status"></span>
+        <button class="btn" id="slots-save">Save</button>
+      </div>
+    </div>
+
+    <div class="card" style="padding:0;">
+      <table id="slots-table">
+        <thead>
+          <tr><th style="width:26%">Slot id</th><th style="width:20%">Provider</th><th style="width:28%">Model</th><th style="width:16%">Effort</th><th></th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <datalist id="model-suggestions"></datalist>
+  </section>
+
+  <!-- Providers -->
+  <section id="view-providers" class="view">
+    <h1>Providers</h1>
+    <p class="subtitle">Endpoints ClaudeRipple can route requests to, and prefix-based direct rules.</p>
+
+    <div class="toolbar">
+      <button class="btn secondary" id="providers-add">+ Add provider</button>
+      <div class="right">
+        <span class="small" id="providers-status"></span>
+        <button class="btn" id="providers-save">Save</button>
+      </div>
+    </div>
+
+    <div id="providers-list"></div>
+
+    <div class="card">
+      <h2>Direct rules</h2>
+      <p class="hint" style="margin-top:-4px;margin-bottom:10px;">A request whose model starts with a prefix below goes to that provider unchanged.</p>
+      <table id="direct-table">
+        <thead><tr><th style="width:40%">Prefix</th><th style="width:40%">Provider</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div style="margin-top:8px;"><button class="btn secondary" id="direct-add">+ Add rule</button></div>
+    </div>
+  </section>
+
+  <!-- Logs -->
+  <section id="view-logs" class="view">
+    <h1>Logs</h1>
+    <div class="toolbar">
+      <label class="check"><input type="checkbox" id="logs-autoscroll" checked /> Auto-scroll</label>
+      <span class="small">Polling every 3s · last 200 lines</span>
+    </div>
+    <pre id="logbox"></pre>
+  </section>
+
+  <!-- About -->
+  <section id="view-about" class="view">
+    <h1>About</h1>
+    <div class="card">
+      <p>ClaudeRipple is an independent open-source project, not affiliated with Anthropic or OpenAI. Claude and Claude Code are trademarks of Anthropic, PBC.</p>
+      <p class="small">License: MIT</p>
+      <p class="small" id="about-home"></p>
+    </div>
+  </section>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script src="app.js"></script>
