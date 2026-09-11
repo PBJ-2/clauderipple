@@ -24,6 +24,63 @@ type Status = {
 const home = process.env.CLAUDERIPPLE_HOME ?? path.join(os.homedir(), ".clauderipple");
 const POLL_MS = 5000;
 
+// ---- i18n: tray menu, dialogs, tooltips -------------------------------------------------
+
+const STRINGS = {
+  en: {
+    healthy: "healthy",
+    attentionNeeded: "attention needed",
+    routerNotRunning: "router not running",
+    slotsMapped: (n: number) => `${n} slot${n === 1 ? "" : "s"} mapped`,
+    inFlight: "in flight",
+    connected: "Claude Desktop → ClaudeRipple ✓",
+    notConnected: "Claude Desktop is NOT using ClaudeRipple",
+    percentOfWeekUsed: (percent: string | number, plan: string) => `ChatGPT ${plan}: ${percent}% of week used`,
+    cliVersion: (v: string) => `Claude Code CLI ${v}`,
+    openWindow: "Open ClaudeRipple…",
+    openInBrowser: "Open in Browser",
+    restartRouter: "Restart Router",
+    startRouter: "Start Router",
+    signInChatgpt: "Sign in to ChatGPT…",
+    copyStatus: "Copy Status",
+    showLogs: "Show Logs",
+    about: "About ClaudeRipple",
+    aboutDetail:
+      "Run GPT and other models inside Claude Desktop, without turning Claude off.\n\nIndependent open-source project (MIT). Not affiliated with, endorsed by, or sponsored by Anthropic or OpenAI. Claude and Claude Code are trademarks of Anthropic, PBC.",
+    quit: "Quit",
+    tooltip: (state: string) => `ClaudeRipple ${state}`,
+    tooltipDown: "ClaudeRipple: router not running",
+    proxyLine: (host: string, port: number, slots: string, flight: string) => `Proxy ${host}:${port} · ${slots} · ${flight}`,
+  },
+  ko: {
+    healthy: "정상",
+    attentionNeeded: "확인 필요",
+    routerNotRunning: "라우터가 꺼져 있음",
+    slotsMapped: (n: number) => `슬롯 ${n}개 매핑`,
+    inFlight: "진행 중",
+    connected: "Claude Desktop → ClaudeRipple 연결됨 ✓",
+    notConnected: "Claude Desktop이 ClaudeRipple을 쓰고 있지 않음",
+    percentOfWeekUsed: (percent: string | number, plan: string) => `ChatGPT ${plan}: 주간 한도 ${percent}% 사용`,
+    cliVersion: (v: string) => `Claude Code CLI ${v}`,
+    openWindow: "ClaudeRipple 열기…",
+    openInBrowser: "브라우저에서 열기",
+    restartRouter: "라우터 재시작",
+    startRouter: "라우터 시작",
+    signInChatgpt: "ChatGPT 로그인…",
+    copyStatus: "상태 복사",
+    showLogs: "로그 보기",
+    about: "ClaudeRipple 정보",
+    aboutDetail:
+      "Claude Desktop을 끄지 않고 그 안에서 GPT 등 다른 모델을 씁니다.\n\n독립 오픈소스 프로젝트(MIT)이며 Anthropic·OpenAI와 제휴·보증·후원 관계가 없습니다. Claude와 Claude Code는 Anthropic, PBC의 상표입니다.",
+    quit: "종료",
+    tooltip: (state: string) => `ClaudeRipple ${state}`,
+    tooltipDown: "ClaudeRipple: 라우터가 꺼져 있음",
+    proxyLine: (host: string, port: number, slots: string, flight: string) => `프록시 ${host}:${port} · ${slots} · ${flight}`,
+  },
+};
+
+let L = STRINGS.en;
+
 function readConfigPorts(): { proxy: number; admin: number } {
   try {
     const c = JSON.parse(fs.readFileSync(path.join(home, "config.json"), "utf8")) as { listen?: { port?: number }; admin?: { port?: number } };
@@ -116,36 +173,37 @@ function render(): void {
   const s = last;
   const quota = Object.values(s?.chatgpt?.quota ?? {}).find((q) => q) as { plan_type?: string; rate_limits?: { primary?: { used_percent?: number; reset_after_seconds?: number } } } | undefined;
   const quotaLine = quota?.rate_limits?.primary
-    ? `ChatGPT ${quota.plan_type ?? ""}: ${quota.rate_limits.primary.used_percent ?? "?"}% of week used`
+    ? L.percentOfWeekUsed(quota.rate_limits.primary.used_percent ?? "?", quota.plan_type ?? "")
     : null;
   const template: Electron.MenuItemConstructorOptions[] = [
-    { label: s ? `ClaudeRipple ${s.version} — ${state === "ok" ? "healthy" : "attention needed"}` : `ClaudeRipple — router not running${lastError ? ` (${lastError})` : ""}`, enabled: false },
+    { label: s ? `ClaudeRipple ${s.version} — ${state === "ok" ? L.healthy : L.attentionNeeded}` : `ClaudeRipple — ${L.routerNotRunning}${lastError ? ` (${lastError})` : ""}`, enabled: false },
     ...(s
       ? [
-          { label: `Proxy 127.0.0.1:${s.listen.port} · ${s.routes} slot${s.routes === 1 ? "" : "s"} mapped · ${s.stats.inFlight} in flight`, enabled: false } as Electron.MenuItemConstructorOptions,
-          { label: s.settings.HTTPS_PROXY === `http://127.0.0.1:${s.listen.port}` ? "Claude Desktop → ClaudeRipple ✓" : "Claude Desktop is NOT using ClaudeRipple", enabled: false } as Electron.MenuItemConstructorOptions,
+          { label: L.proxyLine(`127.0.0.1`, s.listen.port, L.slotsMapped(s.routes), `${s.stats.inFlight} ${L.inFlight}`), enabled: false } as Electron.MenuItemConstructorOptions,
+          { label: s.settings.HTTPS_PROXY === `http://127.0.0.1:${s.listen.port}` ? L.connected : L.notConnected, enabled: false } as Electron.MenuItemConstructorOptions,
           ...Object.entries(s.providers).map(([name, p]) => ({ label: `${p.reachable === false ? "✗" : "✓"} provider ${name}${p.type ? ` (${p.type})` : ""}`, enabled: false }) as Electron.MenuItemConstructorOptions),
           ...(quotaLine ? [{ label: quotaLine, enabled: false } as Electron.MenuItemConstructorOptions] : []),
-          { label: `Claude Code CLI ${s.cliVersion}`, enabled: false } as Electron.MenuItemConstructorOptions,
+          { label: L.cliVersion(s.cliVersion), enabled: false } as Electron.MenuItemConstructorOptions,
         ]
       : []),
     { type: "separator" },
-    { label: "Open ClaudeRipple…", click: openWindow, enabled: !!s },
-    { label: "Open in Browser", click: () => void shell.openExternal(adminUrl()), enabled: !!s },
+    { label: L.openWindow, click: openWindow, enabled: !!s },
+    { label: L.openInBrowser, click: () => void shell.openExternal(adminUrl()), enabled: !!s },
     { type: "separator" },
-    { label: s ? "Restart Router" : "Start Router", click: async () => void dialog.showMessageBox({ message: await runCli([s ? "restart" : "start"]) }) },
-    { label: "Sign in to ChatGPT…", click: async () => void dialog.showMessageBox({ message: await runCli(["login"]) }) },
-    { label: "Copy Status", click: async () => clipboard.writeText(await runCli(["status"])) },
-    { label: "Show Logs", click: () => void shell.openPath(path.join(home, "logs", "router.log")) },
+    { label: s ? L.restartRouter : L.startRouter, click: async () => void dialog.showMessageBox({ message: await runCli([s ? "restart" : "start"]) }) },
+    { label: L.signInChatgpt, click: async () => void dialog.showMessageBox({ message: await runCli(["login"]) }) },
+    { label: L.copyStatus, click: async () => clipboard.writeText(await runCli(["status"])) },
+    { label: L.showLogs, click: () => void shell.openPath(path.join(home, "logs", "router.log")) },
     { type: "separator" },
-    { label: "About ClaudeRipple", click: () => void dialog.showMessageBox({ title: "ClaudeRipple", message: "ClaudeRipple", detail: "Run GPT and other models inside Claude Desktop, without turning Claude off.\n\nIndependent open-source project (MIT). Not affiliated with, endorsed by, or sponsored by Anthropic or OpenAI. Claude and Claude Code are trademarks of Anthropic, PBC." }) },
-    { label: "Quit", role: "quit" },
+    { label: L.about, click: () => void dialog.showMessageBox({ title: "ClaudeRipple", message: "ClaudeRipple", detail: L.aboutDetail }) },
+    { label: L.quit, role: "quit" },
   ];
   tray.setContextMenu(Menu.buildFromTemplate(template));
-  tray.setToolTip(s ? `ClaudeRipple ${state}` : "ClaudeRipple: router not running");
+  tray.setToolTip(s ? L.tooltip(state) : L.tooltipDown);
 }
 
 app.whenReady().then(() => {
+  L = STRINGS[app.getLocale().startsWith("ko") ? "ko" : "en"];
   if (process.platform === "darwin") app.dock?.hide();
   tray = new Tray(icon("down"));
   tray.on("click", () => tray?.popUpContextMenu());

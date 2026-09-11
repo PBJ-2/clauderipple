@@ -63,6 +63,23 @@ for (const b of $all(".nav-btn")) b.addEventListener("click", () => showView(b.d
 showView((location.hash || "#health").slice(1) || "health");
 window.addEventListener("hashchange", () => showView((location.hash || "#health").slice(1) || "health"));
 
+// ---- language toggle --------------------------------------------------------------------
+
+(function setupLangToggle() {
+  const btn = $("#lang-toggle");
+  if (!btn) return;
+  const current = (typeof CURRENT_LANG !== "undefined" && CURRENT_LANG) || "en";
+  btn.textContent = current === "ko" ? t("lang.toggleEn") : t("lang.toggleKo");
+  btn.addEventListener("click", () => {
+    try {
+      localStorage.setItem("clauderipple_lang", current === "ko" ? "en" : "ko");
+    } catch {
+      /* localStorage unavailable */
+    }
+    location.reload();
+  });
+})();
+
 // ---- Health ---------------------------------------------------------------------------
 
 function badge(ok, textOk, textBad) {
@@ -76,23 +93,23 @@ async function refreshHealth() {
     s = await api("/api/status");
   } catch (e) {
     $("#health-router").innerHTML = "";
-    $("#health-router").appendChild(el("div", { class: "row" }, [el("span", { class: "k" }, ["router"]), badge(false, "up", "unreachable")]));
+    $("#health-router").appendChild(el("div", { class: "row" }, [el("span", { class: "k" }, [t("health.router")]), badge(false, t("health.up"), t("health.unreachable"))]));
     return;
   }
 
   const router = $("#health-router");
   router.innerHTML = "";
   const rows = [
-    ["status", badge(true, "running", "")],
-    ["version", s.version],
-    ["listening on", `${s.listen.host}:${s.listen.port}`],
-    ["admin GUI port", s.adminPort],
-    ["upstream", s.upstream],
-    ["routes configured", String(s.routes)],
-    ["requests", `${s.stats.started} started · ${s.stats.completed} ok · ${s.stats.failed} failed · ${s.stats.inFlight} in flight`],
-    ["consecutive upstream failures", el("span", {}, [
+    [t("health.k.status"), badge(true, t("health.running"), "")],
+    [t("health.k.version"), s.version],
+    [t("health.k.listeningOn"), `${s.listen.host}:${s.listen.port}`],
+    [t("health.k.adminPort"), s.adminPort],
+    [t("health.k.upstream"), s.upstream],
+    [t("health.k.routes"), String(s.routes)],
+    [t("health.k.requests"), t("health.requestsFmt", { started: s.stats.started, completed: s.stats.completed, failed: s.stats.failed, inFlight: s.stats.inFlight })],
+    [t("health.k.consecutiveFailures"), el("span", {}, [
       String(s.consecutiveUpstreamFailures),
-      s.consecutiveUpstreamFailures > 0 ? badge(false, "", "elevated") : null,
+      s.consecutiveUpstreamFailures > 0 ? badge(false, "", t("health.elevated")) : null,
     ])],
   ];
   for (const [k, v] of rows) {
@@ -102,39 +119,44 @@ async function refreshHealth() {
 
   const settings = $("#health-settings");
   settings.innerHTML = "";
-  settings.appendChild(el("div", { class: "row" }, [el("span", { class: "k" }, ["points at this router"]), s.settings.pointsAtRouter ? badge(true, "yes", "") : badge(false, "", "no — run `clauderipple install`")]));
-  settings.appendChild(el("div", { class: "row" }, [el("span", { class: "k" }, ["HTTPS_PROXY"]), el("span", { class: "v" }, [s.settings.HTTPS_PROXY || "(unset)"])]));
-  settings.appendChild(el("div", { class: "row" }, [el("span", { class: "k" }, ["NODE_EXTRA_CA_CERTS"]), el("span", { class: "v" }, [s.settings.NODE_EXTRA_CA_CERTS || "(unset)"])]));
+  settings.appendChild(el("div", { class: "row" }, [el("span", { class: "k" }, [t("health.k.pointsAtRouter")]), s.settings.pointsAtRouter ? badge(true, t("health.yes"), "") : badge(false, "", t("health.no"))]));
+  settings.appendChild(el("div", { class: "row" }, [el("span", { class: "k" }, ["HTTPS_PROXY"]), el("span", { class: "v" }, [s.settings.HTTPS_PROXY || t("health.unset")])]));
+  settings.appendChild(el("div", { class: "row" }, [el("span", { class: "k" }, ["NODE_EXTRA_CA_CERTS"]), el("span", { class: "v" }, [s.settings.NODE_EXTRA_CA_CERTS || t("health.unset")])]));
 
   const tbody = $("#health-providers tbody");
   tbody.innerHTML = "";
   const names = Object.keys(s.providers);
   if (names.length === 0) {
-    tbody.appendChild(el("tr", {}, [el("td", { colspan: "3", class: "small" }, ["No providers configured yet — add one under Providers."])]));
+    tbody.appendChild(el("tr", {}, [el("td", { colspan: "3", class: "small" }, [t("health.noProviders")])]));
   }
   for (const name of names) {
     const p = s.providers[name];
     const quota = s.chatgpt && s.chatgpt.quota && s.chatgpt.quota[name];
     const auth = s.chatgpt && s.chatgpt.auth && s.chatgpt.auth[name];
-    const details = [p.type === "chatgpt" ? "ChatGPT subscription" : p.url];
-    if (p.type === "chatgpt" && auth) details.push(`credentials: ${auth}`);
+    const details = [p.type === "chatgpt" ? t("health.chatgptSubscription") : p.url];
+    if (p.type === "chatgpt" && auth) details.push(`${t("health.credentials")}: ${auth}`);
     if (quota && quota.rate_limits && quota.rate_limits.primary) {
       const pr = quota.rate_limits.primary;
       const hours = pr.reset_after_seconds ? Math.round(pr.reset_after_seconds / 3600) : null;
-      details.push(`${quota.plan_type || "plan"}: ${pr.used_percent}% of ${pr.window_minutes === 10080 ? "weekly" : (pr.window_minutes / 60) + "h"} limit used${hours !== null ? `, resets in ${hours}h` : ""}`);
+      const windowLabel = pr.window_minutes === 10080 ? t("health.windowWeekly") : (pr.window_minutes / 60) + "h";
+      details.push(
+        `${quota.plan_type || "plan"}: ` +
+          t("health.weeklyLimitUsed", { percent: pr.used_percent, window: windowLabel }) +
+          (hours !== null ? t("health.resetsIn", { hours }) : "")
+      );
     }
     tbody.appendChild(el("tr", {}, [
       el("td", {}, [name, el("div", { class: "small" }, [p.type])]),
       el("td", { class: "small" }, details.flatMap((d, i) => (i ? [el("br"), d] : [d]))),
-      el("td", {}, [p.reachable ? badge(true, "reachable", "") : badge(false, "", "unreachable")]),
+      el("td", {}, [p.reachable ? badge(true, t("health.reachable"), "") : badge(false, "", t("health.unreachable"))]),
     ]));
   }
 
   const cli = $("#health-cli");
   cli.innerHTML = "";
-  cli.appendChild(el("div", { class: "row" }, [el("span", { class: "k" }, ["cached version"]), el("span", { class: "v" }, [s.cliVersion])]));
+  cli.appendChild(el("div", { class: "row" }, [el("span", { class: "k" }, [t("health.k.cachedVersion")]), el("span", { class: "v" }, [s.cliVersion])]));
 
-  $("#about-home").textContent = `Home directory: ${s.home}`;
+  $("#about-home").textContent = t("health.homeDir", { home: s.home });
 }
 
 refreshHealth();
@@ -144,7 +166,7 @@ setInterval(refreshHealth, 5000);
 
 function providerOptions(selected) {
   const sel = el("select", {});
-  sel.appendChild(el("option", { value: "" }, ["Passthrough (Anthropic)"]));
+  sel.appendChild(el("option", { value: "" }, [t("slots.passthrough")]));
   for (const name of Object.keys(currentConfig.providers)) {
     sel.appendChild(el("option", { value: name }, [name]));
   }
@@ -155,7 +177,7 @@ function providerOptions(selected) {
 function effortSelect(selected) {
   const sel = el("select", {});
   for (const v of ["", "low", "medium", "high", "xhigh", "max"]) {
-    sel.appendChild(el("option", { value: v }, [v === "" ? "(none)" : v]));
+    sel.appendChild(el("option", { value: v }, [v === "" ? t("slots.effortNone") : v]));
   }
   sel.value = selected || "";
   return sel;
@@ -163,9 +185,9 @@ function effortSelect(selected) {
 
 function slotRow(id, route) {
   const tr = el("tr", {});
-  const idInput = el("input", { value: id, placeholder: "claude-..." });
+  const idInput = el("input", { value: id, placeholder: t("slots.slotIdPlaceholder") });
   const provSel = providerOptions(route ? route.provider : "");
-  const modelInput = el("input", { value: route ? route.model : "", placeholder: "model id", list: "model-suggestions-inline" });
+  const modelInput = el("input", { value: route ? route.model : "", placeholder: t("slots.modelPlaceholder"), list: "model-suggestions-inline" });
   const effSel = effortSelect(route ? route.effort : "");
   const dl = el("datalist", { id: `dl-${Math.random().toString(36).slice(2)}` });
   modelInput.setAttribute("list", dl.id);
@@ -182,7 +204,7 @@ function slotRow(id, route) {
   updateSuggestions();
 
   const isDefault = DEFAULT_SLOTS.includes(id);
-  const del = el("button", { class: "icon-btn", title: "Remove slot", onclick: () => { tr.remove(); } }, ["✕"]);
+  const del = el("button", { class: "icon-btn", title: t("slots.removeSlot"), onclick: () => { tr.remove(); } }, ["✕"]);
   if (isDefault) del.style.visibility = "hidden";
 
   tr.appendChild(el("td", {}, [idInput]));
@@ -199,7 +221,7 @@ async function loadSlots() {
   try {
     currentConfig = await api("/api/config");
   } catch (e) {
-    toast(`Failed to load config: ${e.message}`, true);
+    toast(t("slots.loadFailed", { msg: e.message }), true);
     return;
   }
   const tbody = $("#slots-table tbody");
@@ -227,10 +249,10 @@ $("#slots-save").addEventListener("click", async () => {
   const seenIds = new Set();
   for (const r of rows) {
     if (!r.id) continue;
-    if (seenIds.has(r.id)) { errors.push(`duplicate slot id "${r.id}"`); continue; }
+    if (seenIds.has(r.id)) { errors.push(t("slots.duplicateId", { id: r.id })); continue; }
     seenIds.add(r.id);
     if (!r.provider) continue; // passthrough
-    if (!r.model) { errors.push(`slot "${r.id}": model is required when a provider is set`); continue; }
+    if (!r.model) { errors.push(t("slots.modelRequired", { id: r.id })); continue; }
     routes[r.id] = { provider: r.provider, model: r.model, ...(r.effort ? { effort: r.effort } : {}) };
   }
   if (errors.length) { toast(errors.join("; "), true); return; }
@@ -238,9 +260,9 @@ $("#slots-save").addEventListener("click", async () => {
   try {
     await api("/api/config", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(next) });
     currentConfig = next;
-    toast("Slots saved.");
+    toast(t("slots.saved"));
   } catch (e) {
-    toast(`Save failed: ${e.message}`, true);
+    toast(t("slots.saveFailed", { msg: e.message }), true);
   }
 });
 
@@ -248,8 +270,8 @@ $("#slots-save").addEventListener("click", async () => {
 
 function headerRow(key, value, onRemove) {
   const row = el("div", { class: "headers-row" });
-  const k = el("input", { value: key || "", placeholder: "Header name" });
-  const v = el("input", { value: value || "", placeholder: "Value" });
+  const k = el("input", { value: key || "", placeholder: t("providers.headerNamePlaceholder") });
+  const v = el("input", { value: value || "", placeholder: t("providers.headerValuePlaceholder") });
   const del = el("button", { class: "icon-btn", onclick: onRemove }, ["✕"]);
   row.appendChild(k); row.appendChild(v); row.appendChild(del);
   row._get = () => [k.value.trim(), v.value];
@@ -258,27 +280,27 @@ function headerRow(key, value, onRemove) {
 
 function providerCard(name, p) {
   const card = el("div", { class: "card" });
-  const nameInput = el("input", { value: name || "", placeholder: "provider-name", style: "font-weight:600;max-width:220px;" });
+  const nameInput = el("input", { value: name || "", placeholder: t("providers.namePlaceholder"), style: "font-weight:600;max-width:220px;" });
   const typeSel = el("select", { style: "max-width:220px;" }, [
-    el("option", { value: "anthropic-compatible" }, ["anthropic-compatible (URL that speaks Anthropic Messages)"]),
-    el("option", { value: "chatgpt" }, ["chatgpt (your ChatGPT subscription)"]),
+    el("option", { value: "anthropic-compatible" }, [t("providers.typeAnthropic")]),
+    el("option", { value: "chatgpt" }, [t("providers.typeChatgpt")]),
   ]);
   typeSel.value = (p && p.type) || "anthropic-compatible";
-  const urlInput = el("input", { value: (p && p.url) || "", placeholder: "https://api.example.com/anthropic" });
-  const modelsInput = el("input", { value: (p && p.models && p.models.join(", ")) || "", placeholder: "model-a, model-b (optional, for slot suggestions)" });
+  const urlInput = el("input", { value: (p && p.url) || "", placeholder: t("providers.urlPlaceholder") });
+  const modelsInput = el("input", { value: (p && p.models && p.models.join(", ")) || "", placeholder: t("providers.modelsPlaceholder") });
 
   // chatgpt-only fields
   const authSel = el("select", { style: "max-width:320px;" }, [
-    el("option", { value: "auto" }, ["auto — own login if present, else borrow the Codex CLI's"]),
-    el("option", { value: "own" }, ["own — tokens from `clauderipple login`"]),
-    el("option", { value: "borrow-codex" }, ["borrow-codex — read ~/.codex/auth.json (never refreshed by us)"]),
+    el("option", { value: "auto" }, [t("providers.authAuto")]),
+    el("option", { value: "own" }, [t("providers.authOwn")]),
+    el("option", { value: "borrow-codex" }, [t("providers.authBorrow")]),
   ]);
   authSel.value = (p && p.auth) || "auto";
   const identityChk = el("input", { type: "checkbox" });
   identityChk.checked = !(p && p.identity === false);
   const effortSel = el("select", { style: "max-width:220px;" }, ["low", "medium", "high", "xhigh", "max"].map((v) => el("option", { value: v }, [v])));
   effortSel.value = (p && p.defaultEffort) || "high";
-  const appendTa = el("textarea", { rows: "4", placeholder: "Fixed text appended to every system prompt. Keep it constant: changing it breaks the prompt cache." });
+  const appendTa = el("textarea", { rows: "4", placeholder: t("providers.appendPlaceholder") });
   appendTa.value = (p && p.instructionsAppend) || "";
 
   const headersWrap = el("div", { class: "headers-list" });
@@ -294,33 +316,33 @@ function providerCard(name, p) {
     };
     headersWrap.appendChild(row);
   }
-  const addHeaderBtn = el("button", { class: "btn secondary", type: "button" }, ["+ Header"]);
+  const addHeaderBtn = el("button", { class: "btn secondary", type: "button" }, [t("providers.addHeader")]);
   addHeaderBtn.addEventListener("click", () => {
     const row = headerRow("", "", () => row.remove());
     headersWrap.appendChild(row);
   });
 
-  const delProviderBtn = el("button", { class: "btn danger", type: "button" }, ["Remove provider"]);
+  const delProviderBtn = el("button", { class: "btn danger", type: "button" }, [t("providers.removeProvider")]);
   delProviderBtn.addEventListener("click", () => card.remove());
 
   card.appendChild(el("div", { class: "toolbar" }, [nameInput, el("div", { class: "right" }, [delProviderBtn])]));
-  const urlRow = el("div", { class: "row" }, [el("span", { class: "k" }, ["URL"]), urlInput]);
+  const urlRow = el("div", { class: "row" }, [el("span", { class: "k" }, [t("providers.urlLabel")]), urlInput]);
   const compatBlock = el("div", {}, [
-    el("div", { style: "margin-top:10px;" }, [el("span", { class: "small" }, ["Headers (e.g. x-api-key)"])]),
+    el("div", { style: "margin-top:10px;" }, [el("span", { class: "small" }, [t("providers.headersTitle")])]),
     headersWrap,
     el("div", { style: "margin-top:6px;" }, [addHeaderBtn]),
   ]);
   const chatgptBlock = el("div", { class: "rows" }, [
-    el("div", { class: "row" }, [el("span", { class: "k" }, ["Credentials"]), authSel]),
-    el("div", { class: "row" }, [el("span", { class: "k" }, ["Default effort"]), effortSel]),
-    el("div", { class: "row" }, [el("span", { class: "k" }, ["Identity line"]), el("label", { class: "small" }, [identityChk, " prefix the system prompt with “You are <model>, answering through Claude Code”"])]),
-    el("div", { class: "row" }, [el("span", { class: "k" }, ["Append"]), appendTa]),
-    el("div", { class: "small" }, ["Sign in with ", el("code", {}, ["clauderipple login"]), " (or the tray menu). Credentials never leave this machine."]),
+    el("div", { class: "row" }, [el("span", { class: "k" }, [t("providers.credentials")]), authSel]),
+    el("div", { class: "row" }, [el("span", { class: "k" }, [t("providers.defaultEffort")]), effortSel]),
+    el("div", { class: "row" }, [el("span", { class: "k" }, [t("providers.identityLine")]), el("label", { class: "small" }, [identityChk, " " + t("providers.identityLabel")])]),
+    el("div", { class: "row" }, [el("span", { class: "k" }, [t("providers.append")]), appendTa]),
+    el("div", { class: "small" }, [t("providers.signInHint")]),
   ]);
   card.appendChild(el("div", { class: "rows" }, [
-    el("div", { class: "row" }, [el("span", { class: "k" }, ["Type"]), typeSel]),
+    el("div", { class: "row" }, [el("span", { class: "k" }, [t("providers.typeLabel")]), typeSel]),
     urlRow,
-    el("div", { class: "row" }, [el("span", { class: "k" }, ["Models"]), modelsInput]),
+    el("div", { class: "row" }, [el("span", { class: "k" }, [t("providers.modelsLabel")]), modelsInput]),
   ]));
   card.appendChild(compatBlock);
   card.appendChild(chatgptBlock);
@@ -329,7 +351,7 @@ function providerCard(name, p) {
     const gpt = typeSel.value === "chatgpt";
     compatBlock.style.display = gpt ? "none" : "";
     chatgptBlock.style.display = gpt ? "" : "none";
-    urlInput.placeholder = gpt ? "optional — override https://chatgpt.com/backend-api" : "https://api.example.com/anthropic";
+    urlInput.placeholder = gpt ? t("providers.urlPlaceholderChatgpt") : t("providers.urlPlaceholder");
     if (gpt && !modelsInput.value) modelsInput.value = "gpt-5.6-terra, gpt-5.6-sol, gpt-5.6-luna, gpt-6-astra";
   }
   typeSel.addEventListener("change", syncType);
@@ -373,7 +395,7 @@ function providerCard(name, p) {
 
 function directRow(prefix, provider) {
   const tr = el("tr", {});
-  const prefixInput = el("input", { value: prefix || "", placeholder: "gpt-" });
+  const prefixInput = el("input", { value: prefix || "", placeholder: t("providers.prefixPlaceholder") });
   const provSel = providerOptions(provider || "");
   provSel.querySelector('option[value=""]').remove();
   const del = el("button", { class: "icon-btn", onclick: () => tr.remove() }, ["✕"]);
@@ -389,7 +411,7 @@ async function loadProviders() {
   try {
     currentConfig = currentConfig || (await api("/api/config"));
   } catch (e) {
-    toast(`Failed to load config: ${e.message}`, true);
+    toast(t("providers.loadFailed", { msg: e.message }), true);
     return;
   }
   const list = $("#providers-list");
@@ -416,8 +438,8 @@ $("#providers-save").addEventListener("click", async () => {
   const errors = [];
   for (const card of $all("#providers-list .card")) {
     const { name, provider } = card._get();
-    if (!name) { errors.push("a provider is missing a name"); continue; }
-    if (provider.type === "anthropic-compatible" && !provider.url) { errors.push(`provider "${name}": URL is required`); continue; }
+    if (!name) { errors.push(t("providers.missingName")); continue; }
+    if (provider.type === "anthropic-compatible" && !provider.url) { errors.push(t("providers.urlRequired", { name })); continue; }
     providers[name] = provider;
   }
   const direct = $all("#direct-table tbody tr").map((tr) => tr._get()).filter((d) => d.prefix && d.provider);
@@ -427,9 +449,9 @@ $("#providers-save").addEventListener("click", async () => {
     await api("/api/config", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(next) });
     currentConfig = next;
     slotsLoaded = false; // provider list changed; reload next time Slots is opened
-    toast("Providers saved.");
+    toast(t("providers.saved"));
   } catch (e) {
-    toast(`Save failed: ${e.message}`, true);
+    toast(t("providers.saveFailed", { msg: e.message }), true);
   }
 });
 

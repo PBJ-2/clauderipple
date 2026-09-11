@@ -70,6 +70,20 @@ nav button {
 nav button:hover { background: var(--border); color: var(--text); }
 nav button.active { background: var(--accent); color: var(--accent-text); font-weight: 600; }
 
+nav .nav-spacer { flex: 1 1 auto; }
+
+.lang-toggle {
+  all: unset;
+  cursor: pointer;
+  padding: 6px 8px;
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 11.5px;
+  border: 1px solid var(--border);
+  text-align: center;
+}
+.lang-toggle:hover { background: var(--border); color: var(--text); }
+
 main {
   flex: 1 1 auto;
   padding: 22px 28px;
