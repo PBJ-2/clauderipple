@@ -15,6 +15,9 @@ import { ConfigStore, DEFAULTS, homeDir, configPath } from "../../router/src/con
 import { certsExist, certPaths, generateCerts } from "./certs.ts";
 import { applyProxyEnv, currentProxyEnv, removeProxyEnv, settingsPath } from "./settings.ts";
 import { agentState, installAgent, kickstart, plistPath, removeAgent, stopAgent } from "./launchd.ts";
+import { BUNDLE_ID, removeBundle, writeBundle } from "./bundle.ts";
+
+const VERSION = "0.1.0";
 import { probe } from "./probe.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -86,7 +89,9 @@ async function install(): Promise<void> {
   console.log(edit.changed ? `✓ ${settingsPath()} updated (backup: ${edit.backup ?? "none"})` : `✓ ${settingsPath()} already correct`);
   for (const n of edit.notes) console.log(`  note: ${n}`);
 
-  const plist = installAgent({ node: process.execPath, script: routerScript, home });
+  const launcher = writeBundle({ home, node: process.execPath, script: routerScript, version: VERSION });
+  console.log(`✓ background item bundle written: ${path.dirname(path.dirname(path.dirname(launcher)))} (shows as "ClaudeRipple" in Login Items)`);
+  const plist = installAgent({ launcher, bundleId: BUNDLE_ID, home });
   console.log(`✓ launchd agent registered: ${plist}`);
 
   const p = await probeWithRetry({ host: cfg.listen.host, port: cfg.listen.port, caPem: caPath, upstream: cfg.upstream });
@@ -100,6 +105,7 @@ function uninstall(): void {
   const cfg = new ConfigStore(configPath()).get();
   const removed = removeAgent();
   console.log(removed ? `✓ launchd agent removed (${plistPath()})` : "✓ no launchd agent registered");
+  removeBundle(home);
   const edit = removeProxyEnv({ proxyUrl: proxyUrlFor(cfg.listen.port), caPath: certPaths(home).caPem });
   console.log(edit.changed ? `✓ ${settingsPath()} restored (backup: ${edit.backup ?? "none"})` : `✓ ${settingsPath()} had no ClaudeRipple keys`);
   for (const n of edit.notes) console.log(`  note: ${n}`);

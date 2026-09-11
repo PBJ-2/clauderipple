@@ -17,7 +17,7 @@ function esc(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-export function renderPlist(opts: { node: string; script: string; home: string; stdoutLog: string }): string {
+export function renderPlist(opts: { launcher: string; bundleId: string; home: string; stdoutLog: string }): string {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -25,8 +25,11 @@ export function renderPlist(opts: { node: string; script: string; home: string; 
   <key>Label</key><string>${LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${esc(opts.node)}</string>
-    <string>${esc(opts.script)}</string>
+    <string>${esc(opts.launcher)}</string>
+  </array>
+  <key>AssociatedBundleIdentifiers</key>
+  <array>
+    <string>${esc(opts.bundleId)}</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -57,7 +60,7 @@ function domain(): string {
   return `gui/${process.getuid?.() ?? 501}`;
 }
 
-export function installAgent(opts: { node: string; script: string; home: string }): string {
+export function installAgent(opts: { launcher: string; bundleId: string; home: string }): string {
   const file = plistPath();
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const stdoutLog = path.join(opts.home, "logs", "launchd.log");
