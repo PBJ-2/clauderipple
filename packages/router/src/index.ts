@@ -48,11 +48,25 @@ const proxy = new Proxy({ config: () => store.get(), log, secureContext, health,
 
 process.on("uncaughtException", (e) => log!.error(`uncaught ${(e as Error).stack ?? e}`));
 process.on("unhandledRejection", (e) => log!.error(`unhandled ${(e as Error)?.stack ?? e}`));
+const DRAIN_MS = 45_000; // launchd ExitTimeOut is 60s; leave headroom
+let draining = false;
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => {
-    log!.info(`${sig}: shutting down, in-flight=${proxy.stats.inFlight}`);
-    proxy.close();
-    setTimeout(() => process.exit(0), 500).unref();
+    if (draining) return;
+    draining = true;
+    log!.info(`${sig}: draining, in-flight=${proxy.stats.inFlight} model calls=${proxy.stats.messagesInFlight}`);
+    let lastReported = -1;
+    void proxy
+      .drain(DRAIN_MS, (n) => {
+        if (n !== lastReported) {
+          lastReported = n;
+          log!.info(`drain: waiting for ${n} model call(s)`);
+        }
+      })
+      .then(() => {
+        log!.info(`drain complete, exiting (model calls still open: ${proxy.stats.messagesInFlight})`);
+        setTimeout(() => process.exit(0), 200).unref();
+      });
   });
 }
 

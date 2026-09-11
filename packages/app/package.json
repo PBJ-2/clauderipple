@@ -4,6 +4,7 @@
   "private": true,
   "description": "ClaudeRipple menu-bar app (macOS). Hosts the local GUI served by the router and shows chain health in the tray.",
   "license": "MIT",
+  "author": "pbj",
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -17,6 +18,8 @@
   "build": {
     "appId": "com.clauderipple.app",
     "productName": "ClaudeRipple",
+    "electronVersion": "38.8.6",
+    "directories": { "output": "release" },
     "mac": {
       "category": "public.app-category.developer-tools",
       "target": ["dir"],

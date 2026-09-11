@@ -90,6 +90,8 @@ async function install(): Promise<void> {
   console.log(edit.changed ? `✓ ${settingsPath()} updated (backup: ${edit.backup ?? "none"})` : `✓ ${settingsPath()} already correct`);
   for (const n of edit.notes) console.log(`  note: ${n}`);
 
+  // Record where the sources and Node live so the menu-bar app (packaged, no sources inside) can run the CLI.
+  fs.writeFileSync(path.join(home, "paths.json"), JSON.stringify({ node: process.execPath, repo: path.resolve(here, "../../.."), cli: path.resolve(here, "index.ts"), router: routerScript }, null, 2) + "\n");
   const launcher = writeBundle({ home, node: process.execPath, script: routerScript, version: VERSION });
   console.log(`✓ background item bundle written: ${path.dirname(path.dirname(path.dirname(launcher)))} (shows as "ClaudeRipple" in Login Items)`);
   const plist = installAgent({ launcher, bundleId: BUNDLE_ID, home });

@@ -40,13 +40,15 @@ export type ProxyDeps = {
 
 export type Stats = {
   inFlight: number;
+  /** Subset of inFlight that are model calls (/v1/messages). Long-poll worker streams are excluded. */
+  messagesInFlight: number;
   started: number;
   completed: number;
   failed: number;
 };
 
 export class Proxy {
-  readonly stats: Stats = { inFlight: 0, started: 0, completed: 0, failed: 0 };
+  readonly stats: Stats = { inFlight: 0, messagesInFlight: 0, started: 0, completed: 0, failed: 0 };
   private readonly inFlightSockets = new Set<Duplex>();
   private readonly server: net.Server;
   private readonly httpServer: http.Server;
@@ -107,6 +109,22 @@ export class Proxy {
     this.server.close();
     this.httpServer.close();
     for (const s of this.inFlightSockets) s.destroy();
+  }
+
+  /**
+   * Graceful shutdown: stop accepting new connections, let in-flight model calls finish
+   * (up to `maxMs`), then drop everything else. Long-poll worker streams are not waited
+   * for: the CLI reconnects those on its own, while a cut /v1/messages stream surfaces as
+   * "Connection lost mid-response" to the user (observed 2026-09-11, in-flight=5).
+   */
+  async drain(maxMs: number, onProgress?: (n: number) => void): Promise<void> {
+    this.server.close();
+    const t0 = Date.now();
+    while (this.stats.messagesInFlight > 0 && Date.now() - t0 < maxMs) {
+      onProgress?.(this.stats.messagesInFlight);
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    this.close();
   }
 
   // ---- CONNECT handling -------------------------------------------------------------
@@ -186,12 +204,15 @@ export class Proxy {
     const path = req.url ?? "/";
     this.stats.started++;
     this.stats.inFlight++;
+    const isMessages = path.startsWith("/v1/messages");
+    if (isMessages) this.stats.messagesInFlight++;
     let tag = "PASS";
     let finished = false;
     const finish = (status: string, bytes: number, note?: string): void => {
       if (finished) return;
       finished = true;
       this.stats.inFlight--;
+      if (isMessages) this.stats.messagesInFlight--;
       if (note) this.stats.failed++;
       else this.stats.completed++;
       log.info(`${tag} ${method} ${path} -> ${status} ${bytes}B ${((Date.now() - t0) / 1000).toFixed(1)}s${note ? " " + note : ""}`);

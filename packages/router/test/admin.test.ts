@@ -28,7 +28,7 @@ async function withAdmin(
     config: () => cfg,
     configFile,
     log,
-    stats: () => ({ inFlight: 0, started: 1, completed: 1, failed: 0 }),
+    stats: () => ({ inFlight: 0, messagesInFlight: 0, started: 1, completed: 1, failed: 0 }),
     health: () => 0,
     version: "0.0.0-test",
   });

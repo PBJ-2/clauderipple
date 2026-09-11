@@ -88,10 +88,22 @@ function openWindow(): void {
   win.on("closed", () => (win = null));
 }
 
+/** Node 24 + CLI source paths recorded by `clauderipple install` (the packaged app carries neither,
+ *  and Electron's own Node cannot run .ts sources). */
+function cliPaths(): { node: string; cli: string } {
+  try {
+    const p = JSON.parse(fs.readFileSync(path.join(home, "paths.json"), "utf8")) as { node?: string; cli?: string };
+    if (p.node && p.cli && fs.existsSync(p.node) && fs.existsSync(p.cli)) return { node: p.node, cli: p.cli };
+  } catch {
+    /* fall through to the dev layout */
+  }
+  return { node: process.execPath, cli: path.resolve(__dirname, "..", "..", "cli", "src", "index.ts") };
+}
+
 function runCli(args: string[]): Promise<string> {
-  const cli = path.resolve(__dirname, "..", "..", "cli", "src", "index.ts");
+  const { node, cli } = cliPaths();
   return new Promise((resolve) => {
-    execFile(process.execPath, [cli, ...args], { env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", CLAUDERIPPLE_HOME: home } }, (err, stdout, stderr) => {
+    execFile(node, [cli, ...args], { env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", CLAUDERIPPLE_HOME: home } }, (err, stdout, stderr) => {
       resolve(`${stdout}${stderr}${err ? `\n${err.message}` : ""}`.trim());
     });
   });

@@ -15,9 +15,41 @@ Anthropic exactly as before.
 - Per-session and per-subagent model choice. Your Claude subscription and your
   GPT subscription work side by side.
 
-> Status: pre-alpha. The design is proven on a working Python prototype that has
-> routed 1,000+ requests in daily use; the TypeScript product is being built in
-> this repository. See `docs/ROADMAP.md`.
+> Status: alpha, in daily use by the author. See `docs/ROADMAP.md`.
+
+## Install (macOS)
+
+Requires Node 24 and Claude Desktop.
+
+```bash
+git clone https://github.com/pbj/clauderipple && cd clauderipple && npm install
+node packages/cli/src/index.ts install      # certs, settings.json env, launchd agent, end-to-end probe
+node packages/cli/src/index.ts login        # optional: sign in to ChatGPT for the chatgpt provider
+node packages/cli/src/index.ts ui           # open the local GUI (slots, providers, health, logs)
+```
+
+`uninstall` reverses everything and restores `~/.claude/settings.json` from a backup.
+Other commands: `status`, `start`, `stop`, `restart`, `logs -f`, `logout`.
+
+### Menu-bar app
+
+`packages/app` is an Electron shell around the same local GUI: tray icon with
+live health (ok / attention / down), the GUI in a window, restart, ChatGPT
+sign-in, logs. Build with `cd packages/app && npm run dist`.
+
+## Providers
+
+- **chatgpt** — your ChatGPT subscription via the Codex backend. Anthropic
+  Messages are translated to OpenAI Responses with the prompt cache preserved
+  (each turn's input is a byte-stable prefix of the next). Sign in with
+  `clauderipple login`, or let it borrow the Codex CLI's login read-only.
+- **anthropic-compatible** — any endpoint that speaks Anthropic Messages
+  (DeepSeek, Kimi, GLM, MiniMax, a local relay). Host and model rewrite only.
+
+Map picker slots to providers in the GUI: e.g. Opus 4.8 → `gpt-6-astra`,
+Sonnet 4.6 → `gpt-5.6-luna`. Subagents can name a model directly
+(`model: gpt-5.6-sol@medium`) or put `[[ripple: sol@xhigh]]` at the top of
+their prompt.
 
 ## How it works
 
