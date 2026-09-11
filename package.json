@@ -13,7 +13,8 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "router": "node packages/router/src/index.ts",
-    "test": "node --test packages/router/test/*.test.ts"
+    "test": "node --test packages/router/test/*.test.ts packages/cli/test/*.test.ts",
+    "cli": "node packages/cli/src/index.ts"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
