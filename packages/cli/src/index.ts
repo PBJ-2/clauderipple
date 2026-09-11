@@ -17,6 +17,47 @@ import { certsExist, certPaths, generateCerts } from "./certs.ts";
 import { applyProxyEnv, currentProxyEnv, removeProxyEnv, settingsPath } from "./settings.ts";
 import { agentState, installAgent, kickstart, plistPath, removeAgent, stopAgent } from "./launchd.ts";
 import { BUNDLE_ID, removeBundle, writeBundle } from "./bundle.ts";
+import { applyAppProxy, caTrusted, currentAppProxy, removeAppProxy, trustCa, untrustCa } from "./picker.ts";
+
+function setPickerEnabled(enabled: boolean): void {
+  const file = configPath();
+  const raw = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
+  raw.picker = { ...((raw.picker as Record<string, unknown> | undefined) ?? {}), enabled };
+  fs.writeFileSync(file, JSON.stringify(raw, null, 2) + "\n");
+}
+
+async function pickerOn(): Promise<void> {
+  const home = homeDir();
+  const cfg = new ConfigStore(configPath()).get();
+  const caPem = certPaths(home).caPem;
+  if (!fs.existsSync(path.join(home, "ca.key"))) throw new Error("ca.key missing; run `clauderipple install` first");
+  console.log("Picker mode makes Claude Desktop's own claude.ai traffic go through ClaudeRipple so the model picker can list your GPT models.");
+  console.log("Step 1/3: trusting the ClaudeRipple CA in your login keychain. macOS will ask for your password (ClaudeRipple never sees it).");
+  trustCa(caPem);
+  if (!caTrusted()) throw new Error("CA is not trusted; picker mode not enabled");
+  console.log("✓ CA trusted (login keychain only)");
+  const proxyUrl = proxyUrlFor(cfg.listen.port);
+  const r = applyAppProxy(proxyUrl);
+  console.log(`✓ Claude Desktop config library entry applied (${r.id}${r.replaced ? `, previous entry ${r.replaced} remembered` : ""}): egressProxyUrl=${proxyUrl}`);
+  setPickerEnabled(true);
+  console.log("✓ picker.enabled = true (router reloads config on its own)");
+  console.log("\nStep 3/3 is yours: quit and reopen Claude Desktop. The app reads its proxy setting at start.");
+  console.log("Then open the Code tab picker: entries from cli.extraModels should be there. `clauderipple status` shows the last injection.");
+}
+
+function pickerOff(): void {
+  const home = homeDir();
+  const removed = removeAppProxy();
+  console.log(removed ? "✓ Claude Desktop config library entry removed (previous entry restored if there was one)" : "✓ no ClaudeRipple config library entry");
+  try {
+    setPickerEnabled(false);
+    console.log("✓ picker.enabled = false");
+  } catch {
+    /* no config */
+  }
+  console.log(untrustCa(certPaths(home).caPem) ? "✓ CA removed from the login keychain" : "✓ CA was not in the login keychain");
+  console.log("\nQuit and reopen Claude Desktop to apply.");
+}
 
 const VERSION = "0.1.0";
 import { probe } from "./probe.ts";
@@ -130,6 +171,8 @@ async function status(): Promise<void> {
   rows.push(["certs", certsExist(home) ? "present" : "missing"]);
   rows.push(["settings.json", env.HTTPS_PROXY === proxyUrl && env.NODE_EXTRA_CA_CERTS === caPath ? "points at ClaudeRipple" : `HTTPS_PROXY=${env.HTTPS_PROXY ?? "-"} NODE_EXTRA_CA_CERTS=${env.NODE_EXTRA_CA_CERTS ?? "-"}`]);
   rows.push(["launchd", agentState()]);
+  const ap = currentAppProxy();
+  rows.push(["picker mode", cfg.picker?.enabled ? `on · CA ${caTrusted() ? "trusted" : "NOT trusted"} · app proxy ${ap.ours ? ap.egressProxyUrl : "NOT set"}` : `off${ap.ours ? " (app proxy entry still present — run `picker off`)" : ""}`]);
   const p = await probe({ host: cfg.listen.host, port: cfg.listen.port, caPem: caPath, upstream: cfg.upstream });
   rows.push(["probe", `${p.ok ? "ok" : "FAIL"}: ${p.detail} (${p.ms}ms)`]);
   for (const [name, p2] of Object.entries(cfg.providers)) {
@@ -209,6 +252,7 @@ function help(): void {
   ui                open the admin GUI in your browser
   login             sign in to ChatGPT (opens your browser; tokens stay in the home dir)
   logout            forget the ChatGPT login made with "login"
+  picker on|off     show your mapped models by name in the Claude Desktop picker (trusts the CA in your login keychain, routes the app through ClaudeRipple)
 
 Home directory: ${homeDir()}  (override with CLAUDERIPPLE_HOME)`);
 }
@@ -239,6 +283,13 @@ try {
     case "config":
       console.log(configPath());
       break;
+    case "picker": {
+      const sub = args[1];
+      if (sub === "on") await pickerOn();
+      else if (sub === "off") pickerOff();
+      else console.log("usage: clauderipple picker on|off");
+      break;
+    }
     case "login": {
       const { login } = await import("../../router/src/providers/chatgpt/auth.ts");
       console.log("Opening your browser to sign in to ChatGPT. Sign in there; this window waits up to 5 minutes.");

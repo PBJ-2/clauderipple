@@ -81,7 +81,21 @@ export type Config = {
   };
   /** Local admin API + GUI. Binds 127.0.0.1 only. Defaults to listen.port + 1. */
   admin?: { port: number };
+  /**
+   * Picker mode: also terminate the app's own claude.ai traffic and add `cli.extraModels`
+   * to the model picker. Needs the CA trusted in the login keychain and the app started
+   * with our proxy (both done by `clauderipple picker on`).
+   */
+  picker?: { enabled: boolean; hosts?: string[] };
 };
+
+export const PICKER_HOSTS_DEFAULT = ["claude.ai"];
+
+export function terminateHosts(c: Config): string[] {
+  const hosts = [c.upstream];
+  if (c.picker?.enabled) hosts.push(...(c.picker.hosts ?? PICKER_HOSTS_DEFAULT));
+  return hosts;
+}
 
 export const DEFAULTS: Config = {
   listen: { host: "127.0.0.1", port: 8790 },
@@ -114,6 +128,7 @@ function merge(base: Config, over: Partial<Config>): Config {
     log: { ...base.log, ...(over.log ?? {}) },
     effortClamp: { ...base.effortClamp, ...(over.effortClamp ?? {}) },
     ...((over.admin ?? base.admin) ? { admin: over.admin ?? base.admin! } : {}),
+    ...(over.picker ? { picker: { ...over.picker } } : {}),
   };
 }
 

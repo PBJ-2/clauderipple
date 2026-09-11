@@ -25,6 +25,9 @@ import { BOOTSTRAP_PATH, injectBootstrap } from "./bootstrap.ts";
 import { effortOf, resolve, rewriteBody } from "./routing.ts";
 import { ChatGptAdapter } from "./providers/chatgpt/index.ts";
 import type { AnthropicRequest } from "./providers/chatgpt/translate.ts";
+import { terminateHosts } from "./config.ts";
+import type { CertStore } from "./certs.ts";
+import { injectPickerModels, isBootstrapPath } from "./picker.ts";
 
 const MAX_BODY = 64 * 1024 * 1024;
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "host", "content-length"]);
@@ -32,7 +35,8 @@ const HOP_BY_HOP = new Set(["connection", "keep-alive", "proxy-connection", "tra
 export type ProxyDeps = {
   config: () => Config;
   log: Logger;
-  secureContext: tls.SecureContext;
+  /** Leaf certificates per terminated host (api.anthropic.com always; claude.ai in picker mode). */
+  certs: CertStore;
   health: UpstreamHealth;
   /** ClaudeRipple home (credentials for the chatgpt provider live here). */
   home: string;
@@ -91,8 +95,12 @@ export class Proxy {
       }
       socket.destroy();
     });
+    this.httpServer.on("upgrade", (req, socket, head) => this.upgrade(req, socket as net.Socket, head));
     this.server = net.createServer((sock) => this.onConnect(sock));
   }
+
+  /** Surfaces + model ids seen in the last injected bootstrap (admin GUI / debugging). */
+  lastPickerInjection: { at: string; injected: number; surfaces: { id: string; models: string[] }[] } | null = null;
 
   listen(): Promise<void> {
     const { host, port } = this.deps.config().listen;
@@ -158,8 +166,8 @@ export class Proxy {
       const port = colon > 0 ? Number(target.slice(colon + 1)) : 443;
       sock.write("HTTP/1.1 200 Connection Established\r\n\r\n");
       if (rest.length > 0) sock.unshift(rest);
-      if (host === this.deps.config().upstream) {
-        this.terminate(sock);
+      if (terminateHosts(this.deps.config()).includes(host)) {
+        this.terminate(sock, host);
       } else {
         this.tunnel(sock, host, port);
       }
@@ -167,15 +175,61 @@ export class Proxy {
     sock.on("data", onData);
   }
 
-  private terminate(sock: net.Socket): void {
+  private terminate(sock: net.Socket, host: string): void {
+    let ctx: tls.SecureContext;
+    try {
+      ctx = this.deps.certs.contextFor(host);
+    } catch (e) {
+      this.deps.log.error(`no certificate for ${host}: ${(e as Error).message}; tunnelling instead`);
+      this.tunnel(sock, host, 443);
+      return;
+    }
     const tlsSock = new tls.TLSSocket(sock, {
       isServer: true,
-      secureContext: this.deps.secureContext,
+      secureContext: ctx,
       ALPNProtocols: ["http/1.1"],
+      // Chromium (picker mode) sends SNI; serve whichever terminated host it names.
+      SNICallback: (servername, cb) => {
+        try {
+          cb(null, terminateHosts(this.deps.config()).includes(servername) ? this.deps.certs.contextFor(servername) : ctx);
+        } catch (e) {
+          cb(e as Error);
+        }
+      },
     });
-    tlsSock.on("error", (e) => this.deps.log.warn(`tls error ${(e as Error).message}`));
+    tlsSock.on("error", (e) => {
+      const msg = (e as Error).message;
+      if (!/ECONNRESET|ended by the other party/.test(msg)) this.deps.log.warn(`tls error ${msg}`);
+    });
     this.httpServer.emit("connection", tlsSock);
     sock.resume();
+  }
+
+  /** WebSocket / other upgrades on a terminated host: re-open TLS upstream and splice the sockets. */
+  private upgrade(req: http.IncomingMessage, socket: net.Socket, head: Buffer): void {
+    const cfg = this.deps.config();
+    const host = (req.headers.host ?? cfg.upstream).split(":")[0]!;
+    const up = tls.connect({ host, port: 443, servername: host, ALPNProtocols: ["http/1.1"] });
+    const kill = (): void => {
+      socket.destroy();
+      up.destroy();
+    };
+    up.on("error", (e) => {
+      this.deps.log.warn(`upgrade upstream error ${host}: ${(e as Error).message}`);
+      kill();
+    });
+    socket.on("error", kill);
+    up.once("secureConnect", () => {
+      const lines = [`${req.method} ${req.url} HTTP/1.1`];
+      for (let i = 0; i < req.rawHeaders.length; i += 2) lines.push(`${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}`);
+      up.write(lines.join("\r\n") + "\r\n\r\n");
+      if (head.length) up.write(head);
+      socket.pipe(up);
+      up.pipe(socket);
+      this.deps.log.info(`UPGRADE ${host}${req.url}`);
+    });
+    up.on("close", () => socket.destroy());
+    socket.on("close", () => up.destroy());
   }
 
   private tunnel(sock: net.Socket, host: string, port: number): void {
@@ -227,10 +281,15 @@ export class Proxy {
       return;
     }
 
+    // Which terminated host is this request for? Only the Anthropic API host is routed;
+    // anything else (claude.ai in picker mode) is passed through, with bootstrap injection.
+    const reqHost = (req.headers.host ?? cfg.upstream).split(":")[0]!;
+    const isApiHost = reqHost === cfg.upstream;
+
     // Route decision: only Messages requests carry a model.
     let json: Record<string, unknown> | null = null;
     let model: unknown;
-    if (path.startsWith("/v1/messages")) {
+    if (isApiHost && path.startsWith("/v1/messages")) {
       try {
         json = JSON.parse(body.toString("utf8")) as Record<string, unknown>;
         model = json.model;
@@ -272,12 +331,18 @@ export class Proxy {
         extraHeaders: provider.headers ?? {},
       };
       tag = `${route.provider.toUpperCase()} ${route.tag} effort=${effortOf(json) ?? "-"}`;
-    } else {
+    } else if (isApiHost) {
       target = { protocol: "https:", host: cfg.upstream, port: 443, agent: this.upstreamAgent, extraHeaders: {} };
       tag = `PASS ${typeof model === "string" ? model : "-"}`;
+    } else {
+      target = { protocol: "https:", host: reqHost, port: 443, agent: this.agentFor(`host:${reqHost}`, "https:"), extraHeaders: {} };
+      tag = `WEB ${reqHost}`;
     }
 
-    const isBootstrap = !route && path.startsWith(BOOTSTRAP_PATH);
+    // Two kinds of response editing: the CLI bootstrap (api host) and the claude.ai bootstrap (picker mode).
+    const isCliBootstrap = isApiHost && !route && path.startsWith(BOOTSTRAP_PATH);
+    const isPickerBootstrap = !isApiHost && !!cfg.picker?.enabled && method === "GET" && isBootstrapPath(path);
+    const isBootstrap = isCliBootstrap || isPickerBootstrap;
     const headers: string[] = [];
     const raw = req.rawHeaders;
     for (let i = 0; i < raw.length; i += 2) {
@@ -289,7 +354,7 @@ export class Proxy {
       headers.push(k, raw[i + 1]!);
     }
     for (const [k, v] of Object.entries(target.extraHeaders)) headers.push(k, v);
-    headers.push("host", target.host === cfg.upstream ? cfg.upstream : `${target.host}:${target.port}`);
+    headers.push("host", target.protocol === "https:" && target.port === 443 ? target.host : `${target.host}:${target.port}`);
     headers.push("content-length", String(body.length));
 
     const lib = target.protocol === "https:" ? https : http;
@@ -343,11 +408,25 @@ export class Proxy {
         upRes.on("data", (c: Buffer) => chunks.push(c));
         upRes.on("end", () => {
           let out: Buffer = Buffer.concat(chunks);
-          if (status === 200) {
+          if (status === 200 && isCliBootstrap) {
             try {
               out = injectBootstrap(out, cfg);
             } catch (e) {
               log.warn(`bootstrap inject failed: ${(e as Error).message}`);
+            }
+          } else if (status === 200 && isPickerBootstrap) {
+            try {
+              const j = JSON.parse(out.toString("utf8")) as Record<string, unknown>;
+              const r = injectPickerModels(j, cfg.cli.extraModels, cfg.cli.autoCompactWindow);
+              this.lastPickerInjection = { at: new Date().toISOString(), ...r };
+              if (r.surfaces.length > 0) {
+                out = Buffer.from(JSON.stringify(j));
+                log.info(`PICKER injected ${r.injected} model(s); surfaces: ${r.surfaces.map((s) => `${s.id}[${s.models.length}]`).join(" ")}`);
+              } else {
+                log.info(`PICKER bootstrap had no model_selector_config (${path.slice(0, 60)})`);
+              }
+            } catch (e) {
+              log.warn(`picker inject failed: ${(e as Error).message}`);
             }
           }
           outHeaders.push("content-length", String(out.length));

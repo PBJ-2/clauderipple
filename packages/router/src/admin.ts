@@ -40,6 +40,8 @@ export type AdminDeps = {
   version: string;
   /** Optional: chatgpt providers' latest rate-limit snapshot and credential status. */
   chatgpt?: () => { quota: Record<string, Record<string, unknown> | null>; auth: Record<string, string> };
+  /** Optional: picker-mode state and the last bootstrap injection. */
+  picker?: () => { enabled: boolean; hosts: string[]; last: unknown };
 };
 
 export function adminPort(cfg: Config): number {
@@ -133,6 +135,7 @@ async function buildStatus(deps: AdminDeps): Promise<Record<string, unknown>> {
     },
     cliVersion: cliVersion(),
     chatgpt,
+    picker: deps.picker?.() ?? { enabled: false, hosts: [], last: null },
   };
 }
 

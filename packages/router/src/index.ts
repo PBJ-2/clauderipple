@@ -7,8 +7,8 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import tls from "node:tls";
-import { ConfigStore, configPath, homeDir } from "./config.ts";
+import { ConfigStore, configPath, homeDir, terminateHosts } from "./config.ts";
+import { CertStore } from "./certs.ts";
 import { Logger } from "./log.ts";
 import { UpstreamHealth, EXIT_UPSTREAM_UNREACHABLE } from "./health.ts";
 import { Proxy } from "./proxy.ts";
@@ -25,15 +25,22 @@ const store = new ConfigStore(undefined, (c, errors) => {
 const cfg0 = store.get();
 log = new Logger(logFile, cfg0.log.maxBytes, cfg0.log.keep, !!process.env.CLAUDERIPPLE_ECHO || !logFile);
 
-let secureContext: tls.SecureContext;
+const certs = new CertStore(home);
 try {
-  secureContext = tls.createSecureContext({
-    cert: fs.readFileSync(path.join(home, "leaf.pem")),
-    key: fs.readFileSync(path.join(home, "leaf.key")),
-  });
+  certs.register(cfg0.upstream, fs.readFileSync(path.join(home, "leaf.pem")), fs.readFileSync(path.join(home, "leaf.key")));
 } catch (e) {
   log.error(`cannot load leaf.pem/leaf.key from ${home}: ${(e as Error).message}. Run the installer first.`);
   process.exit(2);
+}
+// Picker mode: mint leaves for the app's own hosts up front so the first CONNECT is not slowed down.
+for (const h of terminateHosts(cfg0)) {
+  if (certs.has(h)) continue;
+  try {
+    certs.contextFor(h);
+    log.info(`picker: certificate ready for ${h}`);
+  } catch (e) {
+    log.error(`picker: cannot mint certificate for ${h}: ${(e as Error).message}`);
+  }
 }
 
 const health = new UpstreamHealth(
@@ -44,7 +51,7 @@ const health = new UpstreamHealth(
   },
 );
 
-const proxy = new Proxy({ config: () => store.get(), log, secureContext, health, home });
+const proxy = new Proxy({ config: () => store.get(), log, certs, health, home });
 
 process.on("uncaughtException", (e) => log!.error(`uncaught ${(e as Error).stack ?? e}`));
 process.on("unhandledRejection", (e) => log!.error(`unhandled ${(e as Error)?.stack ?? e}`));
@@ -89,6 +96,7 @@ proxy
       health: () => health.consecutiveFailures,
       version: "0.1.0",
       chatgpt: () => ({ quota: proxy.chatgptRateLimits, auth: proxy.chatgptAuthStatus() }),
+      picker: () => ({ enabled: !!store.get().picker?.enabled, hosts: terminateHosts(store.get()).slice(1), last: proxy.lastPickerInjection }),
     });
     log!.info(`clauderipple admin GUI on http://127.0.0.1:${admin.port}/`);
   })
