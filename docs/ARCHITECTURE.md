@@ -76,10 +76,22 @@ chat is out of reach for every approach, ours included.
   Electron renderer, which a CLI-only proxy cannot see.
 - **v1 decision: alias mode.** Map existing picker entries (e.g. Opus 4.8 →
   GPT-6 Astra) and make the mapping visible in the ClaudeRipple GUI.
-- **v2 option: keychain mode.** Trust the CA system-wide and proxy the whole app,
-  then inject entries into `model_selector_config` for the `code` surface.
-  Costs: admin password, larger break surface (bootstrap push), claude.ai traffic
-  interception. Documented as a roadmap item, not a v1 feature.
+- **Picker mode (implemented 2026-09-11, `clauderipple picker on`).** Verified in
+  the app's main bundle (`index.pre.js`): the app reads `egressProxyUrl` from its
+  own Config Library (`~/Library/Application Support/Claude/configLibrary/
+  _meta.json` → `appliedId` → `<uuid>.json`, flat keys) and applies it at start
+  as Chromium switches `--proxy-server` + `--proxy-bypass-list` (`DK()`), so the
+  renderer's claude.ai traffic goes through the same proxy. No MDM, no OS proxy.
+  The bootstrap is fetched by the page itself at
+  `/edge-api/bootstrap[/{org}/app_start]?statsig_hashing_algorithm=djb2&...`
+  (`window.__BOOTSTRAP_PRELOAD__`), top-level `model_selector_config`. The CA is
+  trusted in the **login keychain only** (`security add-trusted-cert -r trustRoot
+  -k login.keychain-db`; the user types their password in macOS's dialog). The
+  router mints a `claude.ai` leaf from the CA (SNI), passes claude.ai through
+  byte-for-byte except the bootstrap, where `cli.extraModels` are cloned from an
+  enabled Claude entry into every non-`chat` surface. Open question until the
+  first real run: exact surface ids and whether the renderer filters ids; the
+  router logs `PICKER injected … surfaces: …` on each bootstrap.
 - Injecting `additional_model_options` into the Claude Code bootstrap response
   does **not** reach the app picker (measured; the app never reads that field).
 
