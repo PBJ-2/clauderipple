@@ -48,7 +48,9 @@ export class Logger {
   }
 
   line(level: "info" | "warn" | "error", msg: string): void {
-    const ts = new Date().toISOString().slice(5, 19).replace("T", " ");
+    const d = new Date();
+    const p = (n: number): string => String(n).padStart(2, "0");
+    const ts = `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`; // local time, like the app's own logs
     const out = `${ts} ${level === "info" ? "" : level.toUpperCase() + " "}${msg}\n`;
     if (this.echo || this.fd === null) process.stdout.write(out);
     if (this.fd !== null) {
