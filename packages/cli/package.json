@@ -1,0 +1,14 @@
+{
+  "name": "@clauderipple/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Installer and control CLI for ClaudeRipple.",
+  "license": "MIT",
+  "bin": {
+    "clauderipple": "./src/index.ts"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

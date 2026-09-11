@@ -1,0 +1,14 @@
+{
+  "name": "@clauderipple/router",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local proxy that routes selected Claude Code model names to other providers and passes everything else to api.anthropic.com untouched.",
+  "license": "MIT",
+  "bin": {
+    "clauderipple-router": "./src/index.ts"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "clauderipple-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Run GPT and other models inside Claude Desktop, without turning Claude off.",
+  "license": "MIT",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "router": "node packages/router/src/index.ts",
+    "test": "node --test packages/router/test/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "typescript": "^5.9.2"
+  }
+}
