@@ -8,14 +8,34 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export type Provider = {
-  /** Only "anthropic-compatible" exists in M1: an HTTP(S) endpoint that speaks Anthropic Messages. */
+export type AnthropicCompatibleProvider = {
+  /** An HTTP(S) endpoint that speaks Anthropic Messages (DeepSeek, Kimi, GLM, MiniMax, proxenos, ...). */
   type: "anthropic-compatible";
   /** e.g. "http://127.0.0.1:8787" or "https://api.deepseek.com/anthropic" */
   url: string;
   /** Optional headers to set on forwarded requests (e.g. x-api-key). Never logged. */
   headers?: Record<string, string>;
+  /** Optional model ids offered by the GUI as suggestions. */
+  models?: string[];
 };
+
+export type ChatGptProvider = {
+  /** Your ChatGPT subscription through the Codex backend; Anthropic Messages translated to OpenAI Responses. */
+  type: "chatgpt";
+  /** "borrow-codex" reads ~/.codex/auth.json (never refreshed by us); "own" uses `clauderipple login` tokens. Default: own if present, else borrow. */
+  auth?: "own" | "borrow-codex" | "auto";
+  /** Override the backend origin (default https://chatgpt.com/backend-api). */
+  url?: string;
+  /** Prefix the system prompt with a one-line identity so the model knows what it is. Default true. */
+  identity?: boolean;
+  /** Fixed text appended to the system prompt. Must stay constant across turns or the prompt cache breaks. */
+  instructionsAppend?: string;
+  /** Reasoning effort when the request carries none. Default "high". */
+  defaultEffort?: string;
+  models?: string[];
+};
+
+export type Provider = AnthropicCompatibleProvider | ChatGptProvider;
 
 export type Route = {
   provider: string;
@@ -59,6 +79,8 @@ export type Config = {
     maxBytes: number;
     keep: number;
   };
+  /** Local admin API + GUI. Binds 127.0.0.1 only. Defaults to listen.port + 1. */
+  admin?: { port: number };
 };
 
 export const DEFAULTS: Config = {
@@ -91,6 +113,7 @@ function merge(base: Config, over: Partial<Config>): Config {
     health: { ...base.health, ...(over.health ?? {}) },
     log: { ...base.log, ...(over.log ?? {}) },
     effortClamp: { ...base.effortClamp, ...(over.effortClamp ?? {}) },
+    ...((over.admin ?? base.admin) ? { admin: over.admin ?? base.admin! } : {}),
   };
 }
 
@@ -104,7 +127,13 @@ export function validate(c: Config): string[] {
     if (!c.providers[d.provider]) errors.push(`direct ${d.prefix}: unknown provider "${d.provider}"`);
   }
   for (const [name, p] of Object.entries(c.providers)) {
-    if (!/^https?:\/\//.test(p.url)) errors.push(`provider ${name}: url must start with http:// or https://`);
+    if (p.type === "anthropic-compatible") {
+      if (!/^https?:\/\//.test(p.url)) errors.push(`provider ${name}: url must start with http:// or https://`);
+    } else if (p.type === "chatgpt") {
+      if (p.url && !/^https?:\/\//.test(p.url)) errors.push(`provider ${name}: url must start with http:// or https://`);
+    } else {
+      errors.push(`provider ${name}: unknown type "${(p as { type?: string }).type}"`);
+    }
   }
   if (!(c.listen.port > 0 && c.listen.port < 65536)) errors.push("listen.port out of range");
   return errors;

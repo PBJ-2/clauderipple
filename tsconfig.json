@@ -15,5 +15,6 @@
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["packages/*/src/**/*.ts", "packages/*/test/**/*.ts"]
+  "include": ["packages/*/src/**/*.ts", "packages/*/test/**/*.ts"],
+  "exclude": ["packages/app/**", "node_modules"]
 }

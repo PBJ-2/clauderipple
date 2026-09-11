@@ -23,6 +23,8 @@ import type { Logger } from "./log.ts";
 import { UpstreamHealth } from "./health.ts";
 import { BOOTSTRAP_PATH, injectBootstrap } from "./bootstrap.ts";
 import { effortOf, resolve, rewriteBody } from "./routing.ts";
+import { ChatGptAdapter } from "./providers/chatgpt/index.ts";
+import type { AnthropicRequest } from "./providers/chatgpt/translate.ts";
 
 const MAX_BODY = 64 * 1024 * 1024;
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "host", "content-length"]);
@@ -32,6 +34,8 @@ export type ProxyDeps = {
   log: Logger;
   secureContext: tls.SecureContext;
   health: UpstreamHealth;
+  /** ClaudeRipple home (credentials for the chatgpt provider live here). */
+  home: string;
 };
 
 export type Stats = {
@@ -48,7 +52,30 @@ export class Proxy {
   private readonly httpServer: http.Server;
   private readonly upstreamAgent = new https.Agent({ keepAlive: true, maxSockets: 64 });
   private readonly providerAgents = new Map<string, http.Agent | https.Agent>();
+  private readonly chatgptAdapters = new Map<string, { key: string; adapter: ChatGptAdapter }>();
   private readonly deps: ProxyDeps;
+
+  /** Latest rate-limit snapshot reported by any chatgpt provider (for the admin GUI). */
+  get chatgptRateLimits(): Record<string, Record<string, unknown> | null> {
+    const out: Record<string, Record<string, unknown> | null> = {};
+    for (const [name, a] of this.chatgptAdapters) out[name] = a.adapter.lastRateLimits;
+    return out;
+  }
+
+  chatgptAuthStatus(): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const [name, a] of this.chatgptAdapters) out[name] = a.adapter.describeAuth();
+    return out;
+  }
+
+  private chatgpt(name: string, cfg: Extract<Config["providers"][string], { type: "chatgpt" }>): ChatGptAdapter {
+    const key = JSON.stringify(cfg);
+    const cur = this.chatgptAdapters.get(name);
+    if (cur && cur.key === key) return cur.adapter;
+    const adapter = new ChatGptAdapter(name, cfg, this.deps.home, this.deps.log);
+    this.chatgptAdapters.set(name, { key, adapter });
+    return adapter;
+  }
 
   constructor(deps: ProxyDeps) {
     this.deps = deps;
@@ -201,6 +228,18 @@ export class Proxy {
         return;
       }
       rewriteBody(json, route, cfg.effortClamp);
+      if (provider.type === "chatgpt") {
+        tag = `CHATGPT ${route.tag} effort=${effortOf(json) ?? "-"}`;
+        try {
+          const o = await this.chatgpt(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, effortOf(json));
+          finish(String(o.status), o.bytes, o.note);
+        } catch (e) {
+          finish("-", 0, `chatgpt error ${(e as NodeJS.ErrnoException).code ?? ""} ${(e as Error).message}`);
+          if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" }).end(JSON.stringify({ type: "error", error: { type: "api_error", message: (e as Error).message } }));
+          else res.destroy();
+        }
+        return;
+      }
       body = Buffer.from(JSON.stringify(json));
       const u = new URL(provider.url);
       const protocol = u.protocol === "https:" ? "https:" : "http:";
