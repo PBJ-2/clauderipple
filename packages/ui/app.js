@@ -646,10 +646,10 @@ function openProviderForm(options) {
     probeButton.disabled = false;
     const noCredits = response.ok && /^no-credits:/.test(response.error || "");
     const headline = noCredits ? t("providers.probeNoCredits") : response.ok ? t("providers.probeOk") : response.auth === "bad-key" ? t("providers.probeBadKey") : response.unavailable ? t("providers.apiSoon") : t("providers.probeFailed");
-    result.replaceChildren(
+    result.replaceChildren(...[
       el("span", { class: response.ok && !noCredits ? "ok-text" : noCredits ? "warn-text" : "bad-text", text: headline }),
       response.error ? el("div", { class: "small", text: response.error.replace(/^no-credits:\s*/, "") }) : null,
-    );
+    ].filter(Boolean));
     foundModels = response.models && response.models.length ? response.models.map((model) => typeof model === "string" ? { id: model, name: model } : model) : (preset ? (preset.fallbackModels || []) : foundModels);
     modelsBox.replaceWith(modelChecklist(foundModels, new Set(foundModels.map((model) => model.id))));
     modelArea.replaceChildren(el("span", { text: t("providers.models") }), hint(response.ok ? t("providers.modelsFound") : t("providers.modelsFallback")), modelArea.querySelector(".model-checklist") || document.createTextNode(""));
