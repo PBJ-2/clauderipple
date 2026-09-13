@@ -152,12 +152,21 @@ function openWindow(): void {
   win = new BrowserWindow({
     width: 960,
     height: 680,
+    minWidth: 720,
+    minHeight: 480,
     title: "ClaudeRipple",
     titleBarStyle: "hiddenInset",
+    trafficLightPosition: { x: 16, y: 18 },
     webPreferences: { contextIsolation: true, nodeIntegration: false },
   });
   void win.loadURL(adminUrl());
-  win.on("closed", () => (win = null));
+  // Menu-bar app: no Dock icon while only the tray exists; show one while the settings window is open
+  // (so Cmd-Tab and the Dock can reach it), hide it again when the window closes.
+  if (process.platform === "darwin") void app.dock?.show();
+  win.on("closed", () => {
+    win = null;
+    if (process.platform === "darwin") app.dock?.hide();
+  });
 }
 
 /** Node 24 + CLI source paths recorded by `clauderipple install` (the packaged app carries neither,

@@ -58,6 +58,11 @@ nav .brand {
   letter-spacing: 0.2px;
 }
 
+/* Inside the Electron window the title bar is hidden (hiddenInset): leave room for the traffic
+   lights and let the top strip drag the window. */
+body.electron nav { padding-top: 46px; }
+body.electron nav .brand { -webkit-app-region: drag; }
+
 nav button {
   all: unset;
   cursor: pointer;
