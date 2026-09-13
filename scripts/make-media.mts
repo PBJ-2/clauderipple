@@ -25,13 +25,14 @@ const pages: { name: string; hash: string; prep?: string }[] = [
   { name: "status", hash: "health" },
   { name: "mapping", hash: "slots" },
   { name: "providers", hash: "providers" },
+  { name: "clients", hash: "clients" },
+  { name: "logs", hash: "logs" },
+  // last: the chooser modal persists across in-page hash navigation
   {
     name: "add-provider",
     hash: "providers",
     prep: "document.getElementById('providers-add') && document.getElementById('providers-add').click()",
   },
-  { name: "clients", hash: "clients" },
-  { name: "logs", hash: "logs" },
 ];
 const capture = `
 const { app, BrowserWindow } = require("electron");
