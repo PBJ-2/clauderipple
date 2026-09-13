@@ -73,10 +73,19 @@ function blockText(c: string | AnthropicBlock[] | undefined): string {
     .join("\n");
 }
 
+// Claude Code's first system block is Anthropic billing telemetry ("x-anthropic-billing-header: …
+// cch=<hash> …") whose hash changes on every turn. Left in, it sits at the top of `instructions`
+// and invalidates the prompt cache for everything after it (measured 2026-09-13: cached_tokens
+// stuck at the tools prefix while input grew 39k→43k). It means nothing to another provider.
+const BILLING_BLOCK = /^x-anthropic-billing-header:/;
+
 export function systemText(system: AnthropicRequest["system"]): string {
-  if (typeof system === "string") return system;
+  if (typeof system === "string") return system.replace(/^x-anthropic-billing-header:[^\n]*\n*/, "");
   if (!Array.isArray(system)) return "";
-  return system.map((b) => b.text ?? "").filter((s) => s.length > 0).join("\n\n");
+  return system
+    .map((b) => b.text ?? "")
+    .filter((s) => s.length > 0 && !BILLING_BLOCK.test(s))
+    .join("\n\n");
 }
 
 export function conversationKey(req: AnthropicRequest): string {

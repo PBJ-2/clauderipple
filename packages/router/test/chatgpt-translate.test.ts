@@ -28,6 +28,7 @@ test("system → instructions with identity line; tools → function tools; cach
   assert.ok(r.instructions.startsWith("You are gpt-5.6-terra (reasoning effort: "), r.instructions.slice(0, 80));
   assert.ok(r.instructions.includes("), answering through Claude Code"));
   assert.ok(r.instructions.includes("You are Claude Code."));
+  assert.ok(!r.instructions.includes("x-anthropic-billing-header"), "per-turn billing telemetry must not reach the provider (cache)");
   assert.equal(r.tools?.length, 1);
   assert.equal(r.tools?.[0]?.type, "function");
   assert.equal(r.tools?.[0]?.name, "Read");
