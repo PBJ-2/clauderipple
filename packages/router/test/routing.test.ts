@@ -67,7 +67,7 @@ test("rewriteBody sets model, effort and clamps ultra", () => {
 });
 
 test("bootstrap injection adds CLI models and compaction windows", () => {
-  const out = JSON.parse(injectBootstrap(Buffer.from(JSON.stringify({ additional_model_options: [{ model: "a", name: "A" }], auto_compact_windows: { a: 1 } })), cfg).toString());
+  const out = JSON.parse(injectBootstrap(Buffer.from(JSON.stringify({ additional_model_options: [{ model: "a", name: "A" }], auto_compact_windows: { a: 1 } })), cfg, []).toString());
   assert.equal(out.additional_model_options.length, 2);
   assert.equal(out.auto_compact_windows["gpt-5.6-terra@high"], 258400);
   assert.equal(out.auto_compact_windows["claude-opus-4-8"], 258400);
