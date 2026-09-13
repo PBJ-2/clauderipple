@@ -16,6 +16,19 @@ test("validate reports unknown providers and bad urls", () => {
   assert.equal(errs.length, 2);
 });
 
+test("validate accepts named anthropic-compatible model entries and rejects invalid ones", () => {
+  const valid = validate({
+    ...DEFAULTS,
+    providers: { p: { type: "anthropic-compatible", url: "https://example.test", preset: "example", models: [{ id: "model", name: "Model" }] } },
+  });
+  assert.deepEqual(valid, []);
+  const invalid = validate({
+    ...DEFAULTS,
+    providers: { p: { type: "anthropic-compatible", url: "https://example.test", models: [{ id: 7 } as unknown as { id: string }] } },
+  });
+  assert.ok(invalid.some((error) => error.includes("models must be entries")));
+});
+
 test("ConfigStore hot-reloads on mtime change and keeps last good config on errors", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cr-cfg-"));
   const file = path.join(dir, "config.json");

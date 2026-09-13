@@ -31,6 +31,8 @@ test("injects into CLI-backed surfaces (code/ccd/ccr/cowork) using an enabled Cl
   const r = injectPickerModels(j, [{ model: "gpt-5.6-terra@high", name: "GPT-5.6 Terra", description: "default GPT worker" }, { model: "gpt-6-astra@high", name: "GPT-6 Astra" }], 258400);
   assert.equal(r.injected, 2);
   assert.deepEqual(r.surfaces.map((s) => s.id), ["chat", "code"]);
+  assert.deepEqual(r.surfaces[1]?.entries[0], { id: "claude-opus-4-8", name: "Opus 4.8" });
+  assert.ok(r.surfaces[1]?.entries.some((entry) => entry.id === "gpt-5.6-terra@high" && entry.name === "GPT-5.6 Terra"));
   const code = (j.model_selector_config as { id: string; models: Record<string, unknown>[]; context_window_by_model: Record<string, number> }[])[1]!;
   assert.equal(code.models.length, 4);
   const terra = code.models[2]!;

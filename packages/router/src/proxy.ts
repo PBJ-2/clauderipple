@@ -103,7 +103,7 @@ export class Proxy {
   }
 
   /** Surfaces + model ids seen in the last injected bootstrap (admin GUI / debugging). */
-  lastPickerInjection: { at: string; injected: number; surfaces: { id: string; models: string[] }[] } | null = null;
+  lastPickerInjection: { at: string; injected: number; surfaces: { id: string; models: string[]; entries: { id: string; name: string }[] }[] } | null = null;
 
   listen(): Promise<void> {
     const { host, port } = this.deps.config().listen;

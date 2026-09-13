@@ -15,8 +15,10 @@ export type AnthropicCompatibleProvider = {
   url: string;
   /** Optional headers to set on forwarded requests (e.g. x-api-key). Never logged. */
   headers?: Record<string, string>;
-  /** Optional model ids offered by the GUI as suggestions. */
-  models?: string[];
+  /** Catalog preset used to populate this provider, if any. */
+  preset?: string;
+  /** Optional model entries offered by the GUI as suggestions. */
+  models?: { id: string; name?: string }[];
 };
 
 export type ChatGptProvider = {
@@ -144,6 +146,12 @@ export function validate(c: Config): string[] {
   for (const [name, p] of Object.entries(c.providers)) {
     if (p.type === "anthropic-compatible") {
       if (!/^https?:\/\//.test(p.url)) errors.push(`provider ${name}: url must start with http:// or https://`);
+      if (p.preset !== undefined && typeof p.preset !== "string") errors.push(`provider ${name}: preset must be a string`);
+      if (p.models !== undefined) {
+        if (!Array.isArray(p.models) || p.models.some((m) => !m || typeof m.id !== "string" || (m.name !== undefined && typeof m.name !== "string"))) {
+          errors.push(`provider ${name}: models must be entries with string id and optional string name`);
+        }
+      }
     } else if (p.type === "chatgpt") {
       if (p.url && !/^https?:\/\//.test(p.url)) errors.push(`provider ${name}: url must start with http:// or https://`);
     } else {

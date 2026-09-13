@@ -34,7 +34,8 @@ function pickTemplate(models: ModelEntry[]): ModelEntry | null {
   return models.find((m) => isClaudeEntry(m) && !m.disabled && m.section !== "deprecated" && m.section !== "legacy") ?? models.find(isClaudeEntry) ?? null;
 }
 
-export type InjectResult = { injected: number; surfaces: { id: string; models: string[] }[] };
+export type PickerModelEntry = { id: string; name: string };
+export type InjectResult = { injected: number; surfaces: { id: string; models: string[]; entries: PickerModelEntry[] }[] };
 
 /** Mutates `json` in place; returns what was done for logging. */
 export function injectPickerModels(json: Record<string, unknown>, extra: CliModel[], contextWindow?: number): InjectResult {
@@ -44,7 +45,11 @@ export function injectPickerModels(json: Record<string, unknown>, extra: CliMode
   for (const surface of msc as Surface[]) {
     if (!surface || typeof surface !== "object" || !Array.isArray(surface.models)) continue;
     const id = String(surface.id ?? "");
-    result.surfaces.push({ id, models: surface.models.map((m) => String(m.id ?? "?")) });
+    result.surfaces.push({
+      id,
+      models: surface.models.map((m) => String(m.id ?? "?")),
+      entries: surface.models.map((m) => ({ id: String(m.id ?? "?"), name: typeof m.name === "string" ? m.name : String(m.id ?? "?") })),
+    });
     if (!CLI_SURFACES.has(id)) continue;
     const template = pickTemplate(surface.models);
     if (!template) continue;
@@ -65,6 +70,9 @@ export function injectPickerModels(json: Record<string, unknown>, extra: CliMode
         if (map && typeof map === "object") for (const e of extra) (map as Record<string, number>)[e.model] = contextWindow;
       }
     }
+    const recorded = result.surfaces[result.surfaces.length - 1]!;
+    recorded.models = surface.models.map((m) => String(m.id ?? "?"));
+    recorded.entries = surface.models.map((m) => ({ id: String(m.id ?? "?"), name: typeof m.name === "string" ? m.name : String(m.id ?? "?") }));
   }
   return result;
 }

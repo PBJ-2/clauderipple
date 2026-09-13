@@ -17,6 +17,7 @@ import type { Config } from "./config.ts";
 import { homeDir, validate } from "./config.ts";
 import type { Logger } from "./log.ts";
 import type { Stats } from "./proxy.ts";
+import { PRESETS, type ProviderPreset } from "./presets.ts";
 
 const MAX_BODY = 1024 * 1024;
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -44,6 +45,29 @@ export type AdminDeps = {
   /** Optional: picker-mode state and the last bootstrap injection. */
   picker?: () => { enabled: boolean; hosts: string[]; last: unknown };
 };
+
+type ModelEntry = { id: string; name?: string };
+type ProbeAuth = "ok" | "bad-key" | "unreachable" | "unknown";
+type ProbeRequest = {
+  type: "anthropic-compatible";
+  url: string;
+  headers?: Record<string, string>;
+  modelsUrl?: string;
+  modelsAuthHeader?: string;
+};
+
+const CLAUDE_MODEL_FALLBACK: { id: string; name: string }[] = [
+  { id: "claude-fable-5-1", name: "Fable 5.1" },
+  { id: "claude-opus-5", name: "Opus 5" },
+  { id: "claude-sonnet-5", name: "Sonnet 5" },
+  { id: "claude-haiku-4-5", name: "Haiku 4.5" },
+  { id: "claude-fable-5", name: "Fable 5" },
+  { id: "claude-opus-4-8", name: "Opus 4.8" },
+  { id: "claude-opus-4-7", name: "Opus 4.7" },
+  { id: "claude-opus-4-6", name: "Opus 4.6" },
+  { id: "claude-sonnet-4-6", name: "Sonnet 4.6" },
+];
+
 
 export function adminPort(cfg: Config): number {
   return cfg.admin?.port ?? cfg.listen.port + 1;
@@ -182,6 +206,96 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
   res.end(out);
 }
 
+function headerValue(headers: Record<string, string> | undefined): { name: string; value: string } | null {
+  if (!headers) return null;
+  for (const [name, value] of Object.entries(headers)) {
+    const lower = name.toLowerCase();
+    if ((lower === "x-api-key" || lower === "authorization") && typeof value === "string") return { name, value };
+  }
+  return null;
+}
+
+function authHeaders(source: { name: string; value: string } | null, kind?: string): Record<string, string> {
+  if (!source) return {};
+  if (kind === "x-api-key") return { "x-api-key": source.value };
+  if (kind === "authorization-bearer") return { authorization: source.value.startsWith("Bearer ") ? source.value : `Bearer ${source.value}` };
+  return { [source.name]: source.value };
+}
+
+function messagesUrl(base: string): string {
+  return `${base.replace(/\/+$/, "")}/v1/messages`;
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function parsedModels(value: unknown): ModelEntry[] {
+  const data = value && typeof value === "object" && Array.isArray((value as { data?: unknown }).data) ? (value as { data: unknown[] }).data : [];
+  return data.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const r = item as { id?: unknown; name?: unknown };
+    return typeof r.id === "string" ? [{ id: r.id, ...(typeof r.name === "string" ? { name: r.name } : {}) }] : [];
+  });
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+  return fetch(url, { ...init, signal: AbortSignal.timeout(8_000) });
+}
+
+async function probeProvider(body: ProbeRequest): Promise<{ ok: boolean; auth: ProbeAuth; models: ModelEntry[]; error?: string }> {
+  const source = headerValue(body.headers);
+  let models: ModelEntry[] = [];
+  let modelsError: string | undefined;
+  if (body.modelsUrl) {
+    try {
+      const response = await fetchWithTimeout(body.modelsUrl, { headers: authHeaders(source, body.modelsAuthHeader) });
+      if (response.status === 401 || response.status === 403) return { ok: false, auth: "bad-key", models: [], error: `models endpoint returned ${response.status}` };
+      if (response.ok) models = parsedModels(await response.json());
+      else modelsError = `models endpoint returned ${response.status}`;
+    } catch (e) {
+      modelsError = `models endpoint: ${errorText(e)}`;
+    }
+  }
+
+  try {
+    const response = await fetchWithTimeout(messagesUrl(body.url), {
+      method: "POST",
+      headers: { "content-type": "application/json", ...authHeaders(source) },
+      body: JSON.stringify({ model: models[0]?.id ?? "test", max_tokens: 1, messages: [{ role: "user", content: "hi" }] }),
+    });
+    if (response.status === 401 || response.status === 403) return { ok: false, auth: "bad-key", models, error: `messages endpoint returned ${response.status}` };
+    // A model-validation 400 still demonstrates that the endpoint reached the provider and the key was accepted.
+    if (response.ok) return { ok: true, auth: "ok", models, ...(modelsError ? { error: modelsError } : {}) };
+    if (response.status === 400) {
+      const detail = await response.text();
+      if (/model.{0,80}(not.?found|invalid|unsupported|does not exist)|unknown.{0,20}model/i.test(detail)) {
+        return { ok: true, auth: "ok", models, ...(modelsError ? { error: modelsError } : {}) };
+      }
+    }
+    return { ok: false, auth: response.status >= 500 ? "unreachable" : "unknown", models, error: `messages endpoint returned ${response.status}` };
+  } catch (e) {
+    const message = `messages endpoint: ${errorText(e)}`;
+    return { ok: false, auth: /timeout|abort/i.test(message) ? "unreachable" : "unreachable", models, error: modelsError ? `${modelsError}; ${message}` : message };
+  }
+}
+
+function pickerModels(deps: AdminDeps): { models: { id: string; name: string }[]; source: "picker" | "fallback" } {
+  const last = deps.picker?.().last;
+  if (last && typeof last === "object" && Array.isArray((last as { surfaces?: unknown }).surfaces)) {
+    const entries = (last as { surfaces: { id?: unknown; entries?: unknown }[] }).surfaces
+      .filter((surface) => surface.id === "code" || surface.id === "ccd")
+      .flatMap((surface) => (Array.isArray(surface.entries) ? surface.entries : []))
+      .flatMap((entry) => {
+        if (!entry || typeof entry !== "object") return [];
+        const r = entry as { id?: unknown; name?: unknown };
+        return typeof r.id === "string" ? [{ id: r.id, name: typeof r.name === "string" ? r.name : r.id }] : [];
+      });
+    if (entries.length > 0) return { models: entries, source: "picker" };
+  }
+  return { models: CLAUDE_MODEL_FALLBACK, source: "fallback" };
+}
+
 function tailLines(file: string, n: number): string {
   if (!fs.existsSync(file)) return "";
   const text = fs.readFileSync(file, "utf8");
@@ -249,6 +363,69 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
     try {
       if (pathname === "/api/status" && method === "GET") {
         sendJson(res, 200, await buildStatus(deps));
+        return;
+      }
+      if (pathname === "/api/presets" && method === "GET") {
+        sendJson(res, 200, { presets: PRESETS satisfies ProviderPreset[] });
+        return;
+      }
+      if (pathname === "/api/claude-models" && method === "GET") {
+        sendJson(res, 200, pickerModels(deps));
+        return;
+      }
+      if (pathname === "/api/providers/probe" && method === "POST") {
+        let raw: Buffer;
+        try {
+          raw = await readBody(req);
+        } catch (e) {
+          sendJson(res, 400, { error: (e as Error).message });
+          return;
+        }
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(raw.toString("utf8"));
+        } catch {
+          sendJson(res, 400, { error: "invalid JSON" });
+          return;
+        }
+        if (!parsed || typeof parsed !== "object") {
+          sendJson(res, 400, { error: "expected provider probe object" });
+          return;
+        }
+        const probe = parsed as { type?: unknown; url?: unknown; headers?: unknown; modelsUrl?: unknown; modelsAuthHeader?: unknown };
+        if (probe.type === "chatgpt") {
+          const statuses = Object.values(deps.chatgpt?.().auth ?? {});
+          sendJson(res, 200, {
+            ok: true,
+            auth: statuses[0] ?? "unknown",
+            models: [
+              { id: "gpt-5.6-terra", name: "GPT-5.6 Terra" },
+              { id: "gpt-5.6-sol", name: "GPT-5.6 Sol" },
+              { id: "gpt-5.6-luna", name: "GPT-5.6 Luna" },
+              { id: "gpt-6-astra", name: "GPT-6 Astra" },
+            ],
+          });
+          return;
+        }
+        if (
+          probe.type !== "anthropic-compatible" ||
+          typeof probe.url !== "string" ||
+          !/^https?:\/\//.test(probe.url) ||
+          (probe.headers !== undefined && (!probe.headers || typeof probe.headers !== "object" || Array.isArray(probe.headers) || Object.values(probe.headers).some((v) => typeof v !== "string"))) ||
+          (probe.modelsUrl !== undefined && typeof probe.modelsUrl !== "string") ||
+          (probe.modelsAuthHeader !== undefined && typeof probe.modelsAuthHeader !== "string")
+        ) {
+          sendJson(res, 400, { error: "expected {type: 'anthropic-compatible', url: http(s) URL, headers?: Record<string,string>, modelsUrl?: string, modelsAuthHeader?: string}" });
+          return;
+        }
+        const result = await probeProvider({
+          type: "anthropic-compatible",
+          url: probe.url,
+          ...(probe.headers ? { headers: probe.headers as Record<string, string> } : {}),
+          ...(probe.modelsUrl ? { modelsUrl: probe.modelsUrl } : {}),
+          ...(probe.modelsAuthHeader ? { modelsAuthHeader: probe.modelsAuthHeader } : {}),
+        });
+        sendJson(res, 200, result);
         return;
       }
       if (pathname === "/api/config" && method === "GET") {
