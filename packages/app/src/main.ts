@@ -35,9 +35,9 @@ const STRINGS = {
     routerNotRunning: "router not running",
     slotsMapped: (n: number) => `${n} slot${n === 1 ? "" : "s"} mapped`,
     inFlight: "in flight",
-    connected: "Claude Desktop → ClaudeRipple ✓",
-    notConnected: "Claude Desktop is NOT using ClaudeRipple",
-    percentOfWeekUsed: (percent: string | number, plan: string) => `ChatGPT ${plan}: ${percent}% of week used`,
+    connected: "Claude Desktop connected",
+    notConnected: "Claude Desktop not connected",
+    percentOfWeekUsed: (percent: string | number, plan: string) => `ChatGPT ${plan} ${percent}% this week`,
     cliVersion: (v: string) => `Claude Code CLI ${v}`,
     openWindow: "Open ClaudeRipple…",
     openInBrowser: "Open in Browser",
@@ -70,9 +70,9 @@ const STRINGS = {
     routerNotRunning: "라우터가 꺼져 있음",
     slotsMapped: (n: number) => `슬롯 ${n}개 매핑`,
     inFlight: "진행 중",
-    connected: "Claude Desktop → ClaudeRipple 연결됨 ✓",
-    notConnected: "Claude Desktop이 ClaudeRipple을 쓰고 있지 않음",
-    percentOfWeekUsed: (percent: string | number, plan: string) => `ChatGPT ${plan}: 주간 한도 ${percent}% 사용`,
+    connected: "Claude Desktop 연결됨",
+    notConnected: "Claude Desktop 연결 안 됨",
+    percentOfWeekUsed: (percent: string | number, plan: string) => `ChatGPT ${plan} 주간 ${percent}%`,
     cliVersion: (v: string) => `Claude Code CLI ${v}`,
     openWindow: "ClaudeRipple 열기…",
     openInBrowser: "브라우저에서 열기",
@@ -206,52 +206,19 @@ function render(): void {
   const quotaLine = quota?.rate_limits?.primary
     ? L.percentOfWeekUsed(quota.rate_limits.primary.used_percent ?? "?", quota.plan_type ?? "")
     : null;
+  // Two status lines (clickable: they open the window), then only the actions that need the tray.
+  // Everything else lives in the GUI window. Disabled items render grey, so the status lines stay enabled.
+  const connected = !!s && s.settings.HTTPS_PROXY === `http://127.0.0.1:${s.listen.port}`;
+  const headline = s ? `ClaudeRipple · ${state === "ok" ? L.healthy : L.attentionNeeded}` : `ClaudeRipple · ${L.routerNotRunning}`;
+  const detail = s ? [connected ? L.connected : L.notConnected, quotaLine].filter(Boolean).join(" · ") : lastError ?? "";
   const template: Electron.MenuItemConstructorOptions[] = [
-    { label: s ? `ClaudeRipple ${s.version} — ${state === "ok" ? L.healthy : L.attentionNeeded}` : `ClaudeRipple — ${L.routerNotRunning}${lastError ? ` (${lastError})` : ""}`, enabled: false },
-    ...(s
-      ? [
-          { label: L.proxyLine(`127.0.0.1`, s.listen.port, L.slotsMapped(s.routes), `${s.stats.inFlight} ${L.inFlight}`), enabled: false } as Electron.MenuItemConstructorOptions,
-          { label: s.settings.HTTPS_PROXY === `http://127.0.0.1:${s.listen.port}` ? L.connected : L.notConnected, enabled: false } as Electron.MenuItemConstructorOptions,
-          ...Object.entries(s.providers).map(([name, p]) => ({ label: `${p.reachable === false ? "✗" : "✓"} provider ${name}${p.type ? ` (${p.type})` : ""}`, enabled: false }) as Electron.MenuItemConstructorOptions),
-          ...(quotaLine ? [{ label: quotaLine, enabled: false } as Electron.MenuItemConstructorOptions] : []),
-          { label: L.cliVersion(s.cliVersion), enabled: false } as Electron.MenuItemConstructorOptions,
-          { label: L.pickerState(!!s.picker?.enabled), enabled: false } as Electron.MenuItemConstructorOptions,
-        ]
-      : []),
+    { label: headline, click: openWindow },
+    ...(detail ? [{ label: detail, click: openWindow } as Electron.MenuItemConstructorOptions] : []),
     { type: "separator" },
     { label: L.openWindow, click: openWindow, enabled: !!s },
-    { label: L.openInBrowser, click: () => void shell.openExternal(adminUrl()), enabled: !!s },
-    { type: "separator" },
-    {
-      label: s?.picker?.enabled ? L.pickerOff : L.pickerOn,
-      enabled: !!s,
-      click: async () => {
-        const on = !s?.picker?.enabled;
-        if (on) {
-          const r = await dialog.showMessageBox({ message: L.pickerOn, detail: L.pickerOnConfirm, buttons: ["OK", L.cancel], cancelId: 1 });
-          if (r.response !== 0) return;
-        }
-        const out = await runCli(["picker", on ? "on" : "off"]);
-        const failed = /error|not enabled|not trusted/i.test(out) && !/✓ picker.enabled/.test(out);
-        await dialog.showMessageBox({ message: failed ? out : on ? L.pickerDone : L.pickerOffDone, detail: failed ? undefined : out });
-        void poll();
-      },
-    },
-    {
-      label: s?.agentTitle ? L.agentTitleOff : L.agentTitleOn,
-      enabled: !!s,
-      click: async () => {
-        const on = !s?.agentTitle;
-        const out = await runCli(["agent-title", on ? "on" : "off"]);
-        await dialog.showMessageBox({ message: L.agentTitleDone(on), detail: out });
-        void poll();
-      },
-    },
     { type: "separator" },
     { label: s ? L.restartRouter : L.startRouter, click: async () => void dialog.showMessageBox({ message: await runCli([s ? "restart" : "start"]) }) },
     { label: L.signInChatgpt, click: async () => void dialog.showMessageBox({ message: await runCli(["login"]) }) },
-    { label: L.copyStatus, click: async () => clipboard.writeText(await runCli(["status"])) },
-    { label: L.showLogs, click: () => void shell.openPath(path.join(home, "logs", "router.log")) },
     { type: "separator" },
     { label: L.about, click: () => void dialog.showMessageBox({ title: "ClaudeRipple", message: "ClaudeRipple", detail: L.aboutDetail }) },
     { label: L.quit, role: "quit" },
