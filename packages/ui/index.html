@@ -3,8 +3,8 @@
 
 <nav>
   <div class="brand" data-i18n="brand">ClaudeRipple</div>
-  <button data-view="health" class="nav-btn" data-i18n="nav.health">Health</button>
-  <button data-view="slots" class="nav-btn" data-i18n="nav.slots">Slots</button>
+  <button data-view="health" class="nav-btn" data-i18n="nav.health">Status</button>
+  <button data-view="slots" class="nav-btn" data-i18n="nav.slots">Model links</button>
   <button data-view="providers" class="nav-btn" data-i18n="nav.providers">Providers</button>
   <button data-view="logs" class="nav-btn" data-i18n="nav.logs">Logs</button>
   <button data-view="about" class="nav-btn" data-i18n="nav.about">About</button>
@@ -13,117 +13,54 @@
 </nav>
 
 <main>
-  <!-- Health -->
   <section id="view-health" class="view">
-    <h1 data-i18n="health.title">Health</h1>
-    <p class="subtitle" data-i18n="health.subtitle">Live status of the router, settings.json, and every provider. Refreshes every 5s.</p>
-
-    <div class="card">
-      <h2 data-i18n="health.router">Router</h2>
-      <div class="rows" id="health-router"></div>
-    </div>
-
-    <div class="card">
-      <h2 data-i18n="health.settings">settings.json</h2>
-      <div class="rows" id="health-settings"></div>
-    </div>
-
-    <div class="card">
-      <h2 data-i18n="health.providers">Providers</h2>
-      <table id="health-providers">
-        <thead><tr><th data-i18n="providers.th.provider">Provider</th><th data-i18n="providers.urlLabel">URL</th><th data-i18n="health.k.status">Status</th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-
-    <div class="card">
-      <h2 data-i18n="health.cli">Claude Code CLI</h2>
-      <div class="rows" id="health-cli"></div>
-    </div>
-
-    <div class="card">
-      <h2 data-i18n="picker.title">Model picker</h2>
-      <p class="small" data-i18n="picker.subtitle">Show your GPT models by name in the Code tab picker. Routes Claude Desktop's own claude.ai traffic through ClaudeRipple; needs the local certificate trusted in your login keychain (macOS asks for your password once).</p>
-      <div class="rows" id="picker-rows"></div>
-      <div class="actions">
-        <button class="btn" id="picker-toggle" type="button"></button>
-        <span class="small" id="picker-msg"></span>
-      </div>
-    </div>
+    <h1 data-i18n="health.title">Status</h1>
+    <p class="subtitle" data-i18n="health.subtitle">Check that Claude Desktop and your providers are ready.</p>
+    <div class="card"><h2 data-i18n="health.desktop">Claude Desktop connection</h2><div class="rows" id="health-desktop"></div></div>
+    <div class="card"><h2 data-i18n="health.providers">Providers</h2><div class="rows" id="health-providers"></div></div>
+    <div class="card"><h2 data-i18n="picker.title">Model picker</h2><p class="hint" data-i18n="picker.statusHelp">Show selected provider models by their real names in Claude Desktop.</p><div class="rows" id="picker-rows"></div><div class="actions"><button class="btn" id="picker-toggle" type="button"></button><span class="small" id="picker-msg"></span></div></div>
+    <details class="details"><summary data-i18n="health.details">Details</summary><div class="rows detail-rows" id="health-details"></div></details>
   </section>
 
-  <!-- Slots -->
   <section id="view-slots" class="view">
-    <h1 data-i18n="slots.title">Slots</h1>
-    <p class="subtitle" data-i18n="slots.subtitle">Map each app-picker model id to a provider, model, and effort. Rows set to "Passthrough" go straight to Anthropic.</p>
-
-    <div class="toolbar">
-      <button class="btn secondary" id="slots-add" data-i18n="slots.addSlot">+ Add slot</button>
-      <div class="right">
-        <span class="small" id="slots-status"></span>
-        <button class="btn" id="slots-save" data-i18n="slots.save">Save</button>
-      </div>
+    <h1 data-i18n="slots.title">Model links</h1>
+    <p class="subtitle" data-i18n="slots.subtitle">Choose what each Claude model should actually use.</p>
+    <div class="card picker-setting">
+      <div><strong data-i18n="picker.title">Model picker</strong><p class="hint" data-i18n="slots.pickerHelp">Show selected models by their real names in Claude Desktop.</p></div>
+      <label class="switch"><input id="slots-picker-toggle" type="checkbox" /><span></span></label>
     </div>
-
-    <div class="card" style="padding:0;">
-      <table id="slots-table">
-        <thead>
-          <tr><th style="width:26%" data-i18n="slots.th.slotId">Slot id</th><th style="width:20%" data-i18n="slots.th.provider">Provider</th><th style="width:28%" data-i18n="slots.th.model">Model</th><th style="width:16%" data-i18n="slots.th.effort">Effort</th><th></th></tr>
-        </thead>
-        <tbody></tbody>
-      </table>
+    <div class="card" id="picker-models-card" hidden>
+      <h2 data-i18n="slots.pickerModels">Models in picker</h2>
+      <p class="hint" data-i18n="slots.pickerModelsHelp">Tick only models you want to see in Claude Desktop.</p>
+      <div class="model-checklist" id="picker-models"></div>
     </div>
-    <datalist id="model-suggestions"></datalist>
+    <div class="toolbar"><button class="btn secondary" id="slots-add" type="button" data-i18n="slots.add">+ Add link</button></div>
+    <div class="card table-card"><table id="slots-table"><thead><tr><th data-i18n="slots.th.claude">When you choose this</th><th data-i18n="slots.th.target">It answers with</th><th data-i18n="slots.th.effort">Thinking depth</th><th></th></tr></thead><tbody></tbody></table></div>
+    <div class="sticky-save"><div class="small" id="slots-summary"></div><button class="btn" id="slots-save" type="button" data-i18n="common.save">Save</button></div>
   </section>
 
-  <!-- Providers -->
   <section id="view-providers" class="view">
     <h1 data-i18n="providers.title">Providers</h1>
-    <p class="subtitle" data-i18n="providers.subtitle">Endpoints ClaudeRipple can route requests to, and prefix-based direct rules.</p>
-
-    <div class="toolbar">
-      <button class="btn secondary" id="providers-add" data-i18n="providers.addProvider">+ Add provider</button>
-      <div class="right">
-        <span class="small" id="providers-status"></span>
-        <button class="btn" id="providers-save" data-i18n="providers.save">Save</button>
-      </div>
-    </div>
-
+    <p class="subtitle" data-i18n="providers.subtitle">Connect an AI account, then choose the models you will use.</p>
+    <div class="toolbar"><button class="btn" id="providers-add" type="button" data-i18n="providers.add">+ Add provider</button><button class="btn secondary" id="providers-refresh" type="button" data-i18n="providers.refresh">Check connections</button></div>
     <div id="providers-list"></div>
-
-    <div class="card">
-      <h2 data-i18n="providers.directRulesTitle">Direct rules</h2>
-      <p class="hint" style="margin-top:-4px;margin-bottom:10px;" data-i18n="providers.directRulesHint">A request whose model starts with a prefix below goes to that provider unchanged.</p>
-      <table id="direct-table">
-        <thead><tr><th style="width:40%" data-i18n="providers.th.prefix">Prefix</th><th style="width:40%" data-i18n="providers.th.provider">Provider</th><th></th></tr></thead>
-        <tbody></tbody>
-      </table>
-      <div style="margin-top:8px;"><button class="btn secondary" id="direct-add" data-i18n="providers.addRule">+ Add rule</button></div>
-    </div>
   </section>
 
-  <!-- Logs -->
   <section id="view-logs" class="view">
     <h1 data-i18n="logs.title">Logs</h1>
-    <div class="toolbar">
-      <label class="check"><input type="checkbox" id="logs-autoscroll" checked /> <span data-i18n="logs.autoscroll">Auto-scroll</span></label>
-      <span class="small" data-i18n="logs.polling">Polling every 3s · last 200 lines</span>
-    </div>
+    <div class="toolbar"><label class="check"><input type="checkbox" id="logs-autoscroll" checked /><span data-i18n="logs.autoscroll">Auto-scroll</span></label><span class="small" data-i18n="logs.polling">Updates every 3s · last 200 lines</span></div>
     <pre id="logbox"></pre>
   </section>
 
-  <!-- About -->
   <section id="view-about" class="view">
     <h1 data-i18n="about.title">About</h1>
-    <div class="card">
-      <p data-i18n="about.body">ClaudeRipple is an independent open-source project, not affiliated with Anthropic or OpenAI. Claude and Claude Code are trademarks of Anthropic, PBC.</p>
-      <p class="small" data-i18n="about.license">License: MIT</p>
-      <p class="small" id="about-home"></p>
-    </div>
+    <div class="card"><p data-i18n="about.body">ClaudeRipple is an independent open-source project, not affiliated with Anthropic or OpenAI. Claude and Claude Code are trademarks of Anthropic, PBC.</p><p class="small" data-i18n="about.license">License: MIT</p></div>
   </section>
 </main>
 
-<div class="toast" id="toast"></div>
+<div class="toast" id="toast" role="status"></div>
+<div class="modal-backdrop" id="modal-backdrop" hidden><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><button class="icon-btn modal-close" id="modal-close" type="button" aria-label="Close">×</button><div id="modal-content"></div></section></div>
 
 <script src="i18n.js"></script>
+<script src="presets-fallback.js"></script>
 <script src="app.js"></script>

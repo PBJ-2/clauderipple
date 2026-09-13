@@ -1,297 +1,50 @@
 "use strict";
 
-// Minimal i18n: no framework, no dependencies. `t(key, vars)` looks up the current
-// language's dictionary, falling back to English, then to the key itself.
-// Language choice: localStorage.clauderipple_lang, else navigator.language.
-
 const I18N = {
   ko: {
     "brand": "ClaudeRipple",
-    "nav.health": "상태",
-    "nav.slots": "슬롯 매핑",
-    "nav.providers": "프로바이더",
-    "nav.logs": "로그",
-    "nav.about": "정보",
-
-    "health.title": "상태",
-    "health.subtitle": "라우터, settings.json, 프로바이더 상태를 실시간으로 보여줍니다. 5초마다 새로고침.",
-    "health.router": "라우터",
-    "health.settings": "settings.json",
-    "health.providers": "프로바이더",
-    "health.cli": "Claude Code CLI",
-    "health.k.status": "상태",
-    "health.k.version": "버전",
-    "health.k.listeningOn": "리스닝 주소",
-    "health.k.adminPort": "관리 GUI 포트",
-    "health.k.upstream": "업스트림",
-    "health.k.routes": "설정된 라우트",
-    "health.k.requests": "요청",
-    "health.k.consecutiveFailures": "연속 업스트림 실패",
-    "health.k.pointsAtRouter": "이 라우터를 가리킴",
-    "health.k.cachedVersion": "캐시된 버전",
-    "picker.title": "모델 피커",
-    "picker.subtitle": "Code 탭 피커에 GPT 모델을 실명으로 보여줍니다. Claude Desktop 자체의 claude.ai 트래픽을 ClaudeRipple로 통과시키며, 로컬 인증서를 로그인 키체인에 신뢰 등록해야 합니다(macOS가 암호를 한 번 묻습니다).",
-    "picker.k.state": "상태",
-    "picker.k.lastInjection": "마지막 주입",
-    "picker.on": "켜짐 — GPT 모델을 실명으로 표시",
-    "picker.off": "꺼짐 — Claude 이름으로 GPT 사용(별칭 모드)",
-    "picker.never": "아직 없음 (켠 뒤 Claude Desktop을 다시 열면 기록됩니다)",
-    "picker.lastFmt": "{count}개 주입 · surface: {surfaces} · {at}",
-    "picker.turnOn": "피커에 GPT 이름 표시 켜기",
-    "picker.turnOff": "끄기",
-    "picker.confirmOn": "ClaudeRipple 인증서를 신뢰하기 위해 macOS가 로그인 암호를 묻습니다. ClaudeRipple은 암호를 보지 않습니다. 계속할까요?",
-    "picker.working": "처리 중… macOS 암호 창이 뜨면 입력하세요.",
-    "picker.doneOn": "완료. Claude Desktop을 완전히 종료한 뒤 다시 열고 Code 탭 피커를 확인하세요.",
-    "picker.doneOff": "완료. Claude Desktop을 종료했다가 다시 열면 적용됩니다.",
-    "health.running": "실행 중",
-    "health.up": "up",
-    "health.unreachable": "연결 안 됨",
-    "health.reachable": "연결됨",
-    "health.elevated": "이상 있음",
-    "health.yes": "예",
-    "health.no": "아니오 — clauderipple install 실행 필요",
-    "health.unset": "(설정 안 됨)",
-    "health.requestsFmt": "시작 {started} · 성공 {completed} · 실패 {failed} · 진행 중 {inFlight}",
-    "health.noProviders": "설정된 프로바이더가 없습니다 — 프로바이더 탭에서 추가하세요.",
-    "health.chatgptSubscription": "ChatGPT 구독",
-    "health.credentials": "자격증명",
-    "health.weeklyLimitUsed": "{percent}% ({window} 한도 사용)",
-    "health.windowWeekly": "주간",
-    "health.resetsIn": ", {hours}시간 뒤 초기화",
-    "health.homeDir": "홈 디렉터리: {home}",
-
-    "slots.title": "슬롯 매핑",
-    "slots.subtitle": "앱 피커의 각 모델 id를 어느 프로바이더의 어떤 모델·effort로 보낼지 정합니다. '통과'로 두면 Anthropic으로 그대로 갑니다.",
-    "slots.addSlot": "+ 슬롯 추가",
-    "slots.save": "저장",
-    "slots.th.slotId": "슬롯 id",
-    "slots.th.provider": "프로바이더",
-    "slots.th.model": "모델",
-    "slots.th.effort": "Effort",
-    "slots.slotIdPlaceholder": "claude-...",
-    "slots.modelPlaceholder": "모델 id",
-    "slots.removeSlot": "슬롯 제거",
-    "slots.passthrough": "통과 (Anthropic)",
-    "slots.effortNone": "(없음)",
-    "slots.saved": "슬롯을 저장했습니다.",
-    "slots.saveFailed": "저장 실패: {msg}",
-    "slots.loadFailed": "설정을 불러오지 못했습니다: {msg}",
-    "slots.duplicateId": "슬롯 id \"{id}\" 중복",
-    "slots.modelRequired": "슬롯 \"{id}\": 프로바이더를 지정하면 모델도 필요합니다",
-
-    "providers.title": "프로바이더",
-    "providers.subtitle": "ClaudeRipple이 요청을 보낼 수 있는 엔드포인트와 prefix 기반 직접 규칙입니다.",
-    "providers.addProvider": "+ 프로바이더 추가",
-    "providers.save": "저장",
-    "providers.urlLabel": "URL",
-    "providers.urlPlaceholder": "https://api.example.com/anthropic",
-    "providers.modelsLabel": "모델",
-    "providers.modelsPlaceholder": "model-a, model-b (선택, 슬롯 제안용)",
-    "providers.typeLabel": "타입",
-    "providers.typeAnthropic": "anthropic-compatible (Anthropic Messages 형식을 말하는 URL)",
-    "providers.typeChatgpt": "chatgpt (내 ChatGPT 구독)",
-    "providers.namePlaceholder": "provider-name",
-    "providers.removeProvider": "프로바이더 제거",
-    "providers.headersTitle": "헤더 (예: x-api-key)",
-    "providers.addHeader": "+ 헤더",
-    "providers.headerNamePlaceholder": "헤더 이름",
-    "providers.headerValuePlaceholder": "값",
-    "providers.credentials": "자격증명",
-    "providers.authAuto": "auto — 자체 로그인이 있으면 그것, 없으면 Codex CLI 로그인 빌림",
-    "providers.authOwn": "own — clauderipple login 토큰",
-    "providers.authBorrow": "borrow-codex — ~/.codex/auth.json 읽기 (우리가 갱신하지 않음)",
-    "providers.defaultEffort": "기본 effort",
-    "providers.identityLine": "정체 줄",
-    "providers.identityLabel": "시스템 프롬프트 앞에 \"너는 <model>이고 Claude Code를 통해 답한다\"를 붙임",
-    "providers.append": "추가 문구",
-    "providers.appendPlaceholder": "모든 시스템 프롬프트 끝에 붙는 고정 문구. 바꾸면 프롬프트 캐시가 깨지니 자주 바꾸지 마십시오.",
-    "providers.signInHint": "clauderipple login (또는 트레이 메뉴)으로 로그인하십시오. 자격증명은 이 기기를 벗어나지 않습니다.",
-    "providers.urlPlaceholderChatgpt": "선택 — https://chatgpt.com/backend-api 재정의",
-    "providers.directRulesTitle": "직접 규칙",
-    "providers.directRulesHint": "아래 prefix로 시작하는 모델의 요청은 해당 프로바이더로 그대로 갑니다.",
-    "providers.th.prefix": "Prefix",
-    "providers.th.provider": "프로바이더",
-    "providers.prefixPlaceholder": "gpt-",
-    "providers.addRule": "+ 규칙 추가",
-    "providers.saved": "프로바이더를 저장했습니다.",
-    "providers.saveFailed": "저장 실패: {msg}",
-    "providers.loadFailed": "설정을 불러오지 못했습니다: {msg}",
-    "providers.missingName": "이름이 없는 프로바이더가 있습니다",
-    "providers.urlRequired": "프로바이더 \"{name}\": URL이 필요합니다",
-
-    "logs.title": "로그",
-    "logs.autoscroll": "자동 스크롤",
-    "logs.polling": "3초마다 갱신 · 최근 200줄",
-
-    "about.title": "정보",
-    "about.body": "ClaudeRipple은 독립 오픈소스 프로젝트이며 Anthropic·OpenAI와 제휴·보증·후원 관계가 없습니다. Claude와 Claude Code는 Anthropic, PBC의 상표입니다.",
-    "about.license": "라이선스: MIT",
-
-    "lang.toggleKo": "한국어",
-    "lang.toggleEn": "English",
+    "nav.health": "상태", "nav.slots": "모델 연결", "nav.providers": "모델 제공자", "nav.logs": "로그", "nav.about": "정보",
+    "lang.toggleKo": "한국어", "lang.toggleEn": "English",
+    "common.save": "저장", "common.saved": "저장했습니다.", "common.saveFailed": "저장하지 못했습니다.", "common.loadFailed": "불러오지 못했습니다.", "common.actionFailed": "처리하지 못했습니다.", "common.cancel": "취소", "common.edit": "수정", "common.remove": "삭제", "common.show": "보기", "common.hide": "숨기기", "common.advanced": "고급", "common.notAvailable": "—",
+    "health.title": "상태", "health.subtitle": "Claude Desktop과 연결한 모델이 준비됐는지 확인합니다.", "health.desktop": "Claude Desktop 연결", "health.connection": "연결 상태", "health.connected": "연결됨", "health.notConnected": "연결 안 됨", "health.disconnected": "연결 안 됨", "health.connectedHelp": "Claude Desktop에서 선택한 모델을 그대로 연결할 수 있습니다.", "health.notConnectedHelp": "메뉴 막대 앱에서 라우터를 시작하거나 clauderipple install을 실행하세요.", "health.requests": "요청", "health.requestsFmt": "완료 {completed} · 실패 {failed} · 진행 중 {inFlight}", "health.providers": "제공자", "health.noProviders": "연결한 제공자가 없습니다. 모델 제공자에서 추가하세요.", "health.quota": "사용량 {percent}%{reset}", "health.resetsIn": " · {hours}시간 뒤 초기화", "health.details": "자세히", "health.version": "버전", "health.routes": "연결 수", "health.cli": "Claude Code 버전",
+    "picker.title": "모델 피커", "picker.statusHelp": "선택한 모델을 Claude Desktop에 실제 이름으로 표시합니다.", "picker.state": "상태", "picker.on": "켜짐", "picker.off": "꺼짐", "picker.turnOn": "피커 켜기", "picker.turnOff": "피커 끄기", "picker.last": "최근에 모델 {count}개를 표시했습니다.", "picker.restartHelp": "켠 뒤 Claude Desktop을 완전히 껐다 다시 여세요.", "picker.confirmOn": "macOS가 인증서 신뢰를 위해 로그인 암호를 물을 수 있습니다. ClaudeRipple은 암호를 보지 않습니다. 계속할까요?", "picker.working": "처리 중입니다.", "picker.doneOn": "켜졌습니다. Claude Desktop을 완전히 껐다 다시 여세요.", "picker.doneOff": "꺼졌습니다. Claude Desktop을 완전히 껐다 다시 여세요.",
+    "slots.title": "모델 연결", "slots.subtitle": "Claude에서 고른 모델이 실제로 어떤 모델로 답할지 정합니다.", "slots.pickerHelp": "선택한 모델을 Claude Desktop에 실제 이름으로 표시합니다.", "slots.pickerModels": "피커에 표시할 모델", "slots.pickerModelsHelp": "Claude Desktop에서 보고 싶은 모델만 고르세요.", "slots.add": "+ 연결 추가", "slots.th.claude": "Claude 앱에서 이걸 고르면", "slots.th.target": "실제로 답하는 모델", "slots.th.effort": "생각 깊이", "slots.passthrough": "Claude 그대로 (바꾸지 않음)", "slots.noProviderModels": "먼저 모델 제공자를 연결하세요.", "slots.noChanges": "바꿀 연결이 없습니다.", "slots.duplicate": "같은 Claude 모델은 한 번만 연결할 수 있습니다.",
+    "providers.title": "모델 제공자", "providers.subtitle": "AI 계정을 연결한 뒤 쓸 모델을 고릅니다.", "providers.add": "+ 제공자 추가", "providers.refresh": "연결 확인", "providers.check": "연결 확인", "providers.checking": "확인 중", "providers.empty": "아직 연결한 제공자가 없습니다.", "providers.modelsCount": "사용할 모델 {count}개", "providers.noModels": "선택한 모델이 없습니다.", "providers.removeConfirm": "{name} 연결을 지울까요? 이 제공자를 쓰는 모델 연결도 지워집니다.", "providers.choose": "제공자 추가", "providers.chooseHelp": "사용할 서비스 하나를 고르세요.", "providers.chatgpt": "ChatGPT 구독", "providers.chatgptHelp": "Plus 또는 Pro 계정으로 로그인해 사용합니다.", "providers.presetHelp": "키를 넣고 바로 연결할 수 있습니다.", "providers.verified": "확인됨", "providers.custom": "직접 입력", "providers.customName": "새 제공자", "providers.customHelp": "목록에 없는 서비스를 연결합니다.", "providers.addTitle": "제공자 추가", "providers.edit": "제공자 수정", "providers.name": "이름", "providers.nameHelp": "목록에서 구분할 이름입니다.", "providers.nameRequired": "이름을 입력하세요.", "providers.apiKey": "API 키", "providers.keyHelp": "이 키는 이 컴퓨터의 설정에만 저장됩니다.", "providers.keyPlaceholder": "API 키를 붙여 넣으세요", "providers.keySaved": "저장된 키가 있습니다", "providers.url": "URL", "providers.urlHelp": "서비스에서 알려 준 주소가 다를 때만 바꾸세요.", "providers.urlRequired": "올바른 URL을 입력하세요.", "providers.keyType": "키 방식", "providers.keyTypeHelp": "서비스 안내에 따라 고르세요.", "providers.extraHeaders": "추가 헤더", "providers.extraHeadersHelp": "서비스에서 따로 준 값만 한 줄씩 입력하세요.", "providers.models": "쓸 모델 선택", "providers.modelsHelp": "연결할 모델을 고르면 모델 연결에서 바로 고를 수 있습니다.", "providers.modelsFound": "연결된 서비스에서 모델을 찾았습니다.", "providers.modelsFallback": "모델을 확인하지 못해 기본 목록을 보여드립니다.", "providers.probeOk": "연결됐습니다.", "providers.probeFailed": "연결하지 못했습니다.", "providers.apiSoon": "잠시 후 다시 확인하세요.", "providers.showInPicker": "Claude 앱 피커에도 표시", "providers.credentials": "자격증명", "providers.credentialsHelp": "이 컴퓨터에서 쓸 로그인 방식을 고르세요.", "providers.authAuto": "자동 선택", "providers.authOwn": "내 로그인", "providers.authBorrow": "Codex 로그인 사용", "providers.login": "ChatGPT 로그인", "providers.loginHelp": "메뉴 막대 앱이나 터미널에서 로그인 창을 엽니다.", "providers.loginHint": "메뉴 막대 앱에서 ChatGPT 로그인을 누르거나 터미널에서 clauderipple login을 실행하세요.", "providers.defaultEffort": "기본 생각 깊이", "providers.defaultEffortHelp": "따로 정하지 않은 요청에 적용합니다.", "providers.identity": "모델 이름 알리기", "providers.append": "추가 문구", "providers.appendHelp": "모든 요청에 같은 문구를 더합니다.",
+    "providerStatus.connected": "연결됨", "providerStatus.keyNeeded": "키 확인 필요", "providerStatus.disconnected": "연결 안 됨", "providerStatus.checking": "확인 중",
+    "logs.title": "로그", "logs.autoscroll": "자동 스크롤", "logs.polling": "3초마다 갱신 · 최근 200줄",
+    "about.title": "정보", "about.body": "ClaudeRipple은 독립 오픈소스 프로젝트이며 Anthropic·OpenAI와 제휴·보증·후원 관계가 없습니다. Claude와 Claude Code는 Anthropic, PBC의 상표입니다.", "about.license": "라이선스: MIT",
   },
   en: {
     "brand": "ClaudeRipple",
-    "nav.health": "Health",
-    "nav.slots": "Slots",
-    "nav.providers": "Providers",
-    "nav.logs": "Logs",
-    "nav.about": "About",
-
-    "health.title": "Health",
-    "health.subtitle": "Live status of the router, settings.json, and every provider. Refreshes every 5s.",
-    "health.router": "Router",
-    "health.settings": "settings.json",
-    "health.providers": "Providers",
-    "health.cli": "Claude Code CLI",
-    "health.k.status": "status",
-    "health.k.version": "version",
-    "health.k.listeningOn": "listening on",
-    "health.k.adminPort": "admin GUI port",
-    "health.k.upstream": "upstream",
-    "health.k.routes": "routes configured",
-    "health.k.requests": "requests",
-    "health.k.consecutiveFailures": "consecutive upstream failures",
-    "health.k.pointsAtRouter": "points at this router",
-    "health.k.cachedVersion": "cached version",
-    "picker.title": "Model picker",
-    "picker.subtitle": "Show your GPT models by name in the Code tab picker. Routes Claude Desktop's own claude.ai traffic through ClaudeRipple; needs the local certificate trusted in your login keychain (macOS asks for your password once).",
-    "picker.k.state": "State",
-    "picker.k.lastInjection": "Last injection",
-    "picker.on": "on — GPT models shown by name",
-    "picker.off": "off — GPT via Claude names (alias mode)",
-    "picker.never": "none yet (turn it on, then reopen Claude Desktop)",
-    "picker.lastFmt": "{count} injected · surfaces: {surfaces} · {at}",
-    "picker.turnOn": "Show GPT models by name",
-    "picker.turnOff": "Turn off",
-    "picker.confirmOn": "macOS will ask for your login password to trust the ClaudeRipple certificate. ClaudeRipple never sees it. Continue?",
-    "picker.working": "Working… enter your password if macOS asks.",
-    "picker.doneOn": "Done. Quit Claude Desktop completely, open it again, then check the Code tab picker.",
-    "picker.doneOff": "Done. Quit and reopen Claude Desktop to apply.",
-    "health.running": "running",
-    "health.up": "up",
-    "health.unreachable": "unreachable",
-    "health.reachable": "reachable",
-    "health.elevated": "elevated",
-    "health.yes": "yes",
-    "health.no": "no — run `clauderipple install`",
-    "health.unset": "(unset)",
-    "health.requestsFmt": "{started} started · {completed} ok · {failed} failed · {inFlight} in flight",
-    "health.noProviders": "No providers configured yet — add one under Providers.",
-    "health.chatgptSubscription": "ChatGPT subscription",
-    "health.credentials": "credentials",
-    "health.weeklyLimitUsed": "{percent}% of {window} limit used",
-    "health.windowWeekly": "weekly",
-    "health.resetsIn": ", resets in {hours}h",
-    "health.homeDir": "Home directory: {home}",
-
-    "slots.title": "Slots",
-    "slots.subtitle": "Map each app-picker model id to a provider, model, and effort. Rows set to \"Passthrough\" go straight to Anthropic.",
-    "slots.addSlot": "+ Add slot",
-    "slots.save": "Save",
-    "slots.th.slotId": "Slot id",
-    "slots.th.provider": "Provider",
-    "slots.th.model": "Model",
-    "slots.th.effort": "Effort",
-    "slots.slotIdPlaceholder": "claude-...",
-    "slots.modelPlaceholder": "model id",
-    "slots.removeSlot": "Remove slot",
-    "slots.passthrough": "Passthrough (Anthropic)",
-    "slots.effortNone": "(none)",
-    "slots.saved": "Slots saved.",
-    "slots.saveFailed": "Save failed: {msg}",
-    "slots.loadFailed": "Failed to load config: {msg}",
-    "slots.duplicateId": "duplicate slot id \"{id}\"",
-    "slots.modelRequired": "slot \"{id}\": model is required when a provider is set",
-
-    "providers.title": "Providers",
-    "providers.subtitle": "Endpoints ClaudeRipple can route requests to, and prefix-based direct rules.",
-    "providers.addProvider": "+ Add provider",
-    "providers.save": "Save",
-    "providers.urlLabel": "URL",
-    "providers.urlPlaceholder": "https://api.example.com/anthropic",
-    "providers.modelsLabel": "Models",
-    "providers.modelsPlaceholder": "model-a, model-b (optional, for slot suggestions)",
-    "providers.typeLabel": "Type",
-    "providers.typeAnthropic": "anthropic-compatible (URL that speaks Anthropic Messages)",
-    "providers.typeChatgpt": "chatgpt (your ChatGPT subscription)",
-    "providers.namePlaceholder": "provider-name",
-    "providers.removeProvider": "Remove provider",
-    "providers.headersTitle": "Headers (e.g. x-api-key)",
-    "providers.addHeader": "+ Header",
-    "providers.headerNamePlaceholder": "Header name",
-    "providers.headerValuePlaceholder": "Value",
-    "providers.credentials": "Credentials",
-    "providers.authAuto": "auto — own login if present, else borrow the Codex CLI's",
-    "providers.authOwn": "own — tokens from `clauderipple login`",
-    "providers.authBorrow": "borrow-codex — read ~/.codex/auth.json (never refreshed by us)",
-    "providers.defaultEffort": "Default effort",
-    "providers.identityLine": "Identity line",
-    "providers.identityLabel": "prefix the system prompt with “You are <model>, answering through Claude Code”",
-    "providers.append": "Append",
-    "providers.appendPlaceholder": "Fixed text appended to every system prompt. Keep it constant: changing it breaks the prompt cache.",
-    "providers.signInHint": "Sign in with clauderipple login (or the tray menu). Credentials never leave this machine.",
-    "providers.urlPlaceholderChatgpt": "optional — override https://chatgpt.com/backend-api",
-    "providers.directRulesTitle": "Direct rules",
-    "providers.directRulesHint": "A request whose model starts with a prefix below goes to that provider unchanged.",
-    "providers.th.prefix": "Prefix",
-    "providers.th.provider": "Provider",
-    "providers.prefixPlaceholder": "gpt-",
-    "providers.addRule": "+ Add rule",
-    "providers.saved": "Providers saved.",
-    "providers.saveFailed": "Save failed: {msg}",
-    "providers.loadFailed": "Failed to load config: {msg}",
-    "providers.missingName": "a provider is missing a name",
-    "providers.urlRequired": "provider \"{name}\": URL is required",
-
-    "logs.title": "Logs",
-    "logs.autoscroll": "Auto-scroll",
-    "logs.polling": "Polling every 3s · last 200 lines",
-
-    "about.title": "About",
-    "about.body": "ClaudeRipple is an independent open-source project, not affiliated with Anthropic or OpenAI. Claude and Claude Code are trademarks of Anthropic, PBC.",
-    "about.license": "License: MIT",
-
-    "lang.toggleKo": "한국어",
-    "lang.toggleEn": "English",
+    "nav.health": "Status", "nav.slots": "Model links", "nav.providers": "Providers", "nav.logs": "Logs", "nav.about": "About",
+    "lang.toggleKo": "한국어", "lang.toggleEn": "English",
+    "common.save": "Save", "common.saved": "Saved.", "common.saveFailed": "Could not save.", "common.loadFailed": "Could not load.", "common.actionFailed": "Could not complete that action.", "common.cancel": "Cancel", "common.edit": "Edit", "common.remove": "Remove", "common.show": "Show", "common.hide": "Hide", "common.advanced": "Advanced", "common.notAvailable": "—",
+    "health.title": "Status", "health.subtitle": "Check that Claude Desktop and your connected models are ready.", "health.desktop": "Claude Desktop connection", "health.connection": "Connection", "health.connected": "Connected", "health.notConnected": "Not connected", "health.disconnected": "Not connected", "health.connectedHelp": "Models selected in Claude Desktop can be connected as shown.", "health.notConnectedHelp": "Start the router from the menu-bar app or run clauderipple install.", "health.requests": "Requests", "health.requestsFmt": "{completed} done · {failed} failed · {inFlight} in progress", "health.providers": "Providers", "health.noProviders": "No providers are connected. Add one under Providers.", "health.quota": "{percent}% used{reset}", "health.resetsIn": " · resets in {hours}h", "health.details": "Details", "health.version": "Version", "health.routes": "Links", "health.cli": "Claude Code version",
+    "picker.title": "Model picker", "picker.statusHelp": "Show selected models by their real names in Claude Desktop.", "picker.state": "State", "picker.on": "On", "picker.off": "Off", "picker.turnOn": "Turn picker on", "picker.turnOff": "Turn picker off", "picker.last": "Most recently showed {count} models.", "picker.restartHelp": "After turning it on, quit Claude Desktop completely and open it again.", "picker.confirmOn": "macOS may ask for your login password to trust the certificate. ClaudeRipple never sees your password. Continue?", "picker.working": "Working.", "picker.doneOn": "Turned on. Quit Claude Desktop completely and open it again.", "picker.doneOff": "Turned off. Quit Claude Desktop completely and open it again.",
+    "slots.title": "Model links", "slots.subtitle": "Choose which model actually answers when you select a Claude model.", "slots.pickerHelp": "Show selected models by their real names in Claude Desktop.", "slots.pickerModels": "Models in picker", "slots.pickerModelsHelp": "Choose only models you want to see in Claude Desktop.", "slots.add": "+ Add link", "slots.th.claude": "When you choose this", "slots.th.target": "It answers with", "slots.th.effort": "Thinking depth", "slots.passthrough": "Claude as is (do not change)", "slots.noProviderModels": "Connect a provider first.", "slots.noChanges": "There are no links to change.", "slots.duplicate": "Each Claude model can have only one link.",
+    "providers.title": "Providers", "providers.subtitle": "Connect an AI account, then choose the models you will use.", "providers.add": "+ Add provider", "providers.refresh": "Check connections", "providers.check": "Check connection", "providers.checking": "Checking", "providers.empty": "No providers are connected yet.", "providers.modelsCount": "{count} selected models", "providers.noModels": "No models selected.", "providers.removeConfirm": "Remove {name}? Links using this provider will also be removed.", "providers.choose": "Add provider", "providers.chooseHelp": "Choose the service you use.", "providers.chatgpt": "ChatGPT subscription", "providers.chatgptHelp": "Use it by signing in with a Plus or Pro account.", "providers.presetHelp": "Add your key and connect quickly.", "providers.verified": "Verified", "providers.custom": "Enter manually", "providers.customName": "New provider", "providers.customHelp": "Connect a service that is not listed.", "providers.addTitle": "Add provider", "providers.edit": "Edit provider", "providers.name": "Name", "providers.nameHelp": "A name to recognize this connection by.", "providers.nameRequired": "Enter a name.", "providers.apiKey": "API key", "providers.keyHelp": "This key is stored only in this computer's settings.", "providers.keyPlaceholder": "Paste your API key", "providers.keySaved": "A key is already saved", "providers.url": "URL", "providers.urlHelp": "Change this only if the service tells you to use a different address.", "providers.urlRequired": "Enter a valid URL.", "providers.keyType": "Key type", "providers.keyTypeHelp": "Choose the one from the service's instructions.", "providers.extraHeaders": "Extra headers", "providers.extraHeadersHelp": "Enter only values the service specifically gave you, one per line.", "providers.models": "Choose models", "providers.modelsHelp": "Selected models become available under Model links.", "providers.modelsFound": "Models were found on the connected service.", "providers.modelsFallback": "We could not check models, so the default list is shown.", "providers.probeOk": "Connected.", "providers.probeFailed": "Could not connect.", "providers.apiSoon": "Please try again shortly.", "providers.showInPicker": "Also show in Claude Desktop picker", "providers.credentials": "Credentials", "providers.credentialsHelp": "Choose the sign-in method to use on this computer.", "providers.authAuto": "Choose automatically", "providers.authOwn": "My sign-in", "providers.authBorrow": "Use Codex sign-in", "providers.login": "ChatGPT sign-in", "providers.loginHelp": "Open sign-in from the menu-bar app or terminal.", "providers.loginHint": "Choose ChatGPT sign-in in the menu-bar app or run clauderipple login in Terminal.", "providers.defaultEffort": "Default thinking depth", "providers.defaultEffortHelp": "Used when a request does not set it separately.", "providers.identity": "Tell the model its name", "providers.append": "Extra text", "providers.appendHelp": "Adds the same text to every request.",
+    "providerStatus.connected": "Connected", "providerStatus.keyNeeded": "Key needed", "providerStatus.disconnected": "Not connected", "providerStatus.checking": "Checking",
+    "logs.title": "Logs", "logs.autoscroll": "Auto-scroll", "logs.polling": "Updates every 3s · last 200 lines",
+    "about.title": "About", "about.body": "ClaudeRipple is an independent open-source project, not affiliated with Anthropic or OpenAI. Claude and Claude Code are trademarks of Anthropic, PBC.", "about.license": "License: MIT",
   },
 };
 
 function detectLang() {
   try {
-    const saved = localStorage.getItem("clauderipple_lang");
-    if (saved === "ko" || saved === "en") return saved;
-  } catch {
-    /* localStorage unavailable */
-  }
+    const stored = localStorage.getItem("clauderipple_lang");
+    if (stored === "ko" || stored === "en") return stored;
+  } catch { /* storage unavailable */ }
   return navigator.language && navigator.language.startsWith("ko") ? "ko" : "en";
 }
-
 const CURRENT_LANG = detectLang();
-
 function t(key, vars) {
-  const dict = I18N[CURRENT_LANG] || I18N.en;
-  let str = dict[key] !== undefined ? dict[key] : (I18N.en[key] !== undefined ? I18N.en[key] : key);
-  if (vars) {
-    for (const [k, v] of Object.entries(vars)) {
-      str = str.split(`{${k}}`).join(String(v));
-    }
-  }
-  return str;
+  const dictionary = I18N[CURRENT_LANG] || I18N.en;
+  let text = dictionary[key] !== undefined ? dictionary[key] : (I18N.en[key] !== undefined ? I18N.en[key] : key);
+  for (const [name, value] of Object.entries(vars || {})) text = text.split(`{${name}}`).join(String(value));
+  return text;
 }
-
 function applyStaticI18n() {
-  for (const node of document.querySelectorAll("[data-i18n]")) {
-    node.textContent = t(node.getAttribute("data-i18n"));
-  }
-  for (const node of document.querySelectorAll("[data-i18n-placeholder]")) {
-    node.setAttribute("placeholder", t(node.getAttribute("data-i18n-placeholder")));
-  }
+  for (const node of document.querySelectorAll("[data-i18n]")) node.textContent = t(node.getAttribute("data-i18n"));
   document.title = t("brand");
 }
-
-if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", applyStaticI18n);
-} else {
-  applyStaticI18n();
-}
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", applyStaticI18n); else applyStaticI18n();

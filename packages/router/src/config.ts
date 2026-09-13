@@ -36,7 +36,8 @@ export type ChatGptProvider = {
   debugDump?: boolean;
   /** Reasoning effort when the request carries none. Default "high". */
   defaultEffort?: string;
-  models?: string[];
+  /** Models offered in the GUI (the Codex backend has no listing endpoint). */
+  models?: { id: string; name?: string }[];
 };
 
 export type Provider = AnthropicCompatibleProvider | ChatGptProvider;
@@ -155,6 +156,9 @@ export function validate(c: Config): string[] {
         }
       }
     } else if (p.type === "chatgpt") {
+      if (p.models !== undefined && (!Array.isArray(p.models) || p.models.some((m) => !m || typeof m.id !== "string" || (m.name !== undefined && typeof m.name !== "string")))) {
+        errors.push(`provider ${name}: models must be entries with string id and optional string name`);
+      }
       if (p.url && !/^https?:\/\//.test(p.url)) errors.push(`provider ${name}: url must start with http:// or https://`);
     } else {
       errors.push(`provider ${name}: unknown type "${(p as { type?: string }).type}"`);
