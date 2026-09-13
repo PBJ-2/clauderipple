@@ -662,7 +662,7 @@ function openProviderForm(options) {
     if (preset) { d.modelsUrl = preset.modelsUrl; d.modelsAuthHeader = preset.modelsAuthHeader; d.probeModel = (preset.fallbackModels || [])[0] && preset.fallbackModels[0].id; }
     return d;
   }
-  probeButton && probeButton.addEventListener("click", async () => {
+  async function runProbe() {
     const draft = probeDraft();
     if (!draft.url || !/^https?:\/\//.test(draft.url)) { toast(t("providers.urlRequired"), true); return; }
     probeButton.disabled = true;
@@ -677,10 +677,14 @@ function openProviderForm(options) {
       response.error ? el("div", { class: "small", text: response.error.replace(/^no-credits:\s*/, "") }) : null,
     ].filter(Boolean));
     foundModels = response.models && response.models.length ? response.models.map((model) => typeof model === "string" ? { id: model, name: model } : model) : (preset ? (preset.fallbackModels || []) : foundModels);
-    const keep = foundModels.length > 12 ? new Set(modelArea.querySelector(".model-picker").selected().map((m) => m.id)) : new Set(foundModels.map((model) => model.id));
+    const keep = foundModels.length > 12 ? new Set([...currentChecked, ...modelArea.querySelector(".model-picker").selected().map((m) => m.id)]) : new Set(foundModels.map((model) => model.id));
     modelArea.querySelector(".model-picker").replaceWith(modelChecklist(foundModels, keep));
     modelArea.replaceChildren(el("span", { text: t("providers.models") }), hint(response.ok ? (foundModels.length > 12 ? t("providers.modelsFoundMany") : t("providers.modelsFound")) : t("providers.modelsFallback")), modelArea.querySelector(".model-picker") || document.createTextNode(""));
-  });
+  }
+  probeButton && probeButton.addEventListener("click", runProbe);
+  // Editing a provider that can list models: fetch the full list right away so the saved picks are
+  // shown among everything available, not as a two-entry list.
+  if (existing && !isChatgpt && preset && preset.modelsUrl && existingKey) setTimeout(() => void runProbe(), 0);
   const saveButton = el("button", { class: "btn", type: "button", "data-default-action": "", text: existing ? t("common.save") : t("providers.add") });
   saveButton.addEventListener("click", async () => {
     const typedName = nameInput.value.trim();
