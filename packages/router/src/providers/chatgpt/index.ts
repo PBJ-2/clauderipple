@@ -7,6 +7,7 @@ import type { Logger } from "../../log.ts";
 import { CredentialStore } from "./auth.ts";
 import { SseParser } from "./sse.ts";
 import { StreamMapper, conversationKey, estimateTokens, formatSse, toResponsesRequest, type AnthropicRequest } from "./translate.ts";
+import type { RequestUsage } from "../../requestlog.ts";
 import fs from "node:fs";
 import path from "node:path";
 import { homeDir } from "../../config.ts";
@@ -14,7 +15,7 @@ import { homeDir } from "../../config.ts";
 export const DEFAULT_BASE = "https://chatgpt.com/backend-api";
 const PING_MS = 15_000;
 
-export type ChatGptOutcome = { status: number; bytes: number; note?: string };
+export type ChatGptOutcome = { status: number; bytes: number; note?: string; usage?: RequestUsage; stopReason?: string };
 
 function anthropicError(status: number, type: string, message: string): { status: number; body: string } {
   return { status, body: JSON.stringify({ type: "error", error: { type, message } }) };
@@ -240,6 +241,13 @@ export class ChatGptAdapter {
       status: 200,
       bytes,
       note: `in=${u.input_tokens} cached=${u.cache_read_input_tokens} out=${u.output_tokens} stop=${mapper.stopReason}`,
+      usage: {
+        input: u.input_tokens,
+        cached: u.cache_read_input_tokens,
+        ...(u.cache_creation_input_tokens > 0 ? { cacheWrite: u.cache_creation_input_tokens } : {}),
+        output: u.output_tokens,
+      },
+      stopReason: mapper.stopReason,
     };
   }
 }

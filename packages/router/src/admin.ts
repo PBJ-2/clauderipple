@@ -17,6 +17,7 @@ import type { Config } from "./config.ts";
 import { homeDir, validate } from "./config.ts";
 import type { Logger } from "./log.ts";
 import type { Stats } from "./proxy.ts";
+import type { RequestLog } from "./requestlog.ts";
 import { PRESETS, type ProviderPreset } from "./presets.ts";
 
 const MAX_BODY = 1024 * 1024;
@@ -40,6 +41,7 @@ export type AdminDeps = {
   stats: () => Stats;
   health: () => number;
   version: string;
+  requests: RequestLog;
   /** Optional: chatgpt providers' latest rate-limit snapshot and credential status. */
   chatgpt?: () => { quota: Record<string, Record<string, unknown> | null>; auth: Record<string, string> };
   /** Optional: picker-mode state and the last bootstrap injection. */
@@ -534,6 +536,22 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         const r = await runCli(["agent-title", enabled ? "on" : "off"]);
         deps.log.info(`admin: agent-title ${enabled ? "on" : "off"} via GUI -> ${r.ok ? "ok" : "failed"}`);
         sendJson(res, r.ok ? 200 : 500, { ok: r.ok, output: r.output });
+        return;
+      }
+      if (pathname === "/api/requests" && method === "GET") {
+        const query = new URL(url, "http://x").searchParams;
+        const requested = Number(query.get("n") ?? 200);
+        const n = Number.isFinite(requested) ? Math.min(2000, Math.max(1, Math.floor(requested))) : 200;
+        const provider = query.get("provider") || undefined;
+        const kindValue = query.get("kind");
+        const kind = kindValue === "messages" || kindValue === "count_tokens" || kindValue === "other" ? kindValue : undefined;
+        sendJson(res, 200, { requests: deps.requests.list(n, { ...(provider ? { provider } : {}), ...(kind ? { kind } : {}) }) });
+        return;
+      }
+      if (pathname === "/api/requests/summary" && method === "GET") {
+        const seconds = Number(new URL(url, "http://x").searchParams.get("since") ?? 3600);
+        const safeSeconds = Number.isFinite(seconds) ? Math.min(31_536_000, Math.max(0, seconds)) : 3600;
+        sendJson(res, 200, deps.requests.summary(Date.now() - safeSeconds * 1000));
         return;
       }
       if (pathname === "/api/logs" && method === "GET") {

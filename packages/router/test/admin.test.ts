@@ -7,6 +7,7 @@ import path from "node:path";
 import { DEFAULTS, type Config } from "../src/config.ts";
 import { Logger } from "../src/log.ts";
 import { startAdmin } from "../src/admin.ts";
+import { RequestLog } from "../src/requestlog.ts";
 import { PRESETS } from "../src/presets.ts";
 
 function makeCfg(overrides: Partial<Config> = {}): Config {
@@ -32,6 +33,7 @@ async function withAdmin(
     stats: () => ({ inFlight: 0, messagesInFlight: 0, started: 1, completed: 1, failed: 0 }),
     health: () => 0,
     version: "0.0.0-test",
+    requests: new RequestLog(path.join(home, "logs", "requests.jsonl")),
   });
   try {
     await fn({ port: admin.port, configFile, home, setCfg: (c) => (cfg = c) });
@@ -107,6 +109,7 @@ test("GET /api/claude-models uses named entries from code and ccd picker surface
     stats: () => ({ inFlight: 0, messagesInFlight: 0, started: 0, completed: 0, failed: 0 }),
     health: () => 0,
     version: "0.0.0-test",
+    requests: new RequestLog(path.join(home, "logs", "requests.jsonl")),
     picker: () => ({
       enabled: true,
       hosts: ["claude.ai"],
@@ -258,6 +261,28 @@ test("POST /api/providers/probe does not call an upstream 500 authenticated", as
   } finally {
     await new Promise<void>((resolveP, reject) => upstream.close((error) => (error ? reject(error) : resolveP())));
   }
+});
+
+test("GET /api/requests filters newest records and returns a summary", async () => {
+  await withAdmin(makeCfg(), async ({ port, home }) => {
+    const requests = new RequestLog(path.join(home, "logs", "requests.jsonl"));
+    requests.add({ id: "older", at: new Date(Date.now() - 10_000).toISOString(), ms: 150, status: 200, ok: true, kind: "messages", source: "claude", target: "gpt", provider: "chatgpt", stream: true, usage: { input: 20, cached: 80, output: 7 } });
+    requests.add({ id: "newer", at: new Date().toISOString(), ms: 250, status: 400, ok: false, kind: "count_tokens", source: "claude", target: "gpt", provider: "chatgpt", stream: false });
+    // The test admin owns a separate instance, so add these records through its persisted file then reload it.
+    const reloaded = new RequestLog(path.join(home, "logs", "requests.jsonl"));
+    const cfg = makeCfg({ admin: { port: 0 } });
+    const log = new Logger(null, 1_000_000, 1, false);
+    const extra = await startAdmin({ config: () => cfg, configFile: path.join(home, "extra-config.json"), log, stats: () => ({ inFlight: 0, messagesInFlight: 0, started: 0, completed: 0, failed: 0 }), health: () => 0, version: "test", requests: reloaded });
+    try {
+      const list = await fetch(`${base()}:${extra.port}/api/requests?n=5&kind=messages`);
+      assert.deepEqual((await list.json() as { requests: { id: string }[] }).requests.map((r) => r.id), ["older"]);
+      const summary = await fetch(`${base()}:${extra.port}/api/requests/summary?since=3600`);
+      const body = await summary.json() as { total: { count: number; ok: number; failed: number; cached: number } };
+      assert.deepEqual(body.total, { count: 2, ok: 1, failed: 1, input: 20, cached: 80, output: 7, cacheHitPercent: 80, avgMs: 200 });
+    } finally {
+      extra.close();
+    }
+  });
 });
 
 test("GET /api/logs returns the tail of router.log", async () => {

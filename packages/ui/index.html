@@ -1,4 +1,5 @@
 <title>ClaudeRipple</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'" />
 <link rel="stylesheet" href="style.css" />
 
 <nav>
@@ -49,8 +50,24 @@
 
   <section id="view-logs" class="view">
     <h1 data-i18n="logs.title">Logs</h1>
-    <div class="toolbar"><label class="check"><input type="checkbox" id="logs-autoscroll" checked /><span data-i18n="logs.autoscroll">Auto-scroll</span></label><span class="small" data-i18n="logs.polling">Updates every 3s · last 200 lines</span></div>
-    <pre id="logbox"></pre>
+    <div class="logs-tabs" role="tablist">
+      <button class="logs-tab active" id="logs-requests-tab" type="button" role="tab" aria-selected="true" data-i18n="logs.requests">Requests</button>
+      <button class="logs-tab" id="logs-raw-tab" type="button" role="tab" aria-selected="false" data-i18n="logs.raw">Raw logs</button>
+    </div>
+    <div id="logs-requests-panel" role="tabpanel">
+      <div class="logs-summary-title"><strong data-i18n="logs.lastHour">Last hour</strong><span class="small" data-i18n="logs.polling">Updates every 3s</span></div>
+      <div class="logs-summary" id="logs-summary"></div>
+      <div class="toolbar logs-controls">
+        <label class="logs-filter"><span data-i18n="logs.provider">Provider</span><select id="logs-provider"><option value="" data-i18n="logs.all">All</option></select></label>
+        <label class="check"><input type="checkbox" id="logs-count-tokens" /><span data-i18n="logs.showCountTokens">Show token counts</span></label>
+      </div>
+      <div class="card table-card logs-table-card"><table id="requests-table"><thead><tr><th data-i18n="logs.th.time">Time</th><th data-i18n="logs.th.models">Called → answered</th><th data-i18n="logs.th.effort">effort</th><th data-i18n="logs.th.input">Input</th><th data-i18n="logs.th.output">Output</th><th data-i18n="logs.th.duration">Duration</th><th data-i18n="logs.th.status">Status</th></tr></thead><tbody></tbody></table></div>
+      <div class="empty-card" id="requests-empty" hidden data-i18n="logs.empty">No requests yet.</div>
+    </div>
+    <div id="logs-raw-panel" role="tabpanel" hidden>
+      <div class="toolbar"><label class="check"><input type="checkbox" id="logs-autoscroll" checked /><span data-i18n="logs.autoscroll">Auto-scroll</span></label><span class="small" data-i18n="logs.rawPolling">Updates every 3s · last 200 lines</span></div>
+      <pre id="logbox"></pre>
+    </div>
   </section>
 
   <section id="view-about" class="view">

@@ -100,6 +100,7 @@ function showView(name) {
   if (location.hash !== `#${name}`) history.replaceState(null, "", `#${name}`);
   if (name === "slots" && !slotsLoaded) void loadSlots();
   if (name === "providers" && !providersLoaded) void loadProviders();
+  if (name === "logs") queueMicrotask(() => void refreshRequests());
 }
 for (const button of $all(".nav-btn")) button.addEventListener("click", () => showView(button.dataset.view));
 window.addEventListener("hashchange", () => showView((location.hash || "#health").slice(1)));
@@ -746,11 +747,117 @@ function openProviderForm(options) {
 
 // ---- Logs ---------------------------------------------------------------------------
 
+let logsPanel = "requests";
+let requestRows = [];
+let knownRequestProviders = new Set();
+let requestProvider = "";
+let showCountTokens = false;
+let expandedRequestId = null;
+
 function colorizeLogLine(line) {
   const cls = /\bERROR\b|\berror\b/.test(line) ? "tag-ERR" : /\bWARN\b/.test(line) ? "tag-WARN" : "tag-PASS";
   return el("div", { class: cls, text: line });
 }
+function formatNumber(value) { return typeof value === "number" ? value.toLocaleString() : t("common.notAvailable"); }
+function formatSeconds(ms) { return t("logs.seconds", { value: (Math.max(0, ms || 0) / 1000).toFixed(ms >= 10_000 ? 1 : 2) }); }
+function timeOf(iso) { const at = new Date(iso); return Number.isNaN(at.valueOf()) ? t("common.notAvailable") : at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }); }
+function providerClass(name) { return name === "anthropic" ? "provider-anthropic" : name === "chatgpt" ? "provider-chatgpt" : "provider-default"; }
+function summaryChip(label, value) { return el("div", { class: "logs-chip" }, [el("span", { class: "label", text: label }), el("span", { class: "value", text: value })]); }
+
+function showLogsPanel(name) {
+  logsPanel = name;
+  const requests = name === "requests";
+  $("#logs-requests-tab").classList.toggle("active", requests);
+  $("#logs-raw-tab").classList.toggle("active", !requests);
+  $("#logs-requests-tab").setAttribute("aria-selected", String(requests));
+  $("#logs-raw-tab").setAttribute("aria-selected", String(!requests));
+  $("#logs-requests-panel").hidden = !requests;
+  $("#logs-raw-panel").hidden = requests;
+  if (requests) void refreshRequests();
+  else void refreshLogs();
+}
+$("#logs-requests-tab").addEventListener("click", () => showLogsPanel("requests"));
+$("#logs-raw-tab").addEventListener("click", () => showLogsPanel("raw"));
+$("#logs-provider").addEventListener("change", (event) => { requestProvider = event.target.value; void refreshRequests(); });
+$("#logs-count-tokens").addEventListener("change", (event) => { showCountTokens = event.target.checked; void refreshRequests(); });
+
+function renderSummary(summary) {
+  const total = summary && summary.total || { count: 0, ok: 0, failed: 0, input: 0, cached: 0, output: 0, avgMs: 0, cacheHitPercent: 0 };
+  $("#logs-summary").replaceChildren(
+    summaryChip(t("logs.summary.requests"), formatNumber(total.count)),
+    summaryChip(t("logs.summary.success"), `${formatNumber(total.ok)} / ${formatNumber(total.failed)}`),
+    summaryChip(t("logs.summary.input"), `${formatNumber(total.input)} · ${t("logs.cacheHit", { percent: total.cacheHitPercent || 0 })}`),
+    summaryChip(t("logs.summary.output"), formatNumber(total.output)),
+    summaryChip(t("logs.summary.duration"), formatSeconds(total.avgMs)),
+  );
+}
+function renderProviderFilter(records) {
+  const select = $("#logs-provider");
+  for (const record of records) if (record.provider) knownRequestProviders.add(record.provider);
+  const names = [...knownRequestProviders].sort();
+  const before = select.value;
+  select.replaceChildren(el("option", { value: "", text: t("logs.all") }));
+  for (const name of names) select.appendChild(el("option", { value: name, text: name }));
+  select.value = names.includes(requestProvider) ? requestProvider : "";
+  if (!names.includes(requestProvider)) requestProvider = "";
+  if (before && before !== select.value) select.value = requestProvider;
+}
+function requestDetail(record) {
+  const details = [
+    [t("logs.detail.id"), record.id],
+    [t("logs.detail.kind"), record.kind],
+    [t("logs.detail.stop"), record.stopReason || t("logs.none")],
+    [t("logs.detail.cacheWrite"), record.usage && record.usage.cacheWrite ? formatNumber(record.usage.cacheWrite) : t("logs.none")],
+  ].map(([label, value]) => el("div", {}, [el("span", { class: "detail-label", text: label }), el("span", { class: "detail-value", text: value })]));
+  if (record.note) details.push(el("div", { class: "request-note" }, [el("span", { class: "detail-label", text: t("logs.detail.note") }), el("span", { class: "detail-value", text: record.note })]));
+  return el("tr", { class: "request-detail" }, [el("td", { colspan: "7" }, [el("div", { class: "request-detail-grid" }, details)])]);
+}
+function requestRow(record) {
+  const row = el("tr", { class: "request-row", title: record.note || "", onclick: () => { expandedRequestId = expandedRequestId === record.id ? null : record.id; renderRequests(requestRows); } });
+  const model = el("div", { class: "request-models" }, [
+    el("span", { class: "model", text: record.source }),
+    el("span", { class: "small", text: "→" }),
+    el("span", { class: "model", text: record.target }),
+    el("span", { class: `provider-badge ${providerClass(record.provider)}`, text: record.provider }),
+  ]);
+  const input = record.usage
+    ? el("span", { class: "token-cell", text: formatNumber(record.usage.input) }, [el("span", { class: "cache-pill", text: t("logs.cacheHit", { percent: Math.round(record.usage.cached / Math.max(1, record.usage.input + record.usage.cached) * 100) }) })])
+    : el("span", { class: "no-usage", text: t("common.notAvailable") });
+  const status = el("span", { class: `status-text ${record.ok ? "ok" : "bad"}`, text: `${record.ok ? t("logs.status.ok") : t("logs.status.error")} ${record.status}` });
+  row.append(
+    el("td", { text: timeOf(record.at) }),
+    el("td", {}, [model]),
+    el("td", { text: record.effort || t("common.notAvailable") }),
+    el("td", {}, [input]),
+    el("td", { class: record.usage ? "" : "no-usage", text: record.usage ? formatNumber(record.usage.output) : t("common.notAvailable") }),
+    el("td", { text: formatSeconds(record.ms) }),
+    el("td", {}, [status]),
+  );
+  return row;
+}
+function renderRequests(records) {
+  const scroll = $(".logs-table-card");
+  const left = scroll.scrollLeft;
+  const tbody = $("#requests-table tbody");
+  tbody.replaceChildren(...records.flatMap((record) => expandedRequestId === record.id ? [requestRow(record), requestDetail(record)] : [requestRow(record)]));
+  $("#requests-table").closest(".logs-table-card").hidden = records.length === 0;
+  $("#requests-empty").hidden = records.length !== 0;
+  scroll.scrollLeft = left;
+}
+async function refreshRequests() {
+  if (logsPanel !== "requests") return;
+  try {
+    const suffix = requestProvider ? `&provider=${encodeURIComponent(requestProvider)}` : "";
+    const kind = showCountTokens ? "" : "&kind=messages";
+    const [records, summary, allRecords] = await Promise.all([api(`/api/requests?n=200${suffix}${kind}`), api("/api/requests/summary?since=3600"), api("/api/requests?n=200")]);
+    requestRows = Array.isArray(records.requests) ? records.requests : [];
+    renderProviderFilter(Array.isArray(allRecords.requests) ? allRecords.requests : requestRows);
+    renderSummary(summary);
+    renderRequests(requestRows);
+  } catch { /* preserve the last successful request table */ }
+}
 async function refreshLogs() {
+  if (logsPanel !== "raw") return;
   const box = $("#logbox");
   try {
     const response = await fetch("/api/logs?n=200");
@@ -760,5 +867,5 @@ async function refreshLogs() {
     if ($("#logs-autoscroll").checked || nearBottom) box.scrollTop = box.scrollHeight;
   } catch { /* preserve the last contents */ }
 }
-void refreshLogs();
-setInterval(refreshLogs, 3000);
+void refreshRequests();
+setInterval(() => { void refreshRequests(); void refreshLogs(); }, 3000);

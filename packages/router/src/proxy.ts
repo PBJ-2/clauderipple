@@ -13,6 +13,7 @@
 //   - client abort destroys the upstream request; upstream errors answer 502 if possible
 //   - connect-level upstream failures feed UpstreamHealth
 
+import crypto from "node:crypto";
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
@@ -29,6 +30,7 @@ import type { AnthropicRequest } from "./providers/chatgpt/translate.ts";
 import { terminateHosts } from "./config.ts";
 import type { CertStore } from "./certs.ts";
 import { injectPickerModels, isBootstrapPath } from "./picker.ts";
+import { ResponseUsageTap, type RequestLog, type RequestRecord, type RequestUsage } from "./requestlog.ts";
 
 const MAX_BODY = 64 * 1024 * 1024;
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "host", "content-length"]);
@@ -41,6 +43,8 @@ export type ProxyDeps = {
   health: UpstreamHealth;
   /** ClaudeRipple home (credentials for the chatgpt provider live here). */
   home: string;
+  /** Bounded structured history for the local admin Logs page. */
+  requests: RequestLog;
 };
 
 export type Stats = {
@@ -265,19 +269,47 @@ export class Proxy {
     this.stats.started++;
     this.stats.inFlight++;
     const isMessages = path.startsWith("/v1/messages");
+    const isLoggedRequest = path === "/v1/messages" || path === "/v1/messages/count_tokens";
     if (isMessages) this.stats.messagesInFlight++;
     let tag = "PASS";
     let finished = false;
+    let record: Omit<RequestRecord, "at" | "id" | "ms" | "status" | "ok" | "usage" | "stopReason" | "note"> = {
+      kind: path === "/v1/messages/count_tokens" ? "count_tokens" : path === "/v1/messages" ? "messages" : "other",
+      source: "-",
+      target: "-",
+      provider: "anthropic",
+      stream: false,
+    };
+    let observedUsage: RequestUsage | undefined;
+    let observedStopReason: string | undefined;
     // `failed` counts requests that did not get a proper response (vanished, upstream error,
     // provider error). A note alone is not a failure: adapters attach usage notes on success.
-    const finish = (status: string, bytes: number, note?: string, failed: boolean = note !== undefined): void => {
+    const finish = (status: string, bytes: number, note?: string, failed: boolean = note !== undefined, extra?: { usage?: RequestUsage; stopReason?: string }): void => {
       if (finished) return;
       finished = true;
       this.stats.inFlight--;
       if (isMessages) this.stats.messagesInFlight--;
       if (failed) this.stats.failed++;
       else this.stats.completed++;
-      log.info(`${tag} ${method} ${path} -> ${status} ${bytes}B ${((Date.now() - t0) / 1000).toFixed(1)}s${note ? " " + note : ""}`);
+      const ms = Date.now() - t0;
+      log.info(`${tag} ${method} ${path} -> ${status} ${bytes}B ${(ms / 1000).toFixed(1)}s${note ? " " + note : ""}`);
+      if (isLoggedRequest) {
+        const numericStatus = Number(status);
+        const usage = extra?.usage ?? observedUsage;
+        const stopReason = extra?.stopReason ?? observedStopReason;
+        const completed: RequestRecord = {
+          ...record,
+          id: crypto.randomUUID(),
+          at: new Date(t0).toISOString(),
+          ms,
+          status: Number.isFinite(numericStatus) ? numericStatus : status,
+          ok: Number.isFinite(numericStatus) && numericStatus >= 200 && numericStatus < 400,
+        };
+        if (usage) completed.usage = usage;
+        if (stopReason) completed.stopReason = stopReason;
+        if (note) completed.note = note;
+        this.deps.requests.add(completed);
+      }
     };
 
     if (this.draining && isMessages) {
@@ -317,6 +349,15 @@ export class Proxy {
       }
     }
     const route = json ? resolve(model, json, cfg) : null;
+    const source = typeof model === "string" ? model : "-";
+    record = {
+      ...record,
+      source,
+      target: source,
+      stream: json?.stream === true,
+    };
+    const requestedEffort = route ? effortOf(json ?? {}) : undefined;
+    if (requestedEffort) record.effort = requestedEffort;
 
     let target: { protocol: "http:" | "https:"; host: string; port: number; agent: http.Agent | https.Agent; extraHeaders: Record<string, string> };
     if (route && json) {
@@ -336,10 +377,13 @@ export class Proxy {
       }
       if (td === "strip") stripThreadFields(json);
       if (provider.type === "chatgpt") {
-        tag = `CHATGPT ${route.tag} effort=${effortOf(json) ?? "-"}`;
+        record = { ...record, target: route.model, provider: route.provider };
+        const routeEffort = effortOf(json);
+        if (routeEffort) record.effort = routeEffort;
+        tag = `CHATGPT ${route.tag} effort=${routeEffort ?? "-"}`;
         try {
           const o = await this.chatgpt(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, effortOf(json));
-          finish(String(o.status), o.bytes, o.note, o.status >= 400);
+          finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...(o.usage ? { usage: o.usage } : {}), ...(o.stopReason ? { stopReason: o.stopReason } : {}) });
         } catch (e) {
           finish("-", 0, `chatgpt error ${(e as NodeJS.ErrnoException).code ?? ""} ${(e as Error).message}`);
           if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" }).end(JSON.stringify({ type: "error", error: { type: "api_error", message: (e as Error).message } }));
@@ -357,7 +401,10 @@ export class Proxy {
         agent: this.agentFor(route.provider, protocol),
         extraHeaders: provider.headers ?? {},
       };
-      tag = `${route.provider.toUpperCase()} ${route.tag} effort=${effortOf(json) ?? "-"}`;
+      record = { ...record, target: route.model, provider: route.provider };
+      const routeEffort = effortOf(json);
+      if (routeEffort) record.effort = routeEffort;
+      tag = `${route.provider.toUpperCase()} ${route.tag} effort=${routeEffort ?? "-"}`;
     } else if (isApiHost) {
       target = { protocol: "https:", host: cfg.upstream, port: 443, agent: this.upstreamAgent, extraHeaders: {} };
       tag = `PASS ${typeof model === "string" ? model : "-"}`;
@@ -493,12 +540,23 @@ export class Proxy {
         return;
       }
       res.writeHead(status, outHeaders);
+      // This observer is deliberately side-band: it sees the exact chunks after they are written
+      // to the client, retains only a 64 KiB line/object fragment, and never changes backpressure.
+      const tap = new ResponseUsageTap(
+        typeof upRes.headers["content-type"] === "string" ? upRes.headers["content-type"] : undefined,
+        typeof upRes.headers["content-encoding"] === "string" ? upRes.headers["content-encoding"] : undefined,
+      );
       upRes.on("data", (c: Buffer) => {
         bytes += c.length;
-        if (!res.write(c)) upRes.pause();
+        const writable = res.write(c);
+        tap.feed(c);
+        if (!writable) upRes.pause();
       });
       res.on("drain", () => upRes.resume());
       upRes.on("end", () => {
+        const observed = tap.finish();
+        observedUsage = observed.usage;
+        observedStopReason = observed.stopReason;
         res.end();
         finish(String(status), bytes);
       });

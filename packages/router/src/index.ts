@@ -13,6 +13,7 @@ import { Logger } from "./log.ts";
 import { UpstreamHealth, EXIT_UPSTREAM_UNREACHABLE } from "./health.ts";
 import { Proxy } from "./proxy.ts";
 import { startAdmin } from "./admin.ts";
+import { RequestLog } from "./requestlog.ts";
 
 const home = homeDir();
 const logFile = process.env.CLAUDERIPPLE_NO_LOGFILE ? null : path.join(home, "logs", "router.log");
@@ -26,6 +27,7 @@ const cfg0 = store.get();
 log = new Logger(logFile, cfg0.log.maxBytes, cfg0.log.keep, !!process.env.CLAUDERIPPLE_ECHO || !logFile);
 
 const certs = new CertStore(home);
+const requests = new RequestLog(path.join(home, "logs", "requests.jsonl"));
 try {
   certs.register(cfg0.upstream, fs.readFileSync(path.join(home, "leaf.pem")), fs.readFileSync(path.join(home, "leaf.key")));
 } catch (e) {
@@ -51,7 +53,7 @@ const health = new UpstreamHealth(
   },
 );
 
-const proxy = new Proxy({ config: () => store.get(), log, certs, health, home });
+const proxy = new Proxy({ config: () => store.get(), log, certs, health, home, requests });
 
 process.on("uncaughtException", (e) => log!.error(`uncaught ${(e as Error).stack ?? e}`));
 process.on("unhandledRejection", (e) => log!.error(`unhandled ${(e as Error)?.stack ?? e}`));
@@ -95,6 +97,7 @@ proxy
       stats: () => proxy.stats,
       health: () => health.consecutiveFailures,
       version: "0.1.0",
+      requests,
       chatgpt: () => ({ quota: proxy.chatgptRateLimits, auth: proxy.chatgptAuthStatus() }),
       picker: () => ({ enabled: !!store.get().picker?.enabled, hosts: terminateHosts(store.get()).slice(1), last: proxy.lastPickerInjection }),
     });
