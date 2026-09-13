@@ -242,12 +242,22 @@ chat is out of reach for every approach, ours included.
   request fingerprint/session ID, and `custom_` prefixes for non-builtin tool
   names. ClaudeRipple independently implements those behaviors; it does not
   copy reference code. The ingress puts the required compatibility first system
-  block `You are Claude Code, Anthropic's official CLI for Claude.` before the
-  client instructions. Exact upstream identity and header requirements remain
-  version-sensitive and unverified until a credential-bearing isolated live
-  check succeeds.
-- Responses conversion is stateless. `previous_response_id` receives HTTP 400
-  `previous_response_id unsupported` rather than silently losing history.
+  block `You are Claude Code, Anthropic's official CLI for Claude.` and
+  **nothing else in `system`**. Measured 2026-09-13 with a live subscription
+  credential: a request whose system prompt carries Codex's long instructions
+  after the identity line answers HTTP 429 `{"type":"rate_limit_error",
+  "message":"Error"}` (not a real quota limit; a tiny request passes at once).
+  So in borrowed-login mode the client's `instructions` / system messages travel
+  as the first block of the first user message, wrapped in
+  `<operator_instructions>` and cache-marked; with an API key they stay in
+  `system`. Also measured: `claude-haiku-4-5` rejects `output_config.effort`
+  with 400, so effort is sent only to models matching
+  `claudeSupportsEffort()` (Opus/Sonnet/Fable 4.6+ and 5). Verified live:
+  Sonnet 5 and Haiku 4.5 with Codex's full instructions, tools and effort → 200;
+  `codex exec --profile clauderipple -m claude-sonnet-5` → exit 0.
+- Responses conversion is stateless. A non-null `previous_response_id` receives
+  HTTP 400 `previous_response_id unsupported` rather than silently losing
+  history (Codex sends `null` when it carries the full transcript itself).
   `instructions` plus message/input items become Anthropic `system` plus
   `messages`; text, base64/URL images, function calls, and function outputs are
   preserved; reasoning items are dropped. Function tools and tool choice map to

@@ -67,6 +67,13 @@ ClaudeRipple(클로드리플)은 **주군 데스크톱에서 실전 가동 중�
 - **openai-compatible 프로바이더**(`providers/openai`): Grok·Mistral·Groq·Together·Fireworks·Ollama·LM Studio 프리셋. 실키 검증 없음(401 경로만).
 - **모델별 effort**: OpenRouter `supported_parameters`로 모델별 강도 지원 저장·표시·클램프.
 - 실전 라우터는 저장소 소스로 실행 중. 앱은 "설정 다시 실행"을 누르면 번들 사본으로 바뀜.
+- **Codex→Claude 429의 원인(09-13 심야, 실측)**: 구독 로그인으로 보낼 때 `system`에 Claude Code 정체성 한 줄 외의 긴 텍스트(Codex
+  instructions)가 있으면 Anthropic이 `rate_limit_error: "Error"`(429)를 낸다. 진짜 한도가 아니다. 해결: `system`은 정체성 한 줄만,
+  클라이언트 instructions는 첫 user 블록 `<operator_instructions>`로(캐시 마킹). Haiku 4.5는 `output_config.effort`를 400으로
+  거부 → `claudeSupportsEffort()` 모델에만 보냄. 실측 Sonnet 5·Haiku 4.5 200, `codex exec -m claude-sonnet-5` exit 0.
+  주군의 실제 `~/.codex/config.toml`에 `clauderipple` 프로바이더가 적용됨(백업 `config.toml.clauderipple-backup-2026-09-13T11-45-25-816Z`).
+- 저장소는 **비공개로 전환**됨(주군: "다 완성해야 올리지", "멋대로 빌드하지 마라"). 주군이 완성 선언 전엔 릴리스 빌드·공개·태그 금지.
+- README 스크린샷: picker-zoom·luna-answer·subagents 확보. 4번(Codex가 Claude로 답하는 터미널)은 429 수정 후 재촬영 대기.
 
 ## 주군이 직접 할 일 (세션이 못 함)
 - **피커 모드 켜기**(아직 안 하심): 메뉴 막대 ClaudeRipple 아이콘 → "Code 탭 피커에 GPT 모델 이름 표시…"
