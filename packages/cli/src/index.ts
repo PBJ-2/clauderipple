@@ -259,6 +259,8 @@ function help(): void {
   login             sign in to ChatGPT (opens your browser; tokens stay in the home dir)
   logout            forget the ChatGPT login made with "login"
   picker on|off     show your mapped models by name in the Claude Desktop picker (trusts the CA in your login keychain, routes the app through ClaudeRipple)
+  agent-title on|off|status
+                    prefix subagent titles with the real model and thinking depth ("Terra·high · …") via a Claude Code hook
 
 Home directory: ${homeDir()}  (override with CLAUDERIPPLE_HOME)`);
 }
@@ -294,6 +296,18 @@ try {
       if (sub === "on") await pickerOn();
       else if (sub === "off") pickerOff();
       else console.log("usage: clauderipple picker on|off");
+      break;
+    }
+    case "agent-title": {
+      const sub = args[1];
+      const { setAgentTitleHook, agentTitleHookEnabled } = await import("./settings.ts");
+      if (sub === "on" || sub === "off") {
+        const r = setAgentTitleHook(sub === "on", { node: process.execPath, script: path.resolve(here, "hooks", "agent-title.ts") });
+        for (const n of r.notes) console.log(`✓ ${n}`);
+        if (!r.changed) console.log(`✓ already ${sub}`);
+        if (r.backup) console.log(`  backup: ${r.backup}`);
+        console.log("Applies to new subagents from the next message on; no restart needed.");
+      } else console.log(agentTitleHookEnabled() ? "on" : "off");
       break;
     }
     case "login": {

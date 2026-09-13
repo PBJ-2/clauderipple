@@ -87,3 +87,45 @@ export function currentProxyEnv(): { HTTPS_PROXY?: string; NODE_EXTRA_CA_CERTS?:
   if (env.CLAUDE_CODE_MAX_CONTEXT_TOKENS) out.CLAUDE_CODE_MAX_CONTEXT_TOKENS = env.CLAUDE_CODE_MAX_CONTEXT_TOKENS;
   return out;
 }
+
+// ---- Agent-title hook (PreToolUse Agent|Task) -------------------------------------------
+
+const HOOK_MARK = "_clauderipple";
+type HookEntry = { matcher?: string; hooks?: Record<string, unknown>[]; [k: string]: unknown };
+
+/** Adds or removes ClaudeRipple's PreToolUse hook. Only entries carrying our marker are ever touched. */
+export function setAgentTitleHook(enabled: boolean, cmd: { node: string; script: string }): SettingsEdit {
+  const file = settingsPath();
+  const s = readSettings(file);
+  const hooks = (typeof s.hooks === "object" && s.hooks ? (s.hooks as Record<string, unknown>) : {});
+  const list = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as HookEntry[]) : [];
+  const kept = list.filter((e) => e[HOOK_MARK] !== "agent-title");
+  const notes: string[] = [];
+  if (enabled) {
+    kept.push({
+      matcher: "Agent|Task",
+      hooks: [{ type: "command", command: `"${cmd.node}" "${cmd.script}"`, timeout: 10 }],
+      [HOOK_MARK]: "agent-title",
+    });
+    notes.push("hooks.PreToolUse: ClaudeRipple agent-title hook added");
+  } else if (kept.length !== list.length) {
+    notes.push("hooks.PreToolUse: ClaudeRipple agent-title hook removed");
+  }
+  const changed = JSON.stringify(kept) !== JSON.stringify(list);
+  if (!changed) return { changed: false, backup: null, notes };
+  const b = backup(file);
+  hooks.PreToolUse = kept;
+  s.hooks = hooks;
+  write(file, s);
+  return { changed: true, backup: b, notes };
+}
+
+export function agentTitleHookEnabled(): boolean {
+  try {
+    const s = readSettings(settingsPath());
+    const list = (s.hooks as Record<string, unknown> | undefined)?.PreToolUse;
+    return Array.isArray(list) && list.some((e) => (e as HookEntry)[HOOK_MARK] === "agent-title");
+  } catch {
+    return false;
+  }
+}
