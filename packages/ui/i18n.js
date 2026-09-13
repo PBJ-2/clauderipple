@@ -23,6 +23,8 @@ const I18N = {
     "agentTitle.off": "꺼짐",
     "agentTitle.turnOn": "이름표 켜기",
     "agentTitle.turnOff": "이름표 끄기",
+    "providers.probeNoCredits": "키는 맞습니다. 다만 이 계정에 크레딧(잔액)이 없어 응답은 받지 못합니다. 프로바이더 사이트에서 충전하세요.",
+    "providers.probeBadKey": "API 키가 거부됐습니다. 키를 다시 확인하세요.",
   },
   en: {
     "brand": "ClaudeRipple",
@@ -46,6 +48,8 @@ const I18N = {
     "agentTitle.off": "Off",
     "agentTitle.turnOn": "Turn on",
     "agentTitle.turnOff": "Turn off",
+    "providers.probeNoCredits": "The key is valid, but this account has no credits, so no answer came back. Top up on the provider site.",
+    "providers.probeBadKey": "The API key was rejected. Check the key.",
   },
 };
 

@@ -54,6 +54,8 @@ type ProbeRequest = {
   headers?: Record<string, string>;
   modelsUrl?: string;
   modelsAuthHeader?: string;
+  /** Model id to use for the auth check when the provider has no listing endpoint (e.g. the preset's first fallback). */
+  probeModel?: string;
 };
 
 const CLAUDE_MODEL_FALLBACK: { id: string; name: string }[] = [
@@ -251,6 +253,10 @@ function parsedModels(value: unknown): ModelEntry[] {
   });
 }
 
+function snippet(text: string): string {
+  return text.replace(/\s+/g, " ").trim().slice(0, 200);
+}
+
 async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
   return fetch(url, { ...init, signal: AbortSignal.timeout(8_000) });
 }
@@ -274,18 +280,20 @@ async function probeProvider(body: ProbeRequest): Promise<{ ok: boolean; auth: P
     const response = await fetchWithTimeout(messagesUrl(body.url), {
       method: "POST",
       headers: { "content-type": "application/json", ...authHeaders(source) },
-      body: JSON.stringify({ model: models[0]?.id ?? "test", max_tokens: 1, messages: [{ role: "user", content: "hi" }] }),
+      body: JSON.stringify({ model: models[0]?.id ?? body.probeModel ?? "test", max_tokens: 1, messages: [{ role: "user", content: "hi" }] }),
     });
-    if (response.status === 401 || response.status === 403) return { ok: false, auth: "bad-key", models, error: `messages endpoint returned ${response.status}` };
-    // A model-validation 400 still demonstrates that the endpoint reached the provider and the key was accepted.
+    if (response.status === 401 || response.status === 403) return { ok: false, auth: "bad-key", models, error: `messages endpoint returned ${response.status}: ${snippet(await response.text())}` };
     if (response.ok) return { ok: true, auth: "ok", models, ...(modelsError ? { error: modelsError } : {}) };
-    if (response.status === 400) {
-      const detail = await response.text();
-      if (/model.{0,80}(not.?found|invalid|unsupported|does not exist)|unknown.{0,20}model/i.test(detail)) {
-        return { ok: true, auth: "ok", models, ...(modelsError ? { error: modelsError } : {}) };
-      }
+    const detail = snippet(await response.text());
+    // A model-validation 400 still demonstrates that the endpoint reached the provider and the key was accepted.
+    if (response.status === 400 && /model.{0,80}(not.?found|invalid|unsupported|does not exist)|unknown.{0,20}model/i.test(detail)) {
+      return { ok: true, auth: "ok", models, ...(modelsError ? { error: modelsError } : {}) };
     }
-    return { ok: false, auth: response.status >= 500 ? "unreachable" : "unknown", models, error: `messages endpoint returned ${response.status}` };
+    // Key accepted but the account cannot pay: report auth ok so the user tops up instead of re-checking the key.
+    if (response.status === 402 || /insufficient|balance|credit|quota|billing/i.test(detail)) {
+      return { ok: true, auth: "ok", models, error: `no-credits: ${response.status} ${detail}` };
+    }
+    return { ok: false, auth: response.status >= 500 ? "unreachable" : "unknown", models, error: `messages endpoint returned ${response.status}: ${detail}` };
   } catch (e) {
     const message = `messages endpoint: ${errorText(e)}`;
     return { ok: false, auth: /timeout|abort/i.test(message) ? "unreachable" : "unreachable", models, error: modelsError ? `${modelsError}; ${message}` : message };
@@ -404,7 +412,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           sendJson(res, 400, { error: "expected provider probe object" });
           return;
         }
-        const probe = parsed as { type?: unknown; url?: unknown; headers?: unknown; modelsUrl?: unknown; modelsAuthHeader?: unknown };
+        const probe = parsed as { type?: unknown; url?: unknown; headers?: unknown; modelsUrl?: unknown; modelsAuthHeader?: unknown; probeModel?: unknown };
         if (probe.type === "chatgpt") {
           const statuses = Object.values(deps.chatgpt?.().auth ?? {});
           sendJson(res, 200, {
@@ -436,6 +444,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           ...(probe.headers ? { headers: probe.headers as Record<string, string> } : {}),
           ...(probe.modelsUrl ? { modelsUrl: probe.modelsUrl } : {}),
           ...(probe.modelsAuthHeader ? { modelsAuthHeader: probe.modelsAuthHeader } : {}),
+          ...(typeof probe.probeModel === "string" ? { probeModel: probe.probeModel } : {}),
         });
         sendJson(res, 200, result);
         return;

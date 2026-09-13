@@ -406,7 +406,7 @@ async function probeProvider(name, provider, onComplete) {
     const result = await api("/api/providers/probe", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ type: provider.type, url: provider.url, headers, modelsUrl: provider.modelsUrl, modelsAuthHeader: provider.modelsAuthHeader }),
+      body: JSON.stringify({ type: provider.type, url: provider.url, headers, modelsUrl: provider.modelsUrl, modelsAuthHeader: provider.modelsAuthHeader, probeModel: provider.probeModel }),
     });
     probeStates.set(name, result);
     onComplete && onComplete(result);
@@ -623,15 +623,25 @@ function openProviderForm(options) {
     }
     return { type: "anthropic-compatible", url: urlInput.value.trim(), ...(preset ? { preset: preset.id } : {}), ...(Object.keys(readHeaders()).length ? { headers: readHeaders() } : {}) };
   }
+  function probeDraft() {
+    const d = draftProvider();
+    if (preset) { d.modelsUrl = preset.modelsUrl; d.modelsAuthHeader = preset.modelsAuthHeader; d.probeModel = (preset.fallbackModels || [])[0] && preset.fallbackModels[0].id; }
+    return d;
+  }
   probeButton && probeButton.addEventListener("click", async () => {
-    const draft = draftProvider();
+    const draft = probeDraft();
     if (!draft.url || !/^https?:\/\//.test(draft.url)) { toast(t("providers.urlRequired"), true); return; }
     probeButton.disabled = true;
     result.textContent = t("providers.checking");
     const temporary = `__new_${Date.now()}`;
     const response = await probeProvider(temporary, draft);
     probeButton.disabled = false;
-    result.replaceChildren(el("span", { class: response.ok ? "ok-text" : "bad-text", text: response.ok ? t("providers.probeOk") : response.unavailable ? t("providers.apiSoon") : t("providers.probeFailed") }));
+    const noCredits = response.ok && /^no-credits:/.test(response.error || "");
+    const headline = noCredits ? t("providers.probeNoCredits") : response.ok ? t("providers.probeOk") : response.auth === "bad-key" ? t("providers.probeBadKey") : response.unavailable ? t("providers.apiSoon") : t("providers.probeFailed");
+    result.replaceChildren(
+      el("span", { class: response.ok && !noCredits ? "ok-text" : noCredits ? "warn-text" : "bad-text", text: headline }),
+      response.error ? el("div", { class: "small", text: response.error.replace(/^no-credits:\s*/, "") }) : null,
+    );
     foundModels = response.models && response.models.length ? response.models.map((model) => typeof model === "string" ? { id: model, name: model } : model) : (preset ? (preset.fallbackModels || []) : foundModels);
     modelsBox.replaceWith(modelChecklist(foundModels, new Set(foundModels.map((model) => model.id))));
     modelArea.replaceChildren(el("span", { text: t("providers.models") }), hint(response.ok ? t("providers.modelsFound") : t("providers.modelsFallback")), modelArea.querySelector(".model-checklist") || document.createTextNode(""));
