@@ -59,6 +59,15 @@ ClaudeRipple(클로드리플)은 **주군 데스크톱에서 실전 가동 중�
   누르면 앱 번들 사본으로 바뀌므로 개발 중엔 누르지 말 것.
 - 남은 것: GitHub 공개(주군 지시 "다 완성해야 올리지"), Windows, 프리셋 실키 검증(ChatGPT·OpenRouter만 실측).
 
+## 2026-09-13 밤 2 — M4 완료
+- **OpenAI 입구**(`packages/router/src/ingress`, 포트 8793): Codex CLI가 `clauderipple codex on`으로 우리 라우터를 향하고 Claude를
+  구독 로그인으로 쓴다. 실측: `CODEX_HOME=/tmp/… codex exec --profile clauderipple -m claude-haiku-4-5-20251001 "Reply ok"` → "ok".
+  구독 자격증명 우선순위: 프록시 트래픽에서 관찰(메모리, 12h) → env → 키체인 → ~/.claude/.credentials.json → `<home>/claude-auth.json`(setup-token).
+  **라우터 재시작 직후엔 관찰 토큰이 없어 Code 탭 요청이 한 번 지나가야 한다**(파일 지속화 추가 예정/완료 여부는 git log 확인).
+- **openai-compatible 프로바이더**(`providers/openai`): Grok·Mistral·Groq·Together·Fireworks·Ollama·LM Studio 프리셋. 실키 검증 없음(401 경로만).
+- **모델별 effort**: OpenRouter `supported_parameters`로 모델별 강도 지원 저장·표시·클램프.
+- 실전 라우터는 저장소 소스로 실행 중. 앱은 "설정 다시 실행"을 누르면 번들 사본으로 바뀜.
+
 ## 주군이 직접 할 일 (세션이 못 함)
 - **피커 모드 켜기**(아직 안 하심): 메뉴 막대 ClaudeRipple 아이콘 → "Code 탭 피커에 GPT 모델 이름 표시…"
   (또는 GUI 상태 화면의 "모델 피커" 카드 버튼, 또는 터미널 `clauderipple picker on`) → macOS 암호 창(키체인 신뢰)

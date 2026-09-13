@@ -55,7 +55,7 @@ const health = new UpstreamHealth(
   },
 );
 
-const observedClaudeCodeAuth = new ObservedClaudeCodeAuth();
+const observedClaudeCodeAuth = new ObservedClaudeCodeAuth(path.join(home, "claude-auth-observed.json"));
 const proxy = new Proxy({ config: () => store.get(), log, certs, health, home, requests, observedClaudeCodeAuth });
 const ingress = new OpenAiIngress({ config: () => store.get(), log, requests, home, observedClaudeCodeAuth });
 
