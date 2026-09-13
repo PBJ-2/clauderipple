@@ -78,8 +78,11 @@ chat is out of reach for every approach, ours included.
   GPT-6 Astra) and make the mapping visible in the ClaudeRipple GUI.
 - **Picker mode (implemented 2026-09-11, `clauderipple picker on`).** Verified in
   the app's main bundle (`index.pre.js`): the app reads `egressProxyUrl` from its
-  own Config Library (`~/Library/Application Support/Claude/configLibrary/
-  _meta.json` → `appliedId` → `<uuid>.json`, flat keys) and applies it at start
+  own Config Library (`~/Library/Application Support/Claude-3p/configLibrary/
+  _meta.json` → `appliedId` → `<uuid>.json`, flat keys; the `-3p` userData
+  suffix is used in both deployment modes, `AW()` in `index.pre.js` — the plain
+  `Claude/` dir is NOT read, measured 2026-09-13: app log said "proxy for
+  https://claude.ai resolved (direct)") and applies it at start
   as Chromium switches `--proxy-server` + `--proxy-bypass-list` (`DK()`), so the
   renderer's claude.ai traffic goes through the same proxy. No MDM, no OS proxy.
   The bootstrap is fetched by the page itself at
