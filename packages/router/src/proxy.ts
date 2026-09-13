@@ -17,6 +17,7 @@ import http from "node:http";
 import https from "node:https";
 import net from "node:net";
 import tls from "node:tls";
+import zlib from "node:zlib";
 import type { Duplex } from "node:stream";
 import type { Config } from "./config.ts";
 import type { Logger } from "./log.ts";
@@ -367,13 +368,25 @@ export class Proxy {
       const k = raw[i]!;
       const lk = k.toLowerCase();
       if (HOP_BY_HOP.has(lk)) continue;
-      if (isBootstrap && lk === "accept-encoding") continue; // need a plain body to edit
+      // Bootstrap responses are edited: keep the client's accept-encoding as-is (some edges misbehave without it)
+      // and decompress whatever comes back before editing.
       if (lk in target.extraHeaders) continue;
+      // Picker bootstrap: never let the renderer revalidate against a cached (unedited) copy.
+      if (isPickerBootstrap && (lk === "if-none-match" || lk === "if-modified-since")) continue;
       headers.push(k, raw[i + 1]!);
     }
     for (const [k, v] of Object.entries(target.extraHeaders)) headers.push(k, v);
     headers.push("host", target.protocol === "https:" && target.port === 443 ? target.host : `${target.host}:${target.port}`);
-    headers.push("content-length", String(body.length));
+    // No content-length on body-less GET/HEAD: some edges reject it; Chromium never sends it.
+    if (body.length > 0 || (method !== "GET" && method !== "HEAD")) headers.push("content-length", String(body.length));
+    if (isPickerBootstrap) {
+      const shown: string[] = [];
+      for (let i = 0; i < headers.length; i += 2) {
+        const k = headers[i]!.toLowerCase();
+        shown.push(k === "cookie" || k === "authorization" ? `${k}=<${headers[i + 1]!.length}B>` : `${k}=${headers[i + 1]!}`);
+      }
+      log.info(`PICKER request ${method} ${path.slice(0, 80)} headers: ${shown.join(" | ")}`);
+    }
 
     const lib = target.protocol === "https:" ? https : http;
     const upReq = lib.request({
@@ -418,6 +431,7 @@ export class Proxy {
         const lk = r[i]!.toLowerCase();
         if (lk === "connection" || lk === "keep-alive" || lk === "transfer-encoding") continue;
         if (isBootstrap && (lk === "content-length" || lk === "content-encoding")) continue;
+        if (isPickerBootstrap && (lk === "etag" || lk === "last-modified")) continue;
         outHeaders.push(r[i]!, r[i + 1]!);
       }
       let bytes = 0;
@@ -426,18 +440,30 @@ export class Proxy {
         upRes.on("data", (c: Buffer) => chunks.push(c));
         upRes.on("end", () => {
           let out: Buffer = Buffer.concat(chunks);
+          const enc = String(upRes.headers["content-encoding"] ?? "").toLowerCase();
+          try {
+            if (enc === "gzip" || enc === "x-gzip") out = zlib.gunzipSync(out);
+            else if (enc === "deflate") out = zlib.inflateSync(out);
+            else if (enc === "br") out = zlib.brotliDecompressSync(out);
+            else if (enc === "zstd" && typeof (zlib as unknown as { zstdDecompressSync?: unknown }).zstdDecompressSync === "function")
+              out = (zlib as unknown as { zstdDecompressSync: (b: Buffer) => Buffer }).zstdDecompressSync(out);
+          } catch (e) {
+            log.warn(`bootstrap decode (${enc}) failed: ${(e as Error).message}`);
+          }
           if (status === 200 && isCliBootstrap) {
             try {
               out = injectBootstrap(out, cfg);
             } catch (e) {
               log.warn(`bootstrap inject failed: ${(e as Error).message}`);
             }
+          } else if (isPickerBootstrap && status !== 200 && status !== 304) {
+            log.warn(`PICKER bootstrap upstream ${status}; headers: ${JSON.stringify(upRes.headers)}; body: ${out.toString("utf8").slice(0, 300)}`);
           } else if (status === 200 && isPickerBootstrap) {
             try {
               const j = JSON.parse(out.toString("utf8")) as Record<string, unknown>;
               const r = injectPickerModels(j, cfg.cli.extraModels, cfg.cli.autoCompactWindow);
-              this.lastPickerInjection = { at: new Date().toISOString(), ...r };
               if (r.surfaces.length > 0) {
+                this.lastPickerInjection = { at: new Date().toISOString(), ...r };
                 out = Buffer.from(JSON.stringify(j));
                 log.info(`PICKER injected ${r.injected} model(s); surfaces: ${r.surfaces.map((s) => `${s.id}[${s.models.length}]`).join(" ")}`);
               } else {

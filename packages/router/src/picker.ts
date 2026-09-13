@@ -21,7 +21,10 @@ export function isBootstrapPath(path: string): boolean {
 type ModelEntry = Record<string, unknown> & { id?: string };
 type Surface = Record<string, unknown> & { id?: string; models?: ModelEntry[] };
 
-const CHAT_SURFACES = new Set(["chat"]);
+// Surfaces whose sessions run through the Claude Code CLI (and therefore through the router).
+// Measured 2026-09-13: app_start had chat, code, ccr, ccd, cowork, design, office_agent, chrome, voice,
+// claude_science; the Code tab list matched code/ccd/ccr (9 entries). Chat & co. never reach the CLI.
+const CLI_SURFACES = new Set(["code", "ccd", "ccr", "cowork"]);
 
 function isClaudeEntry(m: ModelEntry): boolean {
   return typeof m.id === "string" && m.id.startsWith("claude-");
@@ -42,7 +45,7 @@ export function injectPickerModels(json: Record<string, unknown>, extra: CliMode
     if (!surface || typeof surface !== "object" || !Array.isArray(surface.models)) continue;
     const id = String(surface.id ?? "");
     result.surfaces.push({ id, models: surface.models.map((m) => String(m.id ?? "?")) });
-    if (CHAT_SURFACES.has(id)) continue;
+    if (!CLI_SURFACES.has(id)) continue;
     const template = pickTemplate(surface.models);
     if (!template) continue;
     const existing = new Set(surface.models.map((m) => m.id));

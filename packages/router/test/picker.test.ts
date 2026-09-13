@@ -26,7 +26,7 @@ test("bootstrap path matcher", () => {
   assert.equal(isBootstrapPath("/api/organizations/x/mcp/v2/bootstrap"), false);
 });
 
-test("injects into non-chat surfaces using an enabled Claude entry as template", () => {
+test("injects into CLI-backed surfaces (code/ccd/ccr/cowork) using an enabled Claude entry as template", () => {
   const j = bootstrap();
   const r = injectPickerModels(j, [{ model: "gpt-5.6-terra@high", name: "GPT-5.6 Terra", description: "default GPT worker" }, { model: "gpt-6-astra@high", name: "GPT-6 Astra" }], 258400);
   assert.equal(r.injected, 2);
