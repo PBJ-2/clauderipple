@@ -56,24 +56,49 @@ function ring(x: number, y: number, cx: number, cy: number, r: number, w: number
 }
 
 type Variant = "ok" | "warn" | "down";
+
+// A drop above its ripple: a teardrop at the top, two flat elliptical rings beneath it.
+//   ok   : drop + two rings
+//   warn : drop + inner ring only
+//   down : hollow drop, no rings
+function ellipseRing(x: number, y: number, cx: number, cy: number, rx: number, ry: number, w: number): number {
+  const dn = Math.hypot((x - cx) / rx, (y - cy) / ry); // 1 on the ellipse
+  const d = Math.abs(dn - 1) * ((rx + ry) / 2); // approximate pixel distance to the curve
+  return Math.max(0, Math.min(1, w / 2 - d + 0.5));
+}
+function inTriangle(px: number, py: number, a: number[], b: number[], c: number[]): boolean {
+  const s1 = (b[0]! - a[0]!) * (py - a[1]!) - (b[1]! - a[1]!) * (px - a[0]!);
+  const s2 = (c[0]! - b[0]!) * (py - b[1]!) - (c[1]! - b[1]!) * (px - b[0]!);
+  const s3 = (a[0]! - c[0]!) * (py - c[1]!) - (a[1]! - c[1]!) * (px - c[0]!);
+  return (s1 >= 0 && s2 >= 0 && s3 >= 0) || (s1 <= 0 && s2 <= 0 && s3 <= 0);
+}
 function draw(variant: Variant, scale: number) {
-  const size = 22 * scale;
-  const c = size / 2;
-  const w = 1.6 * scale;
+  const s = scale;
+  const cx = 11 * s;
+  const dropY = 8.2 * s;
+  const dropR = 2.9 * s;
+  const apex = [cx, 2.6 * s];
+  const w = 1.6 * s;
+  const ringY = 15.6 * s;
+  // teardrop = circle(R) ∪ triangle(apex, tangent points); the outline is the shape minus a smaller
+  // drop with the same centre and an apex pulled down so the tip keeps its point.
+  const dropShape = (px: number, py: number, R: number, apexY: number): boolean => {
+    const d = Math.hypot(px - cx, py - dropY);
+    if (d < R) return true;
+    const L = dropY - apexY;
+    if (L <= R) return false;
+    const t = Math.asin(R / L);
+    const p1 = [cx - R * Math.cos(t), dropY - R * Math.sin(t)];
+    const p2 = [cx + R * Math.cos(t), dropY - R * Math.sin(t)];
+    return inTriangle(px, py, [cx, apexY], p1, p2);
+  };
   return (x: number, y: number): number => {
-    const radii = variant === "down" ? [8.5] : [3, 6, 9];
     let a = 0;
-    for (const r0 of radii) {
-      const r = r0 * scale;
-      let v = ring(x, y, c, c, r, w);
-      if (variant === "warn") {
-        // cut a wedge on the upper-right so the rings read as broken
-        const ang = Math.atan2(y - c, x - c);
-        if (ang > -1.2 && ang < -0.3) v = 0;
-      }
-      a = Math.max(a, v);
-    }
-    if (variant !== "down" && Math.hypot(x - c, y - c) < 1.1 * scale) a = 1; // center dot
+    const outer = dropShape(x, y, dropR, apex[1]!);
+    if (variant === "down") a = outer && !dropShape(x, y, dropR - w, apex[1]! + 1.7 * w) ? 1 : 0;
+    else a = outer ? 1 : 0;
+    const rings = variant === "ok" ? [[4.2, 1.5], [8.6, 3.0]] : variant === "warn" ? [[4.2, 1.5]] : [];
+    for (const [rx, ry] of rings) a = Math.max(a, ellipseRing(x, y, cx, ringY, rx! * s, ry! * s, w));
     return a;
   };
 }
@@ -83,4 +108,8 @@ for (const v of ["ok", "warn", "down"] as Variant[]) {
   fs.writeFileSync(path.join(out, `${base}.png`), png(22, draw(v, 1)));
   fs.writeFileSync(path.join(out, `${base}@2x.png`), png(44, draw(v, 2)));
 }
+// Large preview for eyeballing the shapes (not shipped).
+fs.writeFileSync("/tmp/cr-shots/tray-preview-ok.png", png(22 * 8, draw("ok", 8)));
+fs.writeFileSync("/tmp/cr-shots/tray-preview-warn.png", png(22 * 8, draw("warn", 8)));
+fs.writeFileSync("/tmp/cr-shots/tray-preview-down.png", png(22 * 8, draw("down", 8)));
 console.log(`icons written to ${out}`);
