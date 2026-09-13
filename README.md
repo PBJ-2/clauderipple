@@ -99,6 +99,8 @@ you map go to your provider, everything else goes to Anthropic byte for byte.
 
 1. Download `ClaudeRipple-<version>-arm64.dmg` (Apple Silicon) or `-x64.dmg`
    (Intel) from [Releases](https://github.com/PBJ-2/clauderipple/releases).
+   *No release yet: the first signed build is being finished; until then, install
+   from source below.*
 2. Drag ClaudeRipple to Applications and open it. On first launch it offers to set
    itself up: a local certificate, two lines in `~/.claude/settings.json`, and a
    background router that starts at login. No Node install needed.

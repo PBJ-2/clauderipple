@@ -85,7 +85,8 @@ ClaudeRipple은 Claude Code 프로세스만 신뢰하는 작은 HTTPS 프록시�
 ## 설치 (macOS)
 
 1. [Releases](https://github.com/PBJ-2/clauderipple/releases)에서 `ClaudeRipple-<버전>-arm64.dmg`(Apple Silicon)
-   또는 `-x64.dmg`(Intel)를 받습니다.
+   또는 `-x64.dmg`(Intel)를 받습니다. *아직 릴리스가 없습니다. 첫 서명 빌드를 마무리하는 중이며, 그때까지는 아래
+   소스 설치를 쓰십시오.*
 2. ClaudeRipple을 Applications로 끌어다 놓고 엽니다. 첫 실행에 설치를 제안합니다. 로컬 인증서, `~/.claude/settings.json`
    두 줄, 로그인 시 자동 시작하는 백그라운드 라우터. Node 설치는 필요 없습니다.
 3. 메뉴 막대 아이콘 → **ClaudeRipple 열기…** → **프로바이더** → ChatGPT 추가 또는 API 키 붙여 넣기 → **모델 매핑**.
