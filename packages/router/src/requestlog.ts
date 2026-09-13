@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import zlib from "node:zlib";
 import path from "node:path";
 
 const DEFAULT_MAX_BYTES = 20 * 1024 * 1024;
@@ -172,9 +173,22 @@ export class ResponseUsageTap {
   private stopReason: string | undefined;
   private usage: RequestUsage | undefined;
 
+  // Compressed responses (Anthropic answers the CLI with gzip/br) are collected side-band up to a cap
+  // and inflated once at the end; the forwarded bytes are never touched.
+  private readonly encoding: "gzip" | "deflate" | "br" | "zstd" | null = null;
+  private encodedChunks: Buffer[] = [];
+  private encodedBytes = 0;
+  private static readonly MAX_ENCODED = 16 * 1024 * 1024;
+
   constructor(contentType: string | undefined, contentEncoding: string | undefined) {
     this.isSse = /^text\/event-stream\b/i.test(contentType ?? "");
-    if (contentEncoding && contentEncoding.toLowerCase() !== "identity") this.dropUntilNewline = true;
+    const enc = (contentEncoding ?? "").toLowerCase().trim();
+    if (enc === "" || enc === "identity") this.encoding = null;
+    else if (enc === "gzip" || enc === "x-gzip") this.encoding = "gzip";
+    else if (enc === "deflate") this.encoding = "deflate";
+    else if (enc === "br") this.encoding = "br";
+    else if (enc === "zstd" && typeof (zlib as unknown as { zstdDecompressSync?: unknown }).zstdDecompressSync === "function") this.encoding = "zstd";
+    else this.dropUntilNewline = true; // unknown encoding: observe nothing
   }
 
   get enabled(): boolean {
@@ -183,6 +197,16 @@ export class ResponseUsageTap {
 
   feed(chunk: Buffer): void {
     if (!this.enabled) return;
+    if (this.encoding) {
+      if (this.encodedBytes + chunk.length > ResponseUsageTap.MAX_ENCODED) {
+        this.dropUntilNewline = true;
+        this.encodedChunks = [];
+        return;
+      }
+      this.encodedChunks.push(chunk);
+      this.encodedBytes += chunk.length;
+      return;
+    }
     const text = this.decoder.decode(chunk, { stream: true });
     if (this.isSse) this.feedSse(text);
     else this.feedJson(text);
@@ -190,6 +214,23 @@ export class ResponseUsageTap {
 
   finish(): ObservedResponse {
     if (!this.enabled) return {};
+    if (this.encoding) {
+      let plain: Buffer;
+      try {
+        const all = Buffer.concat(this.encodedChunks);
+        plain =
+          this.encoding === "gzip" ? zlib.gunzipSync(all)
+          : this.encoding === "deflate" ? zlib.inflateSync(all)
+          : this.encoding === "br" ? zlib.brotliDecompressSync(all)
+          : (zlib as unknown as { zstdDecompressSync: (b: Buffer) => Buffer }).zstdDecompressSync(all);
+      } catch {
+        return {};
+      }
+      this.encodedChunks = [];
+      const text = plain.toString("utf8");
+      if (this.isSse) this.feedSse(text);
+      else this.feedJson(text);
+    }
     const tail = this.decoder.decode();
     if (tail) {
       if (this.isSse) this.feedSse(tail);

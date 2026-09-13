@@ -96,3 +96,21 @@ test("ResponseUsageTap skips compressed responses and bounds unbroken input", ()
   plain.feed(Buffer.from("x".repeat(70 * 1024)));
   assert.deepEqual(plain.finish(), {});
 });
+
+test("ResponseUsageTap inflates a gzip SSE stream side-band", async () => {
+  const { ResponseUsageTap } = await import("../src/requestlog.ts");
+  const zlib = await import("node:zlib");
+  const sse = [
+    'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":100,"cache_read_input_tokens":900,"cache_creation_input_tokens":0,"output_tokens":1}}}\n\n',
+    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}\n\n',
+    "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+  ].join("");
+  const gz = zlib.gzipSync(Buffer.from(sse));
+  const tap = new ResponseUsageTap("text/event-stream", "gzip");
+  for (let i = 0; i < gz.length; i += 7) tap.feed(gz.subarray(i, i + 7));
+  const r = tap.finish();
+  assert.equal(r.stopReason, "end_turn");
+  assert.equal(r.usage?.input, 100);
+  assert.equal(r.usage?.cached, 900);
+  assert.equal(r.usage?.output, 42);
+});

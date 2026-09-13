@@ -95,7 +95,7 @@ type HookEntry = { matcher?: string; hooks?: Record<string, unknown>[]; [k: stri
 
 /** Adds or removes ClaudeRipple's PreToolUse hook. Only entries carrying our marker are ever touched. */
 function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `\\'`)}'`;
+  return '"' + value.replace(/(["\\$`])/g, "\\$1") + '"';
 }
 
 export function setAgentTitleHook(enabled: boolean, cmd: { node: string; env?: Record<string, string>; script: string }): SettingsEdit {
@@ -107,7 +107,7 @@ export function setAgentTitleHook(enabled: boolean, cmd: { node: string; env?: R
   const notes: string[] = [];
   if (enabled) {
     const prefix = Object.entries(cmd.env ?? {})
-      .map(([key, value]) => `${key}=${shellQuote(value)}`)
+      .map(([key, value]) => /^[A-Za-z0-9_./:-]+$/.test(value) ? `${key}=${value}` : `${key}=${shellQuote(value)}`)
       .join(" ");
     const command = [prefix, shellQuote(cmd.node), shellQuote(cmd.script)].filter(Boolean).join(" ");
     kept.push({
