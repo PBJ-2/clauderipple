@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   ResponsesEventMapper,
+  claudeSupportsEffort,
   chatToAnthropic,
   responsesEventsToChatChunks,
   responsesToAnthropic,
@@ -78,4 +79,44 @@ test("Anthropic SSE maps to Responses and Chat stream events with usage", () => 
   const chat = responsesEventsToChatChunks(events, mapper);
   assert.ok(chat.some((chunk) => JSON.stringify(chunk).includes('"content":"ok"')));
   assert.ok(chat.some((chunk) => JSON.stringify(chunk).includes('"finish_reason":"tool_calls"')));
+});
+
+test("borrowed login: system is the identity line only, client instructions become the first user block", () => {
+  const out = responsesToAnthropic(
+    { model: "claude-sonnet-5", instructions: "You are Codex. Long operator text.", input: [{ type: "message", role: "user", content: "hi" }], reasoning: { effort: "high" } },
+    "claude-sonnet-5",
+    "You are Claude Code, Anthropic's official CLI for Claude.",
+  );
+  assert.deepEqual(out.system, [{ type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude.", cache_control: { type: "ephemeral" } }]);
+  const first = out.messages[0]!;
+  assert.equal(first.role, "user");
+  const blocks = first.content as { type: string; text?: string; cache_control?: unknown }[];
+  assert.equal(blocks[0]!.type, "text");
+  assert.ok(blocks[0]!.text!.startsWith("<operator_instructions>\nYou are Codex."));
+  assert.deepEqual(blocks[0]!.cache_control, { type: "ephemeral" });
+  assert.deepEqual(out.output_config, { effort: "high" });
+});
+
+test("API key path keeps instructions as the system prompt; effort dropped for models that reject it", () => {
+  const out = responsesToAnthropic(
+    { model: "claude-haiku-4-5", instructions: "Be terse.", input: [{ type: "message", role: "user", content: "hi" }], reasoning: { effort: "low" } },
+    "claude-haiku-4-5-20251001",
+  );
+  assert.deepEqual(out.system, [{ type: "text", text: "Be terse.", cache_control: { type: "ephemeral" } }]);
+  assert.equal(out.output_config, undefined);
+  assert.equal((out.messages[0]!.content as unknown[]).length, 1);
+  assert.equal(claudeSupportsEffort("claude-opus-4-6"), true);
+  assert.equal(claudeSupportsEffort("claude-fable-5-1"), true);
+  assert.equal(claudeSupportsEffort("claude-sonnet-4-5-20250929"), false);
+});
+
+test("chat completions: system messages folded into the first user block when a prefix is set", () => {
+  const out = chatToAnthropic(
+    { model: "claude-sonnet-5", messages: [{ role: "system", content: "Rule A" }, { role: "system", content: "Rule B" }, { role: "user", content: "go" }] },
+    "claude-sonnet-5",
+    "identity",
+  );
+  assert.deepEqual(out.system, [{ type: "text", text: "identity", cache_control: { type: "ephemeral" } }]);
+  const text = (out.messages[0]!.content as { text?: string }[])[0]!.text!;
+  assert.ok(text.includes("Rule A\n\nRule B"));
 });
