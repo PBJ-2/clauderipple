@@ -520,15 +520,41 @@ function openProviderChooser() {
 function inputRow(label, control, helpText) {
   return el("label", { class: "form-field" }, [el("span", { text: label }), control, helpText ? el("small", { text: helpText }) : null]);
 }
+// Checklist that stays usable with hundreds of models (OpenRouter lists 400+): a search box, checked
+// entries pinned first, at most 36 visible rows, and the selection kept in a Set so filtering never
+// loses ticks. `box.selected()` returns the chosen {id,name} entries.
 function modelChecklist(models, checked) {
-  const box = el("div", { class: "model-checklist modal-checklist" });
-  for (const model of models) {
-    const input = el("input", { type: "checkbox", checked: checked.has(model.id) });
-    input.dataset.model = model.id;
-    input.dataset.name = labelOf(model);
-    box.appendChild(el("label", { class: "model-check" }, [input, el("span", { text: labelOf(model) })]));
+  const selected = new Map();
+  for (const model of models) if (checked.has(model.id)) selected.set(model.id, { id: model.id, name: labelOf(model) });
+  const wrap = el("div", { class: "model-picker" });
+  const grid = el("div", { class: "model-checklist modal-checklist" });
+  const note = el("div", { class: "small", text: "" });
+  const search = models.length > 12 ? el("input", { type: "search", placeholder: t("providers.searchModels"), class: "model-search" }) : null;
+  const LIMIT = 36;
+  function render() {
+    const q = (search ? search.value : "").trim().toLowerCase();
+    const matches = models.filter((m) => !q || m.id.toLowerCase().includes(q) || labelOf(m).toLowerCase().includes(q));
+    const pinned = matches.filter((m) => selected.has(m.id));
+    const rest = matches.filter((m) => !selected.has(m.id)).slice(0, Math.max(0, LIMIT - pinned.length));
+    grid.replaceChildren();
+    for (const model of [...pinned, ...rest]) {
+      const input = el("input", { type: "checkbox", checked: selected.has(model.id) });
+      input.dataset.model = model.id;
+      input.dataset.name = labelOf(model);
+      input.addEventListener("change", () => { if (input.checked) selected.set(model.id, { id: model.id, name: labelOf(model) }); else selected.delete(model.id); note.textContent = summary(matches.length); });
+      grid.appendChild(el("label", { class: "model-check", title: model.id }, [input, el("span", { text: labelOf(model) })]));
+    }
+    note.textContent = summary(matches.length);
   }
-  return box;
+  function summary(matchCount) {
+    const hidden = Math.max(0, matchCount - Math.min(matchCount, LIMIT));
+    return t("providers.modelsSummary", { selected: selected.size, total: models.length }) + (hidden > 0 ? " · " + t("providers.modelsHidden", { hidden }) : "");
+  }
+  if (search) { search.addEventListener("input", render); wrap.appendChild(search); }
+  wrap.append(grid, note);
+  wrap.selected = () => [...selected.values()];
+  render();
+  return wrap;
 }
 function openProviderForm(options) {
   const existing = options.provider;
@@ -609,7 +635,7 @@ function openProviderForm(options) {
   function readHeaders() {
     const headers = {};
     const kind = keyInput.dataset.headerKind || headerKind;
-    const key = keyInput.value.trim();
+    const key = keyInput.value.replace(/^\s*bearer\s+/i, "").replace(/\s+/g, "");
     if (key) {
       if (kind === "authorization-bearer") headers.authorization = `Bearer ${key}`;
       else headers["x-api-key"] = key;
@@ -651,8 +677,9 @@ function openProviderForm(options) {
       response.error ? el("div", { class: "small", text: response.error.replace(/^no-credits:\s*/, "") }) : null,
     ].filter(Boolean));
     foundModels = response.models && response.models.length ? response.models.map((model) => typeof model === "string" ? { id: model, name: model } : model) : (preset ? (preset.fallbackModels || []) : foundModels);
-    modelsBox.replaceWith(modelChecklist(foundModels, new Set(foundModels.map((model) => model.id))));
-    modelArea.replaceChildren(el("span", { text: t("providers.models") }), hint(response.ok ? t("providers.modelsFound") : t("providers.modelsFallback")), modelArea.querySelector(".model-checklist") || document.createTextNode(""));
+    const keep = foundModels.length > 12 ? new Set(modelArea.querySelector(".model-picker").selected().map((m) => m.id)) : new Set(foundModels.map((model) => model.id));
+    modelArea.querySelector(".model-picker").replaceWith(modelChecklist(foundModels, keep));
+    modelArea.replaceChildren(el("span", { text: t("providers.models") }), hint(response.ok ? (foundModels.length > 12 ? t("providers.modelsFoundMany") : t("providers.modelsFound")) : t("providers.modelsFallback")), modelArea.querySelector(".model-picker") || document.createTextNode(""));
   });
   const saveButton = el("button", { class: "btn", type: "button", "data-default-action": "", text: existing ? t("common.save") : t("providers.add") });
   saveButton.addEventListener("click", async () => {
@@ -663,7 +690,7 @@ function openProviderForm(options) {
     const next = clone(currentConfig);
     const providerName = existing ? options.name : uniqueName(typedName, next.providers);
     if (existing && providerName !== options.name) delete next.providers[options.name];
-    const checkedModels = $all(".model-checklist input:checked", form).map((input) => ({ id: input.dataset.model, name: input.dataset.name }));
+    const checkedModels = form.querySelector(".model-picker").selected();
     provider.models = checkedModels;
     next.providers[providerName] = provider;
     const existingSelections = ((next.cli && next.cli.extraModels) || []).filter((entry) => entry.model !== null && entry.model !== undefined).map((entry) => {

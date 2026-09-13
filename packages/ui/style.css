@@ -297,3 +297,6 @@ label.check input { width: auto; }
   .modal { padding: 19px 16px; }
   .sticky-save { margin-left: 0; margin-right: 0; }
 }
+
+.model-search { width: 100%; margin-top: 8px; }
+.model-picker .small { margin-top: 6px; }
