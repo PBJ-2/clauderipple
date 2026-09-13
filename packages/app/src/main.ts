@@ -225,12 +225,15 @@ function runCli(args: string[]): Promise<string> {
   });
 }
 
+// Offer setup only when there is no working installation at all. A developer who runs the router
+// from a source checkout keeps that; switching to the app's bundled runtime is a menu action.
 function needsSetup(): boolean {
   const current = packagedRuntime();
   if (!current) return false;
   try {
-    const saved = JSON.parse(fs.readFileSync(path.join(home, "paths.json"), "utf8")) as { node?: string };
-    return saved.node !== current.node;
+    const saved = JSON.parse(fs.readFileSync(path.join(home, "paths.json"), "utf8")) as { node?: string; cli?: string; router?: string };
+    const usable = !!saved.node && !!saved.router && fs.existsSync(saved.node) && fs.existsSync(saved.router);
+    return !usable;
   } catch {
     return true;
   }
