@@ -2,40 +2,57 @@
 
 **Run GPT and other models inside Claude Desktop, without turning Claude off.**
 
-ClaudeRipple is a local proxy for the Claude Desktop app's Code tab. It lets you
-pick GPT (via your ChatGPT subscription) or any Anthropic-compatible provider
-from the app's own model picker, while every other request keeps going to
-Anthropic exactly as before.
+ClaudeRipple is a local proxy for Claude Code. It lets you pick GPT (via your
+ChatGPT subscription) or any Anthropic-compatible provider (DeepSeek, Kimi, GLM,
+MiniMax, Qwen, OpenRouter…) from Claude Desktop's own model picker, while every
+other request keeps going to Anthropic exactly as before.
+
+It works everywhere Claude Code runs, because it plugs into the settings file
+Claude Code reads: the **Claude Desktop Code tab**, the **terminal `claude` CLI**
+(`/model gpt-5.6-terra`), and **mobile Remote Control** sessions. Only the "real
+names in the picker" feature is desktop-only.
 
 - No Developer Mode. No "Configure Third-Party Inference".
 - Nothing lost: claude.ai chat, Remote Control, cloud environments, SSH
   sessions, connectors, skills, hooks all keep working.
 - No certificate in your system keychain. Only the Claude Code process trusts
-  ClaudeRipple's local CA, through `NODE_EXTRA_CA_CERTS`.
+  ClaudeRipple's local CA, through `NODE_EXTRA_CA_CERTS`. (Picker mode adds the
+  CA to your *login* keychain, with your consent, and can be turned off again.)
 - Per-session and per-subagent model choice. Your Claude subscription and your
   GPT subscription work side by side.
+- Prompt caching preserved on translated providers (94–99% cache hit measured
+  on multi-turn sessions).
 
-> Status: alpha, in daily use by the author. See `docs/ROADMAP.md`.
+> Status: alpha, in daily use by the author. macOS today; see `docs/RELEASE.md`
+> for what Windows still needs.
 
 ## Install (macOS)
+
+### Menu-bar app (recommended)
+
+Download `ClaudeRipple-<version>-arm64.dmg` (Apple Silicon) or `-x64.dmg`
+(Intel) from the Releases page, drag ClaudeRipple to Applications, open it. On
+first launch it offers to set itself up: local certificate, the two lines in
+`~/.claude/settings.json`, and a background router that starts at login. The app
+carries its own runtime; you do not need Node installed.
+
+The menu-bar icon shows health (drop + rings = ok, one ring = attention, hollow
+drop = router down). "Open ClaudeRipple…" opens the settings window:
+providers, model mapping, picker, logs.
+
+### From source
 
 Requires Node 24 and Claude Desktop.
 
 ```bash
 git clone https://github.com/pbj/clauderipple && cd clauderipple && npm install
 node packages/cli/src/index.ts install      # certs, settings.json env, launchd agent, end-to-end probe
-node packages/cli/src/index.ts login        # optional: sign in to ChatGPT for the chatgpt provider
-node packages/cli/src/index.ts ui           # open the local GUI (slots, providers, health, logs)
+node packages/cli/src/index.ts ui           # open the local GUI in your browser
 ```
 
 `uninstall` reverses everything and restores `~/.claude/settings.json` from a backup.
-Other commands: `status`, `start`, `stop`, `restart`, `logs -f`, `logout`.
-
-### Menu-bar app
-
-`packages/app` is an Electron shell around the same local GUI: tray icon with
-live health (ok / attention / down), the GUI in a window, restart, ChatGPT
-sign-in, logs. Build with `cd packages/app && npm run dist`.
+Other commands: `status`, `start`, `stop`, `restart`, `logs -f`, `login`, `logout`,
+`picker on|off`, `agent-title on|off`.
 
 ## Providers
 
