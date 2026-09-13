@@ -1,12 +1,12 @@
-# 인수인계 — 2026-09-13 오후
+# 인수인계 — 2026-09-13 밤 (최신)
 
 > 다음 세션이 처음 읽을 문서. 기술 근거는 `docs/ARCHITECTURE.md`, 규칙은 `CLAUDE.md`,
 > 메모리는 `~/.claude/projects/-Users-pbj-Downloads/memory/clauderipple-project.md`.
 
 ## 지금 상태 한 줄
-ClaudeRipple(클로드리플)은 **주군 데스크톱에서 실전 가동 중이고, GPT 경로가 자체 ChatGPT 어댑터로
-전환됐다.** proxenos는 더 이상 체인에 없다(데몬은 8787에 켜져 있으나 미사용). 테스트 40개 통과.
-`main` 브랜치, 원격 없음.
+**저장소 공개됨** https://github.com/PBJ-2/clauderipple (GPL-3.0, 09-13 밤). 디씨 두 곳에 글 올라감(AI활용갤 5추, 특갤).
+릴리스 파일은 **아직 없음**(주군 완성 선언 전 빌드 금지) → README에 "소스 설치" 안내만. 실전 라우터는 저장소 소스로 가동 중,
+테스트 114개 통과, HEAD는 `git log -1`. 가장 많이 들어온 요구는 **Windows**(댓글 3명).
 
 ## 실전 환경 (건드리기 전에 알 것)
 | 항목 | 값 |
@@ -92,14 +92,29 @@ ClaudeRipple(클로드리플)은 **주군 데스크톱에서 실전 가동 중�
   (빌드 원본 `packages/app/release/mac-arm64/`).
 - proxenos 데몬(8787)·프로토타입(8790) 정리는 주군 확인 후.
 
-## 다음 세션이 할 일 (우선순위순)
-1. **실전 캐시 적중 관찰**: `grep "CHATGPT" ~/.clauderipple/logs/router.log | tail -30`에서 `cached=` 값. 다중 턴 세션에서 90% 밑이면
-   `prompt_cache_key`(첫 user 메시지 기반)와 instructions 고정성부터 의심.
-2. **피커 모드 실전 검증**(주군이 켠 뒤): `grep "PICKER" ~/.clauderipple/logs/router.log`. 안 뜨면 (a) `grep "WEB claude.ai"`, (b) 부트스트랩 경로,
-   (c) 렌더러 필터 순. 휴리스틱은 `packages/router/src/picker.ts`.
-3. GUI: 피커 상태 표시(`/api/status.picker` 있음), 한도 표시는 헤더 기반 값으로 이미 채워짐. 메뉴 막대 앱 재빌드(`cd packages/app && npm run dist`).
-4. README 영어 마무리, GitHub 공개 준비(원격 없음), 스크린샷.
-5. 프로토타입(8790)·proxenos(8787) 해제는 주군 확인 후.
+## 다음 세션이 할 일 (우선순위순, 09-13 밤 기준)
+1. **Windows 지원(M5)** — 디씨 반응에서 가장 큰 요구. 막힌 것: launchd(→ 작업 스케줄러/로그인 실행), 인증서 생성이 `openssl` CLI 의존
+   (→ 순수 JS ASN.1 서명 또는 번들 openssl), 피커 모드의 키체인 신뢰(→ certutil)와 Claude-3p 경로(`%APPDATA%`), Electron 윈도 빌드·코드서명.
+   추산 이틀. 라우터 코어(TS)는 그대로 돈다.
+2. **첫 서명 릴리스**(주군 "완성" 선언 후에만): `env -u HTTPS_PROXY APPLE_KEYCHAIN_PROFILE=clauderipple-notary npm run release` →
+   원격의 낡은 `v0.1.0` 태그(MIT 시절 커밋) 삭제 후 재태그 → `gh release create` DMG/ZIP → README 설치 절의 "아직 릴리스 없음" 문장 제거.
+3. **Codex 앱 버그 셋**(주군: "나중에"): ① 카탈로그 context_window 200000 고정(Sonnet 5는 1M → 모델별), ② 지시문 `exec_command` vs 도구
+   `custom_exec_command` 불일치로 첫 도구 호출 실패, ③ 관찰 토큰 만료 시 401 그대로 노출(키체인/파일 폴백 필요).
+4. **GPT 통과**: Codex 프로바이더는 전역 하나라 clauderipple이 기본이면 목록의 GPT 항목이 400. 입구에서 gpt-*를
+   chatgpt.com/backend-api/codex/responses로 그대로 통과(auth.json 토큰 + chatgpt-account-id)시키면 한 목록에서 둘 다 됨.
+   **그전까지 주군 `~/.codex/config.toml` 상단 `model = "claude-sonnet-5"` / `model_provider = "clauderipple"`는 임시 상태** —
+   되돌리려면 백업 `config.toml.clauderipple-backup-20260913T211003`의 `model = "gpt-5.5"`로, `model_provider` 줄 삭제.
+5. README 스크린샷 4번(Codex 앱에서 Claude가 답하는 장면) 미확보. `docs/media/codex-claude.png`는 답 없는 중간 장면이라 README에 안 넣음.
+6. 프로토타입(8790)·proxenos(8787) 해제는 주군 확인 후.
+
+## 09-13 밤 3 — 공개 직전에 한 일 (git log로 확인 가능)
+- Codex→Claude 429 원인·수정(instructions를 첫 user 블록으로, effort 게이트), 완료 후 소켓 끊김을 200으로 기록, env_key 제거·Authorization 선택.
+- **Codex 모델 카탈로그**(`model_catalog_json`): 형식은 Codex 파싱 오류를 하나씩 읽어 알아냄 — `{models:[…]}`, 항목마다 `base_instructions`·
+  `supports_parallel_tool_calls` 필수, `model_messages.instructions_template`이 있으면 그것이 시스템 프롬프트. gpt-5.5 항목 복제로 생성.
+  라우터가 설정 변경 시 자동 갱신(`codexEnabled()`일 때만).
+- GUI `?lang=en` 지원 → `scripts/make-media.mts`가 영어로 캡처. README 영/한 전면 개정(비교표·알파 섹션·언어 링크), 라이선스 GPL-3.0.
+- 디씨 댓글 "밴 아님?"에 대한 정확한 답: Claude Code→GPT는 문서화된 프록시 경로라 Claude 요청은 무변경. ChatGPT 구독을 Codex 백엔드로 빌리는 것과
+  Claude 구독을 Codex에서 재사용하는 것은 각사 약관 회색지대(README엔 "약관의 적용을 받는다"만 적음).
 
 ## 검증 명령
 ```bash
