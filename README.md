@@ -15,7 +15,7 @@
 <p align="center">
   <a href="https://github.com/PBJ-2/clauderipple/releases"><img alt="Release" src="https://img.shields.io/github/v/release/PBJ-2/clauderipple?include_prereleases&label=download"></a>
   <img alt="Alpha" src="https://img.shields.io/badge/status-alpha-orange">
-  <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
+  <a href="LICENSE"><img alt="GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-blue"></a>
   <img alt="macOS" src="https://img.shields.io/badge/macOS-arm64%20%7C%20x64-black">
   <img alt="Node" src="https://img.shields.io/badge/runtime-bundled-success">
   <a href="README.ko.md"><img alt="한국어" src="https://img.shields.io/badge/docs-한국어-red"></a>
@@ -219,4 +219,5 @@ trademarks of Anthropic, PBC. ChatGPT and Codex are trademarks of OpenAI.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Copyright (c) 2026 pbj. GPL-3.0 — see [LICENSE](LICENSE). Use it freely; if you distribute a modified
+version, ship its source under the same license.

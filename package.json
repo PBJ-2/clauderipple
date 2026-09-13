@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "description": "Run GPT and other models inside Claude Desktop, without turning Claude off.",
-  "license": "MIT",
+  "license": "GPL-3.0-only",
   "workspaces": [
     "packages/*"
   ],

@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "description": "Local proxy that routes selected Claude Code model names to other providers and passes everything else to api.anthropic.com untouched.",
-  "license": "MIT",
+  "license": "GPL-3.0-only",
   "bin": {
     "clauderipple-router": "./src/index.ts"
   },

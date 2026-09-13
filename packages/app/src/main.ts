@@ -65,7 +65,7 @@ const STRINGS = {
     setupDone: "ClaudeRipple setup finished.",
     about: "About ClaudeRipple",
     aboutDetail:
-      "Run GPT and other models inside Claude Desktop, without turning Claude off.\n\nIndependent open-source project (MIT). Not affiliated with, endorsed by, or sponsored by Anthropic or OpenAI. Claude and Claude Code are trademarks of Anthropic, PBC.",
+      "Run GPT and other models inside Claude Desktop, without turning Claude off.\n\nIndependent open-source project (GPL-3.0). Not affiliated with, endorsed by, or sponsored by Anthropic or OpenAI. Claude and Claude Code are trademarks of Anthropic, PBC.",
     quit: "Quit",
     tooltip: (state: string) => `ClaudeRipple ${state}`,
     tooltipDown: "ClaudeRipple: router not running",
@@ -107,7 +107,7 @@ const STRINGS = {
     setupDone: "ClaudeRipple 설정이 완료되었습니다.",
     about: "ClaudeRipple 정보",
     aboutDetail:
-      "Claude Desktop을 끄지 않고 그 안에서 GPT 등 다른 모델을 씁니다.\n\n독립 오픈소스 프로젝트(MIT)이며 Anthropic·OpenAI와 제휴·보증·후원 관계가 없습니다. Claude와 Claude Code는 Anthropic, PBC의 상표입니다.",
+      "Claude Desktop을 끄지 않고 그 안에서 GPT 등 다른 모델을 씁니다.\n\n독립 오픈소스 프로젝트(GPL-3.0)이며 Anthropic·OpenAI와 제휴·보증·후원 관계가 없습니다. Claude와 Claude Code는 Anthropic, PBC의 상표입니다.",
     quit: "종료",
     tooltip: (state: string) => `ClaudeRipple ${state}`,
     tooltipDown: "ClaudeRipple: 라우터가 꺼져 있음",

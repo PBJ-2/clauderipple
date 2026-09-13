@@ -15,7 +15,7 @@
 <p align="center">
   <a href="https://github.com/PBJ-2/clauderipple/releases"><img alt="Release" src="https://img.shields.io/github/v/release/PBJ-2/clauderipple?include_prereleases&label=download"></a>
   <img alt="Alpha" src="https://img.shields.io/badge/status-alpha-orange">
-  <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
+  <a href="LICENSE"><img alt="GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-blue"></a>
   <img alt="macOS" src="https://img.shields.io/badge/macOS-arm64%20%7C%20x64-black">
   <img alt="Node" src="https://img.shields.io/badge/runtime-bundled-success">
   <a href="README.md"><img alt="English" src="https://img.shields.io/badge/docs-English-blue"></a>
@@ -193,4 +193,4 @@ Anthropic, PBC의 상표입니다. ChatGPT와 Codex는 OpenAI의 상표입니다
 
 ## 라이선스
 
-MIT — [LICENSE](LICENSE) 참고.
+Copyright (c) 2026 pbj. GPL-3.0 — [LICENSE](LICENSE) 참고. 자유롭게 쓰되, 고쳐서 배포하면 그 소스도 같은 라이선스로 공개해야 합니다.

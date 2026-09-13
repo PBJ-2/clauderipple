@@ -351,5 +351,5 @@ Six repos target the app (ModelLink 135★ best); all use the official gateway
 setting and pay its costs (§2). Four are Chinese-market only; ModelLink is
 CC BY-NC-ND (no forks, no sponsors). CLI-targeting `claude-code-router` has
 37,180★, `opencodex` 14,300★ with two README sponsors. Open positions: English
-distribution, MIT license, sponsor slots. Positioning: an **add-on for Claude
+distribution, GPL-3.0 license (chosen 2026-09-13 over MIT: sole author, reversible later, blocks closed commercial repackaging), sponsor slots. Positioning: an **add-on for Claude
 subscribers**, not a replacement for people without one.
