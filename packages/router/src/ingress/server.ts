@@ -249,7 +249,7 @@ export class OpenAiIngress {
         finish(400, bytes);
         return;
       }
-      if (path === "/v1/responses" && body.previous_response_id !== undefined) {
+      if (path === "/v1/responses" && body.previous_response_id != null) {
         const bytes = sendJson(res, 400, openAiError("previous_response_id unsupported; ClaudeRipple OpenAI ingress is stateless", "invalid_request_error", "previous_response_id_unsupported"));
         finish(400, bytes);
         return;
@@ -340,6 +340,7 @@ export class OpenAiIngress {
         response.on("end", () => resolveP(output));
         response.on("error", () => resolveP(output));
       });
+      this.deps.log.warn(`OPENAI ingress upstream ${response.statusCode ?? 0} (${model}): ${text.replace(/\s+/g, " ").slice(0, 400)}`);
       const mapped = httpStatusError(response.statusCode ?? 502, text);
       return { status: mapped.status, bytes: sendJson(res, mapped.status, mapped.error), note: `upstream ${response.statusCode ?? 0}` };
     }

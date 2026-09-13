@@ -181,11 +181,36 @@ export function effortFromRequest(value: unknown): string | undefined {
 }
 
 /** Convert an OpenAI Responses request to a cache-friendly Anthropic Messages request. */
+/** Claude models that accept `output_config.effort` (measured 2026-09-13: Haiku 4.5 answers 400 "does not support the effort parameter"). */
+export function claudeSupportsEffort(model: string): boolean {
+  return /^claude-(opus|sonnet|fable)-(4-[6-9]|5)(-|$)/.test(model);
+}
+
+/**
+ * With a borrowed Claude Code login, Anthropic accepts the request only when the system prompt is
+ * Claude Code's own (measured 2026-09-13: any other long system text → 429 "rate_limit_error: Error",
+ * even though a tiny request passes). So in that mode `system` carries just the identity line and
+ * the client's instructions travel as the first user block, tagged so the model reads them as
+ * operator instructions. The block is cache-marked, so the prefix still caches.
+ */
+function placeInstructions(prefix: string | undefined, instructions: string[], messages: AnthropicMessage[]): { type: "text"; text: string; cache_control?: { type: "ephemeral" } }[] | undefined {
+  const text = instructions.filter((t) => t.length > 0).join("\n\n");
+  if (prefix) {
+    if (text) {
+      const block = { type: "text" as const, text: `<operator_instructions>\n${text}\n</operator_instructions>`, cache_control: EPHEMERAL };
+      const first = messages.find((m) => m.role === "user");
+      if (first && Array.isArray(first.content)) first.content.unshift(block);
+      else messages.unshift({ role: "user", content: [block] });
+    }
+    return [{ type: "text", text: prefix, cache_control: EPHEMERAL }];
+  }
+  return text ? [{ type: "text", text, cache_control: EPHEMERAL }] : undefined;
+}
+
 export function responsesToAnthropic(body: Json, targetModel: string, systemPrefix?: string): AnthropicIngressRequest {
   const instructions = string(body.instructions);
-  const systemText = [systemPrefix, instructions].filter((value): value is string => typeof value === "string" && value.length > 0).join("\n\n");
-  const system = systemText ? [{ type: "text" as const, text: systemText, cache_control: EPHEMERAL }] : undefined;
   const messages = responseItems(body.input);
+  const system = placeInstructions(systemPrefix, instructions ? [instructions] : [], messages);
   applyMessageCache(messages);
   const tools = mapTools(body.tools);
   const maxTokens = typeof body.max_output_tokens === "number" && Number.isFinite(body.max_output_tokens) ? Math.max(1, Math.floor(body.max_output_tokens)) : undefined;
@@ -200,7 +225,7 @@ export function responsesToAnthropic(body: Json, targetModel: string, systemPref
     ...(toolChoice ? { tool_choice: toolChoice } : {}),
     max_tokens: maxTokens ?? DEFAULT_MAX_TOKENS,
     ...(temperature !== undefined ? { temperature } : {}),
-    ...(effort ? { output_config: { effort } } : {}),
+    ...(effort && claudeSupportsEffort(targetModel) ? { output_config: { effort } } : {}),
     stream: body.stream === true,
   };
 }
@@ -233,7 +258,7 @@ function chatMessageToAnthropic(raw: unknown): AnthropicMessage[] {
 /** Convert OpenAI Chat Completions request to an Anthropic Messages request. */
 export function chatToAnthropic(body: Json, targetModel: string, systemPrefix?: string): AnthropicIngressRequest {
   const rawMessages = Array.isArray(body.messages) ? body.messages : [];
-  const systems: string[] = systemPrefix ? [systemPrefix] : [];
+  const systems: string[] = [];
   const messages: AnthropicMessage[] = [];
   for (const raw of rawMessages) {
     const message = object(raw);
@@ -245,8 +270,8 @@ export function chatToAnthropic(body: Json, targetModel: string, systemPrefix?: 
     }
     messages.push(...chatMessageToAnthropic(raw));
   }
+  const system = placeInstructions(systemPrefix, systems, messages);
   applyMessageCache(messages);
-  const system = systems.length ? [{ type: "text" as const, text: systems.join("\n\n"), cache_control: EPHEMERAL }] : undefined;
   const tools = mapTools(body.tools);
   const maxTokensValue = body.max_completion_tokens ?? body.max_tokens;
   const maxTokens = typeof maxTokensValue === "number" && Number.isFinite(maxTokensValue) ? Math.max(1, Math.floor(maxTokensValue)) : undefined;
