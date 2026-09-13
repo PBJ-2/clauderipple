@@ -116,7 +116,7 @@ node packages/cli/src/index.ts ui        # 브라우저에서 GUI 열기
 
 ```bash
 clauderipple codex on          # ~/.codex/config.toml에 "clauderipple" 프로바이더 추가(백업 먼저)
-CLAUDERIPPLE_KEY=local codex --profile clauderipple -m claude-sonnet-5 "…"
+codex --profile clauderipple -m claude-sonnet-5        # 터미널. Codex 앱에서도 됩니다
 ```
 
 Claude는 Claude Code 로그인(실행 중인 Desktop 세션, 터미널 로그인, 또는 `clauderipple claude-login`으로

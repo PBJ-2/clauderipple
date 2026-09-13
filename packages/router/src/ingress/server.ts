@@ -230,9 +230,11 @@ export class OpenAiIngress {
         finish(503, bytes, { note: "refused during drain" });
         return;
       }
+      // Loopback-only listener: a client may omit Authorization (the Codex desktop app has no shell
+      // env to carry a placeholder key). When present it must at least look like a bearer token.
       const authorization = req.headers.authorization;
-      if (typeof authorization !== "string" || !/^Bearer\s+\S+$/i.test(authorization)) {
-        const bytes = sendJson(res, 401, openAiError("Missing Authorization: Bearer token", "authentication_error"));
+      if (authorization !== undefined && (typeof authorization !== "string" || !/^Bearer\s+\S+$/i.test(authorization))) {
+        const bytes = sendJson(res, 401, openAiError("Malformed Authorization header; use Bearer <token> or omit it", "authentication_error"));
         finish(401, bytes);
         return;
       }

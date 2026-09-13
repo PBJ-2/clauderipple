@@ -51,7 +51,6 @@ function providerBlock(port: number): string {
 name = "ClaudeRipple local ingress"
 base_url = "http://127.0.0.1:${port}/v1"
 wire_api = "responses"
-env_key = "CLAUDERIPPLE_KEY"
 ${END}`;
 }
 

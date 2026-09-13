@@ -349,7 +349,7 @@ try {
       if (result.backup) console.log(`  backup: ${result.backup}`);
       if (result.profileBackup) console.log(`  profile backup: ${result.profileBackup}`);
       if (sub === "on") {
-        console.log("Run: CLAUDERIPPLE_KEY=local codex --profile clauderipple -m <mapped-model> \"say ok\"");
+        console.log("Run: codex --profile clauderipple -m <mapped-model> \"say ok\"");
       }
       break;
     }

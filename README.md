@@ -129,7 +129,7 @@ Same router, same mapping. `/model gpt-5.6-terra` lists the models you added.
 
 ```bash
 clauderipple codex on          # adds a "clauderipple" provider to ~/.codex/config.toml (backup first)
-CLAUDERIPPLE_KEY=local codex --profile clauderipple -m claude-sonnet-5 "…"
+codex --profile clauderipple -m claude-sonnet-5        # terminal; the Codex app works too
 ```
 
 Claude is reached through your Claude Code login (detected from the running

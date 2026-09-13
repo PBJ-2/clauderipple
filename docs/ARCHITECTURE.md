@@ -279,7 +279,9 @@ chat is out of reach for every approach, ours included.
   `$CODEX_HOME/config.toml` and a marked selection block in
   `$CODEX_HOME/clauderipple.config.toml`; `off` removes only those blocks after
   a backup. The provider uses `base_url = "http://127.0.0.1:<openaiPort>/v1"`,
-  `wire_api = "responses"`, and `env_key = "CLAUDERIPPLE_KEY"`.
+  and `wire_api = "responses"`; no `env_key`, so the Codex desktop app (which
+  has no shell environment) can use it too. The ingress accepts a missing
+  `Authorization` header and rejects only a malformed one.
 
 Sources: [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference),
 [Codex advanced configuration](https://learn.chatgpt.com/docs/config-file/config-advanced),

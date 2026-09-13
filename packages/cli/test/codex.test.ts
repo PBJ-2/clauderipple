@@ -14,7 +14,7 @@ test("codex on/off owns only marked provider and profile blocks", () => {
   const on = codexOn(18793, home);
   assert.equal(on.changed, true);
   assert.ok(on.backup && fs.existsSync(on.backup));
-  assert.match(fs.readFileSync(config, "utf8"), /\[model_providers\.clauderipple\][\s\S]*base_url = "http:\/\/127\.0\.0\.1:18793\/v1"[\s\S]*wire_api = "responses"[\s\S]*env_key = "CLAUDERIPPLE_KEY"/);
+  assert.match(fs.readFileSync(config, "utf8"), /\[model_providers\.clauderipple\][\s\S]*base_url = "http:\/\/127\.0\.0\.1:18793\/v1"[\s\S]*wire_api = "responses"/);
   assert.match(fs.readFileSync(profile, "utf8"), /approval_policy = "never"[\s\S]*model_provider = "clauderipple"/);
   const off = codexOff(home);
   assert.equal(off.changed, true);
