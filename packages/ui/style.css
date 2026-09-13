@@ -116,9 +116,8 @@ h1 {
 }
 
 .card h2 {
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
+  font-size: 12.5px;
+  letter-spacing: 0.2px;
   color: var(--muted);
   margin: 0 0 10px;
   font-weight: 600;
@@ -144,7 +143,7 @@ h1 {
 .badge.dot::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 
 table { width: 100%; border-collapse: collapse; }
-th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px; color: var(--muted); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+th { text-align: left; font-size: 11.5px; letter-spacing: 0.2px; color: var(--muted); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--border); }
 td { padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
 tr:last-child td { border-bottom: none; }
 
@@ -235,7 +234,8 @@ label.check input { width: auto; }
 .view.active { display: block; }
 .actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
 .actions.end { justify-content: flex-end; }
-.details { color: var(--muted); font-size: 12px; }
+.details { color: var(--muted); font-size: 12px; margin-top: 12px; }
+.advanced-content { margin-top: 10px; display: grid; gap: 12px; }
 .details summary { cursor: pointer; user-select: none; }
 .detail-rows { margin-top: 10px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel); }
 .picker-setting { display: flex; align-items: center; justify-content: space-between; gap: 18px; }

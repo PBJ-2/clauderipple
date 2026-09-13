@@ -172,6 +172,7 @@ async function buildStatus(deps: AdminDeps): Promise<Record<string, unknown>> {
     chatgpt,
     picker: deps.picker?.() ?? { enabled: false, hosts: [], last: null },
     agentTitle: agentTitleHookEnabled(),
+    pickerModels: cfg.cli.extraModels.map((m) => m.name || m.model),
   };
 }
 

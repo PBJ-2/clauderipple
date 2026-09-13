@@ -137,6 +137,7 @@ async function refreshHealth() {
   );
   renderHealthProviders();
   renderPicker(status.picker || { enabled: false, last: null });
+  renderAgentTitle(Boolean(status.agentTitle));
   const details = $("#health-details");
   details.replaceChildren(
     el("div", { class: "row" }, [el("span", { class: "k", text: t("health.version") }), el("span", { class: "v", text: status.version })]),
@@ -177,15 +178,39 @@ function renderHealthProviders() {
 function renderPicker(picker) {
   const rows = $("#picker-rows");
   const last = picker.last || null;
-  rows.replaceChildren(
+  const names = (status && status.pickerModels) || [];
+  rows.replaceChildren(...[
     el("div", { class: "row" }, [el("span", { class: "k", text: t("picker.state") }), picker.enabled ? badge("ok", t("picker.on")) : el("span", { class: "small", text: t("picker.off") })]),
-    last ? el("div", { class: "small", text: t("picker.last", { count: last.injected == null ? "?" : last.injected }) }) : hint(t("picker.restartHelp")),
-  );
+    picker.enabled ? el("div", { class: "small", text: t("picker.models", { count: names.length, names: names.join(", ") || "—" }) }) : null,
+    picker.enabled ? (last && last.at ? el("div", { class: "small", text: t("picker.lastAt", { at: new Date(last.at).toLocaleString() }) }) : hint(t("picker.never"))) : null,
+  ].filter(Boolean));
   const button = $("#picker-toggle");
   button.textContent = picker.enabled ? t("picker.turnOff") : t("picker.turnOn");
   button.className = picker.enabled ? "btn secondary" : "btn";
   button.disabled = pickerBusy;
   button.onclick = () => togglePicker(!picker.enabled, null);
+}
+let agentTitleBusy = false;
+function renderAgentTitle(enabled) {
+  $("#agent-title-rows").replaceChildren(el("div", { class: "row" }, [el("span", { class: "k", text: t("picker.state") }), enabled ? badge("ok", t("agentTitle.on")) : el("span", { class: "small", text: t("agentTitle.off") })]));
+  const button = $("#agent-title-toggle");
+  button.textContent = enabled ? t("agentTitle.turnOff") : t("agentTitle.turnOn");
+  button.className = enabled ? "btn secondary" : "btn";
+  button.disabled = agentTitleBusy;
+  button.onclick = async () => {
+    if (agentTitleBusy) return;
+    agentTitleBusy = true;
+    button.disabled = true;
+    try {
+      await api("/api/agent-title", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: !enabled }) });
+      toast(t("common.saved"));
+    } catch (error) {
+      toast(t("common.actionFailed"), true, error.message);
+    } finally {
+      agentTitleBusy = false;
+      void refreshHealth();
+    }
+  };
 }
 async function togglePicker(enabled, checkbox) {
   if (pickerBusy) return;
@@ -406,9 +431,12 @@ function providerCard(name, provider) {
   const remove = el("button", { class: "btn danger", type: "button", text: t("common.remove") });
   const draw = () => {
     const state = stateFor(name);
-    stateLine.replaceChildren(providerState(name, provider), el("span", { class: "small", text: statusText(state) }));
+    const preset = provider.preset && presetById(provider.preset);
+    let kind = provider.type === "chatgpt" ? t("providers.chatgpt") : preset ? preset.name : "";
+    if (provider.type !== "chatgpt") { try { kind = `${kind ? kind + " · " : ""}${new URL(provider.url).host}`; } catch { /* keep */ } }
+    stateLine.replaceChildren(...[providerState(name, provider), el("span", { class: "small", text: kind }), state && !state.ok && state.error ? el("span", { class: "small bad-text", text: state.error }) : null].filter(Boolean));
     const models = modelsOf(provider);
-    modelText.textContent = models.length ? t("providers.modelsCount", { count: models.length }) : t("providers.noModels");
+    modelText.textContent = models.length ? t("providers.modelsCount", { count: models.length, names: models.map(labelOf).join(", ") }) : t("providers.noModels");
   };
   check.addEventListener("click", async () => { check.disabled = true; await probeProvider(name, provider); check.disabled = false; draw(); });
   edit.addEventListener("click", () => openProviderForm({ name, provider }));
@@ -547,10 +575,14 @@ function openProviderForm(options) {
     const append = el("textarea", { rows: "2", value: (existing && existing.instructionsAppend) || "" });
     chatgptFields = [
       inputRow(t("providers.credentials"), auth, t("providers.credentialsHelp")),
-      el("div", { class: "form-field" }, [el("span", { text: t("providers.login") }), login, el("small", { text: t("providers.loginHelp") })]),
+      el("div", { class: "form-field" }, [el("span", { text: t("providers.login") }), el("small", { text: t("providers.loginHelp") })]),
       inputRow(t("providers.defaultEffort"), effort, t("providers.defaultEffortHelp")),
     ];
-    advancedContent.append(el("label", { class: "check" }, [identity, el("span", { text: t("providers.identity") })]), inputRow(t("providers.append"), append, t("providers.appendHelp")));
+    void login;
+    advancedContent.append(
+      el("div", { class: "form-field" }, [el("label", { class: "check" }, [identity, el("span", { text: t("providers.identity") })]), el("small", { text: t("providers.identityHelp") })]),
+      inputRow(t("providers.append"), append, t("providers.appendHelp")),
+    );
     advancedContent._chatgpt = { auth, effort, identity, append };
   }
   advanced.appendChild(advancedContent);
