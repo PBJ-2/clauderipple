@@ -92,6 +92,16 @@ function readSettingsEnv(): { HTTPS_PROXY?: string; NODE_EXTRA_CA_CERTS?: string
   }
 }
 
+/** Whether ClaudeRipple's agent-title hook is registered in settings.json (see packages/cli/src/settings.ts). */
+function agentTitleHookEnabled(): boolean {
+  try {
+    const s = JSON.parse(fs.readFileSync(settingsPath(), "utf8")) as { hooks?: { PreToolUse?: Record<string, unknown>[] } };
+    return (s.hooks?.PreToolUse ?? []).some((e) => e._clauderipple === "agent-title");
+  } catch {
+    return false;
+  }
+}
+
 function cliVersion(): string {
   const dir = path.join(os.homedir(), "Library", "Application Support", "Claude", "claude-code");
   try {
@@ -161,6 +171,7 @@ async function buildStatus(deps: AdminDeps): Promise<Record<string, unknown>> {
     cliVersion: cliVersion(),
     chatgpt,
     picker: deps.picker?.() ?? { enabled: false, hosts: [], last: null },
+    agentTitle: agentTitleHookEnabled(),
   };
 }
 
@@ -483,6 +494,24 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         }
         const r = await runCli(["picker", enabled ? "on" : "off"]);
         deps.log.info(`admin: picker ${enabled ? "on" : "off"} via GUI -> ${r.ok ? "ok" : "failed"}`);
+        sendJson(res, r.ok ? 200 : 500, { ok: r.ok, output: r.output });
+        return;
+      }
+      if (pathname === "/api/agent-title" && method === "POST") {
+        // Registers/removes the PreToolUse hook that prefixes subagent titles with the real model.
+        let enabled: unknown;
+        try {
+          enabled = (JSON.parse((await readBody(req)).toString("utf8")) as { enabled?: unknown }).enabled;
+        } catch {
+          sendJson(res, 400, { error: "invalid JSON" });
+          return;
+        }
+        if (typeof enabled !== "boolean") {
+          sendJson(res, 400, { error: "expected {enabled: boolean}" });
+          return;
+        }
+        const r = await runCli(["agent-title", enabled ? "on" : "off"]);
+        deps.log.info(`admin: agent-title ${enabled ? "on" : "off"} via GUI -> ${r.ok ? "ok" : "failed"}`);
         sendJson(res, r.ok ? 200 : 500, { ok: r.ok, output: r.output });
         return;
       }

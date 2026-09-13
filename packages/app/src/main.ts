@@ -20,6 +20,7 @@ type Status = {
   cliVersion: string;
   chatgpt?: { quota: Record<string, Record<string, unknown> | null>; auth: Record<string, string> };
   picker?: { enabled: boolean; hosts: string[]; last: unknown };
+  agentTitle?: boolean;
 };
 
 const home = process.env.CLAUDERIPPLE_HOME ?? path.join(os.homedir(), ".clauderipple");
@@ -49,6 +50,9 @@ const STRINGS = {
     pickerDone: "Done. Now quit Claude Desktop completely and open it again, then check the Code tab picker.",
     pickerOffDone: "Done. Quit and reopen Claude Desktop to apply.",
     cancel: "Cancel",
+    agentTitleOn: "Show model names on subagents",
+    agentTitleOff: "Stop showing model names on subagents",
+    agentTitleDone: (on: boolean): string => (on ? "On. New subagents will be titled like \"Terra·high · …\"." : "Off."),
     signInChatgpt: "Sign in to ChatGPT…",
     copyStatus: "Copy Status",
     showLogs: "Show Logs",
@@ -81,6 +85,9 @@ const STRINGS = {
     pickerDone: "완료. 이제 Claude Desktop을 완전히 종료한 뒤 다시 열고 Code 탭 피커를 확인하세요.",
     pickerOffDone: "완료. Claude Desktop을 종료했다가 다시 열면 적용됩니다.",
     cancel: "취소",
+    agentTitleOn: "서브에이전트에 모델 이름 표시",
+    agentTitleOff: "서브에이전트 모델 이름 표시 끄기",
+    agentTitleDone: (on: boolean): string => (on ? "켰습니다. 새로 뜨는 서브에이전트 제목이 \"Terra·high · …\"처럼 보입니다." : "껐습니다."),
     signInChatgpt: "ChatGPT 로그인…",
     copyStatus: "상태 복사",
     showLogs: "로그 보기",
@@ -227,6 +234,16 @@ function render(): void {
         const out = await runCli(["picker", on ? "on" : "off"]);
         const failed = /error|not enabled|not trusted/i.test(out) && !/✓ picker.enabled/.test(out);
         await dialog.showMessageBox({ message: failed ? out : on ? L.pickerDone : L.pickerOffDone, detail: failed ? undefined : out });
+        void poll();
+      },
+    },
+    {
+      label: s?.agentTitle ? L.agentTitleOff : L.agentTitleOn,
+      enabled: !!s,
+      click: async () => {
+        const on = !s?.agentTitle;
+        const out = await runCli(["agent-title", on ? "on" : "off"]);
+        await dialog.showMessageBox({ message: L.agentTitleDone(on), detail: out });
         void poll();
       },
     },
