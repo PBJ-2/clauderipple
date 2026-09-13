@@ -205,8 +205,13 @@ export class OpenAiIngress {
         this.deps.requests.add(entry);
       }
     };
+    // Codex closes the socket the moment it reads `response.completed`, often before Anthropic's
+    // stream has ended on our side; that is a finished request, not an abort.
+    let terminal: Outcome | null = null;
     res.once("close", () => {
-      if (!completed && !res.writableEnded) finish(499, 0, { note: "client closed" });
+      if (completed || res.writableEnded) return;
+      if (terminal) finish(terminal.status, terminal.bytes, { ...(terminal.usage ? { usage: terminal.usage } : {}), ...(terminal.stopReason ? { stopReason: terminal.stopReason } : {}), note: `${terminal.note ?? ""}; client closed after completion`.replace(/^; /, "") });
+      else finish(499, 0, { note: "client closed" });
     });
 
     try {
@@ -296,9 +301,11 @@ export class OpenAiIngress {
       const stream = body.stream === true;
       wire.stream = stream;
       record = { kind: "messages", source: requested, target: route.model, provider: route.provider, ...(route.effort ? { effort: route.effort } : {}), stream };
-      const outcome = await this.forward(res, provider, wire, route.model, path === "/v1/chat/completions", stream);
-      finish(outcome.status, outcome.bytes, { ...(outcome.usage ? { usage: outcome.usage } : {}), ...(outcome.stopReason ? { stopReason: outcome.stopReason } : {}), note: `openai-ingress ${path === "/v1/responses" ? "responses" : "chat"}${outcome.note ? `; ${outcome.note}` : ""}` });
+      const kindNote = `openai-ingress ${path === "/v1/responses" ? "responses" : "chat"}`;
+      const outcome = await this.forward(res, provider, wire, route.model, path === "/v1/chat/completions", stream, (done) => { terminal = { ...done, note: kindNote }; });
+      finish(outcome.status, outcome.bytes, { ...(outcome.usage ? { usage: outcome.usage } : {}), ...(outcome.stopReason ? { stopReason: outcome.stopReason } : {}), note: `${kindNote}${outcome.note ? `; ${outcome.note}` : ""}` });
     } catch (error) {
+      if (completed) return; // already recorded (e.g. client closed after the terminal event)
       this.deps.log.warn(`OPENAI ingress error: ${(error as Error).message}`);
       if (!res.headersSent) {
         const bytes = sendJson(res, 502, openAiError(`Anthropic-compatible upstream unreachable: ${(error as Error).message}`, "api_error"));
@@ -310,7 +317,7 @@ export class OpenAiIngress {
     }
   }
 
-  private async forward(res: http.ServerResponse, provider: AnthropicCompatibleProvider | AnthropicProvider, wire: Json, model: string, chat: boolean, stream: boolean): Promise<Outcome> {
+  private async forward(res: http.ServerResponse, provider: AnthropicCompatibleProvider | AnthropicProvider, wire: Json, model: string, chat: boolean, stream: boolean, onTerminal?: (outcome: Outcome) => void): Promise<Outcome> {
     const native = provider.type === "anthropic";
     const upstream = new URL(native ? "https://api.anthropic.com" : provider.url);
     const protocol = upstream.protocol === "https:" ? "https:" : "http:";
@@ -367,6 +374,10 @@ export class OpenAiIngress {
           for (const event of parser.feed(decoder.decode(chunk, { stream: true }))) {
             const mapped = mapper.feed(event);
             if (stream) write(mapped);
+            if (stream && mapped.some((e) => e.type === "response.completed")) {
+              if (chat) { bytes += Buffer.byteLength("data: [DONE]\n\n"); res.write("data: [DONE]\n\n"); }
+              onTerminal?.({ status: 200, bytes, usage: usage(mapper), stopReason: mapper.output.some((item) => item.type === "function_call") ? "tool_use" : "end_turn" });
+            }
           }
         });
         response.on("end", resolveP);
@@ -386,7 +397,7 @@ export class OpenAiIngress {
     const tail = mapper.finish();
     if (stream) {
       write(tail);
-      if (chat) {
+      if (chat && tail.length) {
         bytes += Buffer.byteLength("data: [DONE]\n\n");
         res.write("data: [DONE]\n\n");
       }
