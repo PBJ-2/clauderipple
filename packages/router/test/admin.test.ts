@@ -253,7 +253,7 @@ test("POST /api/providers/probe does not call an upstream 500 authenticated", as
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ type: "anthropic-compatible", url: `http://127.0.0.1:${address.port}` }),
       });
-      assert.deepEqual(await res.json(), { ok: false, auth: "unreachable", models: [], error: "messages endpoint returned 500" });
+      assert.deepEqual(await res.json(), { ok: false, auth: "unreachable", models: [], error: "messages endpoint returned 500: failure" });
     });
   } finally {
     await new Promise<void>((resolveP, reject) => upstream.close((error) => (error ? reject(error) : resolveP())));
