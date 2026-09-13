@@ -22,7 +22,7 @@ import { PRESETS, type ProviderPreset } from "./presets.ts";
 import { resolveCompatibleCaps } from "./compat.ts";
 import { ClaudeCodeAuthStore, nativeAnthropicHeaders } from "./providers/anthropic.ts";
 import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
-import { codexHome } from "../../cli/src/codex.ts";
+import { codexEnabled, codexHome } from "../../cli/src/codex.ts";
 
 const MAX_BODY = 1024 * 1024;
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -331,7 +331,7 @@ function codexState(): { enabled: boolean; codexHome: string; configPath: string
   const configPath = path.join(home, "config.toml");
   try {
     const text = fs.readFileSync(configPath, "utf8");
-    return { enabled: text.includes("# >>> ClaudeRipple Codex provider >>>") && text.includes("# <<< ClaudeRipple Codex provider <<<"), codexHome: home, configPath };
+    return { enabled: text.length > 0 && codexEnabled(home), codexHome: home, configPath };
   } catch {
     return { enabled: false, codexHome: home, configPath };
   }

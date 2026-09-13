@@ -11,6 +11,7 @@ import { resolve } from "../routing.ts";
 import { PRESETS } from "../presets.ts";
 import { resolveCompatibleCaps, sanitizeForCompatible } from "../compat.ts";
 import { SseParser } from "../providers/chatgpt/sse.ts";
+import { ingressModels } from "./models.ts";
 import { requestId, type RequestLog, type RequestRecord, type RequestUsage } from "../requestlog.ts";
 import { CLAUDE_CODE_IDENTITY, ClaudeCodeAuthStore, fromClaudeCodeToolName, nativeAnthropicHeaders, observedAnthropicHeaders, toClaudeCodeToolName } from "../providers/anthropic.ts";
 import { ObservedClaudeCodeAuth } from "../providers/anthropic-observed.ts";
@@ -216,10 +217,7 @@ export class OpenAiIngress {
 
     try {
       if (path === "/v1/models" && method === "GET") {
-        const data: Json[] = [];
-        const cfg = this.deps.config();
-        for (const [model, route] of Object.entries(cfg.routes)) data.push({ id: model, object: "model", created: 0, owned_by: route.provider });
-        for (const direct of cfg.direct) data.push({ id: direct.prefix, object: "model", created: 0, owned_by: direct.provider });
+        const data: Json[] = ingressModels(this.deps.config()).map((m) => ({ id: m.id, object: "model", created: 0, owned_by: m.provider }));
         const bytes = sendJson(res, 200, { object: "list", data });
         finish(200, bytes);
         return;

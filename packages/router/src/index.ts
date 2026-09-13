@@ -7,6 +7,8 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { codexEnabled, writeCodexCatalog } from "../../cli/src/codex.ts";
+import { ingressModels } from "./ingress/models.ts";
 import { ConfigStore, configPath, homeDir, terminateHosts } from "./config.ts";
 import { CertStore } from "./certs.ts";
 import { Logger } from "./log.ts";
@@ -24,6 +26,12 @@ let log: Logger | null = null;
 const store = new ConfigStore(undefined, (c, errors) => {
   for (const e of errors) (log ?? console).warn(`config: ${e}`);
   log?.info(`config loaded: ${Object.keys(c.routes).length} routes, ${Object.keys(c.providers).length} providers, direct=${c.direct.map((d) => d.prefix).join(",") || "-"}`);
+  // Keep the Codex app's model list in step with the models we serve (only while `codex on` is in effect).
+  try {
+    if (codexEnabled()) writeCodexCatalog(ingressModels(c));
+  } catch (e) {
+    log?.warn(`codex catalog: ${(e as Error).message}`);
+  }
 });
 const cfg0 = store.get();
 log = new Logger(logFile, cfg0.log.maxBytes, cfg0.log.keep, !!process.env.CLAUDERIPPLE_ECHO || !logFile);

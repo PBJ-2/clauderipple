@@ -20,6 +20,7 @@ import { BUNDLE_ID, removeBundle, writeBundle } from "./bundle.ts";
 import { applyAppProxy, caTrusted, currentAppProxy, removeAppProxy, trustCa, untrustCa } from "./picker.ts";
 import { runtime } from "./runtime.ts";
 import { codexOff, codexOn } from "./codex.ts";
+import { ingressModels } from "../../router/src/ingress/models.ts";
 import { claudeLogin, claudeLogout } from "./claude-auth.ts";
 
 function setPickerEnabled(enabled: boolean): void {
@@ -344,7 +345,7 @@ try {
         break;
       }
       const cfg = new ConfigStore(configPath()).get();
-      const result = sub === "on" ? codexOn(cfg.listen.openaiPort ?? cfg.listen.port + 2) : codexOff();
+      const result = sub === "on" ? codexOn(cfg.listen.openaiPort ?? cfg.listen.port + 2, undefined, ingressModels(cfg)) : codexOff();
       console.log(result.changed ? `✓ Codex ${sub}: ${result.config}${sub === "on" ? `\n✓ profile: ${result.profile}` : ""}` : `✓ Codex already ${sub}`);
       if (result.backup) console.log(`  backup: ${result.backup}`);
       if (result.profileBackup) console.log(`  profile backup: ${result.profileBackup}`);
