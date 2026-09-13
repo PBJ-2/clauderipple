@@ -285,7 +285,7 @@ function slotRow(id, route) {
   const target = targetSelect(route);
   const effort = effortSelect(route && route.effort);
   const effortCell = el("td", {}, [effort]);
-  const remove = el("button", { class: "icon-btn", type: "button", title: t("common.remove"), text: "×", onclick: () => { row.remove(); updateSlotSummary(); } });
+  const remove = el("button", { class: "icon-btn", type: "button", title: t("common.remove"), text: "×", onclick: () => { row.remove(); updateSlotSummary(); scheduleSlotsSave(); } });
   function sync() {
     const selected = routeFromTarget(target.value);
     const supported = selected && providerSupportsEffort(currentConfig.providers[selected.provider]);
@@ -295,8 +295,9 @@ function slotRow(id, route) {
     else delete effortCell.dataset.empty;
     updateSlotSummary();
   }
-  target.addEventListener("change", sync);
-  source.addEventListener("change", updateSlotSummary);
+  target.addEventListener("change", () => { sync(); scheduleSlotsSave(); });
+  source.addEventListener("change", () => { updateSlotSummary(); scheduleSlotsSave(); });
+  effort.addEventListener("change", scheduleSlotsSave);
   row.append(el("td", {}, [source]), el("td", {}, [target]), effortCell, el("td", { class: "icon-cell" }, [remove]));
   row._get = () => ({ id: source.value, route: routeFromTarget(target.value), effort: effort.value });
   sync();
@@ -339,6 +340,7 @@ function renderSlotsPicker() {
       input.dataset.model = model.id;
       input.dataset.provider = group.name;
       input.dataset.name = labelOf(model);
+      input.addEventListener("change", scheduleSlotsSave);
       box.appendChild(el("label", { class: "model-check" }, [input, el("span", { text: labelOf(model) }), el("small", { text: group.name })]));
     }
   }
@@ -375,14 +377,29 @@ function updateSlotSummary() {
   });
   $("#slots-summary").textContent = summaries.length ? summaries.join(" · ") : t("slots.noChanges");
 }
-$("#slots-save").addEventListener("click", async () => {
-  if (!currentConfig) return;
+// Changes save themselves (debounced); there is no Save button. `slotsStatus` shows saving/saved/error.
+let slotsSaveTimer = null;
+let slotsSaving = false;
+function slotsStatus(text, isError) {
+  const box = $("#slots-status");
+  box.textContent = text;
+  box.classList.toggle("bad-text", Boolean(isError));
+}
+function scheduleSlotsSave() {
+  if (!currentConfig || !slotsLoaded) return;
+  clearTimeout(slotsSaveTimer);
+  slotsStatus(t("slots.saving"));
+  slotsSaveTimer = setTimeout(() => void saveSlots(), 500);
+}
+async function saveSlots() {
+  if (!currentConfig || slotsSaving) return;
+  slotsSaving = true;
   const next = clone(currentConfig);
   const routes = {};
   const seen = new Set();
   for (const row of $all("#slots-table tbody tr")) {
     const item = row._get();
-    if (seen.has(item.id)) { toast(t("slots.duplicate"), true); return; }
+    if (seen.has(item.id)) { slotsStatus(t("slots.duplicate"), true); slotsSaving = false; return; }
     seen.add(item.id);
     if (item.route) routes[item.id] = { ...item.route, ...(providerSupportsEffort(next.providers[item.route.provider]) ? { effort: item.effort } : {}) };
   }
@@ -391,12 +408,14 @@ $("#slots-save").addEventListener("click", async () => {
   try {
     await configRequest(next);
     currentConfig = next;
-    toast(t("common.saved"));
+    slotsStatus(t("slots.saved"));
     updateSlotSummary();
   } catch (error) {
-    toast(t("common.saveFailed"), true, error.message);
+    slotsStatus(`${t("common.saveFailed")} ${error.message}`, true);
+  } finally {
+    slotsSaving = false;
   }
-});
+}
 
 // ---- Providers ----------------------------------------------------------------------
 
