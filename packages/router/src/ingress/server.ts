@@ -256,7 +256,10 @@ export class OpenAiIngress {
       }
       const requested = typeof body.model === "string" ? body.model : "";
       const cfg = this.deps.config();
-      const route = resolve(requested, {}, cfg);
+      // Unmapped models default to the native `anthropic` provider when one is configured, so a
+      // Codex user can name any Claude model directly (`-m claude-sonnet-5`) without a mapping.
+      const fallback = Object.entries(cfg.providers).find(([, p]) => p.type === "anthropic");
+      const route = resolve(requested, {}, cfg) ?? (fallback && requested ? { provider: fallback[0], model: requested, effort: undefined, tag: `${requested}->${requested}` } : null);
       if (!route) {
         const bytes = sendJson(res, 400, openAiError(`No ClaudeRipple route for model ${requested || "(missing)"}`, "invalid_request_error", "model_not_found"));
         finish(400, bytes);
