@@ -153,3 +153,21 @@ test("tool schemas: patterns the Codex regex engine rejects are dropped, others 
   assert.deepEqual(out.required, ["field"]);
   assert.equal(schema.properties.field.pattern.length > 0, true); // input untouched
 });
+
+test("orphan tool_result (Claude Code side query) becomes user text, matched ones stay function_call_output", () => {
+  const r = toResponsesRequest(
+    {
+      model: "x",
+      max_tokens: 10,
+      messages: [
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "call_orphan", content: "big file" }] },
+        { role: "assistant", content: [{ type: "tool_use", id: "call_ok", name: "Read", input: { p: 1 } }] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "call_ok", content: "ok" }] },
+      ],
+    } as never,
+    { model: "gpt-5.6-terra", effort: "high", identity: true },
+  );
+  const types = r.input.map((i) => i.type);
+  assert.deepEqual(types, ["message", "function_call", "function_call_output"]);
+  assert.ok(JSON.stringify(r.input[0]).includes("[Tool result]\\nbig file"));
+});

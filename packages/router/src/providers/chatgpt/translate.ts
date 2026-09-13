@@ -124,6 +124,11 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
   if (opts.instructionsAppend) parts.push(opts.instructionsAppend);
 
   const input: ResponsesInputItem[] = [];
+  // Claude Code sends side queries whose history starts with a bare tool_result (e.g. summarising a
+  // large tool output). Anthropic tolerates the orphan; the Responses API rejects a function_call_output
+  // whose call_id has no function_call in the same input ("No tool call found…", measured 2026-09-13).
+  // Such results are sent as plain user text instead.
+  const knownCalls = new Set<string>();
   for (const m of req.messages) {
     const role: "user" | "assistant" = m.role === "assistant" ? "assistant" : "user";
     if (typeof m.content === "string") {
@@ -154,6 +159,7 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
         case "tool_use": {
           flush();
           const tu = b as { id: string; name: string; input: unknown };
+          knownCalls.add(tu.id);
           input.push({ type: "function_call", call_id: tu.id, name: tu.name, arguments: typeof tu.input === "string" ? tu.input : JSON.stringify(tu.input ?? {}) });
           break;
         }
@@ -162,7 +168,8 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
           const tr = b as { tool_use_id: string; content?: string | AnthropicBlock[]; is_error?: boolean };
           let out = blockText(tr.content);
           if (tr.is_error && !out) out = "Tool execution failed";
-          input.push({ type: "function_call_output", call_id: tr.tool_use_id, output: out });
+          if (knownCalls.has(tr.tool_use_id)) input.push({ type: "function_call_output", call_id: tr.tool_use_id, output: out });
+          else pending.push({ type: "input_text", text: `[Tool result]\n${out}` });
           break;
         }
         default:

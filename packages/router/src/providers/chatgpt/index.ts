@@ -106,7 +106,7 @@ export class ChatGptAdapter {
       const file = path.join(dir, `upstream-${new Date().toISOString().replace(/[:.]/g, "-")}-${status}.json`);
       fs.writeFileSync(file, JSON.stringify({ status, upstream: upstreamText, request: upstreamReq, anthropic }, null, 1));
       const files = fs.readdirSync(dir).filter((f) => f.startsWith("upstream-")).sort();
-      for (const f of files.slice(0, Math.max(0, files.length - 30))) fs.rmSync(path.join(dir, f), { force: true });
+      for (const f of files.slice(0, Math.max(0, files.length - 60))) fs.rmSync(path.join(dir, f), { force: true });
     } catch (e) {
       this.log.warn(`chatgpt ${this.name}: debug dump failed: ${(e as Error).message}`);
     }
@@ -178,6 +178,7 @@ export class ChatGptAdapter {
       return { status: err.status, bytes: err.body.length, note: `upstream ${upstream.status}` };
     }
 
+    if (this.cfg.debugDump) this.dump(upstream.status, json, upstreamReq, "");
     const wantStream = json.stream === true;
     const mapper = new StreamMapper(model, startInput);
     const parser = new SseParser();

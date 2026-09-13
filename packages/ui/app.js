@@ -500,7 +500,7 @@ function openProviderChooser() {
   chatgpt.addEventListener("click", () => openProviderForm({ kind: "chatgpt" }));
   grid.appendChild(chatgpt);
   for (const preset of presets) {
-    const tile = el("button", { class: "chooser-tile", type: "button" }, [el("strong", { text: preset.name }), preset.verified ? badge("ok", t("providers.verified")) : null, el("span", { text: t("providers.presetHelp") })]);
+    const tile = el("button", { class: "chooser-tile", type: "button" }, [el("strong", { text: preset.name }), el("span", { text: t("providers.presetHelp") })]);
     tile.addEventListener("click", () => openProviderForm({ preset }));
     grid.appendChild(tile);
   }
