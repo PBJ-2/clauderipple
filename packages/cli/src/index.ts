@@ -40,8 +40,7 @@ async function pickerOn(): Promise<void> {
   const r = applyAppProxy(proxyUrl);
   console.log(`✓ Claude Desktop config library entry applied (${r.id}${r.replaced ? `, previous entry ${r.replaced} remembered` : ""}): egressProxyUrl=${proxyUrl}`);
   setPickerEnabled(true);
-  console.log("✓ picker.enabled = true");
-  console.log(describeRestart(restartAgent({ onProgress: (m) => console.log(`  ${m}`) })));
+  console.log("✓ picker.enabled = true (the router picks it up live; no restart)");
   console.log("\nStep 3/3 is yours: quit and reopen Claude Desktop. The app reads its proxy setting at start.");
   console.log("Then open the Code tab picker: entries from cli.extraModels should be there. `clauderipple status` shows the last injection.");
 }

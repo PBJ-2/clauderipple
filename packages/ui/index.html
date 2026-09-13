@@ -40,6 +40,16 @@
       <h2 data-i18n="health.cli">Claude Code CLI</h2>
       <div class="rows" id="health-cli"></div>
     </div>
+
+    <div class="card">
+      <h2 data-i18n="picker.title">Model picker</h2>
+      <p class="small" data-i18n="picker.subtitle">Show your GPT models by name in the Code tab picker. Routes Claude Desktop's own claude.ai traffic through ClaudeRipple; needs the local certificate trusted in your login keychain (macOS asks for your password once).</p>
+      <div class="rows" id="picker-rows"></div>
+      <div class="actions">
+        <button class="btn" id="picker-toggle" type="button"></button>
+        <span class="small" id="picker-msg"></span>
+      </div>
+    </div>
   </section>
 
   <!-- Slots -->

@@ -11,6 +11,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
+import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { Config } from "./config.ts";
 import { homeDir, validate } from "./config.ts";
@@ -139,6 +140,24 @@ async function buildStatus(deps: AdminDeps): Promise<Record<string, unknown>> {
   };
 }
 
+/** Run the ClaudeRipple CLI with the Node that installed us (`<home>/paths.json`, written by `install`). */
+function runCli(args: string[]): Promise<{ ok: boolean; output: string }> {
+  return new Promise((resolveP) => {
+    let node = process.execPath;
+    let cli = path.resolve(here, "../../cli/src/index.ts");
+    try {
+      const p = JSON.parse(fs.readFileSync(path.join(homeDir(), "paths.json"), "utf8")) as { node?: string; cli?: string };
+      if (p.node) node = p.node;
+      if (p.cli) cli = p.cli;
+    } catch {
+      /* not installed via the CLI: fall back to our own node + repo layout */
+    }
+    execFile(node, [cli, ...args], { env: { ...process.env, CLAUDERIPPLE_HOME: homeDir() }, timeout: 180_000 }, (err, stdout, stderr) => {
+      resolveP({ ok: !err, output: `${stdout}${stderr}${err ? `\n${err.message}` : ""}`.trim() });
+    });
+  });
+}
+
 function readBody(req: http.IncomingMessage): Promise<Buffer> {
   return new Promise((resolveP, reject) => {
     const chunks: Buffer[] = [];
@@ -262,6 +281,32 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         fs.renameSync(tmp, deps.configFile);
         deps.log.info(`admin: config saved via GUI (${Object.keys(parsed.routes).length} routes, ${Object.keys(parsed.providers).length} providers)`);
         sendJson(res, 200, { ok: true });
+        return;
+      }
+      if (pathname === "/api/picker" && method === "POST") {
+        // Runs `clauderipple picker on|off` (keychain trust, app Config Library, config flag).
+        // macOS shows its keychain password dialog in the user's session; we never see the password.
+        let body: Buffer;
+        try {
+          body = await readBody(req);
+        } catch (e) {
+          sendJson(res, 400, { error: (e as Error).message });
+          return;
+        }
+        let enabled: unknown;
+        try {
+          enabled = (JSON.parse(body.toString("utf8")) as { enabled?: unknown }).enabled;
+        } catch {
+          sendJson(res, 400, { error: "invalid JSON" });
+          return;
+        }
+        if (typeof enabled !== "boolean") {
+          sendJson(res, 400, { error: "expected {enabled: boolean}" });
+          return;
+        }
+        const r = await runCli(["picker", enabled ? "on" : "off"]);
+        deps.log.info(`admin: picker ${enabled ? "on" : "off"} via GUI -> ${r.ok ? "ok" : "failed"}`);
+        sendJson(res, r.ok ? 200 : 500, { ok: r.ok, output: r.output });
         return;
       }
       if (pathname === "/api/logs" && method === "GET") {

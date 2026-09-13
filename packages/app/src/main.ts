@@ -19,6 +19,7 @@ type Status = {
   settings: { HTTPS_PROXY?: string; NODE_EXTRA_CA_CERTS?: string };
   cliVersion: string;
   chatgpt?: { quota: Record<string, Record<string, unknown> | null>; auth: Record<string, string> };
+  picker?: { enabled: boolean; hosts: string[]; last: unknown };
 };
 
 const home = process.env.CLAUDERIPPLE_HOME ?? path.join(os.homedir(), ".clauderipple");
@@ -41,6 +42,13 @@ const STRINGS = {
     openInBrowser: "Open in Browser",
     restartRouter: "Restart Router",
     startRouter: "Start Router",
+    pickerOn: "Show GPT models in the Code tab picker…",
+    pickerOff: "Stop showing GPT models in the picker…",
+    pickerState: (on: boolean): string => (on ? "Picker: GPT models shown by name ✓" : "Picker: GPT models via Claude names (alias mode)"),
+    pickerOnConfirm: "macOS will ask for your login password to trust the ClaudeRipple certificate (ClaudeRipple never sees it). Then quit and reopen Claude Desktop.",
+    pickerDone: "Done. Now quit Claude Desktop completely and open it again, then check the Code tab picker.",
+    pickerOffDone: "Done. Quit and reopen Claude Desktop to apply.",
+    cancel: "Cancel",
     signInChatgpt: "Sign in to ChatGPT…",
     copyStatus: "Copy Status",
     showLogs: "Show Logs",
@@ -66,6 +74,13 @@ const STRINGS = {
     openInBrowser: "브라우저에서 열기",
     restartRouter: "라우터 재시작",
     startRouter: "라우터 시작",
+    pickerOn: "Code 탭 피커에 GPT 모델 이름 표시…",
+    pickerOff: "피커의 GPT 모델 표시 끄기…",
+    pickerState: (on: boolean): string => (on ? "피커: GPT 모델을 실명으로 표시 중 ✓" : "피커: Claude 이름으로 GPT 사용(별칭 모드)"),
+    pickerOnConfirm: "ClaudeRipple 인증서를 신뢰하기 위해 macOS가 로그인 암호를 묻습니다(ClaudeRipple은 암호를 보지 않습니다). 끝나면 Claude Desktop을 완전히 종료했다가 다시 여세요.",
+    pickerDone: "완료. 이제 Claude Desktop을 완전히 종료한 뒤 다시 열고 Code 탭 피커를 확인하세요.",
+    pickerOffDone: "완료. Claude Desktop을 종료했다가 다시 열면 적용됩니다.",
+    cancel: "취소",
     signInChatgpt: "ChatGPT 로그인…",
     copyStatus: "상태 복사",
     showLogs: "로그 보기",
@@ -184,11 +199,28 @@ function render(): void {
           ...Object.entries(s.providers).map(([name, p]) => ({ label: `${p.reachable === false ? "✗" : "✓"} provider ${name}${p.type ? ` (${p.type})` : ""}`, enabled: false }) as Electron.MenuItemConstructorOptions),
           ...(quotaLine ? [{ label: quotaLine, enabled: false } as Electron.MenuItemConstructorOptions] : []),
           { label: L.cliVersion(s.cliVersion), enabled: false } as Electron.MenuItemConstructorOptions,
+          { label: L.pickerState(!!s.picker?.enabled), enabled: false } as Electron.MenuItemConstructorOptions,
         ]
       : []),
     { type: "separator" },
     { label: L.openWindow, click: openWindow, enabled: !!s },
     { label: L.openInBrowser, click: () => void shell.openExternal(adminUrl()), enabled: !!s },
+    { type: "separator" },
+    {
+      label: s?.picker?.enabled ? L.pickerOff : L.pickerOn,
+      enabled: !!s,
+      click: async () => {
+        const on = !s?.picker?.enabled;
+        if (on) {
+          const r = await dialog.showMessageBox({ message: L.pickerOn, detail: L.pickerOnConfirm, buttons: ["OK", L.cancel], cancelId: 1 });
+          if (r.response !== 0) return;
+        }
+        const out = await runCli(["picker", on ? "on" : "off"]);
+        const failed = /error|not enabled|not trusted/i.test(out) && !/✓ picker.enabled/.test(out);
+        await dialog.showMessageBox({ message: failed ? out : on ? L.pickerDone : L.pickerOffDone, detail: failed ? undefined : out });
+        void poll();
+      },
+    },
     { type: "separator" },
     { label: s ? L.restartRouter : L.startRouter, click: async () => void dialog.showMessageBox({ message: await runCli([s ? "restart" : "start"]) }) },
     { label: L.signInChatgpt, click: async () => void dialog.showMessageBox({ message: await runCli(["login"]) }) },

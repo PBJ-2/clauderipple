@@ -156,7 +156,42 @@ async function refreshHealth() {
   cli.innerHTML = "";
   cli.appendChild(el("div", { class: "row" }, [el("span", { class: "k" }, [t("health.k.cachedVersion")]), el("span", { class: "v" }, [s.cliVersion])]));
 
+  renderPicker(s.picker || { enabled: false, hosts: [], last: null });
   $("#about-home").textContent = t("health.homeDir", { home: s.home });
+}
+
+let pickerBusy = false;
+function renderPicker(p) {
+  const rows = $("#picker-rows");
+  rows.innerHTML = "";
+  rows.appendChild(el("div", { class: "row" }, [el("span", { class: "k" }, [t("picker.k.state")]), p.enabled ? badge(true, t("picker.on"), "") : el("span", { class: "v" }, [t("picker.off")])]));
+  const last = p.last && typeof p.last === "object" ? p.last : null;
+  rows.appendChild(el("div", { class: "row" }, [
+    el("span", { class: "k" }, [t("picker.k.lastInjection")]),
+    el("span", { class: "v" }, [last ? t("picker.lastFmt", { count: last.injected != null ? last.injected : "?", surfaces: (last.surfaces || []).map((x) => x.id).join(", ") || "-", at: last.at || "" }) : t("picker.never")]),
+  ]));
+  const btn = $("#picker-toggle");
+  btn.textContent = p.enabled ? t("picker.turnOff") : t("picker.turnOn");
+  btn.className = p.enabled ? "btn secondary" : "btn";
+  btn.disabled = pickerBusy;
+  btn.onclick = async () => {
+    if (pickerBusy) return;
+    const on = !p.enabled;
+    if (on && !confirm(t("picker.confirmOn"))) return;
+    pickerBusy = true;
+    btn.disabled = true;
+    $("#picker-msg").textContent = t("picker.working");
+    try {
+      const r = await api("/api/picker", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: on }) });
+      $("#picker-msg").textContent = on ? t("picker.doneOn") : t("picker.doneOff");
+      console.log(r.output);
+    } catch (e) {
+      $("#picker-msg").textContent = (e.body && e.body.output) || e.message;
+    } finally {
+      pickerBusy = false;
+      refreshHealth();
+    }
+  };
 }
 
 refreshHealth();
