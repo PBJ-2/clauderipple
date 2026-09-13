@@ -122,9 +122,10 @@ export const PRESETS: ProviderPreset[] = [
     authHeader: "authorization-bearer",
     modelsUrl: "https://openrouter.ai/api/v1/models",
     modelsAuthHeader: "authorization-bearer",
+    // Ids verified against GET /api/v1/models on 2026-09-13 (the "-latest" aliases do not exist there).
     fallbackModels: [
-      { id: "anthropic/claude-sonnet-latest", name: "Claude Sonnet (latest)" },
-      { id: "anthropic/claude-opus-latest", name: "Claude Opus (latest)" },
+      { id: "anthropic/claude-sonnet-5", name: "Claude Sonnet 5" },
+      { id: "anthropic/claude-opus-5", name: "Claude Opus 5" },
     ],
     supportsEffort: true,
     verified: true,

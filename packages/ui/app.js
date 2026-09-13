@@ -678,6 +678,8 @@ function openProviderForm(options) {
     ].filter(Boolean));
     foundModels = response.models && response.models.length ? response.models.map((model) => typeof model === "string" ? { id: model, name: model } : model) : (preset ? (preset.fallbackModels || []) : foundModels);
     const keep = foundModels.length > 12 ? new Set([...currentChecked, ...modelArea.querySelector(".model-picker").selected().map((m) => m.id)]) : new Set(foundModels.map((model) => model.id));
+    // Saved picks that the provider no longer lists stay visible and ticked so nothing is dropped silently.
+    for (const saved of modelsOf(existing)) if (keep.has(saved.id) && !foundModels.some((m) => m.id === saved.id)) foundModels = [saved, ...foundModels];
     modelArea.querySelector(".model-picker").replaceWith(modelChecklist(foundModels, keep));
     modelArea.replaceChildren(el("span", { text: t("providers.models") }), hint(response.ok ? (foundModels.length > 12 ? t("providers.modelsFoundMany") : t("providers.modelsFound")) : t("providers.modelsFallback")), modelArea.querySelector(".model-picker") || document.createTextNode(""));
   }
