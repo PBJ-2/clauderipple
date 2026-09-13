@@ -361,7 +361,7 @@ export class Proxy {
     const requestedEffort = effortOf(json ?? {});
     if (requestedEffort) record.effort = requestedEffort;
 
-    let target: { protocol: "http:" | "https:"; host: string; port: number; agent: http.Agent | https.Agent; extraHeaders: Record<string, string> };
+    let target: { protocol: "http:" | "https:"; host: string; port: number; agent: http.Agent | https.Agent; extraHeaders: Record<string, string>; basePath?: string };
     if (route && json) {
       const provider = cfg.providers[route.provider];
       if (!provider) {
@@ -402,6 +402,10 @@ export class Proxy {
         port: Number(u.port) || (protocol === "https:" ? 443 : 80),
         agent: this.agentFor(route.provider, protocol),
         extraHeaders: provider.headers ?? {},
+        // Providers mount their Anthropic-compatible API under a path (DeepSeek /anthropic, OpenRouter /api,
+        // Qwen /apps/anthropic): the CLI's /v1/messages is appended to it. Dropping it sent requests to the
+        // vendor's website, which answered 200 with HTML (measured 2026-09-13 with OpenRouter).
+        basePath: u.pathname.replace(/\/+$/, ""),
       };
       record = { ...record, target: route.model, provider: route.provider };
       const routeEffort = effortOf(json);
@@ -451,7 +455,7 @@ export class Proxy {
       host: target.host,
       port: target.port,
       method,
-      path,
+      path: target.basePath ? target.basePath + path : path,
       headers,
       agent: target.agent,
       ...(target.protocol === "https:" ? { servername: target.host } : {}),
