@@ -260,10 +260,10 @@ function targetSelect(route) {
   select.appendChild(selectOption("", t("slots.passthrough")));
   for (const group of groupedModels(currentConfig)) {
     const optgroup = el("optgroup", { label: group.name });
-    for (const model of group.models) optgroup.appendChild(selectOption(`${group.name} ${model.id}`, labelOf(model)));
+    for (const model of group.models) optgroup.appendChild(selectOption(JSON.stringify([group.name, model.id]), labelOf(model)));
     select.appendChild(optgroup);
   }
-  select.value = route ? `${route.provider} ${route.model}` : "";
+  select.value = route ? JSON.stringify([route.provider, route.model]) : "";
   return select;
 }
 function effortSelect(value) {
@@ -274,8 +274,10 @@ function effortSelect(value) {
 }
 function routeFromTarget(value) {
   if (!value) return null;
-  const split = value.split(" ");
-  return split.length === 2 ? { provider: split[0], model: split[1] } : null;
+  try {
+    const [provider, model] = JSON.parse(value);
+    return provider && model ? { provider, model } : null;
+  } catch { return null; }
 }
 function slotRow(id, route) {
   const row = el("tr", {});
