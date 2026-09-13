@@ -86,3 +86,17 @@ test("thread: continue is refused with the CLI's error code, create is stripped"
   assert.deepEqual(j, { model: "x" });
   assert.equal((THREAD_UNSUPPORTED.error as { details: { error_code: string } }).details.error_code, "thread_unsupported_request");
 });
+
+test("bootstrap injects agent-file model ids (with @effort) when their base is routable", async () => {
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { injectBootstrap } = await import("../src/bootstrap.ts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cr-agents-"));
+  fs.writeFileSync(path.join(dir, "gpt.md"), "---\nname: gpt\nmodel: gpt-5.6-terra@high\n---\n");
+  fs.writeFileSync(path.join(dir, "other.md"), "---\nname: o\nmodel: sonnet\n---\n");
+  const cfg = { ...DEFAULTS, providers: {}, routes: {}, aliases: {}, direct: [{ prefix: "gpt-", provider: "chatgpt" }], cli: { extraModels: [{ model: "gpt-5.6-terra", name: "GPT-5.6 Terra" }] } } as unknown as Config;
+  const out = JSON.parse(injectBootstrap(Buffer.from("{}"), cfg, [dir]).toString()) as { additional_model_options: { model: string; name: string }[] };
+  assert.deepEqual(out.additional_model_options.map((m) => m.model), ["gpt-5.6-terra", "gpt-5.6-terra@high"]);
+  assert.equal(out.additional_model_options[1]!.name, "GPT-5.6 Terra · high");
+});

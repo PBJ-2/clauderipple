@@ -3,12 +3,58 @@
 //   auto_compact_windows      → per-model compaction thresholds; routed models are unknown to the CLI
 //                               and would otherwise fall back to 200K.
 
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { Config } from "./config.ts";
 
 export const BOOTSTRAP_PATH = "/api/claude_cli/bootstrap";
 
-export function injectBootstrap(body: Buffer, cfg: Config): Buffer {
-  const extra = cfg.cli.extraModels;
+/**
+ * Model ids named in the user's agent definitions (~/.claude/agents/*.md frontmatter `model:`),
+ * e.g. `gpt-5.6-terra@high`. The CLI only accepts ids it saw in its bootstrap list; an agent whose
+ * model id is unknown silently runs on the parent session's Claude model (measured 2026-09-13 after
+ * the picker ids lost their `@effort` suffix). Any such id whose base is routable is injected too.
+ */
+export function agentModelIds(dirs: string[] = [path.join(os.homedir(), ".claude", "agents")]): string[] {
+  const out = new Set<string>();
+  for (const dir of dirs) {
+    let files: string[];
+    try {
+      files = fs.readdirSync(dir).filter((f) => f.endsWith(".md"));
+    } catch {
+      continue;
+    }
+    for (const f of files) {
+      try {
+        const head = fs.readFileSync(path.join(dir, f), "utf8").slice(0, 8192);
+        const m = /^model:\s*['"]?([A-Za-z0-9._\/:\-]+(?:@[a-z]+)?)/m.exec(head);
+        if (m) out.add(m[1]!);
+      } catch {
+        /* unreadable: skip */
+      }
+    }
+  }
+  return [...out];
+}
+
+function routable(id: string, cfg: Config): boolean {
+  const base = id.split("@")[0]!;
+  if (cfg.cli.extraModels.some((m) => m.model === base)) return true;
+  if (cfg.routes[base] || cfg.aliases[base]) return true;
+  return cfg.direct.some((d) => base.startsWith(d.prefix));
+}
+
+export function injectBootstrap(body: Buffer, cfg: Config, agentDirs?: string[]): Buffer {
+  const known = new Set(cfg.cli.extraModels.map((m) => m.model));
+  const fromAgents = agentModelIds(agentDirs)
+    .filter((id) => !known.has(id) && routable(id, cfg))
+    .map((id) => {
+      const [base, effort] = id.split("@");
+      const named = cfg.cli.extraModels.find((m) => m.model === base);
+      return { model: id, name: `${named?.name ?? base}${effort ? ` · ${effort}` : ""}` };
+    });
+  const extra = [...cfg.cli.extraModels, ...fromAgents];
   const win = cfg.cli.autoCompactWindow;
   if (extra.length === 0 && !win) return body;
   let j: Record<string, unknown>;
