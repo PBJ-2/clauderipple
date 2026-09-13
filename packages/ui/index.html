@@ -7,6 +7,7 @@
   <button data-view="health" class="nav-btn" data-i18n="nav.health">Status</button>
   <button data-view="slots" class="nav-btn" data-i18n="nav.slots">Model links</button>
   <button data-view="providers" class="nav-btn" data-i18n="nav.providers">Providers</button>
+  <button data-view="clients" class="nav-btn" data-i18n="nav.clients">Clients</button>
   <button data-view="logs" class="nav-btn" data-i18n="nav.logs">Logs</button>
   <button data-view="about" class="nav-btn" data-i18n="nav.about">About</button>
   <div class="nav-spacer"></div>
@@ -19,23 +20,13 @@
     <p class="subtitle" data-i18n="health.subtitle">Check that Claude Desktop and your providers are ready.</p>
     <div class="card"><h2 data-i18n="health.desktop">Claude Desktop connection</h2><div class="rows" id="health-desktop"></div></div>
     <div class="card"><h2 data-i18n="health.providers">Providers</h2><div class="rows" id="health-providers"></div></div>
-    <div class="card"><h2 data-i18n="picker.title">Model picker</h2><p class="hint" data-i18n="picker.statusHelp">Show selected provider models by their real names in Claude Desktop.</p><div class="rows" id="picker-rows"></div><div class="actions"><button class="btn" id="picker-toggle" type="button"></button><span class="small" id="picker-msg"></span></div></div>
-    <div class="card"><h2 data-i18n="agentTitle.title">Subagent name tags</h2><p class="hint" data-i18n="agentTitle.help"></p><div class="rows" id="agent-title-rows"></div><div class="actions"><button class="btn" id="agent-title-toggle" type="button"></button><span class="small" id="agent-title-msg"></span></div></div>
+    <div class="card"><h2 data-i18n="health.requestCount">Request count</h2><div class="rows" id="health-requests"></div></div>
     <details class="details"><summary data-i18n="health.details">Details</summary><div class="rows detail-rows" id="health-details"></div></details>
   </section>
 
   <section id="view-slots" class="view">
     <h1 data-i18n="slots.title">Model links</h1>
     <p class="subtitle" data-i18n="slots.subtitle">Choose what each Claude model should actually use.</p>
-    <div class="card picker-setting">
-      <div><strong data-i18n="picker.title">Model picker</strong><p class="hint" data-i18n="slots.pickerHelp">Show selected models by their real names in Claude Desktop.</p></div>
-      <label class="switch"><input id="slots-picker-toggle" type="checkbox" /><span></span></label>
-    </div>
-    <div class="card" id="picker-models-card" hidden>
-      <h2 data-i18n="slots.pickerModels">Models in picker</h2>
-      <p class="hint" data-i18n="slots.pickerModelsHelp">Tick only models you want to see in Claude Desktop.</p>
-      <div class="model-checklist" id="picker-models"></div>
-    </div>
     <div class="toolbar"><button class="btn secondary" id="slots-add" type="button" data-i18n="slots.add">+ Add link</button><span class="small" id="slots-status"></span></div>
     <p class="small" id="slots-summary"></p>
     <p class="hint" data-i18n="slots.effortHint">If the effort chosen in the app is unsupported by the model, ClaudeRipple sends the nearest level instead. (For example: xhigh → high)</p>
@@ -47,6 +38,35 @@
     <p class="subtitle" data-i18n="providers.subtitle">Connect an AI account, then choose the models you will use.</p>
     <div class="toolbar"><button class="btn" id="providers-add" type="button" data-i18n="providers.add">+ Add provider</button><button class="btn secondary" id="providers-refresh" type="button" data-i18n="providers.refresh">Check connections</button></div>
     <div id="providers-list"></div>
+  </section>
+
+  <section id="view-clients" class="view">
+    <h1 data-i18n="clients.title">Clients</h1>
+    <p class="subtitle" data-i18n="clients.subtitle">Set up the apps that use ClaudeRipple.</p>
+    <div class="card">
+      <h2 data-i18n="clients.desktop.title">Claude Desktop</h2>
+      <p class="hint" data-i18n="clients.desktop.help">Choose whether provider models appear by name in the model picker.</p>
+      <div class="rows" id="client-picker-rows"></div>
+      <div class="actions"><button class="btn" id="client-picker-toggle" type="button"></button><span class="small" id="client-picker-msg"></span></div>
+      <div class="client-models" id="client-picker-models-card" hidden><h3 data-i18n="slots.pickerModels">Models in picker</h3><p class="hint" data-i18n="slots.pickerModelsHelp">Tick only models you want to see in Claude Desktop.</p><div class="model-checklist" id="client-picker-models"></div></div>
+      <div class="client-divider"></div>
+      <h3 data-i18n="agentTitle.title">Subagent name tags</h3>
+      <p class="hint" data-i18n="agentTitle.help"></p>
+      <div class="rows" id="client-agent-title-rows"></div>
+      <div class="actions"><button class="btn" id="client-agent-title-toggle" type="button"></button></div>
+    </div>
+    <div class="card">
+      <h2 data-i18n="clients.codex.title">Codex CLI</h2>
+      <p class="hint" data-i18n="clients.codex.help">Adds ClaudeRipple as a provider to Codex.</p>
+      <div class="rows" id="client-codex-rows"></div>
+      <div class="actions"><button class="btn" id="client-codex-toggle" type="button"></button><span class="small" id="client-codex-msg"></span></div>
+      <p class="hint" data-i18n="clients.codex.note">ChatGPT subscription models are used directly by Codex, so only Claude and Anthropic-compatible providers appear here.</p>
+    </div>
+    <div class="card">
+      <h2 data-i18n="clients.claudeCode.title">Terminal Claude Code</h2>
+      <p class="hint" data-i18n="clients.claudeCode.help">Terminal Claude uses the same router. Choose with /model &lt;name&gt;.</p>
+      <div class="rows" id="client-claude-code-rows"></div>
+    </div>
   </section>
 
   <section id="view-logs" class="view">

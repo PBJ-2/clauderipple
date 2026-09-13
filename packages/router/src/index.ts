@@ -105,6 +105,7 @@ proxy
       requests,
       chatgpt: () => ({ quota: proxy.chatgptRateLimits, auth: proxy.chatgptAuthStatus() }),
       picker: () => ({ enabled: !!store.get().picker?.enabled, hosts: terminateHosts(store.get()).slice(1), last: proxy.lastPickerInjection }),
+      observedClaudeCodeAuth,
     });
     log!.info(`clauderipple admin GUI on http://127.0.0.1:${admin.port}/`);
   })

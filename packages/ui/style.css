@@ -285,6 +285,9 @@ label.check input { width: auto; }
 .warn-text { color: var(--warn); }.bad-text { color: var(--bad); }
 .advanced-content { padding-top: 3px; }
 .picker-check { margin-top: 15px; }
+.client-models { margin-top: 15px; }
+.client-models h3, .card h3 { color: var(--muted); font-size: 15px; letter-spacing: 0.2px; margin: 0 0 8px; font-weight: 600; }
+.client-divider { border-top: 1px solid var(--border); margin: 18px 0 14px; }
 
 @media (max-width: 680px) {
   body { display: block; }

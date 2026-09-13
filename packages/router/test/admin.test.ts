@@ -9,6 +9,7 @@ import { Logger } from "../src/log.ts";
 import { startAdmin } from "../src/admin.ts";
 import { RequestLog } from "../src/requestlog.ts";
 import { PRESETS } from "../src/presets.ts";
+import { saveClaudeAuthFile } from "../src/providers/anthropic-token-file.ts";
 
 function makeCfg(overrides: Partial<Config> = {}): Config {
   // port 0: let the OS pick a free ephemeral port so parallel tests never collide.
@@ -126,6 +127,19 @@ test("GET /api/claude-models uses named entries from code and ccd picker surface
   }
 });
 
+test("GET /api/status reports native Anthropic TCP reachability and token-file source", async () => {
+  await withAdmin(makeCfg({ providers: { native: { type: "anthropic", auth: "claude-code" } } }), async ({ port, home }) => {
+    saveClaudeAuthFile(home, "test-token", "2026-09-13T00:00:00.000Z");
+    const res = await fetch(`${base()}:${port}/api/status`);
+    assert.equal(res.status, 200);
+    const body = await res.json() as { providers: Record<string, { url: string; type: string; reachable: boolean; authSource: string | null }> };
+    assert.deepEqual(Object.keys(body.providers.native ?? {}).sort(), ["authSource", "reachable", "type", "url"]);
+    assert.equal(body.providers.native?.url, "https://api.anthropic.com");
+    assert.equal(body.providers.native?.type, "anthropic");
+    assert.equal(body.providers.native?.authSource, "token-file");
+  });
+});
+
 test("GET /api/effort-levels reports compatible defaults and ChatGPT model exceptions", async () => {
   const cfg = makeCfg({
     providers: {
@@ -188,6 +202,55 @@ test("PUT /api/config rejects malformed JSON with 400", async () => {
   await withAdmin(makeCfg(), async ({ port }) => {
     const res = await fetch(`${base()}:${port}/api/config`, { method: "PUT", headers: { "content-type": "application/json" }, body: "{ not json" });
     assert.equal(res.status, 400);
+  });
+});
+
+test("POST /api/providers/probe accepts native Claude Code auth and reports only the source name", async () => {
+  await withAdmin(makeCfg(), async ({ port, home }) => {
+    const missing = await fetch(`${base()}:${port}/api/providers/probe`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "anthropic", auth: "claude-code" }) });
+    assert.deepEqual(await missing.json(), { ok: false, auth: "missing", source: null, models: [
+      { id: "claude-fable-5-1", name: "Fable 5.1" }, { id: "claude-opus-5", name: "Opus 5" }, { id: "claude-sonnet-5", name: "Sonnet 5" }, { id: "claude-haiku-4-5", name: "Haiku 4.5" }, { id: "claude-fable-5", name: "Fable 5" }, { id: "claude-opus-4-8", name: "Opus 4.8" }, { id: "claude-opus-4-7", name: "Opus 4.7" }, { id: "claude-opus-4-6", name: "Opus 4.6" }, { id: "claude-sonnet-4-6", name: "Sonnet 4.6" },
+    ] });
+    saveClaudeAuthFile(home, "test-token", "2026-09-13T00:00:00.000Z");
+    const available = await fetch(`${base()}:${port}/api/providers/probe`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "anthropic", auth: "claude-code" }) });
+    const body = await available.json() as { ok: boolean; auth: string; source: string; models: { id: string; name: string }[] };
+    assert.equal(body.ok, true);
+    assert.equal(body.auth, "ok");
+    assert.equal(body.source, "token-file");
+    assert.equal(body.models[0]?.id, "claude-fable-5-1");
+    assert.equal(JSON.stringify(body).includes("test-token"), false);
+  });
+});
+
+test("POST /api/providers/probe sends Anthropic API-key headers and treats a model 400 as authenticated", async () => {
+  const seen: { url?: string; headers?: Headers; body?: string } = {};
+  const cfg = makeCfg();
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-admin-native-probe-"));
+  const configFile = path.join(home, "config.json");
+  fs.writeFileSync(configFile, JSON.stringify(cfg));
+  const admin = await startAdmin({
+    config: () => cfg, configFile, log: new Logger(null, 1_000_000, 1, false),
+    stats: () => ({ inFlight: 0, messagesInFlight: 0, started: 0, completed: 0, failed: 0 }), health: () => 0, version: "test",
+    requests: new RequestLog(path.join(home, "logs", "requests.jsonl")),
+    probeFetch: async (url, init) => { seen.url = url; seen.headers = new Headers(init.headers); seen.body = String(init.body); return new Response(JSON.stringify({ error: { message: "model not found" } }), { status: 400 }); },
+  });
+  try {
+    const res = await fetch(`${base()}:${admin.port}/api/providers/probe`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "anthropic", auth: "api-key", apiKey: "secret-key" }) });
+    assert.deepEqual(await res.json(), { ok: true, auth: "ok", models: [
+      { id: "claude-fable-5-1", name: "Fable 5.1" }, { id: "claude-opus-5", name: "Opus 5" }, { id: "claude-sonnet-5", name: "Sonnet 5" }, { id: "claude-haiku-4-5", name: "Haiku 4.5" }, { id: "claude-fable-5", name: "Fable 5" }, { id: "claude-opus-4-8", name: "Opus 4.8" }, { id: "claude-opus-4-7", name: "Opus 4.7" }, { id: "claude-opus-4-6", name: "Opus 4.6" }, { id: "claude-sonnet-4-6", name: "Sonnet 4.6" },
+    ] });
+    assert.equal(seen.url, "https://api.anthropic.com/v1/messages");
+    assert.equal(seen.headers?.get("x-api-key"), "secret-key");
+    assert.equal(seen.headers?.get("anthropic-version"), "2023-06-01");
+    assert.equal(JSON.parse(seen.body ?? "{}")?.max_tokens, 1);
+  } finally { admin.close(); fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test("POST /api/providers/probe rejects an incomplete native Anthropic request", async () => {
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const res = await fetch(`${base()}:${port}/api/providers/probe`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "anthropic", auth: "api-key" }) });
+    assert.equal(res.status, 400);
+    assert.match((await res.json() as { error: string }).error, /apiKey/);
   });
 });
 
@@ -336,6 +399,40 @@ test("POST /api/providers/probe does not call an upstream 500 authenticated", as
     });
   } finally {
     await new Promise<void>((resolveP, reject) => upstream.close((error) => (error ? reject(error) : resolveP())));
+  }
+});
+
+test("Codex and Claude subscription endpoints invoke the matching CLI command", async () => {
+  const calls: { args: string[]; timeout?: number }[] = [];
+  const cfg = makeCfg();
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-admin-cli-"));
+  const configFile = path.join(home, "config.json");
+  fs.writeFileSync(configFile, JSON.stringify(cfg));
+  const admin = await startAdmin({
+    config: () => cfg,
+    configFile,
+    log: new Logger(null, 1_000_000, 1, false),
+    stats: () => ({ inFlight: 0, messagesInFlight: 0, started: 0, completed: 0, failed: 0 }),
+    health: () => 0,
+    version: "test",
+    requests: new RequestLog(path.join(home, "logs", "requests.jsonl")),
+    runCli: async (args, timeout) => { calls.push({ args, ...(timeout === undefined ? {} : { timeout }) }); return { ok: true, output: "done" }; },
+  });
+  try {
+    const codexBefore = await fetch(`${base()}:${admin.port}/api/codex`);
+    assert.equal(codexBefore.status, 200);
+    const codex = await codexBefore.json() as { enabled: boolean; codexHome: string; configPath: string };
+    assert.equal(typeof codex.enabled, "boolean");
+    assert.ok(codex.configPath.endsWith("config.toml"));
+    for (const [pathName, body] of [["/api/codex", { enabled: true }], ["/api/claude-login", {}], ["/api/claude-logout", {}]] as const) {
+      const res = await fetch(`${base()}:${admin.port}${pathName}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      assert.equal(res.status, 200);
+      assert.deepEqual(await res.json(), { ok: true, output: "done" });
+    }
+    assert.deepEqual(calls, [{ args: ["codex", "on"] }, { args: ["claude-login"], timeout: 200_000 }, { args: ["claude-logout"] }]);
+  } finally {
+    admin.close();
+    fs.rmSync(home, { recursive: true, force: true });
   }
 });
 

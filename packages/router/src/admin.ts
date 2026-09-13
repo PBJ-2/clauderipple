@@ -20,6 +20,9 @@ import type { Stats } from "./proxy.ts";
 import type { RequestLog } from "./requestlog.ts";
 import { PRESETS, type ProviderPreset } from "./presets.ts";
 import { resolveCompatibleCaps } from "./compat.ts";
+import { ClaudeCodeAuthStore, nativeAnthropicHeaders } from "./providers/anthropic.ts";
+import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
+import { codexHome } from "../../cli/src/codex.ts";
 
 const MAX_BODY = 1024 * 1024;
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -47,10 +50,16 @@ export type AdminDeps = {
   chatgpt?: () => { quota: Record<string, Record<string, unknown> | null>; auth: Record<string, string> };
   /** Optional: picker-mode state and the last bootstrap injection. */
   picker?: () => { enabled: boolean; hosts: string[]; last: unknown };
+  /** Optional: observed CLI credentials held by the live proxy, never serialized directly. */
+  observedClaudeCodeAuth?: ObservedClaudeCodeAuth;
+  /** Test seam for the local CLI side effects. Production uses the installed CLI runtime. */
+  runCli?: (args: string[], timeout?: number) => Promise<{ ok: boolean; output: string }>;
+  /** Test seam for the native Anthropic API-key probe. */
+  probeFetch?: (url: string, init: RequestInit) => Promise<Response>;
 };
 
 type ModelEntry = { id: string; name?: string; effortLevels?: string[] };
-type ProbeAuth = "ok" | "bad-key" | "unreachable" | "unknown";
+type ProbeAuth = "ok" | "bad-key" | "unreachable" | "unknown" | "missing";
 type ProbeRequest = {
   type: "anthropic-compatible" | "openai-compatible";
   url: string;
@@ -198,7 +207,7 @@ function tcpReachable(hostname: string, port: number, timeoutMs = 2000): Promise
 
 async function buildStatus(deps: AdminDeps): Promise<Record<string, unknown>> {
   const cfg = deps.config();
-  const providers: Record<string, { url: string; type: string; reachable: boolean }> = {};
+  const providers: Record<string, { url: string; type: string; reachable: boolean; authSource?: "observed" | "env" | "keychain" | "credentials-file" | "token-file" | null }> = {};
   await Promise.all(
     Object.entries(cfg.providers).map(async ([name, p]) => {
       const url = p.type === "anthropic" ? "https://api.anthropic.com" : p.type === "chatgpt" ? (p.url ?? "https://chatgpt.com/backend-api") : p.url;
@@ -209,7 +218,12 @@ async function buildStatus(deps: AdminDeps): Promise<Record<string, unknown>> {
       } catch {
         reachable = false;
       }
-      providers[name] = { url, type: p.type, reachable };
+      providers[name] = {
+        url,
+        type: p.type,
+        reachable,
+        ...(p.type === "anthropic" ? { authSource: p.auth === "claude-code" ? claudeAuthStore(deps).describeSource() : null } : {}),
+      };
     }),
   );
   const chatgpt = deps.chatgpt?.() ?? { quota: {}, auth: {} };
@@ -249,7 +263,7 @@ async function buildStatus(deps: AdminDeps): Promise<Record<string, unknown>> {
 }
 
 /** Run the ClaudeRipple CLI with the Node that installed us (`<home>/paths.json`, written by `install`). */
-function runCli(args: string[]): Promise<{ ok: boolean; output: string }> {
+function runCli(args: string[], timeout = 180_000): Promise<{ ok: boolean; output: string }> {
   return new Promise((resolveP) => {
     let node = process.execPath;
     let cli = path.resolve(here, "../../cli/src/index.ts");
@@ -262,7 +276,7 @@ function runCli(args: string[]): Promise<{ ok: boolean; output: string }> {
     } catch {
       /* not installed via the CLI: fall back to our own node + repo layout */
     }
-    execFile(node, [cli, ...args], { env: { ...process.env, ...runtimeEnv, CLAUDERIPPLE_HOME: homeDir() }, timeout: 180_000 }, (err, stdout, stderr) => {
+    execFile(node, [cli, ...args], { env: { ...process.env, ...runtimeEnv, CLAUDERIPPLE_HOME: homeDir() }, timeout }, (err, stdout, stderr) => {
       resolveP({ ok: !err, output: `${stdout}${stderr}${err ? `\n${err.message}` : ""}`.trim() });
     });
   });
@@ -310,6 +324,46 @@ function authHeaders(source: { name: string; value: string } | null, kind?: stri
 
 function messagesUrl(base: string): string {
   return `${base.replace(/\/+$/, "")}/v1/messages`;
+}
+
+function codexState(): { enabled: boolean; codexHome: string; configPath: string } {
+  const home = codexHome();
+  const configPath = path.join(home, "config.toml");
+  try {
+    const text = fs.readFileSync(configPath, "utf8");
+    return { enabled: text.includes("# >>> ClaudeRipple Codex provider >>>") && text.includes("# <<< ClaudeRipple Codex provider <<<"), codexHome: home, configPath };
+  } catch {
+    return { enabled: false, codexHome: home, configPath };
+  }
+}
+
+function claudeAuthStore(deps: AdminDeps): ClaudeCodeAuthStore {
+  return new ClaudeCodeAuthStore(undefined, { home: homeDir(), ...(deps.observedClaudeCodeAuth ? { observed: deps.observedClaudeCodeAuth } : {}) });
+}
+
+async function probeAnthropicApiKey(apiKey: string, probeFetch: (url: string, init: RequestInit) => Promise<Response> = fetchWithTimeout): Promise<{ ok: boolean; auth: ProbeAuth; models: ModelEntry[]; error?: string }> {
+  const models = CLAUDE_MODEL_FALLBACK;
+  const label = "messages endpoint";
+  try {
+    const response = await probeFetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...nativeAnthropicHeaders({ type: "anthropic", auth: "api-key", apiKey }) },
+      body: JSON.stringify({ model: models[0]!.id, max_tokens: 1, messages: [{ role: "user", content: "hi" }] }),
+    });
+    if (response.status === 401 || response.status === 403) return { ok: false, auth: "bad-key", models, error: `${label} returned ${response.status}: ${snippet(await response.text())}` };
+    if (response.ok) return { ok: true, auth: "ok", models };
+    const detail = snippet(await response.text());
+    if (response.status === 400 && /model.{0,80}(not.?found|invalid|unsupported|does not exist)|unknown.{0,20}model/i.test(detail)) return { ok: true, auth: "ok", models };
+    if (response.status === 402 || /insufficient|balance|credit|quota|billing/i.test(detail)) return { ok: true, auth: "ok", models, error: `no-credits: ${response.status} ${detail}` };
+    return { ok: false, auth: response.status >= 500 ? "unreachable" : "unknown", models, error: `${label} returned ${response.status}: ${detail}` };
+  } catch (e) {
+    return { ok: false, auth: "unreachable", models, error: `${label}: ${errorText(e)}` };
+  }
+}
+
+function probeClaudeCodeAuth(deps: AdminDeps): { ok: boolean; auth: "ok" | "missing"; source: "observed" | "env" | "keychain" | "credentials-file" | "token-file" | null; models: ModelEntry[] } {
+  const source = claudeAuthStore(deps).describeSource();
+  return { ok: source !== null, auth: source ? "ok" : "missing", source, models: CLAUDE_MODEL_FALLBACK };
 }
 
 function chatCompletionsUrl(base: string): string {
@@ -506,7 +560,22 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           sendJson(res, 400, { error: "expected provider probe object" });
           return;
         }
-        const probe = parsed as { type?: unknown; url?: unknown; headers?: unknown; modelsUrl?: unknown; modelsAuthHeader?: unknown; probeModel?: unknown };
+        const probe = parsed as { type?: unknown; auth?: unknown; apiKey?: unknown; url?: unknown; headers?: unknown; modelsUrl?: unknown; modelsAuthHeader?: unknown; probeModel?: unknown };
+        if (probe.type === "anthropic") {
+          if (probe.auth === "claude-code") {
+            sendJson(res, 200, probeClaudeCodeAuth(deps));
+            return;
+          }
+          if (probe.auth === "api-key") {
+            const apiKey = typeof probe.apiKey === "string" && probe.apiKey.length > 0 ? probe.apiKey : process.env.ANTHROPIC_API_KEY;
+            if (apiKey) {
+              sendJson(res, 200, await probeAnthropicApiKey(apiKey, deps.probeFetch));
+              return;
+            }
+          }
+          sendJson(res, 400, { error: "expected {type: 'anthropic', auth: 'claude-code'|'api-key', apiKey?: string}" });
+          return;
+        }
         if (probe.type === "chatgpt") {
           const statuses = Object.values(deps.chatgpt?.().auth ?? {});
           sendJson(res, 200, {
@@ -573,6 +642,39 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         fs.renameSync(tmp, deps.configFile);
         deps.log.info(`admin: config saved via GUI (${Object.keys(parsed.routes).length} routes, ${Object.keys(parsed.providers).length} providers)`);
         sendJson(res, 200, { ok: true });
+        return;
+      }
+      if (pathname === "/api/codex" && method === "GET") {
+        sendJson(res, 200, codexState());
+        return;
+      }
+      if (pathname === "/api/codex" && method === "POST") {
+        let enabled: unknown;
+        try {
+          enabled = (JSON.parse((await readBody(req)).toString("utf8")) as { enabled?: unknown }).enabled;
+        } catch {
+          sendJson(res, 400, { error: "invalid JSON" });
+          return;
+        }
+        if (typeof enabled !== "boolean") {
+          sendJson(res, 400, { error: "expected {enabled: boolean}" });
+          return;
+        }
+        const r = await (deps.runCli ?? runCli)(["codex", enabled ? "on" : "off"]);
+        deps.log.info(`admin: codex ${enabled ? "on" : "off"} via GUI -> ${r.ok ? "ok" : "failed"}`);
+        sendJson(res, r.ok ? 200 : 500, { ok: r.ok, output: r.output });
+        return;
+      }
+      if (pathname === "/api/claude-login" && method === "POST") {
+        const r = await (deps.runCli ?? runCli)(["claude-login"], 200_000);
+        deps.log.info(`admin: claude-login via GUI -> ${r.ok ? "ok" : "failed"}`);
+        sendJson(res, r.ok ? 200 : 500, { ok: r.ok, output: r.output });
+        return;
+      }
+      if (pathname === "/api/claude-logout" && method === "POST") {
+        const r = await (deps.runCli ?? runCli)(["claude-logout"]);
+        deps.log.info(`admin: claude-logout via GUI -> ${r.ok ? "ok" : "failed"}`);
+        sendJson(res, r.ok ? 200 : 500, { ok: r.ok, output: r.output });
         return;
       }
       if (pathname === "/api/picker" && method === "POST") {

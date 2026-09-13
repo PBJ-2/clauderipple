@@ -111,6 +111,7 @@ let presets = FALLBACK_PRESETS;
 let effortCatalog = null;
 let slotsLoaded = false;
 let providersLoaded = false;
+let clientsLoaded = false;
 let pickerBusy = false;
 let probeStates = new Map();
 
@@ -124,6 +125,7 @@ function showView(name) {
   if (location.hash !== `#${name}`) history.replaceState(null, "", `#${name}`);
   if (name === "slots" && !slotsLoaded) void loadSlots();
   if (name === "providers" && !providersLoaded) void loadProviders();
+  if (name === "clients" && !clientsLoaded) void loadClients();
   if (name === "logs") queueMicrotask(() => void refreshRequests());
 }
 for (const button of $all(".nav-btn")) button.addEventListener("click", () => showView(button.dataset.view));
@@ -165,11 +167,10 @@ async function refreshHealth() {
   desktop.replaceChildren(
     el("div", { class: "row" }, [el("span", { class: "k", text: t("health.connection") }), status.settings.pointsAtRouter ? badge("ok", t("health.connected")) : badge("bad", t("health.notConnected"))]),
     hint(status.settings.pointsAtRouter ? t("health.connectedHelp") : t("health.notConnectedHelp")),
-    el("div", { class: "row" }, [el("span", { class: "k", text: t("health.requests") }), el("span", { class: "v", text: t("health.requestsFmt", status.stats) })]),
   );
+  $("#health-requests").replaceChildren(el("div", { class: "row" }, [el("span", { class: "k", text: t("health.requests") }), el("span", { class: "v", text: t("health.requestsFmt", status.stats) })]));
   renderHealthProviders();
-  renderPicker(status.picker || { enabled: false, last: null });
-  renderAgentTitle(Boolean(status.agentTitle));
+  if (clientsLoaded) renderClients();
   const details = $("#health-details");
   details.replaceChildren(
     el("div", { class: "row" }, [el("span", { class: "k", text: t("health.version") }), el("span", { class: "v", text: status.version })]),
@@ -207,68 +208,111 @@ function renderHealthProviders() {
   }));
 }
 
-function renderPicker(picker) {
-  const rows = $("#picker-rows");
+let agentTitleBusy = false;
+let codexBusy = false;
+function renderClients() {
+  if (!currentConfig || !status) return;
+  const picker = status.picker || { enabled: false, last: null };
   const last = picker.last || null;
-  const names = (status && status.pickerModels) || [];
-  rows.replaceChildren(...[
+  const names = status.pickerModels || [];
+  $("#client-picker-rows").replaceChildren(...[
     el("div", { class: "row" }, [el("span", { class: "k", text: t("picker.state") }), picker.enabled ? badge("ok", t("picker.on")) : el("span", { class: "small", text: t("picker.off") })]),
     picker.enabled ? el("div", { class: "small", text: t("picker.models", { count: names.length, names: names.join(", ") || "—" }) }) : null,
     picker.enabled ? (last && last.at ? el("div", { class: "small", text: t("picker.lastAt", { at: new Date(last.at).toLocaleString() }) }) : hint(t("picker.never"))) : null,
   ].filter(Boolean));
-  const button = $("#picker-toggle");
-  button.textContent = picker.enabled ? t("picker.turnOff") : t("picker.turnOn");
-  button.className = picker.enabled ? "btn secondary" : "btn";
-  button.disabled = pickerBusy;
-  button.onclick = () => togglePicker(!picker.enabled, null);
+  const pickerButton = $("#client-picker-toggle");
+  pickerButton.textContent = picker.enabled ? t("picker.turnOff") : t("picker.turnOn");
+  pickerButton.className = picker.enabled ? "btn secondary" : "btn";
+  pickerButton.disabled = pickerBusy;
+  pickerButton.onclick = () => togglePicker(!picker.enabled);
+  renderClientPickerModels(picker.enabled);
+  const agentEnabled = Boolean(status.agentTitle);
+  $("#client-agent-title-rows").replaceChildren(el("div", { class: "row" }, [el("span", { class: "k", text: t("picker.state") }), agentEnabled ? badge("ok", t("agentTitle.on")) : el("span", { class: "small", text: t("agentTitle.off") })]));
+  const agentButton = $("#client-agent-title-toggle");
+  agentButton.textContent = agentEnabled ? t("agentTitle.turnOff") : t("agentTitle.turnOn");
+  agentButton.className = agentEnabled ? "btn secondary" : "btn";
+  agentButton.disabled = agentTitleBusy;
+  agentButton.onclick = () => toggleAgentTitle(!agentEnabled);
+  void renderCodexClient();
+  const mapped = Object.entries(currentConfig.routes || {}).map(([source, route]) => `${labelOf(claudeModels.find((model) => model.id === source) || { id: source })} → ${labelOf((groupedModels(currentConfig).find((group) => group.name === route.provider) || { models: [] }).models.find((model) => model.id === route.model) || { id: route.model })}`);
+  $("#client-claude-code-rows").replaceChildren(el("div", { class: "small", text: mapped.join(" · ") || t("slots.noChanges") }));
 }
-let agentTitleBusy = false;
-function renderAgentTitle(enabled) {
-  $("#agent-title-rows").replaceChildren(el("div", { class: "row" }, [el("span", { class: "k", text: t("picker.state") }), enabled ? badge("ok", t("agentTitle.on")) : el("span", { class: "small", text: t("agentTitle.off") })]));
-  const button = $("#agent-title-toggle");
-  button.textContent = enabled ? t("agentTitle.turnOff") : t("agentTitle.turnOn");
-  button.className = enabled ? "btn secondary" : "btn";
-  button.disabled = agentTitleBusy;
-  button.onclick = async () => {
-    if (agentTitleBusy) return;
-    agentTitleBusy = true;
-    button.disabled = true;
-    try {
-      await api("/api/agent-title", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: !enabled }) });
-      toast(t("common.saved"));
-    } catch (error) {
-      toast(t("common.actionFailed"), true, error.message);
-    } finally {
-      agentTitleBusy = false;
-      void refreshHealth();
-    }
-  };
-}
-async function togglePicker(enabled, checkbox) {
-  if (pickerBusy) return;
-  if (enabled && !confirm(t("picker.confirmOn"))) {
-    if (checkbox) checkbox.checked = false;
-    return;
+function renderClientPickerModels(enabled) {
+  const card = $("#client-picker-models-card");
+  card.hidden = !enabled;
+  if (!enabled) return;
+  const box = $("#client-picker-models");
+  const checked = new Set(((currentConfig.cli && currentConfig.cli.extraModels) || []).map((item) => item.model));
+  box.replaceChildren();
+  for (const group of groupedModels(currentConfig)) for (const model of group.models) {
+    const input = el("input", { type: "checkbox", checked: checked.has(model.id) });
+    input.dataset.model = model.id;
+    input.dataset.provider = group.name;
+    input.dataset.name = labelOf(model);
+    input.addEventListener("change", () => void saveClientPickerModels());
+    box.appendChild(el("label", { class: "model-check" }, [input, el("span", { text: labelOf(model) }), el("small", { text: group.name })]));
   }
+  if (!box.childElementCount) box.appendChild(hint(t("slots.noProviderModels")));
+}
+function clientPickerSelections() {
+  return $all("#client-picker-models input:checked").map((input) => ({ id: input.dataset.model, name: input.dataset.name, provider: input.dataset.provider }));
+}
+async function saveClientPickerModels() {
+  if (!currentConfig) return;
+  const next = applyPickerSelections(clone(currentConfig), clientPickerSelections());
+  try { await configRequest(next); currentConfig = next; toast(t("slots.saved")); } catch (error) { toast(t("common.saveFailed"), true, error.message); }
+}
+async function togglePicker(enabled) {
+  if (pickerBusy) return;
+  if (enabled && !confirm(t("picker.confirmOn"))) return;
   pickerBusy = true;
-  if (checkbox) checkbox.disabled = true;
-  $("#picker-msg").textContent = t("picker.working");
+  $("#client-picker-msg").textContent = t("picker.working");
   try {
     await api("/api/picker", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled }) });
     toast(enabled ? t("picker.doneOn") : t("picker.doneOff"));
-    if (currentConfig) {
-      currentConfig.picker = { ...(currentConfig.picker || {}), enabled };
-      renderSlotsPicker();
-    }
+    if (currentConfig) currentConfig.picker = { ...(currentConfig.picker || {}), enabled };
   } catch (error) {
     toast(t("common.actionFailed"), true, error.message);
-    if (checkbox) checkbox.checked = !enabled;
   } finally {
     pickerBusy = false;
-    if (checkbox) checkbox.disabled = false;
-    $("#picker-msg").textContent = "";
+    $("#client-picker-msg").textContent = "";
     void refreshHealth();
   }
+}
+async function toggleAgentTitle(enabled) {
+  if (agentTitleBusy) return;
+  agentTitleBusy = true;
+  try {
+    await api("/api/agent-title", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled }) });
+    toast(t("common.saved"));
+  } catch (error) {
+    toast(t("common.actionFailed"), true, error.message);
+  } finally {
+    agentTitleBusy = false;
+    void refreshHealth();
+  }
+}
+async function renderCodexClient() {
+  const rows = $("#client-codex-rows");
+  const button = $("#client-codex-toggle");
+  try {
+    const codex = await api("/api/codex");
+    rows.replaceChildren(el("div", { class: "row" }, [el("span", { class: "k", text: t("picker.state") }), codex.enabled ? badge("ok", t("picker.on")) : el("span", { class: "small", text: t("picker.off") })]), el("div", { class: "small", text: codex.configPath }));
+    button.textContent = codex.enabled ? t("clients.codex.turnOff") : t("clients.codex.turnOn");
+    button.className = codex.enabled ? "btn secondary" : "btn";
+    button.disabled = codexBusy;
+    button.onclick = () => toggleCodex(!codex.enabled);
+  } catch (error) {
+    rows.replaceChildren(el("div", { class: "small bad-text", text: error.message }));
+  }
+}
+async function toggleCodex(enabled) {
+  if (codexBusy) return;
+  codexBusy = true;
+  $("#client-codex-msg").textContent = t("picker.working");
+  try { const result = await api("/api/codex", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled }) }); toast(t("common.saved"), false, result.output); }
+  catch (error) { toast(t("common.actionFailed"), true, error.message); }
+  finally { codexBusy = false; $("#client-codex-msg").textContent = ""; void renderCodexClient(); }
 }
 void Promise.all([loadCatalogs(), refreshHealth()]);
 setInterval(refreshHealth, 5000);
@@ -349,40 +393,11 @@ async function loadSlots() {
     const routes = currentConfig.routes || {};
     const ids = [...claudeModels.map((model) => model.id), ...Object.keys(routes).filter((id) => !claudeModels.some((model) => model.id === id))];
     for (const id of ids) rows.appendChild(slotRow(id, routes[id]));
-    renderSlotsPicker();
     updateSlotSummary();
   } catch (error) {
     toast(t("common.loadFailed"), true, error.message);
   }
 }
-function selectedPickerModels() {
-  const configured = new Set(((currentConfig.cli && currentConfig.cli.extraModels) || []).map((entry) => entry.model));
-  return $all("#picker-models input[type=checkbox]").length
-    ? $all("#picker-models input[type=checkbox]").filter((input) => input.checked).map((input) => input.dataset.model)
-    : [...configured];
-}
-function renderSlotsPicker() {
-  const enabled = Boolean(currentConfig && currentConfig.picker && currentConfig.picker.enabled);
-  const toggle = $("#slots-picker-toggle");
-  toggle.checked = enabled;
-  const card = $("#picker-models-card");
-  card.hidden = !enabled;
-  const box = $("#picker-models");
-  const checked = new Set(((currentConfig.cli && currentConfig.cli.extraModels) || []).map((item) => item.model));
-  box.replaceChildren();
-  for (const group of groupedModels(currentConfig)) {
-    for (const model of group.models) {
-      const input = el("input", { type: "checkbox", checked: checked.has(model.id) });
-      input.dataset.model = model.id;
-      input.dataset.provider = group.name;
-      input.dataset.name = labelOf(model);
-      input.addEventListener("change", scheduleSlotsSave);
-      box.appendChild(el("label", { class: "model-check" }, [input, el("span", { text: labelOf(model) }), el("small", { text: group.name })]));
-    }
-  }
-  if (!box.childElementCount) box.appendChild(hint(t("slots.noProviderModels")));
-}
-$("#slots-picker-toggle").addEventListener("change", (event) => togglePicker(event.target.checked, event.target));
 $("#slots-add").addEventListener("click", () => {
   if (!currentConfig) return;
   $("#slots-table tbody").appendChild(slotRow(claudeModels[0].id, null));
@@ -400,9 +415,6 @@ function applyPickerSelections(next, selections) {
   next.direct = [...preservedDirect, ...selected.map((entry) => ({ prefix: entry.id, provider: entry.provider }))];
   // A legacy gpt- prefix rule is intentionally retained by the filter above.
   return next;
-}
-function pickerSelectionsFromChecklist() {
-  return $all("#picker-models input:checked").map((input) => ({ id: input.dataset.model, name: input.dataset.name, provider: input.dataset.provider }));
 }
 function updateSlotSummary() {
   const summaries = $all("#slots-table tbody tr").map((row) => row._get()).filter((item) => item.route).slice(0, 3).map((item) => {
@@ -440,7 +452,6 @@ async function saveSlots() {
     if (item.route) routes[item.id] = { ...item.route, ...(effortLevelsFor(item.route.provider, item.route.model).length ? { effort: item.effort } : {}) };
   }
   next.routes = routes;
-  if (next.picker && next.picker.enabled) applyPickerSelections(next, pickerSelectionsFromChecklist());
   try {
     await configRequest(next);
     currentConfig = next;
@@ -466,17 +477,20 @@ async function probeProvider(name, provider, onComplete) {
   renderHealthProviders();
   try {
     const headers = provider.headers || {};
-    const result = await api("/api/providers/probe", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
+    const body = provider.type === "anthropic"
+      ? { type: "anthropic", auth: provider.auth, ...(provider.auth === "api-key" && provider.apiKey ? { apiKey: provider.apiKey } : {}) }
+      : {
         type: provider.type,
         url: provider.url,
         headers,
         modelsUrl: provider.modelsUrl || (provider.preset && presetById(provider.preset) && presetById(provider.preset).modelsUrl),
         modelsAuthHeader: provider.modelsAuthHeader || (provider.preset && presetById(provider.preset) && presetById(provider.preset).modelsAuthHeader),
         probeModel: provider.probeModel || (provider.preset && presetById(provider.preset) && (presetById(provider.preset).fallbackModels || [])[0] && presetById(provider.preset).fallbackModels[0].id),
-      }),
+      };
+    const result = await api("/api/providers/probe", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
     });
     probeStates.set(name, result);
     onComplete && onComplete(result);
@@ -503,8 +517,8 @@ function providerCard(name, provider) {
   const draw = () => {
     const state = stateFor(name);
     const preset = provider.preset && presetById(provider.preset);
-    let kind = provider.type === "chatgpt" ? t("providers.chatgpt") : preset ? preset.name : "";
-    if (provider.type !== "chatgpt") { try { kind = `${kind ? kind + " · " : ""}${new URL(provider.url).host}`; } catch { /* keep */ } }
+    let kind = provider.type === "chatgpt" ? t("providers.chatgpt") : provider.type === "anthropic" ? `${t("providers.anthropic")} · ${provider.auth === "claude-code" ? t("providers.anthropicLoginReuse") : t("providers.apiKey")}` : preset ? preset.name : "";
+    if (provider.type !== "chatgpt" && provider.type !== "anthropic") { try { kind = `${kind ? kind + " · " : ""}${new URL(provider.url).host}`; } catch { /* keep */ } }
     stateLine.replaceChildren(...[providerState(name, provider), el("span", { class: "small", text: kind }), state && !state.ok && state.error ? el("span", { class: "small bad-text", text: state.error }) : null].filter(Boolean));
     const models = modelsOf(provider);
     modelText.replaceChildren(...(models.length
@@ -537,6 +551,16 @@ function providerCard(name, provider) {
   draw();
   return card;
 }
+async function loadClients() {
+  clientsLoaded = true;
+  try {
+    await loadCatalogs();
+    currentConfig = currentConfig || await api("/api/config");
+    if (!status) status = await api("/api/status");
+    renderClients();
+  } catch (error) { toast(t("common.loadFailed"), true, error.message); }
+}
+
 async function loadProviders() {
   providersLoaded = true;
   try {
@@ -579,6 +603,9 @@ window.addEventListener("keydown", (event) => {
 });
 function openProviderChooser() {
   const grid = el("div", { class: "chooser-grid" });
+  const anthropic = el("button", { class: "chooser-tile", type: "button" }, [el("strong", { text: t("providers.anthropic") }), el("span", { text: t("providers.anthropicHelp") })]);
+  anthropic.addEventListener("click", () => openProviderForm({ kind: "anthropic" }));
+  grid.appendChild(anthropic);
   const chatgpt = el("button", { class: "chooser-tile", type: "button" }, [el("strong", { text: t("providers.chatgpt") }), el("span", { text: t("providers.chatgptHelp") })]);
   chatgpt.addEventListener("click", () => openProviderForm({ kind: "chatgpt" }));
   grid.appendChild(chatgpt);
@@ -646,13 +673,109 @@ function modelChecklist(models, checked) {
   render();
   return wrap;
 }
+function anthropicSourceText(source) {
+  if (source === "observed") return t("providers.anthropicSourceObserved");
+  if (source === "keychain" || source === "credentials-file" || source === "env") return t("providers.anthropicSourceClaudeCode");
+  if (source === "token-file") return t("providers.anthropicSourceTokenFile");
+  return t("providers.anthropicSourceMissing");
+}
+function openAnthropicProviderForm(options) {
+  const existing = options.provider;
+  const displayName = options.name || t("providers.anthropic");
+  const nameInput = el("input", { value: displayName, maxlength: "60" });
+  const auth = el("select", {}, [selectOption("claude-code", t("providers.anthropicAuthClaudeCode")), selectOption("api-key", t("providers.anthropicAuthApiKey"))]);
+  auth.value = (existing && existing.auth) || "claude-code";
+  const keyInput = el("input", { type: "password", autocomplete: "off", placeholder: existing && existing.apiKey ? t("providers.keySaved") : t("providers.keyPlaceholder") });
+  const showKey = el("button", { class: "eye-button", type: "button", text: t("common.show") });
+  showKey.addEventListener("click", () => { const show = keyInput.type === "password"; keyInput.type = show ? "text" : "password"; showKey.textContent = show ? t("common.hide") : t("common.show"); });
+  const result = el("div", { class: "probe-result" });
+  const probeButton = el("button", { class: "btn secondary", type: "button", text: t("providers.check") });
+  const sourceLine = el("div", { class: "small" });
+  let foundModels = modelsOf(existing).length ? modelsOf(existing) : claudeModels.map((model) => ({ id: model.id, name: labelOf(model) }));
+  let selected = new Set(modelsOf(existing).length ? modelsOf(existing).map((model) => model.id) : foundModels.map((model) => model.id));
+  const modelArea = el("div", { class: "form-field" });
+  function renderModels() {
+    const modelsBox = modelChecklist(foundModels, selected);
+    modelArea.replaceChildren(el("span", { text: t("providers.models") }), hint(t("providers.modelsHelp")), el("small", { text: t("providers.effortLevels", { levels: "low · medium · high · max" }) }), modelsBox);
+  }
+  renderModels();
+  const pickerInput = el("input", { type: "checkbox", checked: Boolean(existing && (existing.models || []).some((model) => ((currentConfig.cli && currentConfig.cli.extraModels) || []).some((extra) => extra.model === (typeof model === "string" ? model : model.id)))) });
+  const authField = inputRow(t("providers.credentials"), auth, t("providers.anthropicCredentialsHelp"));
+  const keyField = el("div", { class: "form-field key-field" }, [el("span", { text: t("providers.apiKey") }), el("div", { class: "key-control" }, [keyInput, showKey]), el("small", { text: t("providers.keyHelp") })]);
+  const subscriptionActions = el("div", { class: "actions" }, [el("button", { class: "btn secondary", type: "button", text: t("providers.anthropicLogin") }), el("button", { class: "btn secondary", type: "button", text: t("providers.anthropicLogout") })]);
+  function syncAuthFields() {
+    const reused = auth.value === "claude-code";
+    keyField.hidden = reused;
+    subscriptionActions.hidden = !reused;
+    sourceLine.hidden = !reused;
+  }
+  auth.addEventListener("change", syncAuthFields);
+  syncAuthFields();
+  async function runProbe() {
+    probeButton.disabled = true;
+    result.textContent = t("providers.checking");
+    try {
+      const body = auth.value === "claude-code" ? { type: "anthropic", auth: "claude-code" } : { type: "anthropic", auth: "api-key", apiKey: keyInput.value || (existing && existing.apiKey) };
+      const response = await api("/api/providers/probe", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      sourceLine.textContent = anthropicSourceText(response.source);
+      const noCredits = response.ok && /^no-credits:/.test(response.error || "");
+      result.replaceChildren(...[
+        el("span", { class: response.ok && !noCredits ? "ok-text" : noCredits ? "warn-text" : "bad-text", text: noCredits ? t("providers.probeNoCredits") : response.ok ? t("providers.probeOk") : response.auth === "bad-key" ? t("providers.probeBadKey") : auth.value === "claude-code" ? anthropicSourceText(response.source) : t("providers.probeFailed") }),
+        response.error ? el("div", { class: "small", text: response.error.replace(/^no-credits:\s*/, "") }) : null,
+      ].filter(Boolean));
+      if (Array.isArray(response.models) && response.models.length) {
+        foundModels = response.models;
+        selected = new Set(modelsOf(existing).length ? modelsOf(existing).map((model) => model.id) : foundModels.map((model) => model.id));
+        renderModels();
+      }
+    } catch (error) { result.replaceChildren(el("span", { class: "bad-text", text: t("providers.probeFailed") }), el("div", { class: "small", text: error.message })); }
+    finally { probeButton.disabled = false; }
+  }
+  probeButton.addEventListener("click", () => void runProbe());
+  subscriptionActions.children[0].addEventListener("click", async () => {
+    try { const response = await api("/api/claude-login", { method: "POST" }); result.replaceChildren(el("span", { class: "ok-text", text: t("providers.anthropicLoginDone") }), el("div", { class: "small", text: response.output })); await runProbe(); }
+    catch (error) { result.replaceChildren(el("span", { class: "bad-text", text: t("common.actionFailed") }), el("div", { class: "small", text: error.message })); }
+  });
+  subscriptionActions.children[1].addEventListener("click", async () => {
+    try { const response = await api("/api/claude-logout", { method: "POST" }); result.replaceChildren(el("span", { class: "ok-text", text: response.output })); await runProbe(); }
+    catch (error) { toast(t("common.actionFailed"), true, error.message); }
+  });
+  const form = el("div", { class: "provider-form" }, [
+    el("h1", { id: "modal-title", text: existing ? t("providers.edit") : t("providers.addTitle") }),
+    inputRow(t("providers.name"), nameInput, t("providers.nameHelp")), authField, keyField, probeButton, sourceLine, result, subscriptionActions, modelArea,
+    el("label", { class: "check picker-check" }, [pickerInput, el("span", { text: t("providers.showInPicker") })]),
+  ]);
+  const saveButton = el("button", { class: "btn", type: "button", "data-default-action": "", text: existing ? t("common.save") : t("providers.add") });
+  saveButton.addEventListener("click", async () => {
+    const typedName = nameInput.value.trim();
+    if (!typedName) { toast(t("providers.nameRequired"), true); return; }
+    const next = clone(currentConfig);
+    const providerName = existing ? options.name : uniqueName(typedName, next.providers);
+    const checkedModels = form.querySelector(".model-picker").selected();
+    const provider = { type: "anthropic", auth: auth.value, ...(auth.value === "api-key" && (keyInput.value || (existing && existing.apiKey)) ? { apiKey: keyInput.value || existing.apiKey } : {}), models: checkedModels };
+    next.providers[providerName] = provider;
+    if (pickerInput.checked) {
+      const existingSelections = ((next.cli && next.cli.extraModels) || []).map((entry) => ({ id: entry.model, name: entry.name, provider: ((next.direct || []).find((rule) => entry.model.startsWith(rule.prefix)) || {}).provider })).filter((entry) => entry.provider && entry.provider !== options.name);
+      applyPickerSelections(next, [...existingSelections, ...checkedModels.map((model) => ({ ...model, provider: providerName }))]);
+    }
+    saveButton.disabled = true;
+    try { await configRequest(next); currentConfig = next; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); toast(t("common.saved")); }
+    catch (error) { toast(t("common.saveFailed"), true, error.message); }
+    finally { saveButton.disabled = false; }
+  });
+  form.appendChild(el("div", { class: "actions end" }, [el("button", { class: "btn secondary", type: "button", text: t("common.cancel"), onclick: closeModal }), saveButton]));
+  showModal(form);
+  if (auth.value === "claude-code") void runProbe();
+}
 function openProviderForm(options) {
   const existing = options.provider;
   const preset = options.preset || (existing && existing.preset && presetById(existing.preset));
   const isChatgpt = options.kind === "chatgpt" || (existing && existing.type === "chatgpt");
-  const isOpenAi = !isChatgpt && ((existing && existing.type === "openai-compatible") || (preset && preset.kind === "openai-compatible"));
+  const isAnthropic = options.kind === "anthropic" || (existing && existing.type === "anthropic");
+  const isOpenAi = !isChatgpt && !isAnthropic && ((existing && existing.type === "openai-compatible") || (preset && preset.kind === "openai-compatible"));
   const isCustom = options.kind === "custom";
-  const displayName = options.name || (preset && preset.name) || (isChatgpt ? t("providers.chatgpt") : t("providers.customName"));
+  const displayName = options.name || (preset && preset.name) || (isChatgpt ? t("providers.chatgpt") : isAnthropic ? t("providers.anthropic") : t("providers.customName"));
+  if (isAnthropic) { openAnthropicProviderForm(options); return; }
   const nameInput = el("input", { value: displayName, maxlength: "60" });
   const keyInput = el("input", { type: "password", autocomplete: "off", placeholder: t("providers.keyPlaceholder") });
   const showKey = el("button", { class: "eye-button", type: "button", text: t("common.show") });

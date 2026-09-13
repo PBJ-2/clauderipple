@@ -18,6 +18,8 @@ const CACHE_MS = 60_000;
 
 export type ClaudeCodeCredentials = { accessToken: string; expiresAt: number };
 export type CredentialReader = () => string | null;
+/** Source labels are deliberately metadata only: no token value reaches an admin response. */
+export type ClaudeCodeAuthSource = "observed" | "env" | "keychain" | "credentials-file" | "token-file";
 export type ClaudeCodeAuth =
   | { source: "observed"; observed: ObservedClaudeCodeAuthSnapshot }
   | { source: "env" | "token-file" | "stored"; credentials: ClaudeCodeCredentials };
@@ -120,6 +122,20 @@ export class ClaudeCodeAuthStore {
     const tokenFile = readClaudeAuthFile(this.home);
     if (tokenFile) return { source: "token-file", credentials: { accessToken: tokenFile.token, expiresAt: Number.POSITIVE_INFINITY } };
     return stored;
+  }
+
+  /**
+   * Returns only the currently usable credential source. This never returns a credential,
+   * tests validity using the same precedence as get(), and does not refresh anything.
+   */
+  describeSource(): ClaudeCodeAuthSource | null {
+    if (this.observed?.getFresh(this.now())) return "observed";
+    if (this.env.CLAUDE_CODE_OAUTH_TOKEN?.trim()) return "env";
+    const keychain = parseClaudeCodeCredentials(readClaudeCodeKeychain());
+    if (keychain && this.now() < keychain.expiresAt) return "keychain";
+    const credentialsFile = parseClaudeCodeCredentials(readClaudeCodeCredentialsFile());
+    if (credentialsFile && this.now() < credentialsFile.expiresAt) return "credentials-file";
+    return readClaudeAuthFile(this.home) ? "token-file" : null;
   }
 }
 
