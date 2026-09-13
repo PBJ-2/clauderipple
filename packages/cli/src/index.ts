@@ -96,7 +96,7 @@ async function probeWithRetry(o: Parameters<typeof probe>[0], attempts = 16, del
 function starterConfig(port: number): string {
   return JSON.stringify(
     {
-      $docs: "https://github.com/pbj/clauderipple/blob/main/docs/ARCHITECTURE.md",
+      $docs: "https://github.com/PBJ-2/clauderipple/blob/main/docs/ARCHITECTURE.md",
       listen: { host: "127.0.0.1", port },
       upstream: DEFAULTS.upstream,
       providers: {},

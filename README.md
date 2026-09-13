@@ -46,7 +46,7 @@ providers, model mapping, picker, logs.
 Requires Node 24 and Claude Desktop.
 
 ```bash
-git clone https://github.com/pbj/clauderipple && cd clauderipple && npm install
+git clone https://github.com/PBJ-2/clauderipple && cd clauderipple && npm install
 node packages/cli/src/index.ts install      # certs, settings.json env, launchd agent, end-to-end probe
 node packages/cli/src/index.ts ui           # open the local GUI in your browser
 ```
