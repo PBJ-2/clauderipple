@@ -18,7 +18,7 @@ type Status = {
   providers: Record<string, { url?: string; reachable: boolean; type?: string }>;
   settings: { HTTPS_PROXY?: string; NODE_EXTRA_CA_CERTS?: string };
   cliVersion: string;
-  chatgpt?: { quota: Record<string, Record<string, unknown> | null>; auth: Record<string, string> };
+  chatgpt?: { quota: Record<string, Record<string, unknown> | null>; auth: Record<string, string>; signedIn?: Record<string, boolean> };
   picker?: { enabled: boolean; hosts: string[]; last: unknown };
   agentTitle?: boolean;
 };
@@ -274,7 +274,10 @@ function render(): void {
     { type: "separator" },
     { label: L.rerunSetup, click: () => void setup() },
     { label: s ? L.restartRouter : L.startRouter, click: async () => void dialog.showMessageBox({ message: await runCli([s ? "restart" : "start"]) }) },
-    { label: L.signInChatgpt, click: async () => void dialog.showMessageBox({ message: await runCli(["login"]) }) },
+    // Only offered while a ChatGPT provider has no usable credentials (own login or a reused Codex CLI login).
+    ...(s && Object.values(s.chatgpt?.signedIn ?? {}).some((ok) => !ok)
+      ? [{ label: L.signInChatgpt, click: async () => void dialog.showMessageBox({ message: await runCli(["login"]) }) } as Electron.MenuItemConstructorOptions]
+      : []),
     { type: "separator" },
     { label: L.about, click: () => void dialog.showMessageBox({ title: "ClaudeRipple", message: "ClaudeRipple", detail: L.aboutDetail }) },
     { label: L.quit, role: "quit" },

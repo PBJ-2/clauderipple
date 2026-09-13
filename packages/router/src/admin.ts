@@ -165,6 +165,15 @@ async function buildStatus(deps: AdminDeps): Promise<Record<string, unknown>> {
     }),
   );
   const chatgpt = deps.chatgpt?.() ?? { quota: {}, auth: {} };
+  // Credential presence per chatgpt provider, computed from files so it is right even before the first request.
+  const signedIn: Record<string, boolean> = {};
+  for (const [name, p] of Object.entries(cfg.providers)) {
+    if (p.type !== "chatgpt") continue;
+    const own = fs.existsSync(path.join(homeDir(), "chatgpt-auth.json"));
+    const borrowed = fs.existsSync(path.join(os.homedir(), ".codex", "auth.json"));
+    const mode = p.auth ?? "auto";
+    signedIn[name] = mode === "own" ? own : mode === "borrow-codex" ? borrowed : own || borrowed;
+  }
   const env = readSettingsEnv();
   const wantProxy = `http://127.0.0.1:${cfg.listen.port}`;
   return {
@@ -183,7 +192,7 @@ async function buildStatus(deps: AdminDeps): Promise<Record<string, unknown>> {
       pointsAtRouter: env.HTTPS_PROXY === wantProxy,
     },
     cliVersion: cliVersion(),
-    chatgpt,
+    chatgpt: { ...chatgpt, signedIn },
     picker: deps.picker?.() ?? { enabled: false, hosts: [], last: null },
     agentTitle: agentTitleHookEnabled(),
     pickerModels: cfg.cli.extraModels.map((m) => m.name || m.model),
