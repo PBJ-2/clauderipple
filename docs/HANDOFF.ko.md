@@ -37,9 +37,11 @@ ClaudeRipple(클로드리플)은 **주군 데스크톱에서 실전 가동 중�
    `messagesInFlight`가 0인 순간을 골라서.**
 
 ## 주군이 직접 할 일 (세션이 못 함)
-- **피커 모드 켜기**(아직 안 하심): `cd ~/Documents/ClaudeRipple && node packages/cli/src/index.ts picker on`
-  → macOS 암호 창(키체인 신뢰) → 라우터 자동 재시작(드레인) → **Claude Desktop 완전 종료 후 재실행** → Code 탭 피커에
-  GPT-5.6 Terra/Sol/Luna, GPT-6 Astra가 보이는지 확인. 되돌리기 `picker off`.
+- **피커 모드 켜기**(아직 안 하심): 메뉴 막대 ClaudeRipple 아이콘 → "Code 탭 피커에 GPT 모델 이름 표시…"
+  (또는 GUI 상태 화면의 "모델 피커" 카드 버튼, 또는 터미널 `clauderipple picker on`) → macOS 암호 창(키체인 신뢰)
+  → **Claude Desktop 완전 종료 후 재실행** → Code 탭 피커에 GPT-5.6 Terra/Sol/Luna, GPT-6 Astra가 보이는지 확인.
+  라우터 재시작은 필요 없다(config 핫리로드). 되돌리기는 같은 메뉴의 "끄기". 앱은 `/Applications/ClaudeRipple.app`
+  (빌드 원본 `packages/app/release/mac-arm64/`).
 - proxenos 데몬(8787)·프로토타입(8790) 정리는 주군 확인 후.
 
 ## 다음 세션이 할 일 (우선순위순)
