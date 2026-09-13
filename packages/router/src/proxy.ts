@@ -358,7 +358,7 @@ export class Proxy {
       target: source,
       stream: json?.stream === true,
     };
-    const requestedEffort = route ? effortOf(json ?? {}) : undefined;
+    const requestedEffort = effortOf(json ?? {});
     if (requestedEffort) record.effort = requestedEffort;
 
     let target: { protocol: "http:" | "https:"; host: string; port: number; agent: http.Agent | https.Agent; extraHeaders: Record<string, string> };

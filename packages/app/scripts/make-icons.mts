@@ -109,16 +109,40 @@ for (const v of ["ok", "warn", "down"] as Variant[]) {
   fs.writeFileSync(path.join(out, `${base}.png`), png(22, (x, y) => [0, 0, 0, Math.round(draw(v, 1)(x, y) * 255)]));
   fs.writeFileSync(path.join(out, `${base}@2x.png`), png(44, (x, y) => [0, 0, 0, Math.round(draw(v, 2)(x, y) * 255)]));
 }
-// 1024px application icon: blue drop (#2f6fed) over a white rounded square, with the same ripple motif.
+// 1024px application icon in the macOS style: an 824px rounded square (radius ≈22.4%) centred on the
+// 1024 canvas, a deep-blue→sky gradient with a soft top highlight, the drop and its ripple in white
+// (rings fading outward), and a faint drop shadow under the drop.
+function roundedSquareAlpha(x: number, y: number, x0: number, y0: number, w: number, r: number): number {
+  const cx = Math.max(x0 + r, Math.min(x, x0 + w - r));
+  const cy = Math.max(y0 + r, Math.min(y, y0 + w - r));
+  const d = Math.hypot(x - cx, y - cy);
+  return Math.max(0, Math.min(1, r - d + 0.5));
+}
 function appIcon(x: number, y: number): [number, number, number, number] {
   const size = 1024;
-  const radius = 190;
-  const edge = Math.min(x, y, size - x, size - y);
-  const inSquare = edge >= radius || Math.hypot(Math.max(0, radius - x), Math.max(0, radius - y)) <= radius || Math.hypot(Math.max(0, x - (size - radius)), Math.max(0, radius - y)) <= radius || Math.hypot(Math.max(0, radius - x), Math.max(0, y - (size - radius))) <= radius || Math.hypot(Math.max(0, x - (size - radius)), Math.max(0, y - (size - radius))) <= radius;
-  if (!inSquare) return [0, 0, 0, 0];
-  const scale = size / 22;
-  const alpha = draw("ok", scale)(x, y);
-  return alpha > 0 ? [47, 111, 237, Math.round(alpha * 255)] : [255, 255, 255, 255];
+  const margin = 100;
+  const w = size - margin * 2;
+  const r = 0.2237 * w;
+  const shape = roundedSquareAlpha(x, y, margin, margin, w, r);
+  if (shape <= 0) return [0, 0, 0, 0];
+  // background gradient: top #4c8dff → bottom #1f4fd6, plus a soft radial highlight top-left
+  const t = (y - margin) / w;
+  let R = 76 + (31 - 76) * t, G = 141 + (79 - 141) * t, B = 255 + (214 - 255) * t;
+  const hl = Math.max(0, 1 - Math.hypot(x - (margin + w * 0.3), y - (margin + w * 0.15)) / (w * 0.9)) * 0.18;
+  R += (255 - R) * hl; G += (255 - G) * hl; B += (255 - B) * hl;
+  // glyph: reuse the tray drawing scaled into the square (22-unit grid → 0.7 of the square, centred)
+  const g = w * 0.72 / 22;
+  const gx = margin + (w - 22 * g) / 2;
+  const gy = margin + (w - 22 * g) / 2 - g * 0.6;
+  const glyph = draw("ok", g)(x - gx, y - gy);
+  // rings fade with distance from the drop's centre line
+  const ringFade = y > gy + 12.5 * g ? Math.max(0.55, 1 - (y - (gy + 12.5 * g)) / (12 * g)) : 1;
+  const a = glyph * ringFade;
+  // faint shadow below the drop
+  const sh = draw("ok", g)(x - gx, y - gy - g * 0.9) * 0.22;
+  R = R * (1 - sh); G = G * (1 - sh); B = B * (1 - sh);
+  R = R + (255 - R) * a; G = G + (255 - G) * a; B = B + (255 - B) * a;
+  return [Math.round(R), Math.round(G), Math.round(B), Math.round(shape * 255)];
 }
 
 const build = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "build");
