@@ -11,7 +11,10 @@ export type ProviderPreset = {
   modelsUrl?: string;
   modelsAuthHeader?: "x-api-key" | "authorization-bearer";
   fallbackModels: { id: string; name: string }[];
-  supportsEffort: boolean;
+  /** Empty means output_config.effort is stripped for this provider. */
+  effortLevels: string[];
+  /** Whether adaptive CLI thinking can safely become Anthropic enabled thinking. */
+  thinking: "enabled" | "none";
   verified: boolean;
   notes?: string;
   docsUrl: string;
@@ -29,7 +32,10 @@ export const PRESETS: ProviderPreset[] = [
       { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro" },
       { id: "deepseek-flash", name: "DeepSeek Flash" },
     ],
-    supportsEffort: true,
+    // https://api-docs.deepseek.com/guides/anthropic_api/ documents thinking and output_config.effort,
+    // but no accepted effort-level set for its Anthropic endpoint; strip effort rather than guess.
+    effortLevels: [],
+    thinking: "enabled",
     verified: true,
     notes: "Anthropic thinking is accepted; budget_tokens is ignored.",
     docsUrl: "https://api-docs.deepseek.com/guides/anthropic_api/",
@@ -47,7 +53,9 @@ export const PRESETS: ProviderPreset[] = [
       { id: "kimi-k3", name: "Kimi K3" },
       { id: "kimi-k2.7-code", name: "Kimi K2.7 Code" },
     ],
-    supportsEffort: false,
+    // https://platform.kimi.ai/docs/api/overview documents the endpoint but no Anthropic effort/thinking contract.
+    effortLevels: [],
+    thinking: "none",
     verified: true,
     notes: "K3 exists and is documented alongside K2.7 Code for Claude Code.",
     docsUrl: "https://platform.kimi.ai/docs/api/overview",
@@ -60,7 +68,9 @@ export const PRESETS: ProviderPreset[] = [
     anthropicBaseUrl: "https://api.z.ai/api/anthropic",
     authHeader: "authorization-bearer",
     fallbackModels: [{ id: "glm-5.2", name: "GLM-5.2" }],
-    supportsEffort: false,
+    // https://docs.z.ai/devpack/tool/others documents the endpoint but not an Anthropic effort/thinking contract.
+    effortLevels: [],
+    thinking: "none",
     verified: false,
     notes: "The Anthropic endpoint is documented; model discovery and an effort field were not verified in the Anthropic-protocol documentation.",
     docsUrl: "https://docs.z.ai/devpack/tool/others",
@@ -76,7 +86,10 @@ export const PRESETS: ProviderPreset[] = [
       { id: "MiniMax-M3", name: "MiniMax M3" },
       { id: "MiniMax-M2.7", name: "MiniMax M2.7" },
     ],
-    supportsEffort: true,
+    // https://platform.minimax.io/docs/api-reference/text-anthropic-api documents adaptive thinking,
+    // but not output_config.effort.
+    effortLevels: [],
+    thinking: "enabled",
     verified: true,
     notes: "Uses the thinking parameter; M3 supports adaptive thinking.",
     docsUrl: "https://platform.minimax.io/docs/api-reference/text-anthropic-api",
@@ -92,7 +105,10 @@ export const PRESETS: ProviderPreset[] = [
       { id: "qwen3.8-max", name: "Qwen 3.8 Max" },
       { id: "qwen3.6-flash", name: "Qwen 3.6 Flash" },
     ],
-    supportsEffort: false,
+    // https://help.aliyun.com/en/model-studio/anthropic-api-messages documents enabled thinking;
+    // it explicitly does not support reasoning_effort on the Anthropic endpoint.
+    effortLevels: [],
+    thinking: "enabled",
     verified: true,
     notes: "Keys are region-specific. The Anthropic-compatible endpoint has no model-list endpoint.",
     docsUrl: "https://help.aliyun.com/en/model-studio/claude-code",
@@ -108,7 +124,10 @@ export const PRESETS: ProviderPreset[] = [
       { id: "qwen3.8-max", name: "Qwen 3.8 Max" },
       { id: "qwen3.6-flash", name: "Qwen 3.6 Flash" },
     ],
-    supportsEffort: false,
+    // https://help.aliyun.com/en/model-studio/anthropic-api-messages documents enabled thinking;
+    // it explicitly does not support reasoning_effort on the Anthropic endpoint.
+    effortLevels: [],
+    thinking: "enabled",
     verified: true,
     notes: "Keys are region-specific. The Anthropic-compatible endpoint has no model-list endpoint.",
     docsUrl: "https://help.aliyun.com/en/model-studio/claude-code",
@@ -127,7 +146,10 @@ export const PRESETS: ProviderPreset[] = [
       { id: "anthropic/claude-sonnet-5", name: "Claude Sonnet 5" },
       { id: "anthropic/claude-opus-5", name: "Claude Opus 5" },
     ],
-    supportsEffort: true,
+    // https://openrouter.ai/docs/api/api-reference/anthropic-messages/create-a-message supports
+    // provider passthrough; per-model capabilities vary, so low/medium/high is the conservative default.
+    effortLevels: ["low", "medium", "high"],
+    thinking: "enabled",
     verified: true,
     notes: "The Anthropic skin passes through thinking blocks and native tool use.",
     docsUrl: "https://openrouter.ai/docs/cookbook/coding-agents/claude-code-integration",

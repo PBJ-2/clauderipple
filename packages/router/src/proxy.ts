@@ -25,6 +25,8 @@ import type { Logger } from "./log.ts";
 import { UpstreamHealth } from "./health.ts";
 import { BOOTSTRAP_PATH, injectBootstrap } from "./bootstrap.ts";
 import { THREAD_UNSUPPORTED, effortOf, resolve, rewriteBody, stripThreadFields, threadDecision } from "./routing.ts";
+import { forwardCompatibleHeader, resolveCompatibleCaps, sanitizeForCompatible } from "./compat.ts";
+import { PRESETS } from "./presets.ts";
 import { ChatGptAdapter } from "./providers/chatgpt/index.ts";
 import type { AnthropicRequest } from "./providers/chatgpt/translate.ts";
 import { terminateHosts } from "./config.ts";
@@ -361,6 +363,8 @@ export class Proxy {
     const requestedEffort = effortOf(json ?? {});
     if (requestedEffort) record.effort = requestedEffort;
 
+    let compatCaps: ReturnType<typeof resolveCompatibleCaps> | undefined;
+    let compatChanges: string[] = [];
     let target: { protocol: "http:" | "https:"; host: string; port: number; agent: http.Agent | https.Agent; extraHeaders: Record<string, string>; basePath?: string };
     if (route && json) {
       const provider = cfg.providers[route.provider];
@@ -370,15 +374,15 @@ export class Proxy {
         return;
       }
       rewriteBody(json, route, cfg.effortClamp);
-      const td = threadDecision(json);
-      if (td === "refuse") {
-        const out = JSON.stringify(THREAD_UNSUPPORTED);
-        res.writeHead(400, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
-        finish("400", out.length, "thread continue refused → CLI resends stateless", false);
-        return;
-      }
-      if (td === "strip") stripThreadFields(json);
       if (provider.type === "chatgpt") {
+        const td = threadDecision(json);
+        if (td === "refuse") {
+          const out = JSON.stringify(THREAD_UNSUPPORTED);
+          res.writeHead(400, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
+          finish("400", out.length, "thread continue refused → CLI resends stateless", false);
+          return;
+        }
+        if (td === "strip") stripThreadFields(json);
         record = { ...record, target: route.model, provider: route.provider };
         const routeEffort = effortOf(json);
         if (routeEffort) record.effort = routeEffort;
@@ -393,6 +397,14 @@ export class Proxy {
         }
         return;
       }
+      const preset = provider.preset ? PRESETS.find((entry) => entry.id === provider.preset) : undefined;
+      compatCaps = resolveCompatibleCaps(
+        preset ? { effortLevels: preset.effortLevels, thinking: preset.thinking } : undefined,
+        provider.caps,
+      );
+      const sanitized = sanitizeForCompatible(json, compatCaps);
+      json = sanitized.json;
+      compatChanges = sanitized.changes;
       body = Buffer.from(JSON.stringify(json));
       const u = new URL(provider.url);
       const protocol = u.protocol === "https:" ? "https:" : "http:";
@@ -432,11 +444,17 @@ export class Proxy {
       // Bootstrap responses are edited: keep the client's accept-encoding as-is (some edges misbehave without it)
       // and decompress whatever comes back before editing.
       if (lk in target.extraHeaders) continue;
+      // Anthropic beta flags opt into features most compatible providers have not implemented.
+      if (compatCaps && !forwardCompatibleHeader(lk, compatCaps)) {
+        compatChanges.push("anthropic-beta");
+        continue;
+      }
       // Picker bootstrap: never let the renderer revalidate against a cached (unedited) copy.
       if (isPickerBootstrap && (lk === "if-none-match" || lk === "if-modified-since")) continue;
       headers.push(k, raw[i + 1]!);
     }
     for (const [k, v] of Object.entries(target.extraHeaders)) headers.push(k, v);
+    if (route && compatChanges.length > 0) log.info(`COMPAT ${route.provider}: ${compatChanges.join(", ")}`);
     headers.push("host", target.protocol === "https:" && target.port === 443 ? target.host : `${target.host}:${target.port}`);
     // No content-length on body-less GET/HEAD: some edges reject it; Chromium never sends it.
     if (body.length > 0 || (method !== "GET" && method !== "HEAD")) headers.push("content-length", String(body.length));

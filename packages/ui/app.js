@@ -72,19 +72,29 @@ function groupedModels(config) {
   }
   return groups;
 }
-function providerSupportsEffort(provider) {
-  if (!provider) return false;
-  if (provider.type === "chatgpt") return true;
-  const preset = provider.preset && presetById(provider.preset);
-  return Boolean(preset && preset.supportsEffort);
-}
 function presetById(id) { return presets.find((preset) => preset.id === id); }
+function fallbackEffortLevels(provider, model) {
+  if (!provider) return [];
+  if (provider.type === "chatgpt") return model === "gpt-5.6-luna" ? ["low", "medium", "high", "xhigh", "max", "ultra"] : ["low", "medium", "high", "xhigh", "max"];
+  const preset = provider.preset && presetById(provider.preset);
+  return provider.caps && Array.isArray(provider.caps.effortLevels) ? provider.caps.effortLevels : (preset && preset.effortLevels) || [];
+}
+function effortLevelsFor(providerName, model) {
+  const provider = currentConfig && currentConfig.providers && currentConfig.providers[providerName];
+  const catalog = effortCatalog && effortCatalog.providers && effortCatalog.providers[providerName];
+  if (catalog) return (catalog.models && catalog.models[model]) || catalog.default || [];
+  return fallbackEffortLevels(provider, model);
+}
+function providerSupportsEffort(provider, model) {
+  return fallbackEffortLevels(provider, model).length > 0;
+}
 
 let currentConfig = null;
 let status = null;
 let loadedUiRevision = null;
 let claudeModels = FALLBACK_CLAUDE_MODELS;
 let presets = FALLBACK_PRESETS;
+let effortCatalog = null;
 let slotsLoaded = false;
 let providersLoaded = false;
 let pickerBusy = false;
@@ -117,9 +127,10 @@ showView((location.hash || "#health").slice(1) || "health");
 })();
 
 async function loadCatalogs() {
-  const [modelResult, presetResult] = await Promise.allSettled([api("/api/claude-models"), api("/api/presets")]);
+  const [modelResult, presetResult, effortResult] = await Promise.allSettled([api("/api/claude-models"), api("/api/presets"), api("/api/effort-levels")]);
   if (modelResult.status === "fulfilled" && Array.isArray(modelResult.value.models) && modelResult.value.models.length) claudeModels = modelResult.value.models;
   if (presetResult.status === "fulfilled" && Array.isArray(presetResult.value.presets) && presetResult.value.presets.length) presets = presetResult.value.presets;
+  if (effortResult.status === "fulfilled" && effortResult.value && effortResult.value.providers) effortCatalog = effortResult.value;
 }
 
 // ---- Status -------------------------------------------------------------------------
@@ -267,10 +278,10 @@ function targetSelect(route) {
   select.value = route ? JSON.stringify([route.provider, route.model]) : "";
   return select;
 }
-function effortSelect(value) {
+function effortSelect(value, levels) {
   const select = el("select", {});
-  for (const effort of ["low", "medium", "high", "xhigh", "max"]) select.appendChild(selectOption(effort, effort));
-  select.value = value || "high";
+  for (const effort of levels) select.appendChild(selectOption(effort, effort));
+  select.value = levels.includes(value) ? value : (levels.includes("high") ? "high" : levels[0]);
   return select;
 }
 function routeFromTarget(value) {
@@ -284,16 +295,26 @@ function slotRow(id, route) {
   const row = el("tr", {});
   const source = claudeSelect(id);
   const target = targetSelect(route);
-  const effort = effortSelect(route && route.effort);
+  const initialTarget = routeFromTarget(target.value);
+  const effort = effortSelect(route && route.effort, initialTarget ? effortLevelsFor(initialTarget.provider, initialTarget.model) : ["high"]);
   const effortCell = el("td", {}, [effort]);
   const remove = el("button", { class: "icon-btn", type: "button", title: t("common.remove"), text: "×", onclick: () => { row.remove(); updateSlotSummary(); scheduleSlotsSave(); } });
   function sync() {
     const selected = routeFromTarget(target.value);
-    const supported = selected && providerSupportsEffort(currentConfig.providers[selected.provider]);
+    const levels = selected ? effortLevelsFor(selected.provider, selected.model) : [];
+    const supported = levels.length > 0;
+    const prior = effort.value;
+    effort.replaceChildren(...levels.map((level) => selectOption(level, level)));
+    if (supported) effort.value = levels.includes(prior) ? prior : (levels.includes("high") ? "high" : levels[0]);
     effort.disabled = !supported;
     effortCell.classList.toggle("muted-cell", !supported);
-    if (!supported) effortCell.dataset.empty = t("common.notAvailable");
-    else delete effortCell.dataset.empty;
+    if (!supported) {
+      effortCell.dataset.empty = t("common.notAvailable");
+      effortCell.title = t("slots.noEffort");
+    } else {
+      delete effortCell.dataset.empty;
+      effortCell.removeAttribute("title");
+    }
     updateSlotSummary();
   }
   target.addEventListener("change", () => { sync(); scheduleSlotsSave(); });
@@ -374,7 +395,7 @@ function updateSlotSummary() {
     const source = claudeModels.find((model) => model.id === item.id);
     const group = groupedModels(currentConfig).find((itemGroup) => itemGroup.name === item.route.provider);
     const target = group && group.models.find((model) => model.id === item.route.model);
-    return `${labelOf(source || { id: item.id })} → ${labelOf(target || { id: item.route.model })}${providerSupportsEffort(currentConfig.providers[item.route.provider]) ? ` (${item.effort})` : ""}`;
+    return `${labelOf(source || { id: item.id })} → ${labelOf(target || { id: item.route.model })}${effortLevelsFor(item.route.provider, item.route.model).length ? ` (${item.effort})` : ""}`;
   });
   $("#slots-summary").textContent = summaries.length ? summaries.join(" · ") : t("slots.noChanges");
 }
@@ -402,7 +423,7 @@ async function saveSlots() {
     const item = row._get();
     if (seen.has(item.id)) { slotsStatus(t("slots.duplicate"), true); slotsSaving = false; return; }
     seen.add(item.id);
-    if (item.route) routes[item.id] = { ...item.route, ...(providerSupportsEffort(next.providers[item.route.provider]) ? { effort: item.effort } : {}) };
+    if (item.route) routes[item.id] = { ...item.route, ...(effortLevelsFor(item.route.provider, item.route.model).length ? { effort: item.effort } : {}) };
   }
   next.routes = routes;
   if (next.picker && next.picker.enabled) applyPickerSelections(next, pickerSelectionsFromChecklist());
@@ -454,6 +475,7 @@ function providerCard(name, provider) {
   const title = el("h2", { text: name });
   const stateLine = el("div", { class: "provider-state" });
   const modelText = el("p", { class: "small" });
+  const effortText = el("p", { class: "small" });
   const check = el("button", { class: "btn secondary", type: "button", text: t("providers.check") });
   const edit = el("button", { class: "btn secondary", type: "button", text: t("common.edit") });
   const remove = el("button", { class: "btn danger", type: "button", text: t("common.remove") });
@@ -465,6 +487,8 @@ function providerCard(name, provider) {
     stateLine.replaceChildren(...[providerState(name, provider), el("span", { class: "small", text: kind }), state && !state.ok && state.error ? el("span", { class: "small bad-text", text: state.error }) : null].filter(Boolean));
     const models = modelsOf(provider);
     modelText.textContent = models.length ? t("providers.modelsCount", { count: models.length, names: models.map(labelOf).join(", ") }) : t("providers.noModels");
+    const levels = effortLevelsFor(name, models[0] && models[0].id);
+    effortText.textContent = t("providers.effortLevels", { levels: levels.length ? levels.join(" · ") : t("providers.effortNone") });
   };
   check.addEventListener("click", async () => { check.disabled = true; await probeProvider(name, provider); check.disabled = false; draw(); });
   edit.addEventListener("click", () => openProviderForm({ name, provider }));
@@ -478,7 +502,7 @@ function providerCard(name, provider) {
     try { await configRequest(next); currentConfig = next; providersLoaded = false; slotsLoaded = false; await loadProviders(); toast(t("common.saved")); } catch (error) { toast(t("common.saveFailed"), true, error.message); }
   });
   const quota = quotaLine(name);
-  card.append(el("div", { class: "toolbar" }, [title, el("div", { class: "right" }, [check, edit, remove])]), stateLine, modelText, quota ? el("div", { class: "small", text: quota }) : document.createTextNode(""));
+  card.append(el("div", { class: "toolbar" }, [title, el("div", { class: "right" }, [check, edit, remove])]), stateLine, modelText, effortText, quota ? el("div", { class: "small", text: quota }) : document.createTextNode(""));
   draw();
   return card;
 }
@@ -599,7 +623,15 @@ function openProviderForm(options) {
   let foundModels = initialModels;
   const currentChecked = new Set(modelsOf(existing).map((model) => model.id));
   const modelsBox = modelChecklist(foundModels, currentChecked.size ? currentChecked : new Set(foundModels.map((model) => model.id)));
-  const modelArea = el("div", { class: "form-field" }, [el("span", { text: t("providers.models") }), hint(t("providers.modelsHelp")), modelsBox]);
+  const providerEffortLevels = isChatgpt
+    ? effortLevelsFor(options.name || "chatgpt", "gpt-5.6-terra")
+    : (existing ? effortLevelsFor(options.name, initialModels[0] && initialModels[0].id) : fallbackEffortLevels({ ...(preset ? { preset: preset.id } : {}), ...(isCustom ? { caps: {} } : {}) }, initialModels[0] && initialModels[0].id));
+  const modelArea = el("div", { class: "form-field" }, [
+    el("span", { text: t("providers.models") }),
+    hint(t("providers.modelsHelp")),
+    el("small", { text: t("providers.effortLevels", { levels: providerEffortLevels.length ? providerEffortLevels.join(" · ") : t("providers.effortNone") }) }),
+    modelsBox,
+  ]);
   const result = el("div", { class: "probe-result" });
   const probeButton = el("button", { class: "btn secondary", type: "button", text: t("providers.check") });
   const advanced = el("details", { class: "details" });
@@ -624,7 +656,7 @@ function openProviderForm(options) {
     auth.value = (existing && existing.auth) || "auto";
     const login = el("button", { class: "btn secondary", type: "button", text: t("providers.login") });
     login.addEventListener("click", () => toast(t("providers.loginHint")));
-    const effort = effortSelect((existing && existing.defaultEffort) || "high");
+    const effort = effortSelect((existing && existing.defaultEffort) || "high", ["low", "medium", "high", "xhigh", "max"]);
     const identity = el("input", { type: "checkbox", checked: !(existing && existing.identity === false) });
     const append = el("textarea", { rows: "2", value: (existing && existing.instructionsAppend) || "" });
     chatgptFields = [

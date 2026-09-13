@@ -29,6 +29,19 @@ test("validate accepts named anthropic-compatible model entries and rejects inva
   assert.ok(invalid.some((error) => error.includes("models must be entries")));
 });
 
+test("validate accepts compatible caps and rejects invalid values", () => {
+  const valid = validate({
+    ...DEFAULTS,
+    providers: { p: { type: "anthropic-compatible", url: "https://example.test", caps: { effortLevels: ["low", "high"], thinking: "enabled", betas: true, cacheControl: false } } },
+  });
+  assert.deepEqual(valid, []);
+  const invalid = validate({
+    ...DEFAULTS,
+    providers: { p: { type: "anthropic-compatible", url: "https://example.test", caps: { effortLevels: [3] as unknown as string[], thinking: "adaptive" as "enabled" } } },
+  });
+  assert.ok(invalid.some((error) => error.includes("caps must contain")));
+});
+
 test("ConfigStore hot-reloads on mtime change and keeps last good config on errors", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cr-cfg-"));
   const file = path.join(dir, "config.json");

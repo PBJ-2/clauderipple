@@ -126,6 +126,26 @@ test("GET /api/claude-models uses named entries from code and ccd picker surface
   }
 });
 
+test("GET /api/effort-levels reports compatible defaults and ChatGPT model exceptions", async () => {
+  const cfg = makeCfg({
+    providers: {
+      openrouter: { type: "anthropic-compatible", url: "https://openrouter.ai/api", preset: "openrouter" },
+      custom: { type: "anthropic-compatible", url: "https://example.test", caps: { effortLevels: ["max"], thinking: "none" } },
+      gpt: { type: "chatgpt" },
+    },
+  });
+  await withAdmin(cfg, async ({ port }) => {
+    const res = await fetch(`${base()}:${port}/api/effort-levels`);
+    assert.equal(res.status, 200);
+    const body = await res.json() as { providers: Record<string, { default: string[]; models?: Record<string, string[]> }> };
+    assert.deepEqual(body.providers.anthropic?.default, ["low", "medium", "high", "max"]);
+    assert.deepEqual(body.providers.openrouter?.default, ["low", "medium", "high"]);
+    assert.deepEqual(body.providers.custom?.default, ["max"]);
+    assert.deepEqual(body.providers.gpt?.models?.["gpt-5.6-luna"], ["low", "medium", "high", "xhigh", "max", "ultra"]);
+    assert.deepEqual(body.providers.gpt?.models?.["gpt-5.6-terra"], ["low", "medium", "high", "xhigh", "max"]);
+  });
+});
+
 test("GET /api/config returns the config file contents", async () => {
   const cfg = makeCfg({ routes: { "claude-opus-4-8": { provider: "p", model: "m" } }, providers: { p: { type: "anthropic-compatible", url: "http://x" } } });
   await withAdmin(cfg, async ({ port }) => {

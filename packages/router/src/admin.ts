@@ -19,6 +19,7 @@ import type { Logger } from "./log.ts";
 import type { Stats } from "./proxy.ts";
 import type { RequestLog } from "./requestlog.ts";
 import { PRESETS, type ProviderPreset } from "./presets.ts";
+import { resolveCompatibleCaps } from "./compat.ts";
 
 const MAX_BODY = 1024 * 1024;
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -59,6 +60,34 @@ type ProbeRequest = {
   /** Model id to use for the auth check when the provider has no listing endpoint (e.g. the preset's first fallback). */
   probeModel?: string;
 };
+
+const ANTHROPIC_EFFORT_LEVELS = ["low", "medium", "high", "max"];
+const CHATGPT_DEFAULT_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
+const CHATGPT_LUNA_EFFORT_LEVELS = [...CHATGPT_DEFAULT_EFFORT_LEVELS, "ultra"];
+
+/** Shared catalog for the GUI: model-specific values override provider defaults. */
+export function effortLevels(cfg: Config): { providers: Record<string, { default: string[]; models?: Record<string, string[]> }> } {
+  const providers: Record<string, { default: string[]; models?: Record<string, string[]> }> = {
+    anthropic: { default: ANTHROPIC_EFFORT_LEVELS },
+  };
+  for (const [name, provider] of Object.entries(cfg.providers)) {
+    if (provider.type === "chatgpt") {
+      providers[name] = {
+        default: CHATGPT_DEFAULT_EFFORT_LEVELS,
+        models: {
+          "gpt-5.6-luna": CHATGPT_LUNA_EFFORT_LEVELS,
+          "gpt-5.6-terra": CHATGPT_DEFAULT_EFFORT_LEVELS,
+          "gpt-5.6-sol": CHATGPT_DEFAULT_EFFORT_LEVELS,
+          "gpt-6-astra": CHATGPT_DEFAULT_EFFORT_LEVELS,
+        },
+      };
+      continue;
+    }
+    const preset = provider.preset ? PRESETS.find((entry) => entry.id === provider.preset) : undefined;
+    providers[name] = { default: resolveCompatibleCaps(preset ? { effortLevels: preset.effortLevels, thinking: preset.thinking } : undefined, provider.caps).effortLevels };
+  }
+  return { providers };
+}
 
 const CLAUDE_MODEL_FALLBACK: { id: string; name: string }[] = [
   { id: "claude-fable-5-1", name: "Fable 5.1" },
@@ -415,6 +444,10 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
       }
       if (pathname === "/api/claude-models" && method === "GET") {
         sendJson(res, 200, pickerModels(deps));
+        return;
+      }
+      if (pathname === "/api/effort-levels" && method === "GET") {
+        sendJson(res, 200, effortLevels(deps.config()));
         return;
       }
       if (pathname === "/api/providers/probe" && method === "POST") {

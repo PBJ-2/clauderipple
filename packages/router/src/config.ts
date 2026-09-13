@@ -7,6 +7,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { CompatibleCaps } from "./compat.ts";
 
 export type AnthropicCompatibleProvider = {
   /** An HTTP(S) endpoint that speaks Anthropic Messages (DeepSeek, Kimi, GLM, MiniMax, proxenos, ...). */
@@ -19,6 +20,8 @@ export type AnthropicCompatibleProvider = {
   preset?: string;
   /** Optional model entries offered by the GUI as suggestions. */
   models?: { id: string; name?: string }[];
+  /** Compatibility overrides. Unspecified fields fall back to the preset, then strict defaults. */
+  caps?: CompatibleCaps;
 };
 
 export type ChatGptProvider = {
@@ -153,6 +156,16 @@ export function validate(c: Config): string[] {
       if (p.models !== undefined) {
         if (!Array.isArray(p.models) || p.models.some((m) => !m || typeof m.id !== "string" || (m.name !== undefined && typeof m.name !== "string"))) {
           errors.push(`provider ${name}: models must be entries with string id and optional string name`);
+        }
+      }
+      if (p.caps !== undefined) {
+        const caps = p.caps;
+        if (!caps || typeof caps !== "object" || Array.isArray(caps) ||
+          (caps.effortLevels !== undefined && (!Array.isArray(caps.effortLevels) || caps.effortLevels.some((level) => typeof level !== "string"))) ||
+          (caps.thinking !== undefined && caps.thinking !== "enabled" && caps.thinking !== "none") ||
+          (caps.betas !== undefined && typeof caps.betas !== "boolean") ||
+          (caps.cacheControl !== undefined && typeof caps.cacheControl !== "boolean")) {
+          errors.push(`provider ${name}: caps must contain effortLevels?: string[], thinking?: "enabled"|"none", betas?: boolean, cacheControl?: boolean`);
         }
       }
     } else if (p.type === "chatgpt") {
