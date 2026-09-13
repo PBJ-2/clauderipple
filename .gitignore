@@ -9,3 +9,4 @@ packages/app/release/
 packages/app/build/icon.png
 packages/app/build/icon.icns
 packages/app/build/*.iconset
+packages/app/release-dev/

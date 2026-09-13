@@ -182,6 +182,22 @@ chat is out of reach for every approach, ours included.
   (char/4, floored by the last measured total for the conversation) so the app's
   token counter and the CLI's context accounting are not zero.
 
+- **Provider base path.** Anthropic-compatible vendors mount the API under a path
+  (`https://api.deepseek.com/anthropic`, `https://openrouter.ai/api`,
+  `https://dashscope-intl.aliyuncs.com/apps/anthropic`); the router prepends it to
+  the CLI's `/v1/messages…`. Forwarding to the bare host returned the vendor's
+  website as HTTP 200 HTML (measured 2026-09-13).
+- **Anthropic-only request features.** Claude Code sends `thinking.block_binding`,
+  `defer_loading` tools, `context_management`, `output_config.effort`, and an
+  `anthropic-beta` header; compatible vendors answer 400 for them
+  (`Thinking.block_binding is not supported…`, `Deferred custom tools are only
+  supported on Anthropic models…`). `packages/router/src/compat.ts` strips or
+  clamps them per provider capability (preset `effortLevels` / `thinking`).
+- **New picker entries need a new session.** The CLI validates `set_model`
+  against the model list it received at session start (`additional_model_options`
+  in its bootstrap); a model added afterwards is "not a recognized model id"
+  until a new session starts.
+
 ## 5. Failure modes that must not exist in the product (all observed)
 
 | Observed | Product requirement |

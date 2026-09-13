@@ -10,7 +10,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "npm run build && electron .",
     "icons": "node scripts/make-icons.mts",
-    "dist": "npm run icons && npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --dir",
+    "dist": "npm run icons && npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --dir -c.directories.output=release-dev",
     "release": "npm run icons && npm run build && electron-builder --mac --arm64 --x64"
   },
   "devDependencies": {
@@ -21,7 +21,9 @@
     "appId": "com.clauderipple.app",
     "productName": "ClaudeRipple",
     "electronVersion": "38.8.6",
-    "directories": { "output": "release" },
+    "directories": {
+      "output": "release"
+    },
     "mac": {
       "category": "public.app-category.developer-tools",
       "hardenedRuntime": true,
@@ -29,20 +31,42 @@
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
       "notarize": true,
-      "target": ["dmg", "zip"],
+      "target": [
+        "dmg",
+        "zip"
+      ],
       "artifactName": "${productName}-${version}-${arch}.${ext}",
       "icon": "build/icon.icns",
       "extendInfo": {
         "LSUIElement": true
       }
     },
-    "files": ["dist/**", "assets/**", "package.json"],
+    "files": [
+      "dist/**",
+      "assets/**",
+      "package.json"
+    ],
     "extraResources": [
-      { "from": "../router/src", "to": "clauderipple/packages/router/src" },
-      { "from": "../cli/src", "to": "clauderipple/packages/cli/src" },
-      { "from": "../ui", "to": "clauderipple/packages/ui" },
-      { "from": "../../LICENSE", "to": "clauderipple/LICENSE" },
-      { "from": "../../README.md", "to": "clauderipple/README.md" }
+      {
+        "from": "../router/src",
+        "to": "clauderipple/packages/router/src"
+      },
+      {
+        "from": "../cli/src",
+        "to": "clauderipple/packages/cli/src"
+      },
+      {
+        "from": "../ui",
+        "to": "clauderipple/packages/ui"
+      },
+      {
+        "from": "../../LICENSE",
+        "to": "clauderipple/LICENSE"
+      },
+      {
+        "from": "../../README.md",
+        "to": "clauderipple/README.md"
+      }
     ]
   }
 }
