@@ -104,6 +104,16 @@ function agentTitleHookEnabled(): boolean {
   }
 }
 
+/** Newest mtime of the served GUI files; the page reloads itself when this changes (an open window would otherwise run stale JS). */
+function uiRevision(): string {
+  try {
+    const files = ["index.html", "app.js", "style.css", "i18n.js", "presets-fallback.js"];
+    return String(Math.max(...files.map((f) => { try { return fs.statSync(path.join(UI_ROOT, f)).mtimeMs; } catch { return 0; } })));
+  } catch {
+    return "0";
+  }
+}
+
 function cliVersion(): string {
   const dir = path.join(os.homedir(), "Library", "Application Support", "Claude", "claude-code");
   try {
@@ -175,6 +185,7 @@ async function buildStatus(deps: AdminDeps): Promise<Record<string, unknown>> {
     picker: deps.picker?.() ?? { enabled: false, hosts: [], last: null },
     agentTitle: agentTitleHookEnabled(),
     pickerModels: cfg.cli.extraModels.map((m) => m.name || m.model),
+    uiRevision: uiRevision(),
   };
 }
 

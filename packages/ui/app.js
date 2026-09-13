@@ -82,6 +82,7 @@ function presetById(id) { return presets.find((preset) => preset.id === id); }
 
 let currentConfig = null;
 let status = null;
+let loadedUiRevision = null;
 let claudeModels = FALLBACK_CLAUDE_MODELS;
 let presets = FALLBACK_PRESETS;
 let slotsLoaded = false;
@@ -128,6 +129,11 @@ async function refreshHealth() {
   } catch (error) {
     $("#health-desktop").replaceChildren(el("div", { class: "row" }, [el("span", { class: "k", text: t("health.desktop") }), badge("bad", t("health.disconnected"))]));
     return;
+  }
+  // Served files changed underneath an open window (e.g. after an update): reload, unless a form is open.
+  if (status.uiRevision) {
+    if (loadedUiRevision === null) loadedUiRevision = status.uiRevision;
+    else if (loadedUiRevision !== status.uiRevision && $("#modal-backdrop").hidden) location.reload();
   }
   const desktop = $("#health-desktop");
   desktop.replaceChildren(
