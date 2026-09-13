@@ -667,7 +667,7 @@ function openProviderForm(options) {
     provider.models = checkedModels;
     next.providers[providerName] = provider;
     const existingSelections = ((next.cli && next.cli.extraModels) || []).filter((entry) => entry.model !== null && entry.model !== undefined).map((entry) => {
-      const direct = (next.direct || []).find((rule) => rule.prefix === entry.model);
+      const direct = (next.direct || []).filter((rule) => entry.model.startsWith(rule.prefix)).sort((a, b) => b.prefix.length - a.prefix.length)[0];
       return { id: entry.model, name: entry.name, provider: direct && direct.provider };
     }).filter((entry) => entry.provider && entry.provider !== options.name);
     if (pickerInput.checked) {
