@@ -57,7 +57,7 @@ ClaudeRipple(클로드리플)은 **주군 데스크톱에서 실전 가동 중�
   `APPLE_KEYCHAIN_PROFILE=clauderipple-notary npm run release`(키체인 프로필은 주군 키체인에 저장됨) → `release/*.dmg|zip`.
   주군 맥의 실전 라우터는 **저장소 소스**로 다시 돌려 놓았다(`node packages/cli/src/index.ts install`); 앱의 "설정 다시 실행"을
   누르면 앱 번들 사본으로 바뀌므로 개발 중엔 누르지 말 것.
-- 남은 것: GitHub 공개(주군 지시 "다 완성해야 올리지"), Windows, 프리셋 실키 검증(ChatGPT·OpenRouter만 실측).
+- GitHub 공개 완료: https://github.com/PBJ-2/clauderipple (커밋 이메일은 noreply로 재작성됨; git config user.email 설정됨). 남은 것: Windows, 프리셋 실키 검증(ChatGPT·OpenRouter만 실측).
 
 ## 2026-09-13 밤 2 — M4 완료
 - **OpenAI 입구**(`packages/router/src/ingress`, 포트 8793): Codex CLI가 `clauderipple codex on`으로 우리 라우터를 향하고 Claude를
