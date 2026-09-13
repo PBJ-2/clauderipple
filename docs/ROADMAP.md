@@ -3,9 +3,11 @@
 Language: TypeScript, single repository, Node 24. No runtime dependency on any
 third-party translator binary.
 
-Status 2026-09-11: M1 done and live on the author's machine (cut over from the
-Python prototype). M2 adapter implemented and unit/integration tested; live
-streamed answer pending quota reset. M3 in progress (local GUI + Electron tray).
+Status 2026-09-13: M1–M3 done and released (signed, notarized macOS app 0.1.0
+built; not yet published). M4 in progress: ClaudeRipple becomes a universal
+local proxy — OpenAI-style clients (Codex CLI first) can use Claude and
+Anthropic-compatible providers through it, and Claude Code can use
+OpenAI-only providers (Grok, Mistral, Groq, Ollama…). M5 = Windows.
 
 ## M1 — Router + installer (replaces the Python prototype)
 
@@ -48,3 +50,24 @@ streamed answer pending quota reset. M3 in progress (local GUI + Electron tray).
   into the picker (`model_selector_config`).
 - Windows support (Claude Desktop on Windows honors the same CLI env; verify).
 - Sponsor slots in README once traction exists.
+
+## M4 — Universal proxy (both directions)
+
+- OpenAI-compatible **ingress** (`packages/router/src/ingress`): `/v1/responses`
+  and `/v1/chat/completions` on a local plain-HTTP port, translated to Anthropic
+  Messages, routed through the same model mapping. `clauderipple codex on`
+  points the Codex CLI at it. API keys only (no reuse of Claude subscription
+  OAuth from other clients).
+- **openai-compatible provider type** (`packages/router/src/providers/openai`):
+  Anthropic Messages → Chat Completions / Responses, streaming and tools, cache
+  fields mapped when the vendor reports them. Presets: xAI Grok, Mistral, Groq,
+  Together, Fireworks, Ollama, LM Studio.
+- Acceptance: Codex CLI completes a tool-using session against Claude via the
+  ingress; Claude Code completes a tool-using session against Grok or a local
+  Ollama model; the request log shows both with usage.
+
+## M5 — Windows
+
+- Certificate generation without OpenSSL (pure Node), a Task Scheduler /
+  service supervisor, `certutil` for picker-mode trust, the app's
+  `%LOCALAPPDATA%\Claude-3p\configLibrary` path. Electron build for win-x64.
