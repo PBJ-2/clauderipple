@@ -39,10 +39,10 @@
 
 ## 네 개 대신 하나
 
-지금은 방향마다 프록시가 따로 필요합니다. Claude Code에 GPT를 넣는 것 하나, Codex에 Claude를 넣는 것 하나,
-OpenRouter나 DeepSeek에 닿는 것 하나. 그리고 그중 어느 것도 Claude **데스크톱 앱**에서는 안 됩니다.
-ClaudeRipple은 이 전부를 메뉴 막대 앱 하나로 하고, Claude Code 하네스를 그대로 둡니다. 스킬·훅·MCP 서버·
-`CLAUDE.md`·서브에이전트·claude.ai 커넥터가 전부 살아 있는 채로 두뇌만 다른 모델로 바뀝니다.
+비슷한 도구들은 터미널용입니다. Claude Code CLI나 Codex CLI가 다른 모델을 쓰게는 해 주지만, Claude **데스크톱 앱**에는
+닿지 못하고, 다른 모델로 바꾸는 순간 Claude 구독 쪽 기능(claude.ai 채팅, Remote Control, 클라우드 세션)을 잃습니다.
+ClaudeRipple은 데스크톱 앱·터미널·Codex를 메뉴 막대 앱 하나로 다루고, 두 구독을 나란히 쓰며, Claude Code 하네스를
+그대로 둡니다. 스킬·훅·MCP 서버·`CLAUDE.md`·서브에이전트·claude.ai 커넥터가 전부 살아 있는 채로 두뇌만 바뀝니다.
 
 | | ClaudeRipple | opencodex / openclaude | claude-code-router | Claude Desktop "3P" 설정 |
 |---|---|---|---|---|

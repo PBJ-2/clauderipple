@@ -39,12 +39,13 @@
 
 ## One tool instead of four
 
-Today you need a different proxy for each direction: one to put GPT into Claude Code,
-another to put Claude into Codex, a third to reach OpenRouter or DeepSeek, and none
-of them work with the Claude **desktop app**. ClaudeRipple does all of it from one
-menu-bar app, and it keeps the Claude Code harness intact: your skills, hooks,
-MCP servers, `CLAUDE.md`, subagents and claude.ai connectors keep working while
-another model does the thinking.
+Similar tools are built for the terminal. They let the Claude Code CLI or Codex CLI
+use other models, but they cannot reach the Claude **desktop app**, and the moment
+you switch models you lose the Claude-subscription side (claude.ai chat, Remote
+Control, cloud sessions). ClaudeRipple covers the desktop app, the terminal and
+Codex from one menu-bar app, runs both subscriptions side by side, and keeps the
+Claude Code harness intact: your skills, hooks, MCP servers, `CLAUDE.md`, subagents
+and claude.ai connectors keep working while another model does the thinking.
 
 | | ClaudeRipple | opencodex / openclaude | claude-code-router | Claude Desktop "3P" setting |
 |---|---|---|---|---|
