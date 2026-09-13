@@ -6,6 +6,9 @@
 
 import crypto from "node:crypto";
 
+// Anthropic requires max_tokens; OpenAI clients (Codex included) usually omit it. 16k is safe for every current Claude model.
+export const DEFAULT_MAX_TOKENS = 16384;
+
 export type Json = Record<string, unknown>;
 
 export type AnthropicContent =
@@ -195,7 +198,7 @@ export function responsesToAnthropic(body: Json, targetModel: string, systemPref
     messages,
     ...(tools.length ? { tools } : {}),
     ...(toolChoice ? { tool_choice: toolChoice } : {}),
-    ...(maxTokens ? { max_tokens: maxTokens } : {}),
+    max_tokens: maxTokens ?? DEFAULT_MAX_TOKENS,
     ...(temperature !== undefined ? { temperature } : {}),
     ...(effort ? { output_config: { effort } } : {}),
     stream: body.stream === true,
@@ -255,7 +258,7 @@ export function chatToAnthropic(body: Json, targetModel: string, systemPrefix?: 
     messages,
     ...(tools.length ? { tools } : {}),
     ...(toolChoice ? { tool_choice: toolChoice } : {}),
-    ...(maxTokens ? { max_tokens: maxTokens } : {}),
+    max_tokens: maxTokens ?? DEFAULT_MAX_TOKENS,
     ...(temperature !== undefined ? { temperature } : {}),
     stream: body.stream === true,
   };
