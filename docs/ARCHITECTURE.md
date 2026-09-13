@@ -157,6 +157,31 @@ chat is out of reach for every approach, ours included.
     no reasoning `include`; identity line and `instructionsAppend` are constant
     text; `prompt_cache_key` = sha256(metadata.user_id + first user message).
 
+### 4a. Claude Code request shapes a translator must handle (measured 2026-09-13, CLI 2.1.266)
+
+- **Server-side threads ("tether").** The first request of a session carries
+  `thread: {type:"create"}` and the full history; later turns carry
+  `thread: {type:"continue", previous_message_id: <our last assistant msg id>}` and
+  **only the new messages** (tool results + attachments). A translated provider has no
+  such state, so the router answers a `continue` with HTTP 400 and
+  `error.details.error_code = "thread_unsupported_request"`; the CLI then resends the
+  turn stateless and keeps the session stateless on that model. Accepting the delta
+  instead made the model see an orphan `tool_result`, answer "무엇을 도와드릴까요?", and
+  kept `cached_tokens` stuck at the tools prefix. `thread`/`diagnostics` are stripped
+  from `create` requests before forwarding.
+- **Per-turn billing telemetry.** The first system block is
+  `x-anthropic-billing-header: … cch=<hash> …` and the hash changes every turn. Dropped
+  from `instructions`, otherwise nothing after it is ever cached. With it dropped and
+  sessions stateless, continuation turns measured 94–99% cache hit (`cached_tokens` /
+  total input) on gpt-5.6-terra.
+- **Orphan tool results.** Side queries can start with a bare `tool_result`; the
+  Responses API rejects a `function_call_output` without its `function_call`
+  ("No tool call found"), so such results are sent as user text.
+- **Usage snapshots.** The CLI snapshots `message.usage` per streamed content block,
+  before `message_delta`; `message_start` therefore announces an input estimate
+  (char/4, floored by the last measured total for the conversation) so the app's
+  token counter and the CLI's context accounting are not zero.
+
 ## 5. Failure modes that must not exist in the product (all observed)
 
 | Observed | Product requirement |

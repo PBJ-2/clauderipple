@@ -178,7 +178,7 @@ export class ChatGptAdapter {
       return { status: err.status, bytes: err.body.length, note: `upstream ${upstream.status}` };
     }
 
-    if (this.cfg.debugDump) this.dump(upstream.status, json, upstreamReq, "");
+    if (this.cfg.debugDump === "all") this.dump(upstream.status, json, upstreamReq, "");
     const wantStream = json.stream === true;
     const mapper = new StreamMapper(model, startInput);
     const parser = new SseParser();

@@ -32,8 +32,8 @@ export type ChatGptProvider = {
   identity?: boolean;
   /** Fixed text appended to the system prompt. Must stay constant across turns or the prompt cache breaks. */
   instructionsAppend?: string;
-  /** Write the translated request + upstream reply of every failed upstream call to <home>/debug/ (troubleshooting). */
-  debugDump?: boolean;
+  /** Troubleshooting: true = dump failed upstream exchanges to <home>/debug/; "all" = dump every exchange (last 60). */
+  debugDump?: boolean | "all";
   /** Reasoning effort when the request carries none. Default "high". */
   defaultEffort?: string;
   /** Models offered in the GUI (the Codex backend has no listing endpoint). */

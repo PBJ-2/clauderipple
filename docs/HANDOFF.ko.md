@@ -38,9 +38,10 @@ ClaudeRipple(클로드리플)은 **주군 데스크톱에서 실전 가동 중�
 
 ## 2026-09-13 추가
 - **피커 모드 실전 통과.** 원인 둘: Config Library 경로는 `Claude-3p/`, 부트스트랩 요청의 accept-encoding은 유지하고 라우터가 풀어서 편집. 피커 id는 접미사 없이(`gpt-5.6-luna`), 강도는 앱 선택이 그대로 간다. 정체 문장에 effort 포함.
-- **자체 ChatGPT 어댑터 실전 가동**(proxenos 미사용). 관찰된 문제 둘, 미해결:
-  1. `No tool call found for function call output with call_id call_…` 400이 GPT 서브에이전트 긴 세션에서 툴 호출 턴마다 한 번씩 나왔다(15:26 로그). 재시도는 성공. `providers.chatgpt.debugDump=true`가 켜져 있어 다음 발생 시 `~/.clauderipple/debug/upstream-*-400.json`에 요청 전문이 남는다. 그 파일에서 해당 call_id의 function_call이 왜 빠졌는지 보면 된다.
-  2. 캐시 적중이 낮다: in=131k 중 cached=22k(≈17%). 수용 기준 ≥90%. 22k에서 매 턴 갈라지는 지점을 찾아야 함(instructions 뒤 input 첫 항목이 턴마다 달라지는지). 두 연속 요청을 dump해 diff.
+- **자체 ChatGPT 어댑터 실전 가동**(proxenos 미사용). 오늘 잡은 문제 둘(둘 다 해결, ARCHITECTURE §4a):
+  1. 400 `No tool call found…`의 진짜 원인은 Claude Code의 **서버측 스레드**(`thread: continue` + 새 메시지만 전송). 라우터가 continue를 `thread_unsupported_request`로 거절하면 CLI가 그 세션을 무상태로 전환한다. 부수 원인인 고아 tool_result는 user 텍스트로 보낸다.
+  2. 캐시 17%의 원인은 시스템 블록 첫 줄 `x-anthropic-billing-header … cch=<해시>`가 매 턴 바뀌는 것. 제거 후 연속 턴 94–99%.
+  `providers.chatgpt.debugDump`는 true(실패만 덤프) / "all"(전부, 최근 60개). 실전 config는 지금 true.
 - **토큰 표시**: CLI는 스트리밍 블록마다 usage 스냅샷을 찍으므로 message_start에 입력 토큰 추정치를 넣었다(실측값은 message_delta). 앱 패널 숫자가 실제에 가깝게 나오는지 다음 서브에이전트 실행에서 확인.
 - **agent-title 훅**(서브에이전트 제목에 모델·강도): `clauderipple agent-title on|off`, 트레이 메뉴, `POST /api/agent-title`. GUI 토글은 아직 없음.
 - **GUI 전면 개편**(비개발자용, 프리셋·연결 확인·드롭다운 매핑) 커밋 ce1f9d6. 프리셋 카탈로그 `packages/router/src/presets.ts`(공식 문서 URL 주석). Grok·Mistral은 OpenAI 방식만이라 번역기 필요 → 미지원. 새 GUI는 격리 라우터에서 흐름 검증했고 실제 앱 창 스크린샷 검증은 못 했다(화면 접근 거부됨) — 주군이 직접 보고 어색한 문구·동작을 알려주면 고친다.
