@@ -5,7 +5,7 @@
   --border: #dcdde0;
   --text: #1b1c1f;
   --muted: #4f545c;
-  --accent: #2f6fed;
+  --accent: #6a56d6;
   --accent-text: #ffffff;
   --ok: #1a8a4a;
   --warn: #b5820a;
@@ -21,7 +21,7 @@
     --border: #33353a;
     --text: #e8e9eb;
     --muted: #b3b7bf;
-    --accent: #5b8dfb;
+    --accent: #9f8cf2;
     --accent-text: #0c1220;
     --ok: #3ecb7d;
     --warn: #e0b436;
@@ -338,3 +338,6 @@ input, select, textarea, button { font-size: 15px; }
 .request-note { grid-column: 1 / -1; }
 @media (max-width: 980px) { .logs-summary { grid-template-columns: repeat(3, minmax(130px, 1fr)); } }
 @media (max-width: 680px) { .logs-summary { grid-template-columns: repeat(2, minmax(130px, 1fr)); }.request-detail-grid { grid-template-columns: repeat(2, minmax(120px, 1fr)); } }
+
+nav .brand { display: flex; align-items: center; gap: 8px; }
+nav .brand svg { width: 22px; height: 22px; flex: 0 0 auto; }

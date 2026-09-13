@@ -58,48 +58,32 @@ function ring(x: number, y: number, cx: number, cy: number, r: number, w: number
 
 type Variant = "ok" | "warn" | "down";
 
-// A drop above its ripple: a teardrop at the top, two flat elliptical rings beneath it.
-//   ok   : drop + two rings
-//   warn : drop + inner ring only
-//   down : hollow drop, no rings
-function ellipseRing(x: number, y: number, cx: number, cy: number, rx: number, ry: number, w: number): number {
-  const dn = Math.hypot((x - cx) / rx, (y - cy) / ry); // 1 on the ellipse
-  const d = Math.abs(dn - 1) * ((rx + ry) / 2); // approximate pixel distance to the curve
+// The Ripple family mark (same geometry as BodyRipple's assets/logo.svg, 1024 grid): a solid core
+// (r 128), a full ring (r 245, stroke 56, 62%), and a 270° arc from the top clockwise to the left
+// (r 404, stroke 56, 28%). Tray variants, black on transparent (macOS tints template images):
+//   ok   : core + ring + arc      warn : core + ring      down : hollow core only
+const ARC_START = -Math.PI / 2; // top
+function arcAlpha(x: number, y: number, cx: number, cy: number, r: number, w: number, sweep: number): number {
+  let ang = Math.atan2(y - cy, x - cx) - ARC_START;
+  while (ang < 0) ang += Math.PI * 2;
+  if (ang <= sweep) return ring(x, y, cx, cy, r, w);
+  // round caps
+  const e0 = [cx + r * Math.cos(ARC_START), cy + r * Math.sin(ARC_START)];
+  const e1 = [cx + r * Math.cos(ARC_START + sweep), cy + r * Math.sin(ARC_START + sweep)];
+  const d = Math.min(Math.hypot(x - e0[0]!, y - e0[1]!), Math.hypot(x - e1[0]!, y - e1[1]!));
   return Math.max(0, Math.min(1, w / 2 - d + 0.5));
-}
-function inTriangle(px: number, py: number, a: number[], b: number[], c: number[]): boolean {
-  const s1 = (b[0]! - a[0]!) * (py - a[1]!) - (b[1]! - a[1]!) * (px - a[0]!);
-  const s2 = (c[0]! - b[0]!) * (py - b[1]!) - (c[1]! - b[1]!) * (px - b[0]!);
-  const s3 = (a[0]! - c[0]!) * (py - c[1]!) - (a[1]! - c[1]!) * (px - c[0]!);
-  return (s1 >= 0 && s2 >= 0 && s3 >= 0) || (s1 <= 0 && s2 <= 0 && s3 <= 0);
 }
 function draw(variant: Variant, scale: number) {
   const s = scale;
-  const cx = 11 * s;
-  const dropY = 8.2 * s;
-  const dropR = 2.9 * s;
-  const apex = [cx, 2.6 * s];
+  const c = 11 * s;
   const w = 1.6 * s;
-  const ringY = 15.6 * s;
-  // teardrop = circle(R) ∪ triangle(apex, tangent points); the outline is the shape minus a smaller
-  // drop with the same centre and an apex pulled down so the tip keeps its point.
-  const dropShape = (px: number, py: number, R: number, apexY: number): boolean => {
-    const d = Math.hypot(px - cx, py - dropY);
-    if (d < R) return true;
-    const L = dropY - apexY;
-    if (L <= R) return false;
-    const t = Math.asin(R / L);
-    const p1 = [cx - R * Math.cos(t), dropY - R * Math.sin(t)];
-    const p2 = [cx + R * Math.cos(t), dropY - R * Math.sin(t)];
-    return inTriangle(px, py, [cx, apexY], p1, p2);
-  };
   return (x: number, y: number): number => {
+    const d = Math.hypot(x - c, y - c);
     let a = 0;
-    const outer = dropShape(x, y, dropR, apex[1]!);
-    if (variant === "down") a = outer && !dropShape(x, y, dropR - w, apex[1]! + 1.7 * w) ? 1 : 0;
-    else a = outer ? 1 : 0;
-    const rings = variant === "ok" ? [[4.2, 1.5], [8.6, 3.0]] : variant === "warn" ? [[4.2, 1.5]] : [];
-    for (const [rx, ry] of rings) a = Math.max(a, ellipseRing(x, y, cx, ringY, rx! * s, ry! * s, w));
+    if (variant === "down") a = Math.max(0, Math.min(1, w / 2 - Math.abs(d - 2.2 * s) + 0.5));
+    else a = Math.max(0, Math.min(1, 2.6 * s - d + 0.5));
+    if (variant !== "down") a = Math.max(a, ring(x, y, c, c, 5.4 * s, w));
+    if (variant === "ok") a = Math.max(a, arcAlpha(x, y, c, c, 9.2 * s, w, Math.PI * 1.5));
     return a;
   };
 }
@@ -109,40 +93,40 @@ for (const v of ["ok", "warn", "down"] as Variant[]) {
   fs.writeFileSync(path.join(out, `${base}.png`), png(22, (x, y) => [0, 0, 0, Math.round(draw(v, 1)(x, y) * 255)]));
   fs.writeFileSync(path.join(out, `${base}@2x.png`), png(44, (x, y) => [0, 0, 0, Math.round(draw(v, 2)(x, y) * 255)]));
 }
-// 1024px application icon in the macOS style: an 824px rounded square (radius ≈22.4%) centred on the
-// 1024 canvas, a deep-blue→sky gradient with a soft top highlight, the drop and its ripple in white
-// (rings fading outward), and a faint drop shadow under the drop.
+// 1024px application icon = BodyRipple's logo.svg geometry, drawn on the macOS grid (824px rounded
+// square, radius ≈22.4%, centred on the 1024 canvas). Gradients run along the diagonal like the SVG.
 function roundedSquareAlpha(x: number, y: number, x0: number, y0: number, w: number, r: number): number {
   const cx = Math.max(x0 + r, Math.min(x, x0 + w - r));
   const cy = Math.max(y0 + r, Math.min(y, y0 + w - r));
-  const d = Math.hypot(x - cx, y - cy);
-  return Math.max(0, Math.min(1, r - d + 0.5));
+  return Math.max(0, Math.min(1, r - Math.hypot(x - cx, y - cy) + 0.5));
+}
+function lerp3(a: [number, number, number], b: [number, number, number], t: number): [number, number, number] {
+  const k = Math.max(0, Math.min(1, t));
+  return [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
 }
 function appIcon(x: number, y: number): [number, number, number, number] {
   const size = 1024;
   const margin = 100;
   const w = size - margin * 2;
-  const r = 0.2237 * w;
-  const shape = roundedSquareAlpha(x, y, margin, margin, w, r);
+  const shape = roundedSquareAlpha(x, y, margin, margin, w, 0.2237 * w);
   if (shape <= 0) return [0, 0, 0, 0];
-  // background gradient: top #4c8dff → bottom #1f4fd6, plus a soft radial highlight top-left
-  const t = (y - margin) / w;
-  let R = 76 + (31 - 76) * t, G = 141 + (79 - 141) * t, B = 255 + (214 - 255) * t;
-  const hl = Math.max(0, 1 - Math.hypot(x - (margin + w * 0.3), y - (margin + w * 0.15)) / (w * 0.9)) * 0.18;
-  R += (255 - R) * hl; G += (255 - G) * hl; B += (255 - B) * hl;
-  // glyph: reuse the tray drawing scaled into the square (22-unit grid → 0.7 of the square, centred)
-  const g = w * 0.72 / 22;
-  const gx = margin + (w - 22 * g) / 2;
-  const gy = margin + (w - 22 * g) / 2 - g * 0.6;
-  const glyph = draw("ok", g)(x - gx, y - gy);
-  // rings fade with distance from the drop's centre line
-  const ringFade = y > gy + 12.5 * g ? Math.max(0.55, 1 - (y - (gy + 12.5 * g)) / (12 * g)) : 1;
-  const a = glyph * ringFade;
-  // faint shadow below the drop
-  const sh = draw("ok", g)(x - gx, y - gy - g * 0.9) * 0.22;
-  R = R * (1 - sh); G = G * (1 - sh); B = B * (1 - sh);
-  R = R + (255 - R) * a; G = G + (255 - G) * a; B = B + (255 - B) * a;
-  return [Math.round(R), Math.round(G), Math.round(B), Math.round(shape * 255)];
+  const k = w / 1024; // SVG units → canvas
+  const c = size / 2;
+  const u = (x - c) / k + 512; // back to the SVG's 1024 grid
+  const v = (y - c) / k + 512;
+  const diag = ((u - 108) + (v - 108)) / (2 * 808); // 0 at top-left of the ring box, 1 at bottom-right
+  const core = lerp3([0x9f, 0x8c, 0xf2], [0x51, 0x40, 0xaa], ((u - 270) + (v - 270)) / (2 * 484));
+  const ringC = lerp3([0xa9, 0x99, 0xf4], [0x55, 0x40, 0xb3], diag);
+  const d = Math.hypot(u - 512, v - 512);
+  const px = (rgb: [number, number, number], a: number, base: [number, number, number]): [number, number, number] => lerp3(base, rgb, a);
+  let rgb: [number, number, number] = [0xfb, 0xf8, 0xf4];
+  const arcA = arcAlpha(u, v, 512, 512, 404, 56, Math.PI * 1.5) * 0.28;
+  rgb = px(ringC, arcA, rgb);
+  const ringA = ring(u, v, 512, 512, 245, 56) * 0.62;
+  rgb = px(ringC, ringA, rgb);
+  const coreA = Math.max(0, Math.min(1, 128 - d + 0.5));
+  rgb = px(core, coreA, rgb);
+  return [Math.round(rgb[0]), Math.round(rgb[1]), Math.round(rgb[2]), Math.round(shape * 255)];
 }
 
 const build = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "build");
