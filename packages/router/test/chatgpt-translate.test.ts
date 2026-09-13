@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { StreamMapper, conversationKey, estimateTokens, formatSse, toResponsesRequest, type AnthropicRequest } from "../src/providers/chatgpt/translate.ts";
+import { StreamMapper, conversationKey, estimateTokens, formatSse, normalizeSchema, toResponsesRequest, type AnthropicRequest } from "../src/providers/chatgpt/translate.ts";
 import { SseParser } from "../src/providers/chatgpt/sse.ts";
 
 const opts = { model: "gpt-5.6-terra", effort: "high", identity: true };
@@ -132,4 +132,23 @@ test("sse parser handles split frames, multi-line data and [DONE]", () => {
   assert.deepEqual(a, [{ a: 1 }]);
   const b = p.feed('2}\n\ndata: [DONE]\n\ndata: {"c":\ndata: 3}\r\n\r\n');
   assert.deepEqual(b, [{ b: 2 }, { c: 3 }]);
+});
+
+test("tool schemas: patterns the Codex regex engine rejects are dropped, others kept", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      field: { type: "string", pattern: '^(?!__.*__$)[^\\p{Cc}"\\\\./[\\]]{1,200}$' }, // lookahead → dropped
+      doc_id: { type: "string", pattern: "^[A-Za-z0-9_-]{1,200}$" }, // plain → kept
+      nested: { type: "array", items: { type: "object", properties: { x: { type: "string", pattern: "(a)\\1" } } } }, // backreference → dropped
+    },
+    required: ["field"],
+  };
+  const out = normalizeSchema(schema) as { properties: Record<string, Record<string, unknown>>; required: string[] };
+  assert.equal(out.properties.field!.pattern, undefined);
+  assert.equal(out.properties.doc_id!.pattern, "^[A-Za-z0-9_-]{1,200}$");
+  const x = (out.properties.nested!.items as { properties: { x: Record<string, unknown> } }).properties.x;
+  assert.equal(x.pattern, undefined);
+  assert.deepEqual(out.required, ["field"]);
+  assert.equal(schema.properties.field.pattern.length > 0, true); // input untouched
 });

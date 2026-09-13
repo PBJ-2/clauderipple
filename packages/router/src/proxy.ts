@@ -54,6 +54,8 @@ export type Stats = {
 export class Proxy {
   readonly stats: Stats = { inFlight: 0, messagesInFlight: 0, started: 0, completed: 0, failed: 0 };
   private readonly inFlightSockets = new Set<Duplex>();
+  /** Set by drain(): new model calls are refused with a retryable 503 so the count can only fall. */
+  private draining = false;
   private readonly server: net.Server;
   private readonly httpServer: http.Server;
   private readonly upstreamAgent = new https.Agent({ keepAlive: true, maxSockets: 64 });
@@ -126,6 +128,9 @@ export class Proxy {
    * "Connection lost mid-response" to the user (observed 2026-09-11, in-flight=5).
    */
   async drain(maxMs: number, onProgress?: (n: number) => void): Promise<void> {
+    // server.close() only stops new TCP connections; the CLI keeps sending new requests down
+    // its existing tunnels (measured 2026-09-13: in-flight went 2→1→2 and the budget ran out).
+    this.draining = true;
     this.server.close();
     const t0 = Date.now();
     while (this.stats.messagesInFlight > 0 && Date.now() - t0 < maxMs) {
@@ -262,15 +267,28 @@ export class Proxy {
     if (isMessages) this.stats.messagesInFlight++;
     let tag = "PASS";
     let finished = false;
-    const finish = (status: string, bytes: number, note?: string): void => {
+    // `failed` counts requests that did not get a proper response (vanished, upstream error,
+    // provider error). A note alone is not a failure: adapters attach usage notes on success.
+    const finish = (status: string, bytes: number, note?: string, failed: boolean = note !== undefined): void => {
       if (finished) return;
       finished = true;
       this.stats.inFlight--;
       if (isMessages) this.stats.messagesInFlight--;
-      if (note) this.stats.failed++;
+      if (failed) this.stats.failed++;
       else this.stats.completed++;
       log.info(`${tag} ${method} ${path} -> ${status} ${bytes}B ${((Date.now() - t0) / 1000).toFixed(1)}s${note ? " " + note : ""}`);
     };
+
+    if (this.draining && isMessages) {
+      // Refuse before reading the body: the client (Anthropic SDK) retries 5xx with backoff and
+      // honors retry-after; connection: close makes it reconnect, to the relaunched router.
+      tag = "DRAIN";
+      const msg = JSON.stringify({ type: "error", error: { type: "overloaded_error", message: "ClaudeRipple is restarting; retry" } });
+      res.writeHead(503, { "content-type": "application/json", "retry-after": "3", connection: "close", "content-length": String(Buffer.byteLength(msg)) }).end(msg);
+      req.resume();
+      finish("503", msg.length, "refused during drain (client retries)", false);
+      return;
+    }
 
     let body: Buffer;
     try {
@@ -312,7 +330,7 @@ export class Proxy {
         tag = `CHATGPT ${route.tag} effort=${effortOf(json) ?? "-"}`;
         try {
           const o = await this.chatgpt(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, effortOf(json));
-          finish(String(o.status), o.bytes, o.note);
+          finish(String(o.status), o.bytes, o.note, o.status >= 400);
         } catch (e) {
           finish("-", 0, `chatgpt error ${(e as NodeJS.ErrnoException).code ?? ""} ${(e as Error).message}`);
           if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" }).end(JSON.stringify({ type: "error", error: { type: "api_error", message: (e as Error).message } }));

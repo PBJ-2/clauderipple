@@ -128,11 +128,28 @@ chat is out of reach for every approach, ours included.
     store:false, stream:true, prompt_cache_key`. OAuth: `auth.openai.com/oauth/
     authorize|token`, client `app_EMoamEEZ73f0CkXaXp7hrann`, redirect
     `http://localhost:1455/auth/callback`, PKCE S256, account id from the access
-    token claim `https://api.openai.com/auth.chatgpt_account_id`. Verified live:
-    a request with borrowed Codex CLI credentials was accepted by the backend
-    (answered 429 usage-limit, not 401/400). Streaming translation verified
-    against a fake backend replaying captured event shapes; a real streamed
-    answer is still to be verified once the weekly quota resets (2026-09-15).
+    token claim `https://api.openai.com/auth.chatgpt_account_id`.
+  - **Verified live 2026-09-13 and cut over** (the user's config now uses this
+    adapter; proxenos is no longer in the chain). Measured against the real
+    backend: streamed text, tool calls (`tool_use` + `input_json_delta`),
+    multi-turn with `tool_result`, non-streaming, `count_tokens` (local
+    estimate), `@effort` suffix → `reasoning.effort`. Prompt cache on
+    `gpt-5.6-terra`: 0 on the first call after idle, then **7680/7801 = 98.4%**
+    on every following call with the same `prompt_cache_key`. `gpt-5.6-luna`
+    reported `cached_tokens: 0` on identical repeats (backend behavior, also
+    through proxenos) — do not judge the cache metric on luna.
+  - Quota comes from the backend's **`x-codex-*` response headers** on every
+    response (`x-codex-primary-used-percent`, `-window-minutes`,
+    `-reset-after-seconds`, `-reset-at`, `x-codex-plan-type`); the
+    `codex.rate_limits` SSE event was not sent in any measured response. The
+    adapter reads both.
+  - **Tool schema scrub.** The backend validates every `pattern` in
+    `tools[].parameters` with a regex engine that rejects lookaround and
+    backreferences, and one bad pattern fails the whole request with 400
+    `invalid_function_parameters` ("… is not a 'regex'"). Claude Code's
+    `Artifact` tool carries `^(?!__.*__$)…` since ~2.1.266, which broke every
+    GPT request through proxenos as well. `normalizeSchema` drops such patterns
+    (the client validates its own inputs). Upstream error bodies are now logged.
   - Cache-safety decisions: thinking blocks are dropped from replayed history;
     no reasoning `include`; identity line and `instructionsAppend` are constant
     text; `prompt_cache_key` = sha256(metadata.user_id + first user message).
@@ -145,7 +162,10 @@ chat is out of reach for every approach, ours included.
 | Python 3.9 asyncio GC'd connection handler tasks; 1 in 10 requests vanished with no log line (`Task was destroyed but it is pending`); surfaced as "retry" banners, `Connection lost mid-response`, and subagent compaction failures | Keep strong refs to in-flight connections; log every request completion; an integration test that counts requests in vs. responses out. |
 | Translator daemon (proxenos) was not supervised; it died and every GPT request failed with connection refused | One supervisor for the whole chain; the router reports adapter health, not just its own. |
 | `router.log` grew to 17MB | Log rotation by default. |
-| A `restart` (SIGTERM) killed 5 in-flight requests; a streaming answer died mid-response and Claude Desktop showed a connection error (2026-09-11 17:00) | SIGTERM drains: stop accepting, wait for `/v1/messages` calls (up to 45s), then exit. Long-poll worker streams are not waited for (the CLI reconnects them). launchd `ExitTimeOut` 60. Never restart the live router casually. |
+| A `restart` (SIGTERM) killed 5 in-flight requests; a streaming answer died mid-response and Claude Desktop showed a connection error (2026-09-11 17:00) | SIGTERM drains: stop accepting, wait for `/v1/messages` calls (up to 90s), then exit. Long-poll worker streams are not waited for (the CLI reconnects them). Never restart the live router casually. |
+| `launchctl kickstart -k` SIGKILLed the router ~5s after its SIGTERM; the drain was cut with 2 model calls open (2026-09-13 13:35) | `clauderipple restart` sends SIGTERM itself, waits for the process to exit (up to 120s), and lets launchd KeepAlive relaunch it. `kickstart -k` is only the fallback. |
+| Drain ran the full budget and still had 2 calls open: `server.close()` stops new TCP connections only, and the CLI kept sending new requests down its existing tunnels (in-flight went 2→1→2; 2026-09-13 13:38) | While draining, new `/v1/messages` requests get `503` + `retry-after: 3` + `connection: close` before the body is read (the SDK retries 5xx and reconnects to the relaunched router). The in-flight count can then only fall. Verified: a 47s stream finished, the next call got 503, exit 1s later. |
+| Every GPT request failed with 400 after a Claude Code update added a lookahead regex to the `Artifact` tool schema (2026-09-13; proxenos too) | Tool-schema scrub in the translator (§4). Upstream error bodies are logged, never just the status. |
 | Unknown-model context window defaulted to 200K, compaction fired at 151K; fixed via `CLAUDE_CODE_MAX_CONTEXT_TOKENS=272000` (applies only to models not in the CLI's built-in table; Claude models unaffected) | Installer sets this env for mapped models; document that it does not affect Claude models. |
 | proxenos sends only the 7-day quota window, so the app shows a "weekly limit" banner | Quota reporting must mirror the shape Anthropic returns. |
 

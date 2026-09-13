@@ -85,8 +85,29 @@ export function conversationKey(req: AnthropicRequest): string {
   return crypto.createHash("sha256").update(seed).digest("hex").slice(0, 32);
 }
 
-function normalizeSchema(s: Record<string, unknown> | undefined): Record<string, unknown> {
-  const out: Record<string, unknown> = { ...(s ?? {}) };
+// The Codex backend validates every `pattern` in a tool schema with a regex engine that has no
+// lookaround or backreferences; one such pattern anywhere fails the whole request with
+// "Invalid schema for function 'X': '...' is not a 'regex'" (measured 2026-09-13 with the
+// Claude Code Artifact tool). Those patterns are dropped; the client validates inputs itself.
+const UNSUPPORTED_REGEX = /\(\?[=!<]|\\[1-9]/;
+
+export function unsupportedPattern(p: string): boolean {
+  return UNSUPPORTED_REGEX.test(p);
+}
+
+function scrubSchema(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(scrubSchema);
+  if (typeof node !== "object" || node === null) return node;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+    if (k === "pattern" && typeof v === "string" && unsupportedPattern(v)) continue;
+    out[k] = scrubSchema(v);
+  }
+  return out;
+}
+
+export function normalizeSchema(s: Record<string, unknown> | undefined): Record<string, unknown> {
+  const out = scrubSchema(s ?? {}) as Record<string, unknown>;
   if (out.type !== "object") out.type = "object";
   if (typeof out.properties !== "object" || out.properties === null) out.properties = {};
   if (out.required !== undefined && !Array.isArray(out.required)) delete out.required;

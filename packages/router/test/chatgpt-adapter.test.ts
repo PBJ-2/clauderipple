@@ -6,7 +6,7 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { ChatGptAdapter } from "../src/providers/chatgpt/index.ts";
+import { ChatGptAdapter, rateLimitsFromHeaders } from "../src/providers/chatgpt/index.ts";
 import { Logger } from "../src/log.ts";
 import type { AnthropicRequest } from "../src/providers/chatgpt/translate.ts";
 
@@ -37,7 +37,17 @@ const backend = http.createServer((req, res) => {
   req.on("end", () => {
     seen.push({ headers: req.headers, body: JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown>, path: req.url ?? "" });
     if (mode === "error429") {
-      res.writeHead(429, { "content-type": "application/json" }).end(JSON.stringify({ error: { message: "The usage limit has been reached", type: "usage_limit_reached" } }));
+      res
+        .writeHead(429, {
+          "content-type": "application/json",
+          "x-codex-plan-type": "prolite",
+          "x-codex-primary-used-percent": "100",
+          "x-codex-primary-window-minutes": "10080",
+          "x-codex-primary-reset-after-seconds": "535755",
+          "x-codex-secondary-used-percent": "0",
+          "x-codex-secondary-window-minutes": "0",
+        })
+        .end(JSON.stringify({ error: { message: "The usage limit has been reached", type: "usage_limit_reached" } }));
       return;
     }
     res.writeHead(200, { "content-type": "text/event-stream" });
@@ -142,6 +152,17 @@ test("HTTP 429 upstream → Anthropic rate_limit_error 429", async () => {
   const r = await call(request);
   assert.equal(r.status, 429);
   assert.equal(JSON.parse(r.text).error.type, "rate_limit_error");
+  // quota snapshot comes from x-codex-* headers even on an error response
+  const q = adapter.lastRateLimits as { plan_type: string; rate_limits: { primary: Record<string, number>; secondary: unknown } };
+  assert.equal(q.plan_type, "prolite");
+  assert.equal(q.rate_limits.primary.used_percent, 100);
+  assert.equal(q.rate_limits.primary.window_minutes, 10080);
+  assert.equal(q.rate_limits.primary.reset_after_seconds, 535755);
+  assert.equal(q.rate_limits.secondary, null); // zero-minute window = not a real window
+});
+
+test("rateLimitsFromHeaders: missing headers → null", () => {
+  assert.equal(rateLimitsFromHeaders(new Headers({ "content-type": "text/event-stream" })), null);
 });
 
 test("SSE error event → streamed Anthropic error event", async () => {

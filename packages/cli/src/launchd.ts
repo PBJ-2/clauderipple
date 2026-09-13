@@ -38,7 +38,7 @@ export function renderPlist(opts: { launcher: string; bundleId: string; home: st
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>2</integer>
-  <key>ExitTimeOut</key><integer>60</integer>
+  <key>ExitTimeOut</key><integer>120</integer>
   <key>ProcessType</key><string>Background</string>
   <key>StandardOutPath</key><string>${esc(opts.stdoutLog)}</string>
   <key>StandardErrorPath</key><string>${esc(opts.stdoutLog)}</string>
@@ -89,6 +89,60 @@ export function agentState(): "running" | "loaded" | "not-loaded" {
 
 export function kickstart(): boolean {
   return launchctl(["kickstart", "-k", `${domain()}/${LABEL}`]).ok;
+}
+
+export function agentPid(): number | null {
+  const r = launchctl(["print", `${domain()}/${LABEL}`]);
+  if (!r.ok) return null;
+  const m = /^\s*pid = (\d+)/m.exec(r.out);
+  return m ? Number(m[1]) : null;
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Graceful restart. `launchctl kickstart -k` SIGKILLs about 5s after its SIGTERM (measured
+ * 2026-09-13: the drain was cut and two in-flight model calls died), so instead we send
+ * SIGTERM ourselves, let the router drain (up to 90s), wait for the process to exit, and let
+ * launchd's KeepAlive relaunch it. Falls back to kickstart only if there is no pid or the
+ * process ignores SIGTERM for longer than the drain budget.
+ */
+export function restartAgent(opts: { waitMs?: number; onProgress?: (msg: string) => void } = {}): "drained" | "kickstarted" | "failed" {
+  const pid = agentPid();
+  if (pid === null) return kickstart() ? "kickstarted" : "failed";
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    return kickstart() ? "kickstarted" : "failed";
+  }
+  const t0 = Date.now();
+  const deadline = t0 + (opts.waitMs ?? 120_000);
+  let lastTick = 0;
+  let exited = false;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      exited = true;
+      break;
+    }
+    const s = Math.floor((Date.now() - t0) / 1000);
+    if (s >= 5 && s !== lastTick && s % 5 === 0) {
+      lastTick = s;
+      opts.onProgress?.(`draining… ${s}s (waiting for in-flight model calls)`);
+    }
+    sleepSync(250);
+  }
+  if (!exited) return kickstart() ? "kickstarted" : "failed";
+  // KeepAlive relaunches it; ThrottleInterval is 2s.
+  const upBy = Date.now() + 15_000;
+  while (Date.now() < upBy) {
+    if (agentState() === "running" && agentPid() !== pid) return "drained";
+    sleepSync(250);
+  }
+  return kickstart() ? "kickstarted" : "failed";
 }
 
 export function stopAgent(): boolean {

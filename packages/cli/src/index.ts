@@ -15,7 +15,7 @@ import { ConfigStore, DEFAULTS, homeDir, configPath } from "../../router/src/con
 import { adminPort } from "../../router/src/admin.ts";
 import { certsExist, certPaths, generateCerts } from "./certs.ts";
 import { applyProxyEnv, currentProxyEnv, removeProxyEnv, settingsPath } from "./settings.ts";
-import { agentState, installAgent, kickstart, plistPath, removeAgent, stopAgent } from "./launchd.ts";
+import { agentState, installAgent, kickstart, plistPath, removeAgent, restartAgent, stopAgent } from "./launchd.ts";
 import { BUNDLE_ID, removeBundle, writeBundle } from "./bundle.ts";
 import { applyAppProxy, caTrusted, currentAppProxy, removeAppProxy, trustCa, untrustCa } from "./picker.ts";
 
@@ -41,9 +41,15 @@ async function pickerOn(): Promise<void> {
   console.log(`✓ Claude Desktop config library entry applied (${r.id}${r.replaced ? `, previous entry ${r.replaced} remembered` : ""}): egressProxyUrl=${proxyUrl}`);
   setPickerEnabled(true);
   console.log("✓ picker.enabled = true");
-  console.log(kickstart() ? "✓ router restarted (in-flight model calls were allowed to finish)" : "  router not restarted (not installed?) — run `clauderipple restart`");
+  console.log(describeRestart(restartAgent({ onProgress: (m) => console.log(`  ${m}`) })));
   console.log("\nStep 3/3 is yours: quit and reopen Claude Desktop. The app reads its proxy setting at start.");
   console.log("Then open the Code tab picker: entries from cli.extraModels should be there. `clauderipple status` shows the last injection.");
+}
+
+function describeRestart(r: ReturnType<typeof restartAgent>): string {
+  if (r === "drained") return "✓ router restarted (in-flight model calls were allowed to finish)";
+  if (r === "kickstarted") return "✓ router restarted (hard restart: it did not exit on its own in time)";
+  return "  router not restarted (not installed?) — run `clauderipple install`";
 }
 
 function pickerOff(): void {
@@ -273,7 +279,7 @@ try {
       console.log(kickstart() ? "started" : "start failed (is it installed?)");
       break;
     case "restart":
-      console.log(kickstart() ? "restarted" : "restart failed (is it installed?)");
+      console.log(describeRestart(restartAgent({ onProgress: (m) => console.log(`  ${m}`) })));
       break;
     case "stop":
       console.log(stopAgent() ? "stopped (run `clauderipple start` or `install` to bring it back)" : "stop failed (not loaded?)");

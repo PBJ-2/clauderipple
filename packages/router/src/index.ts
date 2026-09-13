@@ -55,7 +55,7 @@ const proxy = new Proxy({ config: () => store.get(), log, certs, health, home })
 
 process.on("uncaughtException", (e) => log!.error(`uncaught ${(e as Error).stack ?? e}`));
 process.on("unhandledRejection", (e) => log!.error(`unhandled ${(e as Error)?.stack ?? e}`));
-const DRAIN_MS = 45_000; // launchd ExitTimeOut is 60s; leave headroom
+const DRAIN_MS = 90_000; // new model calls are refused during drain, so this is the longest single call we wait for; `clauderipple restart` waits 120s
 let draining = false;
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => {

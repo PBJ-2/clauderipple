@@ -31,6 +31,41 @@ function mapHttpError(status: number, text: string): { status: number; body: str
   return anthropicError(400, "invalid_request_error", `ChatGPT: ${msg}`);
 }
 
+/**
+ * Quota snapshot from the backend's `x-codex-*` response headers (measured 2026-09-13: the
+ * backend reports limits there on every response; the `codex.rate_limits` SSE event is not
+ * always sent). Same shape as the event so the GUI reads either.
+ */
+export function rateLimitsFromHeaders(h: Headers): Record<string, unknown> | null {
+  const num = (k: string): number | undefined => {
+    const v = h.get(k);
+    if (v === null || v === "") return undefined;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : undefined;
+  };
+  const window = (p: string): Record<string, number> | null => {
+    const used = num(`x-codex-${p}-used-percent`);
+    if (used === undefined) return null;
+    const w: Record<string, number> = { used_percent: used };
+    const wm = num(`x-codex-${p}-window-minutes`);
+    const ra = num(`x-codex-${p}-reset-after-seconds`);
+    const rt = num(`x-codex-${p}-reset-at`);
+    if (wm !== undefined) w.window_minutes = wm;
+    if (ra !== undefined) w.reset_after_seconds = ra;
+    if (rt !== undefined) w.reset_at = rt;
+    return w;
+  };
+  const primary = window("primary");
+  if (!primary) return null;
+  const secondary = window("secondary");
+  return {
+    type: "codex.rate_limits",
+    plan_type: h.get("x-codex-plan-type") ?? undefined,
+    rate_limits: { primary, secondary: secondary && secondary.window_minutes ? secondary : null },
+    at: Date.now(),
+  };
+}
+
 export class ChatGptAdapter {
   readonly name: string;
   private readonly cfg: ChatGptProvider;
@@ -98,10 +133,14 @@ export class ChatGptAdapter {
       throw e; // let the proxy feed health with the connect error
     }
 
+    const fromHeaders = rateLimitsFromHeaders(upstream.headers);
+    if (fromHeaders) this.lastRateLimits = fromHeaders;
+
     if (!upstream.ok || !upstream.body) {
       const text = await upstream.text().catch(() => "");
       if (upstream.status === 401) this.creds.invalidate();
       const err = mapHttpError(upstream.status, text);
+      this.log.warn(`chatgpt ${this.name}: upstream ${upstream.status} for ${model}: ${text.replace(/\s+/g, " ").slice(0, 400)}`);
       res.off("close", onClose);
       res.writeHead(err.status, { "content-type": "application/json" }).end(err.body);
       return { status: err.status, bytes: err.body.length, note: `upstream ${upstream.status}` };
