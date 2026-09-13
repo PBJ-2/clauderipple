@@ -106,6 +106,8 @@
    되돌리려면 백업 `config.toml.clauderipple-backup-20260913T211003`의 `model = "gpt-5.5"`로, `model_provider` 줄 삭제.
 5. README 스크린샷 4번(Codex 앱에서 Claude가 답하는 장면) 미확보. `docs/media/codex-claude.png`는 답 없는 중간 장면이라 README에 안 넣음.
 6. 프로토타입(8790)·proxenos(8787) 해제는 주군 확인 후.
+7. README에 **GPT 서브에이전트 에이전트 파일 예시** 추가(`~/.claude/agents/gpt.md`, `model: gpt-5.6-terra`). 디씨에서 "하네스 따로 짜야 하냐"
+   질문이 나옴 — 답은 "아니오, 에이전트 파일 하나". 주군의 `gpt`/`gpt-smart` 타입은 ClaudeRipple에 포함된 게 아니라 주군 개인 설정임.
 
 ## 09-13 밤 3 — 공개 직전에 한 일 (git log로 확인 가능)
 - Codex→Claude 429 원인·수정(instructions를 첫 user 블록으로, effort 게이트), 완료 후 소켓 끊김을 200으로 기록, env_key 제거·Authorization 선택.
