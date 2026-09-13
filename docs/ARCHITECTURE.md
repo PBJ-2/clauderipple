@@ -198,6 +198,117 @@ chat is out of reach for every approach, ours included.
   in its bootstrap); a model added afterwards is "not a recognized model id"
   until a new session starts.
 
+### 4b. OpenAI ingress (Codex CLI and other OpenAI clients)
+
+- A second, plain HTTP listener binds **only** `127.0.0.1` on
+  `listen.openaiPort` (default `listen.port + 2`). It accepts any syntactically
+  valid local `Authorization: Bearer …` value but never forwards that value.
+  It provides `POST /v1/responses`, `POST /v1/chat/completions`, and
+  `GET /v1/models`.
+- Both POST endpoints resolve their requested `model` with the same
+  `routes`/`aliases`/`direct` logic as the proxy. `chatgpt` and
+  `openai-compatible` targets are rejected: Codex already has native paths for
+  them. Targets are `anthropic-compatible`, or native `anthropic`.
+- Configure a native API-key target as
+  `{ "type":"anthropic", "auth":"api-key", "apiKey":"…" }` (or set
+  `ANTHROPIC_API_KEY`). Configure a compatible target as today, for example an
+  `openrouter` provider at `https://openrouter.ai/api` with its own `headers`.
+  Ingress writes requests to the ordinary RequestLog as `kind: "messages"`,
+  with `note: "openai-ingress responses|chat"`.
+- `anthropic.auth: "claude-code"` reuses a Claude subscription credential and
+  is subject to Anthropic's terms. Source precedence is: (1) the latest valid
+  **in-memory** header snapshot observed from an un-routed Claude Code
+  `api.anthropic.com/v1/messages` request (expires after 12 hours and vanishes
+  on router restart), (2) `CLAUDE_CODE_OAUTH_TOKEN`, (3) Claude Code Keychain
+  service `Claude Code-credentials`.claudeAiOauth, (4)
+  `~/.claude/.credentials.json`, then (5) ClaudeRipple's own
+  `<home>/claude-auth.json` setup-token file. The observed source retains only
+  `Authorization`, `anthropic-version`, `anthropic-beta`, `user-agent`,
+  `x-app`, `x-stainless-*`, and `anthropic-client-*` request headers and sends
+  that exact set upstream. It is never persisted, logged, included in RequestLog
+  or picker diagnostics, debug dumps, or any admin API response. Keychain/file
+  reads are cached for 60 seconds; ClaudeRipple **never refreshes or writes**
+  Claude Code's own credential. Expiry becomes OpenAI-style 401 `Claude Code
+  login expired — open Claude Code once to refresh`.
+- `clauderipple claude-login` runs the locally installed `claude setup-token`
+  browser flow and stores only its resulting long-lived token in
+  `<home>/claude-auth.json` with mode `0600`; `claude-logout` removes that file.
+  The command first finds `claude` on PATH, then the newest Desktop-bundled CLI.
+  It never prints the token. `setup-token` availability is CLI-version dependent.
+- **OAuth wire behavior (behavioral-spec evidence; not documented public API
+  contract):** the behavior-only OpenCodex source uses `Authorization: Bearer`,
+  `anthropic-version: 2023-06-01`,
+  `anthropic-beta: claude-code-20250219,oauth-2025-04-20`, a Claude Code
+  request fingerprint/session ID, and `custom_` prefixes for non-builtin tool
+  names. ClaudeRipple independently implements those behaviors; it does not
+  copy reference code. The ingress puts the required compatibility first system
+  block `You are Claude Code, Anthropic's official CLI for Claude.` before the
+  client instructions. Exact upstream identity and header requirements remain
+  version-sensitive and unverified until a credential-bearing isolated live
+  check succeeds.
+- Responses conversion is stateless. `previous_response_id` receives HTTP 400
+  `previous_response_id unsupported` rather than silently losing history.
+  `instructions` plus message/input items become Anthropic `system` plus
+  `messages`; text, base64/URL images, function calls, and function outputs are
+  preserved; reasoning items are dropped. Function tools and tool choice map to
+  Anthropic tools/tool_choice. `max_output_tokens` → `max_tokens`, and
+  `temperature` is preserved. `reasoning.effort` → `output_config.effort`; this
+  ingress does not invent a thinking-token budget because that would change
+  the caller's requested output ceiling.
+- Cache discipline: serialization has no timestamps; cache breakpoints are put
+  on the system block, the final tool definition, and the final user content
+  block. Upstream Anthropic usage maps `cache_read_input_tokens` to Responses
+  `usage.input_tokens_details.cached_tokens`.
+- Anthropic Messages stream conversion emits `response.created`, output-item
+  add/done, text and function-argument deltas/done, then `response.completed`.
+  Chat Completions uses the same mapper and emits `delta.tool_calls` plus a
+  terminal `[DONE]`.
+- Codex 0.146.0-alpha.9.2 on the development machine supports profile layers
+  at `$CODEX_HOME/<name>.config.toml` (`--profile <name>`). `clauderipple codex
+  on` adds only a marked `[model_providers.clauderipple]` block in
+  `$CODEX_HOME/config.toml` and a marked selection block in
+  `$CODEX_HOME/clauderipple.config.toml`; `off` removes only those blocks after
+  a backup. The provider uses `base_url = "http://127.0.0.1:<openaiPort>/v1"`,
+  `wire_api = "responses"`, and `env_key = "CLAUDERIPPLE_KEY"`.
+
+Sources: [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference),
+[Codex advanced configuration](https://learn.chatgpt.com/docs/config-file/config-advanced),
+[Claude Code authentication and credential management](https://code.claude.com/docs/en/authentication),
+and the behavior-only [OpenCodex source](https://github.com/lidge-jun/opencodex)
+inspected 2026-09-13. The latter is not an Anthropic guarantee.
+
+### 4c. `openai-compatible` providers (implemented 2026-09-13)
+
+- This adapter translates Anthropic Messages into either OpenAI **Chat Completions**
+  (the default `wire: "chat"`) or stateless **Responses** (`wire: "responses"`),
+  then maps SSE back into Anthropic `message_start`, content-block, `message_delta`,
+  and `message_stop` events. It supports text, base64/URL images, function tools,
+  tool results, non-streaming replies, and local `count_tokens` estimates.
+- Translation deliberately strips `thinking`, `context_management`, `thread`,
+  `diagnostics`, and `container`; `thread:continue` is refused exactly as in §4a so
+  the CLI resends a full stateless history. The per-turn
+  `x-anthropic-billing-header` system block is also stripped because its changing
+  value breaks every vendor's stable-prefix cache opportunity. Orphan tool results
+  are sent as user text, not a tool result with no antecedent call.
+- `output_config.effort` is emitted only if provider `caps.reasoning` is `"effort"`,
+  clamped to `caps.effortLevels`; Chat Completions receives `reasoning_effort`, while
+  Responses receives `reasoning.effort`. A discovered model's explicit
+  `effortLevels` overrides provider defaults, including `[]` for “no effort”. When
+  an OpenRouter `/models` entry has `supported_parameters`,
+  `reasoning_effort` maps to `[low, medium, high]`; its absence maps to `[]`.
+  Vendors that do not report that field keep their configured fallback. Chat wire
+  forwards Anthropic `stop_sequences` as `stop`; Responses wire deliberately omits
+  them because its common stateless schema has no corresponding universal field.
+- We do not assert a provider-wide cache hit rate: the adapter records
+  `prompt_tokens_details.cached_tokens` / `input_tokens_details.cached_tokens` when
+  a vendor returns it, and otherwise logs zero cache read. The byte-stable
+  translated history preserves cache eligibility but does not create vendor caching.
+- Presets use OpenAI-compatible `GET /models` discovery followed by a one-token
+  `POST /chat/completions` authentication check. 401/403 is a bad key; 402 or an
+  insufficient-credit response means the key is accepted but the account has no
+  credit. Preset endpoint and capability claims cite the vendor's official docs in
+  `packages/router/src/presets.ts`.
+
 ## 5. Failure modes that must not exist in the product (all observed)
 
 | Observed | Product requirement |

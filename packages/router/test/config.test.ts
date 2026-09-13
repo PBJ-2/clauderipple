@@ -29,6 +29,11 @@ test("validate accepts named anthropic-compatible model entries and rejects inva
   assert.ok(invalid.some((error) => error.includes("models must be entries")));
 });
 
+test("validate accepts native Anthropic API-key and Claude Code login providers", () => {
+  assert.deepEqual(validate({ ...DEFAULTS, providers: { api: { type: "anthropic", auth: "api-key" }, login: { type: "anthropic", auth: "claude-code", models: [{ id: "claude-sonnet-5" }] } } }), []);
+  assert.ok(validate({ ...DEFAULTS, providers: { bad: { type: "anthropic", auth: "bad" as "api-key" } } }).some((error) => error.includes("auth must be")));
+});
+
 test("validate accepts compatible caps and rejects invalid values", () => {
   const valid = validate({
     ...DEFAULTS,
@@ -40,6 +45,25 @@ test("validate accepts compatible caps and rejects invalid values", () => {
     providers: { p: { type: "anthropic-compatible", url: "https://example.test", caps: { effortLevels: [3] as unknown as string[], thinking: "adaptive" as "enabled" } } },
   });
   assert.ok(invalid.some((error) => error.includes("caps must contain")));
+});
+
+test("validate accepts openai-compatible configuration and rejects invalid wire/caps", () => {
+  const valid = validate({
+    ...DEFAULTS,
+    providers: { oai: { type: "openai-compatible", url: "https://api.example.test/v1", headers: { authorization: "Bearer key" }, wire: "responses", models: [{ id: "model", name: "Model", effortLevels: ["low", "high"] }], caps: { reasoning: "effort", effortLevels: ["low", "high"] } } },
+  });
+  assert.deepEqual(valid, []);
+  const invalid = validate({
+    ...DEFAULTS,
+    providers: { oai: { type: "openai-compatible", url: "https://api.example.test/v1", wire: "invalid" as "chat", caps: { reasoning: "invalid" as "effort" } } },
+  });
+  assert.ok(invalid.some((error) => error.includes("wire")));
+  assert.ok(invalid.some((error) => error.includes("caps")));
+  const invalidModel = validate({
+    ...DEFAULTS,
+    providers: { oai: { type: "openai-compatible", url: "https://api.example.test/v1", models: [{ id: "model", effortLevels: [7] as unknown as string[] }] } },
+  });
+  assert.ok(invalidModel.some((error) => error.includes("models must be entries")));
 });
 
 test("ConfigStore hot-reloads on mtime change and keeps last good config on errors", () => {

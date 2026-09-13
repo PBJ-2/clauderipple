@@ -19,6 +19,8 @@ import { agentState, installAgent, kickstart, plistPath, removeAgent, restartAge
 import { BUNDLE_ID, removeBundle, writeBundle } from "./bundle.ts";
 import { applyAppProxy, caTrusted, currentAppProxy, removeAppProxy, trustCa, untrustCa } from "./picker.ts";
 import { runtime } from "./runtime.ts";
+import { codexOff, codexOn } from "./codex.ts";
+import { claudeLogin, claudeLogout } from "./claude-auth.ts";
 
 function setPickerEnabled(enabled: boolean): void {
   const file = configPath();
@@ -215,7 +217,8 @@ async function status(): Promise<void> {
   const p = await probe({ host: cfg.listen.host, port: cfg.listen.port, caPem: caPath, upstream: cfg.upstream });
   rows.push(["probe", `${p.ok ? "ok" : "FAIL"}: ${p.detail} (${p.ms}ms)`]);
   for (const [name, p2] of Object.entries(cfg.providers)) {
-    const u = new URL(p2.type === "chatgpt" ? (p2.url ?? "https://chatgpt.com") : p2.url);
+    const providerUrl = p2.type === "chatgpt" ? (p2.url ?? "https://chatgpt.com") : p2.type === "anthropic" ? "https://api.anthropic.com" : p2.url;
+    const u = new URL(providerUrl);
     rows.push([`provider ${name}`, await tcpCheck(u.hostname, Number(u.port) || (u.protocol === "https:" ? 443 : 80))]);
   }
   rows.push(["claude code cli", cliVersions()]);
@@ -291,7 +294,10 @@ function help(): void {
   ui                open the admin GUI in your browser
   login             sign in to ChatGPT (opens your browser; tokens stay in the home dir)
   logout            forget the ChatGPT login made with "login"
+  claude-login      create a Claude subscription token for native Anthropic ingress
+  claude-logout     remove ClaudeRipple's setup-token credential
   picker on|off     show your mapped models by name in the Claude Desktop picker (trusts the CA in your login keychain, routes the app through ClaudeRipple)
+  codex on|off      add/remove ClaudeRipple's local OpenAI provider and selection profile for Codex CLI
   agent-title on|off|status
                     prefix subagent titles with the real model and thinking depth ("Terra·high · …") via a Claude Code hook
 
@@ -331,6 +337,22 @@ try {
       else console.log("usage: clauderipple picker on|off");
       break;
     }
+    case "codex": {
+      const sub = args[1];
+      if (sub !== "on" && sub !== "off") {
+        console.log("usage: clauderipple codex on|off");
+        break;
+      }
+      const cfg = new ConfigStore(configPath()).get();
+      const result = sub === "on" ? codexOn(cfg.listen.openaiPort ?? cfg.listen.port + 2) : codexOff();
+      console.log(result.changed ? `✓ Codex ${sub}: ${result.config}${sub === "on" ? `\n✓ profile: ${result.profile}` : ""}` : `✓ Codex already ${sub}`);
+      if (result.backup) console.log(`  backup: ${result.backup}`);
+      if (result.profileBackup) console.log(`  profile backup: ${result.profileBackup}`);
+      if (sub === "on") {
+        console.log("Run: CLAUDERIPPLE_KEY=local codex --profile clauderipple -m <mapped-model> \"say ok\"");
+      }
+      break;
+    }
     case "agent-title": {
       const sub = args[1];
       const { setAgentTitleHook, agentTitleHookEnabled } = await import("./settings.ts");
@@ -361,6 +383,15 @@ try {
       console.log(logout(homeDir()) ? "✓ ChatGPT login removed" : "no ChatGPT login stored");
       break;
     }
+    case "claude-login": {
+      console.log("Opening your browser through Claude Code to connect your Claude subscription. This terminal waits for approval.");
+      claudeLogin(homeDir());
+      console.log("✓ Claude subscription connected for native Anthropic ingress");
+      break;
+    }
+    case "claude-logout":
+      console.log(claudeLogout(homeDir()) ? "✓ Claude subscription credential removed" : "no Claude subscription credential stored");
+      break;
     case "ui":
       ui();
       break;

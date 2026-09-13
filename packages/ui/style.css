@@ -268,6 +268,9 @@ label.check input { width: auto; }
 .modal h1 { margin-bottom: 5px; }
 .modal-close { position: absolute; top: 11px; right: 11px; font-size: 20px; }
 .chooser-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 9px; margin-top: 16px; }
+.chooser-group { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 3px; padding: 12px 13px; border: 1px solid var(--border); border-radius: 8px; background: color-mix(in srgb, var(--accent) 7%, var(--panel)); }
+.chooser-group strong { font-size: 15px; }
+.chooser-group span { color: var(--muted); font-size: 14px; line-height: 1.35; }
 .chooser-tile { appearance: none; cursor: pointer; min-height: 106px; padding: 13px; text-align: left; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
 .chooser-tile:hover { border-color: var(--accent); }
 .chooser-tile strong, .chooser-tile span { display: block; }
@@ -298,6 +301,10 @@ label.check input { width: auto; }
 
 .model-search { width: 100%; margin-top: 8px; }
 .model-picker .small { margin-top: 6px; }
+.model-effort-tag { display: inline-block; margin-left: 5px; padding: 1px 5px; border-radius: 999px; font-size: 12px; line-height: 1.35; vertical-align: middle; white-space: nowrap; }
+.model-effort-tag.has-effort { color: var(--ok); background: color-mix(in srgb, var(--ok) 13%, transparent); }
+.model-effort-tag.no-effort { color: var(--muted); background: color-mix(in srgb, var(--muted) 12%, transparent); }
+.model-check .model-effort-tag { margin-left: auto; }
 #slots-status { margin-left: 12px; }
 #slots-summary { margin: 0 0 10px; }
 

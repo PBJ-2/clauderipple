@@ -54,6 +54,7 @@ const STRINGS = {
     agentTitleOff: "Stop showing model names on subagents",
     agentTitleDone: (on: boolean): string => (on ? "On. New subagents will be titled like \"Terra·high · …\"." : "Off."),
     signInChatgpt: "Sign in to ChatGPT…",
+    connectClaudeSubscription: "Connect Claude subscription…",
     copyStatus: "Copy Status",
     showLogs: "Show Logs",
     rerunSetup: "Run ClaudeRipple setup again…",
@@ -95,6 +96,7 @@ const STRINGS = {
     agentTitleOff: "서브에이전트 모델 이름 표시 끄기",
     agentTitleDone: (on: boolean): string => (on ? "켰습니다. 새로 뜨는 서브에이전트 제목이 \"Terra·high · …\"처럼 보입니다." : "껐습니다."),
     signInChatgpt: "ChatGPT 로그인…",
+    connectClaudeSubscription: "Claude 구독 연결…",
     copyStatus: "상태 복사",
     showLogs: "로그 보기",
     rerunSetup: "ClaudeRipple 설정 다시 실행…",
@@ -278,6 +280,7 @@ function render(): void {
     ...(s && Object.values(s.chatgpt?.signedIn ?? {}).some((ok) => !ok)
       ? [{ label: L.signInChatgpt, click: async () => void dialog.showMessageBox({ message: await runCli(["login"]) }) } as Electron.MenuItemConstructorOptions]
       : []),
+    { label: L.connectClaudeSubscription, click: async () => void dialog.showMessageBox({ message: await runCli(["claude-login"]) }) },
     { type: "separator" },
     { label: L.about, click: () => void dialog.showMessageBox({ title: "ClaudeRipple", message: "ClaudeRipple", detail: L.aboutDetail }) },
     { label: L.quit, role: "quit" },

@@ -73,10 +73,17 @@ function groupedModels(config) {
   return groups;
 }
 function presetById(id) { return presets.find((preset) => preset.id === id); }
+function modelEffortLevels(provider, model) {
+  const entry = modelsOf(provider).find((item) => item.id === model);
+  return entry && Array.isArray(entry.effortLevels) ? entry.effortLevels : undefined;
+}
 function fallbackEffortLevels(provider, model) {
   if (!provider) return [];
+  const explicit = modelEffortLevels(provider, model);
+  if (explicit !== undefined) return explicit;
   if (provider.type === "chatgpt") return model === "gpt-5.6-luna" ? ["low", "medium", "high", "xhigh", "max", "ultra"] : ["low", "medium", "high", "xhigh", "max"];
   const preset = provider.preset && presetById(provider.preset);
+  if (provider.type === "openai-compatible") return provider.caps && provider.caps.reasoning === "effort" && Array.isArray(provider.caps.effortLevels) ? provider.caps.effortLevels : [];
   return provider.caps && Array.isArray(provider.caps.effortLevels) ? provider.caps.effortLevels : (preset && preset.effortLevels) || [];
 }
 function effortLevelsFor(providerName, model) {
@@ -87,6 +94,13 @@ function effortLevelsFor(providerName, model) {
 }
 function providerSupportsEffort(provider, model) {
   return fallbackEffortLevels(provider, model).length > 0;
+}
+function hasModelEffortData(provider) {
+  return modelsOf(provider).some((model) => Array.isArray(model.effortLevels));
+}
+function modelEffortTag(model) {
+  if (!Array.isArray(model.effortLevels)) return null;
+  return model.effortLevels.length ? t("providers.modelEffort") : t("providers.modelNoEffort");
 }
 
 let currentConfig = null;
@@ -455,7 +469,14 @@ async function probeProvider(name, provider, onComplete) {
     const result = await api("/api/providers/probe", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ type: provider.type, url: provider.url, headers, modelsUrl: provider.modelsUrl, modelsAuthHeader: provider.modelsAuthHeader, probeModel: provider.probeModel }),
+      body: JSON.stringify({
+        type: provider.type,
+        url: provider.url,
+        headers,
+        modelsUrl: provider.modelsUrl || (provider.preset && presetById(provider.preset) && presetById(provider.preset).modelsUrl),
+        modelsAuthHeader: provider.modelsAuthHeader || (provider.preset && presetById(provider.preset) && presetById(provider.preset).modelsAuthHeader),
+        probeModel: provider.probeModel || (provider.preset && presetById(provider.preset) && (presetById(provider.preset).fallbackModels || [])[0] && presetById(provider.preset).fallbackModels[0].id),
+      }),
     });
     probeStates.set(name, result);
     onComplete && onComplete(result);
@@ -486,9 +507,19 @@ function providerCard(name, provider) {
     if (provider.type !== "chatgpt") { try { kind = `${kind ? kind + " · " : ""}${new URL(provider.url).host}`; } catch { /* keep */ } }
     stateLine.replaceChildren(...[providerState(name, provider), el("span", { class: "small", text: kind }), state && !state.ok && state.error ? el("span", { class: "small bad-text", text: state.error }) : null].filter(Boolean));
     const models = modelsOf(provider);
-    modelText.textContent = models.length ? t("providers.modelsCount", { count: models.length, names: models.map(labelOf).join(", ") }) : t("providers.noModels");
-    const levels = effortLevelsFor(name, models[0] && models[0].id);
-    effortText.textContent = t("providers.effortLevels", { levels: levels.length ? levels.join(" · ") : t("providers.effortNone") });
+    modelText.replaceChildren(...(models.length
+      ? models.flatMap((model, index) => [
+          index ? document.createTextNode(", ") : null,
+          document.createTextNode(labelOf(model)),
+          modelEffortTag(model) ? el("span", { class: `model-effort-tag ${model.effortLevels.length ? "has-effort" : "no-effort"}`, text: modelEffortTag(model) }) : null,
+        ].filter(Boolean))
+      : [document.createTextNode(t("providers.noModels"))]));
+    if (hasModelEffortData(provider)) effortText.hidden = true;
+    else {
+      const levels = effortLevelsFor(name, models[0] && models[0].id);
+      effortText.textContent = t("providers.effortLevels", { levels: levels.length ? levels.join(" · ") : t("providers.effortNone") });
+      effortText.hidden = false;
+    }
   };
   check.addEventListener("click", async () => { check.disabled = true; await probeProvider(name, provider); check.disabled = false; draw(); });
   edit.addEventListener("click", () => openProviderForm({ name, provider }));
@@ -551,10 +582,20 @@ function openProviderChooser() {
   const chatgpt = el("button", { class: "chooser-tile", type: "button" }, [el("strong", { text: t("providers.chatgpt") }), el("span", { text: t("providers.chatgptHelp") })]);
   chatgpt.addEventListener("click", () => openProviderForm({ kind: "chatgpt" }));
   grid.appendChild(chatgpt);
-  for (const preset of presets) {
+  const native = presets.filter((preset) => (preset.kind || "anthropic-compatible") === "anthropic-compatible");
+  for (const preset of native) {
     const tile = el("button", { class: "chooser-tile", type: "button" }, [el("strong", { text: preset.name }), el("span", { text: t("providers.presetHelp") })]);
     tile.addEventListener("click", () => openProviderForm({ preset }));
     grid.appendChild(tile);
+  }
+  const openai = presets.filter((preset) => preset.kind === "openai-compatible");
+  if (openai.length) {
+    grid.appendChild(el("div", { class: "chooser-group" }, [el("strong", { text: t("providers.openaiGroup") }), el("span", { text: t("providers.openaiGroupHelp") })]));
+    for (const preset of openai) {
+      const tile = el("button", { class: "chooser-tile", type: "button" }, [el("strong", { text: preset.name }), el("span", { text: t("providers.presetHelp") })]);
+      tile.addEventListener("click", () => openProviderForm({ preset }));
+      grid.appendChild(tile);
+    }
   }
   const custom = el("button", { class: "chooser-tile", type: "button" }, [el("strong", { text: t("providers.custom") }), el("span", { text: t("providers.customHelp") })]);
   custom.addEventListener("click", () => openProviderForm({ kind: "custom" }));
@@ -569,7 +610,7 @@ function inputRow(label, control, helpText) {
 // loses ticks. `box.selected()` returns the chosen {id,name} entries.
 function modelChecklist(models, checked) {
   const selected = new Map();
-  for (const model of models) if (checked.has(model.id)) selected.set(model.id, { id: model.id, name: labelOf(model) });
+  for (const model of models) if (checked.has(model.id)) selected.set(model.id, { id: model.id, name: labelOf(model), ...(Array.isArray(model.effortLevels) ? { effortLevels: [...model.effortLevels] } : {}) });
   const wrap = el("div", { class: "model-picker" });
   const grid = el("div", { class: "model-checklist modal-checklist" });
   const note = el("div", { class: "small", text: "" });
@@ -585,8 +626,13 @@ function modelChecklist(models, checked) {
       const input = el("input", { type: "checkbox", checked: selected.has(model.id) });
       input.dataset.model = model.id;
       input.dataset.name = labelOf(model);
-      input.addEventListener("change", () => { if (input.checked) selected.set(model.id, { id: model.id, name: labelOf(model) }); else selected.delete(model.id); note.textContent = summary(matches.length); });
-      grid.appendChild(el("label", { class: "model-check", title: model.id }, [input, el("span", { text: labelOf(model) })]));
+      input.addEventListener("change", () => {
+        if (input.checked) selected.set(model.id, { id: model.id, name: labelOf(model), ...(Array.isArray(model.effortLevels) ? { effortLevels: [...model.effortLevels] } : {}) });
+        else selected.delete(model.id);
+        note.textContent = summary(matches.length);
+      });
+      const tag = modelEffortTag(model);
+      grid.appendChild(el("label", { class: "model-check", title: model.id }, [input, el("span", { text: labelOf(model) }), tag ? el("span", { class: `model-effort-tag ${model.effortLevels.length ? "has-effort" : "no-effort"}`, text: tag }) : null]));
     }
     note.textContent = summary(matches.length);
   }
@@ -604,6 +650,7 @@ function openProviderForm(options) {
   const existing = options.provider;
   const preset = options.preset || (existing && existing.preset && presetById(existing.preset));
   const isChatgpt = options.kind === "chatgpt" || (existing && existing.type === "chatgpt");
+  const isOpenAi = !isChatgpt && ((existing && existing.type === "openai-compatible") || (preset && preset.kind === "openai-compatible"));
   const isCustom = options.kind === "custom";
   const displayName = options.name || (preset && preset.name) || (isChatgpt ? t("providers.chatgpt") : t("providers.customName"));
   const nameInput = el("input", { value: displayName, maxlength: "60" });
@@ -611,10 +658,12 @@ function openProviderForm(options) {
   const showKey = el("button", { class: "eye-button", type: "button", text: t("common.show") });
   showKey.addEventListener("click", () => { const show = keyInput.type === "password"; keyInput.type = show ? "text" : "password"; showKey.textContent = show ? t("common.hide") : t("common.show"); });
   const currentHeaders = (existing && existing.headers) || {};
-  const headerKind = preset ? preset.authHeader : (Object.keys(currentHeaders).some((key) => key.toLowerCase() === "authorization") ? "authorization-bearer" : "x-api-key");
+  const headerKind = preset ? preset.authHeader : (isOpenAi || Object.keys(currentHeaders).some((key) => key.toLowerCase() === "authorization") ? "authorization-bearer" : "x-api-key");
   const existingKey = headerKind === "authorization-bearer" ? String(currentHeaders.authorization || "").replace(/^Bearer\s+/i, "") : currentHeaders["x-api-key"] || "";
   if (existingKey) keyInput.placeholder = t("providers.keySaved");
   const urlInput = el("input", { value: (existing && existing.url) || (preset && preset.anthropicBaseUrl) || "", placeholder: "https://" });
+  const wireSelect = el("select", {}, [selectOption("chat", "Chat Completions"), selectOption("responses", "Responses")]);
+  wireSelect.value = (existing && existing.wire) || (preset && preset.wire) || "chat";
   const pickerInput = el("input", { type: "checkbox", checked: Boolean(existing && (existing.models || []).some((model) => {
     const id = typeof model === "string" ? model : model.id;
     return ((currentConfig.cli && currentConfig.cli.extraModels) || []).some((extra) => extra.model === id);
@@ -629,7 +678,7 @@ function openProviderForm(options) {
   const modelArea = el("div", { class: "form-field" }, [
     el("span", { text: t("providers.models") }),
     hint(t("providers.modelsHelp")),
-    el("small", { text: t("providers.effortLevels", { levels: providerEffortLevels.length ? providerEffortLevels.join(" · ") : t("providers.effortNone") }) }),
+    hasModelEffortData({ models: initialModels }) ? null : el("small", { text: t("providers.effortLevels", { levels: providerEffortLevels.length ? providerEffortLevels.join(" · ") : t("providers.effortNone") }) }),
     modelsBox,
   ]);
   const result = el("div", { class: "probe-result" });
@@ -639,7 +688,8 @@ function openProviderForm(options) {
   const advancedContent = el("div", { class: "advanced-content" });
   let chatgptFields = [];
   if (!isChatgpt) {
-    advancedContent.appendChild(inputRow(t("providers.url"), urlInput, t("providers.urlHelp")));
+    advancedContent.appendChild(inputRow(t("providers.url"), urlInput, isOpenAi ? t("providers.openaiUrlHelp") : t("providers.urlHelp")));
+    if (isOpenAi) advancedContent.appendChild(inputRow(t("providers.wire"), wireSelect, t("providers.wireHelp")));
     if (isCustom) {
       const authSelect = el("select", {}, [selectOption("x-api-key", "x-api-key"), selectOption("authorization-bearer", "Authorization: Bearer")]);
       authSelect.value = headerKind;
@@ -707,7 +757,13 @@ function openProviderForm(options) {
       const chat = advancedContent._chatgpt;
       return { type: "chatgpt", auth: chat.auth.value, defaultEffort: chat.effort.value, identity: chat.identity.checked, ...(chat.append.value.trim() ? { instructionsAppend: chat.append.value.trim() } : {}) };
     }
-    return { type: "anthropic-compatible", url: urlInput.value.trim(), ...(preset ? { preset: preset.id } : {}), ...(Object.keys(readHeaders()).length ? { headers: readHeaders() } : {}) };
+    return {
+      type: isOpenAi ? "openai-compatible" : "anthropic-compatible",
+      url: urlInput.value.trim(),
+      ...(preset ? { preset: preset.id } : {}),
+      ...(isOpenAi ? { wire: wireSelect.value, caps: { effortLevels: (preset && preset.effortLevels) || [], reasoning: preset && preset.effortLevels && preset.effortLevels.length ? "effort" : "none" } } : {}),
+      ...(Object.keys(readHeaders()).length ? { headers: readHeaders() } : {}),
+    };
   }
   function probeDraft() {
     const d = draftProvider();

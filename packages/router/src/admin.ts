@@ -49,10 +49,10 @@ export type AdminDeps = {
   picker?: () => { enabled: boolean; hosts: string[]; last: unknown };
 };
 
-type ModelEntry = { id: string; name?: string };
+type ModelEntry = { id: string; name?: string; effortLevels?: string[] };
 type ProbeAuth = "ok" | "bad-key" | "unreachable" | "unknown";
 type ProbeRequest = {
-  type: "anthropic-compatible";
+  type: "anthropic-compatible" | "openai-compatible";
   url: string;
   headers?: Record<string, string>;
   modelsUrl?: string;
@@ -83,8 +83,27 @@ export function effortLevels(cfg: Config): { providers: Record<string, { default
       };
       continue;
     }
+    const modelLevels = Object.fromEntries(
+      (provider.models ?? [])
+        .filter((model) => model.effortLevels !== undefined)
+        .map((model) => [model.id, [...model.effortLevels!]]),
+    );
+    if (provider.type === "openai-compatible") {
+      providers[name] = {
+        default: provider.caps?.reasoning === "effort" ? (provider.caps.effortLevels ?? []) : [],
+        ...(Object.keys(modelLevels).length ? { models: modelLevels } : {}),
+      };
+      continue;
+    }
+    if (provider.type === "anthropic") {
+      providers[name] = { default: ANTHROPIC_EFFORT_LEVELS };
+      continue;
+    }
     const preset = provider.preset ? PRESETS.find((entry) => entry.id === provider.preset) : undefined;
-    providers[name] = { default: resolveCompatibleCaps(preset ? { effortLevels: preset.effortLevels, thinking: preset.thinking } : undefined, provider.caps).effortLevels };
+    providers[name] = {
+      default: resolveCompatibleCaps(preset ? { effortLevels: preset.effortLevels, thinking: preset.thinking } : undefined, provider.caps).effortLevels,
+      ...(Object.keys(modelLevels).length ? { models: modelLevels } : {}),
+    };
   }
   return { providers };
 }
@@ -182,7 +201,7 @@ async function buildStatus(deps: AdminDeps): Promise<Record<string, unknown>> {
   const providers: Record<string, { url: string; type: string; reachable: boolean }> = {};
   await Promise.all(
     Object.entries(cfg.providers).map(async ([name, p]) => {
-      const url = p.url ?? "https://chatgpt.com/backend-api";
+      const url = p.type === "anthropic" ? "https://api.anthropic.com" : p.type === "chatgpt" ? (p.url ?? "https://chatgpt.com/backend-api") : p.url;
       let reachable = false;
       try {
         const u = new URL(url);
@@ -293,6 +312,10 @@ function messagesUrl(base: string): string {
   return `${base.replace(/\/+$/, "")}/v1/messages`;
 }
 
+function chatCompletionsUrl(base: string): string {
+  return `${base.replace(/\/+$/, "")}/chat/completions`;
+}
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -301,8 +324,16 @@ function parsedModels(value: unknown): ModelEntry[] {
   const data = value && typeof value === "object" && Array.isArray((value as { data?: unknown }).data) ? (value as { data: unknown[] }).data : [];
   return data.flatMap((item) => {
     if (!item || typeof item !== "object") return [];
-    const r = item as { id?: unknown; name?: unknown };
-    return typeof r.id === "string" ? [{ id: r.id, ...(typeof r.name === "string" ? { name: r.name } : {}) }] : [];
+    const r = item as { id?: unknown; name?: unknown; supported_parameters?: unknown };
+    if (typeof r.id !== "string") return [];
+    const supported = Array.isArray(r.supported_parameters) && r.supported_parameters.every((value) => typeof value === "string")
+      ? r.supported_parameters as string[]
+      : undefined;
+    return [{
+      id: r.id,
+      ...(typeof r.name === "string" ? { name: r.name } : {}),
+      ...(supported ? { effortLevels: supported.includes("reasoning_effort") ? ["low", "medium", "high"] : [] } : {}),
+    }];
   });
 }
 
@@ -329,13 +360,19 @@ async function probeProvider(body: ProbeRequest): Promise<{ ok: boolean; auth: P
     }
   }
 
+  const openai = body.type === "openai-compatible";
+  const checkUrl = openai ? chatCompletionsUrl(body.url) : messagesUrl(body.url);
+  const checkBody = openai
+    ? { model: models[0]?.id ?? body.probeModel ?? "test", max_tokens: 1, stream: false, messages: [{ role: "user", content: "hi" }] }
+    : { model: models[0]?.id ?? body.probeModel ?? "test", max_tokens: 1, messages: [{ role: "user", content: "hi" }] };
+  const label = openai ? "chat completions endpoint" : "messages endpoint";
   try {
-    const response = await fetchWithTimeout(messagesUrl(body.url), {
+    const response = await fetchWithTimeout(checkUrl, {
       method: "POST",
       headers: { "content-type": "application/json", ...authHeaders(source) },
-      body: JSON.stringify({ model: models[0]?.id ?? body.probeModel ?? "test", max_tokens: 1, messages: [{ role: "user", content: "hi" }] }),
+      body: JSON.stringify(checkBody),
     });
-    if (response.status === 401 || response.status === 403) return { ok: false, auth: "bad-key", models, error: `messages endpoint returned ${response.status}: ${snippet(await response.text())}` };
+    if (response.status === 401 || response.status === 403) return { ok: false, auth: "bad-key", models, error: `${label} returned ${response.status}: ${snippet(await response.text())}` };
     if (response.ok) return { ok: true, auth: "ok", models, ...(modelsError ? { error: modelsError } : {}) };
     const detail = snippet(await response.text());
     // A model-validation 400 still demonstrates that the endpoint reached the provider and the key was accepted.
@@ -346,10 +383,10 @@ async function probeProvider(body: ProbeRequest): Promise<{ ok: boolean; auth: P
     if (response.status === 402 || /insufficient|balance|credit|quota|billing/i.test(detail)) {
       return { ok: true, auth: "ok", models, error: `no-credits: ${response.status} ${detail}` };
     }
-    return { ok: false, auth: response.status >= 500 ? "unreachable" : "unknown", models, error: `messages endpoint returned ${response.status}: ${detail}` };
+    return { ok: false, auth: response.status >= 500 ? "unreachable" : "unknown", models, error: `${label} returned ${response.status}: ${detail}` };
   } catch (e) {
-    const message = `messages endpoint: ${errorText(e)}`;
-    return { ok: false, auth: /timeout|abort/i.test(message) ? "unreachable" : "unreachable", models, error: modelsError ? `${modelsError}; ${message}` : message };
+    const message = `${label}: ${errorText(e)}`;
+    return { ok: false, auth: "unreachable", models, error: modelsError ? `${modelsError}; ${message}` : message };
   }
 }
 
@@ -485,18 +522,18 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           return;
         }
         if (
-          probe.type !== "anthropic-compatible" ||
+          (probe.type !== "anthropic-compatible" && probe.type !== "openai-compatible") ||
           typeof probe.url !== "string" ||
           !/^https?:\/\//.test(probe.url) ||
           (probe.headers !== undefined && (!probe.headers || typeof probe.headers !== "object" || Array.isArray(probe.headers) || Object.values(probe.headers).some((v) => typeof v !== "string"))) ||
           (probe.modelsUrl !== undefined && typeof probe.modelsUrl !== "string") ||
           (probe.modelsAuthHeader !== undefined && typeof probe.modelsAuthHeader !== "string")
         ) {
-          sendJson(res, 400, { error: "expected {type: 'anthropic-compatible', url: http(s) URL, headers?: Record<string,string>, modelsUrl?: string, modelsAuthHeader?: string}" });
+          sendJson(res, 400, { error: "expected {type: 'anthropic-compatible'|'openai-compatible', url: http(s) URL, headers?: Record<string,string>, modelsUrl?: string, modelsAuthHeader?: string}" });
           return;
         }
         const result = await probeProvider({
-          type: "anthropic-compatible",
+          type: probe.type,
           url: probe.url,
           ...(probe.headers ? { headers: probe.headers as Record<string, string> } : {}),
           ...(probe.modelsUrl ? { modelsUrl: probe.modelsUrl } : {}),

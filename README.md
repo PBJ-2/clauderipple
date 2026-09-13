@@ -3,8 +3,9 @@
 **Run GPT and other models inside Claude Desktop, without turning Claude off.**
 
 ClaudeRipple is a local proxy for Claude Code. It lets you pick GPT (via your
-ChatGPT subscription) or any Anthropic-compatible provider (DeepSeek, Kimi, GLM,
-MiniMax, Qwen, OpenRouter…) from Claude Desktop's own model picker, while every
+ChatGPT subscription), any Anthropic-compatible provider (DeepSeek, Kimi, GLM,
+MiniMax, Qwen, OpenRouter…), or OpenAI-compatible provider (xAI Grok, Mistral,
+Groq, Together, Fireworks, Ollama, LM Studio) from Claude Desktop's own model picker, while every
 other request keeps going to Anthropic exactly as before.
 
 It works everywhere Claude Code runs, because it plugs into the settings file
@@ -52,7 +53,7 @@ node packages/cli/src/index.ts ui           # open the local GUI in your browser
 
 `uninstall` reverses everything and restores `~/.claude/settings.json` from a backup.
 Other commands: `status`, `start`, `stop`, `restart`, `logs -f`, `login`, `logout`,
-`picker on|off`, `agent-title on|off`.
+`claude-login`, `claude-logout`, `picker on|off`, `agent-title on|off`.
 
 ## Providers
 
@@ -62,11 +63,51 @@ Other commands: `status`, `start`, `stop`, `restart`, `logs -f`, `login`, `logou
   `clauderipple login`, or let it borrow the Codex CLI's login read-only.
 - **anthropic-compatible** — any endpoint that speaks Anthropic Messages
   (DeepSeek, Kimi, GLM, MiniMax, a local relay). Host and model rewrite only.
+- **openai-compatible** — Chat Completions (default) or stateless Responses APIs
+  translated from Anthropic Messages: xAI Grok, Mistral, Groq, Together, Fireworks,
+  Ollama, LM Studio, and compatible native OpenRouter-style endpoints. Native vendor
+  cached-token fields are recorded when provided; cache availability remains vendor- and model-specific.
 
 Map picker slots to providers in the GUI: e.g. Opus 4.8 → `gpt-6-astra`,
 Sonnet 4.6 → `gpt-5.6-luna`. Subagents can name a model directly
 (`model: gpt-5.6-sol@medium`) or put `[[ripple: sol@xhigh]]` at the top of
 their prompt.
+
+## Use Claude or other providers from Codex CLI
+
+ClaudeRipple also exposes a localhost OpenAI-compatible ingress for Codex and
+other OpenAI Responses/Chat Completions clients. Add either an
+`anthropic-compatible` provider (for example OpenRouter's Anthropic endpoint)
+or a native Anthropic provider in ClaudeRipple's config:
+
+```json
+"anthropic": { "type": "anthropic", "auth": "api-key", "apiKey": "…" }
+```
+
+For Claude Code's existing login instead, use
+`{ "type": "anthropic", "auth": "claude-code" }`. ClaudeRipple prefers a
+recent in-memory header snapshot from an active Claude Code session, then
+`CLAUDE_CODE_OAUTH_TOKEN`, Claude Code's Keychain/file login, and finally its
+own setup-token file. It never refreshes Claude Code's credential and is subject
+to Anthropic's terms. If no usable login exists, run `clauderipple claude-login`:
+it opens Claude Code's browser authorization flow and saves the resulting
+long-lived token privately as `~/.clauderipple/claude-auth.json` (mode 0600).
+Run `clauderipple claude-logout` to remove only that file.
+
+Then run `clauderipple codex on`. It backs up and writes only ClaudeRipple's
+provider block in `$CODEX_HOME/config.toml` and a selection profile at
+`$CODEX_HOME/clauderipple.config.toml`; it does not change your normal Codex
+provider. Start a session with:
+
+```bash
+CLAUDERIPPLE_KEY=local codex --profile clauderipple -m claude-sonnet-5 "say ok"
+```
+
+The local URL is `http://127.0.0.1:<listen.openaiPort or listen.port+2>/v1`.
+Supported endpoints are `/v1/responses`, `/v1/chat/completions`, and
+`/v1/models`. The ingress is stateless: `previous_response_id` intentionally
+returns a clear 400 rather than dropping prior context. See architecture §4b
+for the request/cache behavior and OAuth compatibility evidence.
 
 ## How it works
 

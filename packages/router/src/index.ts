@@ -14,6 +14,8 @@ import { UpstreamHealth, EXIT_UPSTREAM_UNREACHABLE } from "./health.ts";
 import { Proxy } from "./proxy.ts";
 import { startAdmin } from "./admin.ts";
 import { RequestLog } from "./requestlog.ts";
+import { OpenAiIngress } from "./ingress/server.ts";
+import { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
 
 const home = homeDir();
 const logFile = process.env.CLAUDERIPPLE_NO_LOGFILE ? null : path.join(home, "logs", "router.log");
@@ -53,7 +55,9 @@ const health = new UpstreamHealth(
   },
 );
 
-const proxy = new Proxy({ config: () => store.get(), log, certs, health, home, requests });
+const observedClaudeCodeAuth = new ObservedClaudeCodeAuth();
+const proxy = new Proxy({ config: () => store.get(), log, certs, health, home, requests, observedClaudeCodeAuth });
+const ingress = new OpenAiIngress({ config: () => store.get(), log, requests, home, observedClaudeCodeAuth });
 
 process.on("uncaughtException", (e) => log!.error(`uncaught ${(e as Error).stack ?? e}`));
 process.on("unhandledRejection", (e) => log!.error(`unhandled ${(e as Error)?.stack ?? e}`));
@@ -63,17 +67,15 @@ for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => {
     if (draining) return;
     draining = true;
-    log!.info(`${sig}: draining, in-flight=${proxy.stats.inFlight} model calls=${proxy.stats.messagesInFlight}`);
+    log!.info(`${sig}: draining, proxy=${proxy.stats.messagesInFlight} ingress=${ingress.stats.messagesInFlight} model calls`);
     let lastReported = -1;
-    void proxy
-      .drain(DRAIN_MS, (n) => {
-        if (n !== lastReported) {
-          lastReported = n;
-          log!.info(`drain: waiting for ${n} model call(s)`);
-        }
-      })
+    void Promise.all([
+      proxy.drain(DRAIN_MS, () => {}),
+      ingress.drain(DRAIN_MS, () => {}),
+    ])
       .then(() => {
-        log!.info(`drain complete, exiting (model calls still open: ${proxy.stats.messagesInFlight})`);
+        const left = proxy.stats.messagesInFlight + ingress.stats.messagesInFlight;
+        if (left !== lastReported) log!.info(`drain complete, exiting (model calls still open: ${left})`);
         setTimeout(() => process.exit(0), 200).unref();
       });
   });
@@ -82,14 +84,17 @@ for (const sig of ["SIGINT", "SIGTERM"] as const) {
 const statsEvery = 5 * 60 * 1000;
 setInterval(() => {
   const s = proxy.stats;
-  log!.info(`stats started=${s.started} completed=${s.completed} failed=${s.failed} inFlight=${s.inFlight} consecutiveUpstreamFailures=${health.consecutiveFailures}`);
+  const oi = ingress.stats;
+  log!.info(`stats proxy=${s.started}/${s.completed}/${s.failed} inFlight=${s.inFlight} ingress=${oi.started}/${oi.completed}/${oi.failed} inFlight=${oi.inFlight} consecutiveUpstreamFailures=${health.consecutiveFailures}`);
 }, statsEvery).unref();
 
 proxy
   .listen()
   .then(async () => {
+    const ingressPort = await ingress.listen();
     const c = store.get();
     log!.info(`clauderipple router listening on ${c.listen.host}:${c.listen.port} upstream=${c.upstream} home=${home}`);
+    log!.info(`clauderipple OpenAI ingress listening on 127.0.0.1:${ingressPort}`);
     const admin = await startAdmin({
       config: () => store.get(),
       configFile: configPath(),

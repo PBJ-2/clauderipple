@@ -129,7 +129,7 @@ test("GET /api/claude-models uses named entries from code and ccd picker surface
 test("GET /api/effort-levels reports compatible defaults and ChatGPT model exceptions", async () => {
   const cfg = makeCfg({
     providers: {
-      openrouter: { type: "anthropic-compatible", url: "https://openrouter.ai/api", preset: "openrouter" },
+      openrouter: { type: "anthropic-compatible", url: "https://openrouter.ai/api", preset: "openrouter", models: [{ id: "effort", effortLevels: ["low", "medium", "high"] }, { id: "no-effort", effortLevels: [] }, { id: "fallback" }] },
       custom: { type: "anthropic-compatible", url: "https://example.test", caps: { effortLevels: ["max"], thinking: "none" } },
       gpt: { type: "chatgpt" },
     },
@@ -140,6 +140,7 @@ test("GET /api/effort-levels reports compatible defaults and ChatGPT model excep
     const body = await res.json() as { providers: Record<string, { default: string[]; models?: Record<string, string[]> }> };
     assert.deepEqual(body.providers.anthropic?.default, ["low", "medium", "high", "max"]);
     assert.deepEqual(body.providers.openrouter?.default, ["low", "medium", "high"]);
+    assert.deepEqual(body.providers.openrouter?.models, { effort: ["low", "medium", "high"], "no-effort": [] });
     assert.deepEqual(body.providers.custom?.default, ["max"]);
     assert.deepEqual(body.providers.gpt?.models?.["gpt-5.6-luna"], ["low", "medium", "high", "xhigh", "max", "ultra"]);
     assert.deepEqual(body.providers.gpt?.models?.["gpt-5.6-terra"], ["low", "medium", "high", "xhigh", "max"]);
@@ -235,6 +236,61 @@ test("POST /api/providers/probe discovers models then accepts model-validation e
     assert.equal(seen.model, "fake-model");
   } finally {
     await new Promise<void>((resolveP, reject) => upstream.close((error) => (error ? reject(error) : resolveP())));
+  }
+});
+
+test("POST /api/providers/probe discovers OpenAI-compatible models and probes Chat Completions", async () => {
+  const seen: { auth?: string; model?: string; tokens?: number } = {};
+  const upstream = http.createServer((req, res) => {
+    if (req.url === "/v1/models") {
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ data: [
+        { id: "oai-model", name: "OAI Model", supported_parameters: ["reasoning_effort"] },
+        { id: "no-effort-model", supported_parameters: ["reasoning"] },
+        { id: "legacy-model" },
+      ] }));
+      return;
+    }
+    if (req.url === "/v1/chat/completions") {
+      if (typeof req.headers.authorization === "string") seen.auth = req.headers.authorization;
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { model: string; max_tokens: number };
+        seen.model = body.model;
+        seen.tokens = body.max_tokens;
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ choices: [] }));
+      });
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  await new Promise<void>((resolveP) => upstream.listen(0, "127.0.0.1", resolveP));
+  const address = upstream.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}/v1`;
+  try {
+    await withAdmin(makeCfg(), async ({ port }) => {
+      const res = await fetch(`${base()}:${port}/api/providers/probe`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "openai-compatible", url: origin, headers: { authorization: "Bearer secret-key" }, modelsUrl: `${origin}/models`, modelsAuthHeader: "authorization-bearer" }),
+      });
+      assert.equal(res.status, 200);
+      assert.deepEqual(await res.json(), {
+        ok: true,
+        auth: "ok",
+        models: [
+          { id: "oai-model", name: "OAI Model", effortLevels: ["low", "medium", "high"] },
+          { id: "no-effort-model", effortLevels: [] },
+          { id: "legacy-model" },
+        ],
+      });
+    });
+    assert.equal(seen.auth, "Bearer secret-key");
+    assert.equal(seen.model, "oai-model");
+    assert.equal(seen.tokens, 1);
+  } finally {
+    await new Promise<void>((resolveP, reject) => upstream.close((error) => error ? reject(error) : resolveP()));
   }
 });
 

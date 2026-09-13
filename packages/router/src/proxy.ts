@@ -28,11 +28,13 @@ import { THREAD_UNSUPPORTED, effortOf, resolve, rewriteBody, stripThreadFields, 
 import { forwardCompatibleHeader, resolveCompatibleCaps, sanitizeForCompatible } from "./compat.ts";
 import { PRESETS } from "./presets.ts";
 import { ChatGptAdapter } from "./providers/chatgpt/index.ts";
+import { OpenAiCompatibleAdapter } from "./providers/openai/index.ts";
 import type { AnthropicRequest } from "./providers/chatgpt/translate.ts";
 import { terminateHosts } from "./config.ts";
 import type { CertStore } from "./certs.ts";
 import { injectPickerModels, isBootstrapPath } from "./picker.ts";
 import { ResponseUsageTap, type RequestLog, type RequestRecord, type RequestUsage } from "./requestlog.ts";
+import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
 
 const MAX_BODY = 64 * 1024 * 1024;
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "host", "content-length"]);
@@ -47,6 +49,8 @@ export type ProxyDeps = {
   home: string;
   /** Bounded structured history for the local admin Logs page. */
   requests: RequestLog;
+  /** Process-memory only; captures a real passthrough Claude Code OAuth header set. */
+  observedClaudeCodeAuth?: ObservedClaudeCodeAuth;
 };
 
 export type Stats = {
@@ -68,6 +72,7 @@ export class Proxy {
   private readonly upstreamAgent = new https.Agent({ keepAlive: true, maxSockets: 64 });
   private readonly providerAgents = new Map<string, http.Agent | https.Agent>();
   private readonly chatgptAdapters = new Map<string, { key: string; adapter: ChatGptAdapter }>();
+  private readonly openaiAdapters = new Map<string, { key: string; adapter: OpenAiCompatibleAdapter }>();
   private readonly deps: ProxyDeps;
 
   /** Latest rate-limit snapshot reported by any chatgpt provider (for the admin GUI). */
@@ -89,6 +94,15 @@ export class Proxy {
     if (cur && cur.key === key) return cur.adapter;
     const adapter = new ChatGptAdapter(name, cfg, this.deps.home, this.deps.log);
     this.chatgptAdapters.set(name, { key, adapter });
+    return adapter;
+  }
+
+  private openai(name: string, cfg: Extract<Config["providers"][string], { type: "openai-compatible" }>): OpenAiCompatibleAdapter {
+    const key = JSON.stringify(cfg);
+    const cur = this.openaiAdapters.get(name);
+    if (cur && cur.key === key) return cur.adapter;
+    const adapter = new OpenAiCompatibleAdapter(name, cfg, this.deps.log);
+    this.openaiAdapters.set(name, { key, adapter });
     return adapter;
   }
 
@@ -363,6 +377,10 @@ export class Proxy {
     const requestedEffort = effortOf(json ?? {});
     if (requestedEffort) record.effort = requestedEffort;
 
+    // Only a real, un-routed Claude Code Messages request may refresh this RAM-only source.
+    // Do not inspect it elsewhere: it must never enter logs, RequestLog, picker diagnostics, or admin data.
+    if (isApiHost && pathname === "/v1/messages" && !route) this.deps.observedClaudeCodeAuth?.observe(req.rawHeaders);
+
     let compatCaps: ReturnType<typeof resolveCompatibleCaps> | undefined;
     let compatChanges: string[] = [];
     let target: { protocol: "http:" | "https:"; host: string; port: number; agent: http.Agent | https.Agent; extraHeaders: Record<string, string>; basePath?: string };
@@ -397,10 +415,39 @@ export class Proxy {
         }
         return;
       }
+      if (provider.type === "openai-compatible") {
+        const td = threadDecision(json);
+        if (td === "refuse") {
+          const out = JSON.stringify(THREAD_UNSUPPORTED);
+          res.writeHead(400, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
+          finish("400", out.length, "thread continue refused → CLI resends stateless", false);
+          return;
+        }
+        if (td === "strip") stripThreadFields(json);
+        record = { ...record, target: route.model, provider: route.provider };
+        const routeEffort = effortOf(json);
+        if (routeEffort) record.effort = routeEffort;
+        tag = `OPENAI ${route.tag} wire=${provider.wire ?? "chat"} effort=${routeEffort ?? "-"}`;
+        try {
+          const o = await this.openai(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort);
+          finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...(o.usage ? { usage: o.usage } : {}), ...(o.stopReason ? { stopReason: o.stopReason } : {}) });
+        } catch (e) {
+          finish("-", 0, `openai error ${(e as NodeJS.ErrnoException).code ?? ""} ${(e as Error).message}`);
+          if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" }).end(JSON.stringify({ type: "error", error: { type: "api_error", message: (e as Error).message } }));
+          else res.destroy();
+        }
+        return;
+      }
+      if (provider.type === "anthropic") {
+        finish("400", 0, "native Anthropic provider is available through OpenAI ingress only", false);
+        res.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({ error: { type: "invalid_request_error", message: "native Anthropic provider is available through OpenAI ingress only" } }));
+        return;
+      }
       const preset = provider.preset ? PRESETS.find((entry) => entry.id === provider.preset) : undefined;
+      const modelEffortLevels = provider.models?.find((entry) => entry.id === route.model)?.effortLevels;
       compatCaps = resolveCompatibleCaps(
         preset ? { effortLevels: preset.effortLevels, thinking: preset.thinking } : undefined,
-        provider.caps,
+        modelEffortLevels === undefined ? provider.caps : { ...provider.caps, effortLevels: modelEffortLevels },
       );
       const sanitized = sanitizeForCompatible(json, compatCaps);
       json = sanitized.json;

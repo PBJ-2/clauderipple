@@ -9,6 +9,13 @@ import os from "node:os";
 import path from "node:path";
 import type { CompatibleCaps } from "./compat.ts";
 
+export type ProviderModel = {
+  id: string;
+  name?: string;
+  /** Explicit per-model reasoning-effort support. An empty array disables the provider fallback. */
+  effortLevels?: string[];
+};
+
 export type AnthropicCompatibleProvider = {
   /** An HTTP(S) endpoint that speaks Anthropic Messages (DeepSeek, Kimi, GLM, MiniMax, proxenos, ...). */
   type: "anthropic-compatible";
@@ -19,7 +26,7 @@ export type AnthropicCompatibleProvider = {
   /** Catalog preset used to populate this provider, if any. */
   preset?: string;
   /** Optional model entries offered by the GUI as suggestions. */
-  models?: { id: string; name?: string }[];
+  models?: ProviderModel[];
   /** Compatibility overrides. Unspecified fields fall back to the preset, then strict defaults. */
   caps?: CompatibleCaps;
 };
@@ -40,10 +47,36 @@ export type ChatGptProvider = {
   /** Reasoning effort when the request carries none. Default "high". */
   defaultEffort?: string;
   /** Models offered in the GUI (the Codex backend has no listing endpoint). */
-  models?: { id: string; name?: string }[];
+  models?: ProviderModel[];
 };
 
-export type Provider = AnthropicCompatibleProvider | ChatGptProvider;
+export type OpenAiCompatibleProvider = {
+  /** An OpenAI-compatible API base, e.g. https://api.x.ai/v1. */
+  type: "openai-compatible";
+  url: string;
+  /** Optional vendor headers, normally authorization: Bearer <key>. Never logged. */
+  headers?: Record<string, string>;
+  /** OpenAI Chat Completions (default) or stateless Responses endpoint. */
+  wire?: "chat" | "responses";
+  /** Catalog preset used to populate this provider, if any. */
+  preset?: string;
+  /** Optional model entries offered by the GUI as suggestions. */
+  models?: ProviderModel[];
+  /** Reasoning-effort capability exposed by this API/model family. */
+  caps?: { effortLevels?: string[]; reasoning?: "effort" | "none" };
+};
+
+export type AnthropicProvider = {
+  /** Native Anthropic Messages API, available to the OpenAI ingress only. */
+  type: "anthropic";
+  /** Console API key, or Claude Code's existing OAuth login read without refresh. */
+  auth: "api-key" | "claude-code";
+  /** Required for api-key unless ANTHROPIC_API_KEY is set. Never logged. */
+  apiKey?: string;
+  models?: ProviderModel[];
+};
+
+export type Provider = AnthropicCompatibleProvider | ChatGptProvider | OpenAiCompatibleProvider | AnthropicProvider;
 
 export type Route = {
   provider: string;
@@ -64,7 +97,7 @@ export type CliModel = {
 };
 
 export type Config = {
-  listen: { host: string; port: number };
+  listen: { host: string; port: number; /** OpenAI-compatible ingress port. Defaults to port + 2. */ openaiPort?: number };
   upstream: string;
   providers: Record<string, Provider>;
   /** Picker-slot alias → route. Keys are the model ids the app sends (e.g. "claude-opus-4-8"). */
@@ -140,6 +173,16 @@ function merge(base: Config, over: Partial<Config>): Config {
   };
 }
 
+function validModels(models: unknown): boolean {
+  return Array.isArray(models) && models.every((model) =>
+    model !== null && typeof model === "object" &&
+    typeof (model as ProviderModel).id === "string" &&
+    ((model as ProviderModel).name === undefined || typeof (model as ProviderModel).name === "string") &&
+    ((model as ProviderModel).effortLevels === undefined ||
+      (Array.isArray((model as ProviderModel).effortLevels) && (model as ProviderModel).effortLevels!.every((level) => typeof level === "string"))),
+  );
+}
+
 export function validate(c: Config): string[] {
   const errors: string[] = [];
   for (const [alias, r] of Object.entries(c.routes)) {
@@ -153,10 +196,8 @@ export function validate(c: Config): string[] {
     if (p.type === "anthropic-compatible") {
       if (!/^https?:\/\//.test(p.url)) errors.push(`provider ${name}: url must start with http:// or https://`);
       if (p.preset !== undefined && typeof p.preset !== "string") errors.push(`provider ${name}: preset must be a string`);
-      if (p.models !== undefined) {
-        if (!Array.isArray(p.models) || p.models.some((m) => !m || typeof m.id !== "string" || (m.name !== undefined && typeof m.name !== "string"))) {
-          errors.push(`provider ${name}: models must be entries with string id and optional string name`);
-        }
+      if (p.models !== undefined && !validModels(p.models)) {
+        errors.push(`provider ${name}: models must be entries with string id, optional string name, and optional string[] effortLevels`);
       }
       if (p.caps !== undefined) {
         const caps = p.caps;
@@ -169,15 +210,37 @@ export function validate(c: Config): string[] {
         }
       }
     } else if (p.type === "chatgpt") {
-      if (p.models !== undefined && (!Array.isArray(p.models) || p.models.some((m) => !m || typeof m.id !== "string" || (m.name !== undefined && typeof m.name !== "string")))) {
-        errors.push(`provider ${name}: models must be entries with string id and optional string name`);
+      if (p.models !== undefined && !validModels(p.models)) {
+        errors.push(`provider ${name}: models must be entries with string id, optional string name, and optional string[] effortLevels`);
       }
       if (p.url && !/^https?:\/\//.test(p.url)) errors.push(`provider ${name}: url must start with http:// or https://`);
+    } else if (p.type === "openai-compatible") {
+      if (!/^https?:\/\//.test(p.url)) errors.push(`provider ${name}: url must start with http:// or https://`);
+      if (p.wire !== undefined && p.wire !== "chat" && p.wire !== "responses") errors.push(`provider ${name}: wire must be "chat" or "responses"`);
+      if (p.preset !== undefined && typeof p.preset !== "string") errors.push(`provider ${name}: preset must be a string`);
+      if (p.headers !== undefined && (!p.headers || typeof p.headers !== "object" || Array.isArray(p.headers) || Object.values(p.headers).some((value) => typeof value !== "string"))) {
+        errors.push(`provider ${name}: headers must be a string record`);
+      }
+      if (p.models !== undefined && !validModels(p.models)) {
+        errors.push(`provider ${name}: models must be entries with string id, optional string name, and optional string[] effortLevels`);
+      }
+      if (p.caps !== undefined && (!p.caps || typeof p.caps !== "object" || Array.isArray(p.caps) ||
+        (p.caps.effortLevels !== undefined && (!Array.isArray(p.caps.effortLevels) || p.caps.effortLevels.some((level) => typeof level !== "string"))) ||
+        (p.caps.reasoning !== undefined && p.caps.reasoning !== "effort" && p.caps.reasoning !== "none"))) {
+        errors.push(`provider ${name}: caps must contain effortLevels?: string[], reasoning?: "effort"|"none"`);
+      }
+    } else if (p.type === "anthropic") {
+      if (p.auth !== "api-key" && p.auth !== "claude-code") errors.push(`provider ${name}: auth must be "api-key" or "claude-code"`);
+      if (p.apiKey !== undefined && typeof p.apiKey !== "string") errors.push(`provider ${name}: apiKey must be a string`);
+      if (p.models !== undefined && !validModels(p.models)) {
+        errors.push(`provider ${name}: models must be entries with string id, optional string name, and optional string[] effortLevels`);
+      }
     } else {
       errors.push(`provider ${name}: unknown type "${(p as { type?: string }).type}"`);
     }
   }
   if (!(c.listen.port > 0 && c.listen.port < 65536)) errors.push("listen.port out of range");
+  if (c.listen.openaiPort !== undefined && !(c.listen.openaiPort >= 0 && c.listen.openaiPort < 65536)) errors.push("listen.openaiPort out of range");
   return errors;
 }
 
