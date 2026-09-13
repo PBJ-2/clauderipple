@@ -22,6 +22,16 @@
   <img src="docs/media/tour.png" width="880" alt="ClaudeRipple settings tour: status, model mapping, providers, clients, request log">
 </p>
 
+<table align="center">
+  <tr>
+    <td align="center" width="34%"><img src="docs/media/picker-zoom.png" width="300" alt="Real names in the Claude Desktop picker"><br><sub>Real names in the Claude Desktop picker</sub></td>
+    <td align="center" width="66%"><img src="docs/media/luna-answer.png" alt="GPT-5.6 Luna answering under its own name, at the effort you chose"><br><sub>GPT-5.6 Luna answering under its own name, at the effort you chose</sub></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><img src="docs/media/subagents.png" alt="Subagents on GPT-5.6 Terra and Sol, named in the background-task panel"><br><sub>Subagents on GPT-5.6 Terra and Sol, named in the background-task panel</sub></td>
+  </tr>
+</table>
+
 ---
 
 ## Why

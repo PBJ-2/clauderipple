@@ -21,6 +21,16 @@
   <img src="docs/media/tour.png" width="880" alt="ClaudeRipple 설정 화면 둘러보기">
 </p>
 
+<table align="center">
+  <tr>
+    <td align="center" width="34%"><img src="docs/media/picker-zoom.png" width="300" alt="Claude Desktop 피커에 실제 이름으로"><br><sub>Claude Desktop 피커에 실제 이름으로</sub></td>
+    <td align="center" width="66%"><img src="docs/media/luna-answer.png" alt="GPT-5.6 Luna가 자기 이름으로, 고른 강도로 답하는 장면"><br><sub>GPT-5.6 Luna가 자기 이름으로, 고른 강도로 답하는 장면</sub></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><img src="docs/media/subagents.png" alt="GPT-5.6 Terra와 Sol로 도는 서브에이전트가 패널에 이름표로 표시"><br><sub>GPT-5.6 Terra와 Sol로 도는 서브에이전트가 패널에 이름표로 표시</sub></td>
+  </tr>
+</table>
+
 ---
 
 ## 왜 만들었나
