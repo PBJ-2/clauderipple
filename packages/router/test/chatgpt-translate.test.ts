@@ -25,7 +25,8 @@ const turn2: AnthropicRequest = {
 
 test("system → instructions with identity line; tools → function tools; cache key stable", () => {
   const r = toResponsesRequest(turn1, opts);
-  assert.ok(r.instructions.startsWith("You are gpt-5.6-terra, answering through Claude Code"));
+  assert.ok(r.instructions.startsWith("You are gpt-5.6-terra (reasoning effort: "), r.instructions.slice(0, 80));
+  assert.ok(r.instructions.includes("), answering through Claude Code"));
   assert.ok(r.instructions.includes("You are Claude Code."));
   assert.equal(r.tools?.length, 1);
   assert.equal(r.tools?.[0]?.type, "function");
