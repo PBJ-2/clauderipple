@@ -116,7 +116,9 @@ export function normalizeSchema(s: Record<string, unknown> | undefined): Record<
 
 export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions): ResponsesRequest {
   const parts: string[] = [];
-  if (opts.identity) parts.push(`You are ${opts.model}, answering through Claude Code, a terminal-based coding agent.`);
+  // Effort is named here because the model cannot see its own reasoning setting and will otherwise guess.
+  // Constant per (model, effort): changing effort mid-session costs one cache miss, which is acceptable.
+  if (opts.identity) parts.push(`You are ${opts.model} (reasoning effort: ${opts.effort}), answering through Claude Code, a terminal-based coding agent.`);
   const sys = systemText(req.system);
   if (sys) parts.push(sys);
   if (opts.instructionsAppend) parts.push(opts.instructionsAppend);
