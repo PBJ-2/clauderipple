@@ -4,6 +4,8 @@
 
 <h1 align="center">ClaudeRipple</h1>
 
+<p align="center"><a href="README.md">English</a> · <b>한국어</b></p>
+
 <p align="center">
   <b>어떤 모델이든, 어떤 AI 코딩 도구에서든. 아무것도 포기하지 않고.</b><br>
   <b>Claude Desktop</b>과 <b>Claude Code</b> 안에서 GPT·DeepSeek·Kimi·Grok 등 400개 넘는 모델을 쓰고,<br>

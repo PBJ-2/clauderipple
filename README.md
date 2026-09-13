@@ -4,6 +4,8 @@
 
 <h1 align="center">ClaudeRipple</h1>
 
+<p align="center"><b>English</b> · <a href="README.ko.md">한국어</a></p>
+
 <p align="center">
   <b>Every model, in every AI coding client, without giving anything up.</b><br>
   GPT, DeepSeek, Kimi, Grok and 400+ models inside <b>Claude Desktop</b> and <b>Claude Code</b>.<br>
