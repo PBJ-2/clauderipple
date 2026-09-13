@@ -46,6 +46,19 @@ ClaudeRipple(클로드리플)은 **주군 데스크톱에서 실전 가동 중�
 - **agent-title 훅**(서브에이전트 제목에 모델·강도): `clauderipple agent-title on|off`, 트레이 메뉴, `POST /api/agent-title`. GUI 토글은 아직 없음.
 - **GUI 전면 개편**(비개발자용, 프리셋·연결 확인·드롭다운 매핑) 커밋 ce1f9d6. 프리셋 카탈로그 `packages/router/src/presets.ts`(공식 문서 URL 주석). Grok·Mistral은 OpenAI 방식만이라 번역기 필요 → 미지원. 새 GUI는 격리 라우터에서 흐름 검증했고 실제 앱 창 스크린샷 검증은 못 했다(화면 접근 거부됨) — 주군이 직접 보고 어색한 문구·동작을 알려주면 고친다.
 
+## 2026-09-13 밤 (릴리스 직전 상태)
+- **호환 계층**(`packages/router/src/compat.ts`): Anthropic 호환 프로바이더로 나갈 때 thinking.block_binding/adaptive, context_management,
+  defer_loading, server tools, anthropic-beta 헤더를 떼거나 바꾸고 effort를 프로바이더 caps에 맞춰 클램프. OpenRouter의
+  DeepSeek·NVIDIA 무료 모델로 실제 Claude CLI(`claude -p --model …`)가 "ok"를 받는 것까지 실측.
+- **프로바이더 URL의 경로 접두어**를 잃던 버그 수정(OpenRouter /api, DeepSeek /anthropic). 연결 확인은 통과하는데 실사용만 깨졌던 이유.
+- **effort 메타데이터** `GET /api/effort-levels`; GUI는 모델별 유효 단계만 보여줌. Claude(패스스루)는 low/medium/high/max, GPT Luna만 ultra.
+- **새로 추가한 피커 모델은 새 세션부터** 인식(CLI가 세션 시작 시 additional_model_options로 목록 고정). GUI 문구에 반영.
+- **앱**: 자체 완결형(앱 안의 Node로 라우터 실행, 소스 동봉). `npm run dist`는 `release-dev/`, 서명·공증 릴리스는
+  `APPLE_KEYCHAIN_PROFILE=clauderipple-notary npm run release`(키체인 프로필은 주군 키체인에 저장됨) → `release/*.dmg|zip`.
+  주군 맥의 실전 라우터는 **저장소 소스**로 다시 돌려 놓았다(`node packages/cli/src/index.ts install`); 앱의 "설정 다시 실행"을
+  누르면 앱 번들 사본으로 바뀌므로 개발 중엔 누르지 말 것.
+- 남은 것: GitHub 공개(주군 지시 "다 완성해야 올리지"), Windows, 프리셋 실키 검증(ChatGPT·OpenRouter만 실측).
+
 ## 주군이 직접 할 일 (세션이 못 함)
 - **피커 모드 켜기**(아직 안 하심): 메뉴 막대 ClaudeRipple 아이콘 → "Code 탭 피커에 GPT 모델 이름 표시…"
   (또는 GUI 상태 화면의 "모델 피커" 카드 버튼, 또는 터미널 `clauderipple picker on`) → macOS 암호 창(키체인 신뢰)
