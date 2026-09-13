@@ -94,7 +94,11 @@ const HOOK_MARK = "_clauderipple";
 type HookEntry = { matcher?: string; hooks?: Record<string, unknown>[]; [k: string]: unknown };
 
 /** Adds or removes ClaudeRipple's PreToolUse hook. Only entries carrying our marker are ever touched. */
-export function setAgentTitleHook(enabled: boolean, cmd: { node: string; script: string }): SettingsEdit {
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `\\'`)}'`;
+}
+
+export function setAgentTitleHook(enabled: boolean, cmd: { node: string; env?: Record<string, string>; script: string }): SettingsEdit {
   const file = settingsPath();
   const s = readSettings(file);
   const hooks = (typeof s.hooks === "object" && s.hooks ? (s.hooks as Record<string, unknown>) : {});
@@ -102,9 +106,13 @@ export function setAgentTitleHook(enabled: boolean, cmd: { node: string; script:
   const kept = list.filter((e) => e[HOOK_MARK] !== "agent-title");
   const notes: string[] = [];
   if (enabled) {
+    const prefix = Object.entries(cmd.env ?? {})
+      .map(([key, value]) => `${key}=${shellQuote(value)}`)
+      .join(" ");
+    const command = [prefix, shellQuote(cmd.node), shellQuote(cmd.script)].filter(Boolean).join(" ");
     kept.push({
       matcher: "Agent|Task",
-      hooks: [{ type: "command", command: `"${cmd.node}" "${cmd.script}"`, timeout: 10 }],
+      hooks: [{ type: "command", command, timeout: 10 }],
       [HOOK_MARK]: "agent-title",
     });
     notes.push("hooks.PreToolUse: ClaudeRipple agent-title hook added");

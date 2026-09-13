@@ -269,12 +269,14 @@ export class Proxy {
     this.stats.started++;
     this.stats.inFlight++;
     const isMessages = path.startsWith("/v1/messages");
-    const isLoggedRequest = path === "/v1/messages" || path === "/v1/messages/count_tokens";
+    // The CLI sends `/v1/messages?beta=true`: compare the pathname, not the raw path.
+    const pathname = path.split("?")[0] ?? path;
+    const isLoggedRequest = pathname === "/v1/messages" || pathname === "/v1/messages/count_tokens";
     if (isMessages) this.stats.messagesInFlight++;
     let tag = "PASS";
     let finished = false;
     let record: Omit<RequestRecord, "at" | "id" | "ms" | "status" | "ok" | "usage" | "stopReason" | "note"> = {
-      kind: path === "/v1/messages/count_tokens" ? "count_tokens" : path === "/v1/messages" ? "messages" : "other",
+      kind: pathname === "/v1/messages/count_tokens" ? "count_tokens" : pathname === "/v1/messages" ? "messages" : "other",
       source: "-",
       target: "-",
       provider: "anthropic",

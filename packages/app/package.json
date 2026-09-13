@@ -9,7 +9,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "npm run build && electron .",
-    "dist": "npm run build && electron-builder --mac --dir"
+    "icons": "node scripts/make-icons.mts",
+    "dist": "npm run icons && npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --dir",
+    "release": "npm run icons && npm run build && electron-builder --mac --arm64 --x64"
   },
   "devDependencies": {
     "electron": "^38.1.0",
@@ -22,11 +24,25 @@
     "directories": { "output": "release" },
     "mac": {
       "category": "public.app-category.developer-tools",
-      "target": ["dir"],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "notarize": true,
+      "target": ["dmg", "zip"],
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
+      "icon": "build/icon.icns",
       "extendInfo": {
         "LSUIElement": true
       }
     },
-    "files": ["dist/**", "assets/**", "package.json"]
+    "files": ["dist/**", "assets/**", "package.json"],
+    "extraResources": [
+      { "from": "../router/src", "to": "clauderipple/packages/router/src" },
+      { "from": "../cli/src", "to": "clauderipple/packages/cli/src" },
+      { "from": "../ui", "to": "clauderipple/packages/ui" },
+      { "from": "../../LICENSE", "to": "clauderipple/LICENSE" },
+      { "from": "../../README.md", "to": "clauderipple/README.md" }
+    ]
   }
 }

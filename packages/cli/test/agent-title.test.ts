@@ -41,12 +41,13 @@ test("settings: hook entry added/removed by marker only", () => {
   process.env.CLAUDE_SETTINGS_PATH = file;
   try {
     assert.equal(agentTitleHookEnabled(), false);
-    assert.equal(setAgentTitleHook(true, { node: "/n", script: "/s.ts" }).changed, true);
+    assert.equal(setAgentTitleHook(true, { node: "/n", env: { ELECTRON_RUN_AS_NODE: "1" }, script: "/s.ts" }).changed, true);
     assert.equal(agentTitleHookEnabled(), true);
     const s = JSON.parse(fs.readFileSync(file, "utf8"));
     assert.equal(s.hooks.PreToolUse.length, 2);
     assert.equal(s.hooks.PreToolUse[0].matcher, "*", "foreign entry untouched");
-    assert.equal(setAgentTitleHook(true, { node: "/n", script: "/s.ts" }).changed, false, "idempotent");
+    assert.equal(s.hooks.PreToolUse[1].hooks[0].command, "ELECTRON_RUN_AS_NODE='1' '/n' '/s.ts'");
+    assert.equal(setAgentTitleHook(true, { node: "/n", env: { ELECTRON_RUN_AS_NODE: "1" }, script: "/s.ts" }).changed, false, "idempotent");
     assert.equal(setAgentTitleHook(false, { node: "/n", script: "/s.ts" }).changed, true);
     assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).hooks.PreToolUse.length, 1);
   } finally {

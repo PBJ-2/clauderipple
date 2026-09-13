@@ -9,31 +9,45 @@ import path from "node:path";
 
 export const LABEL = "com.clauderipple.router";
 
+/** Test-only override; production always uses com.clauderipple.router. */
+export function launchdLabel(): string {
+  return process.env.CLAUDERIPPLE_LAUNCHD_LABEL ?? LABEL;
+}
+
 export function plistPath(): string {
-  return path.join(os.homedir(), "Library", "LaunchAgents", `${LABEL}.plist`);
+  return path.join(os.homedir(), "Library", "LaunchAgents", `${launchdLabel()}.plist`);
 }
 
 function esc(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-export function renderPlist(opts: { launcher: string; bundleId: string; home: string; stdoutLog: string }): string {
+export function renderPlist(opts: { program: string; args?: string[]; bundleId?: string; home: string; stdoutLog: string; env?: Record<string, string> }): string {
+  const args = opts.args ?? [];
+  const env = { CLAUDERIPPLE_HOME: opts.home, ...(opts.env ?? {}) };
+  const bundle = opts.bundleId
+    ? `  <key>AssociatedBundleIdentifiers</key>
+  <array>
+    <string>${esc(opts.bundleId)}</string>
+  </array>
+`
+    : "";
+  const environment = Object.entries(env)
+    .map(([key, value]) => `    <key>${esc(key)}</key><string>${esc(value)}</string>`)
+    .join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>${LABEL}</string>
+  <key>Label</key><string>${launchdLabel()}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${esc(opts.launcher)}</string>
+    <string>${esc(opts.program)}</string>
+${args.map((arg) => `    <string>${esc(arg)}</string>`).join("\n")}
   </array>
-  <key>AssociatedBundleIdentifiers</key>
-  <array>
-    <string>${esc(opts.bundleId)}</string>
-  </array>
-  <key>EnvironmentVariables</key>
+${bundle}  <key>EnvironmentVariables</key>
   <dict>
-    <key>CLAUDERIPPLE_HOME</key><string>${esc(opts.home)}</string>
+${environment}
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -61,7 +75,7 @@ function domain(): string {
   return `gui/${process.getuid?.() ?? 501}`;
 }
 
-export function installAgent(opts: { launcher: string; bundleId: string; home: string }): string {
+export function installAgent(opts: { program: string; args?: string[]; bundleId?: string; home: string; env?: Record<string, string> }): string {
   const file = plistPath();
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const stdoutLog = path.join(opts.home, "logs", "launchd.log");
@@ -82,17 +96,17 @@ export function removeAgent(): boolean {
 }
 
 export function agentState(): "running" | "loaded" | "not-loaded" {
-  const r = launchctl(["print", `${domain()}/${LABEL}`]);
+  const r = launchctl(["print", `${domain()}/${launchdLabel()}`]);
   if (!r.ok) return "not-loaded";
   return /state = running/.test(r.out) ? "running" : "loaded";
 }
 
 export function kickstart(): boolean {
-  return launchctl(["kickstart", "-k", `${domain()}/${LABEL}`]).ok;
+  return launchctl(["kickstart", "-k", `${domain()}/${launchdLabel()}`]).ok;
 }
 
 export function agentPid(): number | null {
-  const r = launchctl(["print", `${domain()}/${LABEL}`]);
+  const r = launchctl(["print", `${domain()}/${launchdLabel()}`]);
   if (!r.ok) return null;
   const m = /^\s*pid = (\d+)/m.exec(r.out);
   return m ? Number(m[1]) : null;

@@ -12,6 +12,8 @@
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dist": "npm --workspace @clauderipple/app run dist",
+    "release": "npm --workspace @clauderipple/app run release",
     "router": "node packages/router/src/index.ts",
     "test": "node --test packages/router/test/*.test.ts packages/cli/test/*.test.ts",
     "cli": "node packages/cli/src/index.ts"

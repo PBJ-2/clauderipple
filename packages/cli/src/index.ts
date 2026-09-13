@@ -18,6 +18,7 @@ import { applyProxyEnv, currentProxyEnv, removeProxyEnv, settingsPath } from "./
 import { agentState, installAgent, kickstart, plistPath, removeAgent, restartAgent, stopAgent } from "./launchd.ts";
 import { BUNDLE_ID, removeBundle, writeBundle } from "./bundle.ts";
 import { applyAppProxy, caTrusted, currentAppProxy, removeAppProxy, trustCa, untrustCa } from "./picker.ts";
+import { runtime } from "./runtime.ts";
 
 function setPickerEnabled(enabled: boolean): void {
   const file = configPath();
@@ -69,7 +70,8 @@ const VERSION = "0.1.0";
 import { probe } from "./probe.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const routerScript = path.resolve(here, "../../router/src/index.ts");
+const installedRuntime = runtime();
+const routerScript = installedRuntime.router;
 
 const args = process.argv.slice(2);
 const cmd = args[0] ?? "help";
@@ -80,7 +82,7 @@ const opt = (name: string): string | undefined => {
 };
 
 /** The router needs a moment to come up under launchd; probe a few times before declaring failure. */
-async function probeWithRetry(o: Parameters<typeof probe>[0], attempts = 8, delayMs = 750): Promise<Awaited<ReturnType<typeof probe>>> {
+async function probeWithRetry(o: Parameters<typeof probe>[0], attempts = 16, delayMs = 750): Promise<Awaited<ReturnType<typeof probe>>> {
   let last = await probe(o);
   for (let i = 1; i < attempts && !last.ok; i++) {
     await new Promise((r) => setTimeout(r, delayMs));
@@ -137,12 +139,43 @@ async function install(): Promise<void> {
   console.log(edit.changed ? `✓ ${settingsPath()} updated (backup: ${edit.backup ?? "none"})` : `✓ ${settingsPath()} already correct`);
   for (const n of edit.notes) console.log(`  note: ${n}`);
 
-  // Record where the sources and Node live so the menu-bar app (packaged, no sources inside) can run the CLI.
-  fs.writeFileSync(path.join(home, "paths.json"), JSON.stringify({ node: process.execPath, repo: path.resolve(here, "../../.."), cli: path.resolve(here, "index.ts"), router: routerScript }, null, 2) + "\n");
-  const launcher = writeBundle({ home, node: process.execPath, script: routerScript, version: VERSION });
-  console.log(`✓ background item bundle written: ${path.dirname(path.dirname(path.dirname(launcher)))} (shows as "ClaudeRipple" in Login Items)`);
-  const plist = installAgent({ launcher, bundleId: BUNDLE_ID, home });
-  console.log(`✓ launchd agent registered: ${plist}`);
+  // Persist the single execution contract so the GUI, admin API, hooks, and supervisor all use
+  // this installation's runtime rather than any Node installation on the user's PATH.
+  fs.writeFileSync(
+    path.join(home, "paths.json"),
+    JSON.stringify(
+      {
+        node: installedRuntime.node,
+        env: installedRuntime.env,
+        cli: installedRuntime.cli,
+        router: installedRuntime.router,
+        hookScript: installedRuntime.hookScript,
+        repo: installedRuntime.repo,
+      },
+      null,
+      2,
+    ) + "\n",
+  );
+  if (installedRuntime.packaged) {
+    const plist = installAgent({
+      program: installedRuntime.node,
+      args: [installedRuntime.router],
+      bundleId: "com.clauderipple.app",
+      home,
+      env: { ...installedRuntime.env, ...(process.env.CLAUDE_SETTINGS_PATH ? { CLAUDE_SETTINGS_PATH: process.env.CLAUDE_SETTINGS_PATH } : {}) },
+    });
+    console.log(`✓ launchd agent registered: ${plist} (shows as "ClaudeRipple" in Login Items)`);
+  } else {
+    const launcher = writeBundle({ home, node: installedRuntime.node, script: installedRuntime.router, version: VERSION });
+    console.log(`✓ background item bundle written: ${path.dirname(path.dirname(path.dirname(launcher)))} (shows as "ClaudeRipple" in Login Items)`);
+    const plist = installAgent({
+      program: launcher,
+      bundleId: BUNDLE_ID,
+      home,
+      ...(process.env.CLAUDE_SETTINGS_PATH ? { env: { CLAUDE_SETTINGS_PATH: process.env.CLAUDE_SETTINGS_PATH } } : {}),
+    });
+    console.log(`✓ launchd agent registered: ${plist}`);
+  }
 
   const p = await probeWithRetry({ host: cfg.listen.host, port: cfg.listen.port, caPem: caPath, upstream: cfg.upstream });
   console.log(p.ok ? `✓ end-to-end probe passed (${p.detail}, ${p.ms}ms)` : `✗ probe failed: ${p.detail}`);
@@ -302,7 +335,7 @@ try {
       const sub = args[1];
       const { setAgentTitleHook, agentTitleHookEnabled } = await import("./settings.ts");
       if (sub === "on" || sub === "off") {
-        const r = setAgentTitleHook(sub === "on", { node: process.execPath, script: path.resolve(here, "hooks", "agent-title.ts") });
+        const r = setAgentTitleHook(sub === "on", { node: installedRuntime.node, env: installedRuntime.env, script: installedRuntime.hookScript });
         for (const n of r.notes) console.log(`✓ ${n}`);
         if (!r.changed) console.log(`✓ already ${sub}`);
         if (r.backup) console.log(`  backup: ${r.backup}`);

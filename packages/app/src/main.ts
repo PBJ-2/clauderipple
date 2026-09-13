@@ -56,6 +56,12 @@ const STRINGS = {
     signInChatgpt: "Sign in to ChatGPT…",
     copyStatus: "Copy Status",
     showLogs: "Show Logs",
+    rerunSetup: "Run ClaudeRipple setup again…",
+    setupTitle: "Set up ClaudeRipple",
+    setupPrompt: "ClaudeRipple will create a local certificate, connect Claude Code settings (~/.claude/settings.json), and register the background router. Continue?",
+    setupLater: "Later",
+    setupContinue: "Continue",
+    setupDone: "ClaudeRipple setup finished.",
     about: "About ClaudeRipple",
     aboutDetail:
       "Run GPT and other models inside Claude Desktop, without turning Claude off.\n\nIndependent open-source project (MIT). Not affiliated with, endorsed by, or sponsored by Anthropic or OpenAI. Claude and Claude Code are trademarks of Anthropic, PBC.",
@@ -91,6 +97,12 @@ const STRINGS = {
     signInChatgpt: "ChatGPT 로그인…",
     copyStatus: "상태 복사",
     showLogs: "로그 보기",
+    rerunSetup: "ClaudeRipple 설정 다시 실행…",
+    setupTitle: "ClaudeRipple을 설정합니다",
+    setupPrompt: "로컬 인증서 생성, Claude Code 설정(~/.claude/settings.json) 연결, 백그라운드 라우터 등록을 진행합니다. 계속할까요?",
+    setupLater: "나중에",
+    setupContinue: "계속",
+    setupDone: "ClaudeRipple 설정이 완료되었습니다.",
     about: "ClaudeRipple 정보",
     aboutDetail:
       "Claude Desktop을 끄지 않고 그 안에서 GPT 등 다른 모델을 씁니다.\n\n독립 오픈소스 프로젝트(MIT)이며 Anthropic·OpenAI와 제휴·보증·후원 관계가 없습니다. Claude와 Claude Code는 Anthropic, PBC의 상표입니다.",
@@ -176,25 +188,68 @@ function openWindow(): void {
   });
 }
 
-/** Node 24 + CLI source paths recorded by `clauderipple install` (the packaged app carries neither,
- *  and Electron's own Node cannot run .ts sources). */
-function cliPaths(): { node: string; cli: string } {
+type CliRuntime = { node: string; env: Record<string, string>; cli: string };
+
+function packagedRuntime(): CliRuntime | null {
+  const bundle = process.execPath.match(/^(.*\.app)\/Contents\/MacOS\//)?.[1];
+  if (!bundle) return null;
+  const resources = path.join(bundle, "Contents", "Resources", "clauderipple");
+  return {
+    node: process.execPath,
+    env: { ELECTRON_RUN_AS_NODE: "1" },
+    cli: path.join(resources, "packages", "cli", "src", "index.ts"),
+  };
+}
+
+/** Prefer this app's bundled Electron runtime; existing installations retain their recorded runtime. */
+function cliPaths(): CliRuntime {
+  const packaged = packagedRuntime();
+  if (packaged && fs.existsSync(packaged.cli)) return packaged;
   try {
-    const p = JSON.parse(fs.readFileSync(path.join(home, "paths.json"), "utf8")) as { node?: string; cli?: string };
-    if (p.node && p.cli && fs.existsSync(p.node) && fs.existsSync(p.cli)) return { node: p.node, cli: p.cli };
+    const p = JSON.parse(fs.readFileSync(path.join(home, "paths.json"), "utf8")) as { node?: string; env?: Record<string, string>; cli?: string };
+    if (p.node && p.cli && fs.existsSync(p.node) && fs.existsSync(p.cli)) return { node: p.node, env: p.env ?? {}, cli: p.cli };
   } catch {
-    /* fall through to the dev layout */
+    /* fall through to the development layout */
   }
-  return { node: process.execPath, cli: path.resolve(__dirname, "..", "..", "cli", "src", "index.ts") };
+  return { node: process.execPath, env: {}, cli: path.resolve(__dirname, "..", "..", "cli", "src", "index.ts") };
 }
 
 function runCli(args: string[]): Promise<string> {
-  const { node, cli } = cliPaths();
+  const { node, env, cli } = cliPaths();
   return new Promise((resolve) => {
-    execFile(node, [cli, ...args], { env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", CLAUDERIPPLE_HOME: home } }, (err, stdout, stderr) => {
+    execFile(node, [cli, ...args], { env: { ...process.env, ...env, CLAUDERIPPLE_HOME: home } }, (err, stdout, stderr) => {
       resolve(`${stdout}${stderr}${err ? `\n${err.message}` : ""}`.trim());
     });
   });
+}
+
+function needsSetup(): boolean {
+  const current = packagedRuntime();
+  if (!current) return false;
+  try {
+    const saved = JSON.parse(fs.readFileSync(path.join(home, "paths.json"), "utf8")) as { node?: string };
+    return saved.node !== current.node;
+  } catch {
+    return true;
+  }
+}
+
+async function setup(): Promise<void> {
+  const out = await runCli(["install"]);
+  await dialog.showMessageBox({ message: L.setupDone, detail: out });
+  void poll();
+}
+
+async function promptForSetup(): Promise<void> {
+  const choice = await dialog.showMessageBox({
+    title: "ClaudeRipple",
+    message: L.setupTitle,
+    detail: L.setupPrompt,
+    buttons: [L.setupContinue, L.setupLater],
+    defaultId: 0,
+    cancelId: 1,
+  });
+  if (choice.response === 0) await setup();
 }
 
 function render(): void {
@@ -217,6 +272,7 @@ function render(): void {
     { type: "separator" },
     { label: L.openWindow, click: openWindow, enabled: !!s },
     { type: "separator" },
+    { label: L.rerunSetup, click: () => void setup() },
     { label: s ? L.restartRouter : L.startRouter, click: async () => void dialog.showMessageBox({ message: await runCli([s ? "restart" : "start"]) }) },
     { label: L.signInChatgpt, click: async () => void dialog.showMessageBox({ message: await runCli(["login"]) }) },
     { type: "separator" },
@@ -235,6 +291,7 @@ app.whenReady().then(() => {
   render();
   void poll();
   setInterval(() => void poll(), POLL_MS);
+  if (needsSetup()) void promptForSetup();
   if (process.env.CLAUDERIPPLE_OPEN_WINDOW) openWindow(); // dev/testing: show the GUI window immediately
 });
 

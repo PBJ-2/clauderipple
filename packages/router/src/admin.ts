@@ -196,14 +196,16 @@ function runCli(args: string[]): Promise<{ ok: boolean; output: string }> {
   return new Promise((resolveP) => {
     let node = process.execPath;
     let cli = path.resolve(here, "../../cli/src/index.ts");
+    let runtimeEnv: Record<string, string> = {};
     try {
-      const p = JSON.parse(fs.readFileSync(path.join(homeDir(), "paths.json"), "utf8")) as { node?: string; cli?: string };
+      const p = JSON.parse(fs.readFileSync(path.join(homeDir(), "paths.json"), "utf8")) as { node?: string; env?: Record<string, string>; cli?: string };
       if (p.node) node = p.node;
+      if (p.env) runtimeEnv = p.env;
       if (p.cli) cli = p.cli;
     } catch {
       /* not installed via the CLI: fall back to our own node + repo layout */
     }
-    execFile(node, [cli, ...args], { env: { ...process.env, CLAUDERIPPLE_HOME: homeDir() }, timeout: 180_000 }, (err, stdout, stderr) => {
+    execFile(node, [cli, ...args], { env: { ...process.env, ...runtimeEnv, CLAUDERIPPLE_HOME: homeDir() }, timeout: 180_000 }, (err, stdout, stderr) => {
       resolveP({ ok: !err, output: `${stdout}${stderr}${err ? `\n${err.message}` : ""}`.trim() });
     });
   });

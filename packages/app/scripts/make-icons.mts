@@ -7,6 +7,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const out = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "assets");
@@ -28,15 +29,15 @@ function chunk(type: string, data: Buffer): Buffer {
   crc.writeUInt32BE(crc32(td));
   return Buffer.concat([len, td, crc]);
 }
-function png(size: number, alphaAt: (x: number, y: number) => number): Buffer {
+function png(size: number, pixelAt: (x: number, y: number) => [number, number, number, number]): Buffer {
   const rows: Buffer[] = [];
   for (let y = 0; y < size; y++) {
     const row = Buffer.alloc(1 + size * 4);
     for (let x = 0; x < size; x++) {
-      const a = Math.round(Math.max(0, Math.min(1, alphaAt(x + 0.5, y + 0.5))) * 255);
-      row[1 + x * 4] = 0;
-      row[2 + x * 4] = 0;
-      row[3 + x * 4] = 0;
+      const [r, g, b, a] = pixelAt(x + 0.5, y + 0.5);
+      row[1 + x * 4] = r;
+      row[2 + x * 4] = g;
+      row[3 + x * 4] = b;
       row[4 + x * 4] = a;
     }
     rows.push(row);
@@ -105,11 +106,34 @@ function draw(variant: Variant, scale: number) {
 
 for (const v of ["ok", "warn", "down"] as Variant[]) {
   const base = v === "ok" ? "trayTemplate" : v === "warn" ? "trayWarnTemplate" : "trayDownTemplate";
-  fs.writeFileSync(path.join(out, `${base}.png`), png(22, draw(v, 1)));
-  fs.writeFileSync(path.join(out, `${base}@2x.png`), png(44, draw(v, 2)));
+  fs.writeFileSync(path.join(out, `${base}.png`), png(22, (x, y) => [0, 0, 0, Math.round(draw(v, 1)(x, y) * 255)]));
+  fs.writeFileSync(path.join(out, `${base}@2x.png`), png(44, (x, y) => [0, 0, 0, Math.round(draw(v, 2)(x, y) * 255)]));
 }
-// Large preview for eyeballing the shapes (not shipped).
-fs.writeFileSync("/tmp/cr-shots/tray-preview-ok.png", png(22 * 8, draw("ok", 8)));
-fs.writeFileSync("/tmp/cr-shots/tray-preview-warn.png", png(22 * 8, draw("warn", 8)));
-fs.writeFileSync("/tmp/cr-shots/tray-preview-down.png", png(22 * 8, draw("down", 8)));
-console.log(`icons written to ${out}`);
+// 1024px application icon: blue drop (#2f6fed) over a white rounded square, with the same ripple motif.
+function appIcon(x: number, y: number): [number, number, number, number] {
+  const size = 1024;
+  const radius = 190;
+  const edge = Math.min(x, y, size - x, size - y);
+  const inSquare = edge >= radius || Math.hypot(Math.max(0, radius - x), Math.max(0, radius - y)) <= radius || Math.hypot(Math.max(0, x - (size - radius)), Math.max(0, radius - y)) <= radius || Math.hypot(Math.max(0, radius - x), Math.max(0, y - (size - radius))) <= radius || Math.hypot(Math.max(0, x - (size - radius)), Math.max(0, y - (size - radius))) <= radius;
+  if (!inSquare) return [0, 0, 0, 0];
+  const scale = size / 22;
+  const alpha = draw("ok", scale)(x, y);
+  return alpha > 0 ? [47, 111, 237, Math.round(alpha * 255)] : [255, 255, 255, 255];
+}
+
+const build = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "build");
+fs.mkdirSync(build, { recursive: true });
+const iconPng = path.join(build, "icon.png");
+fs.writeFileSync(iconPng, png(1024, appIcon));
+const iconset = path.join(build, "icon.iconset");
+fs.rmSync(iconset, { recursive: true, force: true });
+fs.mkdirSync(iconset);
+for (const size of [16, 32, 128, 256, 512]) {
+  const source = png(size, (x, y) => appIcon((x / size) * 1024, (y / size) * 1024));
+  fs.writeFileSync(path.join(iconset, `icon_${size}x${size}.png`), source);
+  fs.writeFileSync(path.join(iconset, `icon_${size}x${size}@2x.png`), png(size * 2, (x, y) => appIcon((x / (size * 2)) * 1024, (y / (size * 2)) * 1024)));
+}
+const iconIcns = path.join(build, "icon.icns");
+fs.rmSync(iconIcns, { force: true });
+execFileSync("iconutil", ["-c", "icns", iconset, "-o", iconIcns]);
+console.log(`icons written to ${out}; app icon written to ${iconPng} and ${iconIcns}`);
