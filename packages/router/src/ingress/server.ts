@@ -278,7 +278,7 @@ export class OpenAiIngress {
       }
       if (provider.type === "chatgpt" || provider.type === "openai-compatible") {
         const bytes = sendJson(res, 400, openAiError(`${provider.type === "chatgpt" ? "ChatGPT" : "OpenAI-compatible"} provider is not available through OpenAI ingress`, "invalid_request_error", "unsupported_provider"));
-        finish(400, bytes);
+        finish(400, bytes, { note: `model ${requested} -> ${provider.type} provider unsupported` });
         return;
       }
       const native = provider.type === "anthropic";
