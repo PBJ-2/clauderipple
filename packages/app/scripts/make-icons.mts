@@ -136,4 +136,5 @@ for (const size of [16, 32, 128, 256, 512]) {
 const iconIcns = path.join(build, "icon.icns");
 fs.rmSync(iconIcns, { force: true });
 execFileSync("iconutil", ["-c", "icns", iconset, "-o", iconIcns]);
+fs.rmSync(iconset, { recursive: true, force: true });
 console.log(`icons written to ${out}; app icon written to ${iconPng} and ${iconIcns}`);
