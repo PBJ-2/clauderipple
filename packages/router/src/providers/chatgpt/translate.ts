@@ -237,8 +237,12 @@ export class StreamMapper {
   readonly content: ({ type: "text"; text: string } | { type: "thinking"; thinking: string; signature: string } | { type: "tool_use"; id: string; name: string; input: unknown; _args?: string })[] = [];
   stopReason: "end_turn" | "tool_use" | "max_tokens" = "end_turn";
 
-  constructor(model: string) {
+  /** Input-token figure announced in message_start (the real one only arrives with response.completed). */
+  private readonly startInput: number;
+
+  constructor(model: string, startInput = 0) {
     this.model = model;
+    this.startInput = startInput;
     this.messageId = `msg_${crypto.randomBytes(12).toString("hex")}`;
   }
 
@@ -254,7 +258,11 @@ export class StreamMapper {
         event: "message_start",
         data: {
           type: "message_start",
-          message: { id: this.messageId, type: "message", role: "assistant", model: this.model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } },
+          // Claude Code snapshots `message.usage` per streamed content block, before message_delta
+          // (measured 2026-09-13: with zeros here the app showed "1 token" for a 118k-token subagent and
+          // the CLI's context accounting saw an empty context). Announce an estimate; the true figures
+          // follow in message_delta and the SDK merges them into the final message.
+          message: { id: this.messageId, type: "message", role: "assistant", model: this.model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: this.startInput, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
         },
       },
     ];

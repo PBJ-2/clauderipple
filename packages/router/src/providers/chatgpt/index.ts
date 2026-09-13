@@ -6,7 +6,10 @@ import type { ChatGptProvider } from "../../config.ts";
 import type { Logger } from "../../log.ts";
 import { CredentialStore } from "./auth.ts";
 import { SseParser } from "./sse.ts";
-import { StreamMapper, estimateTokens, formatSse, toResponsesRequest, type AnthropicRequest } from "./translate.ts";
+import { StreamMapper, conversationKey, estimateTokens, formatSse, toResponsesRequest, type AnthropicRequest } from "./translate.ts";
+import fs from "node:fs";
+import path from "node:path";
+import { homeDir } from "../../config.ts";
 
 export const DEFAULT_BASE = "https://chatgpt.com/backend-api";
 const PING_MS = 15_000;
@@ -84,6 +87,31 @@ export class ChatGptAdapter {
     return this.creds.describe();
   }
 
+  /** Last measured total input (uncached + cached) per conversation, for the next message_start estimate. */
+  private readonly lastInputByKey = new Map<string, number>();
+
+  private rememberInput(key: string, u: { input_tokens: number; cache_read_input_tokens: number }): void {
+    const total = u.input_tokens + u.cache_read_input_tokens;
+    if (total > 0) {
+      this.lastInputByKey.set(key, total);
+      if (this.lastInputByKey.size > 500) this.lastInputByKey.delete(this.lastInputByKey.keys().next().value!);
+    }
+  }
+
+  /** Troubleshooting aid (provider.debugDump): the failing exchange, secrets excluded (the request carries none). */
+  private dump(status: number, anthropic: AnthropicRequest, upstreamReq: unknown, upstreamText: string): void {
+    try {
+      const dir = path.join(homeDir(), "debug");
+      fs.mkdirSync(dir, { recursive: true });
+      const file = path.join(dir, `upstream-${new Date().toISOString().replace(/[:.]/g, "-")}-${status}.json`);
+      fs.writeFileSync(file, JSON.stringify({ status, upstream: upstreamText, request: upstreamReq, anthropic }, null, 1));
+      const files = fs.readdirSync(dir).filter((f) => f.startsWith("upstream-")).sort();
+      for (const f of files.slice(0, Math.max(0, files.length - 30))) fs.rmSync(path.join(dir, f), { force: true });
+    } catch (e) {
+      this.log.warn(`chatgpt ${this.name}: debug dump failed: ${(e as Error).message}`);
+    }
+  }
+
   /** Handle a fully-read Messages request. `model`/`effort` already resolved by routing. */
   async handle(req: http.IncomingMessage, res: http.ServerResponse, path: string, json: AnthropicRequest, model: string, effort: string | undefined): Promise<ChatGptOutcome> {
     if (path.startsWith("/v1/messages/count_tokens")) {
@@ -106,6 +134,9 @@ export class ChatGptAdapter {
       ...(this.cfg.instructionsAppend ? { instructionsAppend: this.cfg.instructionsAppend } : {}),
     });
     const body = JSON.stringify(upstreamReq);
+    const cacheKey = upstreamReq.prompt_cache_key;
+    // Input estimate for message_start: a conversation only grows, so the last measured total is a floor.
+    const startInput = Math.max(estimateTokens(json), this.lastInputByKey.get(cacheKey) ?? 0);
     const ac = new AbortController();
     const onClose = (): void => ac.abort();
     res.on("close", onClose);
@@ -141,13 +172,14 @@ export class ChatGptAdapter {
       if (upstream.status === 401) this.creds.invalidate();
       const err = mapHttpError(upstream.status, text);
       this.log.warn(`chatgpt ${this.name}: upstream ${upstream.status} for ${model}: ${text.replace(/\s+/g, " ").slice(0, 400)}`);
+      if (this.cfg.debugDump) this.dump(upstream.status, json, upstreamReq, text);
       res.off("close", onClose);
       res.writeHead(err.status, { "content-type": "application/json" }).end(err.body);
       return { status: err.status, bytes: err.body.length, note: `upstream ${upstream.status}` };
     }
 
     const wantStream = json.stream === true;
-    const mapper = new StreamMapper(model);
+    const mapper = new StreamMapper(model, startInput);
     const parser = new SseParser();
     let bytes = 0;
     let ping: NodeJS.Timeout | null = null;
@@ -169,6 +201,7 @@ export class ChatGptAdapter {
         for (const ev of parser.feed(decoder.decode(value, { stream: true }))) {
           const outEvents = mapper.feed(ev);
           if (mapper.rateLimits) this.lastRateLimits = mapper.rateLimits;
+          this.rememberInput(cacheKey, mapper.usage);
           if (wantStream) for (const o of outEvents) bytes += write(res, formatSse(o));
           if (mapper.isFinished) break;
         }
