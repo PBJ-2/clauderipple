@@ -23,7 +23,7 @@ import type { Config } from "./config.ts";
 import type { Logger } from "./log.ts";
 import { UpstreamHealth } from "./health.ts";
 import { BOOTSTRAP_PATH, injectBootstrap } from "./bootstrap.ts";
-import { effortOf, resolve, rewriteBody } from "./routing.ts";
+import { THREAD_UNSUPPORTED, effortOf, resolve, rewriteBody, stripThreadFields, threadDecision } from "./routing.ts";
 import { ChatGptAdapter } from "./providers/chatgpt/index.ts";
 import type { AnthropicRequest } from "./providers/chatgpt/translate.ts";
 import { terminateHosts } from "./config.ts";
@@ -327,6 +327,14 @@ export class Proxy {
         return;
       }
       rewriteBody(json, route, cfg.effortClamp);
+      const td = threadDecision(json);
+      if (td === "refuse") {
+        const out = JSON.stringify(THREAD_UNSUPPORTED);
+        res.writeHead(400, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
+        finish("400", out.length, "thread continue refused → CLI resends stateless", false);
+        return;
+      }
+      if (td === "strip") stripThreadFields(json);
       if (provider.type === "chatgpt") {
         tag = `CHATGPT ${route.tag} effort=${effortOf(json) ?? "-"}`;
         try {

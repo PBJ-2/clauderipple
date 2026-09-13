@@ -87,3 +87,34 @@ export function effortOf(json: Record<string, unknown>): string | undefined {
   const oc = json.output_config as { effort?: unknown } | undefined;
   return typeof oc?.effort === "string" ? oc.effort : undefined;
 }
+
+// ---- Server-side threads ("tether") -------------------------------------------------
+//
+// Claude Code 2.1.266 sends `thread: {type:"create"}` on a session's first request and then
+// `thread: {type:"continue", previous_message_id}` with ONLY the new messages, expecting the API to
+// hold the history (measured 2026-09-13; see docs/ARCHITECTURE.md). Translated providers have no
+// such state, so a continue request must be refused with the error code the CLI recognises: it then
+// resends the turn stateless and keeps the session stateless on this model ("retry:tether-stateless").
+// Accepting the continue instead makes the model see an orphan tool_result and forget the task, and
+// kills prompt caching (each turn is a tiny delta with a cold prefix).
+
+export const THREAD_UNSUPPORTED = {
+  type: "error",
+  error: {
+    type: "invalid_request_error",
+    message: "thread: unsupported request — ClaudeRipple routes this model to a provider without server-side threads; resend stateless",
+    details: { error_code: "thread_unsupported_request" },
+  },
+};
+
+/** "refuse" → answer 400 with THREAD_UNSUPPORTED; "strip" → drop thread/diagnostics and proceed. */
+export function threadDecision(json: Record<string, unknown>): "refuse" | "strip" | "none" {
+  const thread = json.thread as { type?: unknown } | undefined;
+  if (!thread || typeof thread !== "object") return "none";
+  return thread.type === "continue" ? "refuse" : "strip";
+}
+
+export function stripThreadFields(json: Record<string, unknown>): void {
+  delete json.thread;
+  delete json.diagnostics;
+}

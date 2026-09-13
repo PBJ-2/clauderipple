@@ -75,3 +75,14 @@ test("bootstrap injection adds CLI models and compaction windows", () => {
   const raw = Buffer.from("not json");
   assert.equal(injectBootstrap(raw, cfg), raw);
 });
+
+test("thread: continue is refused with the CLI's error code, create is stripped", async () => {
+  const { threadDecision, stripThreadFields, THREAD_UNSUPPORTED } = await import("../src/routing.ts");
+  assert.equal(threadDecision({ thread: { type: "continue", previous_message_id: "msg_1" } }), "refuse");
+  assert.equal(threadDecision({ thread: { type: "create" } }), "strip");
+  assert.equal(threadDecision({}), "none");
+  const j: Record<string, unknown> = { thread: { type: "create" }, diagnostics: { previous_message_id: null }, model: "x" };
+  stripThreadFields(j);
+  assert.deepEqual(j, { model: "x" });
+  assert.equal((THREAD_UNSUPPORTED.error as { details: { error_code: string } }).details.error_code, "thread_unsupported_request");
+});
