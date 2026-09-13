@@ -2,7 +2,7 @@
 // Captures README media from the local GUI with Electron (offscreen) and builds an animated GIF
 // tour as an animated PNG (APNG) with no dependencies. Usage: node scripts/make-media.mts [adminUrl]
 //   → docs/media/{status,mapping,providers,add-provider,clients,logs}.png and docs/media/tour.png (animated)
-// Run against an isolated router when the live one holds real keys; the GUI never shows key values,
+// Pages are captured in English (?lang=en). Run against an isolated router when the live one holds real keys; the GUI never shows key values,
 // but the provider names and model lists are whatever that config contains.
 
 import fs from "node:fs";
@@ -42,7 +42,7 @@ app.whenReady().then(async () => {
   const win = new BrowserWindow({ width: ${W}, height: ${H}, show: false, webPreferences: { offscreen: true, zoomFactor: 1 } });
   win.webContents.setZoomFactor(1);
   for (const p of ${JSON.stringify(pages)}) {
-    await win.loadURL(${JSON.stringify(adminUrl)} + "/#" + p.hash);
+    await win.loadURL(${JSON.stringify(adminUrl)} + "/?lang=en#" + p.hash);
     await wait(2200);
     if (p.prep) { try { await win.webContents.executeJavaScript(p.prep); } catch {} await wait(600); }
     const img = await win.webContents.capturePage({ x: 0, y: 0, width: ${W}, height: ${H} });

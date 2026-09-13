@@ -74,6 +74,15 @@ ClaudeRipple(클로드리플)은 **주군 데스크톱에서 실전 가동 중�
   주군의 실제 `~/.codex/config.toml`에 `clauderipple` 프로바이더가 적용됨(백업 `config.toml.clauderipple-backup-2026-09-13T11-45-25-816Z`).
 - 저장소는 **비공개로 전환**됨(주군: "다 완성해야 올리지", "멋대로 빌드하지 마라"). 주군이 완성 선언 전엔 릴리스 빌드·공개·태그 금지.
 - README 스크린샷: picker-zoom·luna-answer·subagents 확보. 4번(Codex가 Claude로 답하는 터미널)은 429 수정 후 재촬영 대기.
+- **Codex 앱 지원(09-13 밤)**: `codex on`이 `~/.codex/clauderipple-models.json` 카탈로그를 쓰고 `model_catalog_json`으로 가리킨다(Codex 앱 목록에
+  Sonnet 5 등 실제 이름으로 뜸). env_key 제거, 입구는 Authorization 없어도 받음. **주군의 실제 config.toml 상단 `model`/`model_provider`가
+  clauderipple/claude-sonnet-5로 임시 변경돼 있음** — 촬영 끝나면 되돌리거나 GPT 통과 기능을 넣을 것.
+- **Codex 앱에서 관찰된 미해결 버그(주군: "나중에")**: ① 카탈로그 context_window 200000 고정 → Sonnet 5는 1M(모델별 값 필요).
+  ② Claude가 Codex 지시문의 `exec_command`를 부르는데 도구는 `custom_exec_command`로 보냄(toClaudeCodeToolName 접두어가 모델에 노출) →
+  첫 호출 실패 후 재시도. 지시문 쪽 이름을 바꾸든가 접두어 없이 보내는 방안 검토. ③ 관찰 토큰 만료 시 401 "OAuth access token has expired"를
+  그대로 노출 — 만료 관찰 토큰은 버리고 키체인/파일 소스로 폴백해야 함.
+- **GPT 통과 미구현**: Codex는 프로바이더가 전역 하나라, clauderipple이 기본이면 목록의 GPT 항목은 400(unsupported_provider). 입구에서
+  gpt-* 요청을 chatgpt.com/backend-api/codex/responses로 그대로 통과(auth.json 토큰+chatgpt-account-id)시키면 한 목록에서 둘 다 쓸 수 있다.
 
 ## 주군이 직접 할 일 (세션이 못 함)
 - **피커 모드 켜기**(아직 안 하심): 메뉴 막대 ClaudeRipple 아이콘 → "Code 탭 피커에 GPT 모델 이름 표시…"

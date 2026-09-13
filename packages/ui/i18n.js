@@ -69,6 +69,10 @@ const I18N = {
 
 function detectLang() {
   try {
+    const q = new URLSearchParams(location.search).get("lang");
+    if (q === "ko" || q === "en") return q;
+  } catch { /* no location */ }
+  try {
     const stored = localStorage.getItem("clauderipple_lang");
     if (stored === "ko" || stored === "en") return stored;
   } catch { /* storage unavailable */ }

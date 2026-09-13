@@ -5,179 +5,190 @@
 <h1 align="center">ClaudeRipple</h1>
 
 <p align="center">
-  <b>AI 코딩 도구와 모델을 전부 잇는 로컬 프록시 하나.</b><br>
-  <b>Claude Desktop</b>과 <b>Claude Code</b> 안에서 GPT·DeepSeek·Kimi·Grok 등 40여 프로바이더를 쓰고,
-  <b>Codex CLI</b>에서는 Claude를 씁니다. 아무것도 끄지 않고요.
+  <b>어떤 모델이든, 어떤 AI 코딩 도구에서든. 아무것도 포기하지 않고.</b><br>
+  <b>Claude Desktop</b>과 <b>Claude Code</b> 안에서 GPT·DeepSeek·Kimi·Grok 등 400개 넘는 모델을 쓰고,<br>
+  <b>Codex 앱</b>과 <b>Codex CLI</b> 안에서 Claude를 씁니다. 로컬 프록시 하나, 메뉴 막대 앱 하나.
 </p>
 
 <p align="center">
   <a href="https://github.com/PBJ-2/clauderipple/releases"><img alt="Release" src="https://img.shields.io/github/v/release/PBJ-2/clauderipple?include_prereleases&label=download"></a>
+  <img alt="Alpha" src="https://img.shields.io/badge/status-alpha-orange">
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
   <img alt="macOS" src="https://img.shields.io/badge/macOS-arm64%20%7C%20x64-black">
+  <img alt="Node" src="https://img.shields.io/badge/runtime-bundled-success">
   <a href="README.md"><img alt="English" src="https://img.shields.io/badge/docs-English-blue"></a>
 </p>
 
 <p align="center">
-  <img src="docs/media/tour.png" width="880" alt="ClaudeRipple 설정 화면 둘러보기">
+  <img src="docs/media/tour.png" width="880" alt="ClaudeRipple 설정 화면: 상태, 모델 매핑, 프로바이더, 클라이언트, 요청 로그">
 </p>
 
 <table align="center">
   <tr>
-    <td align="center" width="34%"><img src="docs/media/picker-zoom.png" width="300" alt="Claude Desktop 피커에 실제 이름으로"><br><sub>Claude Desktop 피커에 실제 이름으로</sub></td>
-    <td align="center" width="66%"><img src="docs/media/luna-answer.png" alt="GPT-5.6 Luna가 자기 이름으로, 고른 강도로 답하는 장면"><br><sub>GPT-5.6 Luna가 자기 이름으로, 고른 강도로 답하는 장면</sub></td>
+    <td align="center" width="34%"><img src="docs/media/picker-zoom.png" width="300" alt="Claude Desktop 피커에 실제 이름으로"><br><sub>Claude Desktop 피커에 GPT 모델이 실제 이름으로</sub></td>
+    <td align="center" width="66%"><img src="docs/media/luna-answer.png" alt="Code 탭에서 답하는 GPT-5.6 Luna"><br><sub>Code 탭에서 고른 추론 강도 그대로 답하는 GPT-5.6 Luna</sub></td>
   </tr>
   <tr>
-    <td colspan="2" align="center"><img src="docs/media/subagents.png" alt="GPT-5.6 Terra와 Sol로 도는 서브에이전트가 패널에 이름표로 표시"><br><sub>GPT-5.6 Terra와 Sol로 도는 서브에이전트가 패널에 이름표로 표시</sub></td>
+    <td colspan="2" align="center"><img src="docs/media/subagents.png" alt="백그라운드 작업 패널에 실제 모델 이름으로 표시된 서브에이전트"><br><sub>GPT-5.6 Terra·Sol로 도는 서브에이전트, 작업 패널에 실제 이름으로</sub></td>
   </tr>
 </table>
 
 ---
 
-## 왜 만들었나
+## 네 개 대신 하나
 
-Claude Desktop의 공식 "서드파티 추론" 설정은 앱 전체를 다른 모드로 바꿉니다. claude.ai
-채팅, 원격 제어, 클라우드 세션을 잃습니다. `ANTHROPIC_BASE_URL`을 바꾸는 도구는 데스크톱
-앱에 아예 닿지 못하고, ChatGPT로 번역해 주는 도구들은 프롬프트 캐시를 자주 깨뜨립니다
-(유명한 것 하나를 측정하니 캐시 적중 12~20%, 입력 토큰 비용 8배).
+지금은 방향마다 프록시가 따로 필요합니다. Claude Code에 GPT를 넣는 것 하나, Codex에 Claude를 넣는 것 하나,
+OpenRouter나 DeepSeek에 닿는 것 하나. 그리고 그중 어느 것도 Claude **데스크톱 앱**에서는 안 됩니다.
+ClaudeRipple은 이 전부를 메뉴 막대 앱 하나로 하고, Claude Code 하네스를 그대로 둡니다. 스킬·훅·MCP 서버·
+`CLAUDE.md`·서브에이전트·claude.ai 커넥터가 전부 살아 있는 채로 두뇌만 다른 모델로 바뀝니다.
 
-ClaudeRipple은 다른 길로 갑니다. Claude Code 프로세스만 신뢰하는 아주 작은 HTTPS
-프록시입니다. 매핑한 모델의 요청만 프로바이더로 가고, 나머지는 바이트 그대로 Anthropic으로
-갑니다. 다른 건 아무것도 바뀌지 않습니다.
+| | ClaudeRipple | opencodex / openclaude | claude-code-router | Claude Desktop "3P" 설정 |
+|---|---|---|---|---|
+| Claude **Desktop** Code 탭 | ✅ | ❌ | ❌ | ✅ |
+| claude.ai 채팅·Remote Control·클라우드 세션 유지 | ✅ | ❌ | ❌ | ❌ |
+| Claude 구독과 GPT 구독 나란히 | ✅ | ❌ 전부 아니면 전무 | ❌ | ❌ |
+| Desktop 피커에 실제 모델 이름 | ✅ | ❌ | ❌ | 일부 |
+| 터미널 `claude` CLI | ✅ | ✅ | ✅ | ✅ |
+| Codex **앱**·Codex CLI → Claude | ✅ | ✅ | ❌ | ❌ |
+| 번역 프로바이더의 프롬프트 캐시 | **94~99 %** 실측 | 12~20 % 실측 | 제각각 | 해당 없음 |
+| 서브에이전트를 실제 모델 이름으로 표시 | ✅ | ❌ | ❌ | ❌ |
+| 터미널 없이 쓰는 설정 GUI | ✅ | ❌ | ❌ | ❌ |
+| 런타임 내장, 서명·공증된 앱 | ✅ | ❌ | ❌ | – |
 
-| | ClaudeRipple | opencodex 계열 | Desktop 3P 설정 |
-|---|---|---|---|
-| Claude Desktop Code 탭 | ✅ | 3P 설정을 켜야 함 | ✅ |
-| claude.ai 채팅·원격 제어·클라우드 세션 유지 | ✅ | ❌ | ❌ |
-| Claude 구독과 GPT 구독 동시 사용 | ✅ | ❌ (전부 아니면 전무) | ❌ |
-| Desktop 피커에 실제 모델 이름 | ✅ | ❌ | 일부 |
-| 번역 프로바이더의 프롬프트 캐시 | **94~99%** 실측 | 12~20% 실측 | 해당 없음 |
-| 터미널 `claude`, 모바일 원격 제어 | ✅ | ✅ / ❌ | ✅ |
-| Codex CLI → Claude 및 다른 프로바이더 | ✅ | ✅ | ❌ |
-| 비개발자용 설정 GUI | ✅ | 일부 | ❌ |
+데스크톱 앱의 "서드파티 추론" 설정은 앱 전체를 다른 모드로 바꿔 버립니다. claude.ai 채팅, Remote Control,
+클라우드 세션을 잃습니다. `ANTHROPIC_BASE_URL`을 바꿔치기하는 도구들은 데스크톱 앱에 아예 닿지 못합니다.
+ClaudeRipple은 Claude Code 프로세스만 신뢰하는 작은 HTTPS 프록시입니다. 매핑한 모델 요청만 프로바이더로 가고,
+나머지는 Anthropic으로 바이트 그대로 지나갑니다.
 
 ## 할 수 있는 것
 
-- **Claude Desktop 피커에서 GPT-5.6 Terra·Sol·Luna, GPT-6 Astra를 실제 이름으로 선택.**
-  ChatGPT Plus/Pro 구독으로 씁니다. 원하면 Claude 이름에 다른 모델을 매핑하고 피커는 그대로 둘 수도 있습니다.
-- **어떤 프로바이더든.** ChatGPT 구독, DeepSeek, Kimi(Moonshot), Z.ai GLM, MiniMax, Qwen,
-  OpenRouter(400여 모델), xAI Grok, Mistral, Groq, Together, Fireworks, Ollama·LM Studio(로컬).
-  프리셋을 고르고 키를 붙여 넣으면 연결 확인과 모델 목록 불러오기가 한 번에 됩니다.
-- **어떤 클라이언트든.** Claude Desktop, 터미널 `claude`(`/model gpt-5.6-terra`), 모바일 원격 제어,
-  그리고 로컬 OpenAI 호환 입구를 통한 **Codex CLI**(`clauderipple codex on`).
-- **정확하게.** 프롬프트 캐시 보존, Claude Code의 서버측 스레드 처리, 도구 호출·이미지 왕복,
-  모델마다 받는 추론 강도로 자동 조정.
-- **제대로 된 요청 로그.** 누가 어떤 모델을 호출했고 어떤 모델이 답했는지, 입력·캐시·출력 토큰, 소요 시간, 상태.
-- **서브에이전트 이름표.** 백그라운드 작업 패널에 "Agent" 대신 `Terra·high · 리뷰`.
-- **메뉴 막대 앱.** 실행 환경을 스스로 갖고 첫 실행 때 설정을 대신 합니다. 서명·공증 완료.
+- **Claude Desktop과 Claude Code에서 어떤 모델이든.** ChatGPT Plus/Pro 구독으로 GPT-5.6 Terra / Sol / Luna와
+  GPT-6 Astra를, 아니면 DeepSeek·Kimi·GLM·MiniMax·Qwen·Grok·Mistral·Groq·Together·Fireworks·OpenRouter(400+ 모델)·
+  로컬 Ollama / LM Studio를. 피커에 실제 이름으로 띄우거나, Claude 이름에 매핑해서.
+- **Codex 앱과 Codex CLI에서 Claude를.** Codex가 프로바이더로 인식하는 로컬 OpenAI 호환 엔드포인트. Claude 모델이
+  Codex 자체 모델 목록에 뜹니다. Claude Code 로그인이나 Anthropic API 키를 씁니다.
+- **Claude Code 하네스는 손대지 않습니다.** 스킬, 훅, MCP, `CLAUDE.md`, 서브에이전트, 플랜 모드, 휴대폰 Remote Control.
+  아무것도 꺼지지 않습니다.
+- **구조적으로 올바르게.** 프롬프트 캐시 보존(Anthropic 캐시 브레이크포인트, 고정된 OpenAI 프리픽스), Claude Code의
+  서버 측 스레드 처리, 도구 호출과 이미지 왕복, 모델이 받는 범위로 추론 강도 클램프, 호환 벤더에는 Anthropic 전용 필드 제거.
+- **제대로 된 요청 로그.** 누가 물었고 어떤 모델이 답했는지, 입력·캐시·출력 토큰, 지연, 상태를 요청마다. 한 시간 요약 포함.
+- **서브에이전트 이름표.** 백그라운드 작업 패널에 "Agent" 대신 `Terra·high · Review`가 보입니다.
+- **터미널이 싫은 사람을 위해.** 원클릭 연결 확인과 모델 자동 검색이 붙은 프로바이더 프리셋, 드롭다운 모델 매핑, 자동 저장,
+  한국어·영어 UI. 런타임을 품고 첫 실행에 스스로 설치하는 메뉴 막대 앱. 서명·공증 완료.
 
 <p align="center">
-  <img src="docs/media/mapping.png" width="880" alt="모델 매핑">
+  <img src="docs/media/mapping.png" width="880" alt="모델 매핑: Claude 이름마다 실제로 답할 모델과 추론 강도">
 </p>
 
 ## 설치 (macOS)
 
 1. [Releases](https://github.com/PBJ-2/clauderipple/releases)에서 `ClaudeRipple-<버전>-arm64.dmg`(Apple Silicon)
    또는 `-x64.dmg`(Intel)를 받습니다.
-2. 응용 프로그램 폴더에 끌어 넣고 엽니다. 첫 실행 때 로컬 인증서, `~/.claude/settings.json` 두 줄,
-   로그인 시 시작되는 백그라운드 라우터 설정을 대신 해 줍니다. Node 설치는 필요 없습니다.
-3. 메뉴 막대 아이콘 → **ClaudeRipple 열기…** → **프로바이더**에서 ChatGPT를 추가하거나 API 키를 붙여 넣고 → **모델 매핑**.
+2. ClaudeRipple을 Applications로 끌어다 놓고 엽니다. 첫 실행에 설치를 제안합니다. 로컬 인증서, `~/.claude/settings.json`
+   두 줄, 로그인 시 자동 시작하는 백그라운드 라우터. Node 설치는 필요 없습니다.
+3. 메뉴 막대 아이콘 → **ClaudeRipple 열기…** → **프로바이더** → ChatGPT 추가 또는 API 키 붙여 넣기 → **모델 매핑**.
 
-Desktop 피커에 실제 이름을 띄우려면 **클라이언트 → Claude Desktop → 모델 피커 켜기**.
-macOS가 로컬 인증서 신뢰를 위해 로그인 암호를 한 번 묻습니다(ClaudeRipple은 암호를 보지 않습니다).
-그 뒤 Claude Desktop을 완전히 껐다 켜면 됩니다.
+선택 사항, Desktop 피커에 실제 이름을 띄우려면: **클라이언트 → Claude Desktop → 모델 피커 → 켜기**. 로컬 인증서를
+신뢰하기 위해 macOS가 로그인 암호를 한 번 묻습니다(ClaudeRipple은 암호를 보지 않습니다). Claude Desktop을 완전히
+종료했다가 다시 엽니다.
 
 <details>
-<summary>소스에서 설치 (Node 24)</summary>
+<summary>소스에서 (Node 24)</summary>
 
 ```bash
 git clone https://github.com/PBJ-2/clauderipple && cd clauderipple && npm install
-node packages/cli/src/index.ts install   # 인증서, settings.json, launchd, 종단 검사
-node packages/cli/src/index.ts ui        # 브라우저에서 GUI 열기
+node packages/cli/src/index.ts install   # 인증서, settings.json 환경, launchd 에이전트, 엔드투엔드 점검
+node packages/cli/src/index.ts ui        # 브라우저에서 로컬 GUI 열기
 ```
 
-`uninstall`은 전부 되돌리고 `~/.claude/settings.json`을 백업에서 복원합니다.
-그 밖의 명령: `status`, `start`, `stop`, `restart`, `logs -f`, `login`, `logout`,
-`claude-login`, `claude-logout`, `picker on|off`, `agent-title on|off`, `codex on|off`.
+`uninstall`은 전부 되돌리고 `~/.claude/settings.json`을 백업에서 복원합니다. 그 밖의 명령: `status`, `start`, `stop`,
+`restart`, `logs -f`, `login`, `logout`, `claude-login`, `claude-logout`, `picker on|off`, `agent-title on|off`,
+`codex on|off`.
 </details>
 
 ## 클라이언트
 
-### Claude Desktop과 Claude Code
+### Claude Desktop
 
-설치하면 바로 됩니다. **모델 매핑**에서 매핑을 정하거나(자동 저장), **피커 모드**를 켜서 앱 피커에
-프로바이더 모델을 실제 이름으로 띄우세요. 서브에이전트도 같은 규칙을 따르고, 프롬프트에
-`[[gpt: sol@xhigh]]` 표식을 넣으면 그 호출만 모델을 바꿉니다.
+설치 후 바로 됩니다. **모델 매핑**에서 매핑하거나(자동 저장), **피커 모드**를 켜서 앱 자체 피커에 프로바이더 모델을
+실제 이름으로 띄웁니다. 앱에서 고른 추론 강도는 그대로 전달되고, 모델이 못 받는 강도는 가장 가까운 값으로 맞춥니다.
 
-### 터미널 `claude`
+### Claude Code (터미널, Remote Control, 서브에이전트)
 
-같은 라우터, 같은 매핑입니다. `/model gpt-5.6-terra`로 추가한 모델이 목록에 나옵니다.
+같은 라우터, 같은 매핑. `/model gpt-5.6-terra`에 추가한 모델이 나열됩니다. 서브에이전트도 같은 라우팅을 따르고,
+프롬프트에 `[[gpt: sol@xhigh]]` 표식을 넣으면 그 호출만 모델을 바꿉니다. 작업 패널에는 실제 모델 이름이 보입니다.
 
-### Codex CLI
+### Codex 앱과 Codex CLI
 
 ```bash
-clauderipple codex on          # ~/.codex/config.toml에 "clauderipple" 프로바이더 추가(백업 먼저)
-codex --profile clauderipple -m claude-sonnet-5        # 터미널. Codex 앱에서도 됩니다
+clauderipple codex on     # ~/.codex/config.toml에 "clauderipple" 프로바이더 추가(백업 먼저)
+codex --profile clauderipple -m claude-sonnet-5
 ```
 
-Claude는 Claude Code 로그인(실행 중인 Desktop 세션, 터미널 로그인, 또는 `clauderipple claude-login`으로
-만든 토큰)이나 Anthropic API 키로 연결됩니다. 구독 로그인 재사용은 Anthropic 약관의 적용을 받습니다.
-설정해 둔 Anthropic 호환 프로바이더도 같은 방법으로 쓸 수 있습니다.
+Claude 모델이 Codex 모델 목록에 이름 그대로 뜹니다(ClaudeRipple이 Codex 자체 카탈로그 옆에 모델 카탈로그를 씁니다).
+Claude는 Claude Code 로그인(실행 중인 Desktop 세션, 터미널 로그인, 또는 `clauderipple claude-login`으로 만든 것)이나
+Anthropic API 키로 갑니다. 구독 로그인 재사용은 Anthropic 약관의 적용을 받습니다. 설정한 Anthropic 호환 프로바이더도
+같은 방식으로 쓸 수 있습니다.
 
 <p align="center">
-  <img src="docs/media/add-provider.png" width="880" alt="프로바이더 추가">
+  <img src="docs/media/add-provider.png" width="880" alt="프로바이더 추가: ChatGPT 구독, 프리셋, OpenAI 호환 프로바이더">
 </p>
 
 ## 프로바이더
 
 | 프로바이더 | 종류 | 인증 | 모델 목록 | 비고 |
 |---|---|---|---|---|
-| ChatGPT 구독 | Codex 백엔드 | 로그인(또는 Codex CLI 로그인 재사용) | Terra, Sol, Luna, Astra | effort low~max(Luna는 ultra), 캐시 94~99% |
-| OpenRouter | Anthropic 호환 | API 키 | 400여 개 자동 | 모델별 강도 지원을 API에서 읽음 |
-| DeepSeek, Kimi, Z.ai GLM, MiniMax, Qwen(국제/중국) | Anthropic 호환 | API 키 | 프리셋 | 공식 문서 기준 검증 |
-| xAI Grok, Mistral, Groq, Together, Fireworks | OpenAI 호환 | API 키 | 자동 | 번역(Chat Completions / Responses) |
-| Ollama, LM Studio | OpenAI 호환, 로컬 | 없음 | 자동 | |
-| Anthropic | 네이티브 | Claude Code 로그인 또는 API 키 | Claude 모델 | Codex 입구용 |
-| 그 외 | 직접 입력 | 자유 | 자동 | Anthropic·OpenAI 호환 엔드포인트 아무거나 |
+| ChatGPT 구독 | Codex 백엔드 | 로그인(또는 Codex 로그인 재사용) | Terra, Sol, Luna, Astra | 추론 강도 low…max(Luna는 ultra), 프롬프트 캐시 94~99 % |
+| OpenRouter | Anthropic 호환 | API 키 | 400+, 자동 검색 | 모델별 추론 강도 지원을 API에서 읽음 |
+| DeepSeek, Kimi, Z.ai GLM, MiniMax, Qwen(국제/중국) | Anthropic 호환 | API 키 | 프리셋 | 벤더 공식 문서로 확인 |
+| xAI Grok, Mistral, Groq, Together, Fireworks | OpenAI 호환 | API 키 | 자동 검색 | 번역(Chat Completions / Responses) |
+| Ollama, LM Studio | OpenAI 호환, 로컬 | 없음 | 자동 검색 | |
+| Anthropic | 네이티브 | Claude Code 로그인 또는 API 키 | Claude 모델 | Codex 쪽에서 사용 |
+| 그 밖의 무엇이든 | 직접 입력 | 자유 | 자동 검색 | Anthropic·OpenAI 호환 엔드포인트라면 무엇이든 |
 
-호환 프로바이더로 나가는 요청에서는 Anthropic 전용 항목(서버측 스레드, 지연 로딩 도구, 문맥 관리,
-사고 바인딩)을 떼고 강도를 모델 단위로 맞춰, Claude Code의 요청 형태 때문에 400이 나지 않게 합니다.
+호환 프로바이더로 가는 요청에서는 Anthropic 전용 필드(서버 측 스레드, 지연 로딩 도구, 컨텍스트 관리, thinking 바인딩)를
+걷어 내고 모델별로 추론 강도를 맞추므로, 벤더가 Claude Code의 요청 형태에 400을 내지 않습니다.
 
 ## 동작 원리
 
 ```
 Claude Desktop / claude CLI ──HTTPS_PROXY──▶ ClaudeRipple ──▶ api.anthropic.com   (그대로)
                                                │
-                        매핑한 모델 ───────────┼──▶ chatgpt.com/backend-api (Responses ⇄ Messages)
+                        매핑된 모델 ───────────┼──▶ chatgpt.com/backend-api (Responses ⇄ Messages)
                                                ├──▶ Anthropic 호환 벤더 (+ 호환 계층)
                                                └──▶ OpenAI 호환 벤더 (Messages ⇄ Chat/Responses)
-Codex CLI ──/v1/responses──▶ ClaudeRipple 입구 ──▶ Claude(로그인 또는 API 키) / 벤더
+Codex 앱 / CLI ──/v1/responses──▶ ClaudeRipple 입구 ──▶ Claude (내 로그인 또는 API 키) / 벤더
 ```
 
-- Claude Code CLI는 `~/.claude/settings.json`의 `HTTPS_PROXY`와 `NODE_EXTRA_CA_CERTS`를 읽습니다
-  (Anthropic이 문서화한 기업 프록시 경로). 그 프로세스만 로컬 인증기관을 신뢰하고, 피커 모드를
-  켜지 않는 한 OS 키체인은 건드리지 않습니다.
-- 피커 모드는 앱 자체의 claude.ai 트래픽을 프록시로 보내고, 앱이 시작할 때 받아가는 피커 목록에
-  모델을 추가합니다. 한 번의 클릭으로 원상복구됩니다.
-- 라우터는 재시작 시 진행 중 호출을 기다리고, 업스트림 장애가 반복되면 스스로 종료해 launchd가
-  다시 띄우게 하며, 로그를 회전하고, 요청을 조용히 잃지 않습니다.
+- Claude Code CLI는 `~/.claude/settings.json`의 `HTTPS_PROXY`와 `NODE_EXTRA_CA_CERTS`를 읽습니다(Anthropic이 문서화한
+  회사 프록시 경로). 그 프로세스만 ClaudeRipple의 로컬 CA를 신뢰합니다. 피커 모드를 켜지 않는 한 OS 키체인은 건드리지 않습니다.
+- 피커 모드는 앱 자체의 claude.ai 트래픽을 프록시로 보내고, 앱이 시작할 때 받아 오는 피커 목록에 내 모델을 더합니다.
+  끄는 것도 클릭 한 번.
+- 라우터는 재시작 때 진행 중인 호출을 끝까지 흘려보내고, 업스트림 실패가 반복되면 스스로 종료해 launchd가 다시 띄우게 하며,
+  로그를 순환하고, 요청을 조용히 떨어뜨리는 일이 없습니다.
 
-근거와 세부는 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)에 있습니다.
+근거가 달린 세부 설명: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## 개인정보
 
-모든 것이 127.0.0.1에서 돕니다. API 키는 `~/.clauderipple/config.json`(0600)에만 있습니다.
-네트워크 목적지는 설정한 프로바이더뿐이고, 원격 측정은 없습니다.
+전부 127.0.0.1에서 돕니다. API 키는 `~/.clauderipple/config.json`(0600)에만 있습니다. 네트워크 목적지는 직접 설정한
+프로바이더뿐입니다. 텔레메트리는 없습니다.
 
-## 상태
+## 상태: 알파
 
-알파. 제작자가 매일 씁니다. 지금은 macOS, Windows는 [로드맵](docs/ROADMAP.md)에 있습니다.
-ChatGPT와 OpenRouter는 실제 키로 검증했고, 다른 프리셋은 벤더 공식 문서 기준입니다.
+작성자가 매일 쓰고 있지만 아직 어립니다. 거친 부분이 있습니다.
+
+- macOS 전용. Windows는 [로드맵](docs/ROADMAP.md)에 있습니다.
+- ChatGPT, OpenRouter, Codex 안의 Claude는 실제 계정으로 검증했습니다. 나머지 프리셋은 벤더 공식 문서를 따릅니다.
+- 피커에 추가한 모델은 다음 세션부터 쓸 수 있습니다.
+- Claude Code와 Codex는 통신 규약을 자주 바꿉니다. 클라이언트 업데이트가 번역을 깨뜨리면 ClaudeRipple이 따라잡을 때까지
+  안 될 수 있습니다. 버그와 로그를 환영합니다.
 
 ## 비제휴
 
-ClaudeRipple은 독립 오픈소스 프로젝트이며 Anthropic·OpenAI와 제휴·보증·후원 관계가 없습니다.
-Claude와 Claude Code는 Anthropic, PBC의 상표이고, ChatGPT와 Codex는 OpenAI의 상표입니다.
+ClaudeRipple은 독립 오픈소스 프로젝트입니다. Anthropic이나 OpenAI와 제휴·보증·후원 관계가 없습니다. Claude와 Claude Code는
+Anthropic, PBC의 상표입니다. ChatGPT와 Codex는 OpenAI의 상표입니다.
 
 ## 라이선스
 
-MIT — [LICENSE](LICENSE).
+MIT — [LICENSE](LICENSE) 참고.
