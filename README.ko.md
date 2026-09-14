@@ -85,8 +85,6 @@ ClaudeRipple은 Claude Code 프로세스만 신뢰하는 작은 HTTPS 프록시�
 
 ## 설치
 
-*아직 릴리스가 없습니다. 첫 빌드를 마무리하는 중이며, 그때까지는 아래 소스 설치를 쓰십시오. 같은 코드입니다.*
-
 **macOS.** [Releases](https://github.com/PBJ-2/clauderipple/releases)에서 `ClaudeRipple-<버전>-arm64.dmg`(Apple Silicon)
 또는 `-x64.dmg`(Intel)를 받아 Applications로 끌어다 놓고 엽니다.
 

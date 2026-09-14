@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.1.0 — 2026-09-14 (first release: macOS + Windows)
+
+The source was published on 2026-09-13; this is the first build. Everything
+under "0.1.0 — 2026-09-13" below is included.
 
 ### Windows support
 

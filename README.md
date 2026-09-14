@@ -98,9 +98,6 @@ you map go to your provider, everything else goes to Anthropic byte for byte.
 
 ## Install
 
-*No release yet: the first builds are being finished. Until then, install from
-source below — it is the same code.*
-
 **macOS.** Download `ClaudeRipple-<version>-arm64.dmg` (Apple Silicon) or `-x64.dmg`
 (Intel) from [Releases](https://github.com/PBJ-2/clauderipple/releases), drag
 ClaudeRipple to Applications and open it.
