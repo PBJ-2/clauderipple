@@ -2,6 +2,7 @@
 // Packaged apps execute TypeScript with Electron's bundled Node in type-stripping mode;
 // development keeps using the Node executable that started the CLI.
 
+import fs from "node:fs";
 import path from "node:path";
 
 export type Runtime = {
@@ -27,6 +28,22 @@ export function runtime(): Runtime {
     const resources = path.join(bundle, "Contents", "Resources", "clauderipple");
     return {
       node: path.join(bundle, "Contents", "MacOS", path.basename(bundle, ".app")),
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+      cli: path.join(resources, "packages", "cli", "src", "index.ts"),
+      router: path.join(resources, "packages", "router", "src", "index.ts"),
+      hookScript: path.join(resources, "packages", "cli", "src", "hooks", "agent-title.ts"),
+      repo: resources,
+      packaged: true,
+    };
+  }
+
+  // Windows (and any non-macOS electron-builder layout): the sources sit in resources/clauderipple
+  // next to app.asar, and the app's own executable runs them with ELECTRON_RUN_AS_NODE.
+  const resourcesPath = electronProcess.resourcesPath;
+  if (resourcesPath && fs.existsSync(path.join(resourcesPath, "clauderipple", "packages", "router", "src", "index.ts"))) {
+    const resources = path.join(resourcesPath, "clauderipple");
+    return {
+      node: process.execPath,
       env: { ELECTRON_RUN_AS_NODE: "1" },
       cli: path.join(resources, "packages", "cli", "src", "index.ts"),
       router: path.join(resources, "packages", "router", "src", "index.ts"),

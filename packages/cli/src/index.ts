@@ -15,7 +15,7 @@ import { ConfigStore, DEFAULTS, homeDir, configPath } from "../../router/src/con
 import { adminPort } from "../../router/src/admin.ts";
 import { certsExist, certPaths, generateCerts } from "./certs.ts";
 import { applyProxyEnv, currentProxyEnv, removeProxyEnv, settingsPath } from "./settings.ts";
-import { agentState, installAgent, plistPath, removeAgent, restartAgent, startAgent, stopAgent } from "./launchd.ts";
+import { agentDefinitionPath, agentState, installAgent, isSupported, isWindows, removeAgent, restartAgent, startAgent, stopAgent, supervisorName } from "./supervisor.ts";
 import { BUNDLE_ID, removeBundle, writeBundle } from "./bundle.ts";
 import { applyAppProxy, caTrusted, currentAppProxy, removeAppProxy, trustCa, untrustCa } from "./picker.ts";
 import { runtime } from "./runtime.ts";
@@ -36,10 +36,14 @@ async function pickerOn(): Promise<void> {
   const caPem = certPaths(home).caPem;
   if (!fs.existsSync(path.join(home, "ca.key"))) throw new Error("ca.key missing; run `clauderipple install` first");
   console.log("Picker mode makes Claude Desktop's own claude.ai traffic go through ClaudeRipple so the model picker can list your GPT models.");
-  console.log("Step 1/3: trusting the ClaudeRipple CA in your login keychain. macOS will ask for your password (ClaudeRipple never sees it).");
+  console.log(
+    isWindows
+      ? "Step 1/3: trusting the ClaudeRipple CA for your Windows user account. Windows will show a confirmation dialog with the certificate fingerprint — answer Yes. No administrator rights are needed."
+      : "Step 1/3: trusting the ClaudeRipple CA in your login keychain. macOS will ask for your password (ClaudeRipple never sees it).",
+  );
   trustCa(caPem);
   if (!caTrusted()) throw new Error("CA is not trusted; picker mode not enabled");
-  console.log("✓ CA trusted (login keychain only)");
+  console.log(isWindows ? "✓ CA trusted (current user only)" : "✓ CA trusted (login keychain only)");
   const proxyUrl = proxyUrlFor(cfg.listen.port);
   const r = applyAppProxy(proxyUrl);
   console.log(`✓ Claude Desktop config library entry applied (${r.id}${r.replaced ? `, previous entry ${r.replaced} remembered` : ""}): egressProxyUrl=${proxyUrl}`);
@@ -65,7 +69,9 @@ function pickerOff(): void {
   } catch {
     /* no config */
   }
-  console.log(untrustCa(certPaths(home).caPem) ? "✓ CA removed from the login keychain" : "✓ CA was not in the login keychain");
+  if (isWindows) console.log("Removing the CA: Windows will ask you to confirm once more.");
+  const store = isWindows ? "your user certificate store" : "the login keychain";
+  console.log(untrustCa(certPaths(home).caPem) ? `✓ CA removed from ${store}` : `✓ CA was not in ${store}`);
   console.log("\nQuit and reopen Claude Desktop to apply.");
 }
 
@@ -121,7 +127,7 @@ function proxyUrlFor(port: number): string {
 async function install(): Promise<void> {
   const home = homeDir();
   const port = Number(opt("port") ?? DEFAULTS.listen.port);
-  if (process.platform !== "darwin") throw new Error("install currently supports macOS only (launchd). Run the router manually on other platforms.");
+  if (!isSupported) throw new Error(`install supports macOS and Windows; on ${process.platform} run the router manually.`);
   fs.mkdirSync(home, { recursive: true, mode: 0o700 });
 
   if (!certsExist(home)) {
@@ -159,7 +165,9 @@ async function install(): Promise<void> {
       2,
     ) + "\n",
   );
-  if (installedRuntime.packaged) {
+  // Windows registers node + the router script directly (schtasks.ts writes its own .cmd launcher);
+  // a macOS source checkout gets a small .app so the agent shows a real name in Login Items.
+  if (installedRuntime.packaged || isWindows) {
     const plist = installAgent({
       program: installedRuntime.node,
       args: [installedRuntime.router],
@@ -167,7 +175,7 @@ async function install(): Promise<void> {
       home,
       env: { ...installedRuntime.env, ...(process.env.CLAUDE_SETTINGS_PATH ? { CLAUDE_SETTINGS_PATH: process.env.CLAUDE_SETTINGS_PATH } : {}) },
     });
-    console.log(`✓ launchd agent registered: ${plist} (shows as "ClaudeRipple" in Login Items)`);
+    console.log(`✓ ${supervisorName()} registered: ${plist} (shows as "ClaudeRipple" in Login Items)`);
   } else {
     const launcher = writeBundle({ home, node: installedRuntime.node, script: installedRuntime.router, version: VERSION });
     console.log(`✓ background item bundle written: ${path.dirname(path.dirname(path.dirname(launcher)))} (shows as "ClaudeRipple" in Login Items)`);
@@ -177,8 +185,13 @@ async function install(): Promise<void> {
       home,
       ...(process.env.CLAUDE_SETTINGS_PATH ? { env: { CLAUDE_SETTINGS_PATH: process.env.CLAUDE_SETTINGS_PATH } } : {}),
     });
-    console.log(`✓ launchd agent registered: ${plist}`);
+    console.log(`✓ ${supervisorName()} registered: ${plist}`);
   }
+
+  // launchd starts the agent the moment it is bootstrapped (RunAtLoad); a scheduled task waits for
+  // its logon trigger, so the router would only appear after the next sign-in. Start it either way.
+  const started = startAgent();
+  console.log(started === "failed" ? `✗ could not start the router (${supervisorName()})` : `✓ router ${started === "already-running" ? "already running" : "started"}`);
 
   const p = await probeWithRetry({ host: cfg.listen.host, port: cfg.listen.port, caPem: caPath, upstream: cfg.upstream });
   console.log(p.ok ? `✓ end-to-end probe passed (${p.detail}, ${p.ms}ms)` : `✗ probe failed: ${p.detail}`);
@@ -190,7 +203,7 @@ function uninstall(): void {
   const home = homeDir();
   const cfg = new ConfigStore(configPath()).get();
   const removed = removeAgent();
-  console.log(removed ? `✓ launchd agent removed (${plistPath()})` : "✓ no launchd agent registered");
+  console.log(removed ? `✓ ${supervisorName()} removed (${agentDefinitionPath()})` : `✓ no ${supervisorName()} registered`);
   removeBundle(home);
   const edit = removeProxyEnv({ proxyUrl: proxyUrlFor(cfg.listen.port), caPath: certPaths(home).caPem });
   console.log(edit.changed ? `✓ ${settingsPath()} restored (backup: ${edit.backup ?? "none"})` : `✓ ${settingsPath()} had no ClaudeRipple keys`);
@@ -212,7 +225,7 @@ async function status(): Promise<void> {
   rows.push(["config", fs.existsSync(configPath()) ? `${Object.keys(cfg.routes).length} routes, ${Object.keys(cfg.providers).length} providers, direct=${cfg.direct.map((d) => d.prefix).join(",") || "-"}` : "missing"]);
   rows.push(["certs", certsExist(home) ? "present" : "missing"]);
   rows.push(["settings.json", env.HTTPS_PROXY === proxyUrl && env.NODE_EXTRA_CA_CERTS === caPath ? "points at ClaudeRipple" : `HTTPS_PROXY=${env.HTTPS_PROXY ?? "-"} NODE_EXTRA_CA_CERTS=${env.NODE_EXTRA_CA_CERTS ?? "-"}`]);
-  rows.push(["launchd", agentState()]);
+  rows.push([supervisorName(), agentState()]);
   const ap = currentAppProxy();
   rows.push(["picker mode", cfg.picker?.enabled ? `on · CA ${caTrusted() ? "trusted" : "NOT trusted"} · app proxy ${ap.ours ? ap.egressProxyUrl : "NOT set"}` : `off${ap.ours ? " (app proxy entry still present — run `picker off`)" : ""}`]);
   const p = await probe({ host: cfg.listen.host, port: cfg.listen.port, caPem: caPath, upstream: cfg.upstream });
@@ -261,11 +274,23 @@ function ui(): void {
   const cfg = new ConfigStore(configPath()).get();
   const port = adminPort(cfg);
   const url = `http://127.0.0.1:${port}/`;
+  if (openBrowser(url)) console.log(`opened ${url}`);
+  else console.log(`could not open a browser automatically; open this URL yourself: ${url}`);
+}
+
+/** Opens `url` in the user's default browser. Returns false if the platform command failed. */
+function openBrowser(url: string): boolean {
   try {
-    execFileSync("open", [url], { stdio: "ignore" });
-    console.log(`opened ${url}`);
-  } catch (e) {
-    console.log(`could not open a browser automatically (${(e as Error).message}); open this URL yourself: ${url}`);
+    if (isWindows) {
+      // Not `cmd /c start`: cmd treats & as a command separator, so an OAuth URL arrives truncated
+      // at its first parameter and the provider answers "missing_required_parameter" (observed
+      // 2026-09-14). Start-Process takes the URL as one argument, quoted PowerShell-style.
+      const quoted = `'${url.replace(/'/g, "''")}'`;
+      execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `Start-Process ${quoted}`], { stdio: "ignore", windowsHide: true });
+    } else execFileSync("open", [url], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -276,11 +301,30 @@ function logs(): void {
     return;
   }
   const n = Number(opt("n") ?? 50);
-  if (flag("f") || args.includes("-f")) {
-    execFileSync("tail", ["-n", String(n), "-f", file], { stdio: "inherit" });
-  } else {
-    execFileSync("tail", ["-n", String(n), file], { stdio: "inherit" });
-  }
+  const follow = flag("f") || args.includes("-f");
+  // No `tail` on Windows, and reimplementing it in Node keeps both platforms on one code path.
+  const printLast = (): number => {
+    const lines = fs.readFileSync(file, "utf8").split("\n");
+    const tail = lines.slice(Math.max(0, lines.length - n - 1));
+    process.stdout.write(tail.join("\n"));
+    return fs.statSync(file).size;
+  };
+  let offset = printLast();
+  if (!follow) return;
+  fs.watchFile(file, { interval: 500 }, () => {
+    const size = fs.statSync(file).size;
+    if (size < offset) offset = 0; // rotated
+    if (size === offset) return;
+    const fd = fs.openSync(file, "r");
+    try {
+      const buf = Buffer.alloc(size - offset);
+      fs.readSync(fd, buf, 0, buf.length, offset);
+      process.stdout.write(buf.toString("utf8"));
+    } finally {
+      fs.closeSync(fd);
+    }
+    offset = size;
+  });
 }
 
 function help(): void {
@@ -372,11 +416,7 @@ try {
       const { login } = await import("../../router/src/providers/chatgpt/auth.ts");
       console.log("Opening your browser to sign in to ChatGPT. Sign in there; this window waits up to 5 minutes.");
       const t = await login(homeDir(), (url) => {
-        try {
-          execFileSync("open", [url], { stdio: "ignore" });
-        } catch {
-          console.log(`Open this URL manually:\n${url}`);
-        }
+        if (!openBrowser(url)) console.log(`Open this URL manually:\n${url}`);
       });
       console.log(`✓ signed in (account ${t.accountId.slice(0, 8)}…, token valid until ${new Date(t.expiresAt).toLocaleString()}). Stored in ${homeDir()}/chatgpt-auth.json`);
       break;

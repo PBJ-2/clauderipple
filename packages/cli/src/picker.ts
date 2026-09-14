@@ -18,7 +18,13 @@ export const CA_NAME = "ClaudeRipple local CA";
 
 function appSupport(): string {
   // Verified in index.pre.js (AW()): userData + "-3p" regardless of 1P/3P mode. Not the plain "Claude" dir.
-  return process.env.CLAUDE_APP_SUPPORT ?? path.join(os.homedir(), "Library", "Application Support", "Claude-3p");
+  // Windows keeps userData under LOCALAPPDATA, not APPDATA — confirmed on Windows 11 (2026-09-14),
+  // where the app had already created %LOCALAPPDATA%\Claude-3p and read a configLibrary we put there.
+  if (process.env.CLAUDE_APP_SUPPORT) return process.env.CLAUDE_APP_SUPPORT;
+  if (process.platform === "win32") {
+    return path.join(process.env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local"), "Claude-3p");
+  }
+  return path.join(os.homedir(), "Library", "Application Support", "Claude-3p");
 }
 
 export function configLibraryDir(): string {
@@ -29,8 +35,42 @@ function loginKeychain(): string {
   return path.join(os.homedir(), "Library", "Keychains", "login.keychain-db");
 }
 
+const isWindows = process.platform === "win32";
+
+/** Single-quoted PowerShell literal; the only escape inside one is a doubled quote. */
+function ps(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+/**
+ * `interactive` drops -NonInteractive and lets a window show. Trusting (and untrusting) a root
+ * certificate is a UI operation: Windows puts up its own confirmation dialog with the fingerprint,
+ * and under -NonInteractive the call fails outright with "this operation cannot use the UI"
+ * (observed 2026-09-14 — the dialog never appeared and picker mode stopped there).
+ */
+function powershell(script: string, opts: { stdio?: "ignore" | "inherit" | "pipe"; interactive?: boolean } = {}): string {
+  const stdio = opts.stdio ?? "pipe";
+  const args = ["-NoProfile", ...(opts.interactive ? [] : ["-NonInteractive"]), "-Command", script];
+  return execFileSync("powershell.exe", args, {
+    stdio: stdio === "pipe" ? ["ignore", "pipe", "pipe"] : stdio,
+    windowsHide: !opts.interactive,
+  })?.toString() ?? "";
+}
+
+/**
+ * Both platforms trust the CA for the current user only — never machine-wide, which would need
+ * administrator rights and would affect everyone on the box.
+ *   macOS   : login keychain, and the OS asks for the account password.
+ *   Windows : Cert:\CurrentUser\Root, and the OS shows a confirmation dialog with the fingerprint.
+ * Measured on Windows 11 (2026-09-14) as a standard user: the import succeeded with no UAC prompt,
+ * only that dialog. Removal shows a second confirmation, so `picker off` prompts the user too.
+ */
 export function caTrusted(): boolean {
   try {
+    if (isWindows) {
+      const out = powershell(`@(Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object { $_.Subject -eq 'CN=${CA_NAME}' }).Count`);
+      return Number(out.trim()) > 0;
+    }
     execFileSync("security", ["find-certificate", "-c", CA_NAME, loginKeychain()], { stdio: "ignore" });
     return true;
   } catch {
@@ -38,14 +78,30 @@ export function caTrusted(): boolean {
   }
 }
 
-/** Adds the CA as a trusted root in the user's login keychain. macOS shows its own password dialog. */
+/** Adds the CA as a trusted root for the current user. The OS shows its own prompt; we never see a password. */
 export function trustCa(caPem: string): void {
   if (caTrusted()) return;
+  if (isWindows) {
+    // stdio inherit: the confirmation dialog is the OS's, but errors should reach the user's terminal.
+    powershell(`Import-Certificate -FilePath ${ps(caPem)} -CertStoreLocation Cert:\\CurrentUser\\Root -ErrorAction Stop | Out-Null`, { stdio: "inherit", interactive: true });
+    return;
+  }
   execFileSync("security", ["add-trusted-cert", "-r", "trustRoot", "-k", loginKeychain(), caPem], { stdio: "inherit" });
 }
 
 export function untrustCa(caPem: string): boolean {
   if (!caTrusted()) return false;
+  if (isWindows) {
+    try {
+      powershell(
+        `Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object { $_.Subject -eq 'CN=${CA_NAME}' } | ForEach-Object { Remove-Item -Path $_.PSPath -Force }`,
+        { stdio: "inherit", interactive: true },
+      );
+    } catch {
+      /* the user may have declined the removal dialog */
+    }
+    return true;
+  }
   try {
     execFileSync("security", ["remove-trusted-cert", caPem], { stdio: "inherit" });
   } catch {
