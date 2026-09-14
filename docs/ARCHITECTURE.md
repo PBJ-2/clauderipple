@@ -97,6 +97,19 @@ chat is out of reach for every approach, ours included.
   router logs `PICKER injected … surfaces: …` on each bootstrap.
 - Injecting `additional_model_options` into the Claude Code bootstrap response
   does **not** reach the app picker (measured; the app never reads that field).
+- **Windows uses the same mechanism** (measured end to end in a Windows 11 VM,
+  2026-09-14: picker listed the GPT models, a call routed, the model answered).
+  Two things differ and nothing else does:
+  - The Config Library lives at `%LOCALAPPDATA%\Claude-3p\configLibrary\`, not
+    `%APPDATA%`. The app creates `Claude-3p` itself but leaves it empty —
+    `configLibrary/` is ours to write, on both platforms (`_meta.json` had
+    `previousAppliedId: null` on a machine that had never been touched).
+  - The CA goes into `Cert:\CurrentUser\Root`. Windows shows a confirmation
+    dialog with the fingerprint instead of asking for a password, and **no UAC
+    prompt**: a standard, non-elevated user can do it. It asks a second time when
+    the certificate is removed, so `picker off` prompts too.
+  The app's own log line confirms the proxy took effect:
+  `[egress-proxy] pinned to fixed proxy at 127.0.0.1:<port>; OS proxy settings ignored`.
 
 ## 4. Provider adapters
 
@@ -338,6 +351,11 @@ inspected 2026-09-13. The latter is not an Anthropic guarantee.
 | After a reboot the router listened 4 minutes after login (26s of it between exec and `listen()`), and for that whole window Claude Desktop was a blank page with `ERR_PROXY_CONNECTION_FAILED` — in picker mode every byte the app sends goes through us, so a router that is merely slow reads as an app that is broken (2026-09-14 09:59 boot → 10:15:59 listening) | The launchd agent is `ProcessType=Interactive`, never `Background` (that key throttles CPU and I/O — launchd.plist(5)). `listen()` comes before certificate minting and any other startup work, so a client waits rather than being refused. Every startup logs its budget (`startup Nms: node …, config …, listen …`). |
 | "Start Router" ran `launchctl kickstart -k`, which kills a router that is already coming up and starts the wait over (three runs in the four minutes after login, 2026-09-14) | Starting is idempotent: a running agent is left alone, an unloaded one is re-bootstrapped. Only `restart` may force. |
 | With the router down, the tray app's window loaded the router-served GUI and showed the same blank page as Claude Desktop — nothing anywhere said why | The app owns an offline notice that names the cause, keeps a login item so it is there before Claude Desktop is, and posts a notification when the router has been down for 20s. |
+| Windows: the scheduled task inherited the console that started it, so closing the installer window killed the router with `0xC000013A` (Ctrl+C), 2026-09-14 | The task runs a PowerShell launcher that uses `Start-Process -PassThru -Wait`: detached from any console, still tracked so `RestartCount` keeps acting as KeepAlive and the exit code (including the health self-exit 75) propagates. |
+| Windows: `install` registered a logon-triggered task and stopped there, so the router did not exist until the next sign-in — launchd starts at bootstrap (`RunAtLoad`) and the difference was invisible | `install` starts the supervisor itself on both platforms and prints the result. |
+| Windows: trusting the CA failed with "this operation cannot use the UI" — every PowerShell call carried `-NonInteractive`, and the confirmation dialog never appeared, so picker mode stopped with no certificate and no explanation | Certificate trust and removal run WITHOUT `-NonInteractive` (and without `windowsHide`). They are UI operations by design: the OS must be able to show the user what it is being asked to trust. |
+| Windows: sign-in failed with `missing_required_parameter` because the OAuth URL was opened via `cmd /c start`, and cmd reads `&` as a command separator — everything after the first parameter was cut off and run as commands (2026-09-14) | Browsers are opened with `Start-Process <url>` as a single quoted argument. Any URL we hand to a shell must survive its metacharacters. |
+| Closing Claude Desktop's window does not quit it; reopening hits `Not main instance, returning early` and the app silently keeps the OLD proxy setting. The user sees "I configured it and nothing happened" with no error anywhere (2026-09-14) | Tell the user that closing the window is not enough, and detect it: with picker mode on, the router knows whether the app is actually routing through it. Surface "configured, but the app has not restarted yet" rather than letting it fail silently. |
 
 ## 6. Blocked paths (measured, do not retry)
 

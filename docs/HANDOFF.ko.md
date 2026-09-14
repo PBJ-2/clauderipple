@@ -1,7 +1,57 @@
-# 인수인계 — 2026-09-13 밤 (최신)
+# 인수인계 — 2026-09-14 (최신)
 
 > 다음 세션이 처음 읽을 문서. 기술 근거는 `docs/ARCHITECTURE.md`, 규칙은 `CLAUDE.md`,
 > 메모리는 `~/.claude/projects/-Users-pbj-Downloads/memory/clauderipple-project.md`.
+
+## 2026-09-14 — 기동 문제 수정 + **Windows 실기 검증 완료**
+
+### 오전: 부팅 지연·표시·보안 (커밋 c776ac3, 42b629a, 411aa73, 844843c)
+실제 사고에서 출발했다. 재부팅 후 **로그인 4분 뒤에야 라우터가 떴고**, 그동안 Claude Desktop은
+`ERR_PROXY_CONNECTION_FAILED` 흰 화면이었다(피커 모드는 앱 트래픽 전량이 라우터를 지나므로
+라우터가 느리면 앱이 죽은 것처럼 보인다 — 공식 문서상 직결 폴백이 없다).
+
+- **launchd `ProcessType` Background → Interactive.** Background는 CPU·I/O를 스로틀한다(man launchd.plist).
+- **`listen()`을 인증서 민팅보다 먼저.** 소켓이 먼저 열리면 클라이언트는 거절이 아니라 대기한다.
+  모든 기동이 `startup Nms: node …, config …, listen …`을 찍는다.
+- **`start`가 멱등적이 됐다.** 예전엔 `kickstart -k`라서 뜨는 중인 라우터를 죽이고 다시 기다리게 했다
+  (로그인 후 4분 동안 runs=3의 정체).
+- **트레이 앱**: 로그인 자동시작, 라우터 다운 시 원인을 설명하는 화면, 20초 후 알림.
+- **openssl 제거** → `packages/router/src/x509.ts` (순수 `node:crypto`, 의존성 0). 기존 CA로
+  발급·검증·TLS 핸드셰이크까지 실측 통과. **이 판단이 Windows에서 곧바로 값을 했다.**
+- **admin API 교차 사이트 POST 차단.** 127.0.0.1 바인딩은 브라우저를 막지 못한다 — 아무 웹페이지나
+  `POST /api/picker`를 보낼 수 있었다(CORS는 응답만 가린다). `Origin` 검사 추가.
+- **`POST /api/shutdown`** 추가 (Windows엔 SIGTERM이 없다).
+- 훅 자기경로 판별을 `fileURLToPath`로 (경로에 공백이 있으면 macOS에서도 조용히 죽었다).
+
+### 오후: Windows 지원 (커밋 3a6be28) — **Parallels Windows 11 VM에서 끝까지 검증**
+피커에 GPT 모델이 뜨고, 선택해서 호출하면 모델이 답한다:
+`CHATGPT gpt-5.6-terra effort=high POST /v1/messages -> 200`.
+
+| 항목 | Windows 구현 |
+|---|---|
+| 감독 | Task Scheduler (`schtasks.ts`), ONLOGON + RestartCount. **표준 사용자, UAC 없음** |
+| 인증서 신뢰 | `Cert:\CurrentUser\Root`. 암호 대신 **지문 확인 창**, 관리자 권한 불필요 |
+| Config Library | `%LOCALAPPDATA%\Claude-3p\configLibrary\` (`%APPDATA%` 아님) |
+| 우아한 종료 | `POST /api/shutdown` (SIGTERM 없음) |
+| 플랫폼 분기 | `supervisor.ts`가 launchd/schtasks를 고른다 |
+
+**Windows에서 잡은 버그 넷 — 전부 "그냥 안 됐을" 것들이다:**
+1. 콘솔 상속 → 설치 창을 닫으면 라우터가 `0xC000013A`로 죽음 → `Start-Process -PassThru -Wait`
+2. `install`이 라우터를 시작 안 함 → 다음 로그인까지 안 뜸 (launchd는 RunAtLoad로 즉시)
+3. `-NonInteractive` → 인증서 신뢰가 "UI를 사용할 수 없습니다"로 실패, 창이 안 뜸
+4. `cmd /c start`가 OAuth URL을 첫 `&`에서 자름 → `missing_required_parameter`로 **로그인 불가**
+
+**아직 안 한 것**: Electron `win` 타겟 빌드(`.ico`, 트레이 아이콘·타이틀바 분기). 그래서 Windows 검증은
+`.bat`으로 소스를 직접 돌리는 방식이었다. VM에는 주군 ChatGPT 토큰이 남아 있다(`chatgpt-auth.json`, 9/24 만료).
+
+**VM 운영 메모**: Parallels의 `Pause idle`이 켜져 있으면 작업이 계속 끊긴다
+(`prlctl set "Windows 11" --pause-idle off --on-window-close keep-running`, 호스트 관리자 암호 필요).
+`prlctl exec`에 PowerShell을 인라인으로 넘기면 따옴표가 벗겨진다 — **스크립트를 base64로 보내 파일로 실행할 것.**
+Windows 바탕화면은 맥 `~/Desktop`과 공유돼 있다(파일을 거기 두면 VM에서 보인다).
+
+---
+
+## 이전 인수인계 (2026-09-13 밤)
 
 ## 지금 상태 한 줄
 **저장소 공개됨** https://github.com/PBJ-2/clauderipple (GPL-3.0, 09-13 밤). 디씨 두 곳에 글 올라감(AI활용갤 5추, 특갤).
