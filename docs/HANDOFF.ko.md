@@ -1,7 +1,37 @@
 # 인수인계 — 2026-09-14 (최신)
 
 > 다음 세션이 처음 읽을 문서. 기술 근거는 `docs/ARCHITECTURE.md`, 규칙은 `CLAUDE.md`,
-> 메모리는 `~/.claude/projects/-Users-pbj-Downloads/memory/clauderipple-project.md`.
+> 릴리스 절차는 `docs/RELEASE.md`.
+
+## ▶ 다음 세션이 할 일 (집 Windows PC에서)
+
+**하나만 확인하면 됩니다: NSIS 인스톨러가 x64 실기에서 제대로 설치되는가.**
+
+파일은 이미 준비돼 있습니다 — 맥 바탕화면 `ClaudeRipple-win-test/`
+(x64 인스톨러, x64 zip, `READ-ME-FIRST.txt` 체크리스트). 주군이 집 PC로 옮기십니다.
+
+### 확인할 것
+설치 후 `%LOCALAPPDATA%\Programs\ClaudeRipple`에 **`ClaudeRipple.exe`와 `.dll`들이 있는가.**
+
+- **있으면** → arm64 에뮬레이션 문제로 확정. README에서 "인스톨러 미검증" 경고를 빼고
+  인스톨러를 기본 배포로 올립니다(`README.md`/`README.ko.md`의 Install 절, `docs/RELEASE.md` §Windows).
+- **없으면** → NSIS 자체 문제. **zip 전용 배포로 확정**하고 nsis 타겟을 빼는 것을 검토합니다.
+  (`packages/app/package.json` → `build.win.target`)
+
+### 증상 (arm64에서 관측된 것)
+인스톨러가 `exit 0`으로 성공을 보고하면서 **122개 중 114개만** 설치합니다. 빠지는 것은
+`ClaudeRipple.exe`와 DLL 8개 — **실행 가능한 바이너리만**. 그래서 앱이 아예 안 켜집니다.
+
+### 이미 배제한 원인 (다시 파지 마십시오)
+- ❌ macOS 크로스 빌드 — Windows 네이티브 빌드도 **똑같이** 재현됨
+- ❌ 코드 서명 — `signExecutable: false`로도 동일
+- ❌ Windows Defender — 예외 경로를 줘도 동일. Smart App Control은 꺼져 있고 ASR 규칙 없음
+- ✅ `win-*-unpacked` 폴더를 **그대로 복사하면 정상 동작** → 범인은 NSIS 패키징 단계
+
+남은 가설: electron-builder의 NSIS 스텁이 x86이라 arm64 Windows에서 에뮬레이션으로 도는 것.
+**x64 실기에서만 판별됩니다.**
+
+---
 
 ## 2026-09-14 — 기동 문제 수정 + **Windows 실기 검증 완료**
 
@@ -41,13 +71,37 @@
 3. `-NonInteractive` → 인증서 신뢰가 "UI를 사용할 수 없습니다"로 실패, 창이 안 뜸
 4. `cmd /c start`가 OAuth URL을 첫 `&`에서 자름 → `missing_required_parameter`로 **로그인 불가**
 
-**아직 안 한 것**: Electron `win` 타겟 빌드(`.ico`, 트레이 아이콘·타이틀바 분기). 그래서 Windows 검증은
-`.bat`으로 소스를 직접 돌리는 방식이었다. VM에는 주군 ChatGPT 토큰이 남아 있다(`chatgpt-auth.json`, 9/24 만료).
+### 저녁: 발표 준비 (커밋 46f1649, 97381cb, 1a4bbe6, 8e3da85, …)
+- **GUI 버그**: 모델 매핑이 모든 모델을 두 번 보여줬다(피커 스냅샷의 `code`·`ccd` 서페이스가
+  같은 목록인데 합쳤다). 주입 *후* 스냅샷이라 우리 GPT id까지 매핑 **소스**로 떴다. 맥에서도 같은 버그.
+- **창 크기**: 960px로 열렸는데 로그 테이블만 920px이 필요했다 → 1180×760, 최소 900.
+- **Windows 메뉴바** 제거(Alt로만). 맥은 Cmd-Q가 거기 있어 유지.
+- **KeepAlive**: Task Scheduler의 `RestartCount`는 **작업 시작 실패**에만 적용된다. 돌던 프로세스가
+  죽으면 그냥 "완료"다(실측: 3분간 아무도 안 살림). 런처 PowerShell이 직접 감시하도록 바꿨고
+  강제 종료 후 **4.8초 만에 자동 복구** 확인.
+- **문서**: README·README.ko에 Windows 추가(서명 없음 경고, 앱 종료 함정), CHANGELOG,
+  RELEASE.md에 Windows 절차.
+- **코드 서명은 하지 않기로 결정**(주군). OV $219~400/년 + 하드웨어 토큰, EV $280~685/년,
+  Azure의 월 $9.99는 **한국에서 가입 불가**. OV는 돈 쓰고도 SmartScreen 경고가 남아 최악.
+  README에 "추가 정보 → 실행"을 명시했다.
+
+**남은 것**
+- ⬜ **x64 인스톨러 검증** (위 ▶ 항목)
+- ⬜ Windows 타이틀바 — 맥은 `titleBarStyle: hiddenInset`인데 Windows는 기본 창틀이라
+  "오래된 프로그램" 느낌. 없애려면 `titleBarOverlay` + GUI에 드래그 영역·창 컨트롤 자리가 필요.
+- ⬜ GitHub Actions(`windows-latest`) 빌드 — VM에 의존하지 않는 재현 가능한 릴리스 경로
+- ⬜ 앱 종료 함정을 제품에서 감지하기 — 피커 모드면 라우터가 앱의 실제 경유 여부를 알 수 있으므로
+  "설정은 됐지만 앱이 아직 재시작되지 않음"을 표시할 수 있다
 
 **VM 운영 메모**: Parallels의 `Pause idle`이 켜져 있으면 작업이 계속 끊긴다
-(`prlctl set "Windows 11" --pause-idle off --on-window-close keep-running`, 호스트 관리자 암호 필요).
+(`prlctl set "Windows 11" --pause-idle off --on-window-close keep-running`, 호스트 관리자 암호 필요 — 주군이 해뒀다).
 `prlctl exec`에 PowerShell을 인라인으로 넘기면 따옴표가 벗겨진다 — **스크립트를 base64로 보내 파일로 실행할 것.**
-Windows 바탕화면은 맥 `~/Desktop`과 공유돼 있다(파일을 거기 두면 VM에서 보인다).
+`prlctl exec`가 반환 없이 매달리는 일이 잦다(4시간 넘게 남은 적 있음) — **작업 후 `ps | grep prlctl`로 정리할 것.**
+Windows 바탕화면은 맥 `~/Desktop`과 공유돼 있다. PowerShell의 `Set-Content -Encoding UTF8`은 BOM을 붙이므로
+JSON 파일을 그것으로 쓰지 말 것(`@electron/rebuild`가 파싱 못 해 빌드가 죽는다).
+
+**VM에 남아 있는 것**: 주군 ChatGPT 토큰(`C:\Users\pbj\.clauderipple\chatgpt-auth.json`, 9/24 만료),
+`C:\build\ClaudeRipple`(빌드용 사본), 테스트 설치 디렉터리 몇 개(`C:\cr-*`). 정리는 미뤘다.
 
 ---
 

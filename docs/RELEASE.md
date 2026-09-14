@@ -85,16 +85,27 @@ gh release create v<version> \
 
 `ClaudeRipple-Setup-<version>-<arch>.exe` (NSIS, 사용자 단위 설치, 권한 상승 없음).
 
-### ⚠️ macOS에서 크로스 빌드하지 마십시오
+### ⚠️ NSIS 인스톨러는 아직 검증되지 않았습니다
 
-`electron-builder --win`은 macOS에서도 **돌아가지만 쓸 수 없는 인스톨러**를 만듭니다.
-중간 산출물(`win-*-unpacked`)에는 122개 파일이 다 있는데, 완성된 인스톨러에는
-**`ClaudeRipple.exe`와 DLL 8개만 빠진 114개**가 들어갑니다. 설치는 `exit 0`으로
-성공했다고 보고하고, 사용자는 "설치됐는데 실행이 안 된다"만 겪습니다.
-(2026-09-14 실측. 코드 서명을 꺼도 동일.)
+`electron-builder --win`이 만든 NSIS 인스톨러가 **실행 파일만 빼고 설치합니다.**
+중간 산출물(`win-*-unpacked`)에는 122개 파일이 다 있는데, 설치 결과는
+**`ClaudeRipple.exe`와 DLL이 빠진 114개**입니다. 설치는 `exit 0`으로 성공했다고
+보고하고, 사용자는 "설치됐는데 실행이 안 된다"만 겪습니다.
 
-**Windows에서 빌드하십시오.** 장기적으로는 GitHub Actions `windows-latest`가
-맞습니다 — 재현 가능하고 VM에 의존하지 않습니다.
+2026-09-14에 Windows 11 **arm64** VM에서 확인한 것:
+
+- macOS에서 크로스 빌드한 인스톨러 — 재현
+- Windows에서 네이티브 빌드한 인스톨러 — **똑같이 재현**
+- 코드 서명을 꺼도 동일
+- Defender 예외 경로를 줘도 동일 (실시간 보호 자체는 변조 방지로 끄지 못함)
+- 같은 `win-arm64-unpacked`를 **폴더째 복사하면 정상 동작**
+
+즉 범인은 NSIS 패키징 단계입니다. **아직 원인을 특정하지 못했습니다.**
+electron-builder의 NSIS 스텁은 x86이라 arm64 Windows에서는 에뮬레이션으로 도는데,
+그것이 원인인지는 **x64 실기에서 확인해야 합니다.**
+
+그때까지 **zip을 기본 배포 경로로** 삼습니다. 압축을 풀어 실행하는 방식이고 실제로
+검증됐습니다.
 
 ### Windows에서 빌드
 

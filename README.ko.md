@@ -90,12 +90,16 @@ ClaudeRipple은 Claude Code 프로세스만 신뢰하는 작은 HTTPS 프록시�
 **macOS.** [Releases](https://github.com/PBJ-2/clauderipple/releases)에서 `ClaudeRipple-<버전>-arm64.dmg`(Apple Silicon)
 또는 `-x64.dmg`(Intel)를 받아 Applications로 끌어다 놓고 엽니다.
 
-**Windows.** `ClaudeRipple-Setup-<버전>-x64.exe`(또는 `-arm64.exe`)를 받아 실행합니다. 사용자 단위로 설치되며
-관리자 권한을 요구하지 않습니다.
+**Windows.** `ClaudeRipple-<버전>-win-x64.zip`(또는 `-arm64.zip`)을 받아 아무 데나 풀고 `ClaudeRipple.exe`를
+실행합니다. 설치 관리자(`ClaudeRipple-Setup-….exe`)도 있지만 **아직 검증되지 않았습니다**(아래 참고).
 
 > **Windows에서 "PC를 보호했습니다" 경고가 뜹니다.** 코드 서명을 하지 않았기 때문입니다. 서명 인증서는 연
 > 219~685달러이고 하드웨어 토큰까지 필요해서, 이 프로젝트는 거기에 돈을 쓰지 않습니다. **추가 정보 → 실행**을
 > 누르십시오. 꺼림칙하시면 소스로 직접 빌드하셔도 결과는 같습니다.
+
+> **설치 관리자는 아직 검증되지 않았습니다.** Windows 11 arm64에서 실행 파일만 빼고 설치하면서 성공했다고
+> 보고합니다(그래서 앱이 안 켜집니다). zip에는 이 문제가 없습니다. x64에서 설치 관리자를 시도해 보셨다면
+> [결과를 알려주십시오](https://github.com/PBJ-2/clauderipple/issues).
 
 첫 실행에 설치를 제안합니다. 로컬 인증서, `~/.claude/settings.json` 두 줄, 로그인 시 자동 시작하는 백그라운드
 라우터. Node 설치는 필요 없습니다. 그다음 트레이 아이콘 → **ClaudeRipple 열기…** → **프로바이더** → ChatGPT 추가

@@ -105,13 +105,19 @@ source below — it is the same code.*
 (Intel) from [Releases](https://github.com/PBJ-2/clauderipple/releases), drag
 ClaudeRipple to Applications and open it.
 
-**Windows.** Download `ClaudeRipple-Setup-<version>-x64.exe` (or `-arm64.exe`) and
-run it. It installs for your user only and never asks for administrator rights.
+**Windows.** Download `ClaudeRipple-<version>-win-x64.zip` (or `-arm64.zip`),
+unpack it anywhere, and run `ClaudeRipple.exe`. There is also an installer
+(`ClaudeRipple-Setup-…exe`) but it is **not verified yet** — see the note below.
 
 > **Windows shows "Windows protected your PC".** The build is not code-signed —
 > a certificate costs $219–685/year and needs a hardware token, which this project
 > does not spend money on. Click **More info → Run anyway**. If you would rather
 > not, build from source; the result is identical.
+
+> **The installer is unverified.** On Windows 11 arm64 it installs everything
+> *except* the executables and reports success anyway, so the app will not start.
+> The zip does not have this problem. If you try the installer on x64, please
+> [tell us what happened](https://github.com/PBJ-2/clauderipple/issues).
 
 On first launch the app offers to set itself up: a local certificate, two lines in
 `~/.claude/settings.json`, and a background router that starts at login. No Node

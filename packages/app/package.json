@@ -78,10 +78,17 @@
             "x64",
             "arm64"
           ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
         }
       ],
       "icon": "build/icon.png",
-      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}",
+      "artifactName": "${productName}-${version}-win-${arch}.${ext}",
       "signExecutable": false
     },
     "nsis": {
@@ -90,7 +97,8 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "ClaudeRipple"
+      "shortcutName": "ClaudeRipple",
+      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}"
     }
   }
 }
