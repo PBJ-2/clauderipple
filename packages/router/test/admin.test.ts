@@ -611,3 +611,23 @@ test("GET /api/claude-models de-duplicates surfaces and drops our own injected i
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
+
+test("a chatgpt provider with no credentials is not reported as usable", async () => {
+  // Reaching chatgpt.com says nothing about being able to call it. Claiming "connected" without a
+  // login sends a new user away believing setup is finished (reported from a real install).
+  const cfg = makeCfg({ providers: { gpt: { type: "chatgpt", auth: "own" } } });
+  await withAdmin(cfg, async ({ port }) => {
+    const status = (await (await fetch(`${base()}:${port}/api/status`)).json()) as { providers: Record<string, { needsLogin?: boolean }> };
+    assert.equal(status.providers.gpt?.needsLogin, true, "status must say a login is missing");
+
+    const probe = await fetch(`${base()}:${port}/api/providers/probe`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ type: "chatgpt", auth: "own" }),
+    });
+    const body = (await probe.json()) as { ok: boolean; auth: string; error?: string };
+    assert.equal(body.ok, false, "the connection check must not claim success without credentials");
+    assert.equal(body.auth, "missing");
+    assert.match(body.error ?? "", /credentials/i);
+  });
+});

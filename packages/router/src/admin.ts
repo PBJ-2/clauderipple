@@ -207,6 +207,16 @@ function tcpReachable(hostname: string, port: number, timeoutMs = 2000): Promise
   });
 }
 
+/**
+ * Whether a chatgpt provider has usable credentials, from the files, so the answer is right before
+ * the first request is ever made. "auto" accepts either our own login or a Codex CLI one.
+ */
+export function chatgptSignedIn(mode: string | undefined): boolean {
+  const own = fs.existsSync(path.join(homeDir(), "chatgpt-auth.json"));
+  const borrowed = fs.existsSync(path.join(os.homedir(), ".codex", "auth.json"));
+  return mode === "own" ? own : mode === "borrow-codex" ? borrowed : own || borrowed;
+}
+
 async function buildStatus(deps: AdminDeps): Promise<Record<string, unknown>> {
   const cfg = deps.config();
   const providers: Record<string, { url: string; type: string; reachable: boolean; authSource?: "observed" | "env" | "keychain" | "credentials-file" | "token-file" | null }> = {};
@@ -224,19 +234,18 @@ async function buildStatus(deps: AdminDeps): Promise<Record<string, unknown>> {
         url,
         type: p.type,
         reachable,
+        // Reaching the host says nothing about being able to use it: a chatgpt provider with no
+        // credentials is not "connected", and calling it that sends the user off believing it works.
+        ...(p.type === "chatgpt" ? { needsLogin: !chatgptSignedIn(p.auth) } : {}),
         ...(p.type === "anthropic" ? { authSource: p.auth === "claude-code" ? claudeAuthStore(deps).describeSource() : null } : {}),
       };
     }),
   );
   const chatgpt = deps.chatgpt?.() ?? { quota: {}, auth: {} };
-  // Credential presence per chatgpt provider, computed from files so it is right even before the first request.
   const signedIn: Record<string, boolean> = {};
   for (const [name, p] of Object.entries(cfg.providers)) {
     if (p.type !== "chatgpt") continue;
-    const own = fs.existsSync(path.join(homeDir(), "chatgpt-auth.json"));
-    const borrowed = fs.existsSync(path.join(os.homedir(), ".codex", "auth.json"));
-    const mode = p.auth ?? "auto";
-    signedIn[name] = mode === "own" ? own : mode === "borrow-codex" ? borrowed : own || borrowed;
+    signedIn[name] = chatgptSignedIn(p.auth);
   }
   const env = readSettingsEnv();
   const wantProxy = `http://127.0.0.1:${cfg.listen.port}`;
@@ -624,9 +633,11 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         }
         if (probe.type === "chatgpt") {
           const statuses = Object.values(deps.chatgpt?.().auth ?? {});
+          const signed = chatgptSignedIn(typeof probe.auth === "string" ? probe.auth : undefined);
           sendJson(res, 200, {
-            ok: true,
-            auth: statuses[0] ?? "unknown",
+            ok: signed,
+            auth: signed ? (statuses[0] ?? "ok") : "missing",
+            ...(signed ? {} : { error: "no ChatGPT credentials: sign in from the tray menu, or install and sign in to the Codex CLI" }),
             models: [
               { id: "gpt-5.6-terra", name: "GPT-5.6 Terra" },
               { id: "gpt-5.6-sol", name: "GPT-5.6 Sol" },

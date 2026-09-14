@@ -188,9 +188,13 @@ function quotaLine(name) {
 }
 function stateFor(name) { return probeStates.get(name); }
 function providerState(name, provider) {
+  const live = status && status.providers && status.providers[name];
+  // Reaching the host is not the same as being able to use it. A ChatGPT provider with no
+  // credentials would otherwise read "Connected" and send the user off believing it works.
+  if (live && live.needsLogin) return badge("warn", t("providerStatus.loginNeeded"));
   const state = stateFor(name);
   if (state) return state.ok ? badge("ok", t("providerStatus.connected")) : state.auth === "bad-key" ? badge("bad", t("providerStatus.keyNeeded")) : badge("bad", t("providerStatus.disconnected"));
-  if (status && status.providers && status.providers[name]) return status.providers[name].reachable ? badge("ok", t("providerStatus.connected")) : badge("bad", t("providerStatus.disconnected"));
+  if (live) return live.reachable ? badge("ok", t("providerStatus.connected")) : badge("bad", t("providerStatus.disconnected"));
   return badge("warn", t("providerStatus.checking"));
 }
 function renderHealthProviders() {
