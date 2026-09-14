@@ -17,6 +17,7 @@
   <img alt="Alpha" src="https://img.shields.io/badge/status-alpha-orange">
   <a href="LICENSE"><img alt="GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-blue"></a>
   <img alt="macOS" src="https://img.shields.io/badge/macOS-arm64%20%7C%20x64-black">
+  <img alt="Windows" src="https://img.shields.io/badge/Windows-arm64%20%7C%20x64-0078D4">
   <img alt="Node" src="https://img.shields.io/badge/runtime-bundled-success">
   <a href="README.md"><img alt="English" src="https://img.shields.io/badge/docs-English-blue"></a>
 </p>
@@ -82,18 +83,32 @@ ClaudeRipple은 Claude Code 프로세스만 신뢰하는 작은 HTTPS 프록시�
   <img src="docs/media/mapping.png" width="880" alt="모델 매핑: Claude 이름마다 실제로 답할 모델과 추론 강도">
 </p>
 
-## 설치 (macOS)
+## 설치
 
-1. [Releases](https://github.com/PBJ-2/clauderipple/releases)에서 `ClaudeRipple-<버전>-arm64.dmg`(Apple Silicon)
-   또는 `-x64.dmg`(Intel)를 받습니다. *아직 릴리스가 없습니다. 첫 서명 빌드를 마무리하는 중이며, 그때까지는 아래
-   소스 설치를 쓰십시오.*
-2. ClaudeRipple을 Applications로 끌어다 놓고 엽니다. 첫 실행에 설치를 제안합니다. 로컬 인증서, `~/.claude/settings.json`
-   두 줄, 로그인 시 자동 시작하는 백그라운드 라우터. Node 설치는 필요 없습니다.
-3. 메뉴 막대 아이콘 → **ClaudeRipple 열기…** → **프로바이더** → ChatGPT 추가 또는 API 키 붙여 넣기 → **모델 매핑**.
+*아직 릴리스가 없습니다. 첫 빌드를 마무리하는 중이며, 그때까지는 아래 소스 설치를 쓰십시오. 같은 코드입니다.*
 
-선택 사항, Desktop 피커에 실제 이름을 띄우려면: **클라이언트 → Claude Desktop → 모델 피커 → 켜기**. 로컬 인증서를
-신뢰하기 위해 macOS가 로그인 암호를 한 번 묻습니다(ClaudeRipple은 암호를 보지 않습니다). Claude Desktop을 완전히
-종료했다가 다시 엽니다.
+**macOS.** [Releases](https://github.com/PBJ-2/clauderipple/releases)에서 `ClaudeRipple-<버전>-arm64.dmg`(Apple Silicon)
+또는 `-x64.dmg`(Intel)를 받아 Applications로 끌어다 놓고 엽니다.
+
+**Windows.** `ClaudeRipple-Setup-<버전>-x64.exe`(또는 `-arm64.exe`)를 받아 실행합니다. 사용자 단위로 설치되며
+관리자 권한을 요구하지 않습니다.
+
+> **Windows에서 "PC를 보호했습니다" 경고가 뜹니다.** 코드 서명을 하지 않았기 때문입니다. 서명 인증서는 연
+> 219~685달러이고 하드웨어 토큰까지 필요해서, 이 프로젝트는 거기에 돈을 쓰지 않습니다. **추가 정보 → 실행**을
+> 누르십시오. 꺼림칙하시면 소스로 직접 빌드하셔도 결과는 같습니다.
+
+첫 실행에 설치를 제안합니다. 로컬 인증서, `~/.claude/settings.json` 두 줄, 로그인 시 자동 시작하는 백그라운드
+라우터. Node 설치는 필요 없습니다. 그다음 트레이 아이콘 → **ClaudeRipple 열기…** → **프로바이더** → ChatGPT 추가
+또는 API 키 붙여 넣기 → **모델 매핑**.
+
+선택 사항, Desktop 피커에 실제 이름을 띄우려면: **클라이언트 → Claude Desktop → 모델 피커 → 켜기**. 그다음 Claude
+Desktop을 완전히 종료했다가 다시 엽니다. 로컬 인증서를 사용자 범위로만 신뢰시키는데, 이때 macOS는 로그인 암호를
+묻고 Windows는 지문이 적힌 확인 창을 띄웁니다. ClaudeRipple은 암호를 보지 않으며, 양쪽 다 관리자 권한이 필요
+없습니다.
+
+> **Claude Desktop은 창을 닫아도 종료되지 않습니다.** 그 상태로 다시 열면 이전 인스턴스를 재사용해서 새 설정을
+> 읽지 않습니다. 제대로 종료하십시오(macOS는 ⌘Q, Windows는 트레이 아이콘 또는 작업 관리자). 안 그러면 피커가
+> 아무 말 없이 그대로입니다.
 
 <details>
 <summary>소스에서 (Node 24)</summary>
@@ -181,7 +196,9 @@ Codex 앱 / CLI ──/v1/responses──▶ ClaudeRipple 입구 ──▶ Claud
 
 작성자가 매일 쓰고 있지만 아직 어립니다. 거친 부분이 있습니다.
 
-- macOS 전용. Windows는 [로드맵](docs/ROADMAP.md)에 있습니다.
+- **Windows 지원은 이제 막 들어갔습니다(2026-09-14).** 모든 기능을 Windows 11 arm64에서 끝까지 검증했습니다 —
+  피커, 인증서 신뢰, 자동 시작과 크래시 복구, 실제 모델 호출까지. x64 빌드는 같은 코드지만 x64 실기에서는 아직
+  돌려보지 않았습니다. Windows 빌드는 서명되지 않았습니다(위 설치 항목 참고).
 - ChatGPT, OpenRouter, Codex 안의 Claude는 실제 계정으로 검증했습니다. 나머지 프리셋은 벤더 공식 문서를 따릅니다.
 - 피커에 추가한 모델은 다음 세션부터 쓸 수 있습니다.
 - Claude Code와 Codex는 통신 규약을 자주 바꿉니다. 클라이언트 업데이트가 번역을 깨뜨리면 ClaudeRipple이 따라잡을 때까지

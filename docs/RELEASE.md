@@ -83,11 +83,48 @@ gh release create v<version> \
 
 ## Windows
 
-Windows 배포는 아직 구현하지 않았습니다. 남은 작업은 다음과 같습니다.
+`ClaudeRipple-Setup-<version>-<arch>.exe` (NSIS, 사용자 단위 설치, 권한 상승 없음).
 
-- OpenSSL에 의존하지 않는 로컬 인증서 생성
-- launchd 대신 Task Scheduler 또는 Windows Service로 라우터 상주
-- picker 모드 CA 신뢰를 위한 `certutil` 처리
-- Claude Desktop Config Library의 `%LOCALAPPDATA%\\Claude-3p\\configLibrary` 경로 지원
+### ⚠️ macOS에서 크로스 빌드하지 마십시오
 
-따라서 현재 Windows용 설치 관리자나 서명된 바이너리를 배포하지 않습니다.
+`electron-builder --win`은 macOS에서도 **돌아가지만 쓸 수 없는 인스톨러**를 만듭니다.
+중간 산출물(`win-*-unpacked`)에는 122개 파일이 다 있는데, 완성된 인스톨러에는
+**`ClaudeRipple.exe`와 DLL 8개만 빠진 114개**가 들어갑니다. 설치는 `exit 0`으로
+성공했다고 보고하고, 사용자는 "설치됐는데 실행이 안 된다"만 겪습니다.
+(2026-09-14 실측. 코드 서명을 꺼도 동일.)
+
+**Windows에서 빌드하십시오.** 장기적으로는 GitHub Actions `windows-latest`가
+맞습니다 — 재현 가능하고 VM에 의존하지 않습니다.
+
+### Windows에서 빌드
+
+```powershell
+# Node 24 + 저장소 (공유 폴더가 아니라 로컬 디스크에)
+npm install
+cd packages\app
+$env:CSC_IDENTITY_AUTO_DISCOVERY = "false"
+npx electron-builder --win
+```
+
+함정 둘:
+
+- **아키텍처는 한 번에 하나씩.** x64와 arm64를 동시에 구우면 중간 디렉터리 이름이
+  겹쳐 `EPERM ... rename win-unpacked.tmp`로 죽습니다.
+- **PowerShell로 `package.json`을 수정하지 마십시오.** `Set-Content -Encoding UTF8`이
+  BOM을 붙이고, `@electron/rebuild`가 그 파일을 파싱하지 못해 빌드가 죽습니다.
+
+### 코드 서명
+
+**현재 Windows 빌드는 서명하지 않습니다.** 사용자는 SmartScreen 경고를 보고
+"추가 정보 → 실행"을 눌러야 하며, README에 그 사실을 적어 두었습니다.
+
+서명하려면 비용이 듭니다(2026-09 기준):
+
+| 선택지 | 비용 | 비고 |
+|---|---|---|
+| OV 인증서 | $219~400/년 | **하드웨어 토큰 필수.** 신규 인증서는 평판이 없어 한동안 경고가 계속 뜹니다 |
+| EV 인증서 | $280~685/년 | SmartScreen 즉시 신뢰 |
+| Azure Artifact Signing | $9.99/월 | 하드웨어 토큰 불필요. **한국에서는 가입 불가**(조직은 미국·캐나다·EU·영국, 개인은 미국·캐나다) |
+
+돈을 쓴다면 OV를 건너뛰고 EV로 가는 것이 맞습니다. OV는 비용을 치르고도 경고가
+남습니다.

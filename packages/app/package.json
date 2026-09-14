@@ -81,7 +81,8 @@
         }
       ],
       "icon": "build/icon.png",
-      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}"
+      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}",
+      "signExecutable": false
     },
     "nsis": {
       "oneClick": false,

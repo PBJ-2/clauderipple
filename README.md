@@ -17,6 +17,7 @@
   <img alt="Alpha" src="https://img.shields.io/badge/status-alpha-orange">
   <a href="LICENSE"><img alt="GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-blue"></a>
   <img alt="macOS" src="https://img.shields.io/badge/macOS-arm64%20%7C%20x64-black">
+  <img alt="Windows" src="https://img.shields.io/badge/Windows-arm64%20%7C%20x64-0078D4">
   <img alt="Node" src="https://img.shields.io/badge/runtime-bundled-success">
   <a href="README.ko.md"><img alt="한국어" src="https://img.shields.io/badge/docs-한국어-red"></a>
 </p>
@@ -95,28 +96,44 @@ you map go to your provider, everything else goes to Anthropic byte for byte.
   <img src="docs/media/mapping.png" width="880" alt="Model mapping: which model answers for each Claude name, with per-model reasoning effort">
 </p>
 
-## Install (macOS)
+## Install
 
-1. Download `ClaudeRipple-<version>-arm64.dmg` (Apple Silicon) or `-x64.dmg`
-   (Intel) from [Releases](https://github.com/PBJ-2/clauderipple/releases).
-   *No release yet: the first signed build is being finished; until then, install
-   from source below.*
-2. Drag ClaudeRipple to Applications and open it. On first launch it offers to set
-   itself up: a local certificate, two lines in `~/.claude/settings.json`, and a
-   background router that starts at login. No Node install needed.
-3. Menu-bar icon → **Open ClaudeRipple…** → **Providers** → add ChatGPT or paste an
-   API key → **Model mapping**.
+*No release yet: the first builds are being finished. Until then, install from
+source below — it is the same code.*
+
+**macOS.** Download `ClaudeRipple-<version>-arm64.dmg` (Apple Silicon) or `-x64.dmg`
+(Intel) from [Releases](https://github.com/PBJ-2/clauderipple/releases), drag
+ClaudeRipple to Applications and open it.
+
+**Windows.** Download `ClaudeRipple-Setup-<version>-x64.exe` (or `-arm64.exe`) and
+run it. It installs for your user only and never asks for administrator rights.
+
+> **Windows shows "Windows protected your PC".** The build is not code-signed —
+> a certificate costs $219–685/year and needs a hardware token, which this project
+> does not spend money on. Click **More info → Run anyway**. If you would rather
+> not, build from source; the result is identical.
+
+On first launch the app offers to set itself up: a local certificate, two lines in
+`~/.claude/settings.json`, and a background router that starts at login. No Node
+install needed. Then: tray icon → **Open ClaudeRipple…** → **Providers** → add
+ChatGPT or paste an API key → **Model mapping**.
 
 Optional, for real names in the Desktop picker: **Clients → Claude Desktop → Model
-picker → on**. macOS asks for your login password once to trust the local
-certificate (ClaudeRipple never sees it); quit and reopen Claude Desktop.
+picker → on**, then quit and reopen Claude Desktop. To trust the local certificate
+for your user only, macOS asks for your login password and Windows shows a
+confirmation dialog with the fingerprint — ClaudeRipple never sees a password, and
+neither platform needs administrator rights.
+
+> **Closing Claude Desktop's window is not enough.** It keeps running, and the next
+> launch reuses it without reading the new setting. Quit it properly (macOS: ⌘Q;
+> Windows: the tray icon, or Task Manager) or the picker will silently not change.
 
 <details>
 <summary>From source (Node 24)</summary>
 
 ```bash
 git clone https://github.com/PBJ-2/clauderipple && cd clauderipple && npm install
-node packages/cli/src/index.ts install   # certs, settings.json env, launchd agent, end-to-end probe
+node packages/cli/src/index.ts install   # certs, settings.json env, supervisor (launchd / Task Scheduler), end-to-end probe
 node packages/cli/src/index.ts ui        # open the local GUI in your browser
 ```
 
@@ -206,7 +223,10 @@ telemetry.
 
 In daily use by the author, but young. Expect rough edges:
 
-- macOS only. Windows is on the [roadmap](docs/ROADMAP.md).
+- **Windows support is new (2026-09-14).** Every feature was verified end to end on
+  Windows 11 arm64 — picker, certificate trust, autostart and crash recovery, real
+  model calls. The x64 build is the same code but has not been run on x64 hardware
+  yet. Windows builds are unsigned; see the note under Install.
 - ChatGPT, OpenRouter and Claude-in-Codex are verified with live accounts; the
   other presets follow the vendors' official documentation.
 - A model added to the picker is usable from the next session.
