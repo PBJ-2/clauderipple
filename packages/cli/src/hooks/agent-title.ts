@@ -14,6 +14,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 type HookInput = {
   tool_name?: string;
@@ -142,7 +143,9 @@ function defaultAgentDirs(): string[] {
   return dirs;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname)) {
+// fileURLToPath, not URL.pathname: the latter keeps percent-encoding (a space in the path becomes
+// %20, so the comparison fails and the hook silently does nothing) and on Windows yields "/C:/…".
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
   try {
     const raw = fs.readFileSync(0, "utf8");
     const data = JSON.parse(raw || "{}") as HookInput;
