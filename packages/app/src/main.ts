@@ -252,10 +252,18 @@ function healthy(s: Status | null): "ok" | "warn" | "down" {
   return providersOk ? "ok" : "warn";
 }
 
+const isMac = process.platform === "darwin";
+
+/**
+ * macOS tints template images (black + alpha) to match the menu bar. Windows does not, so the same
+ * mark would vanish on a dark taskbar — it gets a coloured variant instead, which also lets the
+ * state read as a colour rather than only a shape.
+ */
 function icon(state: "ok" | "warn" | "down"): Electron.NativeImage {
-  const file = path.join(__dirname, "..", "assets", state === "ok" ? "trayTemplate.png" : state === "warn" ? "trayWarnTemplate.png" : "trayDownTemplate.png");
-  const img = nativeImage.createFromPath(file);
-  img.setTemplateImage(true);
+  const mac = { ok: "trayTemplate.png", warn: "trayWarnTemplate.png", down: "trayDownTemplate.png" };
+  const win = { ok: "trayWin.png", warn: "trayWinWarn.png", down: "trayWinDown.png" };
+  const img = nativeImage.createFromPath(path.join(__dirname, "..", "assets", (isMac ? mac : win)[state]));
+  if (isMac) img.setTemplateImage(true);
   return img;
 }
 
@@ -271,17 +279,17 @@ function openWindow(): void {
     minWidth: 720,
     minHeight: 480,
     title: "ClaudeRipple",
-    titleBarStyle: "hiddenInset",
-    trafficLightPosition: { x: 16, y: 18 },
+    // The inset title bar and traffic-light placement are macOS window chrome; Windows keeps its own.
+    ...(isMac ? { titleBarStyle: "hiddenInset" as const, trafficLightPosition: { x: 16, y: 18 } } : {}),
     webPreferences: { contextIsolation: true, nodeIntegration: false },
   });
   showWindowContent({ autoStart: true });
   // Menu-bar app: no Dock icon while only the tray exists; show one while the settings window is open
   // (so Cmd-Tab and the Dock can reach it), hide it again when the window closes.
-  if (process.platform === "darwin") void app.dock?.show();
+  if (isMac) void app.dock?.show();
   win.on("closed", () => {
     win = null;
-    if (process.platform === "darwin") app.dock?.hide();
+    if (isMac) app.dock?.hide();
   });
 }
 
@@ -438,7 +446,7 @@ function render(): void {
 
 app.whenReady().then(() => {
   L = STRINGS[app.getLocale().startsWith("ko") ? "ko" : "en"];
-  if (process.platform === "darwin") app.dock?.hide();
+  if (isMac) app.dock?.hide();
   // Default to starting at login on first run; after that the user's choice stands.
   if (!appState().loginItemInitialized) setLoginItem(true);
   tray = new Tray(icon("down"));

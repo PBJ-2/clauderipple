@@ -11,7 +11,9 @@
     "start": "npm run build && electron .",
     "icons": "node scripts/make-icons.mts",
     "dist": "npm run icons && npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --dir -c.directories.output=release-dev",
-    "release": "npm run icons && npm run build && electron-builder --mac --arm64 --x64"
+    "release": "npm run icons && npm run build && electron-builder --mac --arm64 --x64",
+    "dist:win": "npm run icons && npm run build && electron-builder --win --dir -c.directories.output=release-dev",
+    "release:win": "npm run icons && npm run build && electron-builder --win"
   },
   "devDependencies": {
     "electron": "^38.1.0",
@@ -67,6 +69,27 @@
         "from": "../../README.md",
         "to": "clauderipple/README.md"
       }
-    ]
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "ClaudeRipple"
+    }
   }
 }

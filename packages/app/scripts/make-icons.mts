@@ -93,6 +93,24 @@ for (const v of ["ok", "warn", "down"] as Variant[]) {
   fs.writeFileSync(path.join(out, `${base}.png`), png(22, (x, y) => [0, 0, 0, Math.round(draw(v, 1)(x, y) * 255)]));
   fs.writeFileSync(path.join(out, `${base}@2x.png`), png(44, (x, y) => [0, 0, 0, Math.round(draw(v, 2)(x, y) * 255)]));
 }
+
+// Windows does not tint tray icons the way macOS tints template images, so a black-on-alpha mark
+// disappears on a dark taskbar. Same geometry, drawn in colour — which also lets the state carry a
+// colour of its own instead of only a shape. 32px: Windows scales it down per DPI.
+const TRAY_WIN: Record<Variant, [number, number, number]> = {
+  ok: [0x7c, 0x69, 0xef], // brand violet
+  warn: [0xe0, 0x8c, 0x2a], // amber
+  down: [0xd2, 0x4b, 0x4b], // red
+};
+for (const v of ["ok", "warn", "down"] as Variant[]) {
+  const rgb = TRAY_WIN[v];
+  const name = v === "ok" ? "trayWin" : v === "warn" ? "trayWinWarn" : "trayWinDown";
+  for (const [size, scale] of [[32, 32 / 22], [64, 64 / 22]] as [number, number][]) {
+    const mask = draw(v, scale);
+    const suffix = size === 32 ? "" : "@2x";
+    fs.writeFileSync(path.join(out, `${name}${suffix}.png`), png(size, (x, y) => [rgb[0], rgb[1], rgb[2], Math.round(mask(x, y) * 255)]));
+  }
+}
 // 1024px application icon = BodyRipple's logo.svg geometry, drawn on the macOS grid (824px rounded
 // square, radius ≈22.4%, centred on the 1024 canvas). Gradients run along the diagonal like the SVG.
 function roundedSquareAlpha(x: number, y: number, x0: number, y0: number, w: number, r: number): number {
@@ -141,8 +159,11 @@ for (const size of [16, 32, 128, 256, 512]) {
   fs.writeFileSync(path.join(iconset, `icon_${size}x${size}.png`), source);
   fs.writeFileSync(path.join(iconset, `icon_${size}x${size}@2x.png`), png(size * 2, (x, y) => appIcon((x / (size * 2)) * 1024, (y / (size * 2)) * 1024)));
 }
-const iconIcns = path.join(build, "icon.icns");
-fs.rmSync(iconIcns, { force: true });
-execFileSync("iconutil", ["-c", "icns", iconset, "-o", iconIcns]);
+// iconutil is macOS-only; electron-builder derives the Windows .ico from icon.png itself.
+const iconIcns = process.platform === "darwin" ? path.join(build, "icon.icns") : null;
+if (iconIcns) {
+  fs.rmSync(iconIcns, { force: true });
+  execFileSync("iconutil", ["-c", "icns", iconset, "-o", iconIcns]);
+}
 fs.rmSync(iconset, { recursive: true, force: true });
-console.log(`icons written to ${out}; app icon written to ${iconPng} and ${iconIcns}`);
+console.log(`icons written to ${out}; app icon written to ${iconPng}${iconIcns ? ` and ${iconIcns}` : " (.ico is derived by electron-builder)"}`);
