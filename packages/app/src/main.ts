@@ -498,6 +498,8 @@ function render(): void {
 
 app.whenReady().then(() => {
   L = STRINGS[app.getLocale().startsWith("ko") ? "ko" : "en"];
+  // Without this, Windows attributes our notifications to "Electron" instead of ClaudeRipple.
+  if (process.platform === "win32") app.setAppUserModelId("com.clauderipple.app");
   // macOS keeps its application menu (it owns Cmd-Q and the edit shortcuts); elsewhere it is noise.
   if (!isMac) Menu.setApplicationMenu(null);
   if (isMac) app.dock?.hide();
