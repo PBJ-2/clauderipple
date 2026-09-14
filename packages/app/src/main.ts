@@ -274,10 +274,16 @@ function openWindow(): void {
     return;
   }
   win = new BrowserWindow({
-    width: 960,
-    height: 680,
-    minWidth: 720,
-    minHeight: 480,
+    // Sized to the widest thing the GUI shows: nav 168 + padding 56 + the log table's 920px
+    // minimum. At 960 the window opened too small to read its own content and every user had to
+    // drag it wider first. Electron clamps this to the display if the screen is smaller.
+    width: 1180,
+    height: 760,
+    minWidth: 900,
+    minHeight: 560,
+    // Windows draws Electron's default File/Edit/View menu inside the window; we have no use for
+    // it and it makes a tray utility look like a 2005 desktop app. Alt still reveals it.
+    autoHideMenuBar: true,
     title: "ClaudeRipple",
     // The inset title bar and traffic-light placement are macOS window chrome; Windows keeps its own.
     ...(isMac ? { titleBarStyle: "hiddenInset" as const, trafficLightPosition: { x: 16, y: 18 } } : {}),
@@ -446,6 +452,8 @@ function render(): void {
 
 app.whenReady().then(() => {
   L = STRINGS[app.getLocale().startsWith("ko") ? "ko" : "en"];
+  // macOS keeps its application menu (it owns Cmd-Q and the edit shortcuts); elsewhere it is noise.
+  if (!isMac) Menu.setApplicationMenu(null);
   if (isMac) app.dock?.hide();
   // Default to starting at login on first run; after that the user's choice stands.
   if (!appState().loginItemInitialized) setLoginItem(true);

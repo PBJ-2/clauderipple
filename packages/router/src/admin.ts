@@ -457,7 +457,17 @@ function pickerModels(deps: AdminDeps): { models: { id: string; name: string }[]
         const r = entry as { id?: unknown; name?: unknown };
         return typeof r.id === "string" ? [{ id: r.id, name: typeof r.name === "string" ? r.name : r.id }] : [];
       });
-    if (entries.length > 0) return { models: entries, source: "picker" };
+    // The surfaces carry the same catalog, so "code" + "ccd" lists every model twice. And the
+    // snapshot is taken *after* injection, so our own entries are in it — offering GPT ids as
+    // mapping *sources* is meaningless, they are what a source maps to.
+    const injected = new Set(deps.config().cli.extraModels.map((m) => m.model));
+    const seen = new Set<string>();
+    const models = entries.filter((e) => {
+      if (injected.has(e.id) || seen.has(e.id)) return false;
+      seen.add(e.id);
+      return true;
+    });
+    if (models.length > 0) return { models, source: "picker" };
   }
   return { models: CLAUDE_MODEL_FALLBACK, source: "fallback" };
 }
