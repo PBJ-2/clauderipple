@@ -63,6 +63,7 @@ const STRINGS = {
     setupLater: "Later",
     setupContinue: "Continue",
     setupDone: "ClaudeRipple setup finished.",
+    setupFailed: "Setup did not finish",
     about: "About ClaudeRipple",
     aboutDetail:
       "Run GPT and other models inside Claude Desktop, without turning Claude off.\n\nIndependent open-source project (GPL-3.0). Not affiliated with, endorsed by, or sponsored by Anthropic or OpenAI. Claude and Claude Code are trademarks of Anthropic, PBC.",
@@ -79,6 +80,13 @@ const STRINGS = {
       "Claude Desktop sends all of its traffic through ClaudeRipple, so while the router is down the app shows a blank window with ERR_PROXY_CONNECTION_FAILED. Start the router and reload Claude Desktop.",
     offlineButton: "Start Router",
     offlineWaiting: "Starting… this window opens the dashboard as soon as the router answers.",
+    setupNeeded: "setup not finished",
+    setupNeededDetail: "ClaudeRipple is installed but not set up yet",
+    runSetup: "Finish setting up ClaudeRipple…",
+    setupHeading: "One step left",
+    setupBody:
+      "ClaudeRipple is installed but not set up yet. Setting up creates a local certificate, adds two lines to your Claude Code settings, and registers the background router so it starts with your computer. No administrator rights needed.",
+    setupStarting: "Setting up… this takes a few seconds.",
   },
   ko: {
     healthy: "정상",
@@ -114,6 +122,7 @@ const STRINGS = {
     setupLater: "나중에",
     setupContinue: "계속",
     setupDone: "ClaudeRipple 설정이 완료되었습니다.",
+    setupFailed: "설정을 마치지 못했습니다",
     about: "ClaudeRipple 정보",
     aboutDetail:
       "Claude Desktop을 끄지 않고 그 안에서 GPT 등 다른 모델을 씁니다.\n\n독립 오픈소스 프로젝트(GPL-3.0)이며 Anthropic·OpenAI와 제휴·보증·후원 관계가 없습니다. Claude와 Claude Code는 Anthropic, PBC의 상표입니다.",
@@ -130,6 +139,13 @@ const STRINGS = {
       "Claude Desktop은 모든 통신을 ClaudeRipple로 보냅니다. 그래서 라우터가 꺼져 있는 동안에는 앱이 흰 화면과 ERR_PROXY_CONNECTION_FAILED만 보여줍니다. 라우터를 시작한 뒤 Claude Desktop을 새로고침하세요.",
     offlineButton: "라우터 시작",
     offlineWaiting: "시작하는 중… 라우터가 응답하면 이 창이 대시보드로 바뀝니다.",
+    setupNeeded: "설정이 끝나지 않았습니다",
+    setupNeededDetail: "설치는 됐지만 아직 설정하지 않았습니다",
+    runSetup: "ClaudeRipple 설정 마치기…",
+    setupHeading: "한 단계 남았습니다",
+    setupBody:
+      "설치는 됐지만 아직 설정하지 않았습니다. 설정하면 로컬 인증서를 만들고, Claude Code 설정에 두 줄을 넣고, 컴퓨터를 켤 때 함께 뜨도록 백그라운드 라우터를 등록합니다. 관리자 권한은 필요 없습니다.",
+    setupStarting: "설정하는 중… 몇 초 걸립니다.",
   },
 };
 
@@ -312,13 +328,17 @@ function showWindowContent(opts: { autoStart?: boolean } = {}): void {
     return;
   }
   winOffline = true;
-  void win.loadURL(offlineNotice(!!opts.autoStart));
+  // Before setup there is no router to start, so offer the step that is actually missing.
+  const unconfigured = needsSetup();
+  void win.loadURL(offlineNotice(!!opts.autoStart, unconfigured));
+  if (!opts.autoStart) return;
   // Only when the user just asked for the window: launchd's KeepAlive already handles a crash,
   // and a deliberate `clauderipple stop` should not be undone by an open window.
-  if (opts.autoStart) void startRouter();
+  if (unconfigured) void setup();
+  else void startRouter();
 }
 
-function offlineNotice(starting: boolean): string {
+function offlineNotice(starting: boolean, unconfigured: boolean): string {
   const esc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const html = `<!doctype html><html lang="${app.getLocale().startsWith("ko") ? "ko" : "en"}"><meta charset="utf-8">
 <title>ClaudeRipple</title>
@@ -333,24 +353,31 @@ function offlineNotice(starting: boolean): string {
   .waiting { font-size: .85rem; opacity: .55; }
 </style>
 <main>
-  <h1>${esc(L.offlineHeading)}</h1>
-  <p>${esc(L.offlineBody)}</p>
-  ${starting ? `<p class="waiting">${esc(L.offlineWaiting)}</p>` : ""}
+  <h1>${esc(unconfigured ? L.setupHeading : L.offlineHeading)}</h1>
+  <p>${esc(unconfigured ? L.setupBody : L.offlineBody)}</p>
+  ${starting ? `<p class="waiting">${esc(unconfigured ? L.setupStarting : L.offlineWaiting)}</p>` : ""}
 </main></html>`;
   return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
 }
 
 type CliRuntime = { node: string; env: Record<string, string>; cli: string };
 
+/**
+ * The sources this app carries, when it is a packaged build. macOS keeps them inside the .app;
+ * electron-builder puts them next to app.asar everywhere else.
+ *
+ * This used to match only the macOS bundle path, so on Windows it returned null — which made
+ * needsSetup() answer false and the first-run setup prompt never appear. The app installed, said
+ * "router not running", and left the user with no way to find out what to do (2026-09-14).
+ */
 function packagedRuntime(): CliRuntime | null {
-  const bundle = process.execPath.match(/^(.*\.app)\/Contents\/MacOS\//)?.[1];
-  if (!bundle) return null;
-  const resources = path.join(bundle, "Contents", "Resources", "clauderipple");
-  return {
-    node: process.execPath,
-    env: { ELECTRON_RUN_AS_NODE: "1" },
-    cli: path.join(resources, "packages", "cli", "src", "index.ts"),
-  };
+  const macBundle = process.execPath.match(/^(.*\.app)\/Contents\/MacOS\//)?.[1];
+  const resources = macBundle
+    ? path.join(macBundle, "Contents", "Resources", "clauderipple")
+    : path.join((process as NodeJS.Process & { resourcesPath?: string }).resourcesPath ?? "", "clauderipple");
+  const cli = path.join(resources, "packages", "cli", "src", "index.ts");
+  if (!fs.existsSync(cli)) return null;
+  return { node: process.execPath, env: { ELECTRON_RUN_AS_NODE: "1" }, cli };
 }
 
 /** Prefer this app's bundled Electron runtime; existing installations retain their recorded runtime. */
@@ -393,7 +420,14 @@ function needsSetup(): boolean {
 
 async function setup(): Promise<void> {
   const out = await runCli(["install"]);
-  await dialog.showMessageBox({ message: L.setupDone, detail: out });
+  // `install` marks each step with ✓ or ✗ and ends on a failed probe; saying "finished" over a
+  // failure would send the user away believing it worked.
+  const failed = out.includes("✗") || /error|failed/i.test(out);
+  await dialog.showMessageBox({
+    type: failed ? "warning" : "info",
+    message: failed ? L.setupFailed : L.setupDone,
+    detail: out,
+  });
   void poll();
 }
 
@@ -421,9 +455,17 @@ function render(): void {
   // Two status lines (clickable: they open the window), then only the actions that need the tray.
   // Everything else lives in the GUI window. Disabled items render grey, so the status lines stay enabled.
   const connected = !!s && s.settings.HTTPS_PROXY === `http://127.0.0.1:${s.listen.port}`;
-  const headline = s ? `ClaudeRipple · ${state === "ok" ? L.healthy : L.attentionNeeded}` : `ClaudeRipple · ${L.routerNotRunning}`;
-  // When down, say what it means for the user rather than showing the fetch error.
-  const detail = s ? [connected ? L.connected : L.notConnected, quotaLine].filter(Boolean).join(" · ") : L.downNotifyTitle;
+  // "Router not running" is useless advice to someone who has never set it up — that reads as a
+  // fault when the truth is there is one step left. Separate the two states everywhere.
+  const unconfigured = !s && needsSetup();
+  const headline = s
+    ? `ClaudeRipple · ${state === "ok" ? L.healthy : L.attentionNeeded}`
+    : `ClaudeRipple · ${unconfigured ? L.setupNeeded : L.routerNotRunning}`;
+  const detail = s
+    ? [connected ? L.connected : L.notConnected, quotaLine].filter(Boolean).join(" · ")
+    : unconfigured
+      ? L.setupNeededDetail
+      : L.downNotifyTitle;
   const template: Electron.MenuItemConstructorOptions[] = [
     { label: headline, click: openWindow },
     ...(detail ? [{ label: detail, click: openWindow } as Electron.MenuItemConstructorOptions] : []),
@@ -432,11 +474,15 @@ function render(): void {
     { label: L.openWindow, click: openWindow },
     { label: L.startAtLogin, type: "checkbox", checked: loginItemOn(), click: (item) => setLoginItem(item.checked) },
     { type: "separator" },
-    { label: L.rerunSetup, click: () => void setup() },
-    {
-      label: s ? L.restartRouter : L.startRouter,
-      click: async () => void dialog.showMessageBox({ message: s ? await runCli(["restart"]) : await startRouter() }),
-    },
+    { label: unconfigured ? L.runSetup : L.rerunSetup, click: () => void setup() },
+    ...(unconfigured
+      ? []
+      : [
+          {
+            label: s ? L.restartRouter : L.startRouter,
+            click: async () => void dialog.showMessageBox({ message: s ? await runCli(["restart"]) : await startRouter() }),
+          } as Electron.MenuItemConstructorOptions,
+        ]),
     // Only offered while a ChatGPT provider has no usable credentials (own login or a reused Codex CLI login).
     ...(s && Object.values(s.chatgpt?.signedIn ?? {}).some((ok) => !ok)
       ? [{ label: L.signInChatgpt, click: async () => void dialog.showMessageBox({ message: await runCli(["login"]) }) } as Electron.MenuItemConstructorOptions]
