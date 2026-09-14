@@ -24,7 +24,10 @@
   `ClaudeRipple-Setup-0.1.0-x64-b2120.exe`, `ClaudeRipple-0.1.0-win-{x64,arm64}-b2120.zip`.
 - README(영/한)·CHANGELOG·RELEASE.md 갱신. README의 "아직 릴리스가 없습니다" 문장은 정식 공개 때 지울 것.
 
-**남은 것**: 정식 릴리스 공개(드래프트 승격 또는 v0.1.0 재태그 + 맥 공증 빌드 — 주군 결정), Windows 타이틀바,
+**릴리스 공개됨 (09-14 21:2x)**: https://github.com/PBJ-2/clauderipple/releases/tag/v0.1.0 — `v0.1.0`을 `fffc5c2`로
+재태그(옛 MIT 시절 태그 삭제), 맥 arm64/x64 DMG·zip(서명+공증, DMG 자체엔 스테이플 안 됨 — 앱은 됨), Windows x64
+인스톨러·zip, arm64 zip. 드래프트 릴리스는 삭제됨. 다음 릴리스는 `package.json` 버전을 올리고 `docs/RELEASE.md` 절차대로.
+**남은 것**: Windows 타이틀바,
 GitHub Actions 빌드, 앱 미재시작 감지, 피커 모델 0개 안내, 언인스톨러의 `picker off` 인증서 제거 창(무음 설치에선 안 뜸).
 **주군 PC 상태**: 라우터는 작업 스케줄러로 돌고 있고 피커 켜짐. **트레이 앱은 테스트 중 종료됐으니 시작 메뉴에서
 ClaudeRipple을 다시 열어야 한다.** SSH 열려 있음(아래 "주군 x64 실기 접근").
