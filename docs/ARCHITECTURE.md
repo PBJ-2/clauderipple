@@ -126,9 +126,11 @@ chat is out of reach for every approach, ours included.
     measured cache hit 97.8–98.7% in daily use) and
     [insightflo/chatgpt-codex-proxy](https://github.com/insightflo/chatgpt-codex-proxy)
     (TypeScript, MIT; OAuth, tool calling, SSE).
-  - Cache is the make-or-break metric. An earlier translator (opencodex) lost
+  - Cache is the make-or-break metric. An earlier translator of our own (a
+    GPT layer over the Claude Code harness, before ClaudeRipple) lost
     `cache_control` breakpoints and re-signed reasoning, giving 12–20% cache
-    hit and 8× input token spend. **Acceptance: ≥90% cache hit on a
+    hit and 8× input token spend. That figure is ours, not a measurement of
+    opencodex or any other project. **Acceptance: ≥90% cache hit on a
     multi-turn tool-using session, measured from upstream
     `input_tokens_details.cached_tokens`.**
   - `output_config.effort`: `none…max` accepted by terra/sol/astra, `ultra`

@@ -56,7 +56,7 @@ and claude.ai connectors keep working while another model does the thinking.
 | Real model names in the Desktop picker | ✅ | ❌ | ❌ | partial |
 | Terminal `claude` CLI | ✅ | ✅ | ✅ | ✅ |
 | Codex **app** and Codex CLI → Claude | ✅ | ✅ | ❌ | ❌ |
-| Prompt cache on translated providers | **94–99 %** measured | 12–20 % measured | varies | n/a |
+| Prompt cache on translated providers | **94–99 %** measured | not measured | varies | n/a |
 | Subagents named by real model in the task panel | ✅ | ❌ | ❌ | ❌ |
 | Settings GUI, no terminal needed | ✅ | ❌ | ❌ | ❌ |
 | Signed, notarized app with its own runtime | ✅ | ❌ | ❌ | – |
