@@ -56,6 +56,8 @@ export type AdminDeps = {
   runCli?: (args: string[], timeout?: number) => Promise<{ ok: boolean; output: string }>;
   /** Test seam for the native Anthropic API-key probe. */
   probeFetch?: (url: string, init: RequestInit) => Promise<Response>;
+  /** Begin a graceful drain and exit. Supplied by the router; absent in tests. */
+  shutdown?: () => void;
 };
 
 type ModelEntry = { id: string; name?: string; effortLevels?: string[] };
@@ -516,15 +518,49 @@ function serveStatic(urlPath: string, res: http.ServerResponse): void {
 }
 
 export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): void }> {
+  // Set again once the socket is bound (port 0 in tests); the Origin check below compares against it.
+  let boundPort = adminPort(deps.config());
   const server = http.createServer((req, res) => {
     void handle(req, res);
   });
+
+  /**
+   * Binding to 127.0.0.1 keeps other machines out, but not the browser on this one: any page the
+   * user visits can POST here, and a simple request (no custom header, no JSON content type) is
+   * not stopped by CORS — the response is unreadable, the side effect still happens. That is how
+   * a web page could turn the picker off, or shut the router down and take Claude Desktop with it.
+   *
+   * A browser always sends Origin on a cross-site POST, so requiring it to be our own origin is
+   * enough. Clients that are not browsers (the CLI, the tray app) send none and are let through.
+   */
+  function crossSitePost(req: http.IncomingMessage): boolean {
+    const origin = req.headers.origin;
+    if (!origin) return false;
+    const allowed = new Set([`http://127.0.0.1:${boundPort}`, `http://localhost:${boundPort}`]);
+    return !allowed.has(origin);
+  }
 
   async function handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const url = req.url ?? "/";
     const method = req.method ?? "GET";
     const pathname = url.split("?")[0] ?? "/";
     try {
+      if (method !== "GET" && method !== "HEAD" && crossSitePost(req)) {
+        deps.log.warn(`admin: refused ${method} ${pathname} from origin ${String(req.headers.origin)}`);
+        sendJson(res, 403, { error: "cross-site request refused" });
+        return;
+      }
+      if (pathname === "/api/shutdown" && method === "POST") {
+        if (!deps.shutdown) {
+          sendJson(res, 501, { error: "shutdown not available" });
+          return;
+        }
+        // Answer before draining: the caller needs to know the request was accepted, and the
+        // drain can outlive the connection (it waits for in-flight model calls, up to 90s).
+        sendJson(res, 202, { draining: true });
+        deps.shutdown();
+        return;
+      }
       if (pathname === "/api/status" && method === "GET") {
         sendJson(res, 200, await buildStatus(deps));
         return;
@@ -757,13 +793,13 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
     }
   }
 
-  const port = adminPort(deps.config());
+  const port = boundPort;
   return new Promise((resolveP, reject) => {
     server.once("error", reject);
     server.listen(port, "127.0.0.1", () => {
       server.off("error", reject);
       const addr = server.address();
-      const boundPort = addr && typeof addr === "object" ? addr.port : port;
+      boundPort = addr && typeof addr === "object" ? addr.port : port;
       resolveP({
         port: boundPort,
         close(): void {

@@ -85,23 +85,32 @@ process.on("uncaughtException", (e) => log!.error(`uncaught ${(e as Error).stack
 process.on("unhandledRejection", (e) => log!.error(`unhandled ${(e as Error)?.stack ?? e}`));
 const DRAIN_MS = 90_000; // new model calls are refused during drain, so this is the longest single call we wait for; `clauderipple restart` waits 120s
 let draining = false;
-for (const sig of ["SIGINT", "SIGTERM"] as const) {
-  process.on(sig, () => {
-    if (draining) return;
-    draining = true;
-    log!.info(`${sig}: draining, proxy=${proxy.stats.messagesInFlight} ingress=${ingress.stats.messagesInFlight} model calls`);
-    let lastReported = -1;
-    void Promise.all([
-      proxy.drain(DRAIN_MS, () => {}),
-      ingress.drain(DRAIN_MS, () => {}),
-    ])
-      .then(() => {
-        const left = proxy.stats.messagesInFlight + ingress.stats.messagesInFlight;
-        if (left !== lastReported) log!.info(`drain complete, exiting (model calls still open: ${left})`);
-        setTimeout(() => process.exit(0), 200).unref();
-      });
-  });
+
+/**
+ * Stop accepting, let in-flight model calls finish, exit. Idempotent.
+ *
+ * Reachable two ways: a POSIX signal, and `POST /api/shutdown`. The second exists because Windows
+ * has no SIGTERM — `process.kill(pid, "SIGTERM")` terminates the target outright there, which
+ * would cut the drain — so a supervisor asks over the admin API instead and waits for the process
+ * to go. The same path serves both platforms rather than only being exercised on one.
+ */
+function beginDrain(reason: string): void {
+  if (draining) return;
+  draining = true;
+  log!.info(`${reason}: draining, proxy=${proxy.stats.messagesInFlight} ingress=${ingress.stats.messagesInFlight} model calls`);
+  let lastReported = -1;
+  void Promise.all([
+    proxy.drain(DRAIN_MS, () => {}),
+    ingress.drain(DRAIN_MS, () => {}),
+  ])
+    .then(() => {
+      const left = proxy.stats.messagesInFlight + ingress.stats.messagesInFlight;
+      if (left !== lastReported) log!.info(`drain complete, exiting (model calls still open: ${left})`);
+      setTimeout(() => process.exit(0), 200).unref();
+    });
 }
+
+for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, () => beginDrain(sig));
 
 const statsEvery = 5 * 60 * 1000;
 setInterval(() => {
@@ -131,6 +140,7 @@ proxy
       chatgpt: () => ({ quota: proxy.chatgptRateLimits, auth: proxy.chatgptAuthStatus() }),
       picker: () => ({ enabled: !!store.get().picker?.enabled, hosts: terminateHosts(store.get()).slice(1), last: proxy.lastPickerInjection }),
       observedClaudeCodeAuth,
+      shutdown: () => beginDrain("shutdown requested"),
     });
     log!.info(`clauderipple admin GUI on http://127.0.0.1:${admin.port}/`);
     setImmediate(premintLeaves);

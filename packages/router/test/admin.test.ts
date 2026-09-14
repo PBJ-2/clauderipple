@@ -19,6 +19,7 @@ function makeCfg(overrides: Partial<Config> = {}): Config {
 async function withAdmin(
   cfgInit: Config,
   fn: (ctx: { port: number; configFile: string; home: string; setCfg: (c: Config) => void }) => Promise<void>,
+  extraDeps: { shutdown?: () => void } = {},
 ): Promise<void> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-admin-"));
   const prevHome = process.env.CLAUDERIPPLE_HOME;
@@ -35,6 +36,7 @@ async function withAdmin(
     health: () => 0,
     version: "0.0.0-test",
     requests: new RequestLog(path.join(home, "logs", "requests.jsonl")),
+    ...extraDeps,
   });
   try {
     await fn({ port: admin.port, configFile, home, setCfg: (c) => (cfg = c) });
@@ -504,5 +506,72 @@ test("admin binds only to 127.0.0.1", async () => {
     // connecting via 127.0.0.1 must work; this just re-confirms the server answers there
     const res = await fetch(`${base()}:${port}/api/status`);
     assert.equal(res.status, 200);
+  });
+});
+
+test("POST /api/shutdown accepts, then drains", async () => {
+  let called = 0;
+  await withAdmin(
+    makeCfg(),
+    async ({ port }) => {
+      const res = await fetch(`${base()}:${port}/api/shutdown`, { method: "POST" });
+      assert.equal(res.status, 202);
+      assert.deepEqual(await res.json(), { draining: true });
+      assert.equal(called, 1);
+    },
+    { shutdown: () => void called++ },
+  );
+});
+
+test("POST /api/shutdown reports 501 when the router supplied no drain hook", async () => {
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const res = await fetch(`${base()}:${port}/api/shutdown`, { method: "POST" });
+    assert.equal(res.status, 501);
+  });
+});
+
+test("a POST carrying another site's Origin is refused", async () => {
+  // Binding to loopback does not keep the browser out: a page the user visits can send a simple
+  // POST here and CORS hides only the response, not the side effect.
+  let called = 0;
+  await withAdmin(
+    makeCfg(),
+    async ({ port }) => {
+      for (const origin of ["http://evil.example", "https://claude.ai", "null"]) {
+        const res = await fetch(`${base()}:${port}/api/shutdown`, { method: "POST", headers: { origin } });
+        assert.equal(res.status, 403, `origin ${origin} must be refused`);
+      }
+      assert.equal(called, 0, "the drain hook must never run for a cross-site request");
+    },
+    { shutdown: () => void called++ },
+  );
+});
+
+test("a POST from the GUI's own origin, or from a non-browser client, is allowed", async () => {
+  let called = 0;
+  await withAdmin(
+    makeCfg(),
+    async ({ port }) => {
+      const own = await fetch(`${base()}:${port}/api/shutdown`, { method: "POST", headers: { origin: `http://127.0.0.1:${port}` } });
+      assert.equal(own.status, 202);
+      const localhost = await fetch(`${base()}:${port}/api/shutdown`, { method: "POST", headers: { origin: `http://localhost:${port}` } });
+      assert.equal(localhost.status, 202);
+      const noOrigin = await fetch(`${base()}:${port}/api/shutdown`, { method: "POST" });
+      assert.equal(noOrigin.status, 202);
+      assert.equal(called, 3);
+    },
+    { shutdown: () => void called++ },
+  );
+});
+
+test("the Origin guard covers the other state-changing endpoints too", async () => {
+  await withAdmin(makeCfg(), async ({ port }) => {
+    for (const p of ["/api/picker", "/api/agent-title", "/api/codex", "/api/claude-logout", "/api/providers/probe"]) {
+      const res = await fetch(`${base()}:${port}${p}`, { method: "POST", headers: { origin: "http://evil.example" } });
+      assert.equal(res.status, 403, `${p} must refuse a cross-site POST`);
+    }
+    // Reading is not gated: a cross-site page cannot see the response anyway.
+    const get = await fetch(`${base()}:${port}/api/status`, { headers: { origin: "http://evil.example" } });
+    assert.equal(get.status, 200);
   });
 });
