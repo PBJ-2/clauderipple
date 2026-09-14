@@ -39,7 +39,44 @@ export function startAgent(): "already-running" | "started" | "failed" {
 }
 
 export function stopAgent(): boolean {
-  return isWindows ? schtasks.stopAgent() : launchd.stopAgent();
+  if (!isWindows) return launchd.stopAgent();
+  // Ask the router to drain first: a clean exit also ends the launcher's supervision loop, so the
+  // task does not relaunch it. Then stop the task itself to clear anything left behind.
+  askShutdown();
+  waitForExit(schtasks.agentPid(), 120_000);
+  return schtasks.stopAgent();
+}
+
+/** Blocking POST to the router's shutdown endpoint. Returns false if it did not answer. */
+function askShutdown(): boolean {
+  try {
+    execFileSync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", `Invoke-RestMethod -Method Post -Uri '${adminUrl()}/api/shutdown' -TimeoutSec 10 | Out-Null`],
+      { stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Waits for `pid` to disappear. Returns true if it exited within the budget. */
+function waitForExit(pid: number | null, budgetMs: number, onProgress?: (msg: string) => void): boolean {
+  if (pid === null) return true;
+  const t0 = Date.now();
+  let lastTick = 0;
+  while (Date.now() - t0 < budgetMs) {
+    const now = schtasks.agentPid();
+    if (now === null || now !== pid) return true;
+    const s = Math.floor((Date.now() - t0) / 1000);
+    if (s >= 5 && s !== lastTick && s % 5 === 0) {
+      lastTick = s;
+      onProgress?.(`draining… ${s}s (waiting for in-flight model calls)`);
+    }
+    sleepSync(1000);
+  }
+  return false;
 }
 
 /** Where the router's admin API is listening, per the current config. */
@@ -56,44 +93,17 @@ function sleepSync(ms: number): void {
  * Windows restart. There is no SIGTERM here — `process.kill(pid, "SIGTERM")` terminates the target
  * outright, which is exactly the drain-cutting behaviour launchd's `kickstart -k` was fixed for on
  * macOS — so ask the router to drain over its admin API, wait for the process to go, then start the
- * task again. A scheduled task only auto-restarts on a *non-zero* exit, and a drain exits 0.
+ * task again. The launcher's supervision loop treats a clean exit as "stay stopped", so the restart
+ * has to be explicit.
  */
 function restartWindows(opts: { waitMs?: number; onProgress?: (msg: string) => void }): RestartResult {
   const pid = schtasks.agentPid();
   if (pid === null) return schtasks.startAgent() === "failed" ? "failed" : "kickstarted";
 
-  const asked = (() => {
-    try {
-      // Node's fetch is async; this path is synchronous CLI code, so use a blocking request.
-      execFileSync(
-        "powershell.exe",
-        ["-NoProfile", "-NonInteractive", "-Command", `Invoke-RestMethod -Method Post -Uri '${adminUrl()}/api/shutdown' -TimeoutSec 10 | Out-Null; 'ok'`],
-        { stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
-      );
-      return true;
-    } catch {
-      return false;
-    }
-  })();
-  if (!asked) opts.onProgress?.("router did not answer /api/shutdown; waiting for it to exit anyway");
-
-  const t0 = Date.now();
-  const deadline = t0 + (opts.waitMs ?? 120_000);
-  let lastTick = 0;
-  let exited = false;
-  while (Date.now() < deadline) {
-    if (schtasks.agentPid() === null || schtasks.agentPid() !== pid) {
-      exited = true;
-      break;
-    }
-    const s = Math.floor((Date.now() - t0) / 1000);
-    if (s >= 5 && s !== lastTick && s % 5 === 0) {
-      lastTick = s;
-      opts.onProgress?.(`draining… ${s}s (waiting for in-flight model calls)`);
-    }
-    sleepSync(1000);
-  }
+  if (!askShutdown()) opts.onProgress?.("router did not answer /api/shutdown; waiting for it to exit anyway");
+  const exited = waitForExit(pid, opts.waitMs ?? 120_000, opts.onProgress);
   if (!exited) return "failed";
+  // A clean drain ends the launcher loop too, so the task has to be started again.
   return schtasks.startAgent() === "failed" ? "failed" : "drained";
 }
 
