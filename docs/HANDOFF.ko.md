@@ -3,10 +3,36 @@
 > 다음 세션이 처음 읽을 문서. 기술 근거는 `docs/ARCHITECTURE.md`, 규칙은 `CLAUDE.md`,
 > 릴리스 절차는 `docs/RELEASE.md`.
 
-## ▶ 다음 세션이 할 일 — Windows 마무리 (미해결 4건)
+## ▶ 2026-09-14 밤 — 아래 4건 전부 처리됨 (실기 검증 완료)
+
+- **1. GUI ChatGPT 로그인 버튼** — `POST/GET /api/chatgpt-login`(비동기, admin.ts), 상태 카드·프로바이더 카드·수정 폼에
+  버튼 + 2초 폴링. 격리 라우터에서 fetch 스텁으로 흐름 실측. 실제 OAuth는 주군이 눌러 봐야 한다(트레이 메뉴 경로는 검증됨).
+- **2. 언어** — `main.ts` `uiLang()`: `getPreferredSystemLanguages()[0]` → `getSystemLocale()` → `getLocale()`. GUI는
+  `?lang=<OS언어>`로 열고, `i18n.js`는 **localStorage(토글) > ?lang > navigator.language** 순. 주군 실기에서 실제로
+  영어로 떴는지는 재확인 못 했다(렌더러 cmdline이 `--lang=ko`였다). 트레이 앱 재실행 후 확인할 것.
+- **3. 피커** — 진짜 원인은 "켜진 적 없음"(아래 3번 항목). 수정·검증 완료.
+- **4. 인스톨러** — `packages/app/build/installer.nsh` + `stop-clauderipple.ps1`. `customCheckAppRunning`으로 stock 검사를
+  감싼다: `schtasks /End` → `POST /api/shutdown` → 라우터 종료 대기 → 잔여 강제 종료. 실기: 라우터 돌던 중 재설치
+  exit 0, 27초, 로그에 `shutdown requested … drain complete`, 작업·settings.json·피커 전부 보존.
+  **밟은 함정 셋(전부 고침, 재발 금지):**
+  ① `customCheckAppRunning`을 정의하면 electron-builder가 `getProcessInfo.nsh`·`Var pid`를 안 넣는다 → 직접 include.
+  ② **업그레이드 설치는 이전 버전의 언인스톨러를 `--updated`로 실행한다.** 언인스톨러 훅에서 `clauderipple uninstall`을
+  돌리면 재설치마다 작업·settings.json·피커가 날아간다(실측). `${isUpdated}`면 stop만.
+  ③ PowerShell: 함수가 CimInstance 하나를 돌려주면 `(F).Count`가 **null**이다(`-gt 0` 거짓) → 호출부에서 `@(F).Count`.
+  이것 때문에 드레인 없이 강제 종료되고 있었는데 exit 0이라 안 보였다. 로그의 `drain complete`로만 판별된다.
+- 빌드: 맥 크로스 빌드(`packages/app/release-win/`), 인스톨러 실기 3회 설치. 드래프트 릴리스 에셋 교체:
+  `ClaudeRipple-Setup-0.1.0-x64-b2120.exe`, `ClaudeRipple-0.1.0-win-{x64,arm64}-b2120.zip`.
+- README(영/한)·CHANGELOG·RELEASE.md 갱신. README의 "아직 릴리스가 없습니다" 문장은 정식 공개 때 지울 것.
+
+**남은 것**: 정식 릴리스 공개(드래프트 승격 또는 v0.1.0 재태그 + 맥 공증 빌드 — 주군 결정), Windows 타이틀바,
+GitHub Actions 빌드, 앱 미재시작 감지, 피커 모델 0개 안내, 언인스톨러의 `picker off` 인증서 제거 창(무음 설치에선 안 뜸).
+**주군 PC 상태**: 라우터는 작업 스케줄러로 돌고 있고 피커 켜짐. **트레이 앱은 테스트 중 종료됐으니 시작 메뉴에서
+ClaudeRipple을 다시 열어야 한다.** SSH 열려 있음(아래 "주군 x64 실기 접근").
+
+## (처리됨) 다음 세션이 할 일 — Windows 마무리 (미해결 4건)
 
 **x64 Windows 실기에서 검증은 끝났다. 남은 것은 전부 "동작은 하는데 사용자가 막히는" 것들이다.**
-주군이 실제로 설치하며 발견했고, 하나도 고치지 못한 채 세션이 끝났다.
+주군이 실제로 설치하며 발견했고, 하나도 고치지 못한 채 세션이 끝났다. → **전부 위에서 처리됨.**
 
 ### 1. GUI에 ChatGPT 로그인 버튼이 없다
 프로바이더 화면이 "로그인 필요"라고 띄우면서 **거기서 로그인할 방법을 주지 않는다.**
@@ -22,10 +48,29 @@ L = STRINGS[app.getLocale().startsWith("ko") ? "ko" : "en"];   // packages/app/s
 → `app.getPreferredSystemLanguages()[0]`(Electron 24+) 또는 `app.getSystemLocale()`로 바꿀 것.
 **GUI(`packages/ui/app.js`)의 언어 판정도 별도 로직이니 같이 확인.** 맥에서는 우연히 맞아서 안 드러났다.
 
-### 3. 피커를 켜도 모델이 0개면 아무 말이 없다
-`picker on`은 성공하는데 `cli.extraModels`가 비어 있으면 주입할 것이 없어 피커에 아무것도 안 뜬다.
-사용자는 자기가 뭘 빠뜨렸는지 알 수 없다. → 켤 때 모델이 0개면 그 자리에서 안내할 것.
-(주군 PC에서 피커가 안 뜬 것도 이것이 원인일 가능성이 높다 — **미확인**)
+### 3. ~~피커를 켜도 모델이 0개면 아무 말이 없다~~ → **진짜 원인은 반대였다 (09-14 밤, 실기에서 확인·수정)**
+주군 PC를 SSH로 직접 보니 `config.json`에 `picker` 키가 **없었고**, CA도 신뢰 목록에 없었고, Config Library도
+없었다. 즉 **피커 모드는 켜진 적이 없었다.** 주군은 프로바이더 수정 창의 "Claude 앱 피커에도 실제 이름으로 표시"
+체크박스를 켜기로 알았는데, 그 체크는 `cli.extraModels`(어떤 모델을 보일지)만 저장하고 피커 모드 자체는 건드리지
+않는다. 아무 안내도 없으니 사용자는 "켰는데 안 뜬다"가 된다.
+- **수정(GUI)**: 피커 모드가 꺼져 있으면 체크박스 아래에 안내 문구, 저장 직후 "지금 켤까요?" 확인 → `togglePicker(true)`.
+  격리 라우터에서 문구·확인 창까지 실측. 주군 Windows 설치본의 `resources\clauderipple\packages\ui\`에도 바로 넣었다
+  (원본은 `*.bak-fable`).
+- 켜기 자체는 admin API `POST /api/picker {enabled:true}`로 호출하니 인증서 창 → 신뢰 → Config Library → 플래그가
+  한 번에 통과했고, 앱 재실행 후 `[egress-proxy] pinned to fixed proxy at 127.0.0.1:8790`, 3초 뒤 `PICKER injected 16`,
+  피커에서 Terra 선택 → 호출 성공(주군 확인).
+- **MSIX는 문제가 아니다.** 홈페이지 배포본도 `WindowsApps\Claude_…pzs8sxrjxfjjc`(MSIX)로 설치되고 AppData가
+  `Packages\…\LocalCache`로 가상화되지만, 앱은 실제 `%LOCALAPPDATA%\Claude-3p\configLibrary`를 그대로 읽었다(merge 동작).
+- 이 PC의 포트: 프록시 8790, **admin 8791**, ingress 8792 (`listen.port` 기본값이 8790이라 맥과 하나씩 다르다).
+  `curl.exe … :8792/api/picker`는 ingress의 404가 나온다.
+- 원래 적혀 있던 "모델 0개 안내"는 여전히 있으면 좋은 것이지만 이번 증상의 원인은 아니었다.
+
+**주군 x64 실기 접근(09-14 밤 개통)**: OpenSSH 서버 켜 둠. `ssh -i ~/.ssh/clauderipple_win K@192.168.55.30`
+(같은 공유기, 계정 `K`, 키 인증, 비밀번호 없음). 기본 셸은 cmd라 PowerShell은 **스크립트를 scp로 올려
+`powershell -NoProfile -ExecutionPolicy Bypass -File x.ps1`로 실행**할 것 — 인라인 `-Command`는 따옴표와 한글이 깨진다.
+스크립트의 정규식에 한글을 넣지 말 것(BOM 없이 읽혀 깨진다). 인증서 신뢰처럼 화면이 필요한 작업은 SSH 세션에서
+직접 못 하고, 라우터 admin API를 통해 시키면 라우터(로그온 세션의 작업 스케줄러)가 화면에 띄운다.
+Claude Desktop 로그: `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Local\Claude\logs\main.log`.
 
 ### 4. 인스톨러가 라우터를 내리지 않아 업데이트가 막힌다
 재설치 시 "ClaudeRipple이 종료되지 않았습니다"가 뜨고 재시도해도 안 된다. 앱은 트레이에서 사라졌는데
@@ -50,8 +95,8 @@ Get-Process ClaudeRipple -EA 0 | Stop-Process -Force
 | 인증서·settings.json·작업 등록 | ✅ | ✅ |
 | 라우터 기동·크래시 복구 | ✅ (4.8초) | ✅ |
 | ChatGPT 로그인 | ✅ | ✅ (트레이 메뉴로) |
-| **피커에 모델 표시** | ✅ 12개 | ❌ **안 뜸 — 위 3번 의심, 미확인** |
-| 실제 모델 호출 | ✅ | ⬜ 미확인 |
+| **피커에 모델 표시** | ✅ 12개 | ✅ 16개 (09-14 밤, 피커 모드를 실제로 켠 뒤) |
+| 실제 모델 호출 | ✅ | ✅ Terra 응답 (주군 확인) |
 
 **arm64 인스톨러 문제는 x64에 없다.** zip 전용으로 후퇴할 필요 없음.
 (macOS 크로스 빌드도, Defender도 원인이 아니었다 — 둘 다 배제됨. NSIS 스텁이 x86이라

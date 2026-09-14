@@ -105,19 +105,21 @@ source below — it is the same code.*
 (Intel) from [Releases](https://github.com/PBJ-2/clauderipple/releases), drag
 ClaudeRipple to Applications and open it.
 
-**Windows.** Download `ClaudeRipple-<version>-win-x64.zip` (or `-arm64.zip`),
-unpack it anywhere, and run `ClaudeRipple.exe`. There is also an installer
-(`ClaudeRipple-Setup-…exe`) but it is **not verified yet** — see the note below.
+**Windows (x64).** Download `ClaudeRipple-Setup-<version>-x64.exe` and run it
+(per-user install, no administrator rights). Reinstalling over a running
+ClaudeRipple is fine: the installer stops the router gracefully first.
+`ClaudeRipple-<version>-win-x64.zip` is the same build unpacked, if you prefer.
+**Windows on arm64:** use the `-arm64.zip` — the arm64 installer is broken (below).
 
 > **Windows shows "Windows protected your PC".** The build is not code-signed —
 > a certificate costs $219–685/year and needs a hardware token, which this project
 > does not spend money on. Click **More info → Run anyway**. If you would rather
 > not, build from source; the result is identical.
 
-> **The installer is unverified.** On Windows 11 arm64 it installs everything
+> **The arm64 installer is broken.** On Windows 11 arm64 it installs everything
 > *except* the executables and reports success anyway, so the app will not start.
-> The zip does not have this problem. If you try the installer on x64, please
-> [tell us what happened](https://github.com/PBJ-2/clauderipple/issues).
+> The arm64 zip does not have this problem. The x64 installer is verified on real
+> hardware.
 
 On first launch the app offers to set itself up: a local certificate, two lines in
 `~/.claude/settings.json`, and a background router that starts at login. No Node
@@ -229,11 +231,9 @@ telemetry.
 
 In daily use by the author, but young. Expect rough edges:
 
-- **Windows support is new (2026-09-14) and still has rough edges.** Install,
-  setup, the router and signing in work on x64; the picker, certificate trust and
-  crash recovery were verified on arm64. Known gaps: the GUI has no sign-in button
-  (use the tray menu), the interface can come up in English on a Korean system,
-  and reinstalling over a running router needs it stopped first. Windows builds are
+- **Windows support is new (2026-09-14).** Install, setup, the router, signing
+  in, the picker and a live GPT call are verified on x64 hardware; crash recovery
+  on arm64. The window still has the stock Windows title bar. Windows builds are
   unsigned; see the note under Install.
 - ChatGPT, OpenRouter and Claude-in-Codex are verified with live accounts; the
   other presets follow the vendors' official documentation.

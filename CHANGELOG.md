@@ -4,10 +4,10 @@
 
 ### Windows support
 
-ClaudeRipple runs on Windows. Everything was verified end to end on Windows 11
-arm64 against a real Claude Desktop: the picker lists provider models by name,
-selecting one routes the call, and the model answers with its reasoning effort
-intact. The x64 build is the same code but has not been run on x64 hardware yet.
+ClaudeRipple runs on Windows. Everything was verified end to end against a real
+Claude Desktop on Windows 11 arm64 (VM) and on x64 hardware: the picker lists
+provider models by name, selecting one routes the call, and the model answers
+with its reasoning effort intact.
 
 - Supervisor: a per-user scheduled task, registered without administrator rights.
   It starts the router at logon, and the launcher supervises the process itself —
@@ -18,8 +18,25 @@ intact. The x64 build is the same code but has not been run on x64 hardware yet.
   password; no UAC prompt, and removal asks again.
 - Graceful restart over `POST /api/shutdown`, because Windows has no SIGTERM.
 - Installer: per-user NSIS, no elevation. **Unsigned** — see the README note.
+  Reinstalling and uninstalling stop the supervisor and drain the router first
+  (it kept running as `ClaudeRipple.exe` after the tray app closed, so the
+  installer failed with "could not be closed" and no hint what to close); the
+  uninstaller also undoes the settings.json edits and picker mode while the
+  bundled runtime still exists.
 
 ### Fixed
+
+- **"Show in the Claude app picker" did nothing on its own.** The provider form's
+  checkbox only recorded which models to show; picker mode stayed off and the
+  picker never changed, with no message (Windows x64, 2026-09-14). The form now
+  says so and offers to turn picker mode on right after saving.
+- **ChatGPT sign-in from the GUI.** The provider card said "sign-in needed" and
+  gave no way to do it; it has a button now, and the sign-in runs in the
+  background while the card waits for the browser to finish.
+- **Language.** The tray, notifications and the GUI came up in English on a
+  Korean Windows: `app.getLocale()` is Chromium's app locale, not the language
+  the user set. The OS preference list is used instead, and the GUI follows it
+  unless a language was picked in the GUI itself.
 
 - **Startup.** After a reboot the router could listen minutes after login, and
   Claude Desktop was a blank `ERR_PROXY_CONNECTION_FAILED` window the whole time

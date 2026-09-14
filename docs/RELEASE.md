@@ -85,7 +85,15 @@ gh release create v<version> \
 
 `ClaudeRipple-Setup-<version>-<arch>.exe` (NSIS, 사용자 단위 설치, 권한 상승 없음).
 
-### ⚠️ NSIS 인스톨러는 아직 검증되지 않았습니다
+### x64 인스톨러는 실기 검증됨, arm64 인스톨러는 고장
+
+x64는 실기(2026-09-14)에서 설치·재설치까지 확인했습니다. 재설치 시 인스톨러가
+`build/installer.nsh` → `build/stop-clauderipple.ps1`로 작업 스케줄러를 멈추고
+`POST /api/shutdown`으로 라우터를 드레인한 뒤 남은 프로세스를 끝냅니다(그냥 taskkill하면
+진행 중인 모델 호출이 끊깁니다). 언인스톨러는 같은 절차 뒤 번들 런타임으로
+`picker off`·`uninstall`까지 실행합니다. 이 훅은 macOS 크로스 빌드에서도 컴파일됩니다.
+
+**arm64**에서는 아래 문제가 남아 있습니다.
 
 `electron-builder --win`이 만든 NSIS 인스톨러가 **실행 파일만 빼고 설치합니다.**
 중간 산출물(`win-*-unpacked`)에는 122개 파일이 다 있는데, 설치 결과는
@@ -102,10 +110,9 @@ gh release create v<version> \
 
 즉 범인은 NSIS 패키징 단계입니다. **아직 원인을 특정하지 못했습니다.**
 electron-builder의 NSIS 스텁은 x86이라 arm64 Windows에서는 에뮬레이션으로 도는데,
-그것이 원인인지는 **x64 실기에서 확인해야 합니다.**
+x64 인스톨러는 멀쩡하므로 NSIS 스텁의 arm64 에뮬레이션이 남은 가설입니다.
 
-그때까지 **zip을 기본 배포 경로로** 삼습니다. 압축을 풀어 실행하는 방식이고 실제로
-검증됐습니다.
+그래서 **x64는 인스톨러, arm64는 zip**이 기본 배포 경로입니다.
 
 ### Windows에서 빌드
 
