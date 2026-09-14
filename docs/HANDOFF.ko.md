@@ -3,33 +3,81 @@
 > 다음 세션이 처음 읽을 문서. 기술 근거는 `docs/ARCHITECTURE.md`, 규칙은 `CLAUDE.md`,
 > 릴리스 절차는 `docs/RELEASE.md`.
 
-## ▶ 다음 세션이 할 일 (집 Windows PC에서)
+## ▶ 다음 세션이 할 일 — Windows 마무리 (미해결 4건)
 
-**하나만 확인하면 됩니다: NSIS 인스톨러가 x64 실기에서 제대로 설치되는가.**
+**x64 Windows 실기에서 검증은 끝났다. 남은 것은 전부 "동작은 하는데 사용자가 막히는" 것들이다.**
+주군이 실제로 설치하며 발견했고, 하나도 고치지 못한 채 세션이 끝났다.
 
-파일은 이미 준비돼 있습니다 — 맥 바탕화면 `ClaudeRipple-win-test/`
-(x64 인스톨러, x64 zip, `READ-ME-FIRST.txt` 체크리스트). 주군이 집 PC로 옮기십니다.
+### 1. GUI에 ChatGPT 로그인 버튼이 없다
+프로바이더 화면이 "로그인 필요"라고 띄우면서 **거기서 로그인할 방법을 주지 않는다.**
+트레이 메뉴(`signInChatgpt`)에만 있다. → `packages/ui/app.js`의 프로바이더 카드에 버튼 추가,
+admin에 로그인 트리거 엔드포인트가 필요하다(`runCli(["login"])`은 브라우저를 열고 최대 5분 대기하므로
+비동기 처리 주의).
 
-### 확인할 것
-설치 후 `%LOCALAPPDATA%\Programs\ClaudeRipple`에 **`ClaudeRipple.exe`와 `.dll`들이 있는가.**
+### 2. 트레이·알림·GUI가 한국어 Windows에서 영어로 뜬다
+```ts
+L = STRINGS[app.getLocale().startsWith("ko") ? "ko" : "en"];   // packages/app/src/main.ts
+```
+`app.getLocale()`은 Chromium 앱 로케일이라 OS가 한국어여도 `en-US`를 준다.
+→ `app.getPreferredSystemLanguages()[0]`(Electron 24+) 또는 `app.getSystemLocale()`로 바꿀 것.
+**GUI(`packages/ui/app.js`)의 언어 판정도 별도 로직이니 같이 확인.** 맥에서는 우연히 맞아서 안 드러났다.
 
-- **있으면** → arm64 에뮬레이션 문제로 확정. README에서 "인스톨러 미검증" 경고를 빼고
-  인스톨러를 기본 배포로 올립니다(`README.md`/`README.ko.md`의 Install 절, `docs/RELEASE.md` §Windows).
-- **없으면** → NSIS 자체 문제. **zip 전용 배포로 확정**하고 nsis 타겟을 빼는 것을 검토합니다.
-  (`packages/app/package.json` → `build.win.target`)
+### 3. 피커를 켜도 모델이 0개면 아무 말이 없다
+`picker on`은 성공하는데 `cli.extraModels`가 비어 있으면 주입할 것이 없어 피커에 아무것도 안 뜬다.
+사용자는 자기가 뭘 빠뜨렸는지 알 수 없다. → 켤 때 모델이 0개면 그 자리에서 안내할 것.
+(주군 PC에서 피커가 안 뜬 것도 이것이 원인일 가능성이 높다 — **미확인**)
 
-### 증상 (arm64에서 관측된 것)
-인스톨러가 `exit 0`으로 성공을 보고하면서 **122개 중 114개만** 설치합니다. 빠지는 것은
-`ClaudeRipple.exe`와 DLL 8개 — **실행 가능한 바이너리만**. 그래서 앱이 아예 안 켜집니다.
+### 4. 인스톨러가 라우터를 내리지 않아 업데이트가 막힌다
+재설치 시 "ClaudeRipple이 종료되지 않았습니다"가 뜨고 재시도해도 안 된다. 앱은 트레이에서 사라졌는데
+**라우터가 `ClaudeRipple.exe`로 돌고 있어 파일이 잠긴다.** 사용자는 뭘 끄라는 건지 알 수 없다.
+→ `build.nsis.include`에 `customInit` 매크로로 설치 전 정리:
+`POST /api/shutdown` → 종료 대기 → `schtasks /End` → 남은 프로세스 종료. 그냥 taskkill하면 드레인이 잘린다.
 
-### 이미 배제한 원인 (다시 파지 마십시오)
-- ❌ macOS 크로스 빌드 — Windows 네이티브 빌드도 **똑같이** 재현됨
-- ❌ 코드 서명 — `signExecutable: false`로도 동일
-- ❌ Windows Defender — 예외 경로를 줘도 동일. Smart App Control은 꺼져 있고 ASR 규칙 없음
-- ✅ `win-*-unpacked` 폴더를 **그대로 복사하면 정상 동작** → 범인은 NSIS 패키징 단계
+**임시 우회**(사용자 안내용):
+```powershell
+Stop-ScheduledTask -TaskName ClaudeRippleRouter -EA 0
+Get-Process ClaudeRipple -EA 0 | Stop-Process -Force
+```
 
-남은 가설: electron-builder의 NSIS 스텁이 x86이라 arm64 Windows에서 에뮬레이션으로 도는 것.
-**x64 실기에서만 판별됩니다.**
+---
+
+## Windows 검증 상태 (2026-09-14 기준)
+
+| | arm64 VM | **x64 실기** |
+|---|---|---|
+| 인스톨러가 실행 파일 설치 | ❌ 실행 파일만 누락(122→114) | ✅ **정상** |
+| 첫 실행 설정 안내 | — | ✅ (고친 뒤) |
+| 인증서·settings.json·작업 등록 | ✅ | ✅ |
+| 라우터 기동·크래시 복구 | ✅ (4.8초) | ✅ |
+| ChatGPT 로그인 | ✅ | ✅ (트레이 메뉴로) |
+| **피커에 모델 표시** | ✅ 12개 | ❌ **안 뜸 — 위 3번 의심, 미확인** |
+| 실제 모델 호출 | ✅ | ⬜ 미확인 |
+
+**arm64 인스톨러 문제는 x64에 없다.** zip 전용으로 후퇴할 필요 없음.
+(macOS 크로스 빌드도, Defender도 원인이 아니었다 — 둘 다 배제됨. NSIS 스텁이 x86이라
+arm64에서 에뮬레이션으로 도는 것이 남은 가설이고, x64가 멀쩡하므로 실용적으로는 무시 가능.)
+
+## ⚠️ Windows 빌드 시 반드시 지킬 것
+
+오늘 주군을 **다섯 번** 재설치하게 만든 원인이다.
+
+1. **`npx electron-builder`만 치지 말 것.** `main.ts`를 고쳐도 앱이 실행하는 건 `dist/main.js`다.
+   반드시 `npm run build`(tsc)를 먼저. `tsc --noEmit`은 출력을 만들지 않으므로 통과해도 소용없다.
+2. **올리기 전에 asar 안을 확인할 것.**
+   ```bash
+   node -e "const a=require('@electron/asar');console.log(a.extractFile('packages/app/release-win/win-unpacked/resources/app.asar','dist/main.js').toString().includes('<바꾼 문자열>'))"
+   ```
+   GUI·라우터 소스는 `resources/clauderipple/` 아래를 직접 grep.
+3. **같은 파일명으로 덮어쓰지 말 것.** GitHub/브라우저 캐시로 옛 파일이 내려간다. `-b<HHMM>` 같은 표식을 붙이고,
+   **옛 에셋은 지울 것**(`gh release delete-asset`).
+4. **판별 기준을 상황에 맞게 줄 것.** "설정이 끝나지 않았습니다"는 `paths.json`이 없을 때만 뜬다.
+   이미 설정을 마친 PC에서는 새 빌드여도 안 뜬다 — 이것 때문에 멀쩡한 빌드를 구버전으로 오인했다.
+
+## 배포 중인 것
+
+GitHub **draft** 릴리스(비공개): https://github.com/PBJ-2/clauderipple/releases/tag/untagged-6b9dcd30d6488801d95b
+현재 에셋: `ClaudeRipple-Setup-0.1.0-x64-b2000.exe` (커밋 `4e1b46d` 시점).
+위 4건을 고친 뒤 새 빌드로 교체하고, 확인이 끝나면 지우거나 정식 릴리스로 승격한다.
 
 ---
 
@@ -71,7 +119,7 @@
 3. `-NonInteractive` → 인증서 신뢰가 "UI를 사용할 수 없습니다"로 실패, 창이 안 뜸
 4. `cmd /c start`가 OAuth URL을 첫 `&`에서 자름 → `missing_required_parameter`로 **로그인 불가**
 
-### 저녁: 발표 준비 (커밋 46f1649, 97381cb, 1a4bbe6, 8e3da85, …)
+### 저녁: 발표 준비 + x64 실기 검증 (커밋 46f1649 … 4e1b46d)
 - **GUI 버그**: 모델 매핑이 모든 모델을 두 번 보여줬다(피커 스냅샷의 `code`·`ccd` 서페이스가
   같은 목록인데 합쳤다). 주입 *후* 스냅샷이라 우리 GPT id까지 매핑 **소스**로 떴다. 맥에서도 같은 버그.
 - **창 크기**: 960px로 열렸는데 로그 테이블만 920px이 필요했다 → 1180×760, 최소 900.
@@ -85,8 +133,19 @@
   Azure의 월 $9.99는 **한국에서 가입 불가**. OV는 돈 쓰고도 SmartScreen 경고가 남아 최악.
   README에 "추가 정보 → 실행"을 명시했다.
 
+**x64 실기에서 추가로 고친 것 (6a6a817, 1f9589f, 4e1b46d)**
+- **첫 실행 설정 안내가 Windows에서 구조적으로 안 떴다.** `packagedRuntime()`이 macOS `.app` 경로만
+  매칭해서 Windows에서 null → `needsSetup()`이 false. 설치하고 "라우터 꺼짐"만 보는 상태였다.
+- **"라우터가 꺼져 있음"과 "설정이 안 됨"을 구분.** 설정한 적 없는 사람에게 전자는 고장처럼 읽힌다.
+  설정 전에는 "라우터 시작" 대신 "설정 마치기"를 제안한다.
+- **설정이 실패해도 "완료되었습니다"라고 했다** → 실패를 실패라고 말하게.
+- **Windows 알림이 "Electron" 이름으로 떴다** → `setAppUserModelId`.
+- **인증 없는 ChatGPT 프로바이더가 "연결됨"으로 떴고, 연결 확인은 무조건 성공을 반환했다.**
+  reachable은 TCP 연결일 뿐이고 probe의 chatgpt 분기는 `ok: true` 고정이었다. 이제 둘 다 자격증명을
+  본다(`needsLogin`, `chatgptSignedIn()`).
+
 **남은 것**
-- ⬜ **x64 인스톨러 검증** (위 ▶ 항목)
+- ⬜ **위 ▶ 미해결 4건** (GUI 로그인 버튼, 언어 판정, 피커 0개 안내, 인스톨러의 라우터 종료)
 - ⬜ Windows 타이틀바 — 맥은 `titleBarStyle: hiddenInset`인데 Windows는 기본 창틀이라
   "오래된 프로그램" 느낌. 없애려면 `titleBarOverlay` + GUI에 드래그 영역·창 컨트롤 자리가 필요.
 - ⬜ GitHub Actions(`windows-latest`) 빌드 — VM에 의존하지 않는 재현 가능한 릴리스 경로

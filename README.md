@@ -229,10 +229,12 @@ telemetry.
 
 In daily use by the author, but young. Expect rough edges:
 
-- **Windows support is new (2026-09-14).** Every feature was verified end to end on
-  Windows 11 arm64 — picker, certificate trust, autostart and crash recovery, real
-  model calls. The x64 build is the same code but has not been run on x64 hardware
-  yet. Windows builds are unsigned; see the note under Install.
+- **Windows support is new (2026-09-14) and still has rough edges.** Install,
+  setup, the router and signing in work on x64; the picker, certificate trust and
+  crash recovery were verified on arm64. Known gaps: the GUI has no sign-in button
+  (use the tray menu), the interface can come up in English on a Korean system,
+  and reinstalling over a running router needs it stopped first. Windows builds are
+  unsigned; see the note under Install.
 - ChatGPT, OpenRouter and Claude-in-Codex are verified with live accounts; the
   other presets follow the vendors' official documentation.
 - A model added to the picker is usable from the next session.
