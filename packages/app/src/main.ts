@@ -217,6 +217,22 @@ function adminUrl(): string {
   return `http://127.0.0.1:${readConfigPorts().admin}/`;
 }
 
+/**
+ * The language the user actually set in the OS. `app.getLocale()` is Chromium's app locale and
+ * reads `en-US` on a Korean Windows (measured 2026-09-14), so the tray, notifications and the GUI
+ * came up in English there. macOS happened to agree, which hid it.
+ */
+function uiLang(): "ko" | "en" {
+  const candidates = [...app.getPreferredSystemLanguages(), app.getSystemLocale(), app.getLocale()];
+  const first = candidates.find((l) => typeof l === "string" && l.length > 0) ?? "en";
+  return first.toLowerCase().startsWith("ko") ? "ko" : "en";
+}
+
+/** The GUI follows the OS language by default; a language the user picked in the GUI itself wins (it is stored in the page). */
+function guiUrl(): string {
+  return `${adminUrl()}?lang=${uiLang()}`;
+}
+
 async function poll(): Promise<void> {
   try {
     const res = await fetch(`${adminUrl()}api/status`, { signal: AbortSignal.timeout(3000) });
@@ -324,7 +340,7 @@ function showWindowContent(opts: { autoStart?: boolean } = {}): void {
   if (!win || win.isDestroyed()) return;
   if (last) {
     winOffline = false;
-    void win.loadURL(adminUrl());
+    void win.loadURL(guiUrl());
     return;
   }
   winOffline = true;
@@ -340,7 +356,7 @@ function showWindowContent(opts: { autoStart?: boolean } = {}): void {
 
 function offlineNotice(starting: boolean, unconfigured: boolean): string {
   const esc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  const html = `<!doctype html><html lang="${app.getLocale().startsWith("ko") ? "ko" : "en"}"><meta charset="utf-8">
+  const html = `<!doctype html><html lang="${uiLang()}"><meta charset="utf-8">
 <title>ClaudeRipple</title>
 <style>
   :root { color-scheme: light dark; }
@@ -497,7 +513,7 @@ function render(): void {
 }
 
 app.whenReady().then(() => {
-  L = STRINGS[app.getLocale().startsWith("ko") ? "ko" : "en"];
+  L = STRINGS[uiLang()];
   // Without this, Windows attributes our notifications to "Electron" instead of ClaudeRipple.
   if (process.platform === "win32") app.setAppUserModelId("com.clauderipple.app");
   // macOS keeps its application menu (it owns Cmd-Q and the edit shortcuts); elsewhere it is noise.

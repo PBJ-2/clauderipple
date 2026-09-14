@@ -19,7 +19,7 @@ function makeCfg(overrides: Partial<Config> = {}): Config {
 async function withAdmin(
   cfgInit: Config,
   fn: (ctx: { port: number; configFile: string; home: string; setCfg: (c: Config) => void }) => Promise<void>,
-  extraDeps: { shutdown?: () => void } = {},
+  extraDeps: { shutdown?: () => void; runCli?: (args: string[], timeout?: number) => Promise<{ ok: boolean; output: string }> } = {},
 ): Promise<void> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-admin-"));
   const prevHome = process.env.CLAUDERIPPLE_HOME;
@@ -438,6 +438,39 @@ test("Codex and Claude subscription endpoints invoke the matching CLI command", 
   }
 });
 
+test("ChatGPT login starts without waiting and reports its eventual result", async () => {
+  let complete: ((value: { ok: boolean; output: string }) => void) | undefined;
+  const calls: { args: string[]; timeout?: number }[] = [];
+  const runCli = (args: string[], timeout?: number) => {
+    calls.push({ args, ...(timeout === undefined ? {} : { timeout }) });
+    return new Promise<{ ok: boolean; output: string }>((resolveP) => { complete = resolveP; });
+  };
+  await withAdmin(makeCfg({ providers: { gpt: { type: "chatgpt", auth: "own" } } }), async ({ port }) => {
+    const started = await fetch(`${base()}:${port}/api/chatgpt-login`, { method: "POST" });
+    assert.equal(started.status, 200);
+    assert.deepEqual(await started.json(), { started: true });
+    assert.deepEqual(calls, [{ args: ["login"], timeout: 330_000 }]);
+    const duplicate = await fetch(`${base()}:${port}/api/chatgpt-login`, { method: "POST" });
+    assert.deepEqual(await duplicate.json(), { running: true });
+    assert.equal(calls.length, 1);
+
+    const inProgress = await fetch(`${base()}:${port}/api/chatgpt-login`);
+    const pending = await inProgress.json() as { running: boolean; startedAt?: string; signedIn: boolean };
+    assert.equal(pending.running, true);
+    assert.match(pending.startedAt ?? "", /^\d{4}-\d\d-\d\dT/);
+    assert.equal(pending.signedIn, false);
+
+    complete?.({ ok: true, output: "logged in" });
+    await new Promise((resolveP) => setImmediate(resolveP));
+    const finished = await fetch(`${base()}:${port}/api/chatgpt-login`);
+    const done = await finished.json() as { running: boolean; finishedAt?: string; ok?: boolean; output?: string; signedIn: boolean };
+    assert.equal(done.running, false);
+    assert.equal(done.ok, true);
+    assert.equal(done.output, "logged in");
+    assert.match(done.finishedAt ?? "", /^\d{4}-\d\d-\d\dT/);
+  }, { runCli });
+});
+
 test("GET /api/requests filters newest records and returns a summary", async () => {
   await withAdmin(makeCfg(), async ({ port, home }) => {
     const requests = new RequestLog(path.join(home, "logs", "requests.jsonl"));
@@ -566,7 +599,7 @@ test("a POST from the GUI's own origin, or from a non-browser client, is allowed
 
 test("the Origin guard covers the other state-changing endpoints too", async () => {
   await withAdmin(makeCfg(), async ({ port }) => {
-    for (const p of ["/api/picker", "/api/agent-title", "/api/codex", "/api/claude-logout", "/api/providers/probe"]) {
+    for (const p of ["/api/picker", "/api/agent-title", "/api/codex", "/api/claude-login", "/api/claude-logout", "/api/chatgpt-login", "/api/providers/probe"]) {
       const res = await fetch(`${base()}:${port}${p}`, { method: "POST", headers: { origin: "http://evil.example" } });
       assert.equal(res.status, 403, `${p} must refuse a cross-site POST`);
     }

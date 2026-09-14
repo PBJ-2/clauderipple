@@ -114,6 +114,8 @@ let providersLoaded = false;
 let clientsLoaded = false;
 let pickerBusy = false;
 let probeStates = new Map();
+let chatgptLoginBusy = false;
+let chatgptLoginMessage = "";
 
 function selectOption(value, text) { return el("option", { value }, [text]); }
 function badge(kind, text) { return el("span", { class: `badge ${kind} dot`, text }, []); }
@@ -187,6 +189,41 @@ function quotaLine(name) {
   return t("health.quota", { percent: primary.used_percent, reset });
 }
 function stateFor(name) { return probeStates.get(name); }
+function chatgptLoginButton(onChange) {
+  const button = el("button", { class: "btn secondary", type: "button", text: t("providers.chatgptLogin") });
+  button.disabled = chatgptLoginBusy;
+  button.addEventListener("click", () => void startChatgptLogin(onChange));
+  return button;
+}
+async function startChatgptLogin(onChange) {
+  if (chatgptLoginBusy) return;
+  chatgptLoginBusy = true;
+  chatgptLoginMessage = t("providers.chatgptLoginWaiting");
+  onChange && onChange();
+  try {
+    await api("/api/chatgpt-login", { method: "POST" });
+    const deadline = Date.now() + 6 * 60 * 1000;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      const login = await api("/api/chatgpt-login");
+      if (login.signedIn) {
+        toast(t("providers.chatgptLoginDone"));
+        await refreshHealth();
+        return;
+      }
+      if (login.running === false && login.ok === false) {
+        toast(t("common.actionFailed"), true, login.output);
+        return;
+      }
+    }
+  } catch (error) {
+    toast(t("common.actionFailed"), true, error.message);
+  } finally {
+    chatgptLoginBusy = false;
+    chatgptLoginMessage = "";
+    onChange && onChange();
+  }
+}
 function providerState(name, provider) {
   const live = status && status.providers && status.providers[name];
   // Reaching the host is not the same as being able to use it. A ChatGPT provider with no
@@ -205,7 +242,13 @@ function renderHealthProviders() {
     return;
   }
   box.replaceChildren(...providers.map(([name, provider]) => {
-    const line = el("div", { class: "provider-status" }, [el("strong", { text: name }), providerState(name, provider)]);
+    const live = status && status.providers && status.providers[name];
+    const line = el("div", { class: "provider-status" }, [
+      el("strong", { text: name }),
+      providerState(name, provider),
+      live && live.needsLogin ? chatgptLoginButton(() => renderHealthProviders()) : null,
+      live && live.needsLogin && chatgptLoginMessage ? el("span", { class: "small", text: chatgptLoginMessage }) : null,
+    ].filter(Boolean));
     const quota = quotaLine(name);
     if (quota) line.appendChild(el("div", { class: "small", text: quota }));
     return line;
@@ -266,9 +309,20 @@ async function saveClientPickerModels() {
   const next = applyPickerSelections(clone(currentConfig), clientPickerSelections());
   try { await configRequest(next); currentConfig = next; toast(t("slots.saved")); } catch (error) { toast(t("common.saveFailed"), true, error.message); }
 }
-async function togglePicker(enabled) {
+function pickerModeOn() {
+  return Boolean(status && status.picker && status.picker.enabled);
+}
+// Ticking "show in the Claude app picker" only records which models to show; nothing appears until
+// picker mode itself is on. Ask right after saving so the user is not left with a silent no-op
+// (the box was ticked, picker mode stayed off, and the picker never changed — seen on Windows, 2026-09-14).
+async function offerPickerOn(wanted) {
+  if (!wanted || pickerModeOn()) return;
+  if (!confirm(t("providers.pickerOffPrompt"))) return;
+  await togglePicker(true, true);
+}
+async function togglePicker(enabled, confirmed = false) {
   if (pickerBusy) return;
-  if (enabled && !confirm(t("picker.confirmOn"))) return;
+  if (enabled && !confirmed && !confirm(t("picker.confirmOn"))) return;
   pickerBusy = true;
   $("#client-picker-msg").textContent = t("picker.working");
   try {
@@ -523,7 +577,14 @@ function providerCard(name, provider) {
     const preset = provider.preset && presetById(provider.preset);
     let kind = provider.type === "chatgpt" ? t("providers.chatgpt") : provider.type === "anthropic" ? `${t("providers.anthropic")} · ${provider.auth === "claude-code" ? t("providers.anthropicLoginReuse") : t("providers.apiKey")}` : preset ? preset.name : "";
     if (provider.type !== "chatgpt" && provider.type !== "anthropic") { try { kind = `${kind ? kind + " · " : ""}${new URL(provider.url).host}`; } catch { /* keep */ } }
-    stateLine.replaceChildren(...[providerState(name, provider), el("span", { class: "small", text: kind }), state && !state.ok && state.error ? el("span", { class: "small bad-text", text: state.error }) : null].filter(Boolean));
+    const live = status && status.providers && status.providers[name];
+    stateLine.replaceChildren(...[
+      providerState(name, provider),
+      live && live.needsLogin ? chatgptLoginButton(draw) : null,
+      live && live.needsLogin && chatgptLoginMessage ? el("span", { class: "small", text: chatgptLoginMessage }) : null,
+      el("span", { class: "small", text: kind }),
+      state && !state.ok && state.error ? el("span", { class: "small bad-text", text: state.error }) : null,
+    ].filter(Boolean));
     const models = modelsOf(provider);
     modelText.replaceChildren(...(models.length
       ? models.flatMap((model, index) => [
@@ -748,6 +809,7 @@ function openAnthropicProviderForm(options) {
     el("h1", { id: "modal-title", text: existing ? t("providers.edit") : t("providers.addTitle") }),
     inputRow(t("providers.name"), nameInput, t("providers.nameHelp")), authField, keyField, probeButton, sourceLine, result, subscriptionActions, modelArea,
     el("label", { class: "check picker-check" }, [pickerInput, el("span", { text: t("providers.showInPicker") })]),
+    pickerModeOn() ? null : hint(t("providers.pickerOffHint")),
   ]);
   const saveButton = el("button", { class: "btn", type: "button", "data-default-action": "", text: existing ? t("common.save") : t("providers.add") });
   saveButton.addEventListener("click", async () => {
@@ -763,7 +825,7 @@ function openAnthropicProviderForm(options) {
       applyPickerSelections(next, [...existingSelections, ...checkedModels.map((model) => ({ ...model, provider: providerName }))]);
     }
     saveButton.disabled = true;
-    try { await configRequest(next); currentConfig = next; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); toast(t("common.saved")); }
+    try { await configRequest(next); currentConfig = next; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); toast(t("common.saved")); await offerPickerOn(pickerInput.checked && checkedModels.length > 0); }
     catch (error) { toast(t("common.saveFailed"), true, error.message); }
     finally { saveButton.disabled = false; }
   });
@@ -831,17 +893,20 @@ function openProviderForm(options) {
   } else {
     const auth = el("select", {}, [selectOption("auto", t("providers.authAuto")), selectOption("own", t("providers.authOwn")), selectOption("borrow-codex", t("providers.authBorrow"))]);
     auth.value = (existing && existing.auth) || "auto";
-    const login = el("button", { class: "btn secondary", type: "button", text: t("providers.login") });
-    login.addEventListener("click", () => toast(t("providers.loginHint")));
+    const login = el("button", { class: "btn secondary", type: "button", text: t("providers.chatgptLogin") });
+    login.addEventListener("click", () => void startChatgptLogin(() => {
+      login.disabled = chatgptLoginBusy;
+      loginHelp.textContent = chatgptLoginMessage || t("providers.loginHelp");
+    }));
+    const loginHelp = el("small", { text: t("providers.loginHelp") });
     const effort = effortSelect((existing && existing.defaultEffort) || "high", ["low", "medium", "high", "xhigh", "max"]);
     const identity = el("input", { type: "checkbox", checked: !(existing && existing.identity === false) });
     const append = el("textarea", { rows: "2", value: (existing && existing.instructionsAppend) || "" });
     chatgptFields = [
       inputRow(t("providers.credentials"), auth, t("providers.credentialsHelp")),
-      el("div", { class: "form-field" }, [el("span", { text: t("providers.login") }), el("small", { text: t("providers.loginHelp") })]),
+      el("div", { class: "form-field" }, [el("span", { text: t("providers.login") }), login, loginHelp]),
       inputRow(t("providers.defaultEffort"), effort, t("providers.defaultEffortHelp")),
     ];
-    void login;
     advancedContent.append(
       el("div", { class: "form-field" }, [el("label", { class: "check" }, [identity, el("span", { text: t("providers.identity") })]), el("small", { text: t("providers.identityHelp") })]),
       inputRow(t("providers.append"), append, t("providers.appendHelp")),
@@ -859,6 +924,7 @@ function openProviderForm(options) {
     result,
     modelArea,
     el("label", { class: "check picker-check" }, [pickerInput, el("span", { text: t("providers.showInPicker") })]),
+    pickerModeOn() ? null : hint(t("providers.pickerOffHint")),
     advanced,
   ]);
   function readHeaders() {
@@ -952,6 +1018,7 @@ function openProviderForm(options) {
       closeModal();
       await loadProviders();
       toast(t("common.saved"));
+      await offerPickerOn(pickerInput.checked && checkedModels.length > 0);
     } catch (error) {
       toast(t("common.saveFailed"), true, error.message);
     } finally { saveButton.disabled = false; }

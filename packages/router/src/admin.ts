@@ -4,6 +4,8 @@
 //   GET  /api/config    raw config.json
 //   PUT  /api/config    validate + atomically save config.json (router picks it up via mtime)
 //   GET  /api/logs?n=   tail of router.log
+//   POST /api/chatgpt-login  begin ChatGPT browser login without holding the request open
+//   GET  /api/chatgpt-login  ChatGPT browser login state and credential status
 //   GET  /*             static files from packages/ui (the GUI itself)
 
 import fs from "node:fs";
@@ -75,6 +77,9 @@ type ProbeRequest = {
 const ANTHROPIC_EFFORT_LEVELS = ["low", "medium", "high", "max"];
 const CHATGPT_DEFAULT_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
 const CHATGPT_LUNA_EFFORT_LEVELS = [...CHATGPT_DEFAULT_EFFORT_LEVELS, "ultra"];
+
+type ChatgptLogin = { running: boolean; startedAt?: string; finishedAt?: string; ok?: boolean; output?: string };
+let chatgptLogin: ChatgptLogin = { running: false };
 
 /** Shared catalog for the GUI: model-specific values override provider defaults. */
 export function effortLevels(cfg: Config): { providers: Record<string, { default: string[]; models?: Record<string, string[]> }> } {
@@ -720,6 +725,31 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         const r = await (deps.runCli ?? runCli)(["codex", enabled ? "on" : "off"]);
         deps.log.info(`admin: codex ${enabled ? "on" : "off"} via GUI -> ${r.ok ? "ok" : "failed"}`);
         sendJson(res, r.ok ? 200 : 500, { ok: r.ok, output: r.output });
+        return;
+      }
+      if (pathname === "/api/chatgpt-login" && method === "GET") {
+        const provider = Object.values(deps.config().providers).find((candidate) => candidate.type === "chatgpt");
+        sendJson(res, 200, { ...chatgptLogin, signedIn: chatgptSignedIn(provider?.auth) });
+        return;
+      }
+      if (pathname === "/api/chatgpt-login" && method === "POST") {
+        if (chatgptLogin.running) {
+          sendJson(res, 200, { running: true });
+          return;
+        }
+        chatgptLogin = { running: true, startedAt: new Date().toISOString() };
+        deps.log.info("admin: chatgpt-login via GUI -> started");
+        void (deps.runCli ?? runCli)(["login"], 330_000).then(
+          (result) => {
+            chatgptLogin = { ...chatgptLogin, running: false, finishedAt: new Date().toISOString(), ok: result.ok, output: result.output };
+            deps.log.info(`admin: chatgpt-login via GUI -> ${result.ok ? "ok" : "failed"}`);
+          },
+          (error) => {
+            chatgptLogin = { ...chatgptLogin, running: false, finishedAt: new Date().toISOString(), ok: false, output: errorText(error) };
+            deps.log.info("admin: chatgpt-login via GUI -> failed");
+          },
+        );
+        sendJson(res, 200, { started: true });
         return;
       }
       if (pathname === "/api/claude-login" && method === "POST") {
