@@ -54,7 +54,7 @@ try {
   process.exit(2);
 }
 // Picker mode: mint leaves for the app's own hosts so the first CONNECT is not slowed down.
-// Runs *after* listen(): minting shells out to openssl, and a client that has to wait a moment
+// Runs *after* listen(): minting generates an RSA key pair, and a client that has to wait a moment
 // for its first CONNECT is far better off than one whose connection is refused outright. Lazy
 // minting in the CONNECT path (proxy.ts) covers anything that arrives before this finishes.
 function premintLeaves(): void {

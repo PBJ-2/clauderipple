@@ -1,11 +1,13 @@
 // Per-host leaf certificates minted at runtime from the local CA (picker mode terminates
-// claude.ai in addition to api.anthropic.com). Uses the system openssl like the installer;
-// results are cached in <home>/certs/<host>.pem|key and reused across restarts.
+// claude.ai in addition to api.anthropic.com). Pure node:crypto like the installer, so no
+// openssl binary is needed; results are cached in <home>/certs/<host>.pem|key and reused
+// across restarts.
 
-import { execFileSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import tls from "node:tls";
+import { createLeaf } from "./x509.ts";
 
 export class CertStore {
   private readonly home: string;
@@ -42,28 +44,24 @@ export class CertStore {
     if (fs.existsSync(certFile) && fs.existsSync(keyFile)) {
       const cert = fs.readFileSync(certFile);
       // re-mint when within 30 days of expiry
-      const notAfter = execFileSync("openssl", ["x509", "-noout", "-enddate", "-in", certFile]).toString().replace("notAfter=", "").trim();
-      if (Date.parse(notAfter) - Date.now() > 30 * 86400_000) return { cert, key: fs.readFileSync(keyFile) };
+      try {
+        const notAfter = new crypto.X509Certificate(cert).validTo;
+        if (Date.parse(notAfter) - Date.now() > 30 * 86400_000) return { cert, key: fs.readFileSync(keyFile) };
+      } catch {
+        /* unparseable cache entry: fall through and mint a fresh one */
+      }
     }
     const caPem = path.join(this.home, "ca.pem");
     const caKey = path.join(this.home, "ca.key");
     if (!fs.existsSync(caKey)) throw new Error(`CA key missing (${caKey}); re-run the installer`);
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const tmp = fs.mkdtempSync(path.join(dir, ".mint-"));
-    try {
-      const cnf = path.join(tmp, "leaf.cnf");
-      fs.writeFileSync(
-        cnf,
-        ["[req]", "distinguished_name=dn", "req_extensions=v3_req", "prompt=no", "[dn]", `CN=${host}`, "[v3_req]", "basicConstraints=CA:FALSE", "keyUsage=critical,digitalSignature,keyEncipherment", "extendedKeyUsage=serverAuth", `subjectAltName=DNS:${host}`].join("\n"),
-      );
-      const csr = path.join(tmp, "leaf.csr");
-      const run = (args: string[]): void => void execFileSync("openssl", args, { stdio: ["ignore", "ignore", "pipe"] });
-      run(["req", "-new", "-sha256", "-newkey", "rsa:2048", "-nodes", "-keyout", keyFile, "-out", csr, "-config", cnf]);
-      run(["x509", "-req", "-sha256", "-in", csr, "-CA", caPem, "-CAkey", caKey, "-CAcreateserial", "-out", certFile, "-days", "825", "-extfile", cnf, "-extensions", "v3_req"]);
-      fs.chmodSync(keyFile, 0o600);
-    } finally {
-      fs.rmSync(tmp, { recursive: true, force: true });
-    }
-    return { cert: fs.readFileSync(certFile), key: fs.readFileSync(keyFile) };
+    const leaf = createLeaf({
+      host,
+      caCertPem: fs.readFileSync(caPem, "utf8"),
+      caKeyPem: fs.readFileSync(caKey, "utf8"),
+    });
+    fs.writeFileSync(certFile, leaf.certPem);
+    fs.writeFileSync(keyFile, leaf.keyPem, { mode: 0o600 });
+    return { cert: Buffer.from(leaf.certPem), key: Buffer.from(leaf.keyPem) };
   }
 }
