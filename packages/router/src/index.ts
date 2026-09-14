@@ -19,6 +19,14 @@ import { RequestLog } from "./requestlog.ts";
 import { OpenAiIngress } from "./ingress/server.ts";
 import { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
 
+// Startup timing. Claude Desktop routes *all* its traffic through us in picker mode, so every
+// second before the socket is open is a second the app cannot reach anything (ERR_PROXY_-
+// CONNECTION_FAILED, observed 2026-09-14 after a reboot: 26s between exec and listening).
+// `timeOrigin` is process start, so `node` covers interpreter boot + module loading.
+const T_MODULE = Date.now();
+const T_EXEC = Math.round(performance.timeOrigin);
+const since = (t: number): number => Date.now() - t;
+
 const home = homeDir();
 const logFile = process.env.CLAUDERIPPLE_NO_LOGFILE ? null : path.join(home, "logs", "router.log");
 
@@ -35,6 +43,7 @@ const store = new ConfigStore(undefined, (c, errors) => {
 });
 const cfg0 = store.get();
 log = new Logger(logFile, cfg0.log.maxBytes, cfg0.log.keep, !!process.env.CLAUDERIPPLE_ECHO || !logFile);
+const T_CONFIG = Date.now();
 
 const certs = new CertStore(home);
 const requests = new RequestLog(path.join(home, "logs", "requests.jsonl"));
@@ -44,14 +53,19 @@ try {
   log.error(`cannot load leaf.pem/leaf.key from ${home}: ${(e as Error).message}. Run the installer first.`);
   process.exit(2);
 }
-// Picker mode: mint leaves for the app's own hosts up front so the first CONNECT is not slowed down.
-for (const h of terminateHosts(cfg0)) {
-  if (certs.has(h)) continue;
-  try {
-    certs.contextFor(h);
-    log.info(`picker: certificate ready for ${h}`);
-  } catch (e) {
-    log.error(`picker: cannot mint certificate for ${h}: ${(e as Error).message}`);
+// Picker mode: mint leaves for the app's own hosts so the first CONNECT is not slowed down.
+// Runs *after* listen(): minting shells out to openssl, and a client that has to wait a moment
+// for its first CONNECT is far better off than one whose connection is refused outright. Lazy
+// minting in the CONNECT path (proxy.ts) covers anything that arrives before this finishes.
+function premintLeaves(): void {
+  for (const h of terminateHosts(store.get())) {
+    if (certs.has(h)) continue;
+    try {
+      certs.contextFor(h);
+      log!.info(`picker: certificate ready for ${h}`);
+    } catch (e) {
+      log!.error(`picker: cannot mint certificate for ${h}: ${(e as Error).message}`);
+    }
   }
 }
 
@@ -99,9 +113,12 @@ setInterval(() => {
 proxy
   .listen()
   .then(async () => {
-    const ingressPort = await ingress.listen();
     const c = store.get();
-    log!.info(`clauderipple router listening on ${c.listen.host}:${c.listen.port} upstream=${c.upstream} home=${home}`);
+    log!.info(
+      `clauderipple router listening on ${c.listen.host}:${c.listen.port} upstream=${c.upstream} home=${home}` +
+        ` (startup ${since(T_EXEC)}ms: node ${T_MODULE - T_EXEC}, config ${T_CONFIG - T_MODULE}, listen ${since(T_CONFIG)})`,
+    );
+    const ingressPort = await ingress.listen();
     log!.info(`clauderipple OpenAI ingress listening on 127.0.0.1:${ingressPort}`);
     const admin = await startAdmin({
       config: () => store.get(),
@@ -116,6 +133,7 @@ proxy
       observedClaudeCodeAuth,
     });
     log!.info(`clauderipple admin GUI on http://127.0.0.1:${admin.port}/`);
+    setImmediate(premintLeaves);
   })
   .catch((e) => {
     log!.error(`listen failed: ${(e as Error).message}`);

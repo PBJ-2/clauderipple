@@ -15,7 +15,7 @@ import { ConfigStore, DEFAULTS, homeDir, configPath } from "../../router/src/con
 import { adminPort } from "../../router/src/admin.ts";
 import { certsExist, certPaths, generateCerts } from "./certs.ts";
 import { applyProxyEnv, currentProxyEnv, removeProxyEnv, settingsPath } from "./settings.ts";
-import { agentState, installAgent, kickstart, plistPath, removeAgent, restartAgent, stopAgent } from "./launchd.ts";
+import { agentState, installAgent, plistPath, removeAgent, restartAgent, startAgent, stopAgent } from "./launchd.ts";
 import { BUNDLE_ID, removeBundle, writeBundle } from "./bundle.ts";
 import { applyAppProxy, caTrusted, currentAppProxy, removeAppProxy, trustCa, untrustCa } from "./picker.ts";
 import { runtime } from "./runtime.ts";
@@ -316,9 +316,11 @@ try {
     case "status":
       await status();
       break;
-    case "start":
-      console.log(kickstart() ? "started" : "start failed (is it installed?)");
+    case "start": {
+      const r = startAgent();
+      console.log(r === "already-running" ? "already running" : r === "started" ? "started" : "start failed (is it installed?)");
       break;
+    }
     case "restart":
       console.log(describeRestart(restartAgent({ onProgress: (m) => console.log(`  ${m}`) })));
       break;

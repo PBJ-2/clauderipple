@@ -2,7 +2,7 @@
 // 127.0.0.1; this shell adds a tray icon with live health, a window for the GUI, and shortcuts
 // for restart / logs / login. If the router is down the tray says so and offers to start it.
 
-import { app, BrowserWindow, Menu, Tray, nativeImage, shell, dialog, clipboard } from "electron";
+import { app, BrowserWindow, Menu, Tray, Notification, nativeImage, shell, dialog, clipboard } from "electron";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -68,8 +68,17 @@ const STRINGS = {
       "Run GPT and other models inside Claude Desktop, without turning Claude off.\n\nIndependent open-source project (GPL-3.0). Not affiliated with, endorsed by, or sponsored by Anthropic or OpenAI. Claude and Claude Code are trademarks of Anthropic, PBC.",
     quit: "Quit",
     tooltip: (state: string) => `ClaudeRipple ${state}`,
-    tooltipDown: "ClaudeRipple: router not running",
+    tooltipDown: "ClaudeRipple: router not running — Claude Desktop cannot connect",
     proxyLine: (host: string, port: number, slots: string, flight: string) => `Proxy ${host}:${port} · ${slots} · ${flight}`,
+    startAtLogin: "Start at login",
+    downNotifyTitle: "Claude Desktop cannot connect",
+    downNotifyBody: "The ClaudeRipple router is not running, so Claude Desktop has no way out. Click to start it.",
+    starting: "starting the router…",
+    offlineHeading: "The router is not running",
+    offlineBody:
+      "Claude Desktop sends all of its traffic through ClaudeRipple, so while the router is down the app shows a blank window with ERR_PROXY_CONNECTION_FAILED. Start the router and reload Claude Desktop.",
+    offlineButton: "Start Router",
+    offlineWaiting: "Starting… this window opens the dashboard as soon as the router answers.",
   },
   ko: {
     healthy: "정상",
@@ -110,8 +119,17 @@ const STRINGS = {
       "Claude Desktop을 끄지 않고 그 안에서 GPT 등 다른 모델을 씁니다.\n\n독립 오픈소스 프로젝트(GPL-3.0)이며 Anthropic·OpenAI와 제휴·보증·후원 관계가 없습니다. Claude와 Claude Code는 Anthropic, PBC의 상표입니다.",
     quit: "종료",
     tooltip: (state: string) => `ClaudeRipple ${state}`,
-    tooltipDown: "ClaudeRipple: 라우터가 꺼져 있음",
+    tooltipDown: "ClaudeRipple: 라우터가 꺼져 있어 Claude Desktop이 연결되지 않습니다",
     proxyLine: (host: string, port: number, slots: string, flight: string) => `프록시 ${host}:${port} · ${slots} · ${flight}`,
+    startAtLogin: "로그인 시 자동 시작",
+    downNotifyTitle: "Claude Desktop이 연결되지 않습니다",
+    downNotifyBody: "ClaudeRipple 라우터가 꺼져 있어 Claude Desktop이 밖으로 나가지 못합니다. 눌러서 시작하세요.",
+    starting: "라우터를 시작하는 중…",
+    offlineHeading: "라우터가 꺼져 있습니다",
+    offlineBody:
+      "Claude Desktop은 모든 통신을 ClaudeRipple로 보냅니다. 그래서 라우터가 꺼져 있는 동안에는 앱이 흰 화면과 ERR_PROXY_CONNECTION_FAILED만 보여줍니다. 라우터를 시작한 뒤 Claude Desktop을 새로고침하세요.",
+    offlineButton: "라우터 시작",
+    offlineWaiting: "시작하는 중… 라우터가 응답하면 이 창이 대시보드로 바뀝니다.",
   },
 };
 
@@ -131,6 +149,53 @@ let tray: Tray | null = null;
 let win: BrowserWindow | null = null;
 let last: Status | null = null;
 let lastError: string | null = null;
+/** The window is showing the offline notice rather than the router's GUI. */
+let winOffline = false;
+let starting = false;
+let downSince: number | null = null;
+let downNotified = false;
+// Long enough that a router still coming up after login does not fire a notification.
+const DOWN_NOTIFY_AFTER_MS = 20_000;
+
+// ---- login item ------------------------------------------------------------------------
+// The tray app has to be running before the user opens Claude Desktop: with the router down the
+// app shows nothing but ERR_PROXY_CONNECTION_FAILED, and the tray is the only place that says why.
+
+const stateFile = path.join(home, "app.json");
+
+function appState(): { loginItemInitialized?: boolean } {
+  try {
+    return JSON.parse(fs.readFileSync(stateFile, "utf8")) as { loginItemInitialized?: boolean };
+  } catch {
+    return {};
+  }
+}
+
+function writeAppState(patch: Record<string, unknown>): void {
+  try {
+    fs.mkdirSync(home, { recursive: true });
+    fs.writeFileSync(stateFile, `${JSON.stringify({ ...appState(), ...patch }, null, 2)}\n`);
+  } catch {
+    /* a read-only home only costs us the remembered default */
+  }
+}
+
+function loginItemOn(): boolean {
+  try {
+    return app.getLoginItemSettings().openAtLogin;
+  } catch {
+    return false;
+  }
+}
+
+function setLoginItem(on: boolean): void {
+  try {
+    app.setLoginItemSettings({ openAtLogin: on });
+  } catch {
+    /* macOS may refuse in an unsigned development build */
+  }
+  writeAppState({ loginItemInitialized: true });
+}
 
 function adminUrl(): string {
   return `http://127.0.0.1:${readConfigPorts().admin}/`;
@@ -142,11 +207,41 @@ async function poll(): Promise<void> {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     last = (await res.json()) as Status;
     lastError = null;
+    downSince = null;
+    downNotified = false;
+    if (winOffline) showWindowContent(); // the router answered: swap the notice for the GUI
   } catch (e) {
     last = null;
     lastError = (e as Error).message;
+    downSince ??= Date.now();
+    // An open window would otherwise keep showing a GUI that is no longer being served.
+    if (!winOffline) showWindowContent();
+    if (!downNotified && Date.now() - downSince >= DOWN_NOTIFY_AFTER_MS) {
+      downNotified = true;
+      notifyDown();
+    }
   }
   render();
+}
+
+/** The router being down means Claude Desktop is dead in the water, so say so out loud. */
+function notifyDown(): void {
+  if (!Notification.isSupported()) return;
+  const n = new Notification({ title: L.downNotifyTitle, body: L.downNotifyBody });
+  n.on("click", () => void startRouter());
+  n.show();
+}
+
+/** Idempotent: `clauderipple start` leaves a router that is already coming up alone. */
+async function startRouter(): Promise<string> {
+  if (starting) return L.starting;
+  starting = true;
+  try {
+    return await runCli(["start"]);
+  } finally {
+    starting = false;
+    void poll();
+  }
 }
 
 function healthy(s: Status | null): "ok" | "warn" | "down" {
@@ -180,7 +275,7 @@ function openWindow(): void {
     trafficLightPosition: { x: 16, y: 18 },
     webPreferences: { contextIsolation: true, nodeIntegration: false },
   });
-  void win.loadURL(adminUrl());
+  showWindowContent({ autoStart: true });
   // Menu-bar app: no Dock icon while only the tray exists; show one while the settings window is open
   // (so Cmd-Tab and the Dock can reach it), hide it again when the window closes.
   if (process.platform === "darwin") void app.dock?.show();
@@ -188,6 +283,47 @@ function openWindow(): void {
     win = null;
     if (process.platform === "darwin") app.dock?.hide();
   });
+}
+
+/**
+ * The GUI is served by the router, so with the router down the window would load nothing at all —
+ * the same blank page Claude Desktop shows. Explain it instead, and start the router while the
+ * user reads; poll() swaps in the real GUI as soon as it answers.
+ */
+function showWindowContent(opts: { autoStart?: boolean } = {}): void {
+  if (!win || win.isDestroyed()) return;
+  if (last) {
+    winOffline = false;
+    void win.loadURL(adminUrl());
+    return;
+  }
+  winOffline = true;
+  void win.loadURL(offlineNotice(!!opts.autoStart));
+  // Only when the user just asked for the window: launchd's KeepAlive already handles a crash,
+  // and a deliberate `clauderipple stop` should not be undone by an open window.
+  if (opts.autoStart) void startRouter();
+}
+
+function offlineNotice(starting: boolean): string {
+  const esc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const html = `<!doctype html><html lang="${app.getLocale().startsWith("ko") ? "ko" : "en"}"><meta charset="utf-8">
+<title>ClaudeRipple</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; display: grid; place-items: center; min-height: 100vh;
+         font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+         background: Canvas; color: CanvasText; -webkit-user-select: none; cursor: default; }
+  main { max-width: 30rem; padding: 2rem; text-align: center; }
+  h1 { font-size: 1.25rem; margin: 0 0 .75rem; }
+  p { margin: 0 0 1rem; opacity: .8; }
+  .waiting { font-size: .85rem; opacity: .55; }
+</style>
+<main>
+  <h1>${esc(L.offlineHeading)}</h1>
+  <p>${esc(L.offlineBody)}</p>
+  ${starting ? `<p class="waiting">${esc(L.offlineWaiting)}</p>` : ""}
+</main></html>`;
+  return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
 }
 
 type CliRuntime = { node: string; env: Record<string, string>; cli: string };
@@ -213,7 +349,9 @@ function cliPaths(): CliRuntime {
   } catch {
     /* fall through to the development layout */
   }
-  return { node: process.execPath, env: {}, cli: path.resolve(__dirname, "..", "..", "cli", "src", "index.ts") };
+  // process.execPath is Electron: without ELECTRON_RUN_AS_NODE it launches a second app instead of
+  // running the CLI, and that instance never exits (observed 2026-09-14 with no paths.json).
+  return { node: process.execPath, env: { ELECTRON_RUN_AS_NODE: "1" }, cli: path.resolve(__dirname, "..", "..", "cli", "src", "index.ts") };
 }
 
 function runCli(args: string[]): Promise<string> {
@@ -270,15 +408,21 @@ function render(): void {
   // Everything else lives in the GUI window. Disabled items render grey, so the status lines stay enabled.
   const connected = !!s && s.settings.HTTPS_PROXY === `http://127.0.0.1:${s.listen.port}`;
   const headline = s ? `ClaudeRipple · ${state === "ok" ? L.healthy : L.attentionNeeded}` : `ClaudeRipple · ${L.routerNotRunning}`;
-  const detail = s ? [connected ? L.connected : L.notConnected, quotaLine].filter(Boolean).join(" · ") : lastError ?? "";
+  // When down, say what it means for the user rather than showing the fetch error.
+  const detail = s ? [connected ? L.connected : L.notConnected, quotaLine].filter(Boolean).join(" · ") : L.downNotifyTitle;
   const template: Electron.MenuItemConstructorOptions[] = [
     { label: headline, click: openWindow },
     ...(detail ? [{ label: detail, click: openWindow } as Electron.MenuItemConstructorOptions] : []),
     { type: "separator" },
-    { label: L.openWindow, click: openWindow, enabled: !!s },
+    // Enabled even when the router is down: the window then explains why Claude Desktop is blank.
+    { label: L.openWindow, click: openWindow },
+    { label: L.startAtLogin, type: "checkbox", checked: loginItemOn(), click: (item) => setLoginItem(item.checked) },
     { type: "separator" },
     { label: L.rerunSetup, click: () => void setup() },
-    { label: s ? L.restartRouter : L.startRouter, click: async () => void dialog.showMessageBox({ message: await runCli([s ? "restart" : "start"]) }) },
+    {
+      label: s ? L.restartRouter : L.startRouter,
+      click: async () => void dialog.showMessageBox({ message: s ? await runCli(["restart"]) : await startRouter() }),
+    },
     // Only offered while a ChatGPT provider has no usable credentials (own login or a reused Codex CLI login).
     ...(s && Object.values(s.chatgpt?.signedIn ?? {}).some((ok) => !ok)
       ? [{ label: L.signInChatgpt, click: async () => void dialog.showMessageBox({ message: await runCli(["login"]) }) } as Electron.MenuItemConstructorOptions]
@@ -295,6 +439,8 @@ function render(): void {
 app.whenReady().then(() => {
   L = STRINGS[app.getLocale().startsWith("ko") ? "ko" : "en"];
   if (process.platform === "darwin") app.dock?.hide();
+  // Default to starting at login on first run; after that the user's choice stands.
+  if (!appState().loginItemInitialized) setLoginItem(true);
   tray = new Tray(icon("down"));
   tray.on("click", () => tray?.popUpContextMenu());
   render();
