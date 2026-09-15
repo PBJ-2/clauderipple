@@ -55,7 +55,13 @@ export function resolve(model: unknown, body: unknown, cfg: Config): Resolved | 
     effort = model.slice(at + 1) || undefined;
   }
 
+  // A native `anthropic` provider serves the OpenAI ingress only; it speaks the Messages API with
+  // its own credentials and has nothing to translate for a caller that already speaks it. A rule
+  // naming one is ignored here so the request passes through to Anthropic instead of failing.
+  const ingressOnly = (name: string): boolean => cfg.providers[name]?.type === "anthropic";
+
   const direct = cfg.direct.find((d) => base.startsWith(d.prefix));
+  if (direct && ingressOnly(direct.provider)) return null;
   if (direct) {
     const ov = markerOverride(body, cfg.aliases);
     const finalModel = ov?.model ?? base;
@@ -63,8 +69,10 @@ export function resolve(model: unknown, body: unknown, cfg: Config): Resolved | 
     return { provider: direct.provider, model: finalModel, effort: finalEffort, tag: `${model}->${finalModel}` };
   }
 
-  const route = cfg.routes[base];
-  if (!route) return null;
+  // The app sends some slots with a dated id (`claude-haiku-4-5-20251001`) and others without
+  // (`claude-opus-5`), while the GUI only ever offers the undated form. Match either.
+  const route = cfg.routes[base] ?? cfg.routes[base.replace(/-\d{8}$/, "")];
+  if (!route || ingressOnly(route.provider)) return null;
   return {
     provider: route.provider,
     model: route.model,

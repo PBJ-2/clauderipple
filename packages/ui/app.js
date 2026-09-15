@@ -66,6 +66,9 @@ function uniqueName(name, providers) {
 function groupedModels(config) {
   const groups = [];
   for (const [name, provider] of Object.entries(config.providers || {})) {
+    // A native Claude provider serves the OpenAI ingress (Codex) only, so it is not a mapping
+    // target: the router ignores a slot pointed at it and passes the request through instead.
+    if (provider.type === "anthropic") continue;
     let models = modelsOf(provider);
     if (!models.length && provider.type === "chatgpt") models = CHATGPT_MODELS;
     if (models.length) groups.push({ name, provider, models });
@@ -764,7 +767,6 @@ function openAnthropicProviderForm(options) {
     modelArea.replaceChildren(el("span", { text: t("providers.models") }), hint(t("providers.modelsHelp")), el("small", { text: t("providers.effortLevels", { levels: "low · medium · high · max" }) }), modelsBox);
   }
   renderModels();
-  const pickerInput = el("input", { type: "checkbox", checked: Boolean(existing && (existing.models || []).some((model) => ((currentConfig.cli && currentConfig.cli.extraModels) || []).some((extra) => extra.model === (typeof model === "string" ? model : model.id)))) });
   const authField = inputRow(t("providers.credentials"), auth, t("providers.anthropicCredentialsHelp"));
   const keyField = el("div", { class: "form-field key-field" }, [el("span", { text: t("providers.apiKey") }), el("div", { class: "key-control" }, [keyInput, showKey]), el("small", { text: t("providers.keyHelp") })]);
   const subscriptionActions = el("div", { class: "actions" }, [el("button", { class: "btn secondary", type: "button", text: t("providers.anthropicLogin") }), el("button", { class: "btn secondary", type: "button", text: t("providers.anthropicLogout") })]);
@@ -808,8 +810,7 @@ function openAnthropicProviderForm(options) {
   const form = el("div", { class: "provider-form" }, [
     el("h1", { id: "modal-title", text: existing ? t("providers.edit") : t("providers.addTitle") }),
     inputRow(t("providers.name"), nameInput, t("providers.nameHelp")), authField, keyField, probeButton, sourceLine, result, subscriptionActions, modelArea,
-    el("label", { class: "check picker-check" }, [pickerInput, el("span", { text: t("providers.showInPicker") })]),
-    pickerModeOn() ? null : hint(t("providers.pickerOffHint")),
+    hint(t("providers.anthropicIngressOnly")),
   ]);
   const saveButton = el("button", { class: "btn", type: "button", "data-default-action": "", text: existing ? t("common.save") : t("providers.add") });
   saveButton.addEventListener("click", async () => {
@@ -820,12 +821,10 @@ function openAnthropicProviderForm(options) {
     const checkedModels = form.querySelector(".model-picker").selected();
     const provider = { type: "anthropic", auth: auth.value, ...(auth.value === "api-key" && (keyInput.value || (existing && existing.apiKey)) ? { apiKey: keyInput.value || existing.apiKey } : {}), models: checkedModels };
     next.providers[providerName] = provider;
-    if (pickerInput.checked) {
-      const existingSelections = ((next.cli && next.cli.extraModels) || []).map((entry) => ({ id: entry.model, name: entry.name, provider: ((next.direct || []).find((rule) => entry.model.startsWith(rule.prefix)) || {}).provider })).filter((entry) => entry.provider && entry.provider !== options.name);
-      applyPickerSelections(next, [...existingSelections, ...checkedModels.map((model) => ({ ...model, provider: providerName }))]);
-    }
+    // No picker/direct entries: these models are served to Codex through the OpenAI ingress, not
+    // routed from the Claude app, so a rule naming this provider would never fire.
     saveButton.disabled = true;
-    try { await configRequest(next); currentConfig = next; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); toast(t("common.saved")); await offerPickerOn(pickerInput.checked && checkedModels.length > 0); }
+    try { await configRequest(next); currentConfig = next; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); toast(t("common.saved")); }
     catch (error) { toast(t("common.saveFailed"), true, error.message); }
     finally { saveButton.disabled = false; }
   });

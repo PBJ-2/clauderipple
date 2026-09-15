@@ -38,6 +38,10 @@ import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
 
 const MAX_BODY = 64 * 1024 * 1024;
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "host", "content-length"]);
+// The caller's own Anthropic credentials. A routed request authenticates as the provider, so these
+// are dropped rather than forwarded: the provider header replaces only the one it happens to share
+// a name with, and the other would otherwise travel to an endpoint that is not Anthropic.
+const CLIENT_AUTH = new Set(["authorization", "x-api-key"]);
 
 export type ProxyDeps = {
   config: () => Config;
@@ -383,7 +387,7 @@ export class Proxy {
 
     let compatCaps: ReturnType<typeof resolveCompatibleCaps> | undefined;
     let compatChanges: string[] = [];
-    let target: { protocol: "http:" | "https:"; host: string; port: number; agent: http.Agent | https.Agent; extraHeaders: Record<string, string>; basePath?: string };
+    let target: { protocol: "http:" | "https:"; host: string; port: number; agent: http.Agent | https.Agent; extraHeaders: Record<string, string>; basePath?: string; dropClientAuth?: boolean };
     if (route && json) {
       const provider = cfg.providers[route.provider];
       if (!provider) {
@@ -438,6 +442,9 @@ export class Proxy {
         }
         return;
       }
+      // Unreachable in practice: resolve() drops rules naming a native provider so the request
+      // passes through instead. Kept as a guard — reaching a native endpoint from here would send
+      // it a request assembled for a translating provider.
       if (provider.type === "anthropic") {
         finish("400", 0, "native Anthropic provider is available through OpenAI ingress only", false);
         res.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({ error: { type: "invalid_request_error", message: "native Anthropic provider is available through OpenAI ingress only" } }));
@@ -461,6 +468,7 @@ export class Proxy {
         port: Number(u.port) || (protocol === "https:" ? 443 : 80),
         agent: this.agentFor(route.provider, protocol),
         extraHeaders: provider.headers ?? {},
+        dropClientAuth: true,
         // Providers mount their Anthropic-compatible API under a path (DeepSeek /anthropic, OpenRouter /api,
         // Qwen /apps/anthropic): the CLI's /v1/messages is appended to it. Dropping it sent requests to the
         // vendor's website, which answered 200 with HTML (measured 2026-09-13 with OpenRouter).
@@ -491,6 +499,7 @@ export class Proxy {
       // Bootstrap responses are edited: keep the client's accept-encoding as-is (some edges misbehave without it)
       // and decompress whatever comes back before editing.
       if (lk in target.extraHeaders) continue;
+      if (target.dropClientAuth && CLIENT_AUTH.has(lk)) continue;
       // Anthropic beta flags opt into features most compatible providers have not implemented.
       if (compatCaps && !forwardCompatibleHeader(lk, compatCaps)) {
         compatChanges.push("anthropic-beta");

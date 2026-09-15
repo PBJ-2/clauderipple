@@ -117,6 +117,13 @@ chat is out of reach for every approach, ours included.
   others expose `/v1/messages`): host + model rewrite only, no translation. This
   is the whole reason `claude-code-router` works with just `ANTHROPIC_BASE_URL`.
   **(assumption — verify each provider's endpoint before shipping a preset.)**
+  A routed request authenticates as the provider and only as the provider: the
+  caller's `authorization` and `x-api-key` are dropped before the provider's own
+  headers are added. Presets differ in which header they use (`x-api-key` for
+  DeepSeek and MiniMax, `Authorization: Bearer` for the rest), so relying on the
+  provider header to overwrite the caller's by name covers one of the two at
+  best. An un-routed request keeps its headers — that one really is going to
+  Anthropic. Enforced by `packages/router/test/proxy-headers.test.ts`.
 - **ChatGPT subscription (Codex backend):** needs a translation layer,
   Anthropic Messages ⇄ OpenAI Responses, plus OAuth (PKCE) login against
   `chatgpt.com/backend-api/codex`. The upstream endpoint is unofficial and may
@@ -358,6 +365,10 @@ inspected 2026-09-13. The latter is not an Anthropic guarantee.
 | Windows: trusting the CA failed with "this operation cannot use the UI" — every PowerShell call carried `-NonInteractive`, and the confirmation dialog never appeared, so picker mode stopped with no certificate and no explanation | Certificate trust and removal run WITHOUT `-NonInteractive` (and without `windowsHide`). They are UI operations by design: the OS must be able to show the user what it is being asked to trust. |
 | Windows: sign-in failed with `missing_required_parameter` because the OAuth URL was opened via `cmd /c start`, and cmd reads `&` as a command separator — everything after the first parameter was cut off and run as commands (2026-09-14) | Browsers are opened with `Start-Process <url>` as a single quoted argument. Any URL we hand to a shell must survive its metacharacters. |
 | The provider form's "also show in the Claude app picker" box only records `cli.extraModels`; picker mode itself stayed off, nothing was injected, and the user believed the picker was on (Windows x64, 2026-09-14: `config.json` had no `picker` key, no CA, no Config Library) | When that box is ticked while picker mode is off, the form says so under the box and offers to turn picker mode on right after saving. Any control that *looks* like it enables picker mode must either enable it or say what is still missing. |
+| A DeepSeek mapping answered `401` on every real request while the provider form's own "Test connection" stayed green — the test sends the provider's headers alone, live traffic also carried the caller's `authorization` (2026-09-15, Windows) | A routed request carries provider authentication only (§4). The connection test and live traffic must present the same auth set, or the test certifies a path nobody uses. |
+| Mapping Haiku 4.5 did nothing: the app sends `claude-haiku-4-5-20251001` while the GUI only offers the undated `claude-haiku-4-5`, and route lookup was an exact key match, so the request passed through and Haiku answered itself (2026-09-15) | Route lookup accepts both the dated and undated form of a model id. A mapping the GUI offers must be one the router can actually match. |
+| The native `anthropic` provider (ingress-only) was offered as a mapping target and could be given picker entries; a slot pointed at it made every Claude request fail with `400` (2026-09-15) | Ingress-only providers never appear as mapping targets and create no picker/direct rules. A rule that names one is ignored at resolve time, so an existing config degrades to passthrough instead of failing. |
+| Windows: "Connect Claude subscription" always failed with "Claude Code CLI not found" — discovery looked for an extensionless `claude` on PATH and for the macOS Application Support cache, neither of which exists there (2026-09-15) | Launcher discovery is per-platform: `.exe`/`.cmd`/`.bat` names on Windows, both AppData roots for the Desktop-cached CLI, and a shell for the `.cmd` launcher that cannot be spawned directly. |
 | Closing Claude Desktop's window does not quit it; reopening hits `Not main instance, returning early` and the app silently keeps the OLD proxy setting. The user sees "I configured it and nothing happened" with no error anywhere (2026-09-14) | Tell the user that closing the window is not enough, and detect it: with picker mode on, the router knows whether the app is actually routing through it. Surface "configured, but the app has not restarted yet" rather than letting it fail silently. |
 
 ## 6. Blocked paths (measured, do not retry)

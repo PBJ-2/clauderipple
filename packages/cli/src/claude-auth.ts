@@ -17,30 +17,57 @@ export function parseSetupToken(stdout: string): string | null {
   return unique.length === 1 && isSetupToken(unique[0]!) ? unique[0]! : null;
 }
 
+const isWindows = process.platform === "win32";
+
+/** Launcher names on PATH. Windows has no extensionless one: npm writes .cmd, the app ships .exe. */
+const BINARY_NAMES = isWindows ? ["claude.exe", "claude.cmd", "claude.bat"] : ["claude"];
+
+/** Where Claude Desktop caches the CLI it downloads, per platform. */
+export function desktopClaudeCodeDirs(): string[] {
+  if (!isWindows) return [path.join(os.homedir(), "Library", "Application Support", "Claude", "claude-code")];
+  const roots = [
+    process.env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local"),
+    process.env.APPDATA ?? path.join(os.homedir(), "AppData", "Roaming"),
+  ];
+  return roots.map((root) => path.join(root, "Claude", "claude-code"));
+}
+
+/** Launcher inside one cached version directory. The macOS build nests an .app bundle. */
+function versionBinaries(versionDir: string): string[] {
+  return isWindows
+    ? BINARY_NAMES.map((name) => path.join(versionDir, name))
+    : [path.join(versionDir, "claude.app", "Contents", "MacOS", "claude")];
+}
+
 export function latestDesktopClaude(): string | null {
-  const directory = path.join(os.homedir(), "Library", "Application Support", "Claude", "claude-code");
-  try {
-    const versions = fs.readdirSync(directory)
-      .filter((entry) => /^\d+\.\d+\.\d+$/.test(entry))
-      .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
-    const latest = versions.at(-1);
-    if (!latest) return null;
-    const binary = path.join(directory, latest, "claude.app", "Contents", "MacOS", "claude");
-    return fs.existsSync(binary) ? binary : null;
-  } catch {
-    return null;
+  for (const directory of desktopClaudeCodeDirs()) {
+    try {
+      const versions = fs.readdirSync(directory)
+        .filter((entry) => /^\d+\.\d+\.\d+$/.test(entry))
+        .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
+      for (const version of versions.reverse()) {
+        const binary = versionBinaries(path.join(directory, version)).find((candidate) => fs.existsSync(candidate));
+        if (binary) return binary;
+      }
+    } catch {
+      // Try the next root; a missing directory just means the app has not cached a CLI there.
+    }
   }
+  return null;
 }
 
 export function claudeBinary(pathValue = process.env.PATH): string | null {
   for (const directory of (pathValue ?? "").split(path.delimiter)) {
     if (!directory) continue;
-    const binary = path.join(directory, "claude");
-    try {
-      fs.accessSync(binary, fs.constants.X_OK);
-      return binary;
-    } catch {
-      // Continue to the bundled Desktop CLI.
+    for (const name of BINARY_NAMES) {
+      const binary = path.join(directory, name);
+      try {
+        // X_OK is not meaningful on Windows; existence of a named launcher is the real test.
+        fs.accessSync(binary, isWindows ? fs.constants.F_OK : fs.constants.X_OK);
+        return binary;
+      } catch {
+        // Continue to the next name, then the bundled Desktop CLI.
+      }
     }
   }
   return latestDesktopClaude();
@@ -51,7 +78,13 @@ export function claudeLogin(home: string, options: { binary?: string; pathValue?
   if (!binary) throw new Error("Claude Code CLI not found; install Claude Code or open Claude Desktop once");
   let stdout: string;
   try {
-    stdout = options.run ? options.run(binary) : execFileSync(binary, ["setup-token"], { encoding: "utf8", stdio: ["inherit", "pipe", "inherit"] });
+    // A .cmd/.bat launcher cannot be spawned directly on Windows; it needs a shell, and then the
+    // path must carry its own quotes because the shell re-parses the whole command line.
+    const viaShell = /\.(cmd|bat)$/i.test(binary);
+    const spawn = (): string => viaShell
+      ? execFileSync(`"${binary}"`, ["setup-token"], { encoding: "utf8", stdio: ["inherit", "pipe", "inherit"], shell: true })
+      : execFileSync(binary, ["setup-token"], { encoding: "utf8", stdio: ["inherit", "pipe", "inherit"] });
+    stdout = options.run ? options.run(binary) : spawn();
   } catch (error) {
     const detail = (error as { stderr?: string | Buffer }).stderr;
     const text = typeof detail === "string" ? detail : Buffer.isBuffer(detail) ? detail.toString("utf8") : "";

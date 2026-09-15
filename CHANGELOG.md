@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.1.1 — 2026-09-15
+
+All four were reported from a Windows install and reproduced here.
+
+### Fixed
+
+- **A mapped request now carries provider authentication only.** The caller's
+  own `authorization` and `x-api-key` are dropped before the provider's headers
+  are added. Previously only the header that happened to share a name with the
+  provider's was replaced, which differs per provider: DeepSeek and MiniMax
+  authenticate with `x-api-key`, everything else with `Authorization: Bearer`.
+  A DeepSeek mapping answered `401` on every request while the provider form's
+  own "Test connection" stayed green — the test sends the provider's headers
+  alone, so it certified a path live traffic did not take. An un-routed request
+  is unchanged; it really is going to Anthropic.
+- **Mapping Haiku 4.5 works.** The app sends `claude-haiku-4-5-20251001` while
+  the GUI offers the undated `claude-haiku-4-5`, and route lookup was an exact
+  key match, so the mapping never fired and Haiku answered itself. Lookup now
+  accepts either form.
+- **The native Claude (Anthropic) provider is no longer offered as a mapping
+  target.** It serves the OpenAI ingress (Codex) only, but it could be picked in
+  Model mapping and given picker entries, and a slot pointed at it failed every
+  Claude request with `400`. It is out of the mapping list, creates no picker
+  entries, and an existing config that names it passes through instead of
+  failing.
+- **Windows: "Connect Claude subscription" works.** CLI discovery looked for an
+  extensionless `claude` on `PATH` and for the macOS Application Support cache,
+  so it always reported "Claude Code CLI not found". It now looks for the
+  `.exe`/`.cmd`/`.bat` launchers, checks both AppData roots for the CLI that
+  Claude Desktop caches, and runs a `.cmd` launcher through a shell.
+  `clauderipple status` reported the cached CLI version from the macOS path too.
+
 ## 0.1.0 — 2026-09-14 (first release: macOS + Windows)
 
 The source was published on 2026-09-13; this is the first build. Everything

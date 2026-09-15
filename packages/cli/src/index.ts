@@ -21,7 +21,7 @@ import { applyAppProxy, caTrusted, currentAppProxy, removeAppProxy, trustCa, unt
 import { runtime } from "./runtime.ts";
 import { codexOff, codexOn } from "./codex.ts";
 import { ingressModels } from "../../router/src/ingress/models.ts";
-import { claudeLogin, claudeLogout } from "./claude-auth.ts";
+import { claudeLogin, claudeLogout, desktopClaudeCodeDirs } from "./claude-auth.ts";
 
 function setPickerEnabled(enabled: boolean): void {
   const file = configPath();
@@ -261,13 +261,15 @@ function tcpCheck(host: string, port: number): Promise<string> {
 }
 
 function cliVersions(): string {
-  const dir = path.join(process.env.HOME ?? "", "Library", "Application Support", "Claude", "claude-code");
-  try {
-    const v = fs.readdirSync(dir).filter((d) => /^\d+\.\d+\.\d+$/.test(d)).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-    return v.length ? `${v[v.length - 1]} (${v.length} versions cached; app auto-updates the CLI)` : "none cached";
-  } catch {
-    return "n/a";
+  for (const dir of desktopClaudeCodeDirs()) {
+    try {
+      const v = fs.readdirSync(dir).filter((d) => /^\d+\.\d+\.\d+$/.test(d)).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+      if (v.length) return `${v[v.length - 1]} (${v.length} versions cached; app auto-updates the CLI)`;
+    } catch {
+      // Next root: the app caches under a different AppData directory depending on the platform.
+    }
   }
+  return "none cached";
 }
 
 function ui(): void {

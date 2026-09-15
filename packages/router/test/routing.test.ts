@@ -100,3 +100,35 @@ test("bootstrap injects agent-file model ids (with @effort) when their base is r
   assert.deepEqual(out.additional_model_options.map((m) => m.model), ["gpt-5.6-terra", "gpt-5.6-terra@high"]);
   assert.equal(out.additional_model_options[1]!.name, "GPT-5.6 Terra · high");
 });
+
+test("a dated model id matches its undated mapping", () => {
+  const dated: Config = { ...cfg, routes: { ...cfg.routes, "claude-haiku-4-5": { provider: "chatgpt", model: "gpt-5.6-terra" } } };
+  // The app sends Haiku with a date suffix but the GUI only offers the undated id.
+  const r = resolve("claude-haiku-4-5-20251001", body("hi"), dated)!;
+  assert.equal(r.model, "gpt-5.6-terra");
+  // An exact key still wins, and a bare date-shaped tail is not invented out of nothing.
+  assert.equal(resolve("claude-sonnet-4-6-20250101", body("hi"), dated), null);
+});
+
+test("a rule naming a native anthropic provider is ignored, not routed", () => {
+  const native: Config = {
+    ...cfg,
+    providers: { ...cfg.providers, native: { type: "anthropic", auth: "claude-code" } },
+    routes: { "claude-opus-5": { provider: "native", model: "claude-opus-5" } },
+    direct: [{ prefix: "claude-haiku", provider: "native" }],
+  };
+  assert.equal(resolve("claude-opus-5", body("hi"), native), null);
+  assert.equal(resolve("claude-haiku-4-5-20251001", body("hi"), native), null);
+});
+
+test("an ignored direct rule does not fall through to a mapping", () => {
+  // The direct rule still decides; it is simply unusable, so the request passes through. Falling
+  // back to `routes` would send a model the user pointed elsewhere to a translating provider.
+  const native: Config = {
+    ...cfg,
+    providers: { ...cfg.providers, native: { type: "anthropic", auth: "claude-code" } },
+    routes: { "claude-haiku-4-5": { provider: "chatgpt", model: "gpt-5.6-terra" } },
+    direct: [{ prefix: "claude-haiku-", provider: "native" }],
+  };
+  assert.equal(resolve("claude-haiku-4-5-20251001", body("hi"), native), null);
+});

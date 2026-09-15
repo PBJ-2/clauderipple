@@ -1,7 +1,7 @@
 {
   "name": "clauderipple-monorepo",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Run GPT and other models inside Claude Desktop, without turning Claude off.",
   "license": "GPL-3.0-only",
   "workspaces": [
