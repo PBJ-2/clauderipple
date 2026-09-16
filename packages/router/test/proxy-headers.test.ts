@@ -45,17 +45,24 @@ async function forwardedHeaders(providerHeaders: Record<string, string>): Promis
 }
 
 /** One routed request against a provider that answers `reply`; returns what it saw and what was logged. */
-async function roundTrip(providerHeaders: Record<string, string>, reply: ProviderReply): Promise<{ seen: http.IncomingHttpHeaders; records: RequestRecord[]; clientStatus: number }> {
+async function roundTrip(
+  providerHeaders: Record<string, string>,
+  reply: ProviderReply,
+  options: { provider?: Partial<Provider>; system?: unknown } = {},
+): Promise<{ seen: http.IncomingHttpHeaders; seenBody: Record<string, unknown>; records: RequestRecord[]; clientStatus: number }> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-proxy-headers-"));
   const ca = createCa({ cn: "clauderipple test" });
   fs.writeFileSync(path.join(home, "ca.pem"), ca.certPem);
   fs.writeFileSync(path.join(home, "ca.key"), ca.keyPem);
 
   let seen: http.IncomingHttpHeaders = {};
+  let seenBody: Record<string, unknown> = {};
   const provider = http.createServer((req, res) => {
     seen = req.headers;
-    req.resume();
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
     req.on("end", () => {
+      try { seenBody = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>; } catch { seenBody = {}; }
       res.writeHead(reply.status, reply.headers);
       res.end(reply.body);
     });
@@ -67,7 +74,7 @@ async function roundTrip(providerHeaders: Record<string, string>, reply: Provide
   const cfg: Config = {
     ...DEFAULTS,
     listen: { host: "127.0.0.1", port: proxyPort },
-    providers: { p: { type: "anthropic-compatible", url: `http://127.0.0.1:${providerPort}/anthropic`, headers: providerHeaders } as Provider },
+    providers: { p: { type: "anthropic-compatible", url: `http://127.0.0.1:${providerPort}/anthropic`, headers: providerHeaders, ...options.provider } as Provider },
     routes: { "claude-opus-4-8": { provider: "p", model: "some-model" } },
     direct: [],
   };
@@ -90,7 +97,7 @@ async function roundTrip(providerHeaders: Record<string, string>, reply: Provide
   const secure = tls.connect({ socket: sock, servername: "api.anthropic.com", ca: ca.certPem });
   await new Promise<void>((r) => secure.once("secureConnect", () => r()));
 
-  const body = JSON.stringify({ model: "claude-opus-4-8", max_tokens: 1, messages: [{ role: "user", content: "hi" }] });
+  const body = JSON.stringify({ model: "claude-opus-4-8", max_tokens: 1, messages: [{ role: "user", content: "hi" }], ...(options.system === undefined ? {} : { system: options.system }) });
   secure.write(
     "POST /v1/messages HTTP/1.1\r\n" +
       "Host: api.anthropic.com\r\n" +
@@ -109,7 +116,7 @@ async function roundTrip(providerHeaders: Record<string, string>, reply: Provide
   await new Promise<void>((r) => provider.close(() => r()));
   const records = requests.list(10);
   fs.rmSync(home, { recursive: true, force: true });
-  return { seen, records, clientStatus };
+  return { seen, seenBody, records, clientStatus };
 }
 
 test("an x-api-key provider never receives the caller's authorization header", async () => {
@@ -155,4 +162,29 @@ test("errorSnippet decodes gzip, masks bearer tokens and explicit opaque credent
 test("non-credential headers still reach the provider", async () => {
   const seen = await forwardedHeaders({ "x-api-key": "PROVIDER-KEY" });
   assert.equal(seen["anthropic-version"], "2023-06-01");
+});
+
+// Nothing else tells a mapped provider what it is: it reads Claude Code's system prompt, whose
+// first line says "You are Claude Code, Anthropic's official CLI for Claude". DeepSeek answered
+// accordingly (2026-09-16), so the model's own name goes in front of it.
+test("a mapped provider is told which model it is, before the caller's system prompt", async () => {
+  const { seenBody } = await roundTrip({ "x-api-key": "K" }, OK_REPLY, { system: "You are Claude Code." });
+  assert.equal(seenBody.system, "You are some-model, answering through Claude Code, a terminal-based coding agent.\n\nYou are Claude Code.");
+});
+
+test("a system prompt in blocks keeps its blocks, with the identity added as its own", async () => {
+  const system = [{ type: "text", text: "You are Claude Code.", cache_control: { type: "ephemeral" } }];
+  const { seenBody } = await roundTrip({ "x-api-key": "K" }, OK_REPLY, { system });
+  assert.deepEqual(seenBody.system, [
+    { type: "text", text: "You are some-model, answering through Claude Code, a terminal-based coding agent." },
+    { type: "text", text: "You are Claude Code.", cache_control: { type: "ephemeral" } },
+  ]);
+});
+
+test("identity false leaves the system prompt alone, and the addendum still follows it", async () => {
+  const { seenBody } = await roundTrip({ "x-api-key": "K" }, OK_REPLY, {
+    system: "You are Claude Code.",
+    provider: { identity: false, instructionsAppend: "Answer in Korean." } as Partial<Provider>,
+  });
+  assert.equal(seenBody.system, "You are Claude Code.\n\nAnswer in Korean.");
 });

@@ -27,6 +27,10 @@ export type AnthropicCompatibleProvider = {
   preset?: string;
   /** Optional model entries offered by the GUI as suggestions. */
   models?: ProviderModel[];
+  /** Prefix the system prompt with a one-line identity so the model knows what it is. Default true. */
+  identity?: boolean;
+  /** Fixed text appended to the system prompt. Must stay constant across turns or the prompt cache breaks. */
+  instructionsAppend?: string;
   /** Compatibility overrides. Unspecified fields fall back to the preset, then strict defaults. */
   caps?: CompatibleCaps;
 };
@@ -62,6 +66,10 @@ export type OpenAiCompatibleProvider = {
   preset?: string;
   /** Optional model entries offered by the GUI as suggestions. */
   models?: ProviderModel[];
+  /** Prefix the system prompt with a one-line identity so the model knows what it is. Default true. */
+  identity?: boolean;
+  /** Fixed text appended to the system prompt. Must stay constant across turns or the prompt cache breaks. */
+  instructionsAppend?: string;
   /** Reasoning-effort capability exposed by this API/model family. */
   caps?: { effortLevels?: string[]; reasoning?: "effort" | "none" };
 };
@@ -193,6 +201,10 @@ export function validate(c: Config): string[] {
     if (!c.providers[d.provider]) errors.push(`direct ${d.prefix}: unknown provider "${d.provider}"`);
   }
   for (const [name, p] of Object.entries(c.providers)) {
+    // Carried by every provider that puts together a system prompt, so checked once for all of them.
+    const shared = p as { identity?: unknown; instructionsAppend?: unknown };
+    if (shared.identity !== undefined && typeof shared.identity !== "boolean") errors.push(`provider ${name}: identity must be true or false`);
+    if (shared.instructionsAppend !== undefined && typeof shared.instructionsAppend !== "string") errors.push(`provider ${name}: instructionsAppend must be a string`);
     if (p.type === "anthropic-compatible") {
       if (!/^https?:\/\//.test(p.url)) errors.push(`provider ${name}: url must start with http:// or https://`);
       if (p.preset !== undefined && typeof p.preset !== "string") errors.push(`provider ${name}: preset must be a string`);

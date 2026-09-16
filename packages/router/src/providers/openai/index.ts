@@ -82,7 +82,14 @@ export class OpenAiCompatibleAdapter {
           reasoning: modelEffortLevels && modelEffortLevels.length > 0 ? "effort" as const : "none" as const,
           effortLevels: modelEffortLevels ?? this.cfg.caps?.effortLevels ?? [],
         };
-    const upstreamRequest = toOpenAiRequest(json, { model, wire, ...(effort ? { effort } : {}), caps });
+    const upstreamRequest = toOpenAiRequest(json, {
+      model,
+      wire,
+      ...(effort ? { effort } : {}),
+      caps,
+      ...(this.cfg.identity === undefined ? {} : { identity: this.cfg.identity }),
+      ...(this.cfg.instructionsAppend ? { instructionsAppend: this.cfg.instructionsAppend } : {}),
+    });
     const requestBody = JSON.stringify(upstreamRequest);
     const upstreamHeaders = { "content-type": "application/json", accept: "text/event-stream", ...(this.cfg.headers ?? {}) };
     const upstreamSecrets = credentialHeaderValues(Object.entries(upstreamHeaders));

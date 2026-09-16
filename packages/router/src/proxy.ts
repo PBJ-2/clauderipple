@@ -26,6 +26,7 @@ import { UpstreamHealth } from "./health.ts";
 import { BOOTSTRAP_PATH, injectBootstrap } from "./bootstrap.ts";
 import { THREAD_UNSUPPORTED, effortOf, resolve, rewriteBody, stripThreadFields, threadDecision } from "./routing.ts";
 import { forwardCompatibleHeader, resolveCompatibleCaps, sanitizeForCompatible } from "./compat.ts";
+import { applyIdentityToAnthropicBody } from "./identity.ts";
 import { PRESETS } from "./presets.ts";
 import { ChatGptAdapter } from "./providers/chatgpt/index.ts";
 import { OpenAiCompatibleAdapter } from "./providers/openai/index.ts";
@@ -484,6 +485,14 @@ export class Proxy {
       const sanitized = sanitizeForCompatible(json, compatCaps);
       json = sanitized.json;
       compatChanges = sanitized.changes;
+      // The upstream would otherwise read Claude Code's own system prompt and answer that it is
+      // Claude. After sanitizing, so the effort named is the one the provider actually receives.
+      applyIdentityToAnthropicBody(json, {
+        model: route.model,
+        effort: effortOf(json),
+        identity: provider.identity,
+        instructionsAppend: provider.instructionsAppend,
+      });
       body = Buffer.from(JSON.stringify(json));
       const u = new URL(provider.url);
       const protocol = u.protocol === "https:" ? "https:" : "http:";

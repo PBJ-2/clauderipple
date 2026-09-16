@@ -5,6 +5,7 @@
 import crypto from "node:crypto";
 import { clampEffort } from "../../compat.ts";
 import { conversationKey, estimateTokens, normalizeSchema, systemText, type AnthropicBlock, type AnthropicRequest, type AnthropicTool } from "../chatgpt/translate.ts";
+import { identityPrefix, instructionsSuffix } from "../../identity.ts";
 
 export type OpenAiWire = "chat" | "responses";
 export type OpenAiCaps = { effortLevels?: string[]; reasoning?: "effort" | "none" };
@@ -14,6 +15,10 @@ export type OpenAiTranslateOptions = {
   wire: OpenAiWire;
   effort?: string;
   caps?: OpenAiCaps;
+  /** Prefix the system prompt with what the model is. Default true; see identity.ts. */
+  identity?: boolean;
+  /** Fixed configured text after the system prompt. */
+  instructionsAppend?: string;
 };
 
 type ChatTextPart = { type: "text"; text: string };
@@ -101,6 +106,15 @@ function mapResponsesToolChoice(req: AnthropicRequest, tools: ResponsesTool[]): 
   return choice.type === "tool" && choice.name ? { type: "function", name: choice.name } : undefined;
 }
 
+/** The system text this provider should see: what it is, the caller's prompt, the configured addendum. */
+function systemWithIdentity(sys: string, opts: OpenAiTranslateOptions): string {
+  // The effort named is the one that survives the capability mapping; a provider that takes no
+  // reasoning effort is told none, rather than a level it will never see.
+  return [identityPrefix({ model: opts.model, effort: mappedEffort(opts), identity: opts.identity }), sys, instructionsSuffix({ model: opts.model, instructionsAppend: opts.instructionsAppend })]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
 function mappedEffort(opts: OpenAiTranslateOptions): string | undefined {
   if (opts.caps?.reasoning !== "effort" || !opts.effort) return undefined;
   const levels = opts.caps.effortLevels;
@@ -108,10 +122,11 @@ function mappedEffort(opts: OpenAiTranslateOptions): string | undefined {
 }
 
 /** Convert every Anthropic message into OpenAI Chat Completion messages without inventing unstable text. */
-export function toChatMessages(req: AnthropicRequest): ChatMessage[] {
+export function toChatMessages(req: AnthropicRequest, opts?: OpenAiTranslateOptions): ChatMessage[] {
   const messages: ChatMessage[] = [];
   const sys = systemText(req.system);
-  if (sys) messages.push({ role: "system", content: sys });
+  const content = opts ? systemWithIdentity(sys, opts) : sys;
+  if (content) messages.push({ role: "system", content });
   const knownCalls = new Set<string>();
 
   for (const message of req.messages) {
@@ -214,7 +229,7 @@ export function toOpenAiRequest(req: AnthropicRequest, opts: OpenAiTranslateOpti
   if (opts.wire === "chat") {
     const out: ChatRequest = {
       model: opts.model,
-      messages: toChatMessages(req),
+      messages: toChatMessages(req, opts),
       stream: true,
       stream_options: { include_usage: true },
     };
@@ -237,8 +252,8 @@ export function toOpenAiRequest(req: AnthropicRequest, opts: OpenAiTranslateOpti
     input: toResponsesInput(req),
     stream: true,
   };
-  const sys = systemText(req.system);
-  if (sys) out.instructions = sys;
+  const instructions = systemWithIdentity(systemText(req.system), opts);
+  if (instructions) out.instructions = instructions;
   if (responseTools.length) {
     out.tools = responseTools;
     out.parallel_tool_calls = parallel;

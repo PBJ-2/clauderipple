@@ -35,6 +35,11 @@ process. Nothing restarted it, and nothing could tell.
   now rebuilt from what the providers actually offer, deduplicated by model id,
   and a direct rule that served only a removed model goes with it. A prefix rule
   that is not a model id, such as the legacy `gpt-` one, is kept.
+- **Every provider can tell the model what it is.** The identity line and the
+  system-prompt addendum were ChatGPT-only, so a mapped DeepSeek read Claude
+  Code's own prompt and answered that it was Claude. Anthropic-compatible and
+  OpenAI-compatible providers now carry the same two settings, on by default,
+  and the GUI offers them under Advanced for every provider.
 - **HTML error pages are called out.** A provider that answers with a web page
   (a bare vendor domain, a login wall) is logged as "HTML page … not an API"
   instead of a quoted markup fragment.

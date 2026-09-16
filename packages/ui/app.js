@@ -951,6 +951,15 @@ function openProviderForm(options) {
     extraHeaders.value = additional.map(([key, value]) => `${key}: ${value}`).join("\n");
     advancedContent.appendChild(inputRow(t("providers.extraHeaders"), extraHeaders, t("providers.extraHeadersHelp")));
     advancedContent._extraHeaders = extraHeaders;
+    // Without a line of its own the model reads Claude Code's system prompt and answers that it is
+    // Claude, which is what DeepSeek did before this was offered here too.
+    const identity = el("input", { type: "checkbox", checked: !(existing && existing.identity === false) });
+    const append = el("textarea", { rows: "2", value: (existing && existing.instructionsAppend) || "" });
+    advancedContent.append(
+      el("div", { class: "form-field" }, [el("label", { class: "check" }, [identity, el("span", { text: t("providers.identity") })]), el("small", { text: t("providers.identityHelp") })]),
+      inputRow(t("providers.append"), append, t("providers.appendHelp")),
+    );
+    advancedContent._prompt = { identity, append };
   } else {
     const auth = el("select", {}, [selectOption("auto", t("providers.authAuto")), selectOption("own", t("providers.authOwn")), selectOption("borrow-codex", t("providers.authBorrow"))]);
     auth.value = (existing && existing.auth) || "auto";
@@ -1011,9 +1020,12 @@ function openProviderForm(options) {
       const chat = advancedContent._chatgpt;
       return { type: "chatgpt", auth: chat.auth.value, defaultEffort: chat.effort.value, identity: chat.identity.checked, ...(chat.append.value.trim() ? { instructionsAppend: chat.append.value.trim() } : {}) };
     }
+    const prompt = advancedContent._prompt;
     return {
       type: isOpenAi ? "openai-compatible" : "anthropic-compatible",
       url: urlInput.value.trim(),
+      ...(prompt ? { identity: prompt.identity.checked } : {}),
+      ...(prompt && prompt.append.value.trim() ? { instructionsAppend: prompt.append.value.trim() } : {}),
       ...(preset ? { preset: preset.id } : {}),
       ...(isOpenAi ? { wire: wireSelect.value, caps: { effortLevels: (preset && preset.effortLevels) || [], reasoning: preset && preset.effortLevels && preset.effortLevels.length ? "effort" : "none" } } : {}),
       ...(Object.keys(readHeaders()).length ? { headers: readHeaders() } : {}),

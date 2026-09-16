@@ -24,7 +24,7 @@ const options = { model: "grok", effort: "ultra", caps: { reasoning: "effort" as
 test("chat translation preserves images and tools, removes billing telemetry, and clamps effort", () => {
   const out = toOpenAiRequest(request, { ...options, wire: "chat" }) as ChatRequest;
   assert.equal(out.messages[0]?.role, "system");
-  assert.equal(out.messages[0]?.content, "You are a coding agent.");
+  assert.equal(out.messages[0]?.content, "You are grok (reasoning effort: high), answering through Claude Code, a terminal-based coding agent.\n\nYou are a coding agent.");
   assert.equal(JSON.stringify(out.messages).includes("x-anthropic-billing-header"), false);
   const user = out.messages[1]!;
   assert.ok(Array.isArray(user.content));
@@ -44,7 +44,7 @@ test("chat translation preserves images and tools, removes billing telemetry, an
 
 test("responses translation uses stateless input, tool outputs, and responses effort", () => {
   const out = toOpenAiRequest(request, { ...options, wire: "responses" }) as ResponsesRequest;
-  assert.equal(out.instructions, "You are a coding agent.");
+  assert.equal(out.instructions, "You are grok (reasoning effort: high), answering through Claude Code, a terminal-based coding agent.\n\nYou are a coding agent.");
   assert.deepEqual(out.input.map((item) => item.type), ["message", "function_call", "function_call_output"]);
   const first = out.input[0] as { content: { type: string; image_url?: string }[] };
   assert.deepEqual(first.content.map((part) => part.type), ["input_image", "input_text"]);
@@ -60,8 +60,10 @@ test("orphan tool result becomes user text on both wires", () => {
   const orphan: AnthropicRequest = { model: "m", messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "orphan", content: "side output" }] }] };
   const chat = toOpenAiRequest(orphan, { model: "m", wire: "chat" }) as ChatRequest;
   const responses = toOpenAiRequest(orphan, { model: "m", wire: "responses" }) as ResponsesRequest;
-  assert.equal(chat.messages[0]?.role, "user");
-  assert.match(String(chat.messages[0]?.content), /\[Tool result\]/);
+  // messages[0] is the identity line, which is sent even when the caller supplied no system prompt.
+  assert.equal(chat.messages[0]?.role, "system");
+  assert.equal(chat.messages[1]?.role, "user");
+  assert.match(String(chat.messages[1]?.content), /\[Tool result\]/);
   assert.equal(responses.input[0]?.type, "message");
   assert.match(JSON.stringify(responses.input[0]), /\[Tool result\]/);
 });
@@ -136,4 +138,14 @@ test("responses SSE mapper emits a max-token response", () => {
   const final = [...events, ...done].find((event) => event.event === "message_delta")!;
   assert.equal((final.data.delta as { stop_reason: string }).stop_reason, "max_tokens");
   assert.deepEqual(final.data.usage, { input_tokens: 8, output_tokens: 4, cache_read_input_tokens: 3, cache_creation_input_tokens: 0 });
+});
+
+test("identity false leaves the system prompt as the caller wrote it; the addendum still follows", () => {
+  const out = toOpenAiRequest(request, { ...options, wire: "chat", identity: false, instructionsAppend: "Answer in Korean." }) as ChatRequest;
+  assert.equal(out.messages[0]?.content, "You are a coding agent.\n\nAnswer in Korean.");
+});
+
+test("a provider that takes no reasoning effort is not told one", () => {
+  const out = toOpenAiRequest(request, { model: "kimi", wire: "chat", effort: "high", caps: { reasoning: "none" } }) as ChatRequest;
+  assert.equal(out.messages[0]?.content, "You are kimi, answering through Claude Code, a terminal-based coding agent.\n\nYou are a coding agent.");
 });

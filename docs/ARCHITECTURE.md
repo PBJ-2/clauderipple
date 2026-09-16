@@ -179,6 +179,26 @@ chat is out of reach for every approach, ours included.
     no reasoning `include`; identity line and `instructionsAppend` are constant
     text; `prompt_cache_key` = sha256(metadata.user_id + first user message).
 
+### 4c. What a routed model is told it is
+
+- Claude Code's system prompt opens with "You are Claude Code, Anthropic's
+  official CLI for Claude". A mapped provider receives that text and has nothing
+  else to go on: asked what it was, DeepSeek answered that it was Claude while
+  the session label read `deepseek-flash` (measured 2026-09-16).
+- So every provider that assembles a system prompt puts one line in front of it:
+  `You are <model> (reasoning effort: <effort>), answering through Claude Code, a
+  terminal-based coding agent.` The effort is named because a model cannot see
+  its own setting; it is omitted when the provider takes no reasoning effort.
+  `packages/router/src/identity.ts` holds the sentence, and the ChatGPT,
+  OpenAI-compatible and Anthropic-compatible paths all use it.
+- On the Anthropic-compatible path the line is added **after** the compatibility
+  pass, so the effort named is the one the provider actually receives. A string
+  `system` stays a string; a block array gains a leading block that carries no
+  `cache_control`, leaving the caller's breakpoints where they were.
+- `identity: false` per provider turns it off; `instructionsAppend` adds fixed
+  text after the prompt. Both are constant per provider, so the prompt cache
+  misses once when either changes and not afterwards.
+
 ### 4a. Claude Code request shapes a translator must handle (measured 2026-09-13, CLI 2.1.266)
 
 - **Server-side threads ("tether").** The first request of a session carries

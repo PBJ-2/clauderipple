@@ -7,6 +7,7 @@
 // same reason. `prompt_cache_key` is derived from the conversation's first user message.
 
 import crypto from "node:crypto";
+import { identityLine } from "../../identity.ts";
 
 // ---- Anthropic side -----------------------------------------------------------------
 
@@ -127,7 +128,7 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
   const parts: string[] = [];
   // Effort is named here because the model cannot see its own reasoning setting and will otherwise guess.
   // Constant per (model, effort): changing effort mid-session costs one cache miss, which is acceptable.
-  if (opts.identity) parts.push(`You are ${opts.model} (reasoning effort: ${opts.effort}), answering through Claude Code, a terminal-based coding agent.`);
+  if (opts.identity) parts.push(identityLine(opts.model, opts.effort));
   const sys = systemText(req.system);
   if (sys) parts.push(sys);
   if (opts.instructionsAppend) parts.push(opts.instructionsAppend);
