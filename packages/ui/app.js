@@ -761,6 +761,16 @@ function openAnthropicProviderForm(options) {
   const result = el("div", { class: "probe-result" });
   const probeButton = el("button", { class: "btn secondary", type: "button", text: t("providers.check") });
   const sourceLine = el("div", { class: "small" });
+  // Our own sign-in is stored even while a Claude Desktop session outranks it. Saying so is the
+  // only way a finished sign-in shows up on a screen whose source line does not change.
+  const signedInLine = el("div", { class: "small" });
+  function showSignedIn(response) {
+    const stored = response && response.signedIn;
+    signedInLine.hidden = !stored;
+    if (!stored) return;
+    signedInLine.textContent =
+      response.source === "token-file" ? t("providers.anthropicSignedInActive") : t("providers.anthropicSignedInStandby");
+  }
   let foundModels = modelsOf(existing).length ? modelsOf(existing) : claudeModels.map((model) => ({ id: model.id, name: labelOf(model) }));
   let selected = new Set(modelsOf(existing).length ? modelsOf(existing).map((model) => model.id) : foundModels.map((model) => model.id));
   const modelArea = el("div", { class: "form-field" });
@@ -777,6 +787,7 @@ function openAnthropicProviderForm(options) {
     keyField.hidden = reused;
     subscriptionActions.hidden = !reused;
     sourceLine.hidden = !reused;
+    signedInLine.hidden = !reused || !signedInLine.textContent;
   }
   auth.addEventListener("change", syncAuthFields);
   syncAuthFields();
@@ -787,6 +798,7 @@ function openAnthropicProviderForm(options) {
       const body = auth.value === "claude-code" ? { type: "anthropic", auth: "claude-code" } : { type: "anthropic", auth: "api-key", apiKey: keyInput.value || (existing && existing.apiKey) };
       const response = await api("/api/providers/probe", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
       sourceLine.textContent = anthropicSourceText(response.source);
+      showSignedIn(response);
       const noCredits = response.ok && /^no-credits:/.test(response.error || "");
       result.replaceChildren(...[
         el("span", { class: response.ok && !noCredits ? "ok-text" : noCredits ? "warn-text" : "bad-text", text: noCredits ? t("providers.probeNoCredits") : response.ok ? t("providers.probeOk") : response.auth === "bad-key" ? t("providers.probeBadKey") : auth.value === "claude-code" ? anthropicSourceText(response.source) : t("providers.probeFailed") }),
@@ -824,7 +836,9 @@ function openAnthropicProviderForm(options) {
   }
   function finishSignIn(state) {
     clearInterval(signInPoll);
-    if (state.ok) { result.replaceChildren(el("span", { class: "ok-text", text: t("providers.anthropicLoginDone") })); void runProbe(); return; }
+    // The probe refreshes the source and the stored-sign-in line, then the outcome is put back:
+    // the probe's own wording would otherwise erase the answer to the button that was just pressed.
+    if (state.ok) { void runProbe().then(() => result.replaceChildren(el("span", { class: "ok-text", text: t("providers.anthropicLoginDone") }))); return; }
     const retry = el("button", { class: "btn secondary", type: "button", text: t("providers.anthropicSignInManual") });
     retry.addEventListener("click", () => void startSignIn(true));
     result.replaceChildren(el("span", { class: "bad-text", text: t("providers.anthropicSignInFailed") }), el("div", { class: "small", text: state.error || "" }), retry);
@@ -847,7 +861,7 @@ function openAnthropicProviderForm(options) {
   });
   const form = el("div", { class: "provider-form" }, [
     el("h1", { id: "modal-title", text: existing ? t("providers.edit") : t("providers.addTitle") }),
-    inputRow(t("providers.name"), nameInput, t("providers.nameHelp")), authField, keyField, probeButton, sourceLine, result, subscriptionActions, modelArea,
+    inputRow(t("providers.name"), nameInput, t("providers.nameHelp")), authField, keyField, probeButton, sourceLine, signedInLine, result, subscriptionActions, modelArea,
     hint(t("providers.anthropicIngressOnly")),
   ]);
   const saveButton = el("button", { class: "btn", type: "button", "data-default-action": "", text: existing ? t("common.save") : t("providers.add") });

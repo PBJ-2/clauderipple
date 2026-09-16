@@ -28,6 +28,7 @@ import { codexEnabled, codexHome } from "../../cli/src/codex.ts";
 import { openBrowser } from "../../cli/src/browser.ts";
 import { caTrusted, currentAppProxy } from "../../cli/src/picker.ts";
 import { ClaudeOAuthSession, type ClaudeOAuthState } from "./providers/claude-oauth.ts";
+import { readClaudeAuthFile } from "./providers/anthropic-token-file.ts";
 
 const MAX_BODY = 1024 * 1024;
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -233,7 +234,7 @@ export function chatgptSignedIn(mode: string | undefined): boolean {
 
 async function buildStatus(deps: AdminDeps): Promise<Record<string, unknown>> {
   const cfg = deps.config();
-  const providers: Record<string, { url: string; type: string; reachable: boolean; authSource?: "observed" | "env" | "keychain" | "credentials-file" | "token-file" | null }> = {};
+  const providers: Record<string, { url: string; type: string; reachable: boolean; authSource?: "observed" | "env" | "keychain" | "credentials-file" | "token-file" | null; signedIn?: "oauth" | "setup-token" | null }> = {};
   await Promise.all(
     Object.entries(cfg.providers).map(async ([name, p]) => {
       const url = p.type === "anthropic" ? "https://api.anthropic.com" : p.type === "chatgpt" ? (p.url ?? "https://chatgpt.com/backend-api") : p.url;
@@ -251,7 +252,12 @@ async function buildStatus(deps: AdminDeps): Promise<Record<string, unknown>> {
         // Reaching the host says nothing about being able to use it: a chatgpt provider with no
         // credentials is not "connected", and calling it that sends the user off believing it works.
         ...(p.type === "chatgpt" ? { needsLogin: !chatgptSignedIn(p.auth) } : {}),
-        ...(p.type === "anthropic" ? { authSource: p.auth === "claude-code" ? claudeAuthStore(deps).describeSource() : null } : {}),
+        ...(p.type === "anthropic"
+          ? {
+              authSource: p.auth === "claude-code" ? claudeAuthStore(deps).describeSource() : null,
+              signedIn: p.auth === "claude-code" ? (readClaudeAuthFile(homeDir())?.source ?? null) : null,
+            }
+          : {}),
       };
     }),
   );
@@ -418,9 +424,11 @@ async function probeAnthropicApiKey(apiKey: string, probeFetch: (url: string, in
   }
 }
 
-function probeClaudeCodeAuth(deps: AdminDeps): { ok: boolean; auth: "ok" | "missing"; source: "observed" | "env" | "keychain" | "credentials-file" | "token-file" | null; models: ModelEntry[] } {
+function probeClaudeCodeAuth(deps: AdminDeps): { ok: boolean; auth: "ok" | "missing"; source: "observed" | "env" | "keychain" | "credentials-file" | "token-file" | null; signedIn: "oauth" | "setup-token" | null; models: ModelEntry[] } {
   const source = claudeAuthStore(deps).describeSource();
-  return { ok: source !== null, auth: source ? "ok" : "missing", source, models: CLAUDE_MODEL_FALLBACK };
+  // Our own sign-in is reported separately: a Claude Desktop session outranks it, and without this
+  // the screen would answer a finished sign-in with the source it was already showing.
+  return { ok: source !== null, auth: source ? "ok" : "missing", source, signedIn: readClaudeAuthFile(homeDir())?.source ?? null, models: CLAUDE_MODEL_FALLBACK };
 }
 
 function chatCompletionsUrl(base: string): string {
