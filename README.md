@@ -76,6 +76,59 @@ If you pay for Claude, 3P is not an option — it throws away the half of the
 subscription you are paying for. This is the only way to keep it and still choose
 the model.
 
+## FAQ
+
+### Can I use GPT in the Claude Desktop app?
+
+Yes. Install ClaudeRipple, map a Claude model name to a GPT model, and the Code tab
+answers with GPT under its real name in the model picker. The app itself is not
+modified and not switched into any other mode.
+
+### How do I use GPT in Claude Code?
+
+The same install covers the terminal `claude` CLI. ClaudeRipple is a local proxy that
+Claude Code is pointed at through two lines in `~/.claude/settings.json`, so your
+skills, hooks, MCP servers, `CLAUDE.md` and subagents keep working while another model
+answers.
+
+### Do I have to turn on Claude Desktop's "third-party inference" (gateway) setting?
+
+No — and you should not. That setting switches the whole app into 3P mode, which stops
+loading claude.ai, replaces chat with a local-agent session and turns Remote Control
+off. ClaudeRipple never touches it.
+
+### Will I lose claude.ai chat, Remote Control or my connectors?
+
+No. The app stays signed in to your Claude subscription, so chat, phone Remote Control,
+cloud sessions and Anthropic's own connectors keep working. That is the whole point of
+staying in 1P.
+
+### Can I still use Claude itself?
+
+Yes. Model mapping is per model name: leave a name mapped to Claude and it answers as
+Claude. Most people map one or two names to GPT and leave the rest alone.
+
+### Do I need an OpenAI API key?
+
+No. A ChatGPT Plus or Pro subscription works — you sign in from the app and no API key
+is involved. API keys are for the other providers (DeepSeek, Kimi, GLM, OpenRouter and
+anything else with an Anthropic- or OpenAI-compatible endpoint).
+
+### Which models can I use?
+
+GPT through a ChatGPT subscription, and DeepSeek, Kimi, GLM, Grok, Qwen and 400+ more
+through OpenRouter or a direct API key. Claude models keep working as they are.
+
+### Does it work on Windows?
+
+Yes, on Windows and macOS, arm64 and x64. Install, dashboard, restart and uninstall are
+measured on Windows 11 arm64; the x64 runtime is measured under emulation.
+
+### Is my code sent anywhere else?
+
+No. The proxy runs on your own machine. Requests go to the provider you configured and
+nowhere else, and credentials stay in your home directory. See [Privacy](#privacy).
+
 ## One tool instead of four
 
 Similar tools are built for the terminal. They let the Claude Code CLI or Codex CLI
