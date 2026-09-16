@@ -1,6 +1,6 @@
 {
   "name": "clauderipple",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Use GPT and 400+ other models inside the Claude Desktop app while staying signed in to your Claude subscription — no third-party gateway mode.",
   "license": "GPL-3.0-only",
   "workspaces": [

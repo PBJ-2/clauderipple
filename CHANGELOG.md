@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.1.2 — unreleased
+## 0.2.0 — 2026-09-16
+
+The first release published to npm, and the reason the number moves to 0.2:
+ClaudeRipple is installed with one command instead of a signed application,
+and the Electron window is gone in favour of the dashboard in your own browser.
 
 Why 0.1.1 did not help the Windows install that reported the 0.1.1 bugs: the
 fixes were in the files, but the router that kept answering was the old
