@@ -16,8 +16,14 @@ GitHub의 0.1.1 zip을 직접 받아 확인: 헤더 수정·Haiku 수정 **전�
 앱의 `reconcileRouter()`(버전·경로 불일치 시 install→restart, 앱 실행당 1회, 체크아웃 기록은 불건드림),
 프로바이더 4xx/5xx 본문 로그(마스킹), setup-token 비-TTY 안내. 테스트 141개 통과, 앱 tsc 통과.
 
+**macOS 실측 완료 (2026-09-16 10:58):** `/Applications/ClaudeRipple.app`(0.1.0, ad hoc 서명)을 `npm run dist`로 만든
+0.1.2 번들로 교체하고 앱을 띄우자 5초 안에 라우터 0.1.0을 감지 → SIGTERM 드레인 7초 → 0.1.2로 재기동.
+`/api/status.runtime.router`가 새 번들, `/readyz` 200, `/api/claude-oauth` 응답. 주군 라이브 라우터가 이제 0.1.2다.
+(주의: 주군 맥의 `paths.json`은 이제 소스 체크아웃이 아니라 `/Applications` 앱을 가리킨다. 체크아웃을 고친 뒤
+실측하려면 다시 `npm run dist` → 번들 교체.)
+
 **검증 안 된 것 (다음에 할 일):**
-- `reconcileRouter()`는 패키지 앱에서만 동작하므로 **Windows VM에서 실기 검증이 필요**하다. 시나리오 둘:
+- `reconcileRouter()`의 **Windows VM 실기 검증**은 아직이다. 시나리오 둘:
   ① 0.1.1 exe 설치 상태에서 0.1.2 exe 설치 → 앱이 알림 띄우고 라우터 버전이 0.1.2로 바뀌는지.
   ② 0.1.1 zip 폴더 A에서 라우터가 도는 상태로 0.1.2 zip을 폴더 B에 풀고 B의 앱 실행 → install+restart 후
   `/api/status.runtime.router`가 B를 가리키는지.
