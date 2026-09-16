@@ -46,7 +46,18 @@ GitHub의 0.1.1 zip을 직접 받아 확인: 헤더 수정·Haiku 수정 **전�
   파일은 `<home>/claude-auth.json` `source:"oauth"`(access+refresh+expiresAt), 인그레스가 만료 5분 전에 자동 갱신
   (`ClaudeCodeAuthStore.refreshIfNeeded`, 동시 호출 1회 공유). GUI는 `POST/GET /api/claude-oauth`,
   `POST /api/claude-oauth/code`, `/cancel`. CLI `claude-login`이 기본 이 흐름, `--setup-token`이 옛 경로.
-  **실제 Anthropic 상대로는 안 돌려봤다** — 토큰 엔드포인트는 스텁으로만 검증. 주군이 맥에서 GUI 버튼 한 번 눌러
+  **2026-09-16 14:00 실측 성공 (주군 맥, claude.ai 계정).** 두 가지를 고치고 나서다.
+  ① authorize/token 엔드포인트를 Claude Code 2.1.272 바이너리에서 그대로 읽어 교체했다
+  (`claude.com/cai/oauth/authorize`, `platform.claude.com/v1/oauth/token`,
+  수동 리다이렉트 `platform.claude.com/oauth/code/callback`). 옛 `claude.ai/oauth/authorize`는
+  "인증 실패 / Invalid request format"이 떴다.
+  ② state를 16바이트에서 32바이트로 늘렸다 — CLI는 verifier와 state 둘 다 32바이트다.
+  authorize URL의 파라미터 이름·순서·스코프 목록은 CLI의 생성 함수와 대조해 동일함을 확인했다.
+  수동 모드 리다이렉트가 이 클라이언트에 등록돼 있는지는 여전히 미실측이다.
+  **로그인이 성공해도 프로바이더 카드의 출처 줄은 안 바뀐다**: Claude Desktop 세션(observed)이
+  우선순위가 높기 때문이다. 그래서 probe/status가 `signedIn`을 따로 보고하고 화면이 별도 줄로
+  "ClaudeRipple 로그인도 저장돼 있습니다"라고 말하게 했다.
+  (옛 기록)  — 토큰 엔드포인트는 스텁으로만 검증. 주군이 맥에서 GUI 버튼 한 번 눌러
   실측할 것 (claude.ai 로그인 → 콜백 → 프로바이더 카드 "ClaudeRipple 토큰"). 수동 모드(포트 점유 시)의 리다이렉트
   `console.anthropic.com/oauth/code/callback`이 이 클라이언트에 등록돼 있는지는 Claude Code의 동작으로 미루어
   짐작한 것이라 그것도 실측 대상.

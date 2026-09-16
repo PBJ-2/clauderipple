@@ -22,6 +22,11 @@ process. Nothing restarted it, and nothing could tell.
   model: Claude Code not pointed at ClaudeRipple, Anthropic unreachable, picker
   mode without certificate trust or the app proxy entry, a provider host that
   does not answer. The tray shows the list next to "Connected".
+- **The stored sign-in is reported separately from the one in use.** A live
+  Claude Desktop session outranks ClaudeRipple's own credential, so the provider
+  screen now names both: the source a request would use, and, on its own line,
+  whether a ClaudeRipple sign-in is stored and waiting behind it. Without this a
+  successful sign-in changed nothing on screen.
 - **HTML error pages are called out.** A provider that answers with a web page
   (a bare vendor domain, a login wall) is logged as "HTML page … not an API"
   instead of a quoted markup fragment.
