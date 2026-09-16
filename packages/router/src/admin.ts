@@ -33,6 +33,8 @@ import { readClaudeAuthFile } from "./providers/anthropic-token-file.ts";
 const MAX_BODY = 1024 * 1024;
 const here = path.dirname(fileURLToPath(import.meta.url));
 const STARTED_AT = new Date().toISOString();
+// packages/router/src → packages/ui in a checkout; dist/router/src → dist/ui in an npm install,
+// where the build copies the dashboard so this one path serves both layouts.
 const UI_ROOT = path.resolve(here, "../../ui");
 
 const MIME: Record<string, string> = {
@@ -329,7 +331,8 @@ function pickerTrust(): { caTrusted: boolean; appProxy: boolean } {
 function runCli(args: string[], timeout = 180_000): Promise<{ ok: boolean; output: string }> {
   return new Promise((resolveP) => {
     let node = process.execPath;
-    let cli = path.resolve(here, "../../cli/src/index.ts");
+    // Same walk either way; the extension says which layout this file was loaded from.
+    let cli = path.resolve(here, `../../cli/src/index${path.extname(fileURLToPath(import.meta.url))}`);
     let runtimeEnv: Record<string, string> = {};
     try {
       const p = JSON.parse(fs.readFileSync(path.join(homeDir(), "paths.json"), "utf8")) as { node?: string; env?: Record<string, string>; cli?: string };

@@ -4,6 +4,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 export type Runtime = {
   node: string;
@@ -12,6 +13,8 @@ export type Runtime = {
   router: string;
   hookScript: string;
   repo: string;
+  /** The tray's entry point, which differs between a packaged app, an npm install and a checkout. */
+  trayMain: string;
   packaged: boolean;
 };
 
@@ -33,6 +36,7 @@ export function runtime(): Runtime {
       router: path.join(resources, "packages", "router", "src", "index.ts"),
       hookScript: path.join(resources, "packages", "cli", "src", "hooks", "agent-title.ts"),
       repo: resources,
+      trayMain: "",
       packaged: true,
     };
   }
@@ -49,18 +53,26 @@ export function runtime(): Runtime {
       router: path.join(resources, "packages", "router", "src", "index.ts"),
       hookScript: path.join(resources, "packages", "cli", "src", "hooks", "agent-title.ts"),
       repo: resources,
+      trayMain: "",
       packaged: true,
     };
   }
 
-  const cli = path.resolve(path.dirname(process.argv[1] ?? process.cwd()), "index.ts");
+  // Development runs the .ts sources from the checkout; an npm install runs the .js built from
+  // them, in the same shape one level down (dist/cli/src instead of packages/cli/src). This
+  // module's own file answers both: its extension says which, and the rest is the same relative
+  // walk, so `repo` is the checkout root or the installed package root without a special case.
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const ext = path.extname(fileURLToPath(import.meta.url));
+  const cli = path.join(here, `index${ext}`);
   return {
     node: process.execPath,
     env: {},
     cli,
-    router: path.resolve(path.dirname(cli), "../../router/src/index.ts"),
-    hookScript: path.resolve(path.dirname(cli), "hooks/agent-title.ts"),
-    repo: path.resolve(path.dirname(cli), "../../.."),
+    router: path.resolve(here, `../../router/src/index${ext}`),
+    hookScript: path.resolve(here, `hooks/agent-title${ext}`),
+    repo: path.resolve(here, "../../.."),
+    trayMain: path.resolve(here, "../../..", ext === ".ts" ? "packages/app/dist/main.js" : "dist/app/dist/main.js"),
     packaged: false,
   };
 }

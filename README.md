@@ -98,38 +98,39 @@ you map go to your provider, everything else goes to Anthropic byte for byte.
 
 ## Install
 
-**macOS.** Download `ClaudeRipple-<version>-arm64.dmg` (Apple Silicon) or `-x64.dmg`
-(Intel) from [Releases](https://github.com/PBJ-2/clauderipple/releases), drag
-ClaudeRipple to Applications and open it.
+```sh
+npm install -g clauderipple
+clauderipple install
+```
 
-**Windows (x64).** Download `ClaudeRipple-Setup-<version>-x64.exe` and run it
-(per-user install, no administrator rights). Reinstalling over a running
-ClaudeRipple is fine: the installer stops the router gracefully first.
-`ClaudeRipple-<version>-win-x64.zip` is the same build unpacked, if you prefer.
-**Windows on arm64:** use the `-arm64.zip` — the arm64 installer is broken (below).
+Node 24 or newer, macOS or Windows. `install` creates a local certificate, adds two
+lines to `~/.claude/settings.json`, and registers a background router that starts
+with your computer. It needs no administrator rights and asks for no password.
 
-**Updating.** Install the new version the same way (or unpack the new zip
-anywhere) and open the app: from 0.1.2 on it notices that the router still
-running is the previous version and switches it over, with a notification.
-Until 0.1.2 nothing did that, so a 0.1.0/0.1.1 install keeps serving the old
-code until the router is restarted — and on those versions tray → **Restart
-Router** did not actually restart it on Windows. Sign out and back in (or
-reboot) once after installing 0.1.2; from then on the app handles it.
+Then open the dashboard and add a provider:
 
-> **Windows shows "Windows protected your PC".** The build is not code-signed —
-> a certificate costs $219–685/year and needs a hardware token, which this project
-> does not spend money on. Click **More info → Run anyway**. If you would rather
-> not, build from source; the result is identical.
+```sh
+clauderipple ui
+```
 
-> **The arm64 installer is broken.** On Windows 11 arm64 it installs everything
-> *except* the executables and reports success anyway, so the app will not start.
-> The arm64 zip does not have this problem. The x64 installer is verified on real
-> hardware.
+**Providers** → add ChatGPT or paste an API key → **Model mapping**.
 
-On first launch the app offers to set itself up: a local certificate, two lines in
-`~/.claude/settings.json`, and a background router that starts at login. No Node
-install needed. Then: tray icon → **Open Dashboard in Browser…** → **Providers** → add
-ChatGPT or paste an API key → **Model mapping**.
+**The menu-bar / tray app** is optional. It shows the router's state and opens the
+dashboard in a click:
+
+```sh
+clauderipple tray
+```
+
+It runs on Electron, which npm installs as an optional dependency. If you installed
+with `--omit=optional`, the command says so and everything else still works.
+
+**Updating.**
+
+```sh
+npm install -g clauderipple@latest
+clauderipple restart
+```
 
 Optional, for real names in the Desktop picker: **Clients → Claude Desktop → Model
 picker → on**, then quit and reopen Claude Desktop. To trust the local certificate

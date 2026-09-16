@@ -121,7 +121,10 @@ export function agentState(): "running" | "loaded" | "not-loaded" {
  */
 export function agentPid(): number | null {
   const r = run(
-    `(Get-CimInstance Win32_Process -Filter "Name='node.exe' OR Name='ClaudeRipple.exe'" | Where-Object { $_.CommandLine -like '*packages\\router\\src\\index.ts*' } | Select-Object -First 1).ProcessId`,
+    // Three layouts run the same router: a checkout (packages\router\src\index.ts), an npm
+    // install (dist\router\src\index.js) and the packaged app (the .ts under resources). Matching
+    // on "router\src\index." covers all three and still cannot match an unrelated process.
+    `(Get-CimInstance Win32_Process -Filter "Name='node.exe' OR Name='ClaudeRipple.exe'" | Where-Object { $_.CommandLine -like '*router\\src\\index.*' } | Select-Object -First 1).ProcessId`,
   );
   const n = Number(r.out.trim());
   return r.ok && Number.isFinite(n) && n > 0 ? n : null;

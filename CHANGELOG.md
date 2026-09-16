@@ -6,6 +6,19 @@ Why 0.1.1 did not help the Windows install that reported the 0.1.1 bugs: the
 fixes were in the files, but the router that kept answering was the old
 process. Nothing restarted it, and nothing could tell.
 
+### Changed
+
+- **Distribution is npm.** `npm install -g clauderipple && clauderipple install`.
+  There is no per-platform build to make, nothing to sign, nothing to notarize and
+  no Windows VM in the loop: one `npm publish` serves both platforms, and the
+  arm64 Windows installer bug cannot reach anyone through this path. The cost is
+  that the user needs Node 24. The published package is JavaScript, because Node
+  refuses to strip types under `node_modules`; the electron-builder path is still
+  there for a standalone app but is no longer required for a release.
+- **The tray is a command and an optional dependency.** `clauderipple tray` starts
+  the menu-bar / tray app using the Electron that npm installed for this platform.
+  Without it every other command still works.
+
 ### Added
 
 - **Claude subscription sign-in from the app.** "Connect Claude subscription…"

@@ -12,3 +12,5 @@ packages/app/build/*.iconset
 packages/app/release-dev/
 packages/app/release-win/
 packages/app/release-native/
+
+clauderipple-*.tgz

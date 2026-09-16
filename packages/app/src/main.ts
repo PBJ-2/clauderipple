@@ -412,7 +412,11 @@ function cliPaths(): CliRuntime {
   }
   // process.execPath is Electron: without ELECTRON_RUN_AS_NODE it launches a second app instead of
   // running the CLI, and that instance never exits (observed 2026-09-14 with no paths.json).
-  return { node: process.execPath, env: { ELECTRON_RUN_AS_NODE: "1" }, cli: path.resolve(__dirname, "..", "..", "cli", "src", "index.ts") };
+  // A checkout keeps the CLI two levels up as TypeScript; an npm install has the built JavaScript
+  // in the same place, since the tray is copied into the same tree it was built beside.
+  const nearby = [path.resolve(__dirname, "..", "..", "cli", "src", "index.ts"), path.resolve(__dirname, "..", "..", "cli", "src", "index.js")];
+  const cli = nearby.find((candidate) => fs.existsSync(candidate)) ?? nearby[0]!;
+  return { node: process.execPath, env: { ELECTRON_RUN_AS_NODE: "1" }, cli };
 }
 
 function runCli(args: string[]): Promise<string> {
