@@ -7,10 +7,11 @@
 <p align="center"><b>English</b> · <a href="README.ko.md">한국어</a></p>
 
 <p align="center">
-  <b>Use GPT and 400+ other models inside the Claude Desktop app you are already signed in to.</b><br>
-  Not the third-party gateway mode — the app stays in <b>1P</b>, so your Claude subscription,
-  claude.ai chat, connectors and Remote Control keep working<br>while GPT, DeepSeek, Kimi or Grok
-  answers in the <b>Code tab</b>. Claude inside the <b>Codex app</b> and <b>Codex CLI</b> too.
+  <b>Chat stays Claude. Only Code becomes GPT.</b><br>
+  Claude Desktop's own setting for other models switches the <b>whole app</b> — chat, phone Remote
+  Control and connectors go with it.<br>ClaudeRipple turns nothing off: you stay signed in to your
+  Claude subscription while GPT, DeepSeek, Kimi, Grok<br>or 400+ other models answer in the
+  <b>Code tab</b>. Claude inside the <b>Codex app</b> and <b>Codex CLI</b> too.
 </p>
 
 <p align="center">
@@ -63,6 +64,18 @@ subscription in 1P mode, and another model answers in the Code tab and its subag
 — under its real name in the model picker, at the reasoning effort you chose. You do
 not trade your Claude account for a GPT one. You keep both, in one app.
 
+Three things follow from staying in 1P, and no gateway-based tool can offer any of them:
+
+- **Code from your phone, on GPT.** Remote Control is off in 3P. It is on here, so you
+  can pick a model and send a task from a phone and watch the commits land.
+- **Connectors alive while another model works.** 3P stubs claude.ai calls, which takes
+  Anthropic's own connectors with them. Read a Google Drive doc and have GPT write the code.
+- **Cloud and side sessions.** Gone in 3P. Untouched here.
+
+If you pay for Claude, 3P is not an option — it throws away the half of the
+subscription you are paying for. This is the only way to keep it and still choose
+the model.
+
 ## One tool instead of four
 
 Similar tools are built for the terminal. They let the Claude Code CLI or Codex CLI
@@ -75,8 +88,8 @@ and claude.ai connectors keep working while another model does the thinking.
 
 | | ClaudeRipple | opencodex / openclaude | claude-code-router | Claude Desktop gateway (3P) mode |
 |---|---|---|---|---|
-| Claude **Desktop** Code tab | ✅ | ❌ | ❌ | ✅ |
-| Keeps claude.ai chat, Remote Control, cloud sessions | ✅ | ❌ | ❌ | ❌ |
+| Claude **Desktop** Code tab **without** gateway (3P) mode | ✅ | ❌ ¹ | ❌ | ❌ by definition |
+| Keeps claude.ai chat, Remote Control, cloud sessions, connectors | ✅ | ❌ | ❌ | ❌ |
 | Claude and GPT subscriptions side by side | ✅ | ❌ all-or-nothing | ❌ | ❌ |
 | Real model names in the Desktop picker | ✅ | ❌ | ❌ | partial |
 | Terminal `claude` CLI | ✅ | ✅ | ✅ | ✅ |
@@ -85,6 +98,10 @@ and claude.ai connectors keep working while another model does the thinking.
 | Subagents named by real model in the task panel | ✅ | ❌ | ❌ | ❌ |
 | Settings GUI, no terminal needed | ✅ | ❌ | ❌ | ❌ |
 | Signed, notarized app with its own runtime | ✅ | ❌ | ❌ | – |
+
+¹ opencodex's README shows Claude Desktop in a demo but publishes no setup steps for it,
+in the repository or on its documentation site (checked 2026-09-16). The only public way
+into the desktop app is the official gateway setting — the last column.
 
 The desktop app's own "third-party inference" setting flips the whole app into another
 mode: you lose claude.ai chat, Remote Control and cloud sessions. Tools that replace

@@ -7,10 +7,10 @@
 <p align="center"><a href="README.md">English</a> · <b>한국어</b></p>
 
 <p align="center">
-  <b>지금 로그인해 쓰고 있는 그 Claude Desktop 앱 안에서 GPT를 비롯한 400여 모델을 씁니다.</b><br>
-  타사 게이트웨이(3P) 모드가 아닙니다. 앱은 <b>1P</b>인 채로 남아 Claude 구독·claude.ai 채팅·커넥터·<br>
-  Remote Control이 전부 살아 있고, <b>Code 탭</b>에서는 GPT·DeepSeek·Kimi·Grok이 답합니다.
-  <b>Codex 앱</b>과 <b>Codex CLI</b>에서는 반대로 Claude를 씁니다.
+  <b>채팅은 Claude 그대로. Code만 GPT로.</b><br>
+  Claude Desktop의 타모델 설정은 <b>앱 전체</b>를 바꿔 버립니다. 채팅도, 폰 원격 조종도, 커넥터도 같이 사라집니다.<br>
+  ClaudeRipple은 아무것도 끄지 않습니다. Claude 구독에 로그인한 그대로 두고, <b>Code 탭</b>에서만
+  GPT·DeepSeek·Kimi·Grok 등<br>400여 모델이 답합니다. <b>Codex 앱</b>과 <b>Codex CLI</b>에서는 반대로 Claude를 씁니다.
 </p>
 
 <p align="center">
@@ -58,6 +58,17 @@ Claude Desktop에는 다른 모델을 쓰는 공식 경로가 이미 있습니�
 서브에이전트에서만 다른 모델이 답합니다. 모델 피커에 실제 이름으로 뜨고, 고른 추론 강도가 그대로 전달됩니다.
 Claude 계정을 GPT 계정과 맞바꾸는 것이 아니라, **한 앱에서 둘 다 갖는 것**입니다.
 
+1P에 남았기 때문에 되는 일이 셋 있습니다. 게이트웨이를 쓰는 도구는 어느 것도 줄 수 없습니다.
+
+- **폰에서 GPT에게 코딩 시키기.** 3P는 Remote Control을 끕니다. 여기서는 켜져 있으니, 침대에서 모델을 고르고
+  일을 시키고 커밋이 올라오는 것을 봅니다.
+- **커넥터를 붙인 채로 다른 모델 쓰기.** 3P는 claude.ai 호출을 막아 Anthropic이 만든 커넥터까지 함께 죽입니다.
+  구글 드라이브 문서를 읽으면서 GPT로 코딩하는 것은 1P에서만 됩니다.
+- **클라우드 세션과 사이드 세션.** 3P에서는 사라집니다. 여기서는 그대로입니다.
+
+Claude에 돈을 내고 있다면 3P는 선택지가 아닙니다. 낸 돈의 절반을 버리는 일이기 때문입니다.
+그 돈을 지키면서 모델을 고르는 방법은 이것뿐입니다.
+
 ## 네 개 대신 하나
 
 비슷한 도구들은 터미널용입니다. Claude Code CLI나 Codex CLI가 다른 모델을 쓰게는 해 주지만, Claude **데스크톱 앱**에는
@@ -67,8 +78,8 @@ ClaudeRipple은 데스크톱 앱·터미널·Codex를 메뉴 막대 앱 하나�
 
 | | ClaudeRipple | opencodex / openclaude | claude-code-router | Claude Desktop 게이트웨이(3P) 모드 |
 |---|---|---|---|---|
-| Claude **Desktop** Code 탭 | ✅ | ❌ | ❌ | ✅ |
-| claude.ai 채팅·Remote Control·클라우드 세션 유지 | ✅ | ❌ | ❌ | ❌ |
+| 게이트웨이(3P) 모드 **없이** Claude **Desktop** Code 탭 | ✅ | ❌ ¹ | ❌ | ❌ (정의상 불가) |
+| claude.ai 채팅·Remote Control·클라우드 세션·커넥터 유지 | ✅ | ❌ | ❌ | ❌ |
 | Claude 구독과 GPT 구독 나란히 | ✅ | ❌ 전부 아니면 전무 | ❌ | ❌ |
 | Desktop 피커에 실제 모델 이름 | ✅ | ❌ | ❌ | 일부 |
 | 터미널 `claude` CLI | ✅ | ✅ | ✅ | ✅ |
@@ -77,6 +88,9 @@ ClaudeRipple은 데스크톱 앱·터미널·Codex를 메뉴 막대 앱 하나�
 | 서브에이전트를 실제 모델 이름으로 표시 | ✅ | ❌ | ❌ | ❌ |
 | 터미널 없이 쓰는 설정 GUI | ✅ | ❌ | ❌ | ❌ |
 | 런타임 내장, 서명·공증된 앱 | ✅ | ❌ | ❌ | – |
+
+¹ opencodex는 README에 Claude Desktop 데모를 걸어 두었지만, 저장소에도 문서 사이트에도 설치 절차가 없습니다
+(2026-09-16 확인). 데스크톱 앱으로 들어가는 공개된 경로는 공식 게이트웨이 설정, 즉 마지막 칸뿐입니다.
 
 데스크톱 앱의 "서드파티 추론" 설정은 앱 전체를 다른 모드로 바꿔 버립니다. claude.ai 채팅, Remote Control,
 클라우드 세션을 잃습니다. `ANTHROPIC_BASE_URL`을 바꿔치기하는 도구들은 데스크톱 앱에 아예 닿지 못합니다.
