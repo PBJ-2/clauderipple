@@ -23,7 +23,7 @@ import { codexOff, codexOn } from "./codex.ts";
 import { ingressModels } from "../../router/src/ingress/models.ts";
 import { claudeLogin, claudeLogout, desktopClaudeCodeDirs } from "./claude-auth.ts";
 import { openBrowser } from "./browser.ts";
-import { startTray } from "./tray.ts";
+import { installTrayRuntime, startTray } from "./tray.ts";
 import { ClaudeOAuthSession } from "../../router/src/providers/claude-oauth.ts";
 
 function setPickerEnabled(enabled: boolean): void {
@@ -326,7 +326,7 @@ function help(): void {
   logs [-n N] [-f]
   config            print the config file path
   ui                open the dashboard in your browser
-  tray              start the menu-bar / tray app (needs the optional electron dependency)
+  tray [--install]  start the menu-bar / tray app (--install fetches Electron, ~270MB, once)
   login             sign in to ChatGPT (opens your browser; tokens stay in the home dir)
   logout            forget the ChatGPT login made with "login"
   claude-login      connect a Claude subscription in the browser (--setup-token: via \`claude setup-token\`; --manual: paste the code)
@@ -448,9 +448,9 @@ try {
       ui();
       break;
     case "tray": {
-      const started = startTray();
-      console.log(started.message);
-      if (!started.ok) process.exit(1);
+      const result = args.includes("--install") ? installTrayRuntime() : startTray();
+      console.log(result.message);
+      if (!result.ok) process.exit(1);
       break;
     }
     default:

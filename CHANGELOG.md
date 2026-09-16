@@ -15,9 +15,16 @@ process. Nothing restarted it, and nothing could tell.
   that the user needs Node 24. The published package is JavaScript, because Node
   refuses to strip types under `node_modules`; the electron-builder path is still
   there for a standalone app but is no longer required for a release.
-- **The tray is a command and an optional dependency.** `clauderipple tray` starts
-  the menu-bar / tray app using the Electron that npm installed for this platform.
-  Without it every other command still works.
+- **One command installs everything, Node included.** `curl … install.sh | sh` on
+  macOS, `irm … install.ps1 | iex` on Windows. The script uses a Node 24+ already
+  on PATH and otherwise downloads the official build into `~/.clauderipple/runtime`,
+  checked against the checksum nodejs.org publishes, then runs setup. The package
+  goes under its own prefix, so nothing needs elevation and uninstalling is one
+  directory. The Node version is resolved at install time rather than pinned.
+- **The tray is a command, and its runtime is fetched on request.** `clauderipple
+  tray` starts the menu-bar / tray app; `--install` fetches Electron the first
+  time. Electron is 270MB and is not a dependency, so a plain install is under a
+  megabyte and every other command works without it.
 
 ### Added
 

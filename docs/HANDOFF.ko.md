@@ -3,6 +3,46 @@
 > 다음 세션이 처음 읽을 문서. 기술 근거는 `docs/ARCHITECTURE.md`, 규칙은 `CLAUDE.md`,
 > 릴리스 절차는 `docs/RELEASE.md`.
 
+## ▶ 2026-09-16 (오후) — 배포를 npm으로 바꿨다
+
+**왜.** 릴리스마다 맥에서 서명·공증, Windows VM에서 별도 빌드(arm64 NSIS는 실행 파일을 빼먹는 고장 상태),
+파일 네 개 수동 업로드. 주군 판단으로 이 부담을 없애고 npm 단일 경로로 갔다.
+
+**구조.**
+- 루트 `package.json`이 게시 패키지(`clauderipple`)다. `bin/clauderipple.js`가 진입점.
+- **`node_modules` 아래의 .ts는 Node가 실행하지 않는다**(`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`,
+  직접 받아 보고 알았다). 그래서 `scripts/build-npm.mjs`가 `dist/`로 JS를 굽는다. 배치는 소스와 같은 모양이고
+  한 단계만 다르다(`packages/cli/src` ↔ `dist/cli/src`). `runtime.ts`가 **자기 파일의 확장자**로 어느 배치인지
+  판별하므로 체크아웃·npm·패키지 앱 셋 다 같은 코드로 돈다.
+- `schtasks.agentPid()`의 매칭을 `router\src\index.` 로 넓혔다. 안 그러면 npm 설치본에서 `restart`가 또
+  거짓 보고한다.
+- 트레이는 `clauderipple tray`. Electron은 **의존성이 아니다**(270MB). `tray --install`이 그때 받아 온다.
+  기본 설치 828KB, 0.2초. Electron 받은 뒤 기동까지 실측 확인.
+
+**설치 스크립트.** `scripts/install.sh`(macOS·Linux), `scripts/install.ps1`(Windows). GitHub raw로 제공하므로
+호스팅이 필요 없다. PATH에 Node 24+가 있으면 그대로 쓰고, 없으면 nodejs.org 공식 빌드를
+`~/.clauderipple/runtime`에 받아 **SHASUMS256.txt와 대조한 뒤** 푼다. 버전은 `dist/index.json`에서 최신 24.x를
+조회하고 실패 시에만 스크립트의 핀(v24.21.0)을 쓴다.
+
+**함정 둘 (실측으로 잡았다).**
+1. `download_node`가 `say`로 진행 상황을 stdout에 찍는데 `NODE="$(download_node)"`로 받으면 그 문구가 경로에
+   섞인다. 결과를 stdout으로 돌려주지 말고 약속된 위치(`$RUNTIME/bin/node`)에 두게 고쳤다.
+2. npm이 만드는 명령 링크의 셔뱅은 `env node`다. **우리가 받은 Node가 그 컴퓨터의 유일한 Node면 PATH에 없어서
+   명령이 시작조차 안 된다.** 설치는 성공하고 실행만 안 되는, 가장 나쁜 형태. Node를 우리가 받은 경우에는
+   그 Node를 직접 가리키는 래퍼 스크립트로 교체한다.
+
+**검증한 것 (macOS arm64).** Node 없는 환경(`env -i`)에서 다운로드→체크섬→설치→실행까지, Node 있는 환경에서
+건너뛰기, 격리 홈·포트로 `install`(인증서·설정·launchd·라우터·종단 프로브)→대시보드 200→`uninstall --purge`,
+`tray --install`→`tray` 기동.
+
+**검증 못 한 것.**
+- **`scripts/install.ps1`은 한 줄도 실행해 보지 못했다.** 이 맥에 PowerShell이 없다. 문법 검사조차 못 했다.
+  Windows에서 첫 실행 시 반드시 손으로 확인할 것. 특히 ① `npm install --global --prefix`가 Windows에서는
+  명령을 prefix 루트에 두는 것(`$Prefix\clauderipple.cmd`)을 전제로 했는데 맞는지, ② 사용자 PATH 등록,
+  ③ `irm | iex` 실행 정책.
+- npm에 **아직 게시하지 않았다.** 주군 승인 대기.
+- Windows에서 npm 설치본의 작업 스케줄러 등록·재시작 동작.
+
 ## ▶ 2026-09-16 — 0.1.1이 Windows 신고자에게 안 먹힌 이유와 0.1.2 (미배포)
 
 디씨 댓글(thesingularity 1422778)의 Windows 사용자는 0.1.1을 받고도 DeepSeek 401이 그대로였다.

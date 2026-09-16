@@ -8,9 +8,25 @@
 - 플랫폼별 산출물이 없습니다. 게시하는 것은 JavaScript 한 벌이고, macOS와 Windows가 같은 파일을 받습니다.
 - 서명·공증이 사라집니다. Apple Developer 인증서도, Windows 코드 서명 인증서(연 219~685달러, 하드웨어 토큰)도
   필요 없습니다. SmartScreen 경고도 없습니다.
-- 트레이에 필요한 Electron은 npm이 선택적 의존성으로 플랫폼에 맞는 바이너리를 받아 옵니다. 우리가 굽지 않습니다.
+- 트레이에 필요한 Electron은 npm이 플랫폼에 맞는 바이너리를 받아 옵니다. 우리가 굽지 않습니다. 다만 270MB라
+  의존성에 넣지 않았습니다. 기본 설치는 828KB이고, `clauderipple tray --install`을 눌렀을 때만 받습니다(실측).
 
-대가는 하나입니다. **사용자에게 Node 24가 필요합니다.**
+사용자에게 Node 24가 필요하지만, 설치 스크립트가 없으면 대신 깔아 줍니다.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/PBJ-2/clauderipple/main/scripts/install.sh | sh   # macOS
+irm https://raw.githubusercontent.com/PBJ-2/clauderipple/main/scripts/install.ps1 | iex        # Windows
+```
+
+`scripts/install.sh`와 `scripts/install.ps1`은 GitHub raw로 그대로 제공되므로 별도 호스팅이 없습니다.
+두 스크립트 모두 PATH의 Node 24 이상을 먼저 찾고, 없을 때만 nodejs.org의 공식 빌드를
+`~/.clauderipple/runtime`에 내려받아 **SHASUMS256.txt와 대조한 뒤** 풉니다. 패키지는 시스템 Node 설치본이
+아니라 `~/.clauderipple` 아래에 넣기 때문에 권한 문제(EACCES)가 없고, 제거는 디렉터리 하나를 지우는 일입니다.
+Node를 우리가 내려받은 경우에는 npm이 만든 `env node` 셔뱅 링크 대신 그 Node를 직접 가리키는 래퍼를
+써 넣습니다. 그러지 않으면 설치는 되는데 명령이 시작되지 않습니다(실측).
+
+**Node 버전은 스크립트에 박지 않습니다.** 설치 시점에 `https://nodejs.org/dist/index.json`에서 최신 24.x를
+읽고, 그 조회가 실패할 때만 스크립트의 핀 값을 씁니다. 핀 값은 가끔 올려 두면 됩니다.
 
 ## 게시 절차
 

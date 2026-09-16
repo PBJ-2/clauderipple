@@ -85,13 +85,29 @@ ClaudeRipple은 Claude Code 프로세스만 신뢰하는 작은 HTTPS 프록시�
 
 ## 설치
 
+**macOS**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/PBJ-2/clauderipple/main/scripts/install.sh | sh
+```
+
+**Windows** (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/PBJ-2/clauderipple/main/scripts/install.ps1 | iex
+```
+
+준비물은 없습니다. 이미 Node 24 이상이 있으면 그것을 쓰고, 없으면 공식 빌드를 `~/.clauderipple/runtime`에
+내려받습니다. 내려받은 파일은 nodejs.org가 공개한 체크섬과 대조합니다. 그다음 설치까지 마칩니다. 로컬 인증서,
+`~/.claude/settings.json` 두 줄, 컴퓨터를 켤 때 함께 뜨는 백그라운드 라우터. 관리자 권한도, 암호 입력도 필요
+없습니다.
+
+Node가 이미 있으면 스크립트를 건너뛰어도 됩니다.
+
 ```sh
 npm install -g clauderipple
 clauderipple install
 ```
-
-Node 24 이상, macOS와 Windows. `install`이 로컬 인증서를 만들고, `~/.claude/settings.json`에 두 줄을 넣고,
-컴퓨터를 켤 때 함께 뜨는 백그라운드 라우터를 등록합니다. 관리자 권한도, 암호 입력도 필요 없습니다.
 
 그다음 대시보드를 열어 프로바이더를 추가합니다.
 
@@ -107,8 +123,8 @@ clauderipple ui
 clauderipple tray
 ```
 
-Electron으로 도는데, npm이 선택적 의존성으로 알아서 받습니다. `--omit=optional`로 설치하셨다면 이 명령이
-그 사실을 알려주고, 나머지 기능은 그대로 동작합니다.
+Electron으로 도는데 용량이 270MB라 기본 설치에는 넣지 않았습니다. `clauderipple tray --install`이 한 번만
+받아 옵니다. 나머지 기능은 Electron 없이도 다 돕니다.
 
 **업데이트.**
 

@@ -98,14 +98,30 @@ you map go to your provider, everything else goes to Anthropic byte for byte.
 
 ## Install
 
+**macOS**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/PBJ-2/clauderipple/main/scripts/install.sh | sh
+```
+
+**Windows** (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/PBJ-2/clauderipple/main/scripts/install.ps1 | iex
+```
+
+That is the whole prerequisite list. The script uses a Node 24+ you already have, and
+downloads the official build into `~/.clauderipple/runtime` when you have none,
+verifying it against the checksum nodejs.org publishes. Then it sets ClaudeRipple up:
+a local certificate, two lines in `~/.claude/settings.json`, and a background router
+that starts with your computer. No administrator rights, no password.
+
+With Node already installed you can skip the script:
+
 ```sh
 npm install -g clauderipple
 clauderipple install
 ```
-
-Node 24 or newer, macOS or Windows. `install` creates a local certificate, adds two
-lines to `~/.claude/settings.json`, and registers a background router that starts
-with your computer. It needs no administrator rights and asks for no password.
 
 Then open the dashboard and add a provider:
 
@@ -122,8 +138,8 @@ dashboard in a click:
 clauderipple tray
 ```
 
-It runs on Electron, which npm installs as an optional dependency. If you installed
-with `--omit=optional`, the command says so and everything else still works.
+It runs on Electron, which is about 270MB and is therefore not installed by default.
+`clauderipple tray --install` fetches it once; everything else works without it.
 
 **Updating.**
 
