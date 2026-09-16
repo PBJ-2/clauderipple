@@ -252,11 +252,33 @@ chat is out of reach for every approach, ours included.
   reads are cached for 60 seconds; ClaudeRipple **never refreshes or writes**
   Claude Code's own credential. Expiry becomes OpenAI-style 401 `Claude Code
   login expired — open Claude Code once to refresh`.
-- `clauderipple claude-login` runs the locally installed `claude setup-token`
-  browser flow and stores only its resulting long-lived token in
-  `<home>/claude-auth.json` with mode `0600`; `claude-logout` removes that file.
-  The command first finds `claude` on PATH, then the newest Desktop-bundled CLI.
-  It never prints the token. `setup-token` availability is CLI-version dependent.
+- `clauderipple claude-login` (0.1.2) is ClaudeRipple's own browser sign-in:
+  the OAuth authorization-code flow with PKCE (S256) against Claude Code's
+  public client, `https://claude.ai/oauth/authorize` →
+  `https://api.anthropic.com/v1/oauth/token`, scopes `org:create_api_key
+  user:profile user:inference`. The code returns to a loopback listener on
+  `localhost:54545/callback`; when that port is taken (or `--manual`), the
+  redirect is Anthropic's paste-the-code page and the user pastes `code#state`
+  (or the redirect URL). State and PKCE verifier are per attempt; a callback
+  with the wrong state is refused without ending the attempt; an attempt
+  expires after 5 minutes. The grant (access + refresh token, expiry) is stored
+  only in `<home>/claude-auth.json` (mode `0600`) as `source: "oauth"`; the
+  ingress refreshes it up to 5 minutes before expiry (one refresh shared by
+  concurrent requests) and a failed refresh becomes a clear 401 rather than a
+  dead token. The GUI drives the same flow through `POST/GET /api/claude-oauth`
+  and `POST /api/claude-oauth/code`; no token value ever appears in an admin
+  response or a log line. `--setup-token` keeps the previous path (`claude
+  setup-token` from a terminal, long-lived token, `source: "setup-token"`).
+  `claude-logout` removes the file either way. Wire facts are behaviorally
+  measured (the reference implementations do the same flow); they are not an
+  Anthropic guarantee, and reuse of a subscription is subject to its terms.
+- Readiness vs liveness (0.1.2): `/api/status.readiness` and `GET /readyz`
+  (200 or 503 + `retry-after: 5`) list what stands between a request and a
+  model: `settings` (Claude Code not pointed at us), `upstream` (consecutive
+  connect failures), `picker-ca` / `picker-proxy` (picker mode without trust or
+  the app proxy entry), `provider:<name>` (TCP unreachable). The tray shows the
+  list in its detail line. A router that answers is alive; only an empty list
+  means it is ready.
 - **OAuth wire behavior (behavioral-spec evidence; not documented public API
   contract):** the behavior-only OpenCodex source uses `Authorization: Bearer`,
   `anthropic-version: 2023-06-01`,

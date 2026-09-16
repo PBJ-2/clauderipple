@@ -801,10 +801,46 @@ function openAnthropicProviderForm(options) {
     finally { probeButton.disabled = false; }
   }
   probeButton.addEventListener("click", () => void runProbe());
-  subscriptionActions.children[0].addEventListener("click", async () => {
-    try { const response = await api("/api/claude-login", { method: "POST" }); result.replaceChildren(el("span", { class: "ok-text", text: t("providers.anthropicLoginDone") }), el("div", { class: "small", text: response.output })); await runProbe(); }
-    catch (error) { result.replaceChildren(el("span", { class: "bad-text", text: t("common.actionFailed") }), el("div", { class: "small", text: error.message })); }
-  });
+  // Our own browser sign-in (PKCE): start it, show the link in case no window opened, poll until the
+  // router has the credential. When the loopback port is taken the code is pasted here instead.
+  let signInPoll = null;
+  function renderSignIn(state) {
+    const parts = [el("div", { text: state.manual ? t("providers.anthropicSignInPaste") : t("providers.anthropicSignInBrowser") })];
+    if (state.url) parts.push(el("a", { href: state.url, target: "_blank", rel: "noreferrer", text: t("providers.anthropicSignInLink") }));
+    if (state.manual) {
+      const codeInput = el("input", { type: "text", autocomplete: "off", placeholder: "code#state" });
+      const submit = el("button", { class: "btn secondary", type: "button", text: t("providers.anthropicSignInSubmit") });
+      submit.addEventListener("click", async () => {
+        submit.disabled = true;
+        try { const done = await api("/api/claude-oauth/code", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: codeInput.value }) }); finishSignIn(done); }
+        catch (error) { finishSignIn({ ok: false, error: (error.body && error.body.error) || error.message }); }
+      });
+      parts.push(el("div", { class: "key-control" }, [codeInput, submit]));
+    } else parts.push(el("div", { class: "small", text: t("providers.anthropicSignInWaiting") }));
+    const cancel = el("button", { class: "btn secondary", type: "button", text: t("common.cancel") });
+    cancel.addEventListener("click", async () => { clearInterval(signInPoll); await api("/api/claude-oauth/cancel", { method: "POST" }).catch(() => {}); result.replaceChildren(); });
+    parts.push(cancel);
+    result.replaceChildren(el("div", { class: "sign-in" }, parts));
+  }
+  function finishSignIn(state) {
+    clearInterval(signInPoll);
+    if (state.ok) { result.replaceChildren(el("span", { class: "ok-text", text: t("providers.anthropicLoginDone") })); void runProbe(); return; }
+    const retry = el("button", { class: "btn secondary", type: "button", text: t("providers.anthropicSignInManual") });
+    retry.addEventListener("click", () => void startSignIn(true));
+    result.replaceChildren(el("span", { class: "bad-text", text: t("providers.anthropicSignInFailed") }), el("div", { class: "small", text: state.error || "" }), retry);
+  }
+  async function startSignIn(manual) {
+    clearInterval(signInPoll);
+    try {
+      const state = await api("/api/claude-oauth", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ manual: Boolean(manual) }) });
+      renderSignIn(state);
+      signInPoll = setInterval(async () => {
+        try { const now = await api("/api/claude-oauth"); if (!now.running) finishSignIn(now); }
+        catch { /* the router may be busy; keep polling */ }
+      }, 2000);
+    } catch (error) { result.replaceChildren(el("span", { class: "bad-text", text: t("common.actionFailed") }), el("div", { class: "small", text: error.message })); }
+  }
+  subscriptionActions.children[0].addEventListener("click", () => void startSignIn(false));
   subscriptionActions.children[1].addEventListener("click", async () => {
     try { const response = await api("/api/claude-logout", { method: "POST" }); result.replaceChildren(el("span", { class: "ok-text", text: response.output })); await runProbe(); }
     catch (error) { toast(t("common.actionFailed"), true, error.message); }

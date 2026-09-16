@@ -34,6 +34,22 @@ GitHub의 0.1.1 zip을 직접 받아 확인: 헤더 수정·Haiku 수정 **전�
   (이 부분은 "조사만 하라"고 보낸 GPT 서브에이전트가 지시를 어기고 저장소를 고친 결과다 — CLAUDE.md의
   지시 유실 경고 그대로. 내용은 검토 후 채택했고 테스트 142개 통과. 다음에도 조사 위임 후 `git status`를 확인할 것.)
 
+**오픈코덱스 해부 후 같은 날 추가한 것 (커밋 2건째):**
+- **Claude 구독 브라우저 로그인** `packages/router/src/providers/claude-oauth.ts`: Claude Code 공개 클라이언트로 PKCE
+  OAuth. 콜백은 `localhost:54545/callback`, 포트가 막히면 Anthropic의 코드 표시 페이지 → `code#state` 붙여넣기.
+  파일은 `<home>/claude-auth.json` `source:"oauth"`(access+refresh+expiresAt), 인그레스가 만료 5분 전에 자동 갱신
+  (`ClaudeCodeAuthStore.refreshIfNeeded`, 동시 호출 1회 공유). GUI는 `POST/GET /api/claude-oauth`,
+  `POST /api/claude-oauth/code`, `/cancel`. CLI `claude-login`이 기본 이 흐름, `--setup-token`이 옛 경로.
+  **실제 Anthropic 상대로는 안 돌려봤다** — 토큰 엔드포인트는 스텁으로만 검증. 주군이 맥에서 GUI 버튼 한 번 눌러
+  실측할 것 (claude.ai 로그인 → 콜백 → 프로바이더 카드 "ClaudeRipple 토큰"). 수동 모드(포트 점유 시)의 리다이렉트
+  `console.anthropic.com/oauth/code/callback`이 이 클라이언트에 등록돼 있는지는 Claude Code의 동작으로 미루어
+  짐작한 것이라 그것도 실측 대상.
+- **readiness** `/readyz`·`status.readiness.problems` (settings·upstream·picker-ca·picker-proxy·provider:<name>),
+  트레이 상세 줄에 표시. 인증서 신뢰 조회는 60초 메모.
+- 프로바이더가 HTML을 주면 "HTML page … not an API"로 기록.
+- ⚠️ 테스트에서 `claude-login`을 `--setup-token` 없이 돌리면 **진짜 브라우저가 열린다** (한 번 그랬다, 5분 대기 후
+  실패). 테스트는 반드시 `--setup-token`으로.
+
 **Windows 릴리스 빌드는 이 맥에서 못 만든다** (RELEASE.md: Windows에서 빌드). 0.1.2 태그·릴리스는 VM에서.
 
 ## ▶ 2026-09-14 밤 — 아래 4건 전부 처리됨 (실기 검증 완료)
@@ -306,7 +322,7 @@ JSON 파일을 그것으로 쓰지 말 것(`@electron/rebuild`가 파싱 못 해
 ## 2026-09-13 밤 2 — M4 완료
 - **OpenAI 입구**(`packages/router/src/ingress`, 포트 8793): Codex CLI가 `clauderipple codex on`으로 우리 라우터를 향하고 Claude를
   구독 로그인으로 쓴다. 실측: `CODEX_HOME=/tmp/… codex exec --profile clauderipple -m claude-haiku-4-5-20251001 "Reply ok"` → "ok".
-  구독 자격증명 우선순위: 프록시 트래픽에서 관찰(메모리, 12h) → env → 키체인 → ~/.claude/.credentials.json → `<home>/claude-auth.json`(setup-token).
+  구독 자격증명 우선순위: 프록시 트래픽에서 관찰(메모리, 12h) → env → 키체인 → ~/.claude/.credentials.json → `<home>/claude-auth.json`(setup-token 또는 0.1.2부터 자체 OAuth, 자동 갱신).
   **라우터 재시작 직후엔 관찰 토큰이 없어 Code 탭 요청이 한 번 지나가야 한다**(파일 지속화 추가 예정/완료 여부는 git log 확인).
 - **openai-compatible 프로바이더**(`providers/openai`): Grok·Mistral·Groq·Together·Fireworks·Ollama·LM Studio 프리셋. 실키 검증 없음(401 경로만).
 - **모델별 effort**: OpenRouter `supported_parameters`로 모델별 강도 지원 저장·표시·클램프.

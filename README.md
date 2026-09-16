@@ -179,8 +179,10 @@ codex --profile clauderipple -m claude-sonnet-5
 
 Claude models show up in Codex's model list under their names (ClaudeRipple writes
 a model catalog next to Codex's own). Claude is reached through your Claude Code
-login (detected from the running Desktop session, the terminal login, or one
-created with `clauderipple claude-login`) or an Anthropic API key. Reusing a
+login (detected from the running Desktop session, the terminal login, or a
+sign-in of ClaudeRipple's own: **Providers → Claude → Connect Claude
+subscription…** opens the browser, no terminal needed; the same as
+`clauderipple claude-login`) or an Anthropic API key. Reusing a
 subscription login is subject to Anthropic's terms. Any Anthropic-compatible
 provider you configured is available the same way.
 

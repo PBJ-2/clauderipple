@@ -19,7 +19,12 @@ function makeCfg(overrides: Partial<Config> = {}): Config {
 async function withAdmin(
   cfgInit: Config,
   fn: (ctx: { port: number; configFile: string; home: string; setCfg: (c: Config) => void }) => Promise<void>,
-  extraDeps: { shutdown?: () => void; runCli?: (args: string[], timeout?: number) => Promise<{ ok: boolean; output: string }> } = {},
+  extraDeps: {
+    shutdown?: () => void;
+    runCli?: (args: string[], timeout?: number) => Promise<{ ok: boolean; output: string }>;
+    claudeOAuthFetch?: (url: string, init: RequestInit) => Promise<Response>;
+    openBrowser?: (url: string) => boolean;
+  } = {},
 ): Promise<void> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-admin-"));
   const prevHome = process.env.CLAUDERIPPLE_HOME;
@@ -63,6 +68,58 @@ function rawGet(port: number, rawPath: string): Promise<{ status: number; body: 
     req.end();
   });
 }
+
+test("the Claude subscription sign-in runs from the GUI: start, state, pasted code, stored credential, nothing echoed", async () => {
+  const opened: string[] = [];
+  const calls: Record<string, unknown>[] = [];
+  const claudeOAuthFetch = async (_url: string, init: RequestInit): Promise<Response> => {
+    calls.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+    return new Response(JSON.stringify({ access_token: "at-secret", refresh_token: "rt-secret", expires_in: 3600 }), { status: 200 });
+  };
+  await withAdmin(makeCfg(), async ({ port, home }) => {
+    const idle = (await (await fetch(`${base()}:${port}/api/claude-oauth`)).json()) as { running: boolean; source: string | null };
+    assert.equal(idle.running, false);
+    const started = await fetch(`${base()}:${port}/api/claude-oauth`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ manual: true }) });
+    const state = (await started.json()) as { running: boolean; url: string; manual: boolean; opened: boolean };
+    assert.equal(started.status, 200);
+    assert.equal(state.running, true);
+    assert.equal(state.manual, true);
+    assert.equal(state.opened, true);
+    assert.equal(opened[0], state.url);
+    assert.match(state.url, /^https:\/\/claude\.ai\/oauth\/authorize\?/);
+    // A second start while one is running returns the same attempt instead of a new browser tab.
+    await fetch(`${base()}:${port}/api/claude-oauth`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    assert.equal(opened.length, 1);
+    const oauthState = new URL(state.url).searchParams.get("state");
+    const done = await fetch(`${base()}:${port}/api/claude-oauth/code`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: `abc#${oauthState}` }) });
+    assert.equal(done.status, 200);
+    const finished = (await done.json()) as { running: boolean; ok: boolean };
+    assert.equal(finished.running, false);
+    assert.equal(finished.ok, true);
+    assert.equal(calls[0]?.grant_type, "authorization_code");
+    const stored = JSON.parse(fs.readFileSync(path.join(home, "claude-auth.json"), "utf8")) as { source: string; token: string };
+    assert.equal(stored.source, "oauth");
+    assert.equal(stored.token, "at-secret");
+    const after = (await (await fetch(`${base()}:${port}/api/claude-oauth`)).json()) as { source: string | null };
+    assert.equal(after.source, "token-file");
+    assert.doesNotMatch(JSON.stringify(after), /at-secret|rt-secret/);
+    const nothingWaiting = await fetch(`${base()}:${port}/api/claude-oauth/code`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: "x" }) });
+    assert.equal(nothingWaiting.status, 409);
+  }, { claudeOAuthFetch, openBrowser: (url) => { opened.push(url); return true; } });
+});
+
+test("/readyz separates readiness from liveness and names each problem", async () => {
+  await withAdmin(makeCfg({ providers: { p: { type: "anthropic-compatible", url: "http://127.0.0.1:1" } } }), async ({ port }) => {
+    const res = await fetch(`${base()}:${port}/readyz`);
+    assert.equal(res.status, 503);
+    assert.equal(res.headers.get("retry-after"), "5");
+    const body = (await res.json()) as { ready: boolean; problems: string[] };
+    assert.equal(body.ready, false);
+    assert.ok(body.problems.includes("provider:p"), body.problems.join(","));
+    const status = (await (await fetch(`${base()}:${port}/api/status`)).json()) as { readiness: { ready: boolean; problems: string[] } };
+    assert.deepEqual(status.readiness, body);
+  });
+});
 
 test("GET /api/status returns a snapshot", async () => {
   await withAdmin(makeCfg({ providers: { p: { type: "anthropic-compatible", url: "http://127.0.0.1:1" } } }), async ({ port }) => {

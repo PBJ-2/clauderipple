@@ -9,7 +9,8 @@ import os from "node:os";
 import path from "node:path";
 import type { AnthropicProvider } from "../config.ts";
 import { type ObservedClaudeCodeAuth, type ObservedClaudeCodeAuthSnapshot } from "./anthropic-observed.ts";
-import { readClaudeAuthFile } from "./anthropic-token-file.ts";
+import { readClaudeAuthFile, saveClaudeOAuthFile } from "./anthropic-token-file.ts";
+import { CLAUDE_OAUTH, refreshClaudeOAuth, type FetchLike } from "./claude-oauth.ts";
 
 export const CLAUDE_CODE_OAUTH_BETA = "claude-code-20250219,oauth-2025-04-20";
 export const CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
@@ -28,6 +29,9 @@ export type ClaudeCodeAuthOptions = {
   home?: string;
   env?: NodeJS.ProcessEnv;
   now?: () => number;
+  /** Test seam for the OAuth refresh. */
+  fetch?: FetchLike;
+  log?: (line: string) => void;
 };
 
 function claudeConfigDir(): string {
@@ -103,6 +107,9 @@ export class ClaudeCodeAuthStore {
   private readonly home: string;
   private readonly env: NodeJS.ProcessEnv;
   private readonly now: () => number;
+  private readonly fetchImpl: FetchLike | undefined;
+  private readonly log: (line: string) => void;
+  private refreshing: Promise<void> | null = null;
 
   constructor(credentials = new ClaudeCodeCredentialStore(), options: ClaudeCodeAuthOptions = {}) {
     this.credentials = credentials;
@@ -110,6 +117,8 @@ export class ClaudeCodeAuthStore {
     this.home = options.home ?? (process.env.CLAUDERIPPLE_HOME?.trim() || path.join(os.homedir(), ".clauderipple"));
     this.env = options.env ?? process.env;
     this.now = options.now ?? Date.now;
+    this.fetchImpl = options.fetch;
+    this.log = options.log ?? (() => {});
   }
 
   get(): ClaudeCodeAuth | Error {
@@ -120,8 +129,40 @@ export class ClaudeCodeAuthStore {
     const stored = this.credentials.get();
     if (!(stored instanceof Error)) return { source: "stored", credentials: stored };
     const tokenFile = readClaudeAuthFile(this.home);
-    if (tokenFile) return { source: "token-file", credentials: { accessToken: tokenFile.token, expiresAt: Number.POSITIVE_INFINITY } };
+    if (tokenFile?.source === "setup-token") return { source: "token-file", credentials: { accessToken: tokenFile.token, expiresAt: Number.POSITIVE_INFINITY } };
+    if (tokenFile?.source === "oauth") {
+      if (this.now() >= tokenFile.expiresAt) return new Error("ClaudeRipple's Claude sign-in expired and could not be refreshed — connect the subscription again");
+      return { source: "token-file", credentials: { accessToken: tokenFile.token, expiresAt: tokenFile.expiresAt } };
+    }
     return stored;
+  }
+
+  /**
+   * Refreshes our own OAuth grant when it is about to expire. Only ClaudeRipple's file is ever
+   * written; Claude Code's credential is never refreshed (rotation would invalidate its copy).
+   * Concurrent callers share one refresh. Failures are logged and leave the file as it was, so
+   * get() reports the expiry once it arrives.
+   */
+  refreshIfNeeded(): Promise<void> {
+    if (this.refreshing) return this.refreshing;
+    // Higher-precedence sources make the file irrelevant; do not touch the network for it.
+    if (this.observed?.getFresh(this.now()) || this.env.CLAUDE_CODE_OAUTH_TOKEN?.trim() || !(this.credentials.get() instanceof Error)) return Promise.resolve();
+    const tokenFile = readClaudeAuthFile(this.home);
+    if (tokenFile?.source !== "oauth" || this.now() < tokenFile.expiresAt - CLAUDE_OAUTH.refreshLeadMs) return Promise.resolve();
+    this.refreshing = refreshClaudeOAuth(tokenFile.refreshToken, { ...(this.fetchImpl ? { fetch: this.fetchImpl } : {}), now: this.now })
+      .then(
+        (grant) => {
+          saveClaudeOAuthFile(this.home, grant, tokenFile.createdAt);
+          this.log(`claude oauth: access token refreshed, valid until ${new Date(grant.expiresAt).toISOString()}`);
+        },
+        (error: Error) => {
+          this.log(`claude oauth: refresh failed: ${error.message}`);
+        },
+      )
+      .finally(() => {
+        this.refreshing = null;
+      });
+    return this.refreshing;
   }
 
   /**

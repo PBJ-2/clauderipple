@@ -17,7 +17,7 @@ test("claude-login invokes PATH claude setup-token and saves only a 0600 credent
   fs.writeFileSync(fake, `#!/bin/sh\n[ "$1" = "setup-token" ] || exit 64\nprintf 'CLAUDE_CODE_OAUTH_TOKEN=%s\\n' '${token}'\n`);
   fs.chmodSync(fake, 0o755);
   const cli = path.resolve(import.meta.dirname, "..", "src", "index.ts");
-  const output = execFileSync(process.execPath, [cli, "claude-login"], {
+  const output = execFileSync(process.execPath, [cli, "claude-login", "--setup-token"], {
     encoding: "utf8",
     env: { ...process.env, PATH: bin, CLAUDERIPPLE_HOME: home, CLAUDERIPPLE_ASSUME_TTY: "1" },
   });

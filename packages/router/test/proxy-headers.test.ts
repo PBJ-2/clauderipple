@@ -148,6 +148,7 @@ test("errorSnippet decodes gzip, masks bearer tokens and explicit opaque credent
   assert.match(reflected, /provider rejected \[REDACTED\]/);
   assert.doesNotMatch(reflected, /vendor_key/);
   assert.equal(errorSnippet(Buffer.alloc(0), undefined), "(empty body)");
+  assert.match(errorSnippet(Buffer.from("<html><body>Sign in</body></html>"), undefined, [], "text/html; charset=utf-8"), /^HTML page \(\d+B\)/);
   assert.ok(errorSnippet(Buffer.from("x".repeat(1000)), undefined).length <= 301);
 });
 

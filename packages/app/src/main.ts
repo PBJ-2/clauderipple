@@ -12,6 +12,8 @@ type Status = {
   version: string;
   /** Reported from 0.1.2 on; an older router leaves it out. */
   runtime?: { node: string; router: string | null; startedAt: string };
+  /** Reported from 0.1.2 on: whether requests can actually go through, and what is in the way. */
+  readiness?: { ready: boolean; problems: ("settings" | "upstream" | "picker-ca" | "picker-proxy" | `provider:${string}`)[] };
   listen: { host: string; port: number };
   adminPort: number;
   stats: { started: number; completed: number; failed: number; inFlight: number };
@@ -69,6 +71,13 @@ const STRINGS = {
     updatedTitle: (v: string) => `ClaudeRipple ${v}`,
     updatedRestarting: (from: string) => `The running router is ${from}. Switching it to this version…`,
     updatedFailed: "The router could not be switched to this version",
+    problem: (code: string) =>
+      code === "settings" ? "Claude Code is not pointed at ClaudeRipple"
+      : code === "upstream" ? "Anthropic is unreachable"
+      : code === "picker-ca" ? "picker mode: certificate not trusted"
+      : code === "picker-proxy" ? "picker mode: Claude Desktop proxy not set"
+      : code.startsWith("provider:") ? `provider ${code.slice(9)} unreachable`
+      : code,
     about: "About ClaudeRipple",
     aboutDetail:
       "Run GPT and other models inside Claude Desktop, without turning Claude off.\n\nIndependent open-source project (GPL-3.0). Not affiliated with, endorsed by, or sponsored by Anthropic or OpenAI. Claude and Claude Code are trademarks of Anthropic, PBC.",
@@ -131,6 +140,13 @@ const STRINGS = {
     updatedTitle: (v: string) => `ClaudeRipple ${v}`,
     updatedRestarting: (from: string) => `지금 떠 있는 라우터는 ${from}입니다. 이 버전으로 바꿉니다…`,
     updatedFailed: "라우터를 이 버전으로 바꾸지 못했습니다",
+    problem: (code: string) =>
+      code === "settings" ? "Claude Code가 ClaudeRipple을 거치지 않음"
+      : code === "upstream" ? "Anthropic에 연결 안 됨"
+      : code === "picker-ca" ? "피커 모드: 인증서 미신뢰"
+      : code === "picker-proxy" ? "피커 모드: Claude Desktop 프록시 미설정"
+      : code.startsWith("provider:") ? `프로바이더 ${code.slice(9)} 연결 안 됨`
+      : code,
     about: "ClaudeRipple 정보",
     aboutDetail:
       "Claude Desktop을 끄지 않고 그 안에서 GPT 등 다른 모델을 씁니다.\n\n독립 오픈소스 프로젝트(GPL-3.0)이며 Anthropic·OpenAI와 제휴·보증·후원 관계가 없습니다. Claude와 Claude Code는 Anthropic, PBC의 상표입니다.",
@@ -540,8 +556,10 @@ function render(): void {
   const headline = s
     ? `ClaudeRipple · ${state === "ok" ? L.healthy : L.attentionNeeded}`
     : `ClaudeRipple · ${unconfigured ? L.setupNeeded : L.routerNotRunning}`;
+  // What is actually in the way, not only that something is: the router's readiness list names it.
+  const problems = (s?.readiness?.problems ?? []).map((code) => L.problem(code));
   const detail = s
-    ? [connected ? L.connected : L.notConnected, quotaLine].filter(Boolean).join(" · ")
+    ? [connected ? L.connected : L.notConnected, ...problems, quotaLine].filter(Boolean).join(" · ")
     : unconfigured
       ? L.setupNeededDetail
       : L.downNotifyTitle;

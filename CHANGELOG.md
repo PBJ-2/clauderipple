@@ -6,6 +6,26 @@ Why 0.1.1 did not help the Windows install that reported the 0.1.1 bugs: the
 fixes were in the files, but the router that kept answering was the old
 process. Nothing restarted it, and nothing could tell.
 
+### Added
+
+- **Claude subscription sign-in from the app.** "Connect Claude subscription…"
+  in the GUI (and `clauderipple claude-login`) now runs ClaudeRipple's own
+  browser sign-in: the same OAuth flow with PKCE that Claude Code uses, with the
+  code returning to a loopback listener on port 54545 or, when that port is
+  taken, pasted from Anthropic's page. No terminal needed. The grant is stored
+  in `~/.clauderipple/claude-auth.json` (mode 0600) and refreshed automatically
+  before it expires; a failed refresh becomes a clear 401 instead of a dead
+  token. `--setup-token` keeps the previous terminal-only path. Tray →
+  "Connect Claude subscription" runs the same flow.
+- **Readiness, not only liveness.** `/api/status.readiness` and `GET /readyz`
+  (200, or 503 with `retry-after`) name what stands between a request and a
+  model: Claude Code not pointed at ClaudeRipple, Anthropic unreachable, picker
+  mode without certificate trust or the app proxy entry, a provider host that
+  does not answer. The tray shows the list next to "Connected".
+- **HTML error pages are called out.** A provider that answers with a web page
+  (a bare vendor domain, a login wall) is logged as "HTML page … not an API"
+  instead of a quoted markup fragment.
+
 ### Fixed
 
 - **An update now replaces the running router.** Installing a new version only
@@ -35,12 +55,12 @@ process. Nothing restarted it, and nothing could tell.
   log and the Logs page, with anything key-shaped reduced to its last four
   characters. `/api/status` also reports which files the router is running and
   when it started.
-- **"Connect Claude subscription" from the app says what to do.** `claude
-  setup-token` is an interactive terminal flow; run from the tray or the GUI it
-  can only fail, and it failed with a bare "setup-token failed". Without a
-  terminal the message now says to run `clauderipple claude-login` in
-  Terminal/PowerShell, and that an existing Claude Code login is reused
-  automatically anyway. Other failures include what `claude` printed.
+- **`claude setup-token` from the app no longer hangs or fails silently.** It
+  is an interactive terminal flow; run from the tray or the GUI it waited for
+  input that never came or failed with a bare "setup-token failed". That path
+  is now `claude-login --setup-token` only, refuses without a terminal with a
+  message that says where to run it, and includes what `claude` printed when
+  it fails. The app uses the browser sign-in above instead.
 
 ## 0.1.1 — 2026-09-15
 

@@ -25,6 +25,9 @@ import { resolveCompatibleCaps } from "./compat.ts";
 import { ClaudeCodeAuthStore, nativeAnthropicHeaders } from "./providers/anthropic.ts";
 import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
 import { codexEnabled, codexHome } from "../../cli/src/codex.ts";
+import { openBrowser } from "../../cli/src/browser.ts";
+import { caTrusted, currentAppProxy } from "../../cli/src/picker.ts";
+import { ClaudeOAuthSession, type ClaudeOAuthState } from "./providers/claude-oauth.ts";
 
 const MAX_BODY = 1024 * 1024;
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -59,6 +62,9 @@ export type AdminDeps = {
   runCli?: (args: string[], timeout?: number) => Promise<{ ok: boolean; output: string }>;
   /** Test seam for the native Anthropic API-key probe. */
   probeFetch?: (url: string, init: RequestInit) => Promise<Response>;
+  /** Test seams for the Claude subscription sign-in: the token endpoint and the browser. */
+  claudeOAuthFetch?: (url: string, init: RequestInit) => Promise<Response>;
+  openBrowser?: (url: string) => boolean;
   /** Begin a graceful drain and exit. Supplied by the router; absent in tests. */
   shutdown?: () => void;
 };
@@ -81,6 +87,8 @@ const CHATGPT_LUNA_EFFORT_LEVELS = [...CHATGPT_DEFAULT_EFFORT_LEVELS, "ultra"];
 
 type ChatgptLogin = { running: boolean; startedAt?: string; finishedAt?: string; ok?: boolean; output?: string };
 let chatgptLogin: ChatgptLogin = { running: false };
+/** The Claude subscription sign-in in progress (or the last one), for GET /api/claude-oauth. */
+let claudeOAuth: ClaudeOAuthSession | null = null;
 
 /** Shared catalog for the GUI: model-specific values override provider defaults. */
 export function effortLevels(cfg: Config): { providers: Record<string, { default: string[]; models?: Record<string, string[]> }> } {
@@ -255,8 +263,22 @@ async function buildStatus(deps: AdminDeps): Promise<Record<string, unknown>> {
   }
   const env = readSettingsEnv();
   const wantProxy = `http://127.0.0.1:${cfg.listen.port}`;
+  const picker = deps.picker?.() ?? { enabled: false, hosts: [], last: null };
+  // Readiness is not liveness: this process answering says nothing about whether a Claude request
+  // can go through. In picker mode a missing certificate trust or app proxy entry looks, from the
+  // app, exactly like a dead router. Each problem is a code the tray and the GUI can name.
+  const problems: string[] = [];
+  if (env.HTTPS_PROXY !== wantProxy) problems.push("settings");
+  if (deps.health() > 0) problems.push("upstream");
+  if (picker.enabled) {
+    const trust = pickerTrust();
+    if (!trust.caTrusted) problems.push("picker-ca");
+    if (!trust.appProxy) problems.push("picker-proxy");
+  }
+  for (const [name, p] of Object.entries(providers)) if (p.reachable === false) problems.push(`provider:${name}`);
   return {
     version: deps.version,
+    readiness: { ready: problems.length === 0, problems },
     // Which files this process is running, so the app can tell an old router from its own after
     // an update: a zip unpacked next to the previous install left the old one serving (2026-09-15).
     runtime: { node: process.execPath, router: process.argv[1] ?? null, startedAt: STARTED_AT },
@@ -275,11 +297,26 @@ async function buildStatus(deps: AdminDeps): Promise<Record<string, unknown>> {
     },
     cliVersion: cliVersion(),
     chatgpt: { ...chatgpt, signedIn },
-    picker: deps.picker?.() ?? { enabled: false, hosts: [], last: null },
+    picker,
     agentTitle: agentTitleHookEnabled(),
     pickerModels: cfg.cli.extraModels.map((m) => m.name || m.model),
     uiRevision: uiRevision(),
   };
+}
+
+/** Certificate trust and the app's proxy entry cost a subprocess each; the tray polls every 5s, so remember them for a minute. */
+let pickerTrustMemo: { at: number; value: { caTrusted: boolean; appProxy: boolean } } | null = null;
+function pickerTrust(): { caTrusted: boolean; appProxy: boolean } {
+  const now = Date.now();
+  if (pickerTrustMemo && now - pickerTrustMemo.at < 60_000) return pickerTrustMemo.value;
+  let value = { caTrusted: false, appProxy: false };
+  try {
+    value = { caTrusted: caTrusted(), appProxy: currentAppProxy().ours };
+  } catch {
+    // Unknown counts as not ready; the next poll tries again.
+  }
+  pickerTrustMemo = { at: now, value };
+  return value;
 }
 
 /** Run the ClaudeRipple CLI with the Node that installed us (`<home>/paths.json`, written by `install`). */
@@ -589,6 +626,13 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         deps.shutdown();
         return;
       }
+      // Liveness is answering at all; readiness is 200 only when a request can actually go through.
+      if (pathname === "/readyz" && method === "GET") {
+        const readiness = (await buildStatus(deps)).readiness as { ready: boolean; problems: string[] };
+        if (!readiness.ready) res.setHeader("retry-after", "5");
+        sendJson(res, readiness.ready ? 200 : 503, readiness);
+        return;
+      }
       if (pathname === "/api/status" && method === "GET") {
         sendJson(res, 200, await buildStatus(deps));
         return;
@@ -754,6 +798,61 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           },
         );
         sendJson(res, 200, { started: true });
+        return;
+      }
+      // Claude subscription sign-in of our own (browser, PKCE). The GUI starts it, polls the state,
+      // and pastes the code when the loopback port could not be used. Tokens never leave the router.
+      if (pathname === "/api/claude-oauth" && method === "GET") {
+        const state: ClaudeOAuthState & { source: string | null } = { ...(claudeOAuth?.snapshot ?? { running: false, url: null, manual: false, startedAt: null, finishedAt: null, ok: null, error: null }), source: claudeAuthStore(deps).describeSource() };
+        sendJson(res, 200, state);
+        return;
+      }
+      if (pathname === "/api/claude-oauth" && method === "POST") {
+        if (claudeOAuth?.snapshot.running) {
+          sendJson(res, 200, claudeOAuth.snapshot);
+          return;
+        }
+        let manual = false;
+        try {
+          const body = (await readBody(req)).toString("utf8");
+          manual = body.length > 0 && (JSON.parse(body) as { manual?: unknown }).manual === true;
+        } catch {
+          sendJson(res, 400, { error: "invalid JSON" });
+          return;
+        }
+        const session = new ClaudeOAuthSession({ home: homeDir(), manual, ...(deps.claudeOAuthFetch ? { fetch: deps.claudeOAuthFetch } : {}) });
+        claudeOAuth = session;
+        const { url, manual: needsCode } = await session.start();
+        const opened = deps.openBrowser ? deps.openBrowser(url) : openBrowser(url);
+        deps.log.info(`admin: claude sign-in via GUI -> started (${needsCode ? "paste the code" : "loopback callback"}, browser ${opened ? "opened" : "not opened"})`);
+        void session.result.then(
+          () => deps.log.info("admin: claude sign-in via GUI -> ok"),
+          (error: Error) => deps.log.info(`admin: claude sign-in via GUI -> failed: ${error.message}`),
+        );
+        sendJson(res, 200, { ...session.snapshot, opened });
+        return;
+      }
+      if (pathname === "/api/claude-oauth/code" && method === "POST") {
+        const session = claudeOAuth;
+        if (!session?.snapshot.running) {
+          sendJson(res, 409, { error: "no Claude sign-in is waiting for a code" });
+          return;
+        }
+        let code = "";
+        try {
+          code = String((JSON.parse((await readBody(req)).toString("utf8")) as { code?: unknown }).code ?? "");
+        } catch {
+          sendJson(res, 400, { error: "invalid JSON" });
+          return;
+        }
+        await session.submitCode(code);
+        await session.result.catch(() => {});
+        sendJson(res, session.snapshot.ok ? 200 : 400, session.snapshot);
+        return;
+      }
+      if (pathname === "/api/claude-oauth/cancel" && method === "POST") {
+        claudeOAuth?.cancel();
+        sendJson(res, 200, claudeOAuth?.snapshot ?? { running: false });
         return;
       }
       if (pathname === "/api/claude-login" && method === "POST") {

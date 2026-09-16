@@ -136,6 +136,7 @@ export class OpenAiIngress {
     this.claudeCodeAuth = new ClaudeCodeAuthStore(undefined, {
       ...(deps.observedClaudeCodeAuth ? { observed: deps.observedClaudeCodeAuth } : {}),
       ...(deps.home ? { home: deps.home } : {}),
+      log: (line) => deps.log.info(line),
     });
     this.server = http.createServer({ maxHeaderSize: 64 * 1024 }, (req, res) => void this.handle(req, res));
     this.server.keepAliveTimeout = 65_000;
@@ -323,6 +324,7 @@ export class OpenAiIngress {
     const body = Buffer.from(JSON.stringify(wire));
     let authentication: Record<string, string>;
     if (native && provider.auth === "claude-code") {
+      await this.claudeCodeAuth.refreshIfNeeded();
       const auth = this.claudeCodeAuth.get();
       if (auth instanceof Error) return { status: 401, bytes: sendJson(res, 401, openAiError(auth.message, "authentication_error")), note: "Claude Code OAuth unavailable" };
       authentication = auth.source === "observed" ? observedAnthropicHeaders(auth.observed) : nativeAnthropicHeaders(provider, auth.credentials);

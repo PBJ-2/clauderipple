@@ -22,6 +22,8 @@ import { runtime } from "./runtime.ts";
 import { codexOff, codexOn } from "./codex.ts";
 import { ingressModels } from "../../router/src/ingress/models.ts";
 import { claudeLogin, claudeLogout, desktopClaudeCodeDirs } from "./claude-auth.ts";
+import { openBrowser } from "./browser.ts";
+import { ClaudeOAuthSession } from "../../router/src/providers/claude-oauth.ts";
 
 function setPickerEnabled(enabled: boolean): void {
   const file = configPath();
@@ -280,22 +282,6 @@ function ui(): void {
   else console.log(`could not open a browser automatically; open this URL yourself: ${url}`);
 }
 
-/** Opens `url` in the user's default browser. Returns false if the platform command failed. */
-function openBrowser(url: string): boolean {
-  try {
-    if (isWindows) {
-      // Not `cmd /c start`: cmd treats & as a command separator, so an OAuth URL arrives truncated
-      // at its first parameter and the provider answers "missing_required_parameter" (observed
-      // 2026-09-14). Start-Process takes the URL as one argument, quoted PowerShell-style.
-      const quoted = `'${url.replace(/'/g, "''")}'`;
-      execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `Start-Process ${quoted}`], { stdio: "ignore", windowsHide: true });
-    } else execFileSync("open", [url], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function logs(): void {
   const file = path.join(homeDir(), "logs", "router.log");
   if (!fs.existsSync(file)) {
@@ -341,8 +327,8 @@ function help(): void {
   ui                open the admin GUI in your browser
   login             sign in to ChatGPT (opens your browser; tokens stay in the home dir)
   logout            forget the ChatGPT login made with "login"
-  claude-login      create a Claude subscription token for native Anthropic ingress
-  claude-logout     remove ClaudeRipple's setup-token credential
+  claude-login      connect a Claude subscription in the browser (--setup-token: via \`claude setup-token\`; --manual: paste the code)
+  claude-logout     remove ClaudeRipple's own Claude subscription credential
   picker on|off     show your mapped models by name in the Claude Desktop picker (trusts the CA in your login keychain, routes the app through ClaudeRipple)
   codex on|off      add/remove ClaudeRipple's local OpenAI provider and selection profile for Codex CLI
   agent-title on|off|status
@@ -429,10 +415,28 @@ try {
       break;
     }
     case "claude-login": {
-      console.log("Opening your browser through Claude Code to connect your Claude subscription. This terminal waits for approval.");
-      // CLAUDERIPPLE_ASSUME_TTY: the test drives this command through a pipe with a fake `claude`.
-      claudeLogin(homeDir(), { interactive: process.stdin.isTTY || process.env.CLAUDERIPPLE_ASSUME_TTY === "1" });
-      console.log("✓ Claude subscription connected for native Anthropic ingress");
+      if (flag("setup-token")) {
+        console.log("Opening your browser through Claude Code to connect your Claude subscription. This terminal waits for approval.");
+        // CLAUDERIPPLE_ASSUME_TTY: the test drives this command through a pipe with a fake `claude`.
+        claudeLogin(homeDir(), { interactive: process.stdin.isTTY || process.env.CLAUDERIPPLE_ASSUME_TTY === "1" });
+        console.log("✓ Claude subscription connected for native Anthropic ingress");
+        break;
+      }
+      // Our own browser sign-in (PKCE). No terminal interaction unless the loopback port is taken,
+      // in which case the code from Anthropic's page is pasted here.
+      const session = new ClaudeOAuthSession({ home: homeDir(), manual: flag("manual") });
+      const { url, manual } = await session.start();
+      console.log(manual ? "Opening your browser to sign in to Claude. Paste the code it shows below." : "Opening your browser to sign in to Claude. This window waits up to 5 minutes.");
+      if (!openBrowser(url)) console.log(`Open this URL manually:\n${url}`);
+      if (manual) {
+        if (!process.stdin.isTTY) throw new Error(`the sign-in callback port ${54545} is in use and there is no terminal to paste the code into; free the port or run this in a terminal`);
+        const rl = (await import("node:readline")).createInterface({ input: process.stdin, output: process.stdout });
+        const code = await new Promise<string>((resolve) => rl.question("Code: ", resolve));
+        rl.close();
+        await session.submitCode(code);
+      }
+      await session.result;
+      console.log(`✓ Claude subscription connected. Stored in ${homeDir()}/claude-auth.json; refreshed automatically.`);
       break;
     }
     case "claude-logout":

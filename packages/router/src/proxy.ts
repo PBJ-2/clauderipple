@@ -50,7 +50,11 @@ const ERROR_HEAD_MAX = 4096;
  * A bounded, decoded upstream error excerpt with credentials completely masked. Providers may
  * echo the key they rejected, including an opaque vendor-specific key format.
  */
-export function errorSnippet(head: Buffer, encoding: string | string[] | undefined, secrets: readonly string[] = []): string {
+export function errorSnippet(head: Buffer, encoding: string | string[] | undefined, secrets: readonly string[] = [], contentType?: string | string[]): string {
+  // An HTML error page is never an API answer: the provider URL points at a website (a bare
+  // vendor domain) or a login wall. Say that instead of quoting markup (measured 2026-09-13 with
+  // OpenRouter answering 200 HTML when the /api prefix was lost).
+  if (/text\/html/i.test(String(contentType ?? ""))) return `HTML page (${head.length}B) — the provider URL points at a website or a login page, not an API`;
   let out = head;
   const enc = String(encoding ?? "").toLowerCase();
   try {
@@ -672,7 +676,7 @@ export class Proxy {
         observedUsage = observed.usage;
         observedStopReason = observed.stopReason;
         res.end();
-        finish(String(status), bytes, status >= 400 ? `upstream ${status}: ${errorSnippet(Buffer.concat(errorHead), upRes.headers["content-encoding"], errorSecrets)}` : undefined);
+        finish(String(status), bytes, status >= 400 ? `upstream ${status}: ${errorSnippet(Buffer.concat(errorHead), upRes.headers["content-encoding"], errorSecrets, upRes.headers["content-type"])}` : undefined);
       });
       upRes.on("error", (e) => {
         finish(String(status), bytes, `upstream stream error ${(e as Error).message}`);
