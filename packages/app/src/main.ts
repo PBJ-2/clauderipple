@@ -2,7 +2,7 @@
 // 127.0.0.1; this shell adds a tray icon with live health, a window for the GUI, and shortcuts
 // for restart / logs / login. If the router is down the tray says so and offers to start it.
 
-import { app, BrowserWindow, Menu, Tray, Notification, nativeImage, shell, dialog, clipboard } from "electron";
+import { app, Menu, Tray, Notification, nativeImage, shell, dialog, clipboard } from "electron";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -43,8 +43,6 @@ const STRINGS = {
     notConnected: "Claude Desktop not connected",
     percentOfWeekUsed: (percent: string | number, plan: string) => `ChatGPT ${plan} ${percent}% this week`,
     cliVersion: (v: string) => `Claude Code CLI ${v}`,
-    openWindow: "Open ClaudeRipple…",
-    openInBrowser: "Open in Browser",
     restartRouter: "Restart Router",
     startRouter: "Start Router",
     pickerOn: "Show GPT models in the Code tab picker…",
@@ -89,18 +87,13 @@ const STRINGS = {
     downNotifyTitle: "Claude Desktop cannot connect",
     downNotifyBody: "The ClaudeRipple router is not running, so Claude Desktop has no way out. Click to start it.",
     starting: "starting the router…",
+    openDashboard: "Open Dashboard in Browser…",
     offlineHeading: "The router is not running",
     offlineBody:
       "Claude Desktop sends all of its traffic through ClaudeRipple, so while the router is down the app shows a blank window with ERR_PROXY_CONNECTION_FAILED. Start the router and reload Claude Desktop.",
-    offlineButton: "Start Router",
-    offlineWaiting: "Starting… this window opens the dashboard as soon as the router answers.",
     setupNeeded: "setup not finished",
     setupNeededDetail: "ClaudeRipple is installed but not set up yet",
     runSetup: "Finish setting up ClaudeRipple…",
-    setupHeading: "One step left",
-    setupBody:
-      "ClaudeRipple is installed but not set up yet. Setting up creates a local certificate, adds two lines to your Claude Code settings, and registers the background router so it starts with your computer. No administrator rights needed.",
-    setupStarting: "Setting up… this takes a few seconds.",
   },
   ko: {
     healthy: "정상",
@@ -112,8 +105,6 @@ const STRINGS = {
     notConnected: "Claude Desktop 연결 안 됨",
     percentOfWeekUsed: (percent: string | number, plan: string) => `ChatGPT ${plan} 주간 ${percent}%`,
     cliVersion: (v: string) => `Claude Code CLI ${v}`,
-    openWindow: "ClaudeRipple 열기…",
-    openInBrowser: "브라우저에서 열기",
     restartRouter: "라우터 재시작",
     startRouter: "라우터 시작",
     pickerOn: "Code 탭 피커에 GPT 모델 이름 표시…",
@@ -158,18 +149,13 @@ const STRINGS = {
     downNotifyTitle: "Claude Desktop이 연결되지 않습니다",
     downNotifyBody: "ClaudeRipple 라우터가 꺼져 있어 Claude Desktop이 밖으로 나가지 못합니다. 눌러서 시작하세요.",
     starting: "라우터를 시작하는 중…",
+    openDashboard: "브라우저에서 대시보드 열기…",
     offlineHeading: "라우터가 꺼져 있습니다",
     offlineBody:
       "Claude Desktop은 모든 통신을 ClaudeRipple로 보냅니다. 그래서 라우터가 꺼져 있는 동안에는 앱이 흰 화면과 ERR_PROXY_CONNECTION_FAILED만 보여줍니다. 라우터를 시작한 뒤 Claude Desktop을 새로고침하세요.",
-    offlineButton: "라우터 시작",
-    offlineWaiting: "시작하는 중… 라우터가 응답하면 이 창이 대시보드로 바뀝니다.",
     setupNeeded: "설정이 끝나지 않았습니다",
     setupNeededDetail: "설치는 됐지만 아직 설정하지 않았습니다",
     runSetup: "ClaudeRipple 설정 마치기…",
-    setupHeading: "한 단계 남았습니다",
-    setupBody:
-      "설치는 됐지만 아직 설정하지 않았습니다. 설정하면 로컬 인증서를 만들고, Claude Code 설정에 두 줄을 넣고, 컴퓨터를 켤 때 함께 뜨도록 백그라운드 라우터를 등록합니다. 관리자 권한은 필요 없습니다.",
-    setupStarting: "설정하는 중… 몇 초 걸립니다.",
   },
 };
 
@@ -186,11 +172,8 @@ function readConfigPorts(): { proxy: number; admin: number } {
 }
 
 let tray: Tray | null = null;
-let win: BrowserWindow | null = null;
 let last: Status | null = null;
 let lastError: string | null = null;
-/** The window is showing the offline notice rather than the router's GUI. */
-let winOffline = false;
 let starting = false;
 let downSince: number | null = null;
 let downNotified = false;
@@ -265,14 +248,11 @@ async function poll(): Promise<void> {
     lastError = null;
     downSince = null;
     downNotified = false;
-    if (winOffline) showWindowContent(); // the router answered: swap the notice for the GUI
     void reconcileRouter(last);
   } catch (e) {
     last = null;
     lastError = (e as Error).message;
     downSince ??= Date.now();
-    // An open window would otherwise keep showing a GUI that is no longer being served.
-    if (!winOffline) showWindowContent();
     if (!downNotified && Date.now() - downSince >= DOWN_NOTIFY_AFTER_MS) {
       downNotified = true;
       notifyDown();
@@ -324,81 +304,26 @@ function icon(state: "ok" | "warn" | "down"): Electron.NativeImage {
   return img;
 }
 
-function openWindow(): void {
-  if (win && !win.isDestroyed()) {
-    win.show();
-    win.focus();
-    return;
-  }
-  win = new BrowserWindow({
-    // Sized to the widest thing the GUI shows: nav 168 + padding 56 + the log table's 920px
-    // minimum. At 960 the window opened too small to read its own content and every user had to
-    // drag it wider first. Electron clamps this to the display if the screen is smaller.
-    width: 1180,
-    height: 760,
-    minWidth: 900,
-    minHeight: 560,
-    // Windows draws Electron's default File/Edit/View menu inside the window; we have no use for
-    // it and it makes a tray utility look like a 2005 desktop app. Alt still reveals it.
-    autoHideMenuBar: true,
-    title: "ClaudeRipple",
-    // The inset title bar and traffic-light placement are macOS window chrome; Windows keeps its own.
-    ...(isMac ? { titleBarStyle: "hiddenInset" as const, trafficLightPosition: { x: 16, y: 18 } } : {}),
-    webPreferences: { contextIsolation: true, nodeIntegration: false },
-  });
-  showWindowContent({ autoStart: true });
-  // Menu-bar app: no Dock icon while only the tray exists; show one while the settings window is open
-  // (so Cmd-Tab and the Dock can reach it), hide it again when the window closes.
-  if (isMac) void app.dock?.show();
-  win.on("closed", () => {
-    win = null;
-    if (isMac) app.dock?.hide();
-  });
-}
-
 /**
- * The GUI is served by the router, so with the router down the window would load nothing at all —
- * the same blank page Claude Desktop shows. Explain it instead, and start the router while the
- * user reads; poll() swaps in the real GUI as soon as it answers.
+ * The dashboard is a web page served by the router, so it opens in the user's own browser. With
+ * the router down there is nothing to open: start it (or run setup, when that is what is missing)
+ * and open the page once it answers, rather than sending the browser to a refused connection.
  */
-function showWindowContent(opts: { autoStart?: boolean } = {}): void {
-  if (!win || win.isDestroyed()) return;
+async function openDashboard(): Promise<void> {
   if (last) {
-    winOffline = false;
-    void win.loadURL(guiUrl());
+    void shell.openExternal(guiUrl());
     return;
   }
-  winOffline = true;
   // Before setup there is no router to start, so offer the step that is actually missing.
-  const unconfigured = needsSetup();
-  void win.loadURL(offlineNotice(!!opts.autoStart, unconfigured));
-  if (!opts.autoStart) return;
-  // Only when the user just asked for the window: launchd's KeepAlive already handles a crash,
-  // and a deliberate `clauderipple stop` should not be undone by an open window.
-  if (unconfigured) void setup();
-  else void startRouter();
-}
-
-function offlineNotice(starting: boolean, unconfigured: boolean): string {
-  const esc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  const html = `<!doctype html><html lang="${uiLang()}"><meta charset="utf-8">
-<title>ClaudeRipple</title>
-<style>
-  :root { color-scheme: light dark; }
-  body { margin: 0; display: grid; place-items: center; min-height: 100vh;
-         font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
-         background: Canvas; color: CanvasText; -webkit-user-select: none; cursor: default; }
-  main { max-width: 30rem; padding: 2rem; text-align: center; }
-  h1 { font-size: 1.25rem; margin: 0 0 .75rem; }
-  p { margin: 0 0 1rem; opacity: .8; }
-  .waiting { font-size: .85rem; opacity: .55; }
-</style>
-<main>
-  <h1>${esc(unconfigured ? L.setupHeading : L.offlineHeading)}</h1>
-  <p>${esc(unconfigured ? L.setupBody : L.offlineBody)}</p>
-  ${starting ? `<p class="waiting">${esc(unconfigured ? L.setupStarting : L.offlineWaiting)}</p>` : ""}
-</main></html>`;
-  return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
+  const message = needsSetup() ? (await setup(), "") : await startRouter();
+  // startRouter() returns once the CLI has finished; ask the router itself rather than waiting
+  // for the next tick, since the user is standing in front of the menu.
+  await poll();
+  if (last) {
+    void shell.openExternal(guiUrl());
+    return;
+  }
+  await dialog.showMessageBox({ type: "warning", message: L.offlineHeading, detail: [L.offlineBody, message].filter(Boolean).join("\n\n") });
 }
 
 type CliRuntime = { node: string; env: Record<string, string>; cli: string; router?: string };
@@ -564,11 +489,11 @@ function render(): void {
       ? L.setupNeededDetail
       : L.downNotifyTitle;
   const template: Electron.MenuItemConstructorOptions[] = [
-    { label: headline, click: openWindow },
-    ...(detail ? [{ label: detail, click: openWindow } as Electron.MenuItemConstructorOptions] : []),
+    { label: headline, click: () => void openDashboard() },
+    ...(detail ? [{ label: detail, click: () => void openDashboard() } as Electron.MenuItemConstructorOptions] : []),
     { type: "separator" },
-    // Enabled even when the router is down: the window then explains why Claude Desktop is blank.
-    { label: L.openWindow, click: openWindow },
+    // Enabled even when the router is down: it is started first, then the page is opened.
+    { label: L.openDashboard, click: () => void openDashboard() },
     { label: L.startAtLogin, type: "checkbox", checked: loginItemOn(), click: (item) => setLoginItem(item.checked) },
     { type: "separator" },
     { label: unconfigured ? L.runSetup : L.rerunSetup, click: () => void setup() },
@@ -608,9 +533,9 @@ app.whenReady().then(() => {
   void poll();
   setInterval(() => void poll(), POLL_MS);
   if (needsSetup()) void promptForSetup();
-  if (process.env.CLAUDERIPPLE_OPEN_WINDOW) openWindow(); // dev/testing: show the GUI window immediately
 });
 
+// A tray-only app owns no windows; without this Electron would quit the moment a dialog closes.
 app.on("window-all-closed", () => {
   /* keep running in the tray */
 });

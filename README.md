@@ -128,7 +128,7 @@ reboot) once after installing 0.1.2; from then on the app handles it.
 
 On first launch the app offers to set itself up: a local certificate, two lines in
 `~/.claude/settings.json`, and a background router that starts at login. No Node
-install needed. Then: tray icon → **Open ClaudeRipple…** → **Providers** → add
+install needed. Then: tray icon → **Open Dashboard in Browser…** → **Providers** → add
 ChatGPT or paste an API key → **Model mapping**.
 
 Optional, for real names in the Desktop picker: **Clients → Claude Desktop → Model
