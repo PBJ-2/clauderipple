@@ -113,7 +113,8 @@ export class ClaudeOAuthSession {
   readonly result: Promise<void>;
   private readonly options: ClaudeOAuthOptions;
   private readonly verifier = base64url(crypto.randomBytes(32));
-  private readonly state = base64url(crypto.randomBytes(16));
+  // 32 bytes, the size Claude Code 2.1.272 uses for both the verifier and the state.
+  private readonly state = base64url(crypto.randomBytes(32));
   private redirectUri = "";
   private server: http.Server | null = null;
   private server6: http.Server | null = null;
