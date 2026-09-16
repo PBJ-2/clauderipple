@@ -44,7 +44,9 @@ test("the authorize URL carries a PKCE challenge, and the loopback callback comp
   assert.equal(u.origin + u.pathname, CLAUDE_OAUTH.authorizeUrl);
   assert.equal(u.searchParams.get("client_id"), CLAUDE_OAUTH.clientId);
   assert.equal(u.searchParams.get("code_challenge_method"), "S256");
-  assert.equal(u.searchParams.get("redirect_uri"), `http://localhost:${CLAUDE_OAUTH.port}${CLAUDE_OAUTH.callbackPath}`);
+  assert.equal(session.port, port);
+  assert.equal(u.searchParams.get("redirect_uri"), `http://localhost:${port}${CLAUDE_OAUTH.callbackPath}`);
+  assert.equal(u.searchParams.get("scope"), CLAUDE_OAUTH.scope);
   const state = u.searchParams.get("state")!;
   assert.ok(state.length >= 16);
 
@@ -61,6 +63,8 @@ test("the authorize URL carries a PKCE challenge, and the loopback callback comp
   assert.equal(exchange.grant_type, "authorization_code");
   assert.equal(exchange.code, "the-code");
   assert.equal(exchange.state, state);
+  assert.equal(exchange.redirect_uri, `http://localhost:${port}${CLAUDE_OAUTH.callbackPath}`);
+  assert.equal(exchange.client_id, CLAUDE_OAUTH.clientId);
   // The verifier hashes to the challenge that was sent.
   const challenge = crypto.createHash("sha256").update(String(exchange.code_verifier)).digest("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   assert.equal(challenge, u.searchParams.get("code_challenge"));
@@ -75,6 +79,22 @@ test("the authorize URL carries a PKCE challenge, and the loopback callback comp
     s.listen(port, "127.0.0.1", () => s.close(() => r(true)));
   });
   assert.equal(again, true);
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
+test("a taken preferred port falls back to a random loopback port before manual mode", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-claude-oauth-"));
+  const taken = net.createServer();
+  await new Promise<void>((r) => taken.listen(0, "127.0.0.1", r));
+  const port = (taken.address() as net.AddressInfo).port;
+  const session = new ClaudeOAuthSession({ home, port, fetch: tokenEndpoint().fetchImpl });
+  const { url, manual } = await session.start();
+  assert.equal(manual, false);
+  assert.ok(session.port && session.port !== port);
+  assert.equal(new URL(url).searchParams.get("redirect_uri"), `http://localhost:${session.port}${CLAUDE_OAUTH.callbackPath}`);
+  session.cancel();
+  await assert.rejects(session.result, /cancelled/);
+  await new Promise<void>((r) => taken.close(() => r()));
   fs.rmSync(home, { recursive: true, force: true });
 });
 
@@ -129,6 +149,7 @@ test("the auth store refreshes our OAuth grant before it expires, once, and repo
   assert.equal(endpoint.calls.length, 1);
   assert.equal(endpoint.calls[0]!.grant_type, "refresh_token");
   assert.equal(endpoint.calls[0]!.refresh_token, "rt-old");
+  assert.equal(endpoint.calls[0]!.scope, CLAUDE_OAUTH.refreshScope);
   const auth = store.get();
   assert.ok(!(auth instanceof Error) && auth.source === "token-file");
   assert.equal(auth.credentials.accessToken, "new");

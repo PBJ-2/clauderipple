@@ -254,12 +254,17 @@ chat is out of reach for every approach, ours included.
   login expired — open Claude Code once to refresh`.
 - `clauderipple claude-login` (0.1.2) is ClaudeRipple's own browser sign-in:
   the OAuth authorization-code flow with PKCE (S256) against Claude Code's
-  public client, `https://claude.ai/oauth/authorize` →
-  `https://api.anthropic.com/v1/oauth/token`, scopes `org:create_api_key
-  user:profile user:inference`. The code returns to a loopback listener on
-  `localhost:54545/callback`; when that port is taken (or `--manual`), the
-  redirect is Anthropic's paste-the-code page and the user pastes `code#state`
-  (or the redirect URL). State and PKCE verifier are per attempt; a callback
+  public client, exactly as Claude Code 2.1.271 does (read from its binary,
+  2026-09-16): `https://claude.com/cai/oauth/authorize` →
+  `https://platform.claude.com/v1/oauth/token`, scopes `org:create_api_key
+  user:profile user:inference user:sessions:claude_code user:mcp_servers
+  user:file_upload` (the refresh grant names the subscription scopes only).
+  The older `claude.ai/oauth/authorize` answers "Invalid request format"
+  (measured). The code returns to a loopback listener, port 54545 preferred
+  and any free port otherwise (the authorize server accepts any localhost
+  port); with `--manual` the redirect is
+  `https://platform.claude.com/oauth/code/callback` and the user pastes
+  `code#state` (or the redirect URL). State and PKCE verifier are per attempt; a callback
   with the wrong state is refused without ending the attempt; an attempt
   expires after 5 minutes. The grant (access + refresh token, expiry) is stored
   only in `<home>/claude-auth.json` (mode `0600`) as `source: "oauth"`; the

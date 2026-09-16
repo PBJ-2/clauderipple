@@ -86,7 +86,7 @@ test("the Claude subscription sign-in runs from the GUI: start, state, pasted co
     assert.equal(state.manual, true);
     assert.equal(state.opened, true);
     assert.equal(opened[0], state.url);
-    assert.match(state.url, /^https:\/\/claude\.ai\/oauth\/authorize\?/);
+    assert.match(state.url, /^https:\/\/claude\.com\/cai\/oauth\/authorize\?/);
     // A second start while one is running returns the same attempt instead of a new browser tab.
     await fetch(`${base()}:${port}/api/claude-oauth`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
     assert.equal(opened.length, 1);

@@ -14,15 +14,21 @@ import http from "node:http";
 import net from "node:net";
 import { saveClaudeOAuthFile } from "./anthropic-token-file.ts";
 
+// Endpoints, scopes and body shapes are what Claude Code 2.1.271 sends (read from its binary on
+// 2026-09-16): the claude.ai login is `claude.com/cai/oauth/authorize`, tokens come from
+// `platform.claude.com`. The previous `claude.ai/oauth/authorize` answers "Invalid request format".
 export const CLAUDE_OAUTH = {
   clientId: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-  authorizeUrl: "https://claude.ai/oauth/authorize",
-  tokenUrl: "https://api.anthropic.com/v1/oauth/token",
-  scope: "org:create_api_key user:profile user:inference",
+  authorizeUrl: "https://claude.com/cai/oauth/authorize",
+  tokenUrl: "https://platform.claude.com/v1/oauth/token",
+  scope: "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload",
+  /** The refresh grant names the subscription scopes only (as Claude Code does). */
+  refreshScope: "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload",
+  /** Preferred loopback port; any free port is accepted by the authorize server, so a taken port falls back to a random one. */
   port: 54545,
   callbackPath: "/callback",
   /** Anthropic's own page that shows the code for pasting when no loopback listener can be reached. */
-  manualRedirectUri: "https://console.anthropic.com/oauth/code/callback",
+  manualRedirectUri: "https://platform.claude.com/oauth/code/callback",
   /** How long a sign-in may stay open before it is abandoned. */
   timeoutMs: 5 * 60 * 1000,
   /** Refresh this long before the access token expires. */
@@ -82,7 +88,7 @@ function grantFrom(reply: TokenReply, now: number, previousRefresh?: string): Cl
 
 /** Exchanges a refresh token; the caller persists the result. */
 export async function refreshClaudeOAuth(refreshToken: string, options: { fetch?: FetchLike; now?: () => number } = {}): Promise<ClaudeOAuthGrant> {
-  const reply = await postToken(options.fetch ?? fetch, { grant_type: "refresh_token", client_id: CLAUDE_OAUTH.clientId, refresh_token: refreshToken });
+  const reply = await postToken(options.fetch ?? fetch, { grant_type: "refresh_token", client_id: CLAUDE_OAUTH.clientId, refresh_token: refreshToken, scope: CLAUDE_OAUTH.refreshScope });
   return grantFrom(reply, (options.now ?? Date.now)(), refreshToken);
 }
 
@@ -110,6 +116,7 @@ export class ClaudeOAuthSession {
   private readonly state = base64url(crypto.randomBytes(16));
   private redirectUri = "";
   private server: http.Server | null = null;
+  private server6: http.Server | null = null;
   private settle!: { resolve: (grant: ClaudeOAuthGrant) => void; reject: (error: Error) => void };
   private readonly grant: Promise<ClaudeOAuthGrant>;
   private timer: NodeJS.Timeout | null = null;
@@ -139,10 +146,13 @@ export class ClaudeOAuthSession {
     return this.stateSnapshot;
   }
 
+  /** The loopback port in use, once started. */
+  port: number | null = null;
+
   /** Starts the loopback listener when possible and returns the URL to open. */
   async start(): Promise<{ url: string; manual: boolean }> {
-    const manual = this.options.manual ? true : !(await this.listen());
-    this.redirectUri = manual ? CLAUDE_OAUTH.manualRedirectUri : `http://localhost:${CLAUDE_OAUTH.port}${CLAUDE_OAUTH.callbackPath}`;
+    const manual = this.options.manual ? true : !(await this.listen(this.options.port ?? CLAUDE_OAUTH.port)) && !(await this.listen(0));
+    this.redirectUri = manual ? CLAUDE_OAUTH.manualRedirectUri : `http://localhost:${this.port}${CLAUDE_OAUTH.callbackPath}`;
     const url = new URL(CLAUDE_OAUTH.authorizeUrl);
     url.search = new URLSearchParams({
       code: "true",
@@ -191,9 +201,9 @@ export class ClaudeOAuthSession {
     this.fail(new Error("Claude sign-in cancelled"));
   }
 
-  private listen(): Promise<boolean> {
+  private listen(port: number): Promise<boolean> {
     return new Promise((resolve) => {
-      const server = http.createServer((req, res) => {
+      const handler = (req: http.IncomingMessage, res: http.ServerResponse): void => {
         const u = new URL(req.url ?? "/", "http://localhost");
         if (u.pathname !== CLAUDE_OAUTH.callbackPath) {
           res.writeHead(404).end();
@@ -215,10 +225,19 @@ export class ClaudeOAuthSession {
         }
         res.writeHead(200, { "content-type": "text/plain; charset=utf-8" }).end("ClaudeRipple: Claude subscription connected. You can close this tab.");
         void this.exchange(code);
-      });
+      };
+      const server = http.createServer(handler);
       server.once("error", () => resolve(false));
-      server.listen(this.options.port ?? CLAUDE_OAUTH.port, "127.0.0.1", () => {
+      server.listen(port, "127.0.0.1", () => {
         this.server = server;
+        this.port = (server.address() as net.AddressInfo).port;
+        // The browser resolves "localhost" to ::1 or 127.0.0.1 as it likes; answer on both when
+        // IPv6 loopback is available. Best effort: the IPv4 listener alone is enough on most systems.
+        const six = http.createServer(handler);
+        six.once("error", () => {});
+        six.listen(this.port, "::1", () => {
+          this.server6 = six;
+        });
         resolve(true);
       });
     });
@@ -251,13 +270,14 @@ export class ClaudeOAuthSession {
   private finish(): void {
     this.finished = true;
     if (this.timer) clearTimeout(this.timer);
-    const server = this.server;
-    this.server = null;
-    if (server) {
+    for (const server of [this.server, this.server6]) {
+      if (!server) continue;
       server.close();
       // Keep-alive connections would otherwise hold the port for their idle timeout.
       (server as http.Server & { closeAllConnections?: () => void }).closeAllConnections?.();
     }
+    this.server = null;
+    this.server6 = null;
   }
 }
 
