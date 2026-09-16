@@ -7,18 +7,19 @@
 <p align="center"><a href="README.md">English</a> · <b>한국어</b></p>
 
 <p align="center">
-  <b>어떤 모델이든, 어떤 AI 코딩 도구에서든. 아무것도 포기하지 않고.</b><br>
-  <b>Claude Desktop</b>과 <b>Claude Code</b> 안에서 GPT·DeepSeek·Kimi·Grok 등 400개 넘는 모델을 쓰고,<br>
-  <b>Codex 앱</b>과 <b>Codex CLI</b> 안에서 Claude를 씁니다. 로컬 프록시 하나, 메뉴 막대 앱 하나.
+  <b>지금 로그인해 쓰고 있는 그 Claude Desktop 앱 안에서 GPT를 비롯한 400여 모델을 씁니다.</b><br>
+  타사 게이트웨이(3P) 모드가 아닙니다. 앱은 <b>1P</b>인 채로 남아 Claude 구독·claude.ai 채팅·커넥터·<br>
+  Remote Control이 전부 살아 있고, <b>Code 탭</b>에서는 GPT·DeepSeek·Kimi·Grok이 답합니다.
+  <b>Codex 앱</b>과 <b>Codex CLI</b>에서는 반대로 Claude를 씁니다.
 </p>
 
 <p align="center">
-  <a href="https://github.com/PBJ-2/clauderipple/releases"><img alt="Release" src="https://img.shields.io/github/v/release/PBJ-2/clauderipple?include_prereleases&label=download"></a>
+  <a href="https://www.npmjs.com/package/clauderipple"><img alt="npm" src="https://img.shields.io/npm/v/clauderipple?label=npm"></a>
   <img alt="Alpha" src="https://img.shields.io/badge/status-alpha-orange">
   <a href="LICENSE"><img alt="GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-blue"></a>
   <img alt="macOS" src="https://img.shields.io/badge/macOS-arm64%20%7C%20x64-black">
   <img alt="Windows" src="https://img.shields.io/badge/Windows-arm64%20%7C%20x64-0078D4">
-  <img alt="Node" src="https://img.shields.io/badge/runtime-bundled-success">
+  <img alt="Node" src="https://img.shields.io/badge/node-24%2B-success">
   <a href="README.md"><img alt="English" src="https://img.shields.io/badge/docs-English-blue"></a>
 </p>
 
@@ -38,6 +39,25 @@
 
 ---
 
+## 1P냐 3P냐 — 이 프로젝트가 존재하는 이유
+
+Claude Desktop에는 다른 모델을 쓰는 공식 경로가 이미 있습니다. **추론 게이트웨이** 설정, 앱이 타사(3P)라고
+부르는 모드입니다. 문제는 그게 세션별 선택이 아니라는 것입니다. 앱 전체가 **실행 시점에** 다른 배포 모드로
+뜨고, 그 모드는 사실상 다른 제품입니다.
+
+- 창이 `claude.ai`를 더 이상 불러오지 않고 로컬 번들을 띄웁니다. claude.ai의 `/api/`·`/v1/` 호출은
+  `custom_3p_not_available` 503으로 막힙니다.
+- "채팅"이 claude.ai 채팅이 아닙니다. Claude Code 로컬 에이전트 세션입니다.
+- Remote Control과 사이드 세션이 아예 꺼집니다(`shouldEnableSessionsBridge()`가 false).
+- Anthropic이 만든 claude.ai 커넥터, Claude Design, 모바일 연동, 채팅 검색도 함께 사라집니다.
+
+중간 설정은 없습니다. "채팅은 Claude로, Code는 게이트웨이로"는 누구도 할 수 없습니다. 1P 모드는 게이트웨이로
+아무것도 보내지 않기 때문입니다. (전부 앱 번들을 직접 읽어 확인한 것입니다. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §2)
+
+**ClaudeRipple은 그 설정을 건드리지 않습니다.** 앱은 Claude 구독에 로그인된 1P 상태 그대로 있고, Code 탭과
+서브에이전트에서만 다른 모델이 답합니다. 모델 피커에 실제 이름으로 뜨고, 고른 추론 강도가 그대로 전달됩니다.
+Claude 계정을 GPT 계정과 맞바꾸는 것이 아니라, **한 앱에서 둘 다 갖는 것**입니다.
+
 ## 네 개 대신 하나
 
 비슷한 도구들은 터미널용입니다. Claude Code CLI나 Codex CLI가 다른 모델을 쓰게는 해 주지만, Claude **데스크톱 앱**에는
@@ -45,7 +65,7 @@
 ClaudeRipple은 데스크톱 앱·터미널·Codex를 메뉴 막대 앱 하나로 다루고, 두 구독을 나란히 쓰며, Claude Code 하네스를
 그대로 둡니다. 스킬·훅·MCP 서버·`CLAUDE.md`·서브에이전트·claude.ai 커넥터가 전부 살아 있는 채로 두뇌만 바뀝니다.
 
-| | ClaudeRipple | opencodex / openclaude | claude-code-router | Claude Desktop "3P" 설정 |
+| | ClaudeRipple | opencodex / openclaude | claude-code-router | Claude Desktop 게이트웨이(3P) 모드 |
 |---|---|---|---|---|
 | Claude **Desktop** Code 탭 | ✅ | ❌ | ❌ | ✅ |
 | claude.ai 채팅·Remote Control·클라우드 세션 유지 | ✅ | ❌ | ❌ | ❌ |

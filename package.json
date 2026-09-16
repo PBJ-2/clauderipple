@@ -1,7 +1,7 @@
 {
   "name": "clauderipple",
   "version": "0.1.2",
-  "description": "Run GPT and other models inside Claude Desktop, without turning Claude off.",
+  "description": "Use GPT and 400+ other models inside the Claude Desktop app while staying signed in to your Claude subscription — no third-party gateway mode.",
   "license": "GPL-3.0-only",
   "workspaces": [
     "packages/*"
@@ -43,11 +43,24 @@
   },
   "keywords": [
     "claude",
+    "claude-desktop",
     "claude-code",
-    "proxy",
+    "anthropic",
+    "gpt",
+    "chatgpt",
     "openai",
     "codex",
     "deepseek",
-    "router"
-  ]
+    "kimi",
+    "openrouter",
+    "llm",
+    "proxy",
+    "model-router",
+    "ai-coding-assistant",
+    "mcp"
+  ],
+  "homepage": "https://github.com/PBJ-2/clauderipple",
+  "bugs": {
+    "url": "https://github.com/PBJ-2/clauderipple/issues"
+  }
 }

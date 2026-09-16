@@ -7,18 +7,19 @@
 <p align="center"><b>English</b> · <a href="README.ko.md">한국어</a></p>
 
 <p align="center">
-  <b>Every model, in every AI coding client, without giving anything up.</b><br>
-  GPT, DeepSeek, Kimi, Grok and 400+ models inside <b>Claude Desktop</b> and <b>Claude Code</b>.<br>
-  Claude inside the <b>Codex app</b> and <b>Codex CLI</b>. One local proxy, one menu-bar app.
+  <b>Use GPT and 400+ other models inside the Claude Desktop app you are already signed in to.</b><br>
+  Not the third-party gateway mode — the app stays in <b>1P</b>, so your Claude subscription,
+  claude.ai chat, connectors and Remote Control keep working<br>while GPT, DeepSeek, Kimi or Grok
+  answers in the <b>Code tab</b>. Claude inside the <b>Codex app</b> and <b>Codex CLI</b> too.
 </p>
 
 <p align="center">
-  <a href="https://github.com/PBJ-2/clauderipple/releases"><img alt="Release" src="https://img.shields.io/github/v/release/PBJ-2/clauderipple?include_prereleases&label=download"></a>
+  <a href="https://www.npmjs.com/package/clauderipple"><img alt="npm" src="https://img.shields.io/npm/v/clauderipple?label=npm"></a>
   <img alt="Alpha" src="https://img.shields.io/badge/status-alpha-orange">
   <a href="LICENSE"><img alt="GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-blue"></a>
   <img alt="macOS" src="https://img.shields.io/badge/macOS-arm64%20%7C%20x64-black">
   <img alt="Windows" src="https://img.shields.io/badge/Windows-arm64%20%7C%20x64-0078D4">
-  <img alt="Node" src="https://img.shields.io/badge/runtime-bundled-success">
+  <img alt="Node" src="https://img.shields.io/badge/node-24%2B-success">
   <a href="README.ko.md"><img alt="한국어" src="https://img.shields.io/badge/docs-한국어-red"></a>
 </p>
 
@@ -38,6 +39,30 @@
 
 ---
 
+## 1P, not 3P: the difference this whole project exists for
+
+Claude Desktop already ships an official way to use other models — the **inference
+gateway** setting, what the app calls third-party or **3P** mode. Turning it on is
+not a per-session choice. It switches the **whole app** into a different deployment
+mode at launch, and that mode is a different product:
+
+- The window stops loading `claude.ai` and loads a local bundle instead. claude.ai
+  `/api/` and `/v1/` calls answer `custom_3p_not_available` 503.
+- "Chat" is no longer claude.ai chat. It is a Claude Code local-agent session.
+- Remote Control and side sessions are switched off outright
+  (`shouldEnableSessionsBridge()` returns false).
+- Anthropic's own claude.ai connectors, Claude Design, mobile continuity and chat
+  search go with it.
+
+There is no middle setting. "Chat on Claude, Code on the gateway" is impossible for
+anyone, because 1P mode routes nothing through the gateway at all. (All of this is
+read out of the app's own bundle; see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §2.)
+
+**ClaudeRipple never touches that setting.** The app stays signed in to your Claude
+subscription in 1P mode, and another model answers in the Code tab and its subagents
+— under its real name in the model picker, at the reasoning effort you chose. You do
+not trade your Claude account for a GPT one. You keep both, in one app.
+
 ## One tool instead of four
 
 Similar tools are built for the terminal. They let the Claude Code CLI or Codex CLI
@@ -48,7 +73,7 @@ Codex from one menu-bar app, runs both subscriptions side by side, and keeps the
 Claude Code harness intact: your skills, hooks, MCP servers, `CLAUDE.md`, subagents
 and claude.ai connectors keep working while another model does the thinking.
 
-| | ClaudeRipple | opencodex / openclaude | claude-code-router | Claude Desktop "3P" setting |
+| | ClaudeRipple | opencodex / openclaude | claude-code-router | Claude Desktop gateway (3P) mode |
 |---|---|---|---|---|
 | Claude **Desktop** Code tab | ✅ | ❌ | ❌ | ✅ |
 | Keeps claude.ai chat, Remote Control, cloud sessions | ✅ | ❌ | ❌ | ❌ |
