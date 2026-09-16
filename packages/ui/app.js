@@ -469,13 +469,23 @@ $("#slots-add").addEventListener("click", () => {
 function allKnownModelIds(config) { return new Set(groupedModels(config).flatMap((group) => group.models.map((model) => model.id))); }
 function applyPickerSelections(next, selections) {
   const known = allKnownModelIds(next);
-  const selected = selections.filter((entry) => entry.id && entry.provider);
-  const selectedIds = new Set(selected.map((entry) => entry.id));
+  // An entry no provider offers any more has no checkbox — the list is built from the providers —
+  // so keeping it here left removed models in the app picker forever, twice over once the same id
+  // had been written twice. Orphans go, the rest is deduplicated by model id, and the direct rules
+  // that served only an orphan go with it. A prefix rule that is not a model id (the legacy gpt-
+  // one) is not an orphan and stays.
   const currentExtras = (next.cli && next.cli.extraModels) || [];
-  const preservedExtras = currentExtras.filter((entry) => !known.has(entry.model));
-  next.cli = { ...(next.cli || {}), extraModels: [...preservedExtras, ...selected.map((entry) => ({ model: entry.id, name: entry.name || entry.id }))] };
-  const preservedDirect = (next.direct || []).filter((rule) => !known.has(rule.prefix));
-  next.direct = [...preservedDirect, ...selected.map((entry) => ({ prefix: entry.id, provider: entry.provider }))];
+  const orphans = new Set(currentExtras.filter((entry) => entry.model && !known.has(entry.model)).map((entry) => entry.model));
+  const selected = selections.filter((entry) => entry.id && entry.provider && known.has(entry.id));
+  const extras = new Map();
+  const direct = new Map();
+  for (const entry of selected) {
+    extras.set(entry.id, { model: entry.id, name: entry.name || entry.id });
+    direct.set(entry.id, { prefix: entry.id, provider: entry.provider });
+  }
+  next.cli = { ...(next.cli || {}), extraModels: [...extras.values()] };
+  const preservedDirect = (next.direct || []).filter((rule) => !known.has(rule.prefix) && !orphans.has(rule.prefix));
+  next.direct = [...preservedDirect, ...direct.values()];
   // A legacy gpt- prefix rule is intentionally retained by the filter above.
   return next;
 }

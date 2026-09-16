@@ -27,6 +27,14 @@ process. Nothing restarted it, and nothing could tell.
   screen now names both: the source a request would use, and, on its own line,
   whether a ClaudeRipple sign-in is stored and waiting behind it. Without this a
   successful sign-in changed nothing on screen.
+- **A model removed from a provider leaves the app picker.** Unticking a model
+  rewrote the provider but left its entry in `cli.extraModels` and its `direct`
+  rule behind, and the next save read that entry back as a selection. Since the
+  tick list is built from the providers, such an entry had no checkbox and could
+  never be removed; duplicated ids appeared twice in the picker. The selection is
+  now rebuilt from what the providers actually offer, deduplicated by model id,
+  and a direct rule that served only a removed model goes with it. A prefix rule
+  that is not a model id, such as the legacy `gpt-` one, is kept.
 - **HTML error pages are called out.** A provider that answers with a web page
   (a bare vendor domain, a login wall) is logged as "HTML page … not an API"
   instead of a quoted markup fragment.
