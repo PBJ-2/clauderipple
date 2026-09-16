@@ -205,6 +205,11 @@ async function install(): Promise<void> {
 function uninstall(): void {
   const home = homeDir();
   const cfg = new ConfigStore(configPath()).get();
+  // Stop the router before unregistering it. On macOS unloading the agent takes the process with
+  // it; on Windows removing the task leaves it running, and a running router holds router.log open,
+  // so --purge then fails with EPERM and leaves the home directory behind (measured 2026-09-16 in a
+  // Windows 11 arm64 VM).
+  if (stopAgent()) console.log("✓ router stopped");
   const removed = removeAgent();
   console.log(removed ? `✓ ${supervisorName()} removed (${agentDefinitionPath()})` : `✓ no ${supervisorName()} registered`);
   removeBundle(home);
@@ -212,8 +217,22 @@ function uninstall(): void {
   console.log(edit.changed ? `✓ ${settingsPath()} restored (backup: ${edit.backup ?? "none"})` : `✓ ${settingsPath()} had no ClaudeRipple keys`);
   for (const n of edit.notes) console.log(`  note: ${n}`);
   if (flag("purge")) {
-    fs.rmSync(home, { recursive: true, force: true });
-    console.log(`✓ removed ${home}`);
+    // Windows releases a file handle a moment after the process holding it exits; one immediate
+    // attempt can still lose the race, so the removal is retried briefly before it is reported.
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      try {
+        fs.rmSync(home, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+        lastError = null;
+        break;
+      } catch (e) {
+        lastError = e;
+        const until = Date.now() + 300;
+        while (Date.now() < until) { /* the CLI is synchronous here; a short spin is the whole wait */ }
+      }
+    }
+    if (lastError) console.log(`  could not remove ${home}: ${(lastError as Error).message}`);
+    else console.log(`✓ removed ${home}`);
   } else console.log(`  kept ${home} (config, certs, logs). Add --purge to delete it.`);
 }
 

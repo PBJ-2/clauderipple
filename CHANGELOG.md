@@ -66,6 +66,12 @@ process. Nothing restarted it, and nothing could tell.
 
 ### Fixed
 
+- **`uninstall --purge` removes the home directory on Windows.** It unregistered
+  the scheduled task but left the router running, and a running router holds
+  `router.log` open, so the removal failed with `EPERM` and left everything
+  behind. The router is stopped first now, and the removal is retried briefly
+  while Windows releases the handle.
+
 - **An update now replaces the running router.** Installing a new version only
   replaces files; the supervisor had started the router at logon from the old
   ones, and `start` leaves a running router alone, so the old code kept serving

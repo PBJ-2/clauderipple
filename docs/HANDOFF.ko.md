@@ -35,13 +35,40 @@
 건너뛰기, 격리 홈·포트로 `install`(인증서·설정·launchd·라우터·종단 프로브)→대시보드 200→`uninstall --purge`,
 `tray --install`→`tray` 기동.
 
+**Windows 실측 완료 (2026-09-16 오후, 패러렐즈 Windows 11 arm64, build 26100).**
+
+VM이 안 켜지던 것부터 잡아야 했다. `PRL_ERR_SECURE_BOOT_VIOLATION` — 부팅 이미지 서명 검사 실패로 2초 만에
+CPU가 멈췄다. `prlctl start`는 프로세스 기동까지만 보고하므로 "성공"이라고 답한다. 주군 승인으로 Secure Boot를
+껐다(`prlctl set "Windows 11" --efi-secure-boot off`, 원본 config 백업 `/tmp/config.pvs.bak-20260916T163644`).
+검증은 `prlctl exec`로 게스트 안에서 돌렸고, 파일은 공유 폴더 `\\Mac\Home\cr-vm-test`로 넘겼다.
+
+**install.ps1에서 잡은 버그 셋 (전부 Windows에서만 드러난다).**
+1. **Node가 있는데도 없다고 판단.** `node -e '...split(".")...'`의 따옴표를 PowerShell 5.1이 망가뜨려
+   SyntaxError가 stderr로 나가고, `ErrorActionPreference=Stop` 때문에 그게 종료 오류가 된다. → `node -v` +
+   정규식으로 바꿨다. 이게 주군이 말한 "Node 있으면 건너뛰기"를 실제로 지키는 부분이다.
+2. **`Move-Item`이 없는 상위 폴더를 만들지 않는다.** 30MB를 다 받아 놓고 "경로의 일부를 찾을 수 없습니다"로
+   죽었다. → 옮기기 전에 상위 폴더를 만든다.
+3. **npm이 만든 `clauderipple.cmd`가 맨 `node`를 호출한다.** 우리가 받은 Node가 그 PC의 유일한 Node면
+   PATH에 없어서 명령이 시작조차 못 한다(설치는 성공 보고). macOS 셔뱅 문제와 똑같은 함정의 Windows판.
+   → 우리가 Node를 받은 경우 `.cmd`와 `.ps1`을 그 Node를 직접 가리키는 래퍼로 덮어쓴다.
+
+**CLI에서 잡은 버그 하나.** `uninstall --purge`가 Windows에서 `EPERM`으로 실패했다. 작업 스케줄러 항목만 지우고
+라우터 프로세스는 살려 두는데, 그 프로세스가 `router.log`를 붙잡고 있어 홈 디렉터리가 안 지워진다(launchd는
+unload가 프로세스까지 데려가서 macOS에서는 안 드러난다). → `uninstall`이 먼저 `stopAgent()`를 부르고, 핸들
+해제 경합을 대비해 짧게 재시도한다.
+
+**통과한 항목 (Windows 11 arm64).** Node 숨긴 상태에서 다운로드→SHA256 대조→설치→명령 실행,
+`npm install --global --prefix`가 명령을 prefix 루트에 두는 것 확인, 사용자 PATH 등록,
+`clauderipple install --port 8890`(인증서·설정·작업 스케줄러·라우터·종단 프로브 전부 ✓),
+대시보드 HTTP 200, `/api/status`가 npm 배치의 `dist\router\src\index.js`를 보고,
+**`restart`가 실제로 프로세스를 교체**(startedAt 07:52:23 → 07:52:54 — 0.1.1에서 고장 나 있던 바로 그 기능),
+Electron 없는 `tray`의 안내 문구, `uninstall --purge` 완전 제거. 시험 흔적(C:\cr-test, 사용자 PATH 항목,
+작업 스케줄러, node 프로세스)은 모두 지웠다.
+
 **검증 못 한 것.**
-- **`scripts/install.ps1`은 한 줄도 실행해 보지 못했다.** 이 맥에 PowerShell이 없다. 문법 검사조차 못 했다.
-  Windows에서 첫 실행 시 반드시 손으로 확인할 것. 특히 ① `npm install --global --prefix`가 Windows에서는
-  명령을 prefix 루트에 두는 것(`$Prefix\clauderipple.cmd`)을 전제로 했는데 맞는지, ② 사용자 PATH 등록,
-  ③ `irm | iex` 실행 정책.
+- `irm | iex` 경로 자체(스크립트 파일로 실행했다). GitHub raw에 올라간 뒤 실행 정책과 함께 한 번 볼 것.
+- Windows **x64**. 이 VM은 arm64다.
 - npm에 **아직 게시하지 않았다.** 주군 승인 대기.
-- Windows에서 npm 설치본의 작업 스케줄러 등록·재시작 동작.
 
 ## ▶ 2026-09-16 — 0.1.1이 Windows 신고자에게 안 먹힌 이유와 0.1.2 (미배포)
 

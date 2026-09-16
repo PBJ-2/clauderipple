@@ -24,8 +24,18 @@ $NodeFallback = 'v24.21.0'
 $Runtime = Join-Path $Prefix 'runtime'
 
 function Get-NodeMajor([string]$exe) {
-  try { return [int]((& $exe -e 'process.stdout.write(process.versions.node.split(".")[0])' 2>$null)) }
-  catch { return 0 }
+  # `node -v` and a regex, not `node -e`: PowerShell 5.1 mangles the quotes inside an -e script, and
+  # the resulting SyntaxError on stderr becomes a terminating error under ErrorActionPreference Stop.
+  # Measured 2026-09-16 in a Windows 11 arm64 VM: a perfectly good Node 24 was reported as absent and
+  # the installer downloaded a second copy.
+  try {
+    $old = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $out = (& $exe -v 2>$null | Out-String).Trim()
+    $ErrorActionPreference = $old
+    if ($out -match '^v(\d+)\.') { return [int]$Matches[1] }
+    return 0
+  } catch { return 0 }
 }
 
 function Find-Node {
@@ -65,6 +75,9 @@ function Install-Node {
   if ($actual -ne $expected.ToLower()) { throw 'the Node download does not match its published checksum' }
 
   if (Test-Path $Runtime) { Remove-Item -Recurse -Force $Runtime }
+  # The prefix may not exist yet, and Move-Item will not create a missing parent (measured: it fails
+  # with "part of the path could not be found" after the download has already succeeded).
+  New-Item -ItemType Directory -Path (Split-Path $Runtime -Parent) -Force | Out-Null
   Expand-Archive -Path $zip -DestinationPath $tmp -Force
   Move-Item -Path (Join-Path $tmp $name) -Destination $Runtime
   Remove-Item -Recurse -Force $tmp
@@ -97,6 +110,16 @@ if ($LASTEXITCODE -ne 0) { throw "npm could not install $Package" }
 $bin = $Prefix
 $cmd = Join-Path $bin 'clauderipple.cmd'
 if (-not (Test-Path $cmd)) { throw "npm installed $Package but left no command in $bin" }
+
+# npm's own command shims invoke a bare `node`, which resolves to nothing when the Node we just
+# downloaded is the only one on this machine: the install succeeds and the command cannot start.
+# Measured 2026-09-16 in a Windows 11 arm64 VM. Replaced with shims that name the interpreter.
+if ($node.StartsWith($Runtime, [StringComparison]::OrdinalIgnoreCase)) {
+  $entry = Join-Path $Prefix 'node_modules\clauderipple\bin\clauderipple.js'
+  if (-not (Test-Path $entry)) { throw "the installed package has no entry point at $entry" }
+  Set-Content -Path $cmd -Value "@`"$node`" `"$entry`" %*" -Encoding ASCII
+  Set-Content -Path (Join-Path $bin 'clauderipple.ps1') -Value "& `"$node`" `"$entry`" @args" -Encoding UTF8
+}
 
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if (-not $userPath) { $userPath = '' }
