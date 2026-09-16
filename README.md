@@ -108,6 +108,14 @@ ClaudeRipple is fine: the installer stops the router gracefully first.
 `ClaudeRipple-<version>-win-x64.zip` is the same build unpacked, if you prefer.
 **Windows on arm64:** use the `-arm64.zip` — the arm64 installer is broken (below).
 
+**Updating.** Install the new version the same way (or unpack the new zip
+anywhere) and open the app: from 0.1.2 on it notices that the router still
+running is the previous version and switches it over, with a notification.
+Until 0.1.2 nothing did that, so a 0.1.0/0.1.1 install keeps serving the old
+code until the router is restarted — and on those versions tray → **Restart
+Router** did not actually restart it on Windows. Sign out and back in (or
+reboot) once after installing 0.1.2; from then on the app handles it.
+
 > **Windows shows "Windows protected your PC".** The build is not code-signed —
 > a certificate costs $219–685/year and needs a hardware token, which this project
 > does not spend money on. Click **More info → Run anyway**. If you would rather

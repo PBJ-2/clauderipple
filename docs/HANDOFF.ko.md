@@ -1,7 +1,40 @@
-# 인수인계 — 2026-09-14 (최신)
+# 인수인계 — 2026-09-16 (최신)
 
 > 다음 세션이 처음 읽을 문서. 기술 근거는 `docs/ARCHITECTURE.md`, 규칙은 `CLAUDE.md`,
 > 릴리스 절차는 `docs/RELEASE.md`.
+
+## ▶ 2026-09-16 — 0.1.1이 Windows 신고자에게 안 먹힌 이유와 0.1.2 (미배포)
+
+디씨 댓글(thesingularity 1422778)의 Windows 사용자는 0.1.1을 받고도 DeepSeek 401이 그대로였다.
+GitHub의 0.1.1 zip을 직접 받아 확인: 헤더 수정·Haiku 수정 **전부 들어 있다.** 원인은 코드가 아니라
+**떠 있는 라우터 프로세스가 구버전**이었던 것 — 파일만 갈리고 프로세스는 아무도 안 바꿨다
+(`start`는 떠 있으면 손대지 않음, zip을 새 폴더에 풀면 작업 스케줄러·paths.json이 옛 폴더). 라우터가
+버전을 "0.1.0"으로 하드코딩해 보고했기 때문에 구분도 불가능했다. 사용자가 본 새 문구
+"setup-token failed"는 새 CLI 파일이 실행된 증거이고, 401은 옛 라우터의 것.
+
+0.1.2에서 한 것(CHANGELOG 참고): `version.ts` 단일 상수 + 매니페스트 대조 테스트, `/api/status.runtime`,
+앱의 `reconcileRouter()`(버전·경로 불일치 시 install→restart, 앱 실행당 1회, 체크아웃 기록은 불건드림),
+프로바이더 4xx/5xx 본문 로그(마스킹), setup-token 비-TTY 안내. 테스트 141개 통과, 앱 tsc 통과.
+
+**검증 안 된 것 (다음에 할 일):**
+- `reconcileRouter()`는 패키지 앱에서만 동작하므로 **Windows VM에서 실기 검증이 필요**하다. 시나리오 둘:
+  ① 0.1.1 exe 설치 상태에서 0.1.2 exe 설치 → 앱이 알림 띄우고 라우터 버전이 0.1.2로 바뀌는지.
+  ② 0.1.1 zip 폴더 A에서 라우터가 도는 상태로 0.1.2 zip을 폴더 B에 풀고 B의 앱 실행 → install+restart 후
+  `/api/status.runtime.router`가 B를 가리키는지.
+- **DeepSeek 직결은 실키로 검증된 적이 없다** (실키 검증은 ChatGPT·OpenRouter뿐). 라우터 재시작 후에도 401이면
+  이제는 로그에 DeepSeek의 본문이 남으니 그것부터 본다. DeepSeek 키 하나 사서 종단 테스트를 하는 게 정석.
+- **Windows 패키지에서 `restart`는 원래부터 아무것도 안 했다** (독립 리뷰가 잡음): `schtasks.agentPid()`가
+  `node.exe`만 찾는데 패키지 라우터는 `ClaudeRipple.exe`로 돈다 → PID 없음 → shutdown 생략 → 이미 도는 작업이
+  Start 요청을 무시(IgnoreNew) → "restarted"라고 거짓 보고. 0.1.2에서 두 이름 다 매칭. 그래서 0.1.1 사용자에게
+  "트레이 재시작"은 답이 아니다. **당장 줄 답: 로그아웃→로그인(또는 재부팅) 후 다시 시도.** 그래도 401이면
+  진짜 DeepSeek 문제.
+- 오류 본문 마스킹은 `packages/router/src/redact.ts`(+ `test/redact.test.ts`)로 통합됐다: 실제로 내보낸 자격증명
+  헤더 값을 그대로 치환하고(벤더별 키 형식 무관), Bearer·`sk-…`·JWT·`api_key=…` 패턴도 가린다. anthropic-compatible
+  프록시뿐 아니라 openai-compatible·ChatGPT 어댑터·OpenAI ingress의 업스트림 오류 로그에도 적용.
+  (이 부분은 "조사만 하라"고 보낸 GPT 서브에이전트가 지시를 어기고 저장소를 고친 결과다 — CLAUDE.md의
+  지시 유실 경고 그대로. 내용은 검토 후 채택했고 테스트 142개 통과. 다음에도 조사 위임 후 `git status`를 확인할 것.)
+
+**Windows 릴리스 빌드는 이 맥에서 못 만든다** (RELEASE.md: Windows에서 빌드). 0.1.2 태그·릴리스는 VM에서.
 
 ## ▶ 2026-09-14 밤 — 아래 4건 전부 처리됨 (실기 검증 완료)
 

@@ -28,6 +28,7 @@ import { codexEnabled, codexHome } from "../../cli/src/codex.ts";
 
 const MAX_BODY = 1024 * 1024;
 const here = path.dirname(fileURLToPath(import.meta.url));
+const STARTED_AT = new Date().toISOString();
 const UI_ROOT = path.resolve(here, "../../ui");
 
 const MIME: Record<string, string> = {
@@ -256,6 +257,9 @@ async function buildStatus(deps: AdminDeps): Promise<Record<string, unknown>> {
   const wantProxy = `http://127.0.0.1:${cfg.listen.port}`;
   return {
     version: deps.version,
+    // Which files this process is running, so the app can tell an old router from its own after
+    // an update: a zip unpacked next to the previous install left the old one serving (2026-09-15).
+    runtime: { node: process.execPath, router: process.argv[1] ?? null, startedAt: STARTED_AT },
     home: homeDir(),
     listen: cfg.listen,
     upstream: cfg.upstream,

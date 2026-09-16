@@ -73,9 +73,21 @@ export function claudeBinary(pathValue = process.env.PATH): string | null {
   return latestDesktopClaude();
 }
 
-export function claudeLogin(home: string, options: { binary?: string; pathValue?: string; run?: (binary: string) => string } = {}): void {
+function needsTerminal(): string {
+  return (
+    `Claude sign-in needs a terminal: run \`clauderipple claude-login\` in ${isWindows ? "PowerShell" : "Terminal"}. ` +
+    "If Claude Code is already signed in on this computer, its login is reused automatically and this step is not needed."
+  );
+}
+
+export function claudeLogin(home: string, options: { binary?: string; pathValue?: string; run?: (binary: string) => string; interactive?: boolean } = {}): void {
   const binary = options.binary ?? claudeBinary(options.pathValue);
   if (!binary) throw new Error("Claude Code CLI not found; install Claude Code or open Claude Desktop once");
+  // `claude setup-token` is an interactive terminal flow (it opens the browser and waits for the
+  // code to be pasted back). From the tray app or the GUI there is no terminal: it cannot succeed,
+  // and left to run it waits for input that never comes (the tray has no timeout at all). Refuse
+  // before spawning and say where it works (reported as a bare "setup-token failed", 2026-09-15).
+  if (!options.run && !(options.interactive ?? process.stdin.isTTY)) throw new Error(needsTerminal());
   let stdout: string;
   try {
     // A .cmd/.bat launcher cannot be spawned directly on Windows; it needs a shell, and then the
@@ -89,7 +101,9 @@ export function claudeLogin(home: string, options: { binary?: string; pathValue?
     const detail = (error as { stderr?: string | Buffer }).stderr;
     const text = typeof detail === "string" ? detail : Buffer.isBuffer(detail) ? detail.toString("utf8") : "";
     if (/unknown command|unknown option|setup-token/i.test(text)) throw new Error("This Claude Code version does not support `claude setup-token`; update Claude Code and try again");
-    throw new Error("Claude Code setup-token failed");
+    const reason = text.replace(/\s+/g, " ").trim().slice(0, 200);
+    if (!(options.interactive ?? process.stdin.isTTY)) throw new Error(`${needsTerminal()}${reason ? ` (claude setup-token said: ${reason})` : ""}`);
+    throw new Error(`Claude Code setup-token failed${reason ? `: ${reason}` : ""}`);
   }
   const token = parseSetupToken(stdout);
   if (!token) throw new Error("Claude Code did not return a recognizable setup token; no credential was saved");

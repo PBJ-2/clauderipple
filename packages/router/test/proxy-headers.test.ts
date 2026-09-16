@@ -14,8 +14,9 @@ import { CertStore } from "../src/certs.ts";
 import { DEFAULTS, type Config, type Provider } from "../src/config.ts";
 import { UpstreamHealth } from "../src/health.ts";
 import { Logger } from "../src/log.ts";
-import { Proxy } from "../src/proxy.ts";
-import { RequestLog } from "../src/requestlog.ts";
+import { Proxy, errorSnippet } from "../src/proxy.ts";
+import { RequestLog, type RequestRecord } from "../src/requestlog.ts";
+import zlib from "node:zlib";
 import { createCa } from "../src/x509.ts";
 
 const CLIENT_TOKEN = "Bearer sk-ant-oat01-CLIENTTOKEN";
@@ -31,8 +32,20 @@ function freePort(): Promise<number> {
   });
 }
 
+type ProviderReply = { status: number; headers: Record<string, string>; body: Buffer };
+const OK_REPLY: ProviderReply = {
+  status: 200,
+  headers: { "content-type": "application/json" },
+  body: Buffer.from(JSON.stringify({ id: "msg_1", type: "message", role: "assistant", content: [], model: "x", usage: {} })),
+};
+
 /** Sends one routed /v1/messages through the proxy; returns the headers the provider saw. */
 async function forwardedHeaders(providerHeaders: Record<string, string>): Promise<http.IncomingHttpHeaders> {
+  return (await roundTrip(providerHeaders, OK_REPLY)).seen;
+}
+
+/** One routed request against a provider that answers `reply`; returns what it saw and what was logged. */
+async function roundTrip(providerHeaders: Record<string, string>, reply: ProviderReply): Promise<{ seen: http.IncomingHttpHeaders; records: RequestRecord[]; clientStatus: number }> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-proxy-headers-"));
   const ca = createCa({ cn: "clauderipple test" });
   fs.writeFileSync(path.join(home, "ca.pem"), ca.certPem);
@@ -43,8 +56,8 @@ async function forwardedHeaders(providerHeaders: Record<string, string>): Promis
     seen = req.headers;
     req.resume();
     req.on("end", () => {
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ id: "msg_1", type: "message", role: "assistant", content: [], model: "x", usage: {} }));
+      res.writeHead(reply.status, reply.headers);
+      res.end(reply.body);
     });
   });
   await new Promise<void>((r) => provider.listen(0, "127.0.0.1", r));
@@ -58,6 +71,7 @@ async function forwardedHeaders(providerHeaders: Record<string, string>): Promis
     routes: { "claude-opus-4-8": { provider: "p", model: "some-model" } },
     direct: [],
   };
+  const requests = new RequestLog(path.join(home, "requests.jsonl"));
   const proxy = new Proxy({
     config: () => cfg,
     // A file, not null: a Logger with no file echoes every line to stdout.
@@ -65,7 +79,7 @@ async function forwardedHeaders(providerHeaders: Record<string, string>): Promis
     certs: new CertStore(home),
     health: new UpstreamHealth(() => 100, () => {}),
     home,
-    requests: new RequestLog(path.join(home, "requests.jsonl")),
+    requests,
   });
   await proxy.listen();
 
@@ -87,13 +101,15 @@ async function forwardedHeaders(providerHeaders: Record<string, string>): Promis
       `content-length: ${Buffer.byteLength(body)}\r\n\r\n` +
       body,
   );
-  await new Promise<void>((r) => secure.once("data", () => setTimeout(r, 50)));
+  const first = await new Promise<Buffer>((r) => secure.once("data", (d: Buffer) => setTimeout(() => r(d), 50)));
+  const clientStatus = Number(/^HTTP\/1\.1 (\d{3})/.exec(first.toString("latin1"))?.[1] ?? 0);
 
   secure.destroy();
   proxy.close();
   await new Promise<void>((r) => provider.close(() => r()));
+  const records = requests.list(10);
   fs.rmSync(home, { recursive: true, force: true });
-  return seen;
+  return { seen, records, clientStatus };
 }
 
 test("an x-api-key provider never receives the caller's authorization header", async () => {
@@ -106,6 +122,33 @@ test("a bearer provider never receives the caller's x-api-key header", async () 
   const seen = await forwardedHeaders({ authorization: "Bearer PROVIDER-KEY" });
   assert.equal(seen.authorization, "Bearer PROVIDER-KEY");
   assert.equal(seen["x-api-key"], undefined);
+});
+
+// The status code alone left a DeepSeek 401 unexplained for a day; the body says which key was
+// refused. It is kept masked: a provider that echoes a whole key must not put it in the log.
+test("a provider error body is recorded with credentials masked, and still reaches the client", async () => {
+  const body = Buffer.from(JSON.stringify({ error: { message: "Authentication Fails, Your api key: sk-abcdef0123456789 is invalid", type: "authentication_error" } }));
+  const { records, clientStatus } = await roundTrip({ "x-api-key": "PROVIDER-KEY" }, { status: 401, headers: { "content-type": "application/json" }, body });
+  assert.equal(clientStatus, 401);
+  const record = records.find((r) => r.kind === "messages");
+  assert.ok(record, "the request was logged");
+  assert.equal(record.ok, false);
+  assert.match(record.note ?? "", /^upstream 401: .*Authentication Fails/);
+  assert.match(record.note ?? "", /\[REDACTED\] is invalid/);
+  assert.doesNotMatch(record.note ?? "", /sk-abcdef/);
+});
+
+test("errorSnippet decodes gzip, masks bearer tokens and explicit opaque credentials, and bounds its length", () => {
+  const gz = zlib.gzipSync(Buffer.from('{"error":"token Bearer sk-ant-oat01-SECRETSECRET1234 expired"}'));
+  const s = errorSnippet(gz, "gzip");
+  assert.match(s, /Bearer \[REDACTED\] expired/);
+  assert.doesNotMatch(s, /SECRET/);
+  const opaque = "vendor_key_not_matching_a_known_pattern";
+  const reflected = errorSnippet(Buffer.from(`provider rejected ${opaque}`), undefined, [opaque]);
+  assert.match(reflected, /provider rejected \[REDACTED\]/);
+  assert.doesNotMatch(reflected, /vendor_key/);
+  assert.equal(errorSnippet(Buffer.alloc(0), undefined), "(empty body)");
+  assert.ok(errorSnippet(Buffer.from("x".repeat(1000)), undefined).length <= 301);
 });
 
 test("non-credential headers still reach the provider", async () => {

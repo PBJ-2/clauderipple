@@ -6,6 +6,7 @@ import http from "node:http";
 import type { OpenAiCompatibleProvider } from "../../config.ts";
 import type { Logger } from "../../log.ts";
 import type { RequestUsage } from "../../requestlog.ts";
+import { credentialHeaderValues, redactErrorText } from "../../redact.ts";
 import { SseParser } from "../chatgpt/sse.ts";
 import { estimateTokens, formatSse, OpenAiStreamMapper, toOpenAiRequest } from "./translate.ts";
 import type { AnthropicRequest } from "../chatgpt/translate.ts";
@@ -83,6 +84,8 @@ export class OpenAiCompatibleAdapter {
         };
     const upstreamRequest = toOpenAiRequest(json, { model, wire, ...(effort ? { effort } : {}), caps });
     const requestBody = JSON.stringify(upstreamRequest);
+    const upstreamHeaders = { "content-type": "application/json", accept: "text/event-stream", ...(this.cfg.headers ?? {}) };
+    const upstreamSecrets = credentialHeaderValues(Object.entries(upstreamHeaders));
     // Same input floor behavior as the ChatGPT adapter: the CLI snapshots message_start before usage arrives.
     const key = JSON.stringify({ model, wire, system: json.system ?? "", user: json.messages.find((message) => message.role === "user")?.content ?? "" });
     const startInput = Math.max(estimateTokens(json), this.lastInputByKey.get(key) ?? 0);
@@ -94,7 +97,7 @@ export class OpenAiCompatibleAdapter {
     try {
       upstream = await fetch(endpoint(this.cfg.url, wire), {
         method: "POST",
-        headers: { "content-type": "application/json", accept: "text/event-stream", ...(this.cfg.headers ?? {}) },
+        headers: upstreamHeaders,
         body: requestBody,
         signal: controller.signal,
       });
@@ -108,8 +111,9 @@ export class OpenAiCompatibleAdapter {
 
     if (!upstream.ok || !upstream.body) {
       const text = await upstream.text().catch(() => "");
-      const out = mapHttpError(upstream.status, text);
-      this.log.warn(`openai ${this.name}: upstream ${upstream.status} for ${model}: ${text.replace(/\s+/g, " ").slice(0, 400)}`);
+      const safeText = redactErrorText(text, upstreamSecrets);
+      const out = mapHttpError(upstream.status, safeText);
+      this.log.warn(`openai ${this.name}: upstream ${upstream.status} for ${model}: ${safeText.slice(0, 400)}`);
       res.off("close", onClose);
       res.writeHead(out.status, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out.body)) }).end(out.body);
       return { status: out.status, bytes: Buffer.byteLength(out.body), note: `upstream ${upstream.status}` };

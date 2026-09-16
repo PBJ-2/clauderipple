@@ -18,6 +18,7 @@ import { startAdmin } from "./admin.ts";
 import { RequestLog } from "./requestlog.ts";
 import { OpenAiIngress } from "./ingress/server.ts";
 import { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
+import { VERSION } from "./version.ts";
 
 // Startup timing. Claude Desktop routes *all* its traffic through us in picker mode, so every
 // second before the socket is open is a second the app cannot reach anything (ERR_PROXY_-
@@ -135,7 +136,7 @@ proxy
       log: log!,
       stats: () => proxy.stats,
       health: () => health.consecutiveFailures,
-      version: "0.1.0",
+      version: VERSION,
       requests,
       chatgpt: () => ({ quota: proxy.chatgptRateLimits, auth: proxy.chatgptAuthStatus() }),
       picker: () => ({ enabled: !!store.get().picker?.enabled, hosts: terminateHosts(store.get()).slice(1), last: proxy.lastPickerInjection }),

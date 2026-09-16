@@ -34,6 +34,7 @@ import { terminateHosts } from "./config.ts";
 import type { CertStore } from "./certs.ts";
 import { injectPickerModels, isBootstrapPath } from "./picker.ts";
 import { ResponseUsageTap, type RequestLog, type RequestRecord, type RequestUsage } from "./requestlog.ts";
+import { credentialHeaderValues, redactErrorText, redactHeaders } from "./redact.ts";
 import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
 
 const MAX_BODY = 64 * 1024 * 1024;
@@ -42,6 +43,26 @@ const HOP_BY_HOP = new Set(["connection", "keep-alive", "proxy-connection", "tra
 // are dropped rather than forwarded: the provider header replaces only the one it happens to share
 // a name with, and the other would otherwise travel to an endpoint that is not Anthropic.
 const CLIENT_AUTH = new Set(["authorization", "x-api-key"]);
+/** How much of an upstream error body is kept for the log. */
+const ERROR_HEAD_MAX = 4096;
+
+/**
+ * A bounded, decoded upstream error excerpt with credentials completely masked. Providers may
+ * echo the key they rejected, including an opaque vendor-specific key format.
+ */
+export function errorSnippet(head: Buffer, encoding: string | string[] | undefined, secrets: readonly string[] = []): string {
+  let out = head;
+  const enc = String(encoding ?? "").toLowerCase();
+  try {
+    if (enc === "gzip" || enc === "x-gzip") out = zlib.gunzipSync(head);
+    else if (enc === "deflate") out = zlib.inflateSync(head);
+    else if (enc === "br") out = zlib.brotliDecompressSync(head);
+  } catch {
+    // A truncated compressed body decodes to nothing; fall through to what is readable.
+  }
+  const masked = redactErrorText(out.toString("utf8"), secrets, 300);
+  return masked || "(empty body)";
+}
 
 export type ProxyDeps = {
   config: () => Config;
@@ -516,12 +537,15 @@ export class Proxy {
     if (body.length > 0 || (method !== "GET" && method !== "HEAD")) headers.push("content-length", String(body.length));
     if (isPickerBootstrap) {
       const shown: string[] = [];
-      for (let i = 0; i < headers.length; i += 2) {
-        const k = headers[i]!.toLowerCase();
-        shown.push(k === "cookie" || k === "authorization" ? `${k}=<${headers[i + 1]!.length}B>` : `${k}=${headers[i + 1]!}`);
+      for (const [rawName, value] of Array.from({ length: headers.length / 2 }, (_, i) => [headers[i * 2]!, headers[i * 2 + 1]!] as [string, string])) {
+        const safe = redactHeaders({ [rawName]: value })[rawName];
+        shown.push(safe === "[REDACTED]" ? `${rawName.toLowerCase()}=<${value.length}B>` : `${rawName.toLowerCase()}=${value}`);
       }
       log.info(`PICKER request ${method} ${path.slice(0, 80)} headers: ${shown.join(" | ")}`);
     }
+    // Keep only actual credentials named by the outbound headers. This covers arbitrary vendor
+    // key formats when a provider reflects the key in its error body.
+    const errorSecrets = credentialHeaderValues(Array.from({ length: headers.length / 2 }, (_, i) => [headers[i * 2]!, headers[i * 2 + 1]!] as [string, string]));
 
     const lib = target.protocol === "https:" ? https : http;
     const upReq = lib.request({
@@ -592,7 +616,7 @@ export class Proxy {
               log.warn(`bootstrap inject failed: ${(e as Error).message}`);
             }
           } else if (isPickerBootstrap && status !== 200 && status !== 304) {
-            log.warn(`PICKER bootstrap upstream ${status}; headers: ${JSON.stringify(upRes.headers)}; body: ${out.toString("utf8").slice(0, 300)}`);
+            log.warn(`PICKER bootstrap upstream ${status}; headers: ${JSON.stringify(redactHeaders(upRes.headers))}; body: ${redactErrorText(out.toString("utf8"), errorSecrets, 300)}`);
           } else if (status === 200 && isPickerBootstrap) {
             try {
               const j = JSON.parse(out.toString("utf8")) as Record<string, unknown>;
@@ -626,10 +650,20 @@ export class Proxy {
         typeof upRes.headers["content-type"] === "string" ? upRes.headers["content-type"] : undefined,
         typeof upRes.headers["content-encoding"] === "string" ? upRes.headers["content-encoding"] : undefined,
       );
+      // An error body is the only thing that says why the provider refused; keep its head for the
+      // log and the Logs page. A DeepSeek 401 went unexplained for a day because only the status
+      // code was recorded (2026-09-15).
+      const errorHead: Buffer[] = [];
+      let errorHeadBytes = 0;
       upRes.on("data", (c: Buffer) => {
         bytes += c.length;
         const writable = res.write(c);
         tap.feed(c);
+        if (status >= 400 && errorHeadBytes < ERROR_HEAD_MAX) {
+          const remaining = ERROR_HEAD_MAX - errorHeadBytes;
+          errorHead.push(c.subarray(0, remaining));
+          errorHeadBytes += Math.min(c.length, remaining);
+        }
         if (!writable) upRes.pause();
       });
       res.on("drain", () => upRes.resume());
@@ -638,7 +672,7 @@ export class Proxy {
         observedUsage = observed.usage;
         observedStopReason = observed.stopReason;
         res.end();
-        finish(String(status), bytes);
+        finish(String(status), bytes, status >= 400 ? `upstream ${status}: ${errorSnippet(Buffer.concat(errorHead), upRes.headers["content-encoding"], errorSecrets)}` : undefined);
       });
       upRes.on("error", (e) => {
         finish(String(status), bytes, `upstream stream error ${(e as Error).message}`);

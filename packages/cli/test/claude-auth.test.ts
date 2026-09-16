@@ -19,7 +19,7 @@ test("claude-login invokes PATH claude setup-token and saves only a 0600 credent
   const cli = path.resolve(import.meta.dirname, "..", "src", "index.ts");
   const output = execFileSync(process.execPath, [cli, "claude-login"], {
     encoding: "utf8",
-    env: { ...process.env, PATH: bin, CLAUDERIPPLE_HOME: home },
+    env: { ...process.env, PATH: bin, CLAUDERIPPLE_HOME: home, CLAUDERIPPLE_ASSUME_TTY: "1" },
   });
   assert.match(output, /Claude subscription connected/);
   assert.doesNotMatch(output, new RegExp(token));
@@ -35,5 +35,7 @@ test("setup-token parser rejects prose and extracts only explicit long tokens", 
   assert.equal(parseSetupToken("Copy this token:\nexport CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123456789\nDo not share it."), "sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123456789");
   assert.equal(parseSetupToken("sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123456789 sk-ant-oat01-zyxwvutsrqponmlkjihgfedcba9876543210"), null);
   assert.equal(claudeLogout(fs.mkdtempSync(path.join(os.tmpdir(), "cr-claude-logout-"))), false);
-  assert.throws(() => claudeLogin("/missing", { binary: "/missing/claude" }), /setup-token failed/);
+  assert.throws(() => claudeLogin("/missing", { binary: "/missing/claude", interactive: true }), /setup-token failed/);
+  // The tray app and the GUI have no terminal; the browser flow cannot run there, so say so up front.
+  assert.throws(() => claudeLogin("/missing", { binary: "/missing/claude", interactive: false }), /needs a terminal/);
 });

@@ -10,6 +10,8 @@ import path from "node:path";
 
 type Status = {
   version: string;
+  /** Reported from 0.1.2 on; an older router leaves it out. */
+  runtime?: { node: string; router: string | null; startedAt: string };
   listen: { host: string; port: number };
   adminPort: number;
   stats: { started: number; completed: number; failed: number; inFlight: number };
@@ -64,6 +66,9 @@ const STRINGS = {
     setupContinue: "Continue",
     setupDone: "ClaudeRipple setup finished.",
     setupFailed: "Setup did not finish",
+    updatedTitle: (v: string) => `ClaudeRipple ${v}`,
+    updatedRestarting: (from: string) => `The running router is ${from}. Switching it to this version…`,
+    updatedFailed: "The router could not be switched to this version",
     about: "About ClaudeRipple",
     aboutDetail:
       "Run GPT and other models inside Claude Desktop, without turning Claude off.\n\nIndependent open-source project (GPL-3.0). Not affiliated with, endorsed by, or sponsored by Anthropic or OpenAI. Claude and Claude Code are trademarks of Anthropic, PBC.",
@@ -123,6 +128,9 @@ const STRINGS = {
     setupContinue: "계속",
     setupDone: "ClaudeRipple 설정이 완료되었습니다.",
     setupFailed: "설정을 마치지 못했습니다",
+    updatedTitle: (v: string) => `ClaudeRipple ${v}`,
+    updatedRestarting: (from: string) => `지금 떠 있는 라우터는 ${from}입니다. 이 버전으로 바꿉니다…`,
+    updatedFailed: "라우터를 이 버전으로 바꾸지 못했습니다",
     about: "ClaudeRipple 정보",
     aboutDetail:
       "Claude Desktop을 끄지 않고 그 안에서 GPT 등 다른 모델을 씁니다.\n\n독립 오픈소스 프로젝트(GPL-3.0)이며 Anthropic·OpenAI와 제휴·보증·후원 관계가 없습니다. Claude와 Claude Code는 Anthropic, PBC의 상표입니다.",
@@ -242,6 +250,7 @@ async function poll(): Promise<void> {
     downSince = null;
     downNotified = false;
     if (winOffline) showWindowContent(); // the router answered: swap the notice for the GUI
+    void reconcileRouter(last);
   } catch (e) {
     last = null;
     lastError = (e as Error).message;
@@ -376,7 +385,61 @@ function offlineNotice(starting: boolean, unconfigured: boolean): string {
   return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
 }
 
-type CliRuntime = { node: string; env: Record<string, string>; cli: string };
+type CliRuntime = { node: string; env: Record<string, string>; cli: string; router?: string };
+
+// ---- update handling -------------------------------------------------------------------
+// Installing a new version replaces files, not the process: the supervisor started the router at
+// logon from the previous files, and `start` leaves a running router alone. So after an update
+// the old router kept serving — the 0.1.1 fixes never ran on the Windows install that reported
+// the bugs (2026-09-15). A zip unpacked next to the old folder is worse: the supervisor and
+// paths.json still name the old folder, so even a restart brings the old code back.
+//
+// Once per app run, when the router answers: if it runs another version, restart it; if this
+// installation's files are not the ones recorded, re-run `install` first so the supervisor
+// points here. A source checkout recorded in paths.json is a developer's choice and is left alone.
+
+let reconciled = false;
+
+function savedPaths(): { node?: string; cli?: string; router?: string } | null {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(home, "paths.json"), "utf8")) as { node?: string; cli?: string; router?: string };
+  } catch {
+    return null;
+  }
+}
+
+/** A router path inside a packaged app (macOS .app bundle or electron-builder resources). */
+function looksPackaged(routerPath: string): boolean {
+  return /\.app[\\/]Contents[\\/]Resources[\\/]clauderipple[\\/]/.test(routerPath) || /[\\/]resources[\\/]clauderipple[\\/]/i.test(routerPath);
+}
+
+function samePath(a: string, b: string): boolean {
+  const norm = (p: string) => (process.platform === "win32" ? path.resolve(p).toLowerCase() : path.resolve(p));
+  return norm(a) === norm(b);
+}
+
+async function reconcileRouter(s: Status): Promise<void> {
+  if (reconciled) return;
+  const packaged = packagedRuntime();
+  if (!packaged?.router) return; // development shell: never touch a checkout's router
+  const saved = savedPaths();
+  if (!saved?.router || !looksPackaged(saved.router)) return;
+  const installedElsewhere = !samePath(saved.router, packaged.router);
+  const runningElsewhere = !!s.runtime?.router && !samePath(s.runtime.router, packaged.router);
+  const otherVersion = s.version !== app.getVersion();
+  if (!installedElsewhere && !runningElsewhere && !otherVersion) return;
+  reconciled = true;
+  const from = `${s.version}${s.runtime?.router ? ` (${s.runtime.router})` : ""}`;
+  if (Notification.isSupported()) new Notification({ title: L.updatedTitle(app.getVersion()), body: L.updatedRestarting(from) }).show();
+  const outputs: string[] = [];
+  if (installedElsewhere || runningElsewhere) outputs.push(await runCli(["install"]));
+  outputs.push(await runCli(["restart"]));
+  const out = outputs.join("\n\n");
+  if (/✗|error|failed|not restarted|start failed/i.test(out)) {
+    await dialog.showMessageBox({ type: "warning", message: L.updatedFailed, detail: out });
+  }
+  void poll();
+}
 
 /**
  * The sources this app carries, when it is a packaged build. macOS keeps them inside the .app;
@@ -393,7 +456,7 @@ function packagedRuntime(): CliRuntime | null {
     : path.join((process as NodeJS.Process & { resourcesPath?: string }).resourcesPath ?? "", "clauderipple");
   const cli = path.join(resources, "packages", "cli", "src", "index.ts");
   if (!fs.existsSync(cli)) return null;
-  return { node: process.execPath, env: { ELECTRON_RUN_AS_NODE: "1" }, cli };
+  return { node: process.execPath, env: { ELECTRON_RUN_AS_NODE: "1" }, cli, router: path.join(resources, "packages", "router", "src", "index.ts") };
 }
 
 /** Prefer this app's bundled Electron runtime; existing installations retain their recorded runtime. */

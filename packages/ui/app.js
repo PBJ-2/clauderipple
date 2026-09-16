@@ -179,6 +179,8 @@ async function refreshHealth() {
   const details = $("#health-details");
   details.replaceChildren(
     el("div", { class: "row" }, [el("span", { class: "k", text: t("health.version") }), el("span", { class: "v", text: status.version })]),
+    // Which files answer, and since when: the only way to see that an update actually replaced the router.
+    ...(status.runtime ? [el("div", { class: "row" }, [el("span", { class: "k", text: t("health.runtime") }), el("span", { class: "v", text: `${status.runtime.router || "?"} · ${new Date(status.runtime.startedAt).toLocaleString()}` })])] : []),
     el("div", { class: "row" }, [el("span", { class: "k", text: t("health.routes") }), el("span", { class: "v", text: String(status.routes) })]),
     el("div", { class: "row" }, [el("span", { class: "k", text: t("health.cli") }), el("span", { class: "v", text: status.cliVersion })]),
   );

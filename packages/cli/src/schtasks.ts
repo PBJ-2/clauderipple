@@ -112,12 +112,16 @@ export function agentState(): "running" | "loaded" | "not-loaded" {
 }
 
 /**
- * The scheduled task starts cmd.exe, which starts node, so the task's own pid is the launcher's.
- * What callers want is the router, so find the node process whose command line names our script.
+ * The scheduled task starts PowerShell, which starts the runtime, so the task's own pid is the
+ * launcher's. What callers want is the router, so find the process whose command line names our
+ * script. The runtime is `node.exe` for a source checkout and `ClaudeRipple.exe` (Electron as
+ * Node) for the packaged app — until 0.1.2 only `node.exe` was looked for, so on every packaged
+ * install `restart` found no router, skipped the shutdown, and `Start-ScheduledTask` was ignored
+ * by the task already running: "Restart Router" never restarted anything (found 2026-09-16).
  */
 export function agentPid(): number | null {
   const r = run(
-    `(Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -like '*packages\\router\\src\\index.ts*' } | Select-Object -First 1).ProcessId`,
+    `(Get-CimInstance Win32_Process -Filter "Name='node.exe' OR Name='ClaudeRipple.exe'" | Where-Object { $_.CommandLine -like '*packages\\router\\src\\index.ts*' } | Select-Object -First 1).ProcessId`,
   );
   const n = Number(r.out.trim());
   return r.ok && Number.isFinite(n) && n > 0 ? n : null;

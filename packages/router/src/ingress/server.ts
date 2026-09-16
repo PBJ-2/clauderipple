@@ -13,6 +13,7 @@ import { resolveCompatibleCaps, sanitizeForCompatible } from "../compat.ts";
 import { SseParser } from "../providers/chatgpt/sse.ts";
 import { ingressModels } from "./models.ts";
 import { requestId, type RequestLog, type RequestRecord, type RequestUsage } from "../requestlog.ts";
+import { credentialHeaderValues, redactErrorText } from "../redact.ts";
 import { CLAUDE_CODE_IDENTITY, ClaudeCodeAuthStore, fromClaudeCodeToolName, nativeAnthropicHeaders, observedAnthropicHeaders, toClaudeCodeToolName } from "../providers/anthropic.ts";
 import { ObservedClaudeCodeAuth } from "../providers/anthropic-observed.ts";
 import {
@@ -347,8 +348,9 @@ export class OpenAiIngress {
         response.on("end", () => resolveP(output));
         response.on("error", () => resolveP(output));
       });
-      this.deps.log.warn(`OPENAI ingress upstream ${response.statusCode ?? 0} (${model}): ${text.replace(/\s+/g, " ").slice(0, 400)}`);
-      const mapped = httpStatusError(response.statusCode ?? 502, text);
+      const safeText = redactErrorText(text, credentialHeaderValues(Object.entries(headers)));
+      this.deps.log.warn(`OPENAI ingress upstream ${response.statusCode ?? 0} (${model}): ${safeText.slice(0, 400)}`);
+      const mapped = httpStatusError(response.statusCode ?? 502, safeText);
       return { status: mapped.status, bytes: sendJson(res, mapped.status, mapped.error), note: `upstream ${response.statusCode ?? 0}` };
     }
     const mapper = new ResponsesEventMapper(model, native && provider.auth === "claude-code" ? fromClaudeCodeToolName : undefined);

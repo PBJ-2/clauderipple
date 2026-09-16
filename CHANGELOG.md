@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.1.2 — unreleased
+
+Why 0.1.1 did not help the Windows install that reported the 0.1.1 bugs: the
+fixes were in the files, but the router that kept answering was the old
+process. Nothing restarted it, and nothing could tell.
+
+### Fixed
+
+- **An update now replaces the running router.** Installing a new version only
+  replaces files; the supervisor had started the router at logon from the old
+  ones, and `start` leaves a running router alone, so the old code kept serving
+  after every update. A zip unpacked into a new folder was worse: the
+  supervisor and `paths.json` still named the old folder, so even a restart
+  brought the old code back. The tray app now compares the running router's
+  version and files with its own once per launch; if they differ it re-runs
+  `install` (only when this installation's files are not the recorded ones) and
+  restarts the router, with a notification. A source checkout recorded in
+  `paths.json` is left alone.
+- **Windows: "Restart Router" restarts the router.** The packaged router runs
+  as `ClaudeRipple.exe` (Electron as Node), but the process lookup only knew
+  `node.exe`, so on every packaged install `restart` found nothing to stop,
+  and the scheduled task ignored the start request because it was already
+  running. Nothing was restarted, and the command still said "restarted". The
+  lookup now matches either executable. Until 0.1.2, the only ways to get a
+  new router on a packaged Windows install were the installer (whose own stop
+  script did look for `ClaudeRipple.exe`), signing out and in, or a reboot.
+- **The router reports its real version.** It said `0.1.0` in 0.1.1 (a literal
+  in two places). One `VERSION` constant now feeds the router, the CLI and the
+  status page, and a test fails when it drifts from the package manifests.
+- **Provider errors are logged with their body.** A 4xx/5xx from a provider or
+  from Anthropic recorded only the status; a DeepSeek `401` stayed unexplained
+  for a day. The first 300 characters of the error body now go into the router
+  log and the Logs page, with anything key-shaped reduced to its last four
+  characters. `/api/status` also reports which files the router is running and
+  when it started.
+- **"Connect Claude subscription" from the app says what to do.** `claude
+  setup-token` is an interactive terminal flow; run from the tray or the GUI it
+  can only fail, and it failed with a bare "setup-token failed". Without a
+  terminal the message now says to run `clauderipple claude-login` in
+  Terminal/PowerShell, and that an existing Claude Code login is reused
+  automatically anyway. Other failures include what `claude` printed.
+
 ## 0.1.1 — 2026-09-15
 
 All four were reported from a Windows install and reproduced here.

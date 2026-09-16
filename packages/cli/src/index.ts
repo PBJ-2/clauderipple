@@ -75,7 +75,7 @@ function pickerOff(): void {
   console.log("\nQuit and reopen Claude Desktop to apply.");
 }
 
-const VERSION = "0.1.0";
+import { VERSION } from "../../router/src/version.ts";
 import { probe } from "./probe.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -430,7 +430,8 @@ try {
     }
     case "claude-login": {
       console.log("Opening your browser through Claude Code to connect your Claude subscription. This terminal waits for approval.");
-      claudeLogin(homeDir());
+      // CLAUDERIPPLE_ASSUME_TTY: the test drives this command through a pipe with a fake `claude`.
+      claudeLogin(homeDir(), { interactive: process.stdin.isTTY || process.env.CLAUDERIPPLE_ASSUME_TTY === "1" });
       console.log("✓ Claude subscription connected for native Anthropic ingress");
       break;
     }

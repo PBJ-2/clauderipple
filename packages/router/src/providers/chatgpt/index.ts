@@ -8,6 +8,7 @@ import { CredentialStore } from "./auth.ts";
 import { SseParser } from "./sse.ts";
 import { StreamMapper, conversationKey, estimateTokens, formatSse, toResponsesRequest, type AnthropicRequest } from "./translate.ts";
 import type { RequestUsage } from "../../requestlog.ts";
+import { credentialHeaderValues, redactErrorText } from "../../redact.ts";
 import fs from "node:fs";
 import path from "node:path";
 import { homeDir } from "../../config.ts";
@@ -142,18 +143,20 @@ export class ChatGptAdapter {
     const onClose = (): void => ac.abort();
     res.on("close", onClose);
 
+    const upstreamHeaders = {
+      "content-type": "application/json",
+      accept: "text/event-stream",
+      authorization: `Bearer ${tokens.accessToken}`,
+      "chatgpt-account-id": tokens.accountId,
+      "OpenAI-Beta": "responses=experimental",
+      originator: "codex_cli_rs",
+    };
+    const upstreamSecrets = credentialHeaderValues(Object.entries(upstreamHeaders));
     let upstream: Response;
     try {
       upstream = await fetch(`${(this.cfg.url ?? DEFAULT_BASE).replace(/\/$/, "")}/codex/responses`, {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          accept: "text/event-stream",
-          authorization: `Bearer ${tokens.accessToken}`,
-          "chatgpt-account-id": tokens.accountId,
-          "OpenAI-Beta": "responses=experimental",
-          originator: "codex_cli_rs",
-        },
+        headers: upstreamHeaders,
         body,
         signal: ac.signal,
       });
@@ -170,10 +173,11 @@ export class ChatGptAdapter {
 
     if (!upstream.ok || !upstream.body) {
       const text = await upstream.text().catch(() => "");
+      const safeText = redactErrorText(text, upstreamSecrets);
       if (upstream.status === 401) this.creds.invalidate();
-      const err = mapHttpError(upstream.status, text);
-      this.log.warn(`chatgpt ${this.name}: upstream ${upstream.status} for ${model}: ${text.replace(/\s+/g, " ").slice(0, 400)}`);
-      if (this.cfg.debugDump) this.dump(upstream.status, json, upstreamReq, text);
+      const err = mapHttpError(upstream.status, safeText);
+      this.log.warn(`chatgpt ${this.name}: upstream ${upstream.status} for ${model}: ${safeText.slice(0, 400)}`);
+      if (this.cfg.debugDump) this.dump(upstream.status, json, upstreamReq, safeText);
       res.off("close", onClose);
       res.writeHead(err.status, { "content-type": "application/json" }).end(err.body);
       return { status: err.status, bytes: err.body.length, note: `upstream ${upstream.status}` };
