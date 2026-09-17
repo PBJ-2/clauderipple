@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { StreamMapper, conversationKey, estimateTokens, formatSse, normalizeSchema, toResponsesRequest, type AnthropicRequest } from "../src/providers/chatgpt/translate.ts";
+import { StreamMapper, conversationKey, estimateTokens, formatSse, normalizeSchema, toResponsesRequest, toolNameForResponses, toolNameRestoreMap, type AnthropicRequest } from "../src/providers/chatgpt/translate.ts";
 import { SseParser } from "../src/providers/chatgpt/sse.ts";
 
 const opts = { model: "gpt-5.6-terra", effort: "high", identity: true };
@@ -153,6 +153,59 @@ test("tool schemas: patterns the Codex regex engine rejects are dropped, others 
   assert.equal(x.pattern, undefined);
   assert.deepEqual(out.required, ["field"]);
   assert.equal(schema.properties.field.pattern.length > 0, true); // input untouched
+});
+
+// The Responses API takes `^[a-zA-Z0-9_-]{1,64}$` and fails the whole request on one bad name.
+// Claude Code's MCP names (`mcp__<uuid server>__<tool>`) pass 64 routinely.
+const longMcp = "mcp__claude_ai_Korea_Investment_Securities__get_overseas_stock_chart"; // 68
+
+test("tool names: legal ones untouched, over-long ones mangled deterministically within the limit", () => {
+  assert.equal(toolNameForResponses("Read"), "Read");
+  assert.equal(toolNameForResponses("mcp__short__tool"), "mcp__short__tool");
+
+  const m = toolNameForResponses(longMcp);
+  assert.ok(/^[A-Za-z0-9_-]{1,64}$/.test(m), m);
+  assert.equal(m.length, 64);
+  assert.equal(m, toolNameForResponses(longMcp)); // stable → cache prefix does not move
+  assert.equal(m, `${longMcp.slice(0, 55)}_105ec833`); // 55 of the original + "_" + 8 hex
+
+  // Illegal characters are sanitised, and the hash keeps two names that sanitise alike apart.
+  assert.notEqual(toolNameForResponses("a.b"), toolNameForResponses("a-b"));
+  assert.ok(/^[A-Za-z0-9_-]{1,64}$/.test(toolNameForResponses("a.b")));
+});
+
+test("over-long tool names are mangled on every outbound site and restored on the way back", () => {
+  const req: AnthropicRequest = {
+    model: "x",
+    max_tokens: 10,
+    tools: [{ name: longMcp, input_schema: { type: "object", properties: {} } }, { name: "Read", input_schema: { type: "object", properties: {} } }],
+    tool_choice: { type: "tool", name: longMcp },
+    messages: [
+      { role: "user", content: [{ type: "text", text: "quote please" }] },
+      { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: longMcp, input: { symbol: "AAPL" } }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "call_1", content: "182.3" }] },
+    ],
+  };
+  const r = toResponsesRequest(req, opts);
+  const mangled = toolNameForResponses(longMcp);
+
+  // declarations, tool_choice and the replayed assistant turn all agree, and nothing exceeds 64
+  for (const t of r.tools ?? []) assert.ok(/^[A-Za-z0-9_-]{1,64}$/.test(t.name), t.name);
+  assert.equal(r.tools?.[0]?.name, mangled);
+  assert.equal(r.tools?.[1]?.name, "Read"); // legal name still byte-identical
+  assert.deepEqual(r.tool_choice, { type: "function", name: mangled });
+  const call = r.input.find((i) => i.type === "function_call") as { name: string };
+  assert.equal(call.name, mangled);
+
+  // the model echoes the mangled name; Claude Code only recognises the original
+  const map = toolNameRestoreMap(req);
+  assert.equal(map.get(mangled), longMcp);
+  assert.equal(map.has("Read"), false);
+  const mapper = new StreamMapper("gpt-5.6-terra", 0, map);
+  mapper.start();
+  mapper.feed({ type: "response.output_item.added", item: { type: "function_call", call_id: "call_2", id: "item_1", name: mangled }, output_index: 0 });
+  const block = mapper.content.find((c) => c.type === "tool_use") as { name: string };
+  assert.equal(block.name, longMcp);
 });
 
 test("orphan tool_result (Claude Code side query) becomes user text, matched ones stay function_call_output", () => {

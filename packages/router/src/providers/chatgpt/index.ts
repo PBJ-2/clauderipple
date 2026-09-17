@@ -6,7 +6,7 @@ import type { ChatGptProvider } from "../../config.ts";
 import type { Logger } from "../../log.ts";
 import { CredentialStore } from "./auth.ts";
 import { SseParser } from "./sse.ts";
-import { StreamMapper, conversationKey, estimateTokens, formatSse, toResponsesRequest, type AnthropicRequest } from "./translate.ts";
+import { StreamMapper, conversationKey, estimateTokens, formatSse, toResponsesRequest, toolNameRestoreMap, type AnthropicRequest } from "./translate.ts";
 import type { RequestUsage } from "../../requestlog.ts";
 import { credentialHeaderValues, redactErrorText } from "../../redact.ts";
 import fs from "node:fs";
@@ -185,7 +185,7 @@ export class ChatGptAdapter {
 
     if (this.cfg.debugDump === "all") this.dump(upstream.status, json, upstreamReq, "");
     const wantStream = json.stream === true;
-    const mapper = new StreamMapper(model, startInput);
+    const mapper = new StreamMapper(model, startInput, toolNameRestoreMap(json));
     const parser = new SseParser();
     let bytes = 0;
     let ping: NodeJS.Timeout | null = null;

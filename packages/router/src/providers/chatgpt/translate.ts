@@ -124,6 +124,40 @@ export function normalizeSchema(s: Record<string, unknown> | undefined): Record<
   return out;
 }
 
+// The Responses API constrains a function name to `^[a-zA-Z0-9_-]{1,64}$`, and one name that
+// breaks it fails the whole request, not just that tool. Claude Code names MCP tools
+// `mcp__<server>__<tool>`, and a claude.ai connector's server name is a UUID, so the prefix alone
+// eats 43 characters: names past 64 are routine, not exotic.
+//
+// The mangling has to be deterministic, because the same tool list is resent every turn and a name
+// that moved would break the cache prefix (see the header rule). Hash of the original, not a
+// counter or a salt. Names already inside the constraint are returned untouched, so a session with
+// no MCP tools produces byte-identical output to before this existed.
+const TOOL_NAME_OK = /^[A-Za-z0-9_-]{1,64}$/;
+
+export function toolNameForResponses(name: string): string {
+  if (TOOL_NAME_OK.test(name)) return name;
+  // Sanitising alone would let `a.b` and `a-b` collapse onto the same name, so every mangled name
+  // carries the hash: 55 + "_" + 8 = 64 exactly.
+  const hash = crypto.createHash("sha256").update(name).digest("hex").slice(0, 8);
+  return `${name.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 55)}_${hash}`;
+}
+
+/**
+ * Mangled name → original, for the tools declared in this request. The model echoes the name it was
+ * given and Claude Code matches `tool_use.name` against its own tool list, so the response path has
+ * to undo the mangling. Empty when nothing needed mangling.
+ */
+export function toolNameRestoreMap(req: AnthropicRequest): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const t of req.tools ?? []) {
+    if (typeof t.name !== "string") continue;
+    const mangled = toolNameForResponses(t.name);
+    if (mangled !== t.name) map.set(mangled, t.name);
+  }
+  return map;
+}
+
 export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions): ResponsesRequest {
   const parts: string[] = [];
   // Effort is named here because the model cannot see its own reasoning setting and will otherwise guess.
@@ -170,7 +204,7 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
           flush();
           const tu = b as { id: string; name: string; input: unknown };
           knownCalls.add(tu.id);
-          input.push({ type: "function_call", call_id: tu.id, name: tu.name, arguments: typeof tu.input === "string" ? tu.input : JSON.stringify(tu.input ?? {}) });
+          input.push({ type: "function_call", call_id: tu.id, name: toolNameForResponses(tu.name), arguments: typeof tu.input === "string" ? tu.input : JSON.stringify(tu.input ?? {}) });
           break;
         }
         case "tool_result": {
@@ -192,7 +226,7 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
 
   const tools = (req.tools ?? [])
     .filter((t) => typeof t.name === "string")
-    .map((t) => ({ type: "function" as const, name: t.name, description: t.description ?? "", parameters: normalizeSchema(t.input_schema), strict: false as const }));
+    .map((t) => ({ type: "function" as const, name: toolNameForResponses(t.name), description: t.description ?? "", parameters: normalizeSchema(t.input_schema), strict: false as const }));
 
   let tool_choice: ResponsesRequest["tool_choice"];
   const tc = req.tool_choice;
@@ -200,7 +234,7 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
     if (!tc || tc.type === "auto") tool_choice = "auto";
     else if (tc.type === "any") tool_choice = "required";
     else if (tc.type === "none") tool_choice = "none";
-    else if (tc.type === "tool" && tc.name) tool_choice = { type: "function", name: tc.name };
+    else if (tc.type === "tool" && tc.name) tool_choice = { type: "function", name: toolNameForResponses(tc.name) };
   }
 
   const out: ResponsesRequest = {
@@ -257,9 +291,13 @@ export class StreamMapper {
   /** Input-token figure announced in message_start (the real one only arrives with response.completed). */
   private readonly startInput: number;
 
-  constructor(model: string, startInput = 0) {
+  /** Mangled tool name → the name Claude Code knows, from `toolNameRestoreMap`. */
+  private readonly toolNames: ReadonlyMap<string, string>;
+
+  constructor(model: string, startInput = 0, toolNames: ReadonlyMap<string, string> = new Map()) {
     this.model = model;
     this.startInput = startInput;
+    this.toolNames = toolNames;
     this.messageId = `msg_${crypto.randomBytes(12).toString("hex")}`;
   }
 
@@ -315,8 +353,11 @@ export class StreamMapper {
         if (item.type === "function_call") {
           this.sawToolCall = true;
           const id = item.call_id ?? item.id ?? `call_${crypto.randomBytes(8).toString("hex")}`;
-          this.content.push({ type: "tool_use", id, name: item.name ?? "tool", input: {}, _args: "" });
-          out.push(...this.openBlock("tool", { type: "tool_use", id, name: item.name ?? "tool", input: {} }, item.id));
+          // The model echoes the mangled name; Claude Code only recognises the original.
+          const called = item.name ?? "tool";
+          const name = this.toolNames.get(called) ?? called;
+          this.content.push({ type: "tool_use", id, name, input: {}, _args: "" });
+          out.push(...this.openBlock("tool", { type: "tool_use", id, name, input: {} }, item.id));
         } else if (item.type === "reasoning") {
           this.content.push({ type: "thinking", thinking: "", signature: "" });
           out.push(...this.openBlock("thinking", { type: "thinking", thinking: "" }, item.id));
