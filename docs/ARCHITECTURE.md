@@ -223,6 +223,16 @@ chat is out of reach for every approach, ours included.
       reaches the provider at all, a whole `deepseek-flash` session — search included — ran with
       **zero** Anthropic calls of any kind, title generation included. No interception, no second
       vendor, no translation: the provider the user pays for does its own search.
+    - **Model slots (`cli.models`).** Claude Code fixes its own model choices before a request
+      exists, so routing cannot reach them; they are environment names written into
+      `~/.claude/settings.json` on install, alongside the proxy entries:
+      `main` → `ANTHROPIC_MODEL`, `smallFast` → `ANTHROPIC_SMALL_FAST_MODEL`,
+      `subagent` → `CLAUDE_CODE_SUBAGENT_MODEL`. Each is left alone when unset, so nothing changes
+      until one is chosen, and `removeProxyEnv` always takes all three back — a slot still pointing
+      at a routed model after uninstall would send every search and subagent to a router that is no
+      longer there. The GUI offers them on the Clients screen rather than leaving them to
+      `config.json`, because they are the difference between a session that costs Claude quota and
+      one that does not.
     - This is the preferred path wherever it works. `cfg.webSearch` below is the fallback for
       providers that cannot, and for the translated paths, where the tool is not passed through but
       converted.

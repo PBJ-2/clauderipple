@@ -289,6 +289,7 @@ function renderClients() {
   pickerButton.disabled = pickerBusy;
   pickerButton.onclick = () => togglePicker(!picker.enabled);
   renderClientPickerModels(picker.enabled);
+  renderModelSlots();
   const agentEnabled = Boolean(status.agentTitle);
   $("#client-agent-title-rows").replaceChildren(el("div", { class: "row" }, [el("span", { class: "k", text: t("picker.state") }), agentEnabled ? badge("ok", t("agentTitle.on")) : el("span", { class: "small", text: t("agentTitle.off") })]));
   const agentButton = $("#client-agent-title-toggle");
@@ -331,6 +332,54 @@ function renderClientPickerModels(enabled) {
   }
   if (!box.childElementCount) box.appendChild(hint(t("slots.noProviderModels")));
 }
+// Claude Code picks these before a request exists, so routing cannot reach them: a search, a title
+// or a subagent goes wherever the CLI already decided. Left empty, Claude answers them — which is
+// why a routed session still searches on Claude quota until `smallFast` is pointed somewhere.
+const MODEL_SLOTS = ["smallFast", "subagent", "main"];
+
+function renderModelSlots() {
+  const rows = $("#client-model-slots");
+  if (!rows) return;
+  const chosen = (currentConfig.cli && currentConfig.cli.models) || {};
+  rows.replaceChildren(...MODEL_SLOTS.map((slot) => {
+    const select = el("select", {});
+    select.appendChild(el("option", { value: "", text: t("slots.slotDefault") }));
+    for (const group of groupedModels(currentConfig)) for (const model of group.models) {
+      const option = el("option", { value: model.id, text: `${labelOf(model)} · ${group.name}` });
+      if (chosen[slot] === model.id) option.selected = true;
+      select.appendChild(option);
+    }
+    // A model the config names but no provider offers any more would otherwise vanish silently.
+    if (chosen[slot] && !allKnownModelIds(currentConfig).has(chosen[slot])) {
+      const orphan = el("option", { value: chosen[slot], text: `${chosen[slot]} (?)` });
+      orphan.selected = true;
+      select.appendChild(orphan);
+    }
+    select.onchange = () => void saveModelSlots();
+    select.dataset.slot = slot;
+    return el("div", { class: "row" }, [
+      el("span", { class: "k", text: t(`slots.slot.${slot}`) }),
+      select,
+      el("small", { class: "hint", text: t(`slots.slotHelp.${slot}`) }),
+    ]);
+  }));
+}
+
+async function saveModelSlots() {
+  if (!currentConfig) return;
+  const next = clone(currentConfig);
+  const models = {};
+  for (const select of $all("#client-model-slots select")) {
+    if (select.value) models[select.dataset.slot] = select.value;
+  }
+  next.cli = { ...(next.cli || {}), models };
+  try {
+    await configRequest(next);
+    currentConfig = next;
+    toast(t("slots.slotSaved"));
+  } catch (error) { toast(t("common.saveFailed"), true, error.message); }
+}
+
 function clientPickerSelections() {
   return $all("#client-picker-models input[type=checkbox]:checked").map((input) => {
     const field = $(`#client-picker-models input.model-window[data-model="${CSS.escape(input.dataset.model)}"]`);

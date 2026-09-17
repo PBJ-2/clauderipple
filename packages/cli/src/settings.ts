@@ -31,7 +31,20 @@ function write(file: string, obj: Record<string, unknown>): void {
   fs.writeFileSync(file, JSON.stringify(obj, null, 2) + "\n");
 }
 
-export function applyProxyEnv(opts: { proxyUrl: string; caPath: string; force: boolean; maxContextTokens?: number }): SettingsEdit {
+/**
+ * Claude Code's own model slots, as environment names. These are decided inside the CLI before a
+ * request exists, so routing cannot reach them: `smallFast` in particular is what a `WebSearch`
+ * side request runs on, which is why a routed session searches on Claude quota until it is set.
+ */
+export const MODEL_SLOT_ENV = {
+  main: "ANTHROPIC_MODEL",
+  smallFast: "ANTHROPIC_SMALL_FAST_MODEL",
+  subagent: "CLAUDE_CODE_SUBAGENT_MODEL",
+} as const;
+
+export type ModelSlots = Partial<Record<keyof typeof MODEL_SLOT_ENV, string>>;
+
+export function applyProxyEnv(opts: { proxyUrl: string; caPath: string; force: boolean; maxContextTokens?: number; models?: ModelSlots }): SettingsEdit {
   const file = settingsPath();
   const s = readSettings(file);
   const env = { ...((s.env as Record<string, string> | undefined) ?? {}) };
@@ -43,11 +56,24 @@ export function applyProxyEnv(opts: { proxyUrl: string; caPath: string; force: b
   if (existing && existing !== opts.proxyUrl) notes.push(`replaced HTTPS_PROXY ${existing}`);
   const want: Record<string, string> = { HTTPS_PROXY: opts.proxyUrl, NODE_EXTRA_CA_CERTS: opts.caPath };
   if (opts.maxContextTokens) want.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(opts.maxContextTokens);
+  for (const [slot, name] of Object.entries(MODEL_SLOT_ENV)) {
+    const model = opts.models?.[slot as keyof ModelSlots];
+    if (model) want[name] = model;
+  }
   let changed = false;
   for (const [k, v] of Object.entries(want)) {
     if (env[k] !== v) {
       env[k] = v;
       changed = true;
+    }
+  }
+  // A slot that was set and is now cleared must go, or the old model keeps answering with nothing
+  // in the config to explain why.
+  for (const [slot, name] of Object.entries(MODEL_SLOT_ENV)) {
+    if (!opts.models?.[slot as keyof ModelSlots] && env[name] !== undefined && opts.models !== undefined) {
+      delete env[name];
+      changed = true;
+      notes.push(`cleared ${name}`);
     }
   }
   if (!changed) return { changed: false, backup: null, notes };
@@ -70,6 +96,14 @@ export function removeProxyEnv(opts: { proxyUrl: string; caPath: string }): Sett
     delete env.NODE_EXTRA_CA_CERTS;
     changed = true;
   } else if (env.NODE_EXTRA_CA_CERTS) notes.push(`left NODE_EXTRA_CA_CERTS=${env.NODE_EXTRA_CA_CERTS} (not ours)`);
+  // Uninstalling must hand the CLI back to Anthropic completely: a model slot still pointing at a
+  // routed model would send every search and subagent somewhere the router no longer serves.
+  for (const name of Object.values(MODEL_SLOT_ENV)) {
+    if (env[name] !== undefined) {
+      delete env[name];
+      changed = true;
+    }
+  }
   if (!changed) return { changed: false, backup: null, notes };
   const b = backup(file);
   const next = { ...s };
