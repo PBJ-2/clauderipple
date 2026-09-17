@@ -321,9 +321,29 @@ chat is out of reach for every approach, ours included.
   ten seconds. **A 4xx that is the request's own fault is charged to nobody** — retrying a bad body
   against every credential burns the pool and still fails. State is in memory: a cooldown that
   outlived a restart would make restarting worse. A provider that declares no pool has exactly the
-  credential it always had. Verified end to end against a fake upstream that rate-limits one key:
-  the first turn hit the limited key and 429'd, and both following turns went to the healthy one
-  and stayed there (`["bad","good","good"]`).
+  credential it always had. A slot may also name `fallbacks`: when every credential of its provider
+  is parked, the turn goes to the first fallback that has one, chosen **before anything is sent**,
+  since failing over mid-turn would splice two answers together. With nothing usable anywhere the
+  primary is kept, so the provider refuses rather than the router inventing a refusal.
+  - Four things an independent review found, each of which had made it past the unit tests because
+    each lived in the wiring rather than the state machine: the pool never heard about the ChatGPT
+    or openai-compatible adapters, so those providers looked healthy forever and a slot pointing at
+    one could never fail over; an empty header set went upstream when the pool had nothing ready,
+    and the resulting 401 quarantined a credential that had done nothing; `upReq.destroy()` emits
+    ECONNRESET (measured, Node 24.15), so **every cancelled turn was charged to the credential** and
+    moved the conversation off it, costing the prompt cache the metric depends on; and a fallback
+    naming a native `anthropic` provider re-opened the §5 row about ingress-only targets.
+  - 403 does not quarantine. It is also a content policy, a blocked region, a model the account may
+    not use, or an edge refusing what it took for a bot — parking a working credential until someone
+    notices is the worse mistake. Only 401 parks.
+  - An answer lifts a quarantine but does not cancel a live cooldown: requests overlap, and a 200
+    arriving after a concurrent 429 does not mean the limit lifted.
+  - The conversation key is `conversationKey`, the same one the prompt cache uses. `metadata.user_id`
+    alone is one value for every conversation a user has, so using it raw dragged all of them onto
+    one credential at once — the opposite of what stickiness is for.
+  - Covered by `test/proxy-failover.test.ts`, which drives a real proxy rather than the state
+    machine: rotation, the exhausted-pool header, the cancelled turn, failover, and the ingress-only
+    refusal. Two of them were checked by breaking the fix again and watching them go red.
 - **Provider base path.** Anthropic-compatible vendors mount the API under a path
   (`https://api.deepseek.com/anthropic`, `https://openrouter.ai/api`,
   `https://dashscope-intl.aliyuncs.com/apps/anthropic`); the router prepends it to

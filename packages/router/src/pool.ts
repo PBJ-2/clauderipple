@@ -50,7 +50,12 @@ const MAX_COOLDOWN_MS = 6 * 60 * 60_000;
  */
 export function classify(status: number, retryAfterMs?: number): Verdict {
   const bounded = (ms: number): number => Math.max(1_000, Math.min(MAX_COOLDOWN_MS, Math.round(ms)));
-  if (status === 401 || status === 403) return { retryable: true, kind: "auth", cooldownMs: 0, quarantine: true };
+  // 401 is the credential being rejected, and that does not heal: park it.
+  if (status === 401) return { retryable: true, kind: "auth", cooldownMs: 0, quarantine: true };
+  // 403 is not only that. It is also a content policy, a blocked region, a model the account may
+  // not use, or an edge refusing what it took for a bot — none of which mean the key is dead.
+  // Parking a working credential until someone notices is the worse mistake, so this waits instead.
+  if (status === 403) return { retryable: true, kind: "auth", cooldownMs: bounded(retryAfterMs ?? DEFAULT_RATE_LIMIT_MS), quarantine: false };
   if (status === 429) return { retryable: true, kind: "rate-limit", cooldownMs: bounded(retryAfterMs ?? DEFAULT_RATE_LIMIT_MS), quarantine: false };
   if (status === 402) return { retryable: true, kind: "exhausted", cooldownMs: bounded(retryAfterMs ?? EXHAUSTED_MS), quarantine: false };
   // 408 and 425 are the server saying "ask again"; 5xx is the server being broken. Both may work
@@ -179,10 +184,16 @@ export class CredentialPool {
     return verdict;
   }
 
-  /** A credential that answered is healthy again, whatever it did last time. */
+  /**
+   * A credential that answered is not rejected, so a quarantine lifts and the failure count resets.
+   *
+   * An unexpired cooldown is left alone. Requests overlap, and a 200 arriving after a concurrent
+   * 429 does not mean the rate limit went away — clearing it here would send the next turn straight
+   * back into the limit. The cooldown expires on its own soon enough.
+   */
   succeed(provider: string, id: string): void {
     const h = this.healthOf(provider, id);
-    h.cooldownUntil = 0;
+    if (h.cooldownUntil <= this.now()) h.cooldownUntil = 0;
     h.quarantined = false;
     h.failures = 0;
   }

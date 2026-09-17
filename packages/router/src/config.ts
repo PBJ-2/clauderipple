@@ -272,6 +272,9 @@ export function validate(c: Config): string[] {
       else r.fallbacks.forEach((f, i) => {
         if (!f || typeof f !== "object") { errors.push(`route ${alias}: fallback ${i} must be an object`); return; }
         if (!c.providers[f.provider]) errors.push(`route ${alias}: fallback ${i} names unknown provider "${f.provider}"`);
+        // A native `anthropic` provider answers the OpenAI ingress only; a slot pointing at one
+        // makes every request 400 (§5). It is refused as a primary, so refuse it here too.
+        else if (c.providers[f.provider]!.type === "anthropic") errors.push(`route ${alias}: fallback ${i} names "${f.provider}", which serves the OpenAI ingress only`);
         if (!f.model || typeof f.model !== "string") errors.push(`route ${alias}: fallback ${i} missing model`);
         if (f.provider === r.provider && f.model === r.model) errors.push(`route ${alias}: fallback ${i} repeats the primary target`);
       });

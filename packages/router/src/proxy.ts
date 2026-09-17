@@ -32,7 +32,7 @@ import { CredentialPool, retryAfterMs, type Credential } from "./pool.ts";
 import { PRESETS } from "./presets.ts";
 import { ChatGptAdapter } from "./providers/chatgpt/index.ts";
 import { OpenAiCompatibleAdapter } from "./providers/openai/index.ts";
-import type { AnthropicRequest } from "./providers/chatgpt/translate.ts";
+import { conversationKey, type AnthropicRequest } from "./providers/chatgpt/translate.ts";
 import { terminateHosts } from "./config.ts";
 import type { CertStore } from "./certs.ts";
 import { injectPickerModels, isBootstrapPath } from "./picker.ts";
@@ -465,8 +465,13 @@ export class Proxy {
         tag = `CHATGPT ${route.tag} effort=${routeEffort ?? "-"}`;
         try {
           const o = await this.chatgpt(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, effortOf(json));
+          // Without this the pool never hears about this provider, so it always looks healthy and a
+          // slot pointing at it can never fail over — which is most of the point on a subscription
+          // that runs out. The credential here is the adapter's own OAuth, so there is one of it.
+          this.recordOutcome(route.provider, o.status);
           finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...(o.usage ? { usage: o.usage } : {}), ...(o.stopReason ? { stopReason: o.stopReason } : {}) });
         } catch (e) {
+          this.recordOutcome(route.provider, 0);
           finish("-", 0, `chatgpt error ${(e as NodeJS.ErrnoException).code ?? ""} ${(e as Error).message}`);
           if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" }).end(JSON.stringify({ type: "error", error: { type: "api_error", message: (e as Error).message } }));
           else res.destroy();
@@ -488,8 +493,10 @@ export class Proxy {
         tag = `OPENAI ${route.tag} wire=${provider.wire ?? "chat"} effort=${routeEffort ?? "-"}`;
         try {
           const o = await this.openai(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort);
+          this.recordOutcome(route.provider, o.status);
           finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...(o.usage ? { usage: o.usage } : {}), ...(o.stopReason ? { stopReason: o.stopReason } : {}) });
         } catch (e) {
+          this.recordOutcome(route.provider, 0);
           finish("-", 0, `openai error ${(e as NodeJS.ErrnoException).code ?? ""} ${(e as Error).message}`);
           if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" }).end(JSON.stringify({ type: "error", error: { type: "api_error", message: (e as Error).message } }));
           else res.destroy();
@@ -529,17 +536,21 @@ export class Proxy {
       // quarantined leaves `chosen` null, and the request goes out on the configured headers so the
       // provider — not us — gets to say no.
       const credentials = this.credentialsOf(route.provider, provider);
-      const conversation = typeof json.metadata === "object" && json.metadata
-        ? String((json.metadata as { user_id?: unknown }).user_id ?? "")
-        : "";
-      chosen = this.pool.pick(route.provider, credentials, conversation || undefined);
-      penalised = { provider: route.provider, id: chosen?.id ?? credentials[0]!.id };
+      // The same key the prompt cache is keyed on. `metadata.user_id` alone is one value for every
+      // conversation a user has, so using it raw would drag all of them onto one credential at once
+      // — the opposite of what stickiness is for (see conversationKey and ARCHITECTURE §4).
+      chosen = this.pool.pick(route.provider, credentials, conversationKey(json as AnthropicRequest));
+      // Nothing usable means every credential is cooling, and the turn still has to go somewhere:
+      // the first one, so the request carries real credentials rather than none, and so the answer
+      // is charged to the credential that actually produced it.
+      const using = chosen ?? credentials[0]!;
+      penalised = { provider: route.provider, id: using.id };
       target = {
         protocol,
         host: u.hostname,
         port: Number(u.port) || (protocol === "https:" ? 443 : 80),
         agent: this.agentFor(route.provider, protocol),
-        extraHeaders: chosen?.headers ?? provider.headers ?? {},
+        extraHeaders: using.headers,
         dropClientAuth: true,
         // Providers mount their Anthropic-compatible API under a path (DeepSeek /anthropic, OpenRouter /api,
         // Qwen /apps/anthropic): the CLI's /v1/messages is appended to it. Dropping it sent requests to the
@@ -610,7 +621,13 @@ export class Proxy {
       ...(target.protocol === "https:" ? { servername: target.host } : {}),
     });
 
+    // Destroying the upstream makes it emit ECONNRESET (measured, Node 24.15), which is
+    // indistinguishable from the provider dropping us unless we remember that we did it. Without
+    // this flag every cancelled turn charged the credential a failure and moved the conversation
+    // off it, which costs the prompt cache — for a turn the user cancelled on purpose.
+    let clientAborted = false;
     const abortUpstream = (): void => {
+      clientAborted = true;
       if (!upReq.destroyed) upReq.destroy();
     };
     req.on("aborted", abortUpstream);
@@ -625,7 +642,8 @@ export class Proxy {
       if (target.host === cfg.upstream) this.deps.health.failure(e);
       // Nothing reached the provider, so this says nothing about the credential — but it does say
       // the route is unusable for a moment, and a pool with somewhere else to go should use it.
-      if (penalised) this.pool.penalise(penalised.provider, penalised.id, 0);
+      // Our own abort is not the provider's fault and must not be charged to it.
+      if (penalised && !clientAborted) this.pool.penalise(penalised.provider, penalised.id, 0);
       finish("-", 0, `upstream error ${(e as NodeJS.ErrnoException).code ?? ""} ${(e as Error).message}`);
       if (!res.headersSent) {
         res.writeHead(502, { "content-type": "application/json", connection: "close" });
@@ -807,7 +825,11 @@ export class Proxy {
     if (!resolved.fallbacks?.length) return resolved;
     const usable = (name: string): boolean => {
       const provider = cfg.providers[name];
-      return !!provider && this.pool.hasUsable(name, this.credentialsOf(name, provider));
+      // A native `anthropic` provider serves the OpenAI ingress only; routing a turn to it answers
+      // 400 (§5). `resolve` already refuses to name one as a primary, and a fallback must not be
+      // the way back in — least of all on the day the primary is exhausted.
+      if (!provider || provider.type === "anthropic") return false;
+      return this.pool.hasUsable(name, this.credentialsOf(name, provider));
     };
     if (usable(resolved.provider)) return resolved;
     for (const f of resolved.fallbacks) {
@@ -825,6 +847,19 @@ export class Proxy {
       };
     }
     return resolved;
+  }
+
+  /**
+   * Tell the pool how a translated provider's turn went. These adapters hold their own credential —
+   * an OAuth grant, or configured headers — so there is one of it, but the pool still has to hear
+   * about the result or `hasUsable` says yes forever and a slot can never fail over away.
+   *
+   * A status of 0 means the attempt threw before an answer, which is a connect failure.
+   */
+  private recordOutcome(provider: string, status: number): void {
+    const id = "default";
+    if (status >= 400 || status === 0) this.pool.penalise(provider, id, status);
+    else if (status > 0) this.pool.succeed(provider, id);
   }
 
   /**

@@ -161,3 +161,37 @@ test("retry-after is read as seconds or as a date, and nonsense is ignored", () 
   assert.ok(future !== undefined && future > 50_000 && future <= 60_000, `http-date parsed: ${future}`);
   assert.equal(retryAfterMs({ "retry-after": new Date(Date.now() - 60_000).toUTCString() }), 0, "a past date means now");
 });
+
+// 403 is not only a rejected credential: it is also a content policy, a blocked region, a model
+// the account may not use, or an edge refusing what it took for a bot. Parking a working credential
+// until someone notices is the worse mistake.
+test("403 waits rather than parks, and 401 still parks", () => {
+  const forbidden = classify(403);
+  assert.equal(forbidden.retryable && forbidden.quarantine, false);
+  assert.equal(forbidden.retryable && forbidden.cooldownMs, 60_000);
+  const stated = classify(403, 5_000);
+  assert.equal(stated.retryable && stated.cooldownMs, 5_000);
+
+  const rejected = classify(401);
+  assert.equal(rejected.retryable && rejected.quarantine, true);
+});
+
+// Requests overlap. A 200 arriving after a concurrent 429 does not mean the limit lifted, and
+// clearing the cooldown here would send the next turn straight back into it.
+test("an answer lifts a quarantine but does not cancel a live cooldown", () => {
+  const c = clock();
+  const pool = new CredentialPool({ now: c.now });
+  const all = creds("a", "b");
+
+  pool.penalise("p", "a", 429, 60_000);
+  pool.succeed("p", "a");
+  assert.equal(pool.report("p", all)[0]?.state, "cooling", "the rate limit still stands");
+  assert.equal(pool.pick("p", all, "conv")?.id, "b");
+
+  c.advance(61_000);
+  assert.equal(pool.report("p", all)[0]?.state, "ready", "and it lapses on its own");
+
+  pool.penalise("p", "a", 401);
+  pool.succeed("p", "a");
+  assert.equal(pool.report("p", all)[0]?.state, "ready", "a credential that answered is not rejected");
+});
