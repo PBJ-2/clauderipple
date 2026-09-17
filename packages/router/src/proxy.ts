@@ -28,7 +28,7 @@ import { THREAD_UNSUPPORTED, effortOf, resolve, rewriteBody, stripThreadFields, 
 import { forwardCompatibleHeader, resolveCompatibleCaps, sanitizeForCompatible } from "./compat.ts";
 import { applyIdentityToAnthropicBody } from "./identity.ts";
 import { webPluginBackend, webSearchBlocks, webSearchMessage, webSearchQuery, webSearchSse, type WebSearchQuery } from "./websearch.ts";
-import { CredentialPool, retryAfterMs, type Credential } from "./pool.ts";
+import { classify, CredentialPool, retryAfterMs, type Credential } from "./pool.ts";
 import { PRESETS } from "./presets.ts";
 import { ChatGptAdapter } from "./providers/chatgpt/index.ts";
 import { OpenAiCompatibleAdapter } from "./providers/openai/index.ts";
@@ -48,6 +48,22 @@ const HOP_BY_HOP = new Set(["connection", "keep-alive", "proxy-connection", "tra
 const CLIENT_AUTH = new Set(["authorization", "x-api-key"]);
 /** How much of an upstream error body is kept for the log. */
 const ERROR_HEAD_MAX = 4096;
+
+/**
+ * The same header list with one credential swapped for another. Only the names the replacement
+ * carries are touched, so anything else the provider needs — a version, a beta flag, an account id
+ * it does not authenticate with — survives the swap.
+ */
+export function withCredential(headers: readonly string[], credential: Record<string, string>): string[] {
+  const replaced = new Set(Object.keys(credential).map((k) => k.toLowerCase()));
+  const out: string[] = [];
+  for (let i = 0; i < headers.length; i += 2) {
+    if (replaced.has(headers[i]!.toLowerCase())) continue;
+    out.push(headers[i]!, headers[i + 1]!);
+  }
+  for (const [k, v] of Object.entries(credential)) out.push(k, v);
+  return out;
+}
 
 /**
  * A bounded, decoded upstream error excerpt with credentials completely masked. Providers may
@@ -610,16 +626,45 @@ export class Proxy {
     const errorSecrets = credentialHeaderValues(Array.from({ length: headers.length / 2 }, (_, i) => [headers[i * 2]!, headers[i * 2 + 1]!] as [string, string]));
 
     const lib = target.protocol === "https:" ? https : http;
-    const upReq = lib.request({
-      protocol: target.protocol,
-      host: target.host,
-      port: target.port,
-      method,
-      path: target.basePath ? target.basePath + path : path,
-      headers,
-      agent: target.agent,
-      ...(target.protocol === "https:" ? { servername: target.host } : {}),
-    });
+    /**
+     * The attempt in flight. A routed turn may make more than one: when a credential is refused and
+     * nothing has reached the client yet, the next credential takes over inside the same turn, so
+     * the client is answered on its first ask instead of having to retry. `send` below replaces
+     * this; everything that reaches for the upstream reaches for it through here.
+     */
+    let upReq!: http.ClientRequest;
+    /** Credentials already spent on this turn, so a retry cannot pick one of them again. */
+    const tried = new Set<string>(penalised ? [penalised.id] : []);
+    const send = (attemptHeaders: string[]): void => {
+      upReq = lib.request({
+        protocol: target.protocol,
+        host: target.host,
+        port: target.port,
+        method,
+        path: target.basePath ? target.basePath + path : path,
+        headers: attemptHeaders,
+        agent: target.agent,
+        ...(target.protocol === "https:" ? { servername: target.host } : {}),
+      });
+      upReq.on("error", onUpstreamError);
+      upReq.on("response", onUpstreamResponse);
+      upReq.end(body);
+    };
+
+    /**
+     * The next credential to try inside this turn, or null to answer with what the provider said.
+     * Only for a routed request whose provider has one we have not already spent — a failure that
+     * is the request's own fault is not retried at all (see `classify`).
+     */
+    const nextCredential = (status: number): Credential | null => {
+      if (!route || !penalised || res.headersSent) return null;
+      if (!classify(status).retryable) return null;
+      const provider = cfg.providers[route.provider];
+      if (!provider) return null;
+      const rest = this.credentialsOf(route.provider, provider).filter((c) => !tried.has(c.id));
+      if (rest.length === 0) return null;
+      return this.pool.pick(route.provider, rest, conversationKey(json as AnthropicRequest));
+    };
 
     // Destroying the upstream makes it emit ECONNRESET (measured, Node 24.15), which is
     // indistinguishable from the provider dropping us unless we remember that we did it. Without
@@ -628,7 +673,7 @@ export class Proxy {
     let clientAborted = false;
     const abortUpstream = (): void => {
       clientAborted = true;
-      if (!upReq.destroyed) upReq.destroy();
+      if (upReq && !upReq.destroyed) upReq.destroy();
     };
     req.on("aborted", abortUpstream);
     res.on("close", () => {
@@ -638,7 +683,7 @@ export class Proxy {
       }
     });
 
-    upReq.on("error", (e) => {
+    const onUpstreamError = (e: Error): void => {
       if (target.host === cfg.upstream) this.deps.health.failure(e);
       // Nothing reached the provider, so this says nothing about the credential — but it does say
       // the route is unusable for a moment, and a pool with somewhere else to go should use it.
@@ -651,9 +696,9 @@ export class Proxy {
       } else {
         res.destroy();
       }
-    });
+    };
 
-    upReq.on("response", (upRes) => {
+    const onUpstreamResponse = (upRes: http.IncomingMessage): void => {
       if (target.host === cfg.upstream) this.deps.health.success();
       const status = upRes.statusCode ?? 0;
       // Charge the answer to the credential that produced it. A rate limit parks this one until its
@@ -663,6 +708,23 @@ export class Proxy {
         if (status >= 400) this.pool.penalise(penalised.provider, penalised.id, status, retryAfterMs(upRes.headers));
         else this.pool.succeed(penalised.provider, penalised.id);
       }
+
+      // Nothing has been written to the client yet, so a refused credential can still be replaced
+      // and the client answered on its first ask. Only here: once the answer starts flowing the
+      // turn is committed, because replacing a half-sent stream splices two answers together.
+      const retry = status >= 400 ? nextCredential(status) : null;
+      if (retry) {
+        log.info(`RETRY ${route!.provider}: ${penalised!.id} answered ${status}, trying ${retry.id}`);
+        tried.add(retry.id);
+        penalised = { provider: route!.provider, id: retry.id };
+        upRes.resume();
+        upRes.destroy();
+        // The credential headers are the only thing that changes; everything else about the request
+        // is the same one the provider just refused.
+        send(withCredential(headers, retry.headers));
+        return;
+      }
+
       const outHeaders: string[] = [];
       const r = upRes.rawHeaders;
       for (let i = 0; i < r.length; i += 2) {
@@ -757,9 +819,9 @@ export class Proxy {
         finish(String(status), bytes, `upstream stream error ${(e as Error).message}`);
         res.destroy();
       });
-    });
+    };
 
-    upReq.end(body);
+    send(headers);
   }
 
   /**

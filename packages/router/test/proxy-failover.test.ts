@@ -131,10 +131,12 @@ test("a rate-limited credential hands the conversation to the next one, which th
     : { status: 200 });
   const r = await rig({ p: pooled(up.port) }, { "claude-opus-4-8": { provider: "p", model: "m" } });
   try {
-    assert.equal(await r.send(), 429, "the first turn discovers the limit");
+    // The first turn spends both credentials — the limited one, then the one that answers — and
+    // every turn after it goes straight to the second and stays there for the cache.
     assert.equal(await r.send(), 200);
     assert.equal(await r.send(), 200);
-    assert.deepEqual(up.seen.map((s) => s.key), ["one", "two", "two"], "moved once, then stayed for the cache");
+    assert.equal(await r.send(), 200);
+    assert.deepEqual(up.seen.map((s) => s.key), ["one", "two", "two", "two"]);
   } finally { await r.stop(); await up.close(); }
 });
 
@@ -148,7 +150,8 @@ test("with every credential cooling, the request still carries one — not an em
     await r.send();
     await r.send();
     await r.send();
-    assert.equal(up.seen.length, 3);
+    assert.ok(up.seen.length >= 3, `every turn reached the provider, got ${up.seen.length}`);
+    // The point: never an unauthenticated request, whose 401 would quarantine an innocent key.
     for (const s of up.seen) assert.ok(s.key === "one" || s.key === "two", `credential present, got ${s.key}`);
   } finally { await r.stop(); await up.close(); }
 });
@@ -186,6 +189,41 @@ test("an exhausted provider hands the turn to its fallback, and a healthy one ke
     assert.equal(primary.seen.length, 1, "the exhausted provider is not asked again");
     assert.equal(backup.seen.length, 2);
   } finally { await r.stop(); await primary.close(); await backup.close(); }
+});
+
+test("one client request survives a rate-limited credential without the client seeing it", async () => {
+  // The turn that discovers a limit used to be spent: the client got the 429 and had to retry it
+  // itself. Nothing has been written to the client yet at that point, so the router can take the
+  // next credential and answer on the first ask.
+  const up = await upstream((n) => n === 1
+    ? { status: 429, headers: { "retry-after": "300" }, body: JSON.stringify({ type: "error", error: { type: "rate_limit_error" } }) }
+    : { status: 200 });
+  const r = await rig({ p: pooled(up.port) }, { "claude-opus-4-8": { provider: "p", model: "m" } });
+  try {
+    assert.equal(await r.send(), 200, "answered on the first ask");
+    assert.deepEqual(up.seen.map((s) => s.key), ["one", "two"], "both credentials tried, within one turn");
+  } finally { await r.stop(); await up.close(); }
+});
+
+test("a retry stops when there is nothing left rather than looping", async () => {
+  // Every credential is limited. The client gets the provider's own refusal once, not a hang and
+  // not one attempt per credential per retry.
+  const up = await upstream(() => ({ status: 429, headers: { "retry-after": "300" }, body: "{}" }));
+  const r = await rig({ p: pooled(up.port) }, { "claude-opus-4-8": { provider: "p", model: "m" } });
+  try {
+    assert.equal(await r.send(), 429);
+    assert.equal(up.seen.length, 2, "tried each credential once, then gave the answer to the client");
+  } finally { await r.stop(); await up.close(); }
+});
+
+test("a request that is wrong is not retried against the rest of the pool", async () => {
+  // A 400 is refused everywhere. Retrying it burns the pool and still fails.
+  const up = await upstream(() => ({ status: 400, body: JSON.stringify({ type: "error", error: { type: "invalid_request_error" } }) }));
+  const r = await rig({ p: pooled(up.port) }, { "claude-opus-4-8": { provider: "p", model: "m" } });
+  try {
+    assert.equal(await r.send(), 400);
+    assert.equal(up.seen.length, 1, "asked once");
+  } finally { await r.stop(); await up.close(); }
 });
 
 test("a failover never lands on a provider that serves the ingress only", async () => {

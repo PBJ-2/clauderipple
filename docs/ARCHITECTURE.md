@@ -341,9 +341,17 @@ chat is out of reach for every approach, ours included.
   - The conversation key is `conversationKey`, the same one the prompt cache uses. `metadata.user_id`
     alone is one value for every conversation a user has, so using it raw dragged all of them onto
     one credential at once — the opposite of what stickiness is for.
+  - **A refused credential is replaced inside the same turn**, while nothing has been written to the
+    client. The turn that discovers a limit used to be spent — the client got the 429 and retried it
+    itself — and now the next credential answers on the first ask. Only before the first byte: after
+    that the turn is committed, because replacing a half-sent stream splices two answers together.
+    A credential is tried at most once per turn, and a failure that is the request's own fault is
+    not retried at all, so a bad body cannot walk the whole pool.
   - Covered by `test/proxy-failover.test.ts`, which drives a real proxy rather than the state
-    machine: rotation, the exhausted-pool header, the cancelled turn, failover, and the ingress-only
-    refusal. Two of them were checked by breaking the fix again and watching them go red.
+    machine: rotation, the exhausted-pool header, the cancelled turn, failover, the ingress-only
+    refusal, the same-turn retry, its stopping condition, and a 400 not being retried. Three were
+    written before the code and confirmed red first; two more were confirmed by breaking the fix
+    again afterwards.
 - **Provider base path.** Anthropic-compatible vendors mount the API under a path
   (`https://api.deepseek.com/anthropic`, `https://openrouter.ai/api`,
   `https://dashscope-intl.aliyuncs.com/apps/anthropic`); the router prepends it to
