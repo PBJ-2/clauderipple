@@ -175,6 +175,23 @@ chat is out of reach for every approach, ours included.
     `Artifact` tool carries `^(?!__.*__$)…` since ~2.1.266, which broke every
     GPT request through proxenos as well. `normalizeSchema` drops such patterns
     (the client validates its own inputs). Upstream error bodies are now logged.
+  - **Tool name constraint.** A Responses function name must match
+    `^[a-zA-Z0-9_-]{1,64}$`, and one name that breaks it fails the whole request,
+    not just that tool. Claude Code names MCP tools `mcp__<server>__<tool>` and a
+    claude.ai connector's server name is a UUID, so the prefix alone eats 43
+    characters: over-long names are routine, not exotic (measured in this
+    session's own tool list, 2026-09-17; reported as issue #1). The name is
+    therefore mangled on every outbound site — tool declarations, `tool_choice`,
+    and the `function_call` of a replayed assistant turn — and restored in the
+    inbound `function_call` handler, because the model echoes the name it was
+    given and Claude Code matches `tool_use.name` against its own tool list.
+    `toolNameForResponses` keeps the first 55 characters of the sanitised name
+    and appends `_` plus 8 hex of sha256(original); every mangled name carries
+    the hash, so two names that sanitise alike (`a.b`, `a-b`) cannot collide.
+    A name already inside the constraint is returned untouched, so a session
+    without MCP tools produces byte-identical output and the cache prefix does
+    not move. The same constraint and the same helpers apply to the
+    `openai-compatible` adapter (§4c).
   - Cache-safety decisions: thinking blocks are dropped from replayed history;
     no reasoning `include`; identity line and `instructionsAppend` are constant
     text; `prompt_cache_key` = sha256(metadata.user_id + first user message).
@@ -402,7 +419,9 @@ inspected 2026-09-13. The latter is not an Anthropic guarantee.
 | `launchctl kickstart -k` SIGKILLed the router ~5s after its SIGTERM; the drain was cut with 2 model calls open (2026-09-13 13:35) | `clauderipple restart` sends SIGTERM itself, waits for the process to exit (up to 120s), and lets launchd KeepAlive relaunch it. `kickstart -k` is only the fallback. |
 | Drain ran the full budget and still had 2 calls open: `server.close()` stops new TCP connections only, and the CLI kept sending new requests down its existing tunnels (in-flight went 2→1→2; 2026-09-13 13:38) | While draining, new `/v1/messages` requests get `503` + `retry-after: 3` + `connection: close` before the body is read (the SDK retries 5xx and reconnects to the relaunched router). The in-flight count can then only fall. Verified: a 47s stream finished, the next call got 503, exit 1s later. |
 | Every GPT request failed with 400 after a Claude Code update added a lookahead regex to the `Artifact` tool schema (2026-09-13; proxenos too) | Tool-schema scrub in the translator (§4). Upstream error bodies are logged, never just the status. |
+| Tool names over 64 characters were forwarded to the Responses API unchanged, so a single connected MCP server — the product's own use case (§2) — failed every request of that turn (found by reading the source, issue #1, 2026-09-17) | Any name a translated provider sends is mangled into the provider's constraint deterministically and restored on the way back (§4). A translator must validate what it forwards against the wire it forwards to, not only what it builds itself. |
 | Unknown-model context window defaulted to 200K, compaction fired at 151K; fixed via `CLAUDE_CODE_MAX_CONTEXT_TOKENS=272000` (applies only to models not in the CLI's built-in table; Claude models unaffected) | Installer sets this env for mapped models; document that it does not affect Claude models. |
+| One context window was written to every routed model and every slot, because `cli.autoCompactWindow` is a single number while `auto_compact_windows` and `context_window_by_model` are per-model maps. Routed models do not share a window: set it high and the smaller model overflows before it compacts, set it low and the larger throws away most of its own (issue #2, 2026-09-17) | A window belongs to a model, not to the router. `CliModel.contextWindow` and `Route.contextWindow` win, then whatever the vendor's `/models` reported as `context_length`, then the global value as the fallback it always was. A value the config can only express once must not be injected into a map that is keyed per model. |
 | proxenos sends only the 7-day quota window, so the app shows a "weekly limit" banner | Quota reporting must mirror the shape Anthropic returns. |
 | After a reboot the router listened 4 minutes after login (26s of it between exec and `listen()`), and for that whole window Claude Desktop was a blank page with `ERR_PROXY_CONNECTION_FAILED` — in picker mode every byte the app sends goes through us, so a router that is merely slow reads as an app that is broken (2026-09-14 09:59 boot → 10:15:59 listening) | The launchd agent is `ProcessType=Interactive`, never `Background` (that key throttles CPU and I/O — launchd.plist(5)). `listen()` comes before certificate minting and any other startup work, so a client waits rather than being refused. Every startup logs its budget (`startup Nms: node …, config …, listen …`). |
 | "Start Router" ran `launchctl kickstart -k`, which kills a router that is already coming up and starts the wait over (three runs in the four minutes after login, 2026-09-14) | Starting is idempotent: a running agent is left alone, an unloaded one is re-bootstrapped. Only `restart` may force. |
