@@ -24,7 +24,7 @@ import type { Config } from "./config.ts";
 import type { Logger } from "./log.ts";
 import { UpstreamHealth } from "./health.ts";
 import { BOOTSTRAP_PATH, injectBootstrap } from "./bootstrap.ts";
-import { THREAD_UNSUPPORTED, effortOf, resolve, rewriteBody, stripThreadFields, threadDecision } from "./routing.ts";
+import { THREAD_UNSUPPORTED, effortOf, resolve, rewriteBody, stripThreadFields, threadDecision, type Resolved } from "./routing.ts";
 import { forwardCompatibleHeader, resolveCompatibleCaps, sanitizeForCompatible } from "./compat.ts";
 import { applyIdentityToAnthropicBody } from "./identity.ts";
 import { webPluginBackend, webSearchBlocks, webSearchMessage, webSearchQuery, webSearchSse, type WebSearchQuery } from "./websearch.ts";
@@ -416,7 +416,12 @@ export class Proxy {
       // returns nothing is worse than one that costs what it always cost.
     }
 
-    const route = json ? resolve(model, json, cfg) : null;
+    const resolved = json ? resolve(model, json, cfg) : null;
+    // A slot with fallbacks picks its provider before anything is sent, so a primary that is rate
+    // limited for the next hour is skipped rather than rediscovered once per request. Failing over
+    // mid-turn is not possible — once a byte of the answer has gone out, replacing it would splice
+    // two answers together — so the choice has to be made here or not at all.
+    const route = resolved ? this.chooseTarget(resolved, cfg, log) : null;
     const source = typeof model === "string" ? model : "-";
     record = {
       ...record,
@@ -789,6 +794,37 @@ export class Proxy {
     res.writeHead(200, headers).end(payload);
     finish("200", Buffer.byteLength(payload), `web search via ${settings.provider}`, false);
     return true;
+  }
+
+  /**
+   * The provider this turn actually goes to. The primary unless every one of its credentials is
+   * cooling or quarantined, in which case the first fallback that has something usable takes it.
+   *
+   * When nothing anywhere is usable the primary is kept: the provider gets to refuse the request
+   * rather than the router inventing a refusal, and the answer it gives is what updates the pool.
+   */
+  private chooseTarget(resolved: Resolved, cfg: Config, log: Logger): Resolved {
+    if (!resolved.fallbacks?.length) return resolved;
+    const usable = (name: string): boolean => {
+      const provider = cfg.providers[name];
+      return !!provider && this.pool.hasUsable(name, this.credentialsOf(name, provider));
+    };
+    if (usable(resolved.provider)) return resolved;
+    for (const f of resolved.fallbacks) {
+      if (f.provider === resolved.provider && f.model === resolved.model) continue;
+      if (!usable(f.provider)) continue;
+      log.info(`FAILOVER ${resolved.provider}/${resolved.model} exhausted → ${f.provider}/${f.model}`);
+      // The tag names the model that answers, not the one that could not: a log line saying `->m1`
+      // for a turn that ran on m2 is the kind of thing that costs an hour to disbelieve.
+      const asked = resolved.tag.split("->")[0] ?? resolved.model;
+      return {
+        provider: f.provider,
+        model: f.model,
+        effort: f.effort ?? resolved.effort,
+        tag: `${asked}->${f.model} (failover from ${resolved.provider})`,
+      };
+    }
+    return resolved;
   }
 
   /**

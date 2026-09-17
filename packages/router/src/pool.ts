@@ -159,6 +159,15 @@ export class CredentialPool {
     return next;
   }
 
+  /**
+   * Whether this provider has any credential that could answer right now. Asked before a turn is
+   * committed to a provider, so a session whose primary is rate-limited for the next hour goes to
+   * its fallback instead of failing once per request until the window resets.
+   */
+  hasUsable(provider: string, credentials: readonly Credential[]): boolean {
+    return credentials.some((c) => this.usable(provider, c.id));
+  }
+
   /** Record a failure. Returns the verdict so the caller can decide whether to try the next one. */
   penalise(provider: string, id: string, status: number, retryAfterMs?: number): Verdict {
     const verdict = classify(status, retryAfterMs);

@@ -14,6 +14,8 @@ export type Resolved = {
   effort: string | undefined;
   /** Human tag for the log line, e.g. "claude-opus-4-8->gpt-6-astra". */
   tag: string;
+  /** Where this turn goes when the provider above has nothing usable left. Carried from the route. */
+  fallbacks?: { provider: string; model: string; effort?: string }[];
 };
 
 const REMINDER = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
@@ -78,6 +80,8 @@ export function resolve(model: unknown, body: unknown, cfg: Config): Resolved | 
     model: route.model,
     effort: effort ?? route.effort,
     tag: `${model}->${route.model}`,
+    // Only a slot has somewhere else to go. A direct rule names one provider on purpose.
+    ...(route.fallbacks?.length ? { fallbacks: route.fallbacks } : {}),
   };
 }
 
