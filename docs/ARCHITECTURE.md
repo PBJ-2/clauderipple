@@ -212,6 +212,20 @@ chat is out of reach for every approach, ours included.
     session, Claude or routed.** The routed model still chooses the query and reads the results;
     only titles and URLs survive the hand-back (snippets are dropped in the CLI), plus the search
     model's prose. The gate is Anthropic's to flip, which is why the drop above exists.
+  - **Some providers run the search themselves — ask them, do not read about them.** DeepSeek's
+    Anthropic endpoint executes `web_search_20250305` server-side. Its API documentation does not
+    say so, and a docs check concluded twice that it could not; sending the tool to
+    `api.deepseek.com/anthropic` returned `server_tool_use`, a `web_search_tool_result` holding ten
+    hits, and `usage.server_tool_use.web_search_requests: 1` (2026-09-17). The blanket server-tool
+    drop was therefore destroying a capability the user was already paying for, invisibly. The drop
+    is now gated on `caps.serverTools`, set per preset from a measured reply only.
+    - With that, and `ANTHROPIC_SMALL_FAST_MODEL` pointed at the routed model so the side request
+      reaches the provider at all, a whole `deepseek-flash` session — search included — ran with
+      **zero** Anthropic calls of any kind, title generation included. No interception, no second
+      vendor, no translation: the provider the user pays for does its own search.
+    - This is the preferred path wherever it works. `cfg.webSearch` below is the fallback for
+      providers that cannot, and for the translated paths, where the tool is not passed through but
+      converted.
   - **Serving the search ourselves (`cfg.webSearch`, 2026-09-17).** Because the search runs on a
     Claude model, a routed session still cannot search without Claude quota — the product is only
     half routed. With `webSearch: { provider, model }` set, the router recognises the side request

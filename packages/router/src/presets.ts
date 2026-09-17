@@ -19,6 +19,11 @@ export type ProviderPreset = {
   effortLevels: string[];
   /** Whether adaptive CLI thinking can safely become Anthropic enabled thinking. */
   thinking: "enabled" | "none";
+  /**
+   * Whether the vendor runs Anthropic server tools (`web_search`) itself. Only ever set from a
+   * measured reply, never from a docs page: DeepSeek's docs do not mention it and it works.
+   */
+  serverTools?: boolean;
   verified: boolean;
   notes?: string;
   docsUrl: string;
@@ -41,8 +46,12 @@ export const PRESETS: ProviderPreset[] = [
     // but no accepted effort-level set for its Anthropic endpoint; strip effort rather than guess.
     effortLevels: [],
     thinking: "enabled",
+    // Measured 2026-09-17, not documented: a `web_search_20250305` tool sent to this endpoint came
+    // back with server_tool_use, a web_search_tool_result holding ten hits, and
+    // usage.server_tool_use.web_search_requests = 1. DeepSeek runs the search itself.
+    serverTools: true,
     verified: true,
-    notes: "Anthropic thinking is accepted; budget_tokens is ignored.",
+    notes: "Anthropic thinking is accepted; budget_tokens is ignored. Runs web_search server-side (measured).",
     docsUrl: "https://api-docs.deepseek.com/guides/anthropic_api/",
   },
   // Docs: https://platform.kimi.ai/docs/api/overview

@@ -129,7 +129,7 @@ export function effortLevels(cfg: Config): { providers: Record<string, { default
     }
     const preset = provider.preset ? PRESETS.find((entry) => entry.id === provider.preset) : undefined;
     providers[name] = {
-      default: resolveCompatibleCaps(preset ? { effortLevels: preset.effortLevels, thinking: preset.thinking } : undefined, provider.caps).effortLevels,
+      default: resolveCompatibleCaps(preset ? { effortLevels: preset.effortLevels, thinking: preset.thinking, ...(preset.serverTools ? { serverTools: true } : {}) } : undefined, provider.caps).effortLevels,
       ...(Object.keys(modelLevels).length ? { models: modelLevels } : {}),
     };
   }
