@@ -324,11 +324,16 @@ function renderClientPickerModels(enabled) {
     });
     windowField.hidden = !input.checked;
     windowField.dataset.model = model.id;
-    // The field sits inside the <label>, so a click would otherwise toggle the checkbox.
-    windowField.addEventListener("click", (event) => event.preventDefault());
     windowField.addEventListener("change", () => void saveClientPickerModels());
     input.addEventListener("change", () => { windowField.hidden = !input.checked; void saveClientPickerModels(); });
-    box.appendChild(el("label", { class: "model-check" }, [input, el("span", { text: labelOf(model) }), windowField, el("small", { text: group.name })]));
+    // Two lines: the name owns the first — on one line it was the thing that collapsed, down to
+    // "GPT…" — and the provider and the window share the second. The field sits outside the
+    // <label>, because inside it every click toggles the checkbox instead of reaching the field.
+    box.appendChild(el("div", { class: "picker-model", title: model.id }, [
+      el("label", { class: "pm-main" }, [input, el("span", { text: labelOf(model) })]),
+      el("small", { text: group.name }),
+      windowField,
+    ]));
   }
   if (!box.childElementCount) box.appendChild(hint(t("slots.noProviderModels")));
 }
@@ -357,10 +362,10 @@ function renderModelSlots() {
     }
     select.onchange = () => void saveModelSlots();
     select.dataset.slot = slot;
-    return el("div", { class: "row" }, [
+    return el("div", { class: "slot-row" }, [
       el("span", { class: "k", text: t(`slots.slot.${slot}`) }),
       select,
-      el("small", { class: "hint", text: t(`slots.slotHelp.${slot}`) }),
+      el("span", { class: "hint", text: t(`slots.slotHelp.${slot}`) }),
     ]);
   }));
 }

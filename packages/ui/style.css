@@ -251,7 +251,33 @@ label.check input { width: auto; }
 .model-check input { width: auto; flex: 0 0 auto; }
 .model-check span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .model-check small { margin-left: auto; color: var(--muted); font-size: 13px; white-space: nowrap; }
-.model-check .model-window { flex: 0 0 7.5ch; width: 7.5ch; padding: 2px 4px; font-size: 13px; text-align: right; }
+/* The picker tile carries a name, a provider and a context window. On one flex line the name is
+   what collapses — it was rendering as "GPT…" — so name owns the first row and the rest share the
+   second. The plain .model-check above stays one line for the checklists that only hold a name. */
+.picker-model { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 8px; row-gap: 3px; align-items: center; padding: 8px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
+.picker-model > .pm-main { grid-column: 1 / span 2; display: flex; align-items: center; gap: 7px; min-width: 0; cursor: pointer; }
+.picker-model > .pm-main input { width: auto; flex: 0 0 auto; }
+.picker-model > .pm-main span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker-model > small { grid-column: 1; grid-row: 2; color: var(--muted); font-size: 13px; }
+/* Most models never need their own window, so an empty box on every tile is eight boxes of noise.
+   It stays quiet until it is touched or actually holds a value. */
+.picker-model > .model-window { grid-column: 2; grid-row: 2; width: 8ch; padding: 1px 5px; font-size: 13px; text-align: right; color: var(--muted); background: transparent; border-color: transparent; }
+.picker-model > .model-window::-webkit-inner-spin-button { display: none; }
+.picker-model > .model-window:hover,
+.picker-model > .model-window:focus,
+.picker-model > .model-window:not(:placeholder-shown) { color: inherit; background: var(--bg); border-color: var(--border); }
+#client-picker-models { grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); }
+
+/* One label column so the selects line up instead of each sizing to its own row. */
+.slot-rows { display: grid; gap: 9px; }
+.slot-row { display: grid; grid-template-columns: 132px minmax(0, 1fr) minmax(0, 1.05fr); gap: 12px; align-items: center; }
+.slot-row .k { color: var(--muted); }
+.slot-row select { width: 100%; }
+.slot-row .hint { margin: 0; font-size: 13px; }
+@media (max-width: 760px) {
+  .slot-row { grid-template-columns: 1fr; gap: 4px; }
+  .slot-row .k { font-size: 14px; }
+}
 .provider-card h2 { color: var(--text); font-size: 14px; text-transform: none; letter-spacing: 0; margin: 0; }
 .provider-state { display: flex; gap: 8px; align-items: center; margin: 8px 0 2px; }
 .provider-status { display: grid; grid-template-columns: minmax(120px, 1fr) auto; gap: 8px; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--border); }
