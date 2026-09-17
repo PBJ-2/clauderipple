@@ -131,6 +131,19 @@ export type Config = {
     /** Fallback context window for routed models that do not declare their own (auto_compact_windows). */
     autoCompactWindow?: number;
   };
+  /**
+   * Who performs a `WebSearch`. Claude Code sends the search as its own side request to a small
+   * model, so by default it costs Claude quota whatever the session is routed to — a routed setup
+   * that still cannot search without a Claude subscription. Set this and the named provider's own
+   * hosted search answers instead. Absent, nothing is intercepted and the search behaves as before.
+   */
+  webSearch?: {
+    /** A key of `providers`, speaking an OpenAI-compatible Chat Completions API with a web plugin. */
+    provider: string;
+    /** The model that runs the search. Its hosted search does the work, so a small one is enough. */
+    model: string;
+    maxResults?: number;
+  };
   health: {
     /** Consecutive upstream connect/DNS failures before the process exits for the supervisor to restart it. */
     maxConsecutiveUpstreamFailures: number;
