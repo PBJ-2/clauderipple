@@ -14,6 +14,17 @@ export type CompatibleCaps = {
   betas?: boolean;
   /** Whether cache_control blocks are accepted. Default true. */
   cacheControl?: boolean;
+  /**
+   * Whether the provider runs Anthropic's server-side tools itself (`web_search`). Default false:
+   * a provider that is only offered one it cannot run answers an empty search with no error.
+   *
+   * Not every vendor documents this. DeepSeek does not, and measuring said otherwise — a
+   * `web_search_20250305` tool sent to `api.deepseek.com/anthropic` came back with
+   * `server_tool_use`, a `web_search_tool_result` holding ten hits, and
+   * `usage.server_tool_use.web_search_requests: 1` (2026-09-17). Dropping it was throwing away a
+   * capability the user was already paying for, so this is measured per preset, not assumed.
+   */
+  serverTools?: boolean;
 };
 
 export type ResolvedCompatibleCaps = {
@@ -21,6 +32,7 @@ export type ResolvedCompatibleCaps = {
   thinking: "enabled" | "none";
   betas: boolean;
   cacheControl: boolean;
+  serverTools: boolean;
 };
 
 export const STRICT_COMPAT_CAPS: ResolvedCompatibleCaps = {
@@ -28,6 +40,7 @@ export const STRICT_COMPAT_CAPS: ResolvedCompatibleCaps = {
   thinking: "none",
   betas: false,
   cacheControl: true,
+  serverTools: false,
 };
 
 export function resolveCompatibleCaps(preset?: CompatibleCaps, override?: CompatibleCaps): ResolvedCompatibleCaps {
@@ -36,6 +49,7 @@ export function resolveCompatibleCaps(preset?: CompatibleCaps, override?: Compat
     thinking: override?.thinking ?? preset?.thinking ?? STRICT_COMPAT_CAPS.thinking,
     betas: override?.betas ?? preset?.betas ?? STRICT_COMPAT_CAPS.betas,
     cacheControl: override?.cacheControl ?? preset?.cacheControl ?? STRICT_COMPAT_CAPS.cacheControl,
+    serverTools: override?.serverTools ?? preset?.serverTools ?? STRICT_COMPAT_CAPS.serverTools,
   };
 }
 
@@ -162,7 +176,9 @@ export function sanitizeForCompatible(json: Record<string, unknown>, caps: Resol
         kept.push(tool);
         continue;
       }
-      if (source.type !== undefined && source.type !== "custom") {
+      // A provider that runs server tools keeps them: dropping one it can execute throws away a
+      // capability the user is paying for, and the loss is invisible (see `serverTools`).
+      if (source.type !== undefined && source.type !== "custom" && !caps.serverTools) {
         dropped++;
         if (typeof source.name === "string") droppedNames.add(source.name);
         continue;

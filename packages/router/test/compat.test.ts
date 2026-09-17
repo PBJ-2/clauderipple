@@ -84,6 +84,27 @@ test("only an explicit beta capability forwards anthropic-beta", () => {
 
 test("provider caps override a preset one field at a time", () => {
   assert.deepEqual(resolveCompatibleCaps({ effortLevels: ["low"], thinking: "enabled", betas: true }, { effortLevels: ["high"], cacheControl: false }), {
-    effortLevels: ["high"], thinking: "enabled", betas: true, cacheControl: false,
+    effortLevels: ["high"], thinking: "enabled", betas: true, cacheControl: false, serverTools: false,
   });
+});
+
+// DeepSeek runs `web_search` itself on its Anthropic endpoint (measured 2026-09-17, undocumented).
+// Dropping it there threw away a capability the user was already paying for, and silently.
+test("a provider that runs server tools keeps them; one that does not still loses them", () => {
+  const request = () => ({
+    model: "m",
+    messages: [],
+    tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 8 }, { type: "custom", name: "Read" }],
+    tool_choice: { type: "tool", name: "web_search" },
+  });
+
+  const kept = sanitizeForCompatible(request(), { ...STRICT_COMPAT_CAPS, serverTools: true });
+  assert.deepEqual((kept.json.tools as { name: string }[]).map((t) => t.name), ["web_search", "Read"]);
+  assert.equal("tool_choice" in kept.json, true, "the choice stands when the tool does");
+  assert.equal(kept.changes.some((c) => c.startsWith("server_tools")), false);
+
+  const dropped = sanitizeForCompatible(request(), STRICT_COMPAT_CAPS);
+  assert.deepEqual((dropped.json.tools as { name: string }[]).map((t) => t.name), ["Read"]);
+  assert.equal("tool_choice" in dropped.json, false);
+  assert.ok(dropped.changes.includes("server_tools×1"));
 });

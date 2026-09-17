@@ -492,7 +492,7 @@ export class Proxy {
       const preset = provider.preset ? PRESETS.find((entry) => entry.id === provider.preset) : undefined;
       const modelEffortLevels = provider.models?.find((entry) => entry.id === route.model)?.effortLevels;
       compatCaps = resolveCompatibleCaps(
-        preset ? { effortLevels: preset.effortLevels, thinking: preset.thinking } : undefined,
+        preset ? { effortLevels: preset.effortLevels, thinking: preset.thinking, ...(preset.serverTools ? { serverTools: true } : {}) } : undefined,
         modelEffortLevels === undefined ? provider.caps : { ...provider.caps, effortLevels: modelEffortLevels },
       );
       const sanitized = sanitizeForCompatible(json, compatCaps);
