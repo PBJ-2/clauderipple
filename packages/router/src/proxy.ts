@@ -27,6 +27,7 @@ import { BOOTSTRAP_PATH, injectBootstrap } from "./bootstrap.ts";
 import { THREAD_UNSUPPORTED, effortOf, resolve, rewriteBody, stripThreadFields, threadDecision } from "./routing.ts";
 import { forwardCompatibleHeader, resolveCompatibleCaps, sanitizeForCompatible } from "./compat.ts";
 import { applyIdentityToAnthropicBody } from "./identity.ts";
+import { webPluginBackend, webSearchBlocks, webSearchMessage, webSearchQuery, webSearchSse, type WebSearchQuery } from "./websearch.ts";
 import { PRESETS } from "./presets.ts";
 import { ChatGptAdapter } from "./providers/chatgpt/index.ts";
 import { OpenAiCompatibleAdapter } from "./providers/openai/index.ts";
@@ -396,6 +397,18 @@ export class Proxy {
         json = null;
       }
     }
+    // A WebSearch arrives as its own request aimed at ANTHROPIC_SMALL_FAST_MODEL, recognised by the
+    // forced `web_search` server tool rather than by its model id. Answer it from the configured
+    // provider's hosted search, so a routed session does not have to spend Claude quota to search
+    // (§4). Without `cfg.webSearch` nothing is intercepted and the request takes its normal path.
+    const search = cfg.webSearch && json && isApiHost && pathname === "/v1/messages" ? webSearchQuery(json) : null;
+    if (search && cfg.webSearch) {
+      const served = await this.serveWebSearch(res, json!, search, cfg.webSearch, record, finish);
+      if (served) return;
+      // Fall through on failure: the ordinary path still answers, and a search that quietly
+      // returns nothing is worse than one that costs what it always cost.
+    }
+
     const route = json ? resolve(model, json, cfg) : null;
     const source = typeof model === "string" ? model : "-";
     record = {
@@ -694,6 +707,58 @@ export class Proxy {
     });
 
     upReq.end(body);
+  }
+
+  /**
+   * Answer a WebSearch side request from a provider's hosted search instead of letting it reach a
+   * model. Returns false when it could not be served, and the caller falls back to the normal path:
+   * an empty search result is the one outcome worth avoiding, because nothing anywhere reports it.
+   */
+  private async serveWebSearch(
+    res: http.ServerResponse,
+    json: Record<string, unknown>,
+    query: WebSearchQuery,
+    settings: NonNullable<Config["webSearch"]>,
+    record: { source?: string; target?: string },
+    finish: (status: string, bytes: number, note?: string, failed?: boolean) => void,
+  ): Promise<boolean> {
+    const provider = this.deps.config().providers[settings.provider];
+    if (!provider) {
+      this.deps.log.warn(`web search: unknown provider ${settings.provider}; leaving the request alone`);
+      return false;
+    }
+    const url = "url" in provider && typeof provider.url === "string" ? provider.url : undefined;
+    if (!url) {
+      this.deps.log.warn(`web search: provider ${settings.provider} has no url; leaving the request alone`);
+      return false;
+    }
+    const backend = webPluginBackend({
+      name: settings.provider,
+      url,
+      headers: ("headers" in provider && provider.headers) || {},
+      model: settings.model,
+      ...(settings.maxResults ? { maxResults: settings.maxResults } : {}),
+    });
+
+    const model = typeof json.model === "string" ? json.model : "unknown";
+    let blocks;
+    try {
+      const outcome = await backend.search(query);
+      blocks = webSearchBlocks(query, outcome).blocks;
+    } catch (e) {
+      this.deps.log.warn(`web search via ${settings.provider}: ${(e as Error).message}`);
+      return false;
+    }
+
+    record.target = `${settings.provider}/${settings.model}`;
+    const wantStream = json.stream === true;
+    const payload = wantStream ? webSearchSse(model, blocks, 1) : JSON.stringify(webSearchMessage(model, blocks, 1));
+    const headers = wantStream
+      ? { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" }
+      : { "content-type": "application/json" };
+    res.writeHead(200, headers).end(payload);
+    finish("200", Buffer.byteLength(payload), `web search via ${settings.provider}`, false);
+    return true;
   }
 
   private agentFor(provider: string, protocol: "http:" | "https:"): http.Agent | https.Agent {

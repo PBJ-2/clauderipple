@@ -212,6 +212,29 @@ chat is out of reach for every approach, ours included.
     session, Claude or routed.** The routed model still chooses the query and reads the results;
     only titles and URLs survive the hand-back (snippets are dropped in the CLI), plus the search
     model's prose. The gate is Anthropic's to flip, which is why the drop above exists.
+  - **Serving the search ourselves (`cfg.webSearch`, 2026-09-17).** Because the search runs on a
+    Claude model, a routed session still cannot search without Claude quota — the product is only
+    half routed. With `webSearch: { provider, model }` set, the router recognises the side request
+    and answers it from that provider's own hosted search, and no model call leaves for Anthropic.
+    Verified end to end: a `deepseek-flash` session searched and got real results with **zero**
+    Anthropic `/v1/messages` calls in the log, the only `PASS` line being the intercepted search
+    itself. It needs no env var — we terminate TLS for `api.anthropic.com`, so the side request
+    passes through whatever its model id, and the interception sits ahead of routing.
+    - The fingerprint is **one declared tool, the `web_search` server tool, and one user message
+      that is the CLI's fixed sentence**. A forced `tool_choice` is deliberately *not* required:
+      the CLI source passes `toolChoice: {type:"tool", name:"web_search"}`, but the wire carries
+      `{"type":"auto"}` (measured). Reading the source alone got this wrong once.
+    - OpenRouter runs it as `plugins: [{id:"web"}]` on Chat Completions and answers with
+      `annotations[].url_citation` (`title`, `url`); the side request's `allowed_domains` /
+      `blocked_domains` map to `include_domains` / `exclude_domains`. Measured live: four
+      citations, $0.0073 for the call.
+    - The reply is assembled as `server_tool_use` + `web_search_tool_result` + `text`, with
+      `usage.server_tool_use.web_search_requests` — the field the CLI turns into "Did N searches".
+    - A backend that returns no citations **throws**, and the request falls through to the ordinary
+      path. A search that quietly returns nothing is the one outcome worth avoiding, since nothing
+      anywhere reports it.
+    - The search model iterates: a single `WebSearch` can produce several side requests with
+      refined queries, each intercepted on its own.
   - `WebFetch` needs none of this: the CLI fetches the URL itself (its own transport, cache and
     preflight; there is no `web_fetch` server tool in the binary) and has the session's model read
     the text. It works on any provider.
