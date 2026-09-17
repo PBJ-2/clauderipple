@@ -4,7 +4,7 @@
 
 import crypto from "node:crypto";
 import { clampEffort } from "../../compat.ts";
-import { conversationKey, estimateTokens, normalizeSchema, systemText, type AnthropicBlock, type AnthropicRequest, type AnthropicTool } from "../chatgpt/translate.ts";
+import { conversationKey, estimateTokens, normalizeSchema, systemText, toolNameForResponses, type AnthropicBlock, type AnthropicRequest, type AnthropicTool } from "../chatgpt/translate.ts";
 import { identityPrefix, instructionsSuffix } from "../../identity.ts";
 
 export type OpenAiWire = "chat" | "responses";
@@ -85,7 +85,7 @@ function imageUrl(block: AnthropicBlock): string | null {
 function functionTools(tools: AnthropicTool[] | undefined): OpenAiTool[] {
   return (tools ?? [])
     .filter((tool) => typeof tool.name === "string")
-    .map((tool) => ({ type: "function" as const, function: { name: tool.name, description: tool.description ?? "", parameters: normalizeSchema(tool.input_schema) } }));
+    .map((tool) => ({ type: "function" as const, function: { name: toolNameForResponses(tool.name), description: tool.description ?? "", parameters: normalizeSchema(tool.input_schema) } }));
 }
 
 function mapToolChoice(req: AnthropicRequest, tools: OpenAiTool[]): ChatRequest["tool_choice"] | undefined {
@@ -94,7 +94,7 @@ function mapToolChoice(req: AnthropicRequest, tools: OpenAiTool[]): ChatRequest[
   if (!choice || choice.type === "auto") return "auto";
   if (choice.type === "any") return "required";
   if (choice.type === "none") return "none";
-  return choice.type === "tool" && choice.name ? { type: "function", function: { name: choice.name } } : undefined;
+  return choice.type === "tool" && choice.name ? { type: "function", function: { name: toolNameForResponses(choice.name) } } : undefined;
 }
 
 function mapResponsesToolChoice(req: AnthropicRequest, tools: ResponsesTool[]): ResponsesRequest["tool_choice"] | undefined {
@@ -103,7 +103,7 @@ function mapResponsesToolChoice(req: AnthropicRequest, tools: ResponsesTool[]): 
   if (!choice || choice.type === "auto") return "auto";
   if (choice.type === "any") return "required";
   if (choice.type === "none") return "none";
-  return choice.type === "tool" && choice.name ? { type: "function", name: choice.name } : undefined;
+  return choice.type === "tool" && choice.name ? { type: "function", name: toolNameForResponses(choice.name) } : undefined;
 }
 
 /** The system text this provider should see: what it is, the caller's prompt, the configured addendum. */
@@ -145,7 +145,7 @@ export function toChatMessages(req: AnthropicRequest, opts?: OpenAiTranslateOpti
         if (block.type === "tool_use") {
           const call = block as { id: string; name: string; input: unknown };
           knownCalls.add(call.id);
-          calls.push({ id: call.id, type: "function", function: { name: call.name, arguments: typeof call.input === "string" ? call.input : JSON.stringify(call.input ?? {}) } });
+          calls.push({ id: call.id, type: "function", function: { name: toolNameForResponses(call.name), arguments: typeof call.input === "string" ? call.input : JSON.stringify(call.input ?? {}) } });
         }
       }
       if (text.some(Boolean) || calls.length) messages.push({ role: "assistant", content: text.join("\n") || null, ...(calls.length ? { tool_calls: calls } : {}) });
@@ -207,7 +207,7 @@ export function toResponsesInput(req: AnthropicRequest): ResponseInput[] {
         flush();
         const call = block as { id: string; name: string; input: unknown };
         knownCalls.add(call.id);
-        input.push({ type: "function_call", call_id: call.id, name: call.name, arguments: typeof call.input === "string" ? call.input : JSON.stringify(call.input ?? {}) });
+        input.push({ type: "function_call", call_id: call.id, name: toolNameForResponses(call.name), arguments: typeof call.input === "string" ? call.input : JSON.stringify(call.input ?? {}) });
       } else if (block.type === "tool_result") {
         flush();
         const result = block as { tool_use_id: string; content?: string | AnthropicBlock[]; is_error?: boolean };
@@ -302,9 +302,13 @@ export class OpenAiStreamMapper {
   readonly model: string;
   private readonly startInput: number;
 
-  constructor(model: string, startInput = 0) {
+  /** Mangled tool name → the name Claude Code knows, from `toolNameRestoreMap`. */
+  private readonly toolNames: ReadonlyMap<string, string>;
+
+  constructor(model: string, startInput = 0, toolNames: ReadonlyMap<string, string> = new Map()) {
     this.model = model;
     this.startInput = startInput;
+    this.toolNames = toolNames;
   }
 
   get isFinished(): boolean { return this.finished; }
@@ -341,17 +345,22 @@ export class OpenAiStreamMapper {
     this.usage = { input_tokens: Math.max(0, (input ?? this.usage.input_tokens + cached) - cached), output_tokens: Math.max(0, output ?? this.usage.output_tokens), cache_read_input_tokens: cached, cache_creation_input_tokens: 0 };
   }
 
+  /** The vendor echoes the name it was given; Claude Code only recognises the original. */
+  private restore(name: string): string {
+    return this.toolNames.get(name) ?? name;
+  }
+
   private toolFor(index: number, delta: { id?: unknown; function?: { name?: unknown; arguments?: unknown } }): ToolOutputBlock {
     let tool = this.content.find((block): block is ToolOutputBlock => block.type === "tool_use" && block.index === index);
     if (!tool) {
       const id = typeof delta.id === "string" ? delta.id : `call_${crypto.randomBytes(8).toString("hex")}`;
-      const name = typeof delta.function?.name === "string" ? delta.function.name : "tool";
+      const name = typeof delta.function?.name === "string" ? this.restore(delta.function.name) : "tool";
       tool = { type: "tool_use", id, name, input: {}, args: "", index };
       this.content.push(tool);
       this.sawTool = true;
     }
     if (typeof delta.id === "string") tool.id = delta.id;
-    if (typeof delta.function?.name === "string") tool.name = delta.function.name;
+    if (typeof delta.function?.name === "string") tool.name = this.restore(delta.function.name);
     return tool;
   }
 

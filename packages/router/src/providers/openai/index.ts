@@ -9,6 +9,7 @@ import type { RequestUsage } from "../../requestlog.ts";
 import { credentialHeaderValues, redactErrorText } from "../../redact.ts";
 import { SseParser } from "../chatgpt/sse.ts";
 import { estimateTokens, formatSse, OpenAiStreamMapper, toOpenAiRequest } from "./translate.ts";
+import { toolNameRestoreMap } from "../chatgpt/translate.ts";
 import type { AnthropicRequest } from "../chatgpt/translate.ts";
 
 const PING_MS = 15_000;
@@ -127,7 +128,7 @@ export class OpenAiCompatibleAdapter {
     }
 
     const wantStream = json.stream === true;
-    const mapper = new OpenAiStreamMapper(model, startInput);
+    const mapper = new OpenAiStreamMapper(model, startInput, toolNameRestoreMap(json));
     const parser = new SseParser();
     const reader = upstream.body.getReader();
     const decoder = new TextDecoder();

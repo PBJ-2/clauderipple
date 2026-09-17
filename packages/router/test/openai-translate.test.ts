@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { OpenAiStreamMapper, toOpenAiRequest, type ChatRequest, type ResponsesRequest } from "../src/providers/openai/translate.ts";
-import type { AnthropicRequest } from "../src/providers/chatgpt/translate.ts";
+import { toolNameForResponses, toolNameRestoreMap, type AnthropicRequest } from "../src/providers/chatgpt/translate.ts";
 
 const request: AnthropicRequest = {
   model: "claude-opus-5",
@@ -148,4 +148,58 @@ test("identity false leaves the system prompt as the caller wrote it; the addend
 test("a provider that takes no reasoning effort is not told one", () => {
   const out = toOpenAiRequest(request, { model: "kimi", wire: "chat", effort: "high", caps: { reasoning: "none" } }) as ChatRequest;
   assert.equal(out.messages[0]?.content, "You are kimi, answering through Claude Code, a terminal-based coding agent.\n\nYou are a coding agent.");
+});
+
+// OpenAI function names take the same `^[a-zA-Z0-9_-]{1,64}$` as the Codex backend, and one
+// over-long name fails the whole request. Claude Code's MCP names pass 64 routinely (issue #1).
+const longMcp = "mcp__claude_ai_Korea_Investment_Securities__get_overseas_stock_chart"; // 68
+const mangled = toolNameForResponses(longMcp);
+
+const mcpRequest: AnthropicRequest = {
+  ...request,
+  tools: [{ name: longMcp, input_schema: { type: "object", properties: {} } }, { name: "Read", input_schema: { type: "object", properties: {} } }],
+  tool_choice: { type: "tool", name: longMcp },
+  messages: [
+    { role: "user", content: [{ type: "text", text: "quote please" }] },
+    { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: longMcp, input: { symbol: "AAPL" } }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "call_1", content: "182.3" }] },
+  ],
+};
+
+test("over-long tool names are mangled on the chat wire, declarations, choice and replayed calls alike", () => {
+  const out = toOpenAiRequest(mcpRequest, { ...options, wire: "chat" }) as ChatRequest;
+  assert.equal(out.tools?.[0]?.function.name, mangled);
+  assert.equal(out.tools?.[1]?.function.name, "Read"); // legal name still byte-identical
+  for (const t of out.tools ?? []) assert.ok(/^[A-Za-z0-9_-]{1,64}$/.test(t.function.name), t.function.name);
+  assert.deepEqual(out.tool_choice, { type: "function", function: { name: mangled } });
+  const replay = out.messages.find((m) => m.tool_calls)?.tool_calls?.[0];
+  assert.equal(replay?.function.name, mangled);
+});
+
+test("over-long tool names are mangled on the responses wire too", () => {
+  const out = toOpenAiRequest(mcpRequest, { ...options, wire: "responses" }) as ResponsesRequest;
+  assert.equal(out.tools?.[0]?.name, mangled);
+  for (const t of out.tools ?? []) assert.ok(/^[A-Za-z0-9_-]{1,64}$/.test(t.name), t.name);
+  assert.deepEqual(out.tool_choice, { type: "function", name: mangled });
+  const call = out.input.find((i) => (i as { type?: string }).type === "function_call") as { name: string };
+  assert.equal(call.name, mangled);
+});
+
+test("the mangled name the vendor echoes is restored to the one Claude Code knows, on both wires", () => {
+  const map = toolNameRestoreMap(mcpRequest);
+  assert.equal(map.get(mangled), longMcp);
+  assert.equal(map.has("Read"), false);
+
+  const toolName = (mapper: OpenAiStreamMapper): string | undefined => {
+    const blocks = mapper.message().content as { type: string; name?: string }[];
+    return blocks.find((b) => b.type === "tool_use")?.name;
+  };
+
+  const chat = new OpenAiStreamMapper("test", 0, map);
+  chat.feed({ id: "c1", choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", function: { name: mangled, arguments: "{}" } }] }, finish_reason: "tool_calls" }] }, "chat");
+  assert.equal(toolName(chat), longMcp);
+
+  const responses = new OpenAiStreamMapper("test", 0, map);
+  responses.feed({ type: "response.output_item.added", output_index: 0, item: { type: "function_call", id: "fc_1", call_id: "call_1", name: mangled } }, "responses");
+  assert.equal(toolName(responses), longMcp);
 });
