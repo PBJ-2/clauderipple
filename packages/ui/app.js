@@ -246,8 +246,14 @@ function providerState(name, provider) {
   // credentials would otherwise read "Connected" and send the user off believing it works.
   if (live && live.needsLogin) return badge("warn", t("providerStatus.loginNeeded"));
   const state = stateFor(name);
-  if (state) return state.ok ? badge("ok", t("providerStatus.connected")) : state.auth === "bad-key" ? badge("bad", t("providerStatus.keyNeeded")) : badge("bad", t("providerStatus.disconnected"));
+  if (state && state.ok) return badge("ok", t("providerStatus.connected"));
+  // A rejected key is a standing fact, so it keeps precedence. A probe that merely failed to
+  // connect is a moment in the past: one that happened while the router was restarting was left on
+  // screen in red for the rest of the session, while polling every five seconds said the provider
+  // was fine and a fresh probe agreed. The newer evidence wins.
+  if (state && state.auth === "bad-key") return badge("bad", t("providerStatus.keyNeeded"));
   if (live) return live.reachable ? badge("ok", t("providerStatus.connected")) : badge("bad", t("providerStatus.disconnected"));
+  if (state) return badge("bad", t("providerStatus.disconnected"));
   return badge("warn", t("providerStatus.checking"));
 }
 function renderHealthProviders() {

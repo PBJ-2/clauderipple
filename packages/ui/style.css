@@ -110,12 +110,15 @@ h1 {
   margin-bottom: 14px;
 }
 
+/* Three levels, and they have to differ by more than weight: a card title, the sections inside it,
+   and the prose. Titles were --muted while body text is --text, so a heading came out fainter than
+   the paragraph under it and the sections ran together. */
 .card h2 {
-  font-size: 15px;
-  letter-spacing: 0.2px;
-  color: var(--muted);
+  font-size: 16px;
+  letter-spacing: 0;
+  color: var(--text);
   margin: 0 0 10px;
-  font-weight: 600;
+  font-weight: 650;
 }
 
 .rows { display: flex; flex-direction: column; gap: 7px; }
@@ -308,7 +311,11 @@ label.check input { width: auto; }
 .advanced-content { padding-top: 3px; }
 .picker-check { margin-top: 15px; }
 .client-models { margin-top: 15px; }
-.client-models h3, .card h3 { color: var(--muted); font-size: 15px; letter-spacing: 0.2px; margin: 0 0 8px; font-weight: 600; }
+/* A section inside a card: full contrast like the title, a step smaller, and with room above it so
+   the eye sees where one section ends and the next begins. */
+.client-models h3, .card h3 { color: var(--text); font-size: 14px; letter-spacing: 0; margin: 18px 0 6px; font-weight: 600; }
+.client-models h3:first-child, .card h3:first-child { margin-top: 0; }
+.client-divider + h3 { margin-top: 0; }
 .client-divider { border-top: 1px solid var(--border); margin: 18px 0 14px; }
 
 @media (max-width: 680px) {
