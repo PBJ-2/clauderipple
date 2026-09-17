@@ -90,3 +90,39 @@ test("Logger rotates by size and keeps N files", () => {
   assert.deepEqual(files, ["router.log", "router.log.1", "router.log.2"]);
   assert.ok(fs.statSync(file).size < 5000);
 });
+
+// A fallback is only reached once something has already failed, so a broken one shows up on the
+// worst possible day. These are refused at save time instead.
+test("validate refuses fallbacks that name nothing, or repeat the primary", () => {
+  const cfg = (fallbacks: unknown) => validate({
+    ...DEFAULTS,
+    providers: {
+      p: { type: "anthropic-compatible", url: "https://example.test" },
+      q: { type: "anthropic-compatible", url: "https://other.test" },
+    },
+    routes: { slot: { provider: "p", model: "m", fallbacks } as never },
+  });
+
+  assert.deepEqual(cfg([{ provider: "q", model: "n" }]), [], "a real second target is fine");
+  assert.deepEqual(cfg(undefined), [], "no fallbacks at all is the normal case");
+  assert.ok(cfg([{ provider: "gone", model: "n" }])[0]?.includes("unknown provider"));
+  assert.ok(cfg([{ provider: "q" }])[0]?.includes("missing model"));
+  assert.ok(cfg([{ provider: "p", model: "m" }])[0]?.includes("repeats the primary"));
+  assert.ok(cfg("nope")[0]?.includes("must be a list"));
+});
+
+// Credential ids key the cooldown and quarantine state. Two credentials sharing one id would share
+// one health record and take each other down.
+test("validate refuses a credential pool with duplicate ids or non-string headers", () => {
+  const cfg = (credentials: unknown) => validate({
+    ...DEFAULTS,
+    providers: { p: { type: "anthropic-compatible", url: "https://example.test", credentials } as never },
+  });
+
+  assert.deepEqual(cfg([{ id: "one", headers: { "x-api-key": "k" } }, { id: "two", headers: {}, label: "spare" }]), []);
+  assert.deepEqual(cfg(undefined), [], "a provider with one credential is unchanged");
+  assert.ok(cfg([{ id: "same", headers: {} }, { id: "same", headers: {} }])[0]?.includes("used twice"));
+  assert.ok(cfg([{ headers: {} }])[0]?.includes("non-empty id"));
+  assert.ok(cfg([{ id: "a", headers: { key: 5 } }])[0]?.includes("string record"));
+  assert.ok(cfg([{ id: "a", headers: {}, label: 7 }])[0]?.includes("label must be a string"));
+});

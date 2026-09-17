@@ -18,6 +18,17 @@ export type ProviderModel = {
   contextWindow?: number;
 };
 
+/**
+ * One credential in a provider's pool. `id` is what the router's health state is keyed on, so it
+ * has to stay put across config edits — renaming one resets its cooldown. Never logged.
+ */
+export type ProviderCredential = {
+  id: string;
+  headers: Record<string, string>;
+  /** Shown in the dashboard instead of the id. Not a secret, so keep the key out of it. */
+  label?: string;
+};
+
 export type AnthropicCompatibleProvider = {
   /** An HTTP(S) endpoint that speaks Anthropic Messages (DeepSeek, Kimi, GLM, MiniMax, proxenos, ...). */
   type: "anthropic-compatible";
@@ -25,6 +36,13 @@ export type AnthropicCompatibleProvider = {
   url: string;
   /** Optional headers to set on forwarded requests (e.g. x-api-key). Never logged. */
   headers?: Record<string, string>;
+  /**
+   * Further credentials for the same provider, tried when `headers` is rate limited or rejected.
+   * Each is a complete header set, so vendors that need more than a key still work. A conversation
+   * keeps whichever one it is on while that one is healthy, because moving it moves the prompt
+   * cache with it. Absent, the provider has exactly the one credential it always had.
+   */
+  credentials?: ProviderCredential[];
   /** Catalog preset used to populate this provider, if any. */
   preset?: string;
   /** Optional model entries offered by the GUI as suggestions. */
@@ -94,6 +112,13 @@ export type Route = {
   effort?: string;
   /** Context window for this slot, when the routed model's differs. Falls back to `cli.autoCompactWindow`. */
   contextWindow?: number;
+  /**
+   * Where the turn goes when this provider cannot answer it — rate limited, rejected, or down.
+   * Tried in order, and only for failures another provider could plausibly answer: a bad request
+   * is refused everywhere, so it is not retried. Failover ends at the first byte of the answer,
+   * because replacing a half-sent stream produces two answers spliced together.
+   */
+  fallbacks?: { provider: string; model: string; effort?: string }[];
 };
 
 export type DirectRule = {
@@ -240,6 +265,17 @@ export function validate(c: Config): string[] {
   for (const [alias, r] of Object.entries(c.routes)) {
     if (!c.providers[r.provider]) errors.push(`route ${alias}: unknown provider "${r.provider}"`);
     if (!r.model) errors.push(`route ${alias}: missing model`);
+    // A fallback is only reached when something has already gone wrong, so a broken one is found
+    // on the worst possible day. Refuse it at save time instead.
+    if (r.fallbacks !== undefined) {
+      if (!Array.isArray(r.fallbacks)) errors.push(`route ${alias}: fallbacks must be a list`);
+      else r.fallbacks.forEach((f, i) => {
+        if (!f || typeof f !== "object") { errors.push(`route ${alias}: fallback ${i} must be an object`); return; }
+        if (!c.providers[f.provider]) errors.push(`route ${alias}: fallback ${i} names unknown provider "${f.provider}"`);
+        if (!f.model || typeof f.model !== "string") errors.push(`route ${alias}: fallback ${i} missing model`);
+        if (f.provider === r.provider && f.model === r.model) errors.push(`route ${alias}: fallback ${i} repeats the primary target`);
+      });
+    }
   }
   for (const d of c.direct) {
     if (!c.providers[d.provider]) errors.push(`direct ${d.prefix}: unknown provider "${d.provider}"`);
@@ -249,6 +285,27 @@ export function validate(c: Config): string[] {
     const shared = p as { identity?: unknown; instructionsAppend?: unknown };
     if (shared.identity !== undefined && typeof shared.identity !== "boolean") errors.push(`provider ${name}: identity must be true or false`);
     if (shared.instructionsAppend !== undefined && typeof shared.instructionsAppend !== "string") errors.push(`provider ${name}: instructionsAppend must be a string`);
+    // Ids key the router's cooldown and quarantine state, so a duplicate would make two credentials
+    // share one health record and take each other down.
+    const pool = (p as { credentials?: unknown }).credentials;
+    if (pool !== undefined) {
+      if (!Array.isArray(pool)) errors.push(`provider ${name}: credentials must be a list`);
+      else {
+        const seen = new Set<string>();
+        pool.forEach((entry, i) => {
+          const cred = entry as { id?: unknown; headers?: unknown; label?: unknown } | null;
+          if (!cred || typeof cred !== "object") { errors.push(`provider ${name}: credential ${i} must be an object`); return; }
+          if (typeof cred.id !== "string" || !cred.id) errors.push(`provider ${name}: credential ${i} needs a non-empty id`);
+          else if (seen.has(cred.id)) errors.push(`provider ${name}: credential id "${cred.id}" is used twice`);
+          else seen.add(cred.id);
+          if (!cred.headers || typeof cred.headers !== "object" || Array.isArray(cred.headers) ||
+            Object.values(cred.headers as Record<string, unknown>).some((value) => typeof value !== "string")) {
+            errors.push(`provider ${name}: credential ${i} headers must be a string record`);
+          }
+          if (cred.label !== undefined && typeof cred.label !== "string") errors.push(`provider ${name}: credential ${i} label must be a string`);
+        });
+      }
+    }
     if (p.type === "anthropic-compatible") {
       if (!/^https?:\/\//.test(p.url)) errors.push(`provider ${name}: url must start with http:// or https://`);
       if (p.preset !== undefined && typeof p.preset !== "string") errors.push(`provider ${name}: preset must be a string`);
