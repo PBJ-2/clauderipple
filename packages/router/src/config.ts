@@ -130,6 +130,26 @@ export type Config = {
     extraModels: CliModel[];
     /** Fallback context window for routed models that do not declare their own (auto_compact_windows). */
     autoCompactWindow?: number;
+    /**
+     * Which model fills each of Claude Code's own slots, written into `~/.claude/settings.json`
+     * env. Claude Code decides these before a request exists, so the router cannot reach them by
+     * routing: a search, a session title or a subagent goes wherever the CLI already decided.
+     *
+     * `smallFast` is the one that matters most. Claude Code runs `WebSearch` as a side request
+     * against it, so left at its default a routed session still searches on Claude quota — and a
+     * user without a Claude subscription cannot search at all. Pointed at a routed model, the
+     * provider does its own search and pays for it (§4).
+     *
+     * Each is left alone when unset, so nothing here changes behaviour until it is chosen.
+     */
+    models?: {
+      /** ANTHROPIC_MODEL — the session default. */
+      main?: string;
+      /** ANTHROPIC_SMALL_FAST_MODEL — web search, titles, classifiers. */
+      smallFast?: string;
+      /** CLAUDE_CODE_SUBAGENT_MODEL — what a subagent runs on unless it names its own. */
+      subagent?: string;
+    };
   };
   /**
    * Who performs a `WebSearch`. Claude Code sends the search as its own side request to a small

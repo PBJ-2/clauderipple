@@ -40,3 +40,37 @@ test("removeProxyEnv leaves foreign proxy values alone", () => {
   assert.equal(r.changed, false);
   assert.equal(r.notes.length, 1);
 });
+
+// Claude Code decides these before a request exists, so the router cannot reach them by routing.
+// `smallFast` is what a WebSearch side request runs on: until it moves, a routed session still
+// searches on Claude quota.
+test("model slots are written, changed and cleared, and uninstall always takes them back", () => {
+  const file = process.env.CLAUDE_SETTINGS_PATH!;
+  fs.writeFileSync(file, JSON.stringify({ env: { FOO: "1" } }));
+  const proxy = { proxyUrl: "http://127.0.0.1:8790", caPath: "/x/ca.pem", force: false };
+
+  applyProxyEnv({ ...proxy, models: { smallFast: "deepseek-flash", subagent: "gpt-5.6-terra" } });
+  let env = JSON.parse(fs.readFileSync(file, "utf8")).env;
+  assert.equal(env.ANTHROPIC_SMALL_FAST_MODEL, "deepseek-flash");
+  assert.equal(env.CLAUDE_CODE_SUBAGENT_MODEL, "gpt-5.6-terra");
+  assert.equal("ANTHROPIC_MODEL" in env, false, "an unset slot is not written");
+  assert.equal(env.FOO, "1", "unrelated env is left alone");
+
+  // Clearing a slot must remove it: leaving the old model behind would keep answering with nothing
+  // in the config to explain why.
+  const cleared = applyProxyEnv({ ...proxy, models: { smallFast: "deepseek-flash" } });
+  assert.equal(cleared.changed, true);
+  env = JSON.parse(fs.readFileSync(file, "utf8")).env;
+  assert.equal("CLAUDE_CODE_SUBAGENT_MODEL" in env, false);
+  assert.equal(env.ANTHROPIC_SMALL_FAST_MODEL, "deepseek-flash");
+
+  // Passing no `models` at all is "do not manage these", not "clear them".
+  applyProxyEnv({ ...proxy });
+  env = JSON.parse(fs.readFileSync(file, "utf8")).env;
+  assert.equal(env.ANTHROPIC_SMALL_FAST_MODEL, "deepseek-flash");
+
+  // Uninstalling hands the CLI back to Anthropic completely; a slot left pointing at a routed
+  // model would send every search and subagent somewhere the router no longer serves.
+  removeProxyEnv({ proxyUrl: "http://127.0.0.1:8790", caPath: "/x/ca.pem" });
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")).env, { FOO: "1" });
+});
