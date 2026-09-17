@@ -443,7 +443,9 @@ Sources: [Codex configuration reference](https://learn.chatgpt.com/docs/config-f
 [Codex advanced configuration](https://learn.chatgpt.com/docs/config-file/config-advanced),
 [Claude Code authentication and credential management](https://code.claude.com/docs/en/authentication),
 and the behavior-only [OpenCodex source](https://github.com/lidge-jun/opencodex)
-inspected 2026-09-13. The latter is not an Anthropic guarantee.
+inspected 2026-09-13. The latter is not an Anthropic guarantee. Its published documentation is
+surveyed in [OPENCODEX.md](OPENCODEX.md) — adapter wire behaviour, the patterns worth reusing, and
+what we do not have yet — so that adding a provider does not start with reading it again.
 
 ### 4c. `openai-compatible` providers (implemented 2026-09-13)
 
