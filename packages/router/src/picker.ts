@@ -64,10 +64,13 @@ export function injectPickerModels(json: Record<string, unknown>, extra: CliMode
       surface.models.push(entry);
       result.injected++;
     }
-    if (contextWindow) {
-      for (const key of ["context_window_by_model", "contextWindowByModel"]) {
-        const map = surface[key];
-        if (map && typeof map === "object") for (const e of extra) (map as Record<string, number>)[e.model] = contextWindow;
+    // Per-entry window first: routed models do not share one, and `contextWindow` is only the fallback.
+    for (const key of ["context_window_by_model", "contextWindowByModel"]) {
+      const map = surface[key];
+      if (!map || typeof map !== "object") continue;
+      for (const e of extra) {
+        const w = e.contextWindow ?? contextWindow;
+        if (w) (map as Record<string, number>)[e.model] = w;
       }
     }
     const recorded = result.surfaces[result.surfaces.length - 1]!;

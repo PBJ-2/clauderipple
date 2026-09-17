@@ -8,10 +8,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-type Entry = { id: string; name?: string; provider: string };
+type Entry = { id: string; name?: string; provider: string; contextWindow?: number };
 type Config = {
   providers: Record<string, { models?: { id: string; name?: string }[] }>;
-  cli?: { extraModels?: { model: string; name?: string }[] };
+  cli?: { extraModels?: { model: string; name?: string; contextWindow?: number }[] };
   direct?: { prefix: string; provider: string }[];
 };
 
@@ -74,4 +74,17 @@ test("unchecking every model empties the picker list", () => {
   const next = apply(baseConfig(), []);
   assert.deepEqual(next.cli?.extraModels, []);
   assert.deepEqual(next.direct, [{ prefix: "gpt-", provider: "chatgpt" }]);
+});
+
+// The list is rebuilt from the checkboxes on every change, so a window that is not carried through
+// would be wiped by the next click on an unrelated model.
+test("a model's own context window survives the rebuild; a missing or unusable one is left out", () => {
+  const next = apply(baseConfig(), [
+    { id: "z-ai/glm-5.3-flash", name: "GLM", provider: "openrouter", contextWindow: 400000 },
+    { id: "gpt-5.6-terra", name: "Terra", provider: "chatgpt" },
+  ]);
+  assert.deepEqual(next.cli?.extraModels, [
+    { model: "z-ai/glm-5.3-flash", name: "GLM", contextWindow: 400000 },
+    { model: "gpt-5.6-terra", name: "Terra" },
+  ]);
 });

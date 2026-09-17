@@ -14,6 +14,8 @@ export type ProviderModel = {
   name?: string;
   /** Explicit per-model reasoning-effort support. An empty array disables the provider fallback. */
   effortLevels?: string[];
+  /** The model's context window, as the vendor's `/models` reported it (`context_length`). */
+  contextWindow?: number;
 };
 
 export type AnthropicCompatibleProvider = {
@@ -90,6 +92,8 @@ export type Route = {
   provider: string;
   model: string;
   effort?: string;
+  /** Context window for this slot, when the routed model's differs. Falls back to `cli.autoCompactWindow`. */
+  contextWindow?: number;
 };
 
 export type DirectRule = {
@@ -102,6 +106,13 @@ export type CliModel = {
   model: string;
   name: string;
   description?: string;
+  /**
+   * This model's own context window. Routed models do not share one — forcing a single value on a
+   * 1M-window model and a 400K one either overflows the smaller or throws away most of the larger.
+   * Falls back to `cli.autoCompactWindow`. This is the model's real window, not a compaction
+   * threshold: Claude Code applies its own fraction (measured: a 200K window compacted at 151K).
+   */
+  contextWindow?: number;
 };
 
 export type Config = {
@@ -117,7 +128,7 @@ export type Config = {
   cli: {
     /** Extra entries for the CLI's own /model picker (not the app picker; see docs/ARCHITECTURE.md §3). */
     extraModels: CliModel[];
-    /** Context window applied to every routed model in the CLI bootstrap (auto_compact_windows). */
+    /** Fallback context window for routed models that do not declare their own (auto_compact_windows). */
     autoCompactWindow?: number;
   };
   health: {
