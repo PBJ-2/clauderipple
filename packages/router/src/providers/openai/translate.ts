@@ -4,7 +4,7 @@
 
 import crypto from "node:crypto";
 import { clampEffort } from "../../compat.ts";
-import { conversationKey, estimateTokens, normalizeSchema, systemText, toolNameForResponses, type AnthropicBlock, type AnthropicRequest, type AnthropicTool } from "../chatgpt/translate.ts";
+import { conversationKey, estimateTokens, normalizeSchema, serverToolNames, systemText, toolNameForResponses, type AnthropicBlock, type AnthropicRequest, type AnthropicTool } from "../chatgpt/translate.ts";
 import { identityPrefix, instructionsSuffix } from "../../identity.ts";
 
 export type OpenAiWire = "chat" | "responses";
@@ -82,10 +82,18 @@ function imageUrl(block: AnthropicBlock): string | null {
   return null;
 }
 
+// Anthropic's server-side tools cannot run here; see the rule in the ChatGPT translator.
 function functionTools(tools: AnthropicTool[] | undefined): OpenAiTool[] {
+  const dropped = serverToolNames(tools);
   return (tools ?? [])
-    .filter((tool) => typeof tool.name === "string")
+    .filter((tool) => typeof tool.name === "string" && !dropped.has(tool.name))
     .map((tool) => ({ type: "function" as const, function: { name: toolNameForResponses(tool.name), description: tool.description ?? "", parameters: normalizeSchema(tool.input_schema) } }));
+}
+
+/** A choice that named a dropped tool would force the model onto something no longer declared. */
+function choiceSurvives(req: AnthropicRequest): boolean {
+  const choice = req.tool_choice;
+  return choice?.type === "tool" && !!choice.name && !serverToolNames(req.tools).has(choice.name);
 }
 
 function mapToolChoice(req: AnthropicRequest, tools: OpenAiTool[]): ChatRequest["tool_choice"] | undefined {
@@ -94,7 +102,7 @@ function mapToolChoice(req: AnthropicRequest, tools: OpenAiTool[]): ChatRequest[
   if (!choice || choice.type === "auto") return "auto";
   if (choice.type === "any") return "required";
   if (choice.type === "none") return "none";
-  return choice.type === "tool" && choice.name ? { type: "function", function: { name: toolNameForResponses(choice.name) } } : undefined;
+  return choiceSurvives(req) ? { type: "function", function: { name: toolNameForResponses(choice.name!) } } : undefined;
 }
 
 function mapResponsesToolChoice(req: AnthropicRequest, tools: ResponsesTool[]): ResponsesRequest["tool_choice"] | undefined {
@@ -103,7 +111,7 @@ function mapResponsesToolChoice(req: AnthropicRequest, tools: ResponsesTool[]): 
   if (!choice || choice.type === "auto") return "auto";
   if (choice.type === "any") return "required";
   if (choice.type === "none") return "none";
-  return choice.type === "tool" && choice.name ? { type: "function", name: toolNameForResponses(choice.name) } : undefined;
+  return choiceSurvives(req) ? { type: "function", name: toolNameForResponses(choice.name!) } : undefined;
 }
 
 /** The system text this provider should see: what it is, the caller's prompt, the configured addendum. */

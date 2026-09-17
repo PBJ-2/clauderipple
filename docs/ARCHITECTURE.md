@@ -192,6 +192,29 @@ chat is out of reach for every approach, ours included.
     without MCP tools produces byte-identical output and the cache prefix does
     not move. The same constraint and the same helpers apply to the
     `openai-compatible` adapter (§4c).
+  - **Server tools are dropped, on every translated path.** `web_search` and its siblings arrive
+    as `{ type: "web_search_20250305", name: "web_search", max_uses: N }` with no `input_schema`.
+    They are run by Anthropic, not by the model holding them, so declaring one to a translated
+    provider offers a tool that cannot execute: the model calls it, nothing answers, and the turn
+    returns empty with no error. `compat.ts` has dropped these on the anthropic-compatible path
+    from the start; the ChatGPT and openai-compatible translators do the same, and a `tool_choice`
+    that named a dropped tool is dropped with it. The adapter logs each drop by name, because the
+    failure it replaces is silent.
+  - **Where web search actually runs (measured 2026-09-17).** Claude Code does not put `web_search`
+    in the main request. `WebSearch` opens a *separate side request* — system prompt "You are an
+    assistant for performing a web search tool use", one message "Perform a web search for the
+    query: …", the server tool forced by `tool_choice`, `max_uses: 8` — and sends it to
+    `H("tengu_plum_vx3") ? Og() : mainLoopModel()`. That gate is on: an Opus 5 session and a
+    DeepSeek-routed session both sent it to `claude-haiku-4-5-20251001`, byte-for-byte the same
+    request (11,208 input tokens for an identical query), which passes through to Anthropic and
+    never reaches an adapter. A control run without a search produced no such request. So today a
+    routed model never sees a server tool — **and the model driving the search is Haiku for every
+    session, Claude or routed.** The routed model still chooses the query and reads the results;
+    only titles and URLs survive the hand-back (snippets are dropped in the CLI), plus the search
+    model's prose. The gate is Anthropic's to flip, which is why the drop above exists.
+  - `WebFetch` needs none of this: the CLI fetches the URL itself (its own transport, cache and
+    preflight; there is no `web_fetch` server tool in the binary) and has the session's model read
+    the text. It works on any provider.
   - Cache-safety decisions: thinking blocks are dropped from replayed history;
     no reasoning `include`; identity line and `instructionsAppend` are constant
     text; `prompt_cache_key` = sha256(metadata.user_id + first user message).
@@ -421,6 +444,7 @@ inspected 2026-09-13. The latter is not an Anthropic guarantee.
 | Every GPT request failed with 400 after a Claude Code update added a lookahead regex to the `Artifact` tool schema (2026-09-13; proxenos too) | Tool-schema scrub in the translator (§4). Upstream error bodies are logged, never just the status. |
 | Tool names over 64 characters were forwarded to the Responses API unchanged, so a single connected MCP server — the product's own use case (§2) — failed every request of that turn (found by reading the source, issue #1, 2026-09-17) | Any name a translated provider sends is mangled into the provider's constraint deterministically and restored on the way back (§4). A translator must validate what it forwards against the wire it forwards to, not only what it builds itself. |
 | Unknown-model context window defaulted to 200K, compaction fired at 151K; fixed via `CLAUDE_CODE_MAX_CONTEXT_TOKENS=272000` (applies only to models not in the CLI's built-in table; Claude models unaffected) | Installer sets this env for mapped models; document that it does not affect Claude models. |
+| Server tools (`web_search`) were declared to translated providers as ordinary functions: a tool the model can call and nothing can run. Not observed live, because Claude Code currently routes its web search elsewhere (§4) — the failure was one server-side flag away, and its shape is an empty answer with nothing logged (issue #4, 2026-09-17) | A translator declares only what the provider can actually execute, and says in the log what it removed. A capability that silently disappears is worse than one that visibly fails. |
 | One context window was written to every routed model and every slot, because `cli.autoCompactWindow` is a single number while `auto_compact_windows` and `context_window_by_model` are per-model maps. Routed models do not share a window: set it high and the smaller model overflows before it compacts, set it low and the larger throws away most of its own (issue #2, 2026-09-17) | A window belongs to a model, not to the router. `CliModel.contextWindow` and `Route.contextWindow` win, then whatever the vendor's `/models` reported as `context_length`, then the global value as the fallback it always was. A value the config can only express once must not be injected into a map that is keyed per model. |
 | proxenos sends only the 7-day quota window, so the app shows a "weekly limit" banner | Quota reporting must mirror the shape Anthropic returns. |
 | After a reboot the router listened 4 minutes after login (26s of it between exec and `listen()`), and for that whole window Claude Desktop was a blank page with `ERR_PROXY_CONNECTION_FAILED` — in picker mode every byte the app sends goes through us, so a router that is merely slow reads as an app that is broken (2026-09-14 09:59 boot → 10:15:59 listening) | The launchd agent is `ProcessType=Interactive`, never `Background` (that key throttles CPU and I/O — launchd.plist(5)). `listen()` comes before certificate minting and any other startup work, so a client waits rather than being refused. Every startup logs its budget (`startup Nms: node …, config …, listen …`). |

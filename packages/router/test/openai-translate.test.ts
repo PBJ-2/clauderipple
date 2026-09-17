@@ -150,6 +150,31 @@ test("a provider that takes no reasoning effort is not told one", () => {
   assert.equal(out.messages[0]?.content, "You are kimi, answering through Claude Code, a terminal-based coding agent.\n\nYou are a coding agent.");
 });
 
+// Anthropic runs server tools; this provider cannot. The shape is Claude Code's real web-search
+// side query: one forced server tool and nothing else.
+const serverToolRequest: AnthropicRequest = {
+  model: "x",
+  max_tokens: 10,
+  tools: [
+    { name: "web_search", type: "web_search_20250305", max_uses: 8 } as never,
+    { name: "Read", input_schema: { type: "object", properties: {} } },
+  ],
+  tool_choice: { type: "tool", name: "web_search" },
+  messages: [{ role: "user", content: "Perform a web search for the query: node 24" }],
+};
+
+test("server tools are dropped on the chat wire, and the choice that named one with them", () => {
+  const out = toOpenAiRequest(serverToolRequest, { ...options, wire: "chat" }) as ChatRequest;
+  assert.deepEqual(out.tools?.map((t) => t.function.name), ["Read"]);
+  assert.equal(out.tool_choice, undefined);
+});
+
+test("server tools are dropped on the responses wire too", () => {
+  const out = toOpenAiRequest(serverToolRequest, { ...options, wire: "responses" }) as ResponsesRequest;
+  assert.deepEqual(out.tools?.map((t) => t.name), ["Read"]);
+  assert.equal(out.tool_choice, undefined);
+});
+
 // OpenAI function names take the same `^[a-zA-Z0-9_-]{1,64}$` as the Codex backend, and one
 // over-long name fails the whole request. Claude Code's MCP names pass 64 routinely (issue #1).
 const longMcp = "mcp__claude_ai_Korea_Investment_Securities__get_overseas_stock_chart"; // 68

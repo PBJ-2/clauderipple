@@ -9,7 +9,7 @@ import type { RequestUsage } from "../../requestlog.ts";
 import { credentialHeaderValues, redactErrorText } from "../../redact.ts";
 import { SseParser } from "../chatgpt/sse.ts";
 import { estimateTokens, formatSse, OpenAiStreamMapper, toOpenAiRequest } from "./translate.ts";
-import { toolNameRestoreMap } from "../chatgpt/translate.ts";
+import { serverToolNames, toolNameRestoreMap } from "../chatgpt/translate.ts";
 import type { AnthropicRequest } from "../chatgpt/translate.ts";
 
 const PING_MS = 15_000;
@@ -83,6 +83,11 @@ export class OpenAiCompatibleAdapter {
           reasoning: modelEffortLevels && modelEffortLevels.length > 0 ? "effort" as const : "none" as const,
           effortLevels: modelEffortLevels ?? this.cfg.caps?.effortLevels ?? [],
         };
+    // Dropping a tool the model was meant to have is worth a line: the alternative to this drop is
+    // an empty answer with nothing logged anywhere.
+    const serverTools = serverToolNames(json.tools);
+    if (serverTools.size > 0) this.log.warn(`openai ${this.name}: dropped server tools for ${model}: ${[...serverTools].join(", ")} (Anthropic runs these; this provider cannot)`);
+
     const upstreamRequest = toOpenAiRequest(json, {
       model,
       wire,
