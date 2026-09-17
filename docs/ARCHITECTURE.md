@@ -311,6 +311,19 @@ chat is out of reach for every approach, ours included.
   (char/4, floored by the last measured total for the conversation) so the app's
   token counter and the CLI's context accounting are not zero.
 
+- **Credential pools (`providers.<name>.credentials`, 2026-09-17).** A provider may hold several
+  credentials, each a complete header set. The conversation keeps the one it is on while that one
+  is healthy — moving it moves the prompt cache with it, and ≥90% cache hit is an acceptance metric
+  — and only a failure moves it, including back to one that has recovered rather than to the head
+  of the list. A 401 quarantines a credential, because rejected credentials do not heal; a 429
+  cools it until the vendor's stated reset (`retry-after`, seconds or HTTP-date, or the Codex reset
+  header), clamped to six hours; a 402 cools it for half an hour; a 5xx or a connect failure for
+  ten seconds. **A 4xx that is the request's own fault is charged to nobody** — retrying a bad body
+  against every credential burns the pool and still fails. State is in memory: a cooldown that
+  outlived a restart would make restarting worse. A provider that declares no pool has exactly the
+  credential it always had. Verified end to end against a fake upstream that rate-limits one key:
+  the first turn hit the limited key and 429'd, and both following turns went to the healthy one
+  and stayed there (`["bad","good","good"]`).
 - **Provider base path.** Anthropic-compatible vendors mount the API under a path
   (`https://api.deepseek.com/anthropic`, `https://openrouter.ai/api`,
   `https://dashscope-intl.aliyuncs.com/apps/anthropic`); the router prepends it to

@@ -28,6 +28,7 @@ import { THREAD_UNSUPPORTED, effortOf, resolve, rewriteBody, stripThreadFields, 
 import { forwardCompatibleHeader, resolveCompatibleCaps, sanitizeForCompatible } from "./compat.ts";
 import { applyIdentityToAnthropicBody } from "./identity.ts";
 import { webPluginBackend, webSearchBlocks, webSearchMessage, webSearchQuery, webSearchSse, type WebSearchQuery } from "./websearch.ts";
+import { CredentialPool, retryAfterMs, type Credential } from "./pool.ts";
 import { PRESETS } from "./presets.ts";
 import { ChatGptAdapter } from "./providers/chatgpt/index.ts";
 import { OpenAiCompatibleAdapter } from "./providers/openai/index.ts";
@@ -105,6 +106,12 @@ export class Proxy {
   private readonly chatgptAdapters = new Map<string, { key: string; adapter: ChatGptAdapter }>();
   private readonly openaiAdapters = new Map<string, { key: string; adapter: OpenAiCompatibleAdapter }>();
   private readonly deps: ProxyDeps;
+  /**
+   * Cooldowns, quarantines and conversation stickiness for provider credentials. In memory: a
+   * cooldown that outlived a restart would make restarting worse, and a rejected credential earns
+   * its quarantine again on the first request.
+   */
+  private readonly pool = new CredentialPool();
 
   /** Latest rate-limit snapshot reported by any chatgpt provider (for the admin GUI). */
   get chatgptRateLimits(): Record<string, Record<string, unknown> | null> {
@@ -426,6 +433,9 @@ export class Proxy {
 
     let compatCaps: ReturnType<typeof resolveCompatibleCaps> | undefined;
     let compatChanges: string[] = [];
+    /** The credential this attempt is using, and so the one a failure is charged to. */
+    let chosen: Credential | null = null;
+    let penalised: { provider: string; id: string } | null = null;
     let target: { protocol: "http:" | "https:"; host: string; port: number; agent: http.Agent | https.Agent; extraHeaders: Record<string, string>; basePath?: string; dropClientAuth?: boolean };
     if (route && json) {
       const provider = cfg.providers[route.provider];
@@ -509,12 +519,22 @@ export class Proxy {
       body = Buffer.from(JSON.stringify(json));
       const u = new URL(provider.url);
       const protocol = u.protocol === "https:" ? "https:" : "http:";
+      // Which credential answers this turn. The conversation keeps the one it is on while that one
+      // is healthy, because moving it moves the prompt cache with it. Every credential cooling or
+      // quarantined leaves `chosen` null, and the request goes out on the configured headers so the
+      // provider — not us — gets to say no.
+      const credentials = this.credentialsOf(route.provider, provider);
+      const conversation = typeof json.metadata === "object" && json.metadata
+        ? String((json.metadata as { user_id?: unknown }).user_id ?? "")
+        : "";
+      chosen = this.pool.pick(route.provider, credentials, conversation || undefined);
+      penalised = { provider: route.provider, id: chosen?.id ?? credentials[0]!.id };
       target = {
         protocol,
         host: u.hostname,
         port: Number(u.port) || (protocol === "https:" ? 443 : 80),
         agent: this.agentFor(route.provider, protocol),
-        extraHeaders: provider.headers ?? {},
+        extraHeaders: chosen?.headers ?? provider.headers ?? {},
         dropClientAuth: true,
         // Providers mount their Anthropic-compatible API under a path (DeepSeek /anthropic, OpenRouter /api,
         // Qwen /apps/anthropic): the CLI's /v1/messages is appended to it. Dropping it sent requests to the
@@ -598,6 +618,9 @@ export class Proxy {
 
     upReq.on("error", (e) => {
       if (target.host === cfg.upstream) this.deps.health.failure(e);
+      // Nothing reached the provider, so this says nothing about the credential — but it does say
+      // the route is unusable for a moment, and a pool with somewhere else to go should use it.
+      if (penalised) this.pool.penalise(penalised.provider, penalised.id, 0);
       finish("-", 0, `upstream error ${(e as NodeJS.ErrnoException).code ?? ""} ${(e as Error).message}`);
       if (!res.headersSent) {
         res.writeHead(502, { "content-type": "application/json", connection: "close" });
@@ -610,6 +633,13 @@ export class Proxy {
     upReq.on("response", (upRes) => {
       if (target.host === cfg.upstream) this.deps.health.success();
       const status = upRes.statusCode ?? 0;
+      // Charge the answer to the credential that produced it. A rate limit parks this one until its
+      // stated reset so the next request takes another; an answer clears whatever it was carrying.
+      // A 400 is our own request and is charged to nobody (see `classify`).
+      if (penalised) {
+        if (status >= 400) this.pool.penalise(penalised.provider, penalised.id, status, retryAfterMs(upRes.headers));
+        else this.pool.succeed(penalised.provider, penalised.id);
+      }
       const outHeaders: string[] = [];
       const r = upRes.rawHeaders;
       for (let i = 0; i < r.length; i += 2) {
@@ -759,6 +789,29 @@ export class Proxy {
     res.writeHead(200, headers).end(payload);
     finish("200", Buffer.byteLength(payload), `web search via ${settings.provider}`, false);
     return true;
+  }
+
+  /**
+   * A provider's credentials as a pool. A provider that declares none has exactly the one it always
+   * had, under a fixed id so its health survives config edits that do not touch it.
+   */
+  private credentialsOf(name: string, provider: Config["providers"][string]): Credential[] {
+    const declared = (provider as { credentials?: Credential[] }).credentials;
+    if (declared && declared.length > 0) return declared;
+    const headers = ("headers" in provider && provider.headers) || {};
+    return [{ id: "default", headers }];
+  }
+
+  /** Health of every credential the config declares, for the dashboard. */
+  credentialHealth(): Record<string, ReturnType<CredentialPool["report"]>> {
+    const cfg = this.deps.config();
+    const out: Record<string, ReturnType<CredentialPool["report"]>> = {};
+    for (const [name, provider] of Object.entries(cfg.providers)) {
+      const creds = this.credentialsOf(name, provider);
+      if (creds.length === 1 && creds[0]!.id === "default") continue; // nothing to report about a pool of one
+      out[name] = this.pool.report(name, creds);
+    }
+    return out;
   }
 
   private agentFor(provider: string, protocol: "http:" | "https:"): http.Agent | https.Agent {

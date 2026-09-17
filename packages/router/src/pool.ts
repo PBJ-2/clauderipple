@@ -65,6 +65,30 @@ export function classify(status: number, retryAfterMs?: number): Verdict {
   return { retryable: false, reason: `status ${status} is not a credential or provider problem` };
 }
 
+/**
+ * A vendor's own account of when to come back, from `retry-after` (seconds, or an HTTP date) or a
+ * vendor reset field. Preferred over a guess, and ignored when it is not a number we can use.
+ */
+export function retryAfterMs(headers: Record<string, string | string[] | undefined>): number | undefined {
+  const pick = (name: string): string | undefined => {
+    const v = headers[name];
+    return Array.isArray(v) ? v[0] : v;
+  };
+  const header = pick("retry-after");
+  if (header) {
+    const seconds = Number(header);
+    // Anything numeric is seconds, including a negative one — which is not a wait, and must not
+    // fall through to the date branch, where `Date.parse("-5")` succeeds and means something else.
+    if (Number.isFinite(seconds)) return seconds >= 0 ? seconds * 1000 : undefined;
+    const at = Date.parse(header);
+    if (Number.isFinite(at)) return Math.max(0, at - Date.now());
+  }
+  // The Codex backend states its window this way rather than with retry-after.
+  const codex = Number(pick("x-codex-primary-reset-after-seconds"));
+  if (Number.isFinite(codex) && codex >= 0) return codex * 1000;
+  return undefined;
+}
+
 /** A single usable credential. `id` is stable across reloads so state survives a config edit. */
 export type Credential = { id: string; headers: Record<string, string>; label?: string };
 

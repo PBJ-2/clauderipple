@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classify, CredentialPool, targets, type Credential } from "../src/pool.ts";
+import { classify, CredentialPool, retryAfterMs, targets, type Credential } from "../src/pool.ts";
 
 const creds = (...ids: string[]): Credential[] => ids.map((id) => ({ id, headers: { "x-api-key": id } }));
 
@@ -144,4 +144,20 @@ test("fallbacks follow the primary in order, and a repeat of it is not a second 
   ]);
   assert.equal(list[0]?.tag, "slot", "the primary keeps the tag the log already uses");
   assert.deepEqual(targets(primary), [primary], "no fallbacks is just the primary");
+});
+
+// A vendor saying when to come back beats our guess, and a vendor saying nothing useful must not
+// turn into NaN milliseconds.
+test("retry-after is read as seconds or as a date, and nonsense is ignored", () => {
+  assert.equal(retryAfterMs({ "retry-after": "30" }), 30_000);
+  assert.equal(retryAfterMs({ "retry-after": ["45"] }), 45_000, "a repeated header still parses");
+  assert.equal(retryAfterMs({ "retry-after": "0" }), 0);
+  assert.equal(retryAfterMs({ "x-codex-primary-reset-after-seconds": "120" }), 120_000);
+  assert.equal(retryAfterMs({}), undefined);
+  assert.equal(retryAfterMs({ "retry-after": "soon" }), undefined);
+  assert.equal(retryAfterMs({ "retry-after": "-5" }), undefined, "a negative wait is not a wait");
+
+  const future = retryAfterMs({ "retry-after": new Date(Date.now() + 60_000).toUTCString() });
+  assert.ok(future !== undefined && future > 50_000 && future <= 60_000, `http-date parsed: ${future}`);
+  assert.equal(retryAfterMs({ "retry-after": new Date(Date.now() - 60_000).toUTCString() }), 0, "a past date means now");
 });
