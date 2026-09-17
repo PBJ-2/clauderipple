@@ -266,6 +266,23 @@ async function startChatgptLogin(onChange) {
     onChange && onChange();
   }
 }
+/**
+ * Which of a provider's credentials are resting, and until when. Absent for a provider with one
+ * credential: a row that can only ever say "ready" is noise. Ids and labels only — never a key.
+ */
+function credentialLine(name) {
+  const pool = (status && status.credentials && status.credentials[name]) || [];
+  if (!pool.length) return null;
+  const parts = pool.map((c) => {
+    const who = c.label || c.id;
+    if (c.state === "quarantined") return `${who}: ${t("pool.quarantined")}`;
+    if (c.state === "cooling") return `${who}: ${t("pool.cooling", { seconds: c.cooldownSeconds ?? 0 })}`;
+    return `${who}: ${t("pool.ready")}`;
+  });
+  const resting = pool.filter((c) => c.state !== "ready").length;
+  return el("div", { class: `small ${resting ? "bad-text" : ""}`.trim(), text: parts.join(" · ") });
+}
+
 function providerState(name, provider) {
   const live = status && status.providers && status.providers[name];
   // Reaching the host is not the same as being able to use it. A ChatGPT provider with no
@@ -302,6 +319,8 @@ function renderHealthProviders() {
     ].filter(Boolean));
     const quota = quotaLine(name);
     if (quota) line.appendChild(el("div", { class: "small", text: quota }));
+    const pool = credentialLine(name);
+    if (pool) line.appendChild(pool);
     return line;
   }));
 }

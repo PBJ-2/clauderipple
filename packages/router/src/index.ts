@@ -139,6 +139,7 @@ proxy
       version: VERSION,
       requests,
       chatgpt: () => ({ quota: proxy.chatgptRateLimits, auth: proxy.chatgptAuthStatus() }),
+      credentials: () => proxy.credentialHealth(),
       picker: () => ({ enabled: !!store.get().picker?.enabled, hosts: terminateHosts(store.get()).slice(1), last: proxy.lastPickerInjection }),
       observedClaudeCodeAuth,
       shutdown: () => beginDrain("shutdown requested"),

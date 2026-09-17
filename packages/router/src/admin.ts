@@ -57,6 +57,11 @@ export type AdminDeps = {
   requests: RequestLog;
   /** Optional: chatgpt providers' latest rate-limit snapshot and credential status. */
   chatgpt?: () => { quota: Record<string, Record<string, unknown> | null>; auth: Record<string, string> };
+  /**
+   * Optional: per-credential cooldowns and quarantines, for providers that declare a pool. Ids and
+   * labels only — never a header value.
+   */
+  credentials?: () => Record<string, { id: string; label?: string; state: string; cooldownSeconds?: number; failures: number }[]>;
   /** Optional: picker-mode state and the last bootstrap injection. */
   picker?: () => { enabled: boolean; hosts: string[]; last: unknown };
   /** Optional: observed CLI credentials held by the live proxy, never serialized directly. */
@@ -308,6 +313,9 @@ async function buildStatus(deps: AdminDeps): Promise<Record<string, unknown>> {
     },
     cliVersion: cliVersion(),
     chatgpt: { ...chatgpt, signedIn },
+    // Only present for providers that declare a pool; a provider with one credential has nothing
+    // to report and would only add a row that never changes.
+    credentials: deps.credentials?.() ?? {},
     picker,
     agentTitle: agentTitleHookEnabled(),
     pickerModels: cfg.cli.extraModels.map((m) => m.name || m.model),
