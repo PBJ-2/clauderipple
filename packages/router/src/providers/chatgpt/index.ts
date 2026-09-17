@@ -6,7 +6,7 @@ import type { ChatGptProvider } from "../../config.ts";
 import type { Logger } from "../../log.ts";
 import { CredentialStore } from "./auth.ts";
 import { SseParser } from "./sse.ts";
-import { StreamMapper, conversationKey, estimateTokens, formatSse, toResponsesRequest, toolNameRestoreMap, type AnthropicRequest } from "./translate.ts";
+import { StreamMapper, conversationKey, estimateTokens, formatSse, serverToolNames, toResponsesRequest, toolNameRestoreMap, type AnthropicRequest } from "./translate.ts";
 import type { RequestUsage } from "../../requestlog.ts";
 import { credentialHeaderValues, redactErrorText } from "../../redact.ts";
 import fs from "node:fs";
@@ -128,6 +128,11 @@ export class ChatGptAdapter {
       res.writeHead(e.status, { "content-type": "application/json" }).end(e.body);
       return { status: e.status, bytes: e.body.length, note: "no credentials" };
     }
+
+    // Dropping a tool the model was meant to have is worth a line: the alternative to this drop is
+    // an empty answer with nothing logged anywhere, which is what made it expensive to find.
+    const serverTools = serverToolNames(json.tools);
+    if (serverTools.size > 0) this.log.warn(`chatgpt ${this.name}: dropped server tools for ${model}: ${[...serverTools].join(", ")} (Anthropic runs these; this provider cannot)`);
 
     const upstreamReq = toResponsesRequest(json, {
       model,

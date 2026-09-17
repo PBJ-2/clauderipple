@@ -143,6 +143,28 @@ export function toolNameForResponses(name: string): string {
   return `${name.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 55)}_${hash}`;
 }
 
+// Anthropic's server-side tools (`web_search` and friends) are run by Anthropic, not by the model
+// holding them. Declaring one to a translated provider offers a tool that cannot possibly execute:
+// the model calls it, nothing answers, and the turn comes back empty with no error anywhere — the
+// worst failure shape there is. `compat.ts` has dropped them on the anthropic-compatible path from
+// the start; the rule belongs here too, and is the same rule, not a second one.
+//
+// These do not arrive today. Claude Code runs its web search as a separate side request on a fixed
+// small model — measured 2026-09-17: an Opus session and a DeepSeek-routed session both sent it to
+// `claude-haiku-4-5`, which passes through to Anthropic and never reaches an adapter. Which model
+// that is, is a server-side flag we do not own, so this guards the day it changes.
+export function isServerTool(tool: AnthropicTool): boolean {
+  const type = (tool as { type?: unknown }).type;
+  return type !== undefined && type !== "custom";
+}
+
+/** Names of the tools this request declares that no translated provider can run. */
+export function serverToolNames(tools: AnthropicTool[] | undefined): Set<string> {
+  const names = new Set<string>();
+  for (const t of tools ?? []) if (typeof t.name === "string" && isServerTool(t)) names.add(t.name);
+  return names;
+}
+
 /**
  * Mangled name → original, for the tools declared in this request. The model echoes the name it was
  * given and Claude Code matches `tool_use.name` against its own tool list, so the response path has
@@ -151,7 +173,7 @@ export function toolNameForResponses(name: string): string {
 export function toolNameRestoreMap(req: AnthropicRequest): Map<string, string> {
   const map = new Map<string, string>();
   for (const t of req.tools ?? []) {
-    if (typeof t.name !== "string") continue;
+    if (typeof t.name !== "string" || isServerTool(t)) continue;
     const mangled = toolNameForResponses(t.name);
     if (mangled !== t.name) map.set(mangled, t.name);
   }
@@ -224,8 +246,9 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
     flush();
   }
 
+  const dropped = serverToolNames(req.tools);
   const tools = (req.tools ?? [])
-    .filter((t) => typeof t.name === "string")
+    .filter((t) => typeof t.name === "string" && !dropped.has(t.name))
     .map((t) => ({ type: "function" as const, name: toolNameForResponses(t.name), description: t.description ?? "", parameters: normalizeSchema(t.input_schema), strict: false as const }));
 
   let tool_choice: ResponsesRequest["tool_choice"];
@@ -234,7 +257,8 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
     if (!tc || tc.type === "auto") tool_choice = "auto";
     else if (tc.type === "any") tool_choice = "required";
     else if (tc.type === "none") tool_choice = "none";
-    else if (tc.type === "tool" && tc.name) tool_choice = { type: "function", name: toolNameForResponses(tc.name) };
+    // A choice that named a dropped tool would force the model onto something no longer declared.
+    else if (tc.type === "tool" && tc.name && !dropped.has(tc.name)) tool_choice = { type: "function", name: toolNameForResponses(tc.name) };
   }
 
   const out: ResponsesRequest = {

@@ -208,6 +208,37 @@ test("over-long tool names are mangled on every outbound site and restored on th
   assert.equal(block.name, longMcp);
 });
 
+// Anthropic runs these; a translated provider cannot. Declaring one offers a tool that can only
+// fail silently. The shape below is Claude Code's real web-search side query (read from the CLI
+// binary, 2.1.271): one forced server tool and nothing else.
+test("server tools are dropped, and a tool_choice that named one goes with them", () => {
+  const r = toResponsesRequest({
+    model: "x",
+    max_tokens: 10,
+    tools: [
+      { name: "web_search", type: "web_search_20250305", max_uses: 8 } as never,
+      { name: "Read", type: "custom", input_schema: { type: "object", properties: {} } },
+      { name: "Edit", input_schema: { type: "object", properties: {} } },
+    ],
+    tool_choice: { type: "tool", name: "web_search" },
+    messages: [{ role: "user", content: "Perform a web search for the query: node 24" }],
+  }, opts);
+  assert.deepEqual(r.tools?.map((t) => t.name), ["Read", "Edit"], "a tool with no type is a custom tool and stays");
+  assert.equal("tool_choice" in r && r.tool_choice !== undefined, false, "forcing a dropped tool would be worse than dropping it");
+});
+
+test("a request that is only a server tool declares no tools at all", () => {
+  const r = toResponsesRequest({
+    model: "x",
+    max_tokens: 10,
+    tools: [{ name: "web_search", type: "web_search_20250305", max_uses: 8 } as never],
+    tool_choice: { type: "tool", name: "web_search" },
+    messages: [{ role: "user", content: "Perform a web search for the query: node 24" }],
+  }, opts);
+  assert.equal(r.tools, undefined, "no tools left means the field is omitted, not sent empty");
+  assert.equal(r.tool_choice, undefined);
+});
+
 test("orphan tool_result (Claude Code side query) becomes user text, matched ones stay function_call_output", () => {
   const r = toResponsesRequest(
     {
