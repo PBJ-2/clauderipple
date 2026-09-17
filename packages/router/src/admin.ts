@@ -237,7 +237,9 @@ export function chatgptSignedIn(mode: string | undefined): boolean {
 async function buildStatus(deps: AdminDeps): Promise<Record<string, unknown>> {
   const cfg = deps.config();
   const providers: Record<string, { url: string; type: string; reachable: boolean; authSource?: "observed" | "env" | "keychain" | "credentials-file" | "token-file" | null; signedIn?: "oauth" | "setup-token" | null }> = {};
-  await Promise.all(
+  // Keyed in the order the config lists them. Assigning inside the Promise.all callbacks ordered
+  // them by whichever TCP check answered first, so the Health list reshuffled on every poll.
+  const checked = await Promise.all(
     Object.entries(cfg.providers).map(async ([name, p]) => {
       const url = p.type === "anthropic" ? "https://api.anthropic.com" : p.type === "chatgpt" ? (p.url ?? "https://chatgpt.com/backend-api") : p.url;
       let reachable = false;
@@ -247,7 +249,7 @@ async function buildStatus(deps: AdminDeps): Promise<Record<string, unknown>> {
       } catch {
         reachable = false;
       }
-      providers[name] = {
+      return [name, {
         url,
         type: p.type,
         reachable,
@@ -260,9 +262,10 @@ async function buildStatus(deps: AdminDeps): Promise<Record<string, unknown>> {
               signedIn: p.auth === "claude-code" ? (readClaudeAuthFile(homeDir())?.source ?? null) : null,
             }
           : {}),
-      };
+      }] as const;
     }),
   );
+  for (const [name, entry] of checked) providers[name] = entry;
   const chatgpt = deps.chatgpt?.() ?? { quota: {}, auth: {} };
   const signedIn: Record<string, boolean> = {};
   for (const [name, p] of Object.entries(cfg.providers)) {

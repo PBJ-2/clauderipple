@@ -201,9 +201,35 @@ function quotaLine(name) {
   const quota = status && status.chatgpt && status.chatgpt.quota && status.chatgpt.quota[name];
   const primary = quota && quota.rate_limits && quota.rate_limits.primary;
   if (!primary) return null;
-  const reset = primary.reset_after_seconds ? t("health.resetsIn", { hours: Math.max(1, Math.round(primary.reset_after_seconds / 3600)) }) : "";
-  return t("health.quota", { percent: primary.used_percent, reset });
+  // The usage figure is what anyone acts on. The reset countdown was a second number beside it
+  // that nobody does anything with, so it is left out.
+  return t("health.quota", { percent: primary.used_percent, reset: "" });
 }
+/**
+ * One line a person can read. Vendors answer with a JSON body and sometimes an escaped one inside
+ * it; the useful part is the status and the vendor's own message, not the envelope around them.
+ * The full text stays on the element's title.
+ */
+function shortError(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return "";
+  const status = raw.match(/\b(\d{3})\b/);
+  let message = "";
+  try {
+    const json = raw.slice(raw.indexOf("{"));
+    const parsed = JSON.parse(json);
+    const err = parsed.error || parsed;
+    message = String(err.message || err.error || "").trim();
+  } catch { /* not JSON, or truncated: fall back to the raw head */ }
+  if (!message) message = raw.replace(/\s+/g, " ").slice(0, 120);
+  const head = status ? `HTTP ${status[1]}` : "";
+  const line = [head, message].filter(Boolean).join(" · ");
+  return line.length > 140 ? `${line.slice(0, 139)}…` : line;
+}
+
+/** How long a probe result speaks for the provider before the live reading takes over. */
+const PROBE_TTL_MS = 90_000;
+function probeIsStale(state) { return !state.pending && typeof state.at === "number" && Date.now() - state.at > PROBE_TTL_MS; }
 function stateFor(name) { return probeStates.get(name); }
 function chatgptLoginButton(onChange) {
   const button = el("button", { class: "btn secondary", type: "button", text: t("providers.chatgptLogin") });
@@ -246,12 +272,15 @@ function providerState(name, provider) {
   // credentials would otherwise read "Connected" and send the user off believing it works.
   if (live && live.needsLogin) return badge("warn", t("providerStatus.loginNeeded"));
   const state = stateFor(name);
-  if (state && state.ok) return badge("ok", t("providerStatus.connected"));
-  // A rejected key is a standing fact, so it keeps precedence. A probe that merely failed to
-  // connect is a moment in the past: one that happened while the router was restarting was left on
-  // screen in red for the rest of the session, while polling every five seconds said the provider
-  // was fine and a fresh probe agreed. The newer evidence wins.
-  if (state && state.auth === "bad-key") return badge("bad", t("providerStatus.keyNeeded"));
+  // A probe is the better evidence — it actually called the provider — but only while it is fresh.
+  // One caught mid-restart used to sit there in red for the rest of the session, while the poll
+  // every five seconds said the provider was fine and a fresh probe agreed. After PROBE_TTL_MS the
+  // live reading takes over, so a stale failure heals itself instead of needing a manual re-check.
+  if (state && !probeIsStale(state)) {
+    return state.ok ? badge("ok", t("providerStatus.connected"))
+      : state.auth === "bad-key" ? badge("bad", t("providerStatus.keyNeeded"))
+      : badge("bad", t("providerStatus.disconnected"));
+  }
   if (live) return live.reachable ? badge("ok", t("providerStatus.connected")) : badge("bad", t("providerStatus.disconnected"));
   if (state) return badge("bad", t("providerStatus.disconnected"));
   return badge("warn", t("providerStatus.checking"));
@@ -656,13 +685,13 @@ async function probeProvider(name, provider, onComplete) {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
-    probeStates.set(name, result);
+    probeStates.set(name, { ...result, at: Date.now() });
     onComplete && onComplete(result);
     return result;
   } catch (error) {
     const unavailable = error.status === 404;
     const result = { ok: false, auth: unavailable ? "unknown" : "unreachable", models: [], error: unavailable ? t("providers.apiSoon") : error.message, unavailable };
-    probeStates.set(name, result);
+    probeStates.set(name, { ...result, at: Date.now() });
     onComplete && onComplete(result);
     return result;
   } finally {
@@ -689,7 +718,9 @@ function providerCard(name, provider) {
       live && live.needsLogin ? chatgptLoginButton(draw) : null,
       live && live.needsLogin && chatgptLoginMessage ? el("span", { class: "small", text: chatgptLoginMessage }) : null,
       el("span", { class: "small", text: kind }),
-      state && !state.ok && state.error ? el("span", { class: "small bad-text", text: state.error }) : null,
+      // Vendors answer with a whole JSON body. Printed in full it pushed the badge into a vertical
+      // sliver and the card into nonsense, so it is cut to one readable line with the rest on hover.
+      state && !state.ok && state.error ? el("span", { class: "small bad-text provider-error", text: shortError(state.error), title: state.error }) : null,
     ].filter(Boolean));
     const models = modelsOf(provider);
     modelText.replaceChildren(...(models.length
@@ -742,7 +773,9 @@ async function loadProviders() {
     if (!currentConfig.providers || !Object.keys(currentConfig.providers).length) list.appendChild(el("div", { class: "empty-card", text: t("providers.empty") }));
     void Promise.all(Object.entries(currentConfig.providers || {}).map(([name, provider]) => probeProvider(name, provider, () => {
       const existing = $all(".provider-card").find((card) => card.querySelector("h2").textContent === name);
-      if (existing) { existing.remove(); list.appendChild(providerCard(name, provider)); }
+      // Replace where it stands. Removing and appending re-sorted the whole list by whichever probe
+      // answered first, so the providers moved around every time the tab was opened.
+      if (existing) existing.replaceWith(providerCard(name, provider));
     })));
   } catch (error) { toast(t("common.loadFailed"), true, error.message); }
 }
