@@ -52,11 +52,15 @@ export function injectBootstrap(body: Buffer, cfg: Config, agentDirs?: string[])
     .map((id) => {
       const [base, effort] = id.split("@");
       const named = cfg.cli.extraModels.find((m) => m.model === base);
-      return { model: id, name: `${named?.name ?? base}${effort ? ` · ${effort}` : ""}` };
+      // An "<model>@<effort>" entry is the same model with a different effort, so it has the same window.
+      return { model: id, name: `${named?.name ?? base}${effort ? ` · ${effort}` : ""}`, ...(named?.contextWindow ? { contextWindow: named.contextWindow } : {}) };
     });
   const extra = [...cfg.cli.extraModels, ...fromAgents];
   const win = cfg.cli.autoCompactWindow;
-  if (extra.length === 0 && !win) return body;
+  // Routed models do not share a context window; the global value is only the fallback for entries
+  // that do not name their own, so a per-entry window alone is reason enough to write the map.
+  const anyWindow = win !== undefined || extra.some((m) => m.contextWindow) || Object.values(cfg.routes).some((r) => r.contextWindow);
+  if (extra.length === 0 && !anyWindow) return body;
   let j: Record<string, unknown>;
   try {
     j = JSON.parse(body.toString("utf8")) as Record<string, unknown>;
@@ -67,10 +71,16 @@ export function injectBootstrap(body: Buffer, cfg: Config, agentDirs?: string[])
     const existing = Array.isArray(j.additional_model_options) ? (j.additional_model_options as unknown[]) : [];
     j.additional_model_options = [...existing, ...extra];
   }
-  if (win) {
+  if (anyWindow) {
     const acw = { ...((j.auto_compact_windows as Record<string, number> | undefined) ?? {}) };
-    for (const m of extra) acw[m.model] = win;
-    for (const alias of Object.keys(cfg.routes)) acw[alias] = win;
+    for (const m of extra) {
+      const w = m.contextWindow ?? win;
+      if (w) acw[m.model] = w;
+    }
+    for (const [alias, route] of Object.entries(cfg.routes)) {
+      const w = route.contextWindow ?? win;
+      if (w) acw[alias] = w;
+    }
     j.auto_compact_windows = acw;
   }
   return Buffer.from(JSON.stringify(j));

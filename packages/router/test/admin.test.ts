@@ -384,8 +384,8 @@ test("POST /api/providers/probe discovers OpenAI-compatible models and probes Ch
   const upstream = http.createServer((req, res) => {
     if (req.url === "/v1/models") {
       res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ data: [
-        { id: "oai-model", name: "OAI Model", supported_parameters: ["reasoning_effort"] },
-        { id: "no-effort-model", supported_parameters: ["reasoning"] },
+        { id: "oai-model", name: "OAI Model", supported_parameters: ["reasoning_effort"], context_length: 1000000 },
+        { id: "no-effort-model", supported_parameters: ["reasoning"], context_length: "400k" },
         { id: "legacy-model" },
       ] }));
       return;
@@ -420,7 +420,8 @@ test("POST /api/providers/probe discovers OpenAI-compatible models and probes Ch
         ok: true,
         auth: "ok",
         models: [
-          { id: "oai-model", name: "OAI Model", effortLevels: ["low", "medium", "high"] },
+          // context_length is taken when it is a usable number, and ignored otherwise ("400k").
+          { id: "oai-model", name: "OAI Model", effortLevels: ["low", "medium", "high"], contextWindow: 1000000 },
           { id: "no-effort-model", effortLevels: [] },
           { id: "legacy-model" },
         ],

@@ -104,6 +104,18 @@ function modelEffortTag(model) {
   if (!Array.isArray(model.effortLevels)) return null;
   return model.effortLevels.length ? t("providers.modelEffort") : t("providers.modelNoEffort");
 }
+// Routed models do not share a context window, so each picker entry carries its own. What the user
+// typed wins; otherwise whatever the vendor's /models reported (`context_length`); otherwise the
+// global cli.autoCompactWindow fallback. This is the model's real window, not a compaction point.
+function discoveredContextWindow(providerName, modelId) {
+  const provider = currentConfig && currentConfig.providers && currentConfig.providers[providerName];
+  const entry = provider && modelsOf(provider).find((item) => item.id === modelId);
+  return entry && Number.isFinite(entry.contextWindow) ? entry.contextWindow : undefined;
+}
+function savedContextWindow(modelId) {
+  const entry = ((currentConfig && currentConfig.cli && currentConfig.cli.extraModels) || []).find((item) => item.model === modelId);
+  return entry && Number.isFinite(entry.contextWindow) ? entry.contextWindow : undefined;
+}
 
 let currentConfig = null;
 let status = null;
@@ -300,13 +312,32 @@ function renderClientPickerModels(enabled) {
     input.dataset.model = model.id;
     input.dataset.provider = group.name;
     input.dataset.name = labelOf(model);
-    input.addEventListener("change", () => void saveClientPickerModels());
-    box.appendChild(el("label", { class: "model-check" }, [input, el("span", { text: labelOf(model) }), el("small", { text: group.name })]));
+    const discovered = discoveredContextWindow(group.name, model.id);
+    const saved = savedContextWindow(model.id);
+    // Blank means "use the global fallback"; the placeholder says what that would be.
+    const windowField = el("input", {
+      type: "number", class: "model-window", min: "1", step: "1000",
+      value: saved !== undefined ? String(saved) : "",
+      placeholder: discovered !== undefined ? String(discovered) : t("slots.windowGlobal"),
+      title: t("slots.windowHelp"),
+    });
+    windowField.hidden = !input.checked;
+    windowField.dataset.model = model.id;
+    // The field sits inside the <label>, so a click would otherwise toggle the checkbox.
+    windowField.addEventListener("click", (event) => event.preventDefault());
+    windowField.addEventListener("change", () => void saveClientPickerModels());
+    input.addEventListener("change", () => { windowField.hidden = !input.checked; void saveClientPickerModels(); });
+    box.appendChild(el("label", { class: "model-check" }, [input, el("span", { text: labelOf(model) }), windowField, el("small", { text: group.name })]));
   }
   if (!box.childElementCount) box.appendChild(hint(t("slots.noProviderModels")));
 }
 function clientPickerSelections() {
-  return $all("#client-picker-models input:checked").map((input) => ({ id: input.dataset.model, name: input.dataset.name, provider: input.dataset.provider }));
+  return $all("#client-picker-models input[type=checkbox]:checked").map((input) => {
+    const field = $(`#client-picker-models input.model-window[data-model="${CSS.escape(input.dataset.model)}"]`);
+    const typed = field && field.value.trim() ? Number(field.value) : NaN;
+    const contextWindow = Number.isFinite(typed) && typed > 0 ? Math.floor(typed) : discoveredContextWindow(input.dataset.provider, input.dataset.model);
+    return { id: input.dataset.model, name: input.dataset.name, provider: input.dataset.provider, contextWindow };
+  });
 }
 async function saveClientPickerModels() {
   if (!currentConfig) return;
@@ -479,7 +510,8 @@ function applyPickerSelections(next, selections) {
   const extras = new Map();
   const direct = new Map();
   for (const entry of selected) {
-    extras.set(entry.id, { model: entry.id, name: entry.name || entry.id });
+    // Without this the rebuild would drop the window on every checkbox click.
+    extras.set(entry.id, { model: entry.id, name: entry.name || entry.id, ...(Number.isFinite(entry.contextWindow) && entry.contextWindow > 0 ? { contextWindow: entry.contextWindow } : {}) });
     direct.set(entry.id, { prefix: entry.id, provider: entry.provider });
   }
   next.cli = { ...(next.cli || {}), extraModels: [...extras.values()] };

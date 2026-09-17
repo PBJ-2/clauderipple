@@ -72,7 +72,7 @@ export type AdminDeps = {
   shutdown?: () => void;
 };
 
-type ModelEntry = { id: string; name?: string; effortLevels?: string[] };
+type ModelEntry = { id: string; name?: string; effortLevels?: string[]; contextWindow?: number };
 type ProbeAuth = "ok" | "bad-key" | "unreachable" | "unknown" | "missing";
 type ProbeRequest = {
   type: "anthropic-compatible" | "openai-compatible";
@@ -446,15 +446,21 @@ function parsedModels(value: unknown): ModelEntry[] {
   const data = value && typeof value === "object" && Array.isArray((value as { data?: unknown }).data) ? (value as { data: unknown[] }).data : [];
   return data.flatMap((item) => {
     if (!item || typeof item !== "object") return [];
-    const r = item as { id?: unknown; name?: unknown; supported_parameters?: unknown };
+    const r = item as { id?: unknown; name?: unknown; supported_parameters?: unknown; context_length?: unknown };
     if (typeof r.id !== "string") return [];
     const supported = Array.isArray(r.supported_parameters) && r.supported_parameters.every((value) => typeof value === "string")
       ? r.supported_parameters as string[]
+      : undefined;
+    // OpenRouter and several other OpenAI-compatible vendors report each model's real context
+    // window here. Taking it means a routed model gets its own window without anyone typing it.
+    const contextWindow = typeof r.context_length === "number" && Number.isFinite(r.context_length) && r.context_length > 0
+      ? Math.floor(r.context_length)
       : undefined;
     return [{
       id: r.id,
       ...(typeof r.name === "string" ? { name: r.name } : {}),
       ...(supported ? { effortLevels: supported.includes("reasoning_effort") ? ["low", "medium", "high"] : [] } : {}),
+      ...(contextWindow ? { contextWindow } : {}),
     }];
   });
 }

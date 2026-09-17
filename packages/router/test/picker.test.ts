@@ -50,6 +50,28 @@ test("injects into CLI-backed surfaces (code/ccd/ccr/cowork) using an enabled Cl
   assert.equal(injectPickerModels(j, [{ model: "gpt-6-astra@high", name: "GPT-6 Astra" }]).injected, 0);
 });
 
+test("each picker entry gets its own context window; the global value is only the fallback", () => {
+  const j = bootstrap();
+  injectPickerModels(j, [
+    { model: "big@high", name: "Big", contextWindow: 1_000_000 },
+    { model: "small@high", name: "Small", contextWindow: 400_000 },
+    { model: "plain@high", name: "Plain" },
+  ], 258400);
+  const code = (j.model_selector_config as { context_window_by_model: Record<string, number> }[])[1]!;
+  assert.equal(code.context_window_by_model["big@high"], 1_000_000);
+  assert.equal(code.context_window_by_model["small@high"], 400_000);
+  assert.equal(code.context_window_by_model["plain@high"], 258400, "no own window → global fallback");
+  assert.equal(code.context_window_by_model["claude-opus-4-8"], 200000, "existing entries untouched");
+});
+
+test("a per-entry window applies even with no global value", () => {
+  const j = bootstrap();
+  injectPickerModels(j, [{ model: "big@high", name: "Big", contextWindow: 1_000_000 }, { model: "plain@high", name: "Plain" }]);
+  const code = (j.model_selector_config as { context_window_by_model: Record<string, number> }[])[1]!;
+  assert.equal(code.context_window_by_model["big@high"], 1_000_000);
+  assert.equal("plain@high" in code.context_window_by_model, false, "nothing to say about it → say nothing");
+});
+
 test("no-ops on unexpected shapes", () => {
   assert.equal(injectPickerModels({}, [{ model: "m", name: "M" }]).injected, 0);
   assert.equal(injectPickerModels({ model_selector_config: "nope" }, [{ model: "m", name: "M" }]).injected, 0);

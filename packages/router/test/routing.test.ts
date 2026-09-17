@@ -76,6 +76,33 @@ test("bootstrap injection adds CLI models and compaction windows", () => {
   assert.equal(injectBootstrap(raw, cfg), raw);
 });
 
+test("each routed model and slot keeps its own compaction window; the global value is only the fallback", () => {
+  const perModel: Config = {
+    ...cfg,
+    routes: {
+      "claude-opus-4-8": { provider: "chatgpt", model: "gpt-6-astra", contextWindow: 1_000_000 },
+      "claude-opus-4-6": { provider: "chatgpt", model: "gpt-5.6-terra", effort: "high" },
+    },
+    cli: { extraModels: [{ model: "gpt-5.6-terra@high", name: "GPT-5.6 Terra", contextWindow: 400_000 }, { model: "gpt-6-astra@high", name: "GPT-6 Astra" }], autoCompactWindow: 258400 },
+  };
+  const out = JSON.parse(injectBootstrap(Buffer.from(JSON.stringify({})), perModel, []).toString());
+  assert.equal(out.auto_compact_windows["gpt-5.6-terra@high"], 400_000);
+  assert.equal(out.auto_compact_windows["gpt-6-astra@high"], 258400, "no own window → global fallback");
+  assert.equal(out.auto_compact_windows["claude-opus-4-8"], 1_000_000, "slot carries its own");
+  assert.equal(out.auto_compact_windows["claude-opus-4-6"], 258400);
+});
+
+test("a per-model window applies even with no global autoCompactWindow", () => {
+  const noGlobal: Config = {
+    ...cfg,
+    routes: { "claude-opus-4-8": { provider: "chatgpt", model: "gpt-6-astra" } },
+    cli: { extraModels: [{ model: "gpt-5.6-terra@high", name: "GPT-5.6 Terra", contextWindow: 400_000 }] },
+  };
+  const out = JSON.parse(injectBootstrap(Buffer.from(JSON.stringify({})), noGlobal, []).toString());
+  assert.equal(out.auto_compact_windows["gpt-5.6-terra@high"], 400_000);
+  assert.equal("claude-opus-4-8" in out.auto_compact_windows, false, "nothing to say about it → say nothing");
+});
+
 test("thread: continue is refused with the CLI's error code, create is stripped", async () => {
   const { threadDecision, stripThreadFields, THREAD_UNSUPPORTED } = await import("../src/routing.ts");
   assert.equal(threadDecision({ thread: { type: "continue", previous_message_id: "msg_1" } }), "refuse");

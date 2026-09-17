@@ -251,6 +251,7 @@ label.check input { width: auto; }
 .model-check input { width: auto; flex: 0 0 auto; }
 .model-check span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .model-check small { margin-left: auto; color: var(--muted); font-size: 13px; white-space: nowrap; }
+.model-check .model-window { flex: 0 0 7.5ch; width: 7.5ch; padding: 2px 4px; font-size: 13px; text-align: right; }
 .provider-card h2 { color: var(--text); font-size: 14px; text-transform: none; letter-spacing: 0; margin: 0; }
 .provider-state { display: flex; gap: 8px; align-items: center; margin: 8px 0 2px; }
 .provider-status { display: grid; grid-template-columns: minmax(120px, 1fr) auto; gap: 8px; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--border); }
