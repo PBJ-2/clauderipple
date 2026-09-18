@@ -263,8 +263,8 @@ export const PRESETS: ProviderPreset[] = [
     // No per-model effort contract is published for this endpoint; strip it rather than guess.
     effortLevels: [],
     thinking: "none",
-    verified: false,
-    notes: "Same subscription and key as the Responses entry; a different endpoint, so a separate provider. Not measured from here.",
+    verified: true,
+    notes: "Same subscription and key as the Responses entry; a different endpoint, so a separate provider. Measured 2026-09-18: glm-5.3, glm-5.3-flash, kimi-k3, kimi-k2.7-code, deepseek-v4.1-flash, deepseek-v4-pro, longcat-2.0 and mimo-v2.5-pro all answered.",
     docsUrl: "https://opencode.ai/docs/go/",
   },
   // And the third endpoint, which speaks Anthropic Messages, so it needs no translation at all.
@@ -298,8 +298,8 @@ export const PRESETS: ProviderPreset[] = [
     ],
     effortLevels: [],
     thinking: "none",
-    verified: false,
-    notes: "Same subscription and key as the other two entries. Anthropic-wire models, so nothing is translated. Not measured from here.",
+    verified: true,
+    notes: "Same subscription and key as the other two entries. Anthropic-wire models, so nothing is translated. Measured 2026-09-18: minimax-m3, qwen3.8-max and qwen3.8-flash answered, and the prompt cache reached 99% on a repeated turn. union-alpha, the free row, answered \"Model is unavailable\".",
     docsUrl: "https://opencode.ai/docs/go/",
   },
   // Docs: https://docs.mistral.ai/api/endpoint/chat and https://docs.mistral.ai/api/endpoint/models

@@ -54,8 +54,8 @@ test("OpenCode Go covers all three of its endpoints, on one key", () => {
     // The vendor keys its prompt cache on this. Omitting it errors nothing and multiplies the bill,
     // which is exactly how it was left off one of these entries the first time.
     assert.equal(p.sessionHeader, "x-opencode-session", `${p.id} must carry the session header`);
-    // Only the Responses entry has been exercised against the live endpoint.
-    assert.equal(p.verified, p.wire === "responses", p.id);
+    // All three have been exercised against the live endpoint, one model from each group at least.
+    assert.equal(p.verified, true, p.id);
   }
   assert.ok(
     go.find((p) => p.wire === "responses")?.fallbackModels.some((m) => m.id === "muse-spark-1.3-contributor"),
