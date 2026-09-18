@@ -167,3 +167,29 @@ test("only web_search_result entries count as hits", () => {
   ]), [{ title: "A", url: "https://a.test" }, { title: "https://b.test", url: "https://b.test" }]);
   assert.deepEqual(hitsFromServerToolResult(undefined), []);
 });
+
+// The guard that had to exist. A side request routed to a provider that drops the server tool used
+// to be sent anyway — "perform a web search" with no tool — and the model narrated a tool call in
+// its own markup, returned as HTTP 200. A live session read that as the search tool hanging.
+test("a search routed where it cannot run is refused in the shape the CLI prints", () => {
+  // This pins the contract the guard rests on: the fingerprint has to be recognisable with no
+  // backend configured at all, because that is precisely when the guard has to fire. Tying
+  // recognition to `cfg.webSearch` is what let the bad answer through the first time.
+  const side = {
+    model: "deepseek-v4.1-flash",
+    max_tokens: 1024,
+    system: [{ type: "text", text: "You are an assistant for performing a web search tool use" }],
+    messages: [{ role: "user" as const, content: "Perform a web search for the query: Node.js 24 LTS release date" }],
+    tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 8 }],
+    tool_choice: { type: "auto" },
+  };
+  const q = webSearchQuery(side);
+  assert.equal(q?.query, "Node.js 24 LTS release date", "recognised without any webSearch config in sight");
+
+  const blocks = webSearchErrorBlocks(q!, "unavailable");
+  const message = webSearchMessage(side.model, blocks, 0);
+  assert.deepEqual(blocks.map((b) => b.type), ["server_tool_use", "web_search_tool_result"]);
+  assert.deepEqual((blocks[1] as { content: unknown }).content, { type: "web_search_tool_result_error", error_code: "unavailable" });
+  // Zero searches, stated. A refusal that claimed one would be its own kind of lie.
+  assert.deepEqual((message.usage as { server_tool_use: unknown }).server_tool_use, { web_search_requests: 0 });
+});

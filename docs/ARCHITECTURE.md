@@ -258,6 +258,13 @@ chat is out of reach for every approach, ours included.
       (`anthropicServerToolBackend`): the same side request, relayed, with the hits read back out
       of its `web_search_tool_result`. No translation, no agent loop — opencodex needs a loop only
       because its backends cannot be handed a server tool directly (§4 of OPENCODEX).
+    - **A side request routed where the tool cannot run is refused, not sent.** Recognising the
+      search does not depend on `webSearch` being configured — it is the unconfigured router that
+      most needs the guard. The reply is `web_search_tool_result_error: unavailable` with
+      `web_search_requests: 0`, so the CLI reports a failed search instead of printing invented
+      prose. This was found the hard way: a stale `ANTHROPIC_SMALL_FAST_MODEL` left in a running
+      session kept sending searches to a provider that could not run them, and the session reported
+      the search tool as unresponsive with nothing in any log to say why.
     - **The backend is chosen by how the provider is spoken to, not by vendor.**
       `anthropic-compatible` → server tool, `openai-compatible` → web plugin. Anything else refuses
       and leaves the request alone.

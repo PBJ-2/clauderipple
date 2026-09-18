@@ -27,7 +27,7 @@ import { BOOTSTRAP_PATH, injectBootstrap } from "./bootstrap.ts";
 import { THREAD_UNSUPPORTED, effortOf, resolve, rewriteBody, stripThreadFields, threadDecision, type Resolved } from "./routing.ts";
 import { forwardCompatibleHeader, resolveCompatibleCaps, sanitizeForCompatible } from "./compat.ts";
 import { applyIdentityToAnthropicBody } from "./identity.ts";
-import { anthropicServerToolBackend, webPluginBackend, webSearchBlocks, webSearchMessage, webSearchQuery, webSearchSse, type WebSearchQuery } from "./websearch.ts";
+import { anthropicServerToolBackend, webPluginBackend, webSearchBlocks, webSearchErrorBlocks, webSearchMessage, webSearchQuery, webSearchSse, type WebSearchQuery } from "./websearch.ts";
 import { classify, CredentialPool, retryAfterMs, type Credential } from "./pool.ts";
 import { PRESETS } from "./presets.ts";
 import { ChatGptAdapter } from "./providers/chatgpt/index.ts";
@@ -421,10 +421,11 @@ export class Proxy {
       }
     }
     // A WebSearch arrives as its own request aimed at ANTHROPIC_SMALL_FAST_MODEL, recognised by the
-    // forced `web_search` server tool rather than by its model id. Answer it from the configured
-    // provider's hosted search, so a routed session does not have to spend Claude quota to search
-    // (§4). Without `cfg.webSearch` nothing is intercepted and the request takes its normal path.
-    const search = cfg.webSearch && json && isApiHost && pathname === "/v1/messages" ? webSearchQuery(json) : null;
+    // forced `web_search` server tool rather than by its model id. Recognise it whether or not a
+    // backend is configured: `cfg.webSearch` decides who answers it, but knowing that this is a
+    // search is what lets the guard below refuse a provider that cannot run one. Tying the two
+    // together meant an unconfigured router could not tell a search from any other turn.
+    const search = json && isApiHost && pathname === "/v1/messages" ? webSearchQuery(json) : null;
     if (search && cfg.webSearch) {
       const served = await this.serveWebSearch(res, json!, search, cfg.webSearch, record, finish);
       if (served) return;
@@ -451,6 +452,28 @@ export class Proxy {
     // Only a real, un-routed Claude Code Messages request may refresh this RAM-only source.
     // Do not inspect it elsewhere: it must never enter logs, RequestLog, picker diagnostics, or admin data.
     if (isApiHost && pathname === "/v1/messages" && !route) this.deps.observedClaudeCodeAuth?.observe(req.rawHeaders);
+
+    // A `WebSearch` side request routed to a provider that cannot run the server tool must not be
+    // sent. The tool is dropped on every translated path, which leaves "you are an assistant for
+    // performing a web search tool use / perform a web search for the query: …" with no tool
+    // attached — and a model told to search with nothing to search with narrates a tool call
+    // instead. OpenCode Go's DeepSeek answered exactly that, in its own markup, as HTTP 200
+    // (measured 2026-09-18), and the session reported the search tool as unresponsive.
+    //
+    // Say so in the shape the CLI prints. A search that fails visibly can be retried by a human;
+    // one that returns prose shaped like an answer cannot.
+    if (search && route && json && !this.canRunServerTools(route.provider, cfg)) {
+      const blocks = webSearchErrorBlocks(search, "unavailable");
+      const model = typeof json.model === "string" ? json.model : "unknown";
+      const wantStream = json.stream === true;
+      const payload = wantStream ? webSearchSse(model, blocks, 0) : JSON.stringify(webSearchMessage(model, blocks, 0));
+      res.writeHead(200, wantStream
+        ? { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" }
+        : { "content-type": "application/json" }).end(payload);
+      log.warn(`web search: ${route.provider} cannot run server tools and no webSearch backend is configured; refused rather than answered with invented results`);
+      finish("200", Buffer.byteLength(payload), `web search refused: ${route.provider} runs no server tools`, false);
+      return;
+    }
 
     let compatCaps: ReturnType<typeof resolveCompatibleCaps> | undefined;
     let compatChanges: string[] = [];
@@ -866,9 +889,7 @@ export class Proxy {
       // Refuse before sending rather than after. A provider that cannot run the server tool is sent
       // "perform a web search" with no tool attached, and a model told to search with nothing to
       // search with narrates a tool call instead — an answer shaped like success, holding nothing.
-      const preset = provider.preset ? PRESETS.find((entry) => entry.id === provider.preset) : undefined;
-      const caps = resolveCompatibleCaps(preset ? { ...(preset.serverTools ? { serverTools: true } : {}) } : undefined, provider.caps);
-      if (!caps.serverTools) {
+      if (!this.canRunServerTools(settings.provider, this.deps.config())) {
         this.deps.log.warn(`web search: provider ${settings.provider} does not run server tools; leaving the request alone`);
         return false;
       }
@@ -899,6 +920,19 @@ export class Proxy {
     res.writeHead(200, headers).end(payload);
     finish("200", Buffer.byteLength(payload), `web search via ${settings.provider}`, false);
     return true;
+  }
+
+  /**
+   * Whether this provider executes Anthropic's server-side tools (`web_search`) itself, rather than
+   * having them dropped on the way out. Only an anthropic-compatible provider whose preset or caps
+   * say so, measured per provider — `serverTools` in compat.ts. Two routes to the same vendor can
+   * differ: DeepSeek's own endpoint runs it, the same model through OpenCode Go does not.
+   */
+  private canRunServerTools(name: string, cfg: Config): boolean {
+    const provider = cfg.providers[name];
+    if (!provider || provider.type !== "anthropic-compatible") return false;
+    const preset = provider.preset ? PRESETS.find((entry) => entry.id === provider.preset) : undefined;
+    return resolveCompatibleCaps(preset ? { ...(preset.serverTools ? { serverTools: true } : {}) } : undefined, provider.caps).serverTools;
   }
 
   /**
