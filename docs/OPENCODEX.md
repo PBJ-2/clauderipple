@@ -5,12 +5,15 @@ at it longer. Its documentation describes how each provider is actually spoken t
 expensive knowledge — not the code. This file keeps that knowledge so nobody re-reads 43 documents
 to add one adapter, and keeps an honest list of what we do not have yet.
 
-**No code has been read or copied, and none may be.** opencodex is MIT, so copying would be legal
-with its notice retained, and the project rule is still no: the moat is the 1P integration, not the
-adapter count, and a borrowed structure built for a different runtime and a different client would
-be rewritten anyway. Everything below came from its published documentation (2026-09-17,
-`docs-site/src/content/docs/`), restated rather than quoted. Facts, wire formats and endpoint names
-are not anybody's property; their prose is.
+**Read the code when the documentation runs out.** It usually does: the docs say a sidecar exists,
+not what it sends. Reading is how you learn what a thing actually does, and refusing to look is how
+you end up writing a preset from a model card and being wrong four times in a row.
+
+**Copying is still out.** opencodex is MIT, so copying would be legal with its notice retained, and
+the project rule (CLAUDE.md) is still no: the moat is the 1P integration, not the adapter count, and
+a borrowed structure built for a different runtime and a different client would be rewritten anyway.
+So: read it, understand it, write our own. Facts, wire formats and endpoint names are not anybody's
+property; their prose and their code are.
 
 ---
 
@@ -46,7 +49,7 @@ counting config keys. They have roughly 300; most are per-vendor workarounds acc
 | Failover routing | One virtual model id over several targets | Same problem, other half: without it a dead provider is a dead session |
 | More adapters | `google` (AI Studio / Vertex / Antigravity), `azure-openai`, `ollama-native` | Presets cannot substitute: these speak wires our four adapters do not |
 | Vision sidecar | Describe an image with a vision-capable model, hand the text to a text-only model | An image sent to a text-only routed model breaks the turn today |
-| Web-search backends | Ours does OpenAI-compatible web plugins only | A user whose provider is not one of those loses search |
+| Web-search backends | Ours does OpenAI-compatible web plugins and Anthropic-shaped server tools. Theirs adds `xai`, `gemini` and `exa` | A user on none of those loses search |
 | Usage and cost | Append-only usage ledger, list-price cost estimates | We record tokens per request and stop there |
 
 ### Tier 2 — real draws, not blockers
@@ -113,6 +116,33 @@ function tool in its place, run a small loop, and hand the result back in the sh
 parses. Backends are explicit and **fail closed** — a missing credential means no sidecar rather
 than a silent fallback to somebody else's quota. Our web-search interception is the same shape,
 arrived at from the other direction (§4 of ARCHITECTURE).
+
+Read closer (2026-09-18), the web-search sidecar is specifically:
+
+- The hosted `web_search` is replaced by a synthetic function tool `web_search(query)`, and the
+  routed model calls that instead. Passthrough routes are left alone so the provider runs its own.
+- Backends are `openai` (ChatGPT forward, the default), `anthropic` (Anthropic OAuth), `xai`,
+  `gemini` and `exa`. **No Brave, Tavily or SearXNG** — every backend is either somebody's hosted
+  search or the Exa API.
+- The search budget is `maxSearchesPerTurn`, default **3**. When it runs out the synthetic tool is
+  removed and the model is forced to answer from what it already has, rather than looping.
+- Results come back as ordinary function `tool_result` text, capped (answer 4000 chars, 8 sources),
+  and the outbound translation turns them into `server_tool_use` + `web_search_tool_result` for
+  Claude Code.
+- A backend named without its credential yields **no sidecar at all**; it never borrows another
+  backend's login.
+
+**The loop is the part we do not need.** It exists because their backends cannot be handed an
+Anthropic server tool directly. Where a provider runs `web_search_20250305` itself — DeepSeek's own
+endpoint does — the side request needs no translation and no loop: what comes back is already the
+shape the CLI parses. That is `anthropicServerToolBackend`, and it is roughly forty lines because
+the hard part was knowing which providers qualify, which is a measurement and not a design.
+
+**OpenClaude is not a comparable.** It is a terminal coding agent, not a proxy; its search is a
+client-side adapter with fourteen backends (Firecrawl, Tavily, Exa, Brave, SearXNG, DuckDuckGo by
+default …) chosen by `WEB_SEARCH_PROVIDER`, falling through the list when a credential is missing.
+Worth remembering only for the one idea we lack: **a default backend that needs no credential at
+all.** Everything we and opencodex offer assumes the user is already paying somebody.
 
 **Fail closed, and say what was removed.** Their drops are logged by name and surfaced. This is the
 rule we learned the hard way with server tools: a capability that disappears silently is worse than

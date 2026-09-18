@@ -267,3 +267,78 @@ export function webPluginBackend(opts: {
     },
   };
 }
+
+/** Hits out of an Anthropic `web_search_tool_result` block's content. */
+export function hitsFromServerToolResult(content: unknown): SearchHit[] {
+  const hits: SearchHit[] = [];
+  for (const block of Array.isArray(content) ? content : []) {
+    if (!block || typeof block !== "object") continue;
+    const { type, title, url } = block as { type?: unknown; title?: unknown; url?: unknown };
+    if (type !== "web_search_result" || typeof url !== "string") continue;
+    hits.push({ title: typeof title === "string" && title ? title : url, url });
+  }
+  return hits;
+}
+
+/**
+ * A provider that runs Anthropic's `web_search` server tool itself, asked in Anthropic's own shape.
+ *
+ * DeepSeek's own endpoint does this (measured; see `serverTools` in compat.ts), and for such a
+ * provider the side request needs no translation at all — what comes back is already the shape
+ * Claude Code parses. The hits are still read out and rebuilt through the one path every backend
+ * shares, so a provider that answers politely with nothing is caught here rather than by the user.
+ * That is the failure this whole module exists to prevent: a search that returns prose instead of
+ * results looks like an answer.
+ */
+export function anthropicServerToolBackend(opts: {
+  name: string;
+  /** Provider base url, as configured (`https://api.deepseek.com/anthropic`); `/v1/messages` is appended. */
+  url: string;
+  headers: Record<string, string>;
+  model: string;
+  maxResults?: number;
+  fetchImpl?: typeof fetch;
+}): SearchBackend {
+  return {
+    name: opts.name,
+    async search(q, signal) {
+      const tool: Record<string, unknown> = { type: "web_search_20250305", name: "web_search" };
+      if (q.maxUses) tool.max_uses = q.maxUses;
+      if (q.allowedDomains) tool.allowed_domains = q.allowedDomains;
+      else if (q.blockedDomains) tool.blocked_domains = q.blockedDomains;
+      const body = {
+        model: opts.model,
+        max_tokens: 1024,
+        system: [{ type: "text", text: "You are an assistant for performing a web search tool use" }],
+        messages: [{ role: "user", content: `${QUERY_PREFIX}${q.query}` }],
+        tools: [tool],
+        tool_choice: { type: "tool", name: "web_search" },
+      };
+      const doFetch = opts.fetchImpl ?? fetch;
+      const res = await doFetch(`${opts.url.replace(/\/+$/, "")}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "anthropic-version": "2023-06-01", ...opts.headers },
+        body: JSON.stringify(body),
+        ...(signal ? { signal } : {}),
+      });
+      if (!res.ok) throw new Error(`${opts.name} web search: HTTP ${res.status}`);
+      const json = await res.json() as { content?: unknown };
+      const hits: SearchHit[] = [];
+      const prose: string[] = [];
+      for (const block of Array.isArray(json.content) ? json.content : []) {
+        if (!block || typeof block !== "object") continue;
+        const b = block as { type?: unknown; content?: unknown; text?: unknown };
+        if (b.type === "web_search_tool_result") hits.push(...hitsFromServerToolResult(b.content));
+        else if (b.type === "text" && typeof b.text === "string") prose.push(b.text);
+      }
+      // No result blocks means the provider did not run the tool, whatever else it said. A model
+      // told to search with no tool it can reach will narrate one instead — an OpenCode Go DeepSeek
+      // answered this exact request with its own tool-call markup as plain text and zero searches
+      // (measured 2026-09-18). Treat that as the failure it is.
+      const deduped = dedupeHits(hits).slice(0, opts.maxResults ?? 10);
+      if (deduped.length === 0) throw new Error(`${opts.name} web search: no results returned`);
+      const text = prose.join("").trim();
+      return text ? { hits: deduped, text } : { hits: deduped };
+    },
+  };
+}

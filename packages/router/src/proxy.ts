@@ -27,7 +27,7 @@ import { BOOTSTRAP_PATH, injectBootstrap } from "./bootstrap.ts";
 import { THREAD_UNSUPPORTED, effortOf, resolve, rewriteBody, stripThreadFields, threadDecision, type Resolved } from "./routing.ts";
 import { forwardCompatibleHeader, resolveCompatibleCaps, sanitizeForCompatible } from "./compat.ts";
 import { applyIdentityToAnthropicBody } from "./identity.ts";
-import { webPluginBackend, webSearchBlocks, webSearchMessage, webSearchQuery, webSearchSse, type WebSearchQuery } from "./websearch.ts";
+import { anthropicServerToolBackend, webPluginBackend, webSearchBlocks, webSearchMessage, webSearchQuery, webSearchSse, type WebSearchQuery } from "./websearch.ts";
 import { classify, CredentialPool, retryAfterMs, type Credential } from "./pool.ts";
 import { PRESETS } from "./presets.ts";
 import { ChatGptAdapter } from "./providers/chatgpt/index.ts";
@@ -851,13 +851,34 @@ export class Proxy {
       this.deps.log.warn(`web search: provider ${settings.provider} has no url; leaving the request alone`);
       return false;
     }
-    const backend = webPluginBackend({
+    // Which backend depends on how the provider is spoken to, not on the vendor. An
+    // anthropic-compatible one is asked in Anthropic's own shape and hands back the blocks the CLI
+    // already parses; an openai-compatible one is asked through its chat web plugin.
+    const common = {
       name: settings.provider,
       url,
       headers: ("headers" in provider && provider.headers) || {},
       model: settings.model,
       ...(settings.maxResults ? { maxResults: settings.maxResults } : {}),
-    });
+    };
+    let backend;
+    if (provider.type === "anthropic-compatible") {
+      // Refuse before sending rather than after. A provider that cannot run the server tool is sent
+      // "perform a web search" with no tool attached, and a model told to search with nothing to
+      // search with narrates a tool call instead — an answer shaped like success, holding nothing.
+      const preset = provider.preset ? PRESETS.find((entry) => entry.id === provider.preset) : undefined;
+      const caps = resolveCompatibleCaps(preset ? { ...(preset.serverTools ? { serverTools: true } : {}) } : undefined, provider.caps);
+      if (!caps.serverTools) {
+        this.deps.log.warn(`web search: provider ${settings.provider} does not run server tools; leaving the request alone`);
+        return false;
+      }
+      backend = anthropicServerToolBackend(common);
+    } else if (provider.type === "openai-compatible") {
+      backend = webPluginBackend(common);
+    } else {
+      this.deps.log.warn(`web search: provider ${settings.provider} is a ${provider.type} provider, which has no search backend; leaving the request alone`);
+      return false;
+    }
 
     const model = typeof json.model === "string" ? json.model : "unknown";
     let blocks;

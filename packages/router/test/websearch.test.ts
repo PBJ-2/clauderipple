@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { dedupeHits, webSearchBlocks, webSearchErrorBlocks, webSearchMessage, webSearchQuery } from "../src/websearch.ts";
+import { anthropicServerToolBackend, dedupeHits, hitsFromServerToolResult, webSearchBlocks, webSearchErrorBlocks, webSearchMessage, webSearchQuery } from "../src/websearch.ts";
 
 // The real shape, read from the Claude Code binary 2.1.271: one forced server tool, one message.
 const sideRequest = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
@@ -96,4 +96,74 @@ test("a failed search says so in the shape the CLI prints, rather than returning
   const q = webSearchQuery(sideRequest())!;
   const blocks = webSearchErrorBlocks(q, "unavailable");
   assert.deepEqual((blocks[1] as { content: unknown }).content, { type: "web_search_tool_result_error", error_code: "unavailable" });
+});
+
+// A provider that runs the server tool itself answers in Anthropic's own shape, so the backend is
+// mostly a relay. What it must not relay is a polite non-answer.
+test("the anthropic server-tool backend asks in Anthropic's shape and reads the result blocks", async () => {
+  let sent: { url: string; body: Record<string, unknown>; headers: Record<string, string> } | null = null;
+  const fetchImpl = (async (url: string, init: { body: string; headers: Record<string, string> }) => {
+    sent = { url, body: JSON.parse(init.body) as Record<string, unknown>, headers: init.headers };
+    return {
+      ok: true,
+      json: async () => ({
+        content: [
+          { type: "server_tool_use", id: "srvtoolu_1", name: "web_search", input: { query: "Node.js 24 LTS release date" } },
+          { type: "web_search_tool_result", tool_use_id: "srvtoolu_1", content: [
+            { type: "web_search_result", title: "Node.js 24.11.0 (LTS)", url: "https://nodejs.org/en/blog/release/v24.11.0" },
+            { type: "web_search_result", title: "Releases", url: "https://nodejs.org/en/about/previous-releases" },
+            { type: "web_search_result", title: "dup", url: "https://nodejs.org/en/about/previous-releases" },
+          ] },
+          { type: "text", text: "Node.js 24 entered LTS in October 2025." },
+        ],
+      }),
+    };
+  }) as unknown as typeof fetch;
+
+  const backend = anthropicServerToolBackend({
+    name: "deepseek", url: "https://api.deepseek.com/anthropic/", headers: { "x-api-key": "k" },
+    model: "deepseek-chat", fetchImpl,
+  });
+  const outcome = await backend.search({ query: "Node.js 24 LTS release date", maxUses: 8 });
+
+  const call = sent as unknown as { url: string; body: Record<string, unknown>; headers: Record<string, string> };
+  assert.equal(call.url, "https://api.deepseek.com/anthropic/v1/messages", "the trailing slash does not double up");
+  assert.equal(call.headers["x-api-key"], "k");
+  assert.equal(call.headers["anthropic-version"], "2023-06-01");
+  assert.deepEqual(call.body.tools, [{ type: "web_search_20250305", name: "web_search", max_uses: 8 }]);
+  assert.deepEqual(call.body.tool_choice, { type: "tool", name: "web_search" });
+
+  assert.deepEqual(outcome.hits.map((h) => h.url), [
+    "https://nodejs.org/en/blog/release/v24.11.0",
+    "https://nodejs.org/en/about/previous-releases",
+  ], "the repeated url is folded");
+  assert.equal(outcome.text, "Node.js 24 entered LTS in October 2025.");
+});
+
+// Measured 2026-09-18: OpenCode Go's DeepSeek, handed this request, answered with its own tool-call
+// markup as plain text and ran no search at all. Returning that as a result is the silent failure
+// this module exists to prevent, so it has to raise.
+test("prose with no result blocks is a failure, not an answer", async () => {
+  const fetchImpl = (async () => ({
+    ok: true,
+    json: async () => ({ content: [{ type: "text", text: '<｜｜DSML｜｜ invoke name="web_search">…' }] }),
+  })) as unknown as typeof fetch;
+  const backend = anthropicServerToolBackend({ name: "opencode-go", url: "https://x.test", headers: {}, model: "deepseek-v4.1-flash", fetchImpl });
+  await assert.rejects(() => backend.search({ query: "anything" }), /no results returned/);
+});
+
+test("an http failure names the backend rather than surfacing as a transport error", async () => {
+  const fetchImpl = (async () => ({ ok: false, status: 402, json: async () => ({}) })) as unknown as typeof fetch;
+  const backend = anthropicServerToolBackend({ name: "deepseek", url: "https://x.test", headers: {}, model: "m", fetchImpl });
+  await assert.rejects(() => backend.search({ query: "anything" }), /deepseek web search: HTTP 402/);
+});
+
+test("only web_search_result entries count as hits", () => {
+  assert.deepEqual(hitsFromServerToolResult([
+    { type: "web_search_result", title: "A", url: "https://a.test" },
+    { type: "web_search_tool_result_error", error_code: "unavailable" },
+    { type: "web_search_result", url: "https://b.test" },
+    { type: "web_search_result", title: "no url" },
+  ]), [{ title: "A", url: "https://a.test" }, { title: "https://b.test", url: "https://b.test" }]);
+  assert.deepEqual(hitsFromServerToolResult(undefined), []);
 });

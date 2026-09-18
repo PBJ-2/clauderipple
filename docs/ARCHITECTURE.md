@@ -254,9 +254,23 @@ chat is out of reach for every approach, ours included.
       citations, $0.0073 for the call.
     - The reply is assembled as `server_tool_use` + `web_search_tool_result` + `text`, with
       `usage.server_tool_use.web_search_requests` — the field the CLI turns into "Did N searches".
-    - A backend that returns no citations **throws**, and the request falls through to the ordinary
-      path. A search that quietly returns nothing is the one outcome worth avoiding, since nothing
-      anywhere reports it.
+    - A provider that runs the tool itself is asked in Anthropic's own shape instead
+      (`anthropicServerToolBackend`): the same side request, relayed, with the hits read back out
+      of its `web_search_tool_result`. No translation, no agent loop — opencodex needs a loop only
+      because its backends cannot be handed a server tool directly (§4 of OPENCODEX).
+    - **The backend is chosen by how the provider is spoken to, not by vendor.**
+      `anthropic-compatible` → server tool, `openai-compatible` → web plugin. Anything else refuses
+      and leaves the request alone.
+    - An `anthropic-compatible` provider whose `serverTools` capability is false is **refused before
+      the request is sent**. This is not caution: dropping the server tool leaves a request that
+      says "you are an assistant for performing a web search tool use / perform a web search for the
+      query: …" **with no tool attached**, and a model told to search with nothing to search with
+      narrates a tool call instead. OpenCode Go's DeepSeek answered exactly that — its own
+      `<｜｜DSML｜｜ invoke name="web_search">` markup as plain text, zero searches, HTTP 200
+      (measured 2026-09-18). Same vendor as the DeepSeek that does run it; different route.
+    - A backend that returns no citations, or no result blocks, **throws**, and the request falls
+      through to the ordinary path. A search that quietly returns nothing is the one outcome worth
+      avoiding, since nothing anywhere reports it.
     - The search model iterates: a single `WebSearch` can produce several side requests with
       refined queries, each intercepted on its own.
   - `WebFetch` needs none of this: the CLI fetches the URL itself (its own transport, cache and
