@@ -249,6 +249,31 @@ node packages/cli/src/index.ts ui        # 브라우저에서 로컬 GUI 열기
 같은 라우터, 같은 매핑. `/model gpt-5.6-terra`에 추가한 모델이 나열됩니다. 서브에이전트도 같은 라우팅을 따르고,
 프롬프트에 `[[gpt: sol@xhigh]]` 표식을 넣으면 그 호출만 모델을 바꿉니다. 작업 패널에는 실제 모델 이름이 보입니다.
 
+**이걸 쓰려고 하네스를 따로 짤 필요는 없습니다.** 서브에이전트 슬롯을 라우팅된 모델로 지정하면
+모든 서브에이전트가 그 모델로 돕니다. 에이전트 파일도, 다른 것도 필요 없습니다.
+
+```jsonc
+// 설정 → CLI 모델, 또는 설정 파일의 "cli": { "models": { … } }
+{ "subagent": "gpt-5.6-terra" }   // → CLAUDE_CODE_SUBAGENT_MODEL
+```
+
+에이전트 파일은 **이름을 붙여** 불러 쓰고 싶을 때, 그 에이전트만의 지시와 추론 강도를 주려고 만드는 것입니다.
+그건 Claude Code 자체 기능이지 ClaudeRipple이 더하는 게 아니고, `model:` 줄은 라우터가 이미 아는 모델 이름을
+적는 자리일 뿐입니다.
+
+```markdown
+---
+name: gpt
+description: 구현·조사·리뷰를 GPT-5.6 Terra에 위임할 때 쓴다.
+model: gpt-5.6-terra
+---
+너는 이 세션의 실행자다. 위임받은 작업을 직접 끝내고 직접 검증해서 결론만 간결히 보고한다.
+```
+
+`~/.claude/agents/gpt.md`(프로젝트 전용이면 `.claude/agents/`)로 저장하고 Agent 도구로 부르면 됩니다.
+모델 뒤에 강도를 붙여(`gpt-5.6-terra@high`) 고정하거나, 프롬프트의 `[[ripple: …]]` 표식으로
+부르는 쪽이 작업마다 고르게 할 수 있습니다.
+
 ### Codex 앱과 Codex CLI
 
 ```bash

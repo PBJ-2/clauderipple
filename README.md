@@ -282,6 +282,32 @@ Same router, same mapping. `/model gpt-5.6-terra` lists the models you added.
 Subagents follow the routing; a `[[gpt: sol@xhigh]]` marker in a subagent prompt
 overrides the model for that call, and the task panel shows the real model name.
 
+**You do not have to build an agent harness for this.** Point the subagent slot at
+a routed model and every subagent runs on it — no agent file, nothing else:
+
+```jsonc
+// Settings → CLI models, or "cli": { "models": { … } } in the config
+{ "subagent": "gpt-5.6-terra" }   // → CLAUDE_CODE_SUBAGENT_MODEL
+```
+
+An agent file is only for a **named** subagent you want to call by name, with its
+own brief and effort. That is Claude Code's own feature, not something ClaudeRipple
+adds — the `model:` line just names a model the router already knows:
+
+```markdown
+---
+name: gpt
+description: Delegate implementation, research and review to GPT-5.6 Terra.
+model: gpt-5.6-terra
+---
+You are the worker for this session. Finish the task, verify it yourself, and
+report the conclusion only.
+```
+
+Save it as `~/.claude/agents/gpt.md` (or `.claude/agents/` in a project) and call it
+with the Agent tool. Append an effort to the model (`gpt-5.6-terra@high`) to fix one,
+or let the caller choose per task with a `[[ripple: …]]` marker in the prompt.
+
 ### Codex app and Codex CLI
 
 ```bash
