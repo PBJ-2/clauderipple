@@ -37,6 +37,12 @@ export type AnthropicCompatibleProvider = {
   /** Optional headers to set on forwarded requests (e.g. x-api-key). Never logged. */
   headers?: Record<string, string>;
   /**
+   * A header this vendor recognises a conversation by, filled with a value that is stable for one
+   * conversation and different between two. Vendors that key their prompt cache on it charge full
+   * price to anyone who omits it. Absent, nothing extra is sent.
+   */
+  sessionHeader?: string;
+  /**
    * Further credentials for the same provider, tried when `headers` is rate limited or rejected.
    * Each is a complete header set, so vendors that need more than a key still work. A conversation
    * keeps whichever one it is on while that one is healthy, because moving it moves the prompt
@@ -80,6 +86,13 @@ export type OpenAiCompatibleProvider = {
   url: string;
   /** Optional vendor headers, normally authorization: Bearer <key>. Never logged. */
   headers?: Record<string, string>;
+  /**
+   * A header this vendor uses to recognise a conversation, filled with a value that is stable for
+   * one conversation and different between two (`x-opencode-session`, for instance). Vendors that
+   * key their prompt cache on it hand a cold cache to anyone who does not send one, which costs
+   * several times the tokens. Absent, nothing extra is sent.
+   */
+  sessionHeader?: string;
   /** OpenAI Chat Completions (default) or stateless Responses endpoint. */
   wire?: "chat" | "responses";
   /** Catalog preset used to populate this provider, if any. */

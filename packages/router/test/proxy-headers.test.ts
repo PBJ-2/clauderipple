@@ -188,3 +188,18 @@ test("identity false leaves the system prompt alone, and the addendum still foll
   });
   assert.equal(seenBody.system, "You are Claude Code.\n\nAnswer in Korean.");
 });
+
+// A vendor that keys its prompt cache on a session header charges full price to anyone who omits
+// one. On this path the header has to be added where the provider's own headers are, and it must
+// never displace them.
+test("an anthropic-compatible provider sends its session header, and the credential still wins", async () => {
+  const withSession = await roundTrip({ "x-api-key": "provider-key" }, OK_REPLY, {
+    provider: { sessionHeader: "x-opencode-session" } as never,
+  });
+  const session = withSession.seen["x-opencode-session"];
+  assert.ok(typeof session === "string" && session.length > 0, "the header went out");
+  assert.equal(withSession.seen["x-api-key"], "provider-key", "credentials untouched");
+
+  const without = await roundTrip({ "x-api-key": "provider-key" }, OK_REPLY);
+  assert.equal(without.seen["x-opencode-session"], undefined, "nothing extra unless asked for");
+});

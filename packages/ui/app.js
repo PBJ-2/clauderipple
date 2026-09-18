@@ -1170,6 +1170,9 @@ function openProviderForm(options) {
       ...(prompt ? { identity: prompt.identity.checked } : {}),
       ...(prompt && prompt.append.value.trim() ? { instructionsAppend: prompt.append.value.trim() } : {}),
       ...(preset ? { preset: preset.id } : {}),
+      // A vendor that asks for a session header keys its prompt cache on it, so carry it from the
+      // preset rather than leaving the user to discover the bill.
+      ...(preset && preset.sessionHeader ? { sessionHeader: preset.sessionHeader } : {}),
       ...(isOpenAi ? { wire: wireSelect.value, caps: { effortLevels: (preset && preset.effortLevels) || [], reasoning: preset && preset.effortLevels && preset.effortLevels.length ? "effort" : "none" } } : {}),
       ...(Object.keys(readHeaders()).length ? { headers: readHeaders() } : {}),
     };

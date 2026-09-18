@@ -145,6 +145,41 @@ test("count tokens is local", async () => {
   assert.equal(seen.length, before);
 });
 
+// Some vendors key their prompt cache on a session header (OpenCode Go's `x-opencode-session`) and
+// charge full price to anyone who omits one. A miss here is silent and shows up on the bill.
+test("a configured session header is sent, stable per conversation and different between two", async () => {
+  mode = "chat";
+  adapter = new OpenAiCompatibleAdapter("fake", {
+    type: "openai-compatible",
+    url: `http://127.0.0.1:${upstreamPort}/v1`,
+    headers: { authorization: "Bearer secret" },
+    sessionHeader: "x-opencode-session",
+  }, log);
+
+  const conversation = { ...request, metadata: { user_id: "user-1" }, messages: [{ role: "user" as const, content: "first question" }] };
+  await call(conversation);
+  const first = seen.at(-1)!.headers["x-opencode-session"];
+  assert.ok(typeof first === "string" && first.length > 0, "the header went out");
+
+  // A later turn of the same conversation keeps the value; a different conversation gets its own.
+  await call({ ...conversation, messages: [...conversation.messages, { role: "assistant" as const, content: "ok" }, { role: "user" as const, content: "second question" }] });
+  assert.equal(seen.at(-1)!.headers["x-opencode-session"], first, "same conversation, same session");
+
+  await call({ ...request, metadata: { user_id: "user-1" }, messages: [{ role: "user" as const, content: "a different opening" }] });
+  assert.notEqual(seen.at(-1)!.headers["x-opencode-session"], first, "a different conversation is not the same session");
+});
+
+test("no session header is sent unless the provider asks for one", async () => {
+  mode = "chat";
+  adapter = new OpenAiCompatibleAdapter("fake", {
+    type: "openai-compatible",
+    url: `http://127.0.0.1:${upstreamPort}/v1`,
+    headers: { authorization: "Bearer secret" },
+  }, log);
+  await call(request);
+  assert.equal(seen.at(-1)!.headers["x-opencode-session"], undefined);
+});
+
 test("cleanup", () => {
   front.close();
   upstream.close();

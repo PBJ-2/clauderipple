@@ -566,7 +566,11 @@ export class Proxy {
         host: u.hostname,
         port: Number(u.port) || (protocol === "https:" ? 443 : 80),
         agent: this.agentFor(route.provider, protocol),
-        extraHeaders: using.headers,
+        // The credential wins over the session header: they are different names in practice, but a
+        // vendor that reused one would mean the request going out unauthenticated.
+        extraHeaders: provider.sessionHeader
+          ? { [provider.sessionHeader]: conversationKey(json as AnthropicRequest), ...using.headers }
+          : using.headers,
         dropClientAuth: true,
         // Providers mount their Anthropic-compatible API under a path (DeepSeek /anthropic, OpenRouter /api,
         // Qwen /apps/anthropic): the CLI's /v1/messages is appended to it. Dropping it sent requests to the

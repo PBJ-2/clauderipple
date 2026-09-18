@@ -9,7 +9,7 @@ import type { RequestUsage } from "../../requestlog.ts";
 import { credentialHeaderValues, redactErrorText } from "../../redact.ts";
 import { SseParser } from "../chatgpt/sse.ts";
 import { estimateTokens, formatSse, OpenAiStreamMapper, toOpenAiRequest } from "./translate.ts";
-import { serverToolNames, toolNameRestoreMap } from "../chatgpt/translate.ts";
+import { conversationKey, serverToolNames, toolNameRestoreMap } from "../chatgpt/translate.ts";
 import type { AnthropicRequest } from "../chatgpt/translate.ts";
 
 const PING_MS = 15_000;
@@ -97,7 +97,13 @@ export class OpenAiCompatibleAdapter {
       ...(this.cfg.instructionsAppend ? { instructionsAppend: this.cfg.instructionsAppend } : {}),
     });
     const requestBody = JSON.stringify(upstreamRequest);
-    const upstreamHeaders = { "content-type": "application/json", accept: "text/event-stream", ...(this.cfg.headers ?? {}) };
+    // Some vendors key their prompt cache on a session header rather than on the request's own
+    // shape, and hand a cold cache to anyone who does not send one. `conversationKey` is the value
+    // this codebase already trusts to be stable for one conversation and different between two.
+    const sessionHeader = this.cfg.sessionHeader
+      ? { [this.cfg.sessionHeader]: conversationKey(json) }
+      : {};
+    const upstreamHeaders = { "content-type": "application/json", accept: "text/event-stream", ...sessionHeader, ...(this.cfg.headers ?? {}) };
     const upstreamSecrets = credentialHeaderValues(Object.entries(upstreamHeaders));
     // Same input floor behavior as the ChatGPT adapter: the CLI snapshots message_start before usage arrives.
     const key = JSON.stringify({ model, wire, system: json.system ?? "", user: json.messages.find((message) => message.role === "user")?.content ?? "" });

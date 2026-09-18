@@ -14,6 +14,11 @@ export type ProviderPreset = {
   modelsAuthHeader?: "x-api-key" | "authorization-bearer";
   /** Default OpenAI-compatible wire for this preset; omitted means Chat Completions. */
   wire?: "chat" | "responses";
+  /**
+   * A header this vendor recognises a conversation by. Set only where the vendor asks for one —
+   * some of them key their prompt cache on it and charge full price without it.
+   */
+  sessionHeader?: string;
   fallbackModels: { id: string; name: string }[];
   /** Empty means output_config.effort is stripped for this provider. */
   effortLevels: string[];
@@ -192,6 +197,94 @@ export const PRESETS: ProviderPreset[] = [
     verified: true,
     notes: "Responses supports reasoning.effort; Chat Completions may vary by model. Model discovery is used instead of a stale fallback id.",
     docsUrl: "https://docs.x.ai/docs/guides/reasoning",
+  },
+  // Docs: https://opencode.ai/docs/go/
+  //
+  // One subscription, three endpoints, split by which wire each model speaks: `/responses` for
+  // Muse Spark, Grok and GPT; `/chat/completions` for GLM, Kimi, DeepSeek and LongCat;
+  // `/messages` (Anthropic) for MiniMax and Qwen. A provider carries one url and one wire, so the
+  // other two are separate providers — this preset is the Responses one, which is where Muse Spark
+  // lives.
+  //
+  // `x-opencode-session` is not optional in practice: the vendor keys its prompt cache on it, and
+  // a caller that omits it pays full price for every turn.
+  {
+    id: "opencode-go",
+    kind: "openai-compatible",
+    name: "OpenCode Go (Responses)",
+    vendorUrl: "https://opencode.ai/go",
+    anthropicBaseUrl: "https://opencode.ai/zen/go/v1",
+    authHeader: "authorization-bearer",
+    wire: "responses",
+    sessionHeader: "x-opencode-session",
+    // `/models` lists every model on the plan, including the ones the other two endpoints serve.
+    // The fallback list is therefore the Responses ones by name: a model from another group is
+    // offered by discovery but will not answer here.
+    modelsUrl: "https://opencode.ai/zen/go/v1/models",
+    modelsAuthHeader: "authorization-bearer",
+    fallbackModels: [
+      { id: "muse-spark-1.3-contributor", name: "Muse Spark 1.3 (Contributor)" },
+      { id: "muse-spark-1.2-contributor", name: "Muse Spark 1.2 (Contributor)" },
+      { id: "grok-4.6", name: "Grok 4.6" },
+      { id: "gpt-5.6-luna", name: "GPT-5.6 Luna" },
+    ],
+    // Muse Spark advertises low/high/max. Not measured against this endpoint yet.
+    effortLevels: ["low", "high", "max"],
+    thinking: "none",
+    verified: false,
+    notes: "Contributor tier: Meta states these interactions are used to improve its products, which is why they are ~90% cheaper. Muse Spark is limited to some regions. Neither has been measured from here.",
+    docsUrl: "https://opencode.ai/docs/go/",
+  },
+  // The same subscription and the same key, on the endpoint the rest of the OpenAI-wire models use.
+  {
+    id: "opencode-go-chat",
+    kind: "openai-compatible",
+    name: "OpenCode Go (Chat)",
+    vendorUrl: "https://opencode.ai/go",
+    anthropicBaseUrl: "https://opencode.ai/zen/go/v1",
+    authHeader: "authorization-bearer",
+    wire: "chat",
+    sessionHeader: "x-opencode-session",
+    modelsUrl: "https://opencode.ai/zen/go/v1/models",
+    modelsAuthHeader: "authorization-bearer",
+    fallbackModels: [
+      { id: "glm-5.3", name: "GLM-5.3" },
+      { id: "glm-5.3-flash", name: "GLM-5.3 Flash" },
+      { id: "kimi-k3", name: "Kimi K3" },
+      { id: "kimi-k2.7-code", name: "Kimi K2.7 Code" },
+      { id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" },
+      { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro" },
+      { id: "longcat-2.0", name: "LongCat 2.0" },
+      { id: "mimo-v2.5-pro", name: "MiMo V2.5 Pro" },
+    ],
+    // No per-model effort contract is published for this endpoint; strip it rather than guess.
+    effortLevels: [],
+    thinking: "none",
+    verified: false,
+    notes: "Same subscription and key as the Responses entry; a different endpoint, so a separate provider. Not measured from here.",
+    docsUrl: "https://opencode.ai/docs/go/",
+  },
+  // And the third endpoint, which speaks Anthropic Messages, so it needs no translation at all.
+  {
+    id: "opencode-go-anthropic",
+    kind: "anthropic-compatible",
+    name: "OpenCode Go (Anthropic)",
+    vendorUrl: "https://opencode.ai/go",
+    anthropicBaseUrl: "https://opencode.ai/zen/go/v1",
+    authHeader: "authorization-bearer",
+    modelsUrl: "https://opencode.ai/zen/go/v1/models",
+    modelsAuthHeader: "authorization-bearer",
+    fallbackModels: [
+      { id: "minimax-m3", name: "MiniMax M3" },
+      { id: "qwen3.8-max", name: "Qwen3.8 Max" },
+      { id: "qwen3.8-flash", name: "Qwen3.8 Flash" },
+      { id: "union-alpha", name: "Union Alpha (free)" },
+    ],
+    effortLevels: [],
+    thinking: "none",
+    verified: false,
+    notes: "Same subscription and key as the other two entries. Anthropic-wire models, so nothing is translated. Not measured from here.",
+    docsUrl: "https://opencode.ai/docs/go/",
   },
   // Docs: https://docs.mistral.ai/api/endpoint/chat and https://docs.mistral.ai/api/endpoint/models
   {
