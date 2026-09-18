@@ -272,6 +272,10 @@ export const PRESETS: ProviderPreset[] = [
     vendorUrl: "https://opencode.ai/go",
     anthropicBaseUrl: "https://opencode.ai/zen/go/v1",
     authHeader: "authorization-bearer",
+    // The same cache key the other two send. Left off here once already: the support was wired on
+    // both paths and the value was simply never put in this entry, which costs nothing visible and
+    // several times the tokens.
+    sessionHeader: "x-opencode-session",
     modelsUrl: "https://opencode.ai/zen/go/v1/models",
     modelsAuthHeader: "authorization-bearer",
     fallbackModels: [

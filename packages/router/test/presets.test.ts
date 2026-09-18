@@ -26,3 +26,28 @@ test("catalog distinguishes native and OpenAI-compatible presets", () => {
     assert.match(preset?.modelsUrl ?? "", /\/models$/, id);
   }
 });
+
+// One subscription reaches its models through three endpoints, split by wire. A preset that only
+// covers one of them leaves two thirds of what the user paid for unreachable.
+test("OpenCode Go covers all three of its endpoints, on one key", () => {
+  const go = PRESETS.filter((p) => p.id.startsWith("opencode-go"));
+  assert.equal(go.length, 3, "responses, chat and anthropic");
+  assert.deepEqual(
+    go.map((p) => `${p.kind}/${p.wire ?? "-"}`).sort(),
+    ["anthropic-compatible/-", "openai-compatible/chat", "openai-compatible/responses"],
+  );
+  for (const p of go) {
+    assert.equal(p.anthropicBaseUrl, "https://opencode.ai/zen/go/v1", p.id);
+    assert.equal(p.authHeader, "authorization-bearer", p.id);
+    assert.match(p.modelsUrl ?? "", /\/models$/, p.id);
+    // The vendor keys its prompt cache on this. Omitting it errors nothing and multiplies the bill,
+    // which is exactly how it was left off one of these entries the first time.
+    assert.equal(p.sessionHeader, "x-opencode-session", `${p.id} must carry the session header`);
+    // Nothing here has been measured against the endpoint.
+    assert.equal(p.verified, false, p.id);
+  }
+  assert.ok(
+    go.find((p) => p.wire === "responses")?.fallbackModels.some((m) => m.id === "muse-spark-1.3-contributor"),
+    "Muse Spark is on the Responses endpoint",
+  );
+});
