@@ -118,6 +118,38 @@ arrived at from the other direction (§4 of ARCHITECTURE).
 rule we learned the hard way with server tools: a capability that disappears silently is worse than
 one that fails loudly.
 
+## 4a. OpenCode Go, measured (2026-09-18)
+
+Added as three presets, because one subscription reaches its models through three endpoints and a
+provider carries one url, one wire and one auth header. Everything here came from the endpoint
+rather than the documentation, which does not say most of it — and where it was guessed from
+convention first, the guess was wrong four times in a row.
+
+| | `/responses` | `/chat/completions` | `/messages` |
+|---|---|---|---|
+| wire | OpenAI Responses | OpenAI Chat | Anthropic Messages |
+| auth header | `Authorization: Bearer` | `Authorization: Bearer` | **`x-api-key`** |
+| base url | `…/zen/go/v1` | `…/zen/go/v1` | **`…/zen/go`** |
+
+- **Each endpoint follows the auth convention of the API it imitates**, and each ignores the other's
+  header. Established without a real key: the header a server does not recognise answers "Missing
+  API key", the one it does answers "Invalid API key". Sending both would satisfy all three.
+- **The base url differs by provider kind, not by vendor.** An openai-compatible provider has the
+  endpoint name appended, so its base carries the `/v1`; an anthropic-compatible one has the
+  caller's whole `/v1/messages` appended, so the same base asks for `/v1/v1/messages` — answered
+  with the website, as an HTML 404.
+- **`x-opencode-session` gates the request, not just the cache.** Without it: 400 `MissingSessionID`,
+  "cannot be routed efficiently". Filled with `conversationKey`, the prompt cache reached
+  **2545/2640 = 96%** on a repeated turn.
+- **`GET /models` needs no key** and returns the real ids.
+- **Muse Spark's effort ladder is `none … xhigh`.** `max` and `ultra` are refused with
+  `invalid_request_error`, which no model card says.
+- **The Contributor models are refused until the workspace opts in**: 403 `DataPolicyError`, with
+  the link. Meta states those interactions are used to improve its products, which is the whole
+  reason the tier is ~90% cheaper.
+- Muse Spark reasons on every turn: "Reply with exactly: MUSE OK" cost 302 output tokens, and a
+  64-token ceiling returned an empty answer because the reasoning consumed all of it.
+
 ## 5. Where we are ahead
 
 - **1P preservation.** The TLS-terminating proxy and bootstrap injection reach the Code tab without

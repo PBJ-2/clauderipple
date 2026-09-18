@@ -228,11 +228,14 @@ export const PRESETS: ProviderPreset[] = [
       { id: "grok-4.6", name: "Grok 4.6" },
       { id: "gpt-5.6-luna", name: "GPT-5.6 Luna" },
     ],
-    // Muse Spark advertises low/high/max. Not measured against this endpoint yet.
-    effortLevels: ["low", "high", "max"],
+    // Measured 2026-09-18 against the live endpoint, one effort at a time: none, minimal, low,
+    // medium, high and xhigh are accepted; **max and ultra are refused** with invalid_request_error.
+    // The ladder therefore tops out at xhigh, which is unusual enough that reading it off the model
+    // card would have got it wrong twice — the first list here had max in it and no xhigh.
+    effortLevels: ["none", "minimal", "low", "medium", "high", "xhigh"],
     thinking: "none",
-    verified: false,
-    notes: "Contributor tier: Meta states these interactions are used to improve its products, which is why they are ~90% cheaper. Muse Spark is limited to some regions. Neither has been measured from here.",
+    verified: true,
+    notes: "Contributor tier: Meta states these interactions are used to improve its products, which is why they are ~90% cheaper, and OpenCode refuses the model until the workspace opts in (403 DataPolicyError, with the link). Measured: answers, effort ladder tops out at xhigh, prompt cache reached 96% on a repeated turn. Muse Spark is limited to some regions.",
     docsUrl: "https://opencode.ai/docs/go/",
   },
   // The same subscription and the same key, on the endpoint the rest of the OpenAI-wire models use.

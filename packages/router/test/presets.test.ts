@@ -54,11 +54,19 @@ test("OpenCode Go covers all three of its endpoints, on one key", () => {
     // The vendor keys its prompt cache on this. Omitting it errors nothing and multiplies the bill,
     // which is exactly how it was left off one of these entries the first time.
     assert.equal(p.sessionHeader, "x-opencode-session", `${p.id} must carry the session header`);
-    // Nothing here has been measured against the endpoint.
-    assert.equal(p.verified, false, p.id);
+    // Only the Responses entry has been exercised against the live endpoint.
+    assert.equal(p.verified, p.wire === "responses", p.id);
   }
   assert.ok(
     go.find((p) => p.wire === "responses")?.fallbackModels.some((m) => m.id === "muse-spark-1.3-contributor"),
     "Muse Spark is on the Responses endpoint",
   );
+});
+
+// Read off the model card this was wrong twice over: it listed max, which the endpoint refuses,
+// and omitted xhigh, which it accepts. Measured one effort at a time against the live endpoint.
+test("Muse Spark's effort ladder tops out at xhigh, and does not include max", () => {
+  const responses = PRESETS.find((p) => p.id === "opencode-go");
+  assert.deepEqual(responses?.effortLevels, ["none", "minimal", "low", "medium", "high", "xhigh"]);
+  assert.equal(responses?.effortLevels.includes("max"), false, "max is refused with invalid_request_error");
 });
