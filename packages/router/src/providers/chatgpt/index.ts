@@ -6,6 +6,7 @@ import type { ChatGptProvider } from "../../config.ts";
 import type { Logger } from "../../log.ts";
 import { CredentialStore } from "./auth.ts";
 import { SseParser } from "./sse.ts";
+import { looksLikeAuth } from "../openai/index.ts";
 import { StreamMapper, conversationKey, estimateTokens, formatSse, serverToolNames, toResponsesRequest, toolNameRestoreMap, type AnthropicRequest } from "./translate.ts";
 import type { RequestUsage } from "../../requestlog.ts";
 import { credentialHeaderValues, redactErrorText } from "../../redact.ts";
@@ -30,7 +31,14 @@ function mapHttpError(status: number, text: string): { status: number; body: str
   } catch {
     /* keep raw */
   }
-  if (status === 401 || status === 403) return anthropicError(401, "authentication_error", `ChatGPT: ${msg}`);
+  if (status === 401) return anthropicError(401, "authentication_error", `ChatGPT: ${msg}`);
+  // Same reasoning as the openai-compatible adapter: a 403 is often about what the account may do,
+  // not about the credential, and naming it an auth error sends the user to check the wrong thing.
+  if (status === 403) {
+    return looksLikeAuth(text)
+      ? anthropicError(401, "authentication_error", `ChatGPT: ${msg}`)
+      : anthropicError(403, "permission_error", `ChatGPT: ${msg}`);
+  }
   if (status === 429) return anthropicError(429, "rate_limit_error", `ChatGPT: ${msg}`);
   if (status >= 500) return anthropicError(529, "overloaded_error", `ChatGPT: ${msg}`);
   return anthropicError(400, "invalid_request_error", `ChatGPT: ${msg}`);

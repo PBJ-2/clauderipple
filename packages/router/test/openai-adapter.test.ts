@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { OpenAiCompatibleAdapter } from "../src/providers/openai/index.ts";
+import { mapHttpError, OpenAiCompatibleAdapter } from "../src/providers/openai/index.ts";
 import { Logger } from "../src/log.ts";
 import type { AnthropicRequest } from "../src/providers/chatgpt/translate.ts";
 
@@ -183,4 +183,21 @@ test("no session header is sent unless the provider asks for one", async () => {
 test("cleanup", () => {
   front.close();
   upstream.close();
+});
+
+// A 403 is often about what the account may do rather than about the credential. Calling it an
+// authentication error sends the user back to a key that was never the problem — which is how an
+// OpenCode Go data-policy refusal read as a bad key.
+test("a 403 that is not about the credential is a permission error, not an auth error", async () => {
+  const policy = mapHttpError(403, JSON.stringify({ error: { type: "DataPolicyError", message: "This model collects data used to improve its quality and requires explicit opt in" } }));
+  assert.equal(policy.status, 403);
+  assert.match(policy.body, /permission_error/);
+  assert.match(policy.body, /explicit opt in/, "the vendor's own words survive");
+
+  // A 403 that really is the credential keeps saying so.
+  const rejected = mapHttpError(403, JSON.stringify({ error: { message: "Invalid API key" } }));
+  assert.equal(rejected.status, 401);
+  assert.match(rejected.body, /authentication_error/);
+
+  assert.equal(mapHttpError(401, "{}").status, 401);
 });

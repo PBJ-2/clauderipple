@@ -29,9 +29,22 @@ function vendorMessage(text: string): string {
   return text.replace(/\s+/g, " ").trim().slice(0, 500) || "upstream request failed";
 }
 
+/** Whether a 403 body is about the credential rather than about what the account may do. */
+export function looksLikeAuth(text: string): boolean {
+  return /\b(api[_ -]?key|token|credential|unauthori[sz]ed|authentication|invalid[_ -]?key|expired)\b/i.test(text);
+}
+
 export function mapHttpError(status: number, text: string): { status: number; body: string } {
   const message = `OpenAI-compatible provider: ${vendorMessage(text)}`;
-  if (status === 401 || status === 403) return anthropicError(401, "authentication_error", message);
+  if (status === 401) return anthropicError(401, "authentication_error", message);
+  // A 403 is often not the credential at all: a data-sharing policy that needs opting into, a
+  // region, a model the account may not use. Calling it an authentication error sends the user
+  // back to check a key that was never the problem — which is most of an afternoon.
+  if (status === 403) {
+    return looksLikeAuth(text)
+      ? anthropicError(401, "authentication_error", message)
+      : anthropicError(403, "permission_error", message);
+  }
   if (status === 429) return anthropicError(429, "rate_limit_error", message);
   if (status >= 500) return anthropicError(529, "api_error", message);
   return anthropicError(400, "invalid_request_error", message);
