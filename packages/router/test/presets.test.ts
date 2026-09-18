@@ -37,8 +37,19 @@ test("OpenCode Go covers all three of its endpoints, on one key", () => {
     ["anthropic-compatible/-", "openai-compatible/chat", "openai-compatible/responses"],
   );
   for (const p of go) {
-    assert.equal(p.anthropicBaseUrl, "https://opencode.ai/zen/go/v1", p.id);
-    assert.equal(p.authHeader, "authorization-bearer", p.id);
+    // The two kinds mean different things by "base". An openai-compatible provider has the endpoint
+    // name appended, so its base carries the `/v1`; an anthropic-compatible one has the caller's
+    // whole `/v1/messages` appended, so the same base would ask for `/v1/v1/messages` — which this
+    // vendor answers with an HTML 404. Measured the hard way.
+    assert.equal(
+      p.anthropicBaseUrl,
+      p.kind === "anthropic-compatible" ? "https://opencode.ai/zen/go" : "https://opencode.ai/zen/go/v1",
+      p.id,
+    );
+    // Each endpoint wants the auth header of the API it imitates, and they are not the same one.
+    // Measured with a wrong key: the unrecognised header answers "Missing API key", the right one
+    // answers "Invalid API key".
+    assert.equal(p.authHeader, p.kind === "anthropic-compatible" ? "x-api-key" : "authorization-bearer", p.id);
     assert.match(p.modelsUrl ?? "", /\/models$/, p.id);
     // The vendor keys its prompt cache on this. Omitting it errors nothing and multiplies the bill,
     // which is exactly how it was left off one of these entries the first time.

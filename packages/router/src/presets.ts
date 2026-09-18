@@ -270,8 +270,17 @@ export const PRESETS: ProviderPreset[] = [
     kind: "anthropic-compatible",
     name: "OpenCode Go (Anthropic)",
     vendorUrl: "https://opencode.ai/go",
-    anthropicBaseUrl: "https://opencode.ai/zen/go/v1",
-    authHeader: "authorization-bearer",
+    // Deliberately one segment shorter than the two OpenAI entries. The kinds mean different things
+    // by "base": an openai-compatible provider has the endpoint name appended (`/responses`), so its
+    // base carries the `/v1`; an anthropic-compatible one has the caller's whole `/v1/messages`
+    // appended, so a base ending in `/v1` asks for `/v1/v1/messages` — which this vendor answers
+    // with its website, as a 404 page of HTML.
+    anthropicBaseUrl: "https://opencode.ai/zen/go",
+    // Each endpoint follows the auth convention of the API it imitates: this one answers Anthropic
+    // Messages, so it wants Anthropic's header, while the two OpenAI-wire endpoints on the same key
+    // want a bearer. Measured 2026-09-18 with a deliberately wrong key: the header it does not
+    // recognise answers "Missing API key", the one it does answers "Invalid API key".
+    authHeader: "x-api-key",
     // The same cache key the other two send. Left off here once already: the support was wired on
     // both paths and the value was simply never put in this entry, which costs nothing visible and
     // several times the tokens.
