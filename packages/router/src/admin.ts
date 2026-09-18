@@ -8,6 +8,7 @@
 //   GET  /api/chatgpt-login  ChatGPT browser login state and credential status
 //   GET  /*             static files from packages/ui (the GUI itself)
 
+import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -87,6 +88,12 @@ type ProbeRequest = {
   modelsAuthHeader?: string;
   /** Model id to use for the auth check when the provider has no listing endpoint (e.g. the preset's first fallback). */
   probeModel?: string;
+  /**
+   * A header the vendor recognises a conversation by. Not only a cache hint for some of them:
+   * OpenCode Go refuses a request without `x-opencode-session` outright, so a connection test that
+   * omits it reports a broken provider that is in fact fine.
+   */
+  sessionHeader?: string;
 };
 
 const ANTHROPIC_EFFORT_LEVELS = ["low", "medium", "high", "max"];
@@ -508,7 +515,11 @@ async function probeProvider(body: ProbeRequest): Promise<{ ok: boolean; auth: P
   try {
     const response = await fetchWithTimeout(checkUrl, {
       method: "POST",
-      headers: { "content-type": "application/json", ...authHeaders(source) },
+      headers: {
+        "content-type": "application/json",
+        ...(body.sessionHeader ? { [body.sessionHeader]: `probe-${crypto.randomBytes(8).toString("hex")}` } : {}),
+        ...authHeaders(source),
+      },
       body: JSON.stringify(checkBody),
     });
     if (response.status === 401 || response.status === 403) return { ok: false, auth: "bad-key", models, error: `${label} returned ${response.status}: ${snippet(await response.text())}` };
@@ -696,7 +707,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           sendJson(res, 400, { error: "expected provider probe object" });
           return;
         }
-        const probe = parsed as { type?: unknown; auth?: unknown; apiKey?: unknown; url?: unknown; headers?: unknown; modelsUrl?: unknown; modelsAuthHeader?: unknown; probeModel?: unknown };
+        const probe = parsed as { type?: unknown; auth?: unknown; apiKey?: unknown; url?: unknown; headers?: unknown; modelsUrl?: unknown; modelsAuthHeader?: unknown; probeModel?: unknown; sessionHeader?: unknown };
         if (probe.type === "anthropic") {
           if (probe.auth === "claude-code") {
             sendJson(res, 200, probeClaudeCodeAuth(deps));
@@ -744,6 +755,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           url: probe.url,
           ...(probe.headers ? { headers: probe.headers as Record<string, string> } : {}),
           ...(probe.modelsUrl ? { modelsUrl: probe.modelsUrl } : {}),
+          ...(typeof probe.sessionHeader === "string" && probe.sessionHeader ? { sessionHeader: probe.sessionHeader } : {}),
           ...(probe.modelsAuthHeader ? { modelsAuthHeader: probe.modelsAuthHeader } : {}),
           ...(typeof probe.probeModel === "string" ? { probeModel: probe.probeModel } : {}),
         });

@@ -698,6 +698,9 @@ async function probeProvider(name, provider, onComplete) {
         modelsUrl: provider.modelsUrl || (provider.preset && presetById(provider.preset) && presetById(provider.preset).modelsUrl),
         modelsAuthHeader: provider.modelsAuthHeader || (provider.preset && presetById(provider.preset) && presetById(provider.preset).modelsAuthHeader),
         probeModel: provider.probeModel || (provider.preset && presetById(provider.preset) && (presetById(provider.preset).fallbackModels || [])[0] && presetById(provider.preset).fallbackModels[0].id),
+        // Some vendors refuse a request without it rather than merely losing the cache, so a test
+        // that leaves it out reports a broken provider that works perfectly.
+        sessionHeader: provider.sessionHeader || (provider.preset && presetById(provider.preset) && presetById(provider.preset).sessionHeader),
       };
     const result = await api("/api/providers/probe", {
       method: "POST",

@@ -263,6 +263,22 @@ function merge(base: Config, over: Partial<Config>): Config {
   };
 }
 
+/**
+ * An HTTP header value is bytes, so anything above U+00FF cannot travel in one. A key pasted with
+ * the label beside it — "API 키 sk-…" — fails deep inside the HTTP client with a message about
+ * ByteString conversion and a character code, which tells the person nothing about what they did.
+ * Returns what to say instead, or null when the value is fine.
+ */
+export function headerValueProblem(value: string): string | null {
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code > 0xff) return `character ${i + 1} is "${value[i]}", which cannot travel in an HTTP header — paste the key on its own, without any label or surrounding text`;
+    // A newline would split the header; a stray one usually means a copied line rather than a key.
+    if (code === 0x0a || code === 0x0d) return `there is a line break at character ${i + 1} — paste the key on its own, without the line around it`;
+  }
+  return null;
+}
+
 function validModels(models: unknown): boolean {
   return Array.isArray(models) && models.every((model) =>
     model !== null && typeof model === "object" &&
@@ -317,6 +333,11 @@ export function validate(c: Config): string[] {
           if (!cred.headers || typeof cred.headers !== "object" || Array.isArray(cred.headers) ||
             Object.values(cred.headers as Record<string, unknown>).some((value) => typeof value !== "string")) {
             errors.push(`provider ${name}: credential ${i} headers must be a string record`);
+          } else {
+            for (const [header, value] of Object.entries(cred.headers as Record<string, string>)) {
+              const problem = headerValueProblem(value);
+              if (problem) errors.push(`provider ${name}: credential ${i} header "${header}": ${problem}`);
+            }
           }
           if (cred.label !== undefined && typeof cred.label !== "string") errors.push(`provider ${name}: credential ${i} label must be a string`);
         });

@@ -206,8 +206,8 @@ export const PRESETS: ProviderPreset[] = [
   // other two are separate providers — this preset is the Responses one, which is where Muse Spark
   // lives.
   //
-  // `x-opencode-session` is not optional in practice: the vendor keys its prompt cache on it, and
-  // a caller that omits it pays full price for every turn.
+  // `x-opencode-session` is not optional at all: the vendor answers 400 `MissingSessionID` without
+  // it — "cannot be routed efficiently" — so it gates the request rather than just the cache.
   {
     id: "opencode-go",
     kind: "openai-compatible",
