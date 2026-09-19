@@ -186,12 +186,20 @@ test("tool schemas: patterns the Codex regex engine rejects are dropped, others 
       field: { type: "string", pattern: '^(?!__.*__$)[^\\p{Cc}"\\\\./[\\]]{1,200}$' }, // lookahead → dropped
       doc_id: { type: "string", pattern: "^[A-Za-z0-9_-]{1,200}$" }, // plain → kept
       nested: { type: "array", items: { type: "object", properties: { x: { type: "string", pattern: "(a)\\1" } } } }, // backreference → dropped
+      // The Artifact tool's `file_paths` items. OpenCode Go refuses the whole request over this
+      // one escape (measured 2026-09-19); it is the same class as the two above.
+      file_paths: { type: "array", items: { maxLength: 1024, minLength: 1, type: "string", pattern: "^[^\\0]*$" } },
+      digits: { type: "string", pattern: "^\\d+$" }, // \d is not an escape either backend rejects → kept
     },
     required: ["field"],
   };
   const out = normalizeSchema(schema) as { properties: Record<string, Record<string, unknown>>; required: string[] };
   assert.equal(out.properties.field!.pattern, undefined);
   assert.equal(out.properties.doc_id!.pattern, "^[A-Za-z0-9_-]{1,200}$");
+  const paths = out.properties.file_paths!.items as Record<string, unknown>;
+  assert.equal(paths.pattern, undefined, "the \\0 escape must be dropped");
+  assert.equal(paths.maxLength, 1024, "the rest of the schema is kept: only the pattern offends");
+  assert.equal(out.properties.digits!.pattern, "^\\d+$");
   const x = (out.properties.nested!.items as { properties: { x: Record<string, unknown> } }).properties.x;
   assert.equal(x.pattern, undefined);
   assert.deepEqual(out.required, ["field"]);

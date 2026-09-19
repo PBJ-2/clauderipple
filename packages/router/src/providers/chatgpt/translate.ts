@@ -114,7 +114,16 @@ export function conversationKey(req: AnthropicRequest): string {
 // lookaround or backreferences; one such pattern anywhere fails the whole request with
 // "Invalid schema for function 'X': '...' is not a 'regex'" (measured 2026-09-13 with the
 // Claude Code Artifact tool). Those patterns are dropped; the client validates inputs itself.
-const UNSUPPORTED_REGEX = /\(\?[=!<]|\\[1-9]/;
+//
+// `\0` belongs in the same class and was missed, because the rule was written as the
+// backreferences 1-9 rather than as the escapes a strict engine will not take. The Artifact tool
+// declares `file_paths` items as `^[^\0]*$` — any string without a NUL — and OpenCode Go refuses
+// the whole request over it: `Invalid JSON schema: {…"pattern":"^[^\\0]*$"…} is not valid under
+// any of the schemas listed in the 'anyOf' keyword` (measured 2026-09-19 against
+// muse-spark-1.3-contributor; the same schema with the pattern removed is accepted, and
+// `\d`, `propertyNames`, nested `anyOf`, `const`, `format` and `$schema` all pass, so this escape
+// is the whole of it). Two backends now, which is why the rule is the escape class, not a list.
+const UNSUPPORTED_REGEX = /\(\?[=!<]|\\[0-9]/;
 
 export function unsupportedPattern(p: string): boolean {
   return UNSUPPORTED_REGEX.test(p);
