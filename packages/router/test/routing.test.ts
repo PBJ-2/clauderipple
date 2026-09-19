@@ -53,6 +53,59 @@ test("marker overrides direct models only, ignores system-reminder blocks", () =
   assert.equal(resolve("claude-opus-4-8", body("[[ripple: luna]]"), cfg)!.model, "gpt-6-astra");
 });
 
+// A config shaped like a real one: providers that carry their own `models` list (the probe fills it
+// from the vendor's /models and the GUI ticks it), one id offered by two of them, and the native
+// `anthropic` provider that exists for the OpenAI ingress and lists the Claude models.
+const declared: Config = {
+  ...DEFAULTS,
+  providers: {
+    chatgpt: { type: "chatgpt", models: [{ id: "gpt-5.6-terra" }, { id: "gpt-5.6-luna" }] },
+    "opencode-go-chat": { type: "openai-compatible", url: "http://127.0.0.1:8788", wire: "chat", models: [{ id: "kimi-k3" }, { id: "deepseek-v4-pro" }] },
+    deepseek: { type: "anthropic-compatible", url: "http://127.0.0.1:8789", models: [{ id: "deepseek-v4-pro" }] },
+    anthropic: { type: "anthropic", auth: "claude-code", models: [{ id: "claude-opus-5" }, { id: "claude-haiku-4-5" }] },
+  },
+  routes: { "claude-opus-4-8": { provider: "chatgpt", model: "gpt-5.6-terra" } },
+  direct: [{ prefix: "gpt-", provider: "chatgpt" }],
+  aliases: { luna: "gpt-5.6-luna", k3: "kimi-k3" },
+};
+
+test("a model only one provider carries routes there without a rule", () => {
+  const r = resolve("kimi-k3", body("hi"), declared)!;
+  assert.equal(r.provider, "opencode-go-chat");
+  assert.equal(r.model, "kimi-k3", "the model is not rewritten: the provider serves it under its own name");
+  assert.equal(resolve("kimi-k3@low", body("hi"), declared)!.effort, "low");
+});
+
+test("a model two providers carry still needs the operator to say which", () => {
+  assert.equal(resolve("deepseek-v4-pro", body("hi"), declared), null, "guessing would send traffic to a vendor nobody chose");
+});
+
+test("the native anthropic provider's models are not a routing target", () => {
+  // The §5 failure this protects: a slot pointed at an ingress-only provider made every Claude
+  // request fail with 400. Auto-routing would have done it to a whole session without a rule.
+  assert.equal(resolve("claude-opus-5", body("hi"), declared), null);
+  assert.equal(resolve("claude-haiku-4-5-20251001", body("hi"), declared), null, "dated form too");
+});
+
+test("rules still win over what a provider declares", () => {
+  // chatgpt carries gpt-5.6-terra AND a direct prefix rule covers it; the rule decides.
+  assert.equal(resolve("gpt-5.6-terra", body("hi"), declared)!.provider, "chatgpt");
+  assert.equal(resolve("claude-opus-4-8", body("hi"), declared)!.model, "gpt-5.6-terra", "a slot alias is still an alias");
+  // A prefix rule reaches models no provider declares — that is why rules are not redundant.
+  assert.equal(resolve("gpt-7-unreleased", body("hi"), declared)!.provider, "chatgpt");
+});
+
+test("an unknown model still passes through to Anthropic", () => {
+  assert.equal(resolve("some-model-nobody-has", body("hi"), declared), null);
+});
+
+test("a marker on an auto-routed model picks the overridden model's own provider", () => {
+  const r = resolve("kimi-k3", body("[[ripple: luna@high]] do it"), declared)!;
+  assert.equal(r.model, "gpt-5.6-luna");
+  assert.equal(r.provider, "chatgpt", "the override names the model, and the model names the provider");
+  assert.equal(r.effort, "high");
+});
+
 test("marker only scans the first five user messages", () => {
   const msgs = { messages: Array.from({ length: 7 }, (_, i) => ({ role: "user", content: i === 6 ? "[[ripple: sol]]" : "x" })) };
   assert.equal(markerOverride(msgs, cfg.aliases), null);

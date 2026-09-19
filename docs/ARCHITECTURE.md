@@ -12,8 +12,12 @@ Everything below is backed by a document, a file, or a measured log. Items marke
   env.NODE_EXTRA_CA_CERTS = <state dir>/ca.pem
 
 CLI: CONNECT api.anthropic.com  → ClaudeRipple terminates TLS (leaf cert signed by ca.pem)
-     per request:
-       model matches a route  → rewrite model (+effort), send to provider adapter
+     per request, in order:
+       direct rule (prefix)   → send to that provider, model unchanged (+effort)
+       slot alias (routes)    → rewrite model (+effort), send to provider adapter
+       exactly one provider's
+         own `models` carries
+         the id               → send there, model unchanged (see "declared models" below)
        otherwise              → forward byte-for-byte to api.anthropic.com over real TLS
 CLI: CONNECT anything else      → blind tunnel
 ```
@@ -113,6 +117,26 @@ chat is out of reach for every approach, ours included.
 
 ## 4. Provider adapters
 
+- **Declared models route themselves (2026-09-19).** A provider's `models` list —
+  filled by the probe from the vendor's `/models`, ticked in the GUI — now decides
+  routing when no rule matched: a model exactly one provider carries goes there,
+  unchanged. Before this, that list was display only, so ticking a model in the GUI
+  did nothing until a `direct` rule was also written by hand; one live config had
+  eighteen such rules, and seventeen were exactly this case. Rules keep their
+  priority, so this only fills the gap they leave — measured against that config,
+  **nothing that routed changed** and three models that had been ticked but were
+  falling through to Anthropic (`deepseek-flash`, `moonshotai/kimi-k3`,
+  `z-ai/glm-5.3-flash`) started working. Two constraints make it safe to have as a
+  default: an id **two** providers carry is left to the operator (`deepseek-v4-pro`
+  is on both a direct DeepSeek mapping and OpenCode Go, and they are not the same
+  deal), and an **ingress-only** owner is not a target — the native `anthropic`
+  provider lists the Claude models, and routing those would have done the §5 400 to
+  a whole session without anyone writing a rule. An ingress-only owner still counts
+  as an owner, so a third party also offering `claude-opus-5` reads as an ambiguity
+  to ask about rather than a silent redirection of Claude traffic.
+  Prefix rules stay useful for what no provider declares yet (`gpt-` catches a model
+  released today). A model reaching a provider this way carries no per-model context
+  window unless it is also in `cli.extraModels` or a slot — the same as a direct rule.
 - **Anthropic-compatible providers** (DeepSeek, Kimi/Moonshot, GLM, MiniMax and
   others expose `/v1/messages`): host + model rewrite only, no translation. This
   is the whole reason `claude-code-router` works with just `ANTHROPIC_BASE_URL`.

@@ -3,6 +3,8 @@
 //   "claude-opus-4-8"            → routes["claude-opus-4-8"]           (picker-slot alias)
 //   "gpt-5.6-sol"                → direct rule by prefix, model unchanged
 //   "gpt-5.6-sol@medium"         → same, effort forced to medium
+//   "kimi-k3"                    → the one provider whose `models` carries it, model unchanged
+//                                  (only when no rule matched and exactly one provider claims it)
 //   "[[ripple: sol@xhigh]]" or "[[gpt: sol@xhigh]]" at the top of the first user
 //   message overrides model/effort for direct-rule models only (subagent prompts).
 
@@ -74,15 +76,60 @@ export function resolve(model: unknown, body: unknown, cfg: Config): Resolved | 
   // The app sends some slots with a dated id (`claude-haiku-4-5-20251001`) and others without
   // (`claude-opus-5`), while the GUI only ever offers the undated form. Match either.
   const route = cfg.routes[base] ?? cfg.routes[base.replace(/-\d{8}$/, "")];
-  if (!route || ingressOnly(route.provider)) return null;
-  return {
-    provider: route.provider,
-    model: route.model,
-    effort: effort ?? route.effort,
-    tag: `${model}->${route.model}`,
-    // Only a slot has somewhere else to go. A direct rule names one provider on purpose.
-    ...(route.fallbacks?.length ? { fallbacks: route.fallbacks } : {}),
-  };
+  if (route) {
+    if (ingressOnly(route.provider)) return null;
+    return {
+      provider: route.provider,
+      model: route.model,
+      effort: effort ?? route.effort,
+      tag: `${model}->${route.model}`,
+      // Only a slot has somewhere else to go. A direct rule names one provider on purpose.
+      ...(route.fallbacks?.length ? { fallbacks: route.fallbacks } : {}),
+    };
+  }
+
+  // No rule names this model. A provider that carries it in its own `models` list names it just as
+  // plainly: that list is what the probe read from the vendor's `/models` and what the GUI ticked.
+  // Not using it was why ticking a model in the GUI did nothing until a `direct` rule was also
+  // written by hand, and why one config had eighteen of them (2026-09-19: seventeen of those
+  // eighteen are exactly this case). Rules keep their priority — this only fills the gap they
+  // leave, so nothing that routes today routes differently.
+  const ov = markerOverride(body, cfg.aliases);
+  const finalModel = ov?.model ?? base;
+  const owners = declaredBy(finalModel, cfg);
+
+  // Two providers offering the same id is a question only the operator can answer (one config has
+  // `deepseek-v4-pro` on both a direct DeepSeek mapping and OpenCode Go, and they are not the same
+  // deal). Guessing would route someone's traffic to a vendor they did not choose, so an ambiguous
+  // id keeps requiring the explicit rule it requires today.
+  if (owners.length !== 1) return null;
+  const owner = owners[0]!;
+
+  // An ingress-only provider declaring a model does not make it a target: it serves the OpenAI
+  // ingress with its own credentials (see `ingressOnly` above). This matters more here than
+  // anywhere else — a native `anthropic` provider lists the Claude models, and auto-routing those
+  // would hijack every Claude request in the session into a provider that answers 400 (ARCHITECTURE
+  // §5). Counting it as an owner rather than skipping it is deliberate: if some other provider also
+  // offered `claude-opus-5`, that is an ambiguity to be asked about, not a silent redirection of
+  // Claude traffic to a third party.
+  if (ingressOnly(owner)) return null;
+
+  return { provider: owner, model: finalModel, effort: ov?.effort ?? effort, tag: `${model}->${finalModel}` };
+}
+
+/**
+ * Providers whose own `models` list carries this id. Dated and undated forms match each other, the
+ * same way a slot lookup does. Ingress-only providers are included on purpose — see the call site.
+ */
+function declaredBy(id: string, cfg: Config): string[] {
+  const undated = id.replace(/-\d{8}$/, "");
+  const owners: string[] = [];
+  for (const [name, provider] of Object.entries(cfg.providers)) {
+    const models = provider.models;
+    if (!models?.length) continue;
+    if (models.some((m) => m.id === id || m.id === undated || m.id.replace(/-\d{8}$/, "") === undated)) owners.push(name);
+  }
+  return owners;
 }
 
 /** Apply a resolution to a parsed Messages request body (mutates and returns it). */
