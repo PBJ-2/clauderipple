@@ -39,6 +39,49 @@ test("system → instructions with identity line; tools → function tools; cach
   assert.equal(r.prompt_cache_key, conversationKey(turn2), "cache key must not change across turns");
 });
 
+// What the CLI sends beside a conversation: no metadata, one message, a different query each time.
+// The shape is the one websearch.test.ts reads off the binary.
+const sideRequest = (query: string, system = "You are an assistant for performing a web search tool use"): AnthropicRequest => ({
+  model: "deepseek-v4.1-flash",
+  system: [{ type: "text", text: system }],
+  messages: [{ role: "user", content: `Perform a web search for the query: ${query}` }],
+  tools: [{ type: "web_search_20250305", name: "web_search" }],
+  max_tokens: 1024,
+});
+
+test("side requests of one kind share a key, so the prefix they all send can cache", () => {
+  // Before: one key per request, and the shared prefix was never read back — 68 calls, 0 hits.
+  assert.equal(
+    conversationKey(sideRequest("Node.js 24 LTS release date")),
+    conversationKey(sideRequest("TypeScript 6 release date")),
+    "two searches are the same class of request, however different the query",
+  );
+});
+
+test("a different kind of side request is a different key", () => {
+  assert.notEqual(
+    conversationKey(sideRequest("x", "Summarise this conversation in five words")),
+    conversationKey(sideRequest("x")),
+    "the system prompt is what names the class; two classes must not share a cache lineage",
+  );
+});
+
+test("a conversation is still keyed on its opening message, not on its system prompt", () => {
+  const a: AnthropicRequest = { ...turn1, messages: [{ role: "user", content: [{ type: "text", text: "read foo.ts" }] }] };
+  const b: AnthropicRequest = { ...turn1, messages: [{ role: "user", content: [{ type: "text", text: "a different opening" }] }] };
+  assert.notEqual(conversationKey(a), conversationKey(b), "one user's two conversations must not collapse onto one key");
+});
+
+test("a conversation with no metadata keeps its key from its second turn on", () => {
+  // The OpenAI ingress builds no metadata, and its traffic is real multi-turn conversation.
+  const { metadata: _drop, ...noMeta } = turn1;
+  const opening: AnthropicRequest = { ...noMeta, messages: [{ role: "user", content: [{ type: "text", text: "read foo.ts" }] }] };
+  const second: AnthropicRequest = { ...noMeta, messages: turn2.messages };
+  const third: AnthropicRequest = { ...noMeta, messages: [...turn2.messages, { role: "user", content: [{ type: "text", text: "now read bar.ts" }] }] };
+  assert.equal(conversationKey(second), conversationKey(third), "a metadata-less conversation must not move once it is under way");
+  assert.notEqual(conversationKey(opening), conversationKey(second), "its opening turn is indistinguishable from a side request, and is keyed as one");
+});
+
 test("turn N input is a strict prefix of turn N+1 input (prompt cache prerequisite)", () => {
   const a = toResponsesRequest(turn1, opts);
   const b = toResponsesRequest(turn2, opts);

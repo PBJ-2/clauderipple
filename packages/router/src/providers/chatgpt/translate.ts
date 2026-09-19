@@ -4,7 +4,8 @@
 // next turn's `input`. Claude Code resends the whole history every turn, so the mapping
 // has to be deterministic and must not inject anything that varies (timestamps, salts,
 // re-signed reasoning). Thinking blocks from earlier assistant turns are dropped for the
-// same reason. `prompt_cache_key` is derived from the conversation's first user message.
+// same reason. `prompt_cache_key` is derived from the conversation's first user message — or,
+// for a request that is not a conversation at all, from its system prompt (see `conversationKey`).
 
 import crypto from "node:crypto";
 import { identityLine } from "../../identity.ts";
@@ -89,9 +90,23 @@ export function systemText(system: AnthropicRequest["system"]): string {
     .join("\n\n");
 }
 
+// A request with no `metadata.user_id` and one lone user turn is not a conversation: it is one of
+// the things the CLI sends beside one — the web-search side request, a title, a summary. Its single
+// message differs every time, so seeding on it minted a fresh key per request and the prefix all of
+// them share (system prompt, tool definitions) was never cached: measured `cached_tokens: 0` on all
+// 68 smallFast calls in a day's log, where the same wire asked twice under one key returns 94%.
+// The system prompt is the part of such a request that does not vary, so it is what names the class.
+// A real conversation that simply was not given metadata — the OpenAI ingress builds none — keeps
+// the old seed from its second turn on; only its opening turn shares the class key, and what that
+// turn reads there is the same fixed prefix it would have paid for anyway.
 export function conversationKey(req: AnthropicRequest): string {
+  const userId = req.metadata?.user_id;
   const first = req.messages.find((m) => m.role === "user");
-  const seed = `${req.metadata?.user_id ?? ""}\n${first ? blockText(first.content).slice(0, 4000) : ""}`;
+  // `side` keeps the two seeds in separate spaces: without it a conversation whose opening message
+  // happened to equal a system prompt would land on that class's key.
+  const seed = !userId && req.messages.length <= 1
+    ? `side\n${systemText(req.system).slice(0, 4000)}`
+    : `${userId ?? ""}\n${first ? blockText(first.content).slice(0, 4000) : ""}`;
   return crypto.createHash("sha256").update(seed).digest("hex").slice(0, 32);
 }
 

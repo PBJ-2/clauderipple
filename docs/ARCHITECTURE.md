@@ -285,7 +285,9 @@ chat is out of reach for every approach, ours included.
     the text. It works on any provider.
   - Cache-safety decisions: thinking blocks are dropped from replayed history;
     no reasoning `include`; identity line and `instructionsAppend` are constant
-    text; `prompt_cache_key` = sha256(metadata.user_id + first user message).
+    text; `prompt_cache_key` = sha256(metadata.user_id + first user message),
+    and sha256(system prompt) for a request that carries no `metadata.user_id`
+    and one lone user turn — see the conversation-key note in §4.
 
 ### 4c. What a routed model is told it is
 
@@ -362,6 +364,18 @@ chat is out of reach for every approach, ours included.
   - The conversation key is `conversationKey`, the same one the prompt cache uses. `metadata.user_id`
     alone is one value for every conversation a user has, so using it raw dragged all of them onto
     one credential at once — the opposite of what stickiness is for.
+  - The same key has a second branch, because not every request is a conversation. What the CLI
+    sends *beside* one — the web-search side request, a title, a summary — carries no `metadata` at
+    all and one lone user message that is different every time, so seeding on that message minted a
+    new key per request: measured `cached_tokens: 0` on all 68 smallFast calls in a day's log, while
+    Muse hit 97/129 and Opus 6,960/11,633 in the same log. It was not the endpoint — the same wire
+    asked twice under one key returned 94% (2,304/2,441). So a request with no `user_id` and one
+    message is keyed on its **system prompt**, which is the part of it that does not vary: every
+    web search shares one key, every title another, and the fixed prefix each class sends is cached
+    after the first. This is the acceptance metric (≥90% on translated providers), not a tidy-up.
+    A real conversation that was merely never given metadata — the OpenAI ingress builds none — is
+    keyed as before from its second turn on; only its opening turn, which is indistinguishable from
+    a side request, joins the class key, and what it reads there is the prefix it sends anyway.
   - **A refused credential is replaced inside the same turn**, while nothing has been written to the
     client. The turn that discovers a limit used to be spent — the client got the 429 and retried it
     itself — and now the next credential answers on the first ask. Only before the first byte: after
