@@ -137,6 +137,14 @@ chat is out of reach for every approach, ours included.
   Prefix rules stay useful for what no provider declares yet (`gpt-` catches a model
   released today). A model reaching a provider this way carries no per-model context
   window unless it is also in `cli.extraModels` or a slot — the same as a direct rule.
+  - **The GUI stopped writing a rule per ticked model** at the same time, since ticking
+    one is no longer what makes it route. It writes one only for an id more than one
+    provider offers, and keeps an existing one for such an id **even when nothing ticks
+    it** — `deepseek-v4-pro` is in no picker list and dropping its rule would have
+    stopped it routing. Simulating one save on the config above: 18 direct rules → 2
+    (`gpt-` and `deepseek-v4-pro`), picker entries unchanged at 5, and **no model
+    resolved anywhere different**. Picker exposure stays what the operator ticked; it is
+    routing that stopped needing to be said twice.
 - **Anthropic-compatible providers** (DeepSeek, Kimi/Moonshot, GLM, MiniMax and
   others expose `/v1/messages`): host + model rewrite only, no translation. This
   is the whole reason `claude-code-router` works with just `ANTHROPIC_BASE_URL`.

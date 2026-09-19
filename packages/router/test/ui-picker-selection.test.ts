@@ -55,19 +55,44 @@ test("a model no provider offers any more leaves the picker, and takes its direc
   const next = apply(baseConfig(), [{ id: "z-ai/glm-5.3-flash", name: "GLM", provider: "openrouter" }]);
   assert.deepEqual(next.cli?.extraModels, [{ model: "z-ai/glm-5.3-flash", name: "GLM" }]);
   assert.deepEqual(next.direct, [
-    // Not a model id, so not an orphan: the legacy prefix rule is kept on purpose.
+    // Not a model id, so not an orphan: the legacy prefix rule is kept on purpose. The rule for the
+    // ticked model is gone with it — one provider offers it, so the router resolves it unaided.
     { prefix: "gpt-", provider: "chatgpt" },
-    { prefix: "z-ai/glm-5.3-flash", provider: "openrouter" },
   ]);
 });
 
-test("the same model chosen twice is written once", () => {
+test("ticking a model no longer writes a rule: one provider offering it is already the answer", () => {
   const next = apply(baseConfig(), [
     { id: "gpt-5.6-terra", name: "Terra", provider: "chatgpt" },
     { id: "gpt-5.6-terra", name: "Terra", provider: "chatgpt" },
   ]);
-  assert.deepEqual(next.cli?.extraModels, [{ model: "gpt-5.6-terra", name: "Terra" }]);
-  assert.equal(next.direct?.filter((rule) => rule.prefix === "gpt-5.6-terra").length, 1);
+  assert.deepEqual(next.cli?.extraModels, [{ model: "gpt-5.6-terra", name: "Terra" }], "the same model chosen twice is written once");
+  assert.equal(next.direct?.some((rule) => rule.prefix === "gpt-5.6-terra"), false);
+});
+
+// The one case the router refuses to guess through, so the one case a rule is still the answer.
+function ambiguousConfig(): Config {
+  return {
+    providers: {
+      deepseek: { models: [{ id: "deepseek-v4-pro", name: "DeepSeek Pro" }] },
+      "opencode-go-chat": { models: [{ id: "deepseek-v4-pro", name: "DeepSeek Pro" }, { id: "kimi-k3", name: "Kimi" }] },
+    },
+    cli: { extraModels: [] },
+    direct: [{ prefix: "deepseek-v4-pro", provider: "deepseek" }],
+  };
+}
+
+test("an id two providers offer keeps its rule even though nothing ticked it", () => {
+  // It is in no picker list, and dropping it because of that would stop it routing entirely.
+  const next = apply(ambiguousConfig(), [{ id: "kimi-k3", name: "Kimi", provider: "opencode-go-chat" }]);
+  assert.deepEqual(next.direct, [{ prefix: "deepseek-v4-pro", provider: "deepseek" }]);
+  assert.equal(next.direct?.some((rule) => rule.prefix === "kimi-k3"), false, "the unambiguous one needs nothing");
+});
+
+test("ticking an ambiguous model writes the rule that says which provider was meant", () => {
+  const next = apply(ambiguousConfig(), [{ id: "deepseek-v4-pro", name: "DeepSeek Pro", provider: "opencode-go-chat" }]);
+  assert.equal(next.direct?.length, 1);
+  assert.equal(next.direct?.[0]?.provider, "deepseek", "an existing rule is the operator's answer and is not overwritten by a tick");
 });
 
 test("unchecking every model empties the picker list", () => {

@@ -605,6 +605,9 @@ $("#slots-add").addEventListener("click", () => {
   updateSlotSummary();
 });
 function allKnownModelIds(config) { return new Set(groupedModels(config).flatMap((group) => group.models.map((model) => model.id))); }
+// Which providers carry this exact id. One is what lets the router route it with no rule at all;
+// two is the ambiguity it refuses to guess through, and the only case a rule is still needed.
+function providersOffering(config, id) { return groupedModels(config).filter((group) => group.models.some((model) => model.id === id)).map((group) => group.name); }
 function applyPickerSelections(next, selections) {
   const known = allKnownModelIds(next);
   // An entry no provider offers any more has no checkbox — the list is built from the providers —
@@ -620,11 +623,25 @@ function applyPickerSelections(next, selections) {
   for (const entry of selected) {
     // Without this the rebuild would drop the window on every checkbox click.
     extras.set(entry.id, { model: entry.id, name: entry.name || entry.id, ...(Number.isFinite(entry.contextWindow) && entry.contextWindow > 0 ? { contextWindow: entry.contextWindow } : {}) });
-    direct.set(entry.id, { prefix: entry.id, provider: entry.provider });
+    // A rule per ticked model is no longer what makes it route: since 2026-09-19 the router sends a
+    // model to the one provider whose own `models` list carries it (routing.ts, "declared models").
+    // Writing one anyway restated the same fact in a second place and piled up — one config reached
+    // eighteen. It is still written for the case the router deliberately refuses to guess: an id
+    // that MORE THAN ONE provider offers, where only the operator knows which deal is meant. Keep
+    // this condition and the router's in step; the router is the one that decides.
+    if (providersOffering(next, entry.id).length > 1) direct.set(entry.id, { prefix: entry.id, provider: entry.provider });
   }
   next.cli = { ...(next.cli || {}), extraModels: [...extras.values()] };
-  const preservedDirect = (next.direct || []).filter((rule) => !known.has(rule.prefix) && !orphans.has(rule.prefix));
-  next.direct = [...preservedDirect, ...direct.values()];
+  // A rule survives when it is not a model id at all (the legacy `gpt-` prefix), or when it names an
+  // id two providers offer, which the router will not resolve on its own. Dropping that second kind
+  // because the model happens not to be ticked in the picker would stop it routing: the config here
+  // has `deepseek-v4-pro` on a direct mapping and on OpenCode Go, and it is in no picker list.
+  // An orphan goes either way — no provider offers it, and nothing in the interface can uncheck it.
+  const preservedDirect = (next.direct || []).filter((rule) =>
+    !orphans.has(rule.prefix) && (!known.has(rule.prefix) || providersOffering(next, rule.prefix).length > 1));
+  const byPrefix = new Map(preservedDirect.map((rule) => [rule.prefix, rule]));
+  for (const [prefix, rule] of direct) if (!byPrefix.has(prefix)) byPrefix.set(prefix, rule);
+  next.direct = [...byPrefix.values()];
   // A legacy gpt- prefix rule is intentionally retained by the filter above.
   return next;
 }
