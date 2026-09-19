@@ -42,6 +42,20 @@ function run(script: string): { ok: boolean; out: string } {
   }
 }
 
+type TaskDefinition = { actionCount?: number; execute?: string; arguments?: string; userId?: string; runLevel?: number };
+
+export function taskDefinitionMatches(value: unknown, expected: { arguments: string; userId: string }): boolean {
+  if (!value || typeof value !== "object") return false;
+  const task = value as TaskDefinition;
+  return (
+    task.actionCount === 1 &&
+    task.execute?.toLowerCase() === "powershell.exe" &&
+    task.arguments === expected.arguments &&
+    task.userId?.toLowerCase() === expected.userId.toLowerCase() &&
+    task.runLevel === 0
+  );
+}
+
 /**
  * The task runs a PowerShell launcher rather than node directly, for three reasons.
  *
@@ -85,9 +99,31 @@ function writeLauncher(opts: { program: string; args: string[]; home: string; en
 export function installAgent(opts: { program: string; args?: string[]; home: string; env?: Record<string, string> }): string {
   const launcher = writeLauncher({ program: opts.program, args: opts.args ?? [], home: opts.home, ...(opts.env ? { env: opts.env } : {}) });
   const user = `${os.userInfo().username}`;
+  const actionArgs = `-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "${launcher}"`;
+  // Updating the generated launcher does not require re-registering an otherwise correct task.
+  // Some Windows installations protect an existing per-user task's security descriptor so that
+  // even the same unelevated user gets E_ACCESSDENIED from Register-ScheduledTask -Force. Treat the
+  // verified existing definition as success; never silently accept a same-named foreign task.
+  const existing = run(
+    [
+      `$t = Get-ScheduledTask -TaskName ${ps(taskName())} -ErrorAction SilentlyContinue`,
+      `if ($null -eq $t) { 'null'; exit 0 }`,
+      `$a = @($t.Actions); $p = $t.Principal`,
+      `[pscustomobject]@{ actionCount = $a.Count; execute = $a[0].Execute; arguments = $a[0].Arguments; userId = $p.UserId; runLevel = [int]$p.RunLevel } | ConvertTo-Json -Compress`,
+    ].join("; "),
+  );
+  let definition: unknown = null;
+  if (existing.ok) {
+    try {
+      definition = JSON.parse(existing.out);
+    } catch {
+      // A malformed inspection result is not trusted; fall through to registration.
+    }
+  }
+  if (taskDefinitionMatches(definition, { arguments: actionArgs, userId: user })) return launcher;
   const script = [
     `$ErrorActionPreference = 'Stop'`,
-    `$a = New-ScheduledTaskAction -Execute ${ps("powershell.exe")} -Argument ${ps(`-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "${launcher}"`)}`,
+    `$a = New-ScheduledTaskAction -Execute ${ps("powershell.exe")} -Argument ${ps(actionArgs)}`,
     `$t = New-ScheduledTaskTrigger -AtLogOn -User ${ps(user)}`,
     // Limited: the router needs no elevation, and asking for it would put a UAC prompt at every logon.
     `$p = New-ScheduledTaskPrincipal -UserId ${ps(user)} -LogonType Interactive -RunLevel Limited`,
