@@ -50,6 +50,35 @@ const CLIENT_AUTH = new Set(["authorization", "x-api-key"]);
 /** How much of an upstream error body is kept for the log. */
 const ERROR_HEAD_MAX = 4096;
 
+export type AbsoluteProxyRequest = { host: string; port: number; head: Buffer };
+
+/**
+ * Claude Code's Remote Control registration uses HTTPS absolute-form proxy requests instead of
+ * CONNECT (`POST https://api.anthropic.com/v1/environments/bridge HTTP/1.1`). Convert that legal
+ * forward-proxy form to the origin form expected inside a TLS connection. Credentials and the
+ * request body remain byte-for-byte client data; proxy-only headers never reach the destination.
+ */
+export function absoluteProxyRequest(header: Buffer): AbsoluteProxyRequest | null {
+  const lines = header.toString("latin1").split("\r\n");
+  const first = lines.shift() ?? "";
+  const match = /^(\S+)\s+(\S+)\s+(HTTP\/\d(?:\.\d)?)$/.exec(first);
+  if (!match) return null;
+  let url: URL;
+  try {
+    url = new URL(match[2]!);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" || url.username || url.password || !url.hostname) return null;
+  const port = url.port ? Number(url.port) : 443;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  const headers = lines.filter((line) => !/^proxy-(?:authorization|connection)\s*:/i.test(line) && !/^host\s*:/i.test(line));
+  const authority = url.port ? `${url.hostname}:${url.port}` : url.hostname;
+  const path = `${url.pathname || "/"}${url.search}`;
+  const rewritten = [`${match[1]} ${path} ${match[3]}`, `Host: ${authority}`, ...headers].join("\r\n") + "\r\n\r\n";
+  return { host: url.hostname, port, head: Buffer.from(rewritten, "latin1") };
+}
+
 /**
  * The same header list with one credential swapped for another. Only the names the replacement
  * carries are touched, so anything else the provider needs — a version, a beta flag, an account id
@@ -259,6 +288,12 @@ export class Proxy {
       const line = head.subarray(0, end).toString("latin1").split("\r\n")[0] ?? "";
       const [method, target] = line.split(" ");
       if (method !== "CONNECT" || !target) {
+        const absolute = absoluteProxyRequest(head.subarray(0, end));
+        if (absolute) {
+          log.info(`ABSOLUTE ${method ?? "?"} https://${absolute.host}:${absolute.port}${new URL(target!).pathname}`);
+          this.forwardAbsolute(sock, absolute, rest);
+          return;
+        }
         sock.end("HTTP/1.1 405 Method Not Allowed\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
         return;
       }
@@ -274,6 +309,31 @@ export class Proxy {
       }
     };
     sock.on("data", onData);
+  }
+
+  /** Forward an HTTPS absolute-form request without terminating it through the routing layer. */
+  private forwardAbsolute(sock: net.Socket, request: AbsoluteProxyRequest, rest: Buffer): void {
+    const servername = net.isIP(request.host) ? undefined : request.host;
+    const up = tls.connect({ host: request.host, port: request.port, ...(servername ? { servername } : {}), ALPNProtocols: ["http/1.1"] });
+    const kill = (): void => {
+      sock.destroy();
+      up.destroy();
+    };
+    up.on("error", (e) => {
+      this.deps.log.warn(`absolute upstream error ${request.host}:${request.port}: ${(e as Error).message}`);
+      if (sock.writable) sock.end("HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+      up.destroy();
+    });
+    sock.on("error", kill);
+    up.once("secureConnect", () => {
+      up.write(request.head);
+      if (rest.length) up.write(rest);
+      sock.pipe(up);
+      up.pipe(sock);
+      sock.resume();
+    });
+    up.on("close", () => sock.destroy());
+    sock.on("close", () => up.destroy());
   }
 
   private terminate(sock: net.Socket, host: string): void {
