@@ -78,6 +78,19 @@ chat is out of reach for every approach, ours included.
 - So: if the picker ever shows `gpt-5.6-sol`, the rest of the chain passes it
   through unchanged. But the picker list travels over claude.ai web traffic in the
   Electron renderer, which a CLI-only proxy cannot see.
+- The CLI is **not** the unchecked link the sentence above might suggest: it does
+  classify the id, and an id it does not know produces a stderr line
+  `[claude-code:unrecognized_model] {"model":"…","query_source":"…"}`. That
+  classification is a **signal only** — the request still goes out with the custom
+  id. Measured 2026-09-19 on 2.1.272:
+  `claude --model muse-spark-1.3-contributor@medium -p "…"` printed the warning
+  and the router logged
+  `muse-spark-1.3-contributor@medium -> muse-spark-1.3-contributor  out=22`, i.e.
+  the id reached the provider unchanged. The same `unrecognized_model` path exists
+  in 2.1.268 and 2.1.270, so this is not new behaviour. Two consequences for us:
+  picker mode keeps working, but the warning is noise users will report, and the
+  classifier is a place where a future release could start rejecting rather than
+  warning — worth re-measuring on each CLI bump.
 - **v1 decision: alias mode.** Map existing picker entries (e.g. Opus 4.8 →
   GPT-6 Astra) and make the mapping visible in the ClaudeRipple GUI.
 - **Picker mode (implemented 2026-09-11, `clauderipple picker on`).** Verified in
