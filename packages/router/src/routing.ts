@@ -5,8 +5,10 @@
 //   "gpt-5.6-sol@medium"         → same, effort forced to medium
 //   "kimi-k3"                    → the one provider whose `models` carries it, model unchanged
 //                                  (only when no rule matched and exactly one provider claims it)
-//   "[[ripple: sol@xhigh]]" or "[[gpt: sol@xhigh]]" at the top of the first user
-//   message overrides model/effort for direct-rule models only (subagent prompts).
+//   "[[ripple: sol@xhigh]]" or "[[gpt: sol@xhigh]]" at the very top of a user
+//   message (a subagent prompt) overrides model/effort; the marker's model is then
+//   placed by its own prefix rule or its one declaring provider. A slot ignores it.
+//   Quoted anywhere else, a marker is prose (issue #13).
 
 import type { Config } from "./config.ts";
 
@@ -89,9 +91,11 @@ export function resolve(model: unknown, body: unknown, cfg: Config): Resolved | 
       const ownDirect = cfg.direct.find((d) => finalModel.startsWith(d.prefix));
       const provider = ownDirect ? ownDirect.provider : soleOwner(finalModel, cfg);
       if (!provider || ingressOnly(provider)) return null;
-      return { provider, model: finalModel, effort: finalEffort, tag: `${model}->${finalModel}` };
+      return { provider, model: finalModel, effort: finalEffort, tag: `${model}->${finalModel} (marker)` };
     }
-    return { provider: direct.provider, model: finalModel, effort: finalEffort, tag: `${model}->${finalModel}` };
+    // The log says when a marker decided: `claude-sonnet-5->gpt-6-astra` with no hint of why cost a
+    // reporter twenty minutes (issue #13).
+    return { provider: direct.provider, model: finalModel, effort: finalEffort, tag: `${model}->${finalModel}${ov ? " (marker)" : ""}` };
   }
 
   // The app sends some slots with a dated id (`claude-haiku-4-5-20251001`) and others without
@@ -135,7 +139,7 @@ export function resolve(model: unknown, body: unknown, cfg: Config): Resolved | 
   // Claude traffic to a third party.
   if (ingressOnly(owner)) return null;
 
-  return { provider: owner, model: finalModel, effort: ov?.effort ?? effort, tag: `${model}->${finalModel}` };
+  return { provider: owner, model: finalModel, effort: ov?.effort ?? effort, tag: `${model}->${finalModel}${ov ? " (marker)" : ""}` };
 }
 
 /**

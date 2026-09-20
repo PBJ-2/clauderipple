@@ -308,6 +308,7 @@ test("a marker's model takes its own provider, even under a prefix rule on the s
   assert.equal(r.provider, "opencode");
   assert.equal(r.model, "muse-spark-1.3-contributor");
   assert.equal(r.effort, "high");
+  assert.equal(r.tag, "gpt-6-astra->muse-spark-1.3-contributor (marker)", "the log says a marker decided (issue #13)");
   // A marker naming a gpt-* model still goes to the prefix rule's provider.
   assert.equal(resolve("gpt-6-astra", body("[[ripple: gpt-5.6-sol@low]] x"), cfg2)!.provider, "chatgpt");
   // A marker to a model nobody declares is a refusal, with the reason, not a 400 from ChatGPT.
