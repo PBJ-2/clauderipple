@@ -94,8 +94,8 @@ export function retryAfterMs(headers: Record<string, string | string[] | undefin
   return undefined;
 }
 
-/** A single usable credential. `id` is stable across reloads so state survives a config edit. */
-export type Credential = { id: string; headers: Record<string, string>; label?: string };
+/** A single usable credential. `id` keys runtime health; `ownerId` identifies its durable account. */
+export type Credential = { id: string; headers: Record<string, string>; label?: string; ownerId?: string };
 
 type Health = { cooldownUntil: number; quarantined: boolean; failures: number };
 
@@ -115,8 +115,8 @@ export type CredentialReport = {
  */
 export class CredentialPool {
   private readonly health = new Map<string, Health>();
-  /** conversation → credential id, so a live conversation keeps its prompt cache. */
-  private readonly sticky = new Map<string, { provider: string; id: string; at: number }>();
+  /** conversation → durable owner id (or runtime id when there is no owner), preserving its cache across token refreshes. */
+  private readonly sticky = new Map<string, { provider: string; ownerId: string; at: number }>();
   private readonly now: () => number;
   /** How long an idle conversation keeps its claim on a credential. */
   private readonly stickyTtlMs: number;
@@ -151,7 +151,7 @@ export class CredentialPool {
     if (conversation) {
       const held = this.sticky.get(conversation);
       if (held && held.provider === provider) {
-        const current = credentials.find((c) => c.id === held.id);
+        const current = credentials.find((c) => (c.ownerId ?? c.id) === held.ownerId);
         if (current && this.usable(provider, current.id)) {
           held.at = this.now();
           return current;
@@ -160,7 +160,7 @@ export class CredentialPool {
     }
     const next = credentials.find((c) => this.usable(provider, c.id));
     if (!next) return null;
-    if (conversation) this.sticky.set(conversation, { provider, id: next.id, at: this.now() });
+    if (conversation) this.sticky.set(conversation, { provider, ownerId: next.ownerId ?? next.id, at: this.now() });
     return next;
   }
 

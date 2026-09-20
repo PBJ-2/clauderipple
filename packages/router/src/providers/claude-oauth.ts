@@ -6,13 +6,14 @@
 // Wire facts are behaviorally measured against Claude Code's public client and are not an
 // Anthropic guarantee (docs/ARCHITECTURE.md §4b). The browser is sent to claude.ai; the code comes
 // back either to a loopback listener on the registered port or, when that port is taken, through
-// the manual "paste the code" page (`code#state`). Tokens are stored only in <home>/claude-auth.json
-// (mode 0600) and never logged or returned by the admin API.
+// the manual "paste the code" page (`code#state`). Grants are stored only in the 0600
+// <home>/claude-accounts.json pool and never logged or returned by the admin API.
 
 import crypto from "node:crypto";
 import http from "node:http";
 import net from "node:net";
-import { saveClaudeOAuthFile } from "./anthropic-token-file.ts";
+import { redactErrorText } from "../redact.ts";
+import { saveClaudeOAuthAccount, type ClaudeAccountSummary } from "./anthropic-accounts.ts";
 
 // Endpoints, scopes and body shapes are what Claude Code 2.1.271 sends (read from its binary on
 // 2026-09-16): the claude.ai login is `claude.com/cai/oauth/authorize`, tokens come from
@@ -35,7 +36,13 @@ export const CLAUDE_OAUTH = {
   refreshLeadMs: 5 * 60 * 1000,
 } as const;
 
-export type ClaudeOAuthGrant = { accessToken: string; refreshToken: string; expiresAt: number };
+export type ClaudeOAuthGrant = {
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: number;
+  accountId?: string;
+  email?: string;
+};
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 
 export type ClaudeOAuthOptions = {
@@ -53,15 +60,42 @@ function base64url(buffer: Buffer): string {
 }
 
 /** A token endpoint reply. Only the fields we use are typed; anything else is ignored. */
-type TokenReply = { access_token?: unknown; refresh_token?: unknown; expires_in?: unknown; error?: unknown; error_description?: unknown };
+type TokenReply = {
+  access_token?: unknown;
+  refresh_token?: unknown;
+  expires_in?: unknown;
+  account?: { uuid?: unknown; email_address?: unknown };
+  error?: unknown;
+  error_description?: unknown;
+};
+
+export class ClaudeOAuthTokenError extends Error {
+  readonly status: number;
+  readonly code: string | null;
+  readonly needsReauth: boolean;
+
+  constructor(message: string, status: number, code: string | null) {
+    super(message);
+    this.name = "ClaudeOAuthTokenError";
+    this.status = status;
+    this.code = code;
+    this.needsReauth = status === 400 && code !== null && /^(invalid_grant|invalid_token|access_denied|expired_token)$/.test(code);
+  }
+}
 
 async function postToken(fetchImpl: FetchLike, body: Record<string, string>): Promise<TokenReply> {
-  const response = await fetchImpl(CLAUDE_OAUTH.tokenUrl, {
-    method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json" },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(30_000),
-  });
+  let response: Response;
+  try {
+    response = await fetchImpl(CLAUDE_OAUTH.tokenUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch (error) {
+    const raw = error instanceof Error ? error.message : String(error);
+    throw new Error(`Claude token endpoint request failed: ${redactErrorText(raw, Object.values(body), 300)}`);
+  }
   const text = await response.text();
   let parsed: TokenReply = {};
   try {
@@ -70,8 +104,10 @@ async function postToken(fetchImpl: FetchLike, body: Record<string, string>): Pr
     // A non-JSON body is reported through the status below.
   }
   if (!response.ok) {
-    const detail = typeof parsed.error_description === "string" ? parsed.error_description : typeof parsed.error === "string" ? parsed.error : `HTTP ${response.status}`;
-    throw new Error(`Claude sign-in was refused by the token endpoint: ${detail}`);
+    const code = typeof parsed.error === "string" ? parsed.error : null;
+    const rawDetail = typeof parsed.error_description === "string" ? parsed.error_description : code ?? `HTTP ${response.status}`;
+    const detail = redactErrorText(rawDetail, Object.values(body), 300);
+    throw new ClaudeOAuthTokenError(`Claude sign-in was refused by the token endpoint: ${detail}`, response.status, code);
   }
   return parsed;
 }
@@ -83,7 +119,18 @@ function grantFrom(reply: TokenReply, now: number, previousRefresh?: string): Cl
   // A missing or absurd expires_in is treated as one hour: better an early refresh than a token
   // believed valid forever.
   const expiresIn = typeof reply.expires_in === "number" && Number.isFinite(reply.expires_in) && reply.expires_in > 0 ? reply.expires_in : 3600;
-  return { accessToken: reply.access_token, refreshToken, expiresAt: now + expiresIn * 1000 };
+  const accountId = typeof reply.account?.uuid === "string" && reply.account.uuid.length > 0 ? reply.account.uuid : undefined;
+  const emailValue = typeof reply.account?.email_address === "string"
+    ? reply.account.email_address.replace(/[\x00-\x1f\x7f]/g, "").trim().slice(0, 320)
+    : "";
+  const email = emailValue || undefined;
+  return {
+    accessToken: reply.access_token,
+    refreshToken,
+    expiresAt: now + expiresIn * 1000,
+    ...(accountId ? { accountId } : {}),
+    ...(email ? { email } : {}),
+  };
 }
 
 /** Exchanges a refresh token; the caller persists the result. */
@@ -102,6 +149,8 @@ export type ClaudeOAuthState = {
   finishedAt: string | null;
   ok: boolean | null;
   error: string | null;
+  /** Safe metadata for the account just added; no token or upstream UUID. */
+  account: ClaudeAccountSummary | null;
 };
 
 /**
@@ -121,8 +170,9 @@ export class ClaudeOAuthSession {
   private settle!: { resolve: (grant: ClaudeOAuthGrant) => void; reject: (error: Error) => void };
   private readonly grant: Promise<ClaudeOAuthGrant>;
   private timer: NodeJS.Timeout | null = null;
+  private exchanging = false;
   private finished = false;
-  private stateSnapshot: ClaudeOAuthState = { running: false, url: null, manual: false, startedAt: null, finishedAt: null, ok: null, error: null };
+  private stateSnapshot: ClaudeOAuthState = { running: false, url: null, manual: false, startedAt: null, finishedAt: null, ok: null, error: null, account: null };
 
   constructor(options: ClaudeOAuthOptions) {
     this.options = options;
@@ -131,8 +181,8 @@ export class ClaudeOAuthSession {
     });
     this.result = this.grant.then(
       (grant) => {
-        saveClaudeOAuthFile(options.home, grant);
-        this.stateSnapshot = { ...this.stateSnapshot, running: false, finishedAt: new Date().toISOString(), ok: true };
+        const account = saveClaudeOAuthAccount(options.home, grant);
+        this.stateSnapshot = { ...this.stateSnapshot, running: false, finishedAt: new Date().toISOString(), ok: true, account };
       },
       (error: Error) => {
         this.stateSnapshot = { ...this.stateSnapshot, running: false, finishedAt: new Date().toISOString(), ok: false, error: error.message };
@@ -167,12 +217,13 @@ export class ClaudeOAuthSession {
     }).toString();
     this.timer = setTimeout(() => this.fail(new Error("Claude sign-in timed out; start it again")), CLAUDE_OAUTH.timeoutMs);
     this.timer.unref();
-    this.stateSnapshot = { running: true, url: url.toString(), manual, startedAt: new Date().toISOString(), finishedAt: null, ok: null, error: null };
+    this.stateSnapshot = { running: true, url: url.toString(), manual, startedAt: new Date().toISOString(), finishedAt: null, ok: null, error: null, account: null };
     return { url: url.toString(), manual };
   }
 
   /** Accepts `code`, `code#state`, or the full redirect URL the browser landed on. */
   async submitCode(input: string): Promise<void> {
+    if (this.finished || this.exchanging) return;
     let code = input.trim();
     let state: string | null = null;
     try {
@@ -220,8 +271,9 @@ export class ClaudeOAuthSession {
           return;
         }
         if (error || !code) {
-          res.writeHead(400, { "content-type": "text/plain; charset=utf-8" }).end(`Claude sign-in failed: ${error}. You can close this tab.`);
-          this.fail(new Error(`Claude refused the sign-in: ${error}`));
+          const detail = redactErrorText(error ?? "missing authorization code", [], 200);
+          res.writeHead(400, { "content-type": "text/plain; charset=utf-8" }).end(`Claude sign-in failed: ${detail}. You can close this tab.`);
+          this.fail(new Error(`Claude refused the sign-in: ${detail}`));
           return;
         }
         res.writeHead(200, { "content-type": "text/plain; charset=utf-8" }).end("ClaudeRipple: Claude subscription connected. You can close this tab.");
@@ -237,6 +289,10 @@ export class ClaudeOAuthSession {
         const six = http.createServer(handler);
         six.once("error", () => {});
         six.listen(this.port, "::1", () => {
+          if (this.finished) {
+            six.close();
+            return;
+          }
           this.server6 = six;
         });
         resolve(true);
@@ -245,7 +301,8 @@ export class ClaudeOAuthSession {
   }
 
   private async exchange(code: string): Promise<void> {
-    if (this.finished) return;
+    if (this.finished || this.exchanging) return;
+    this.exchanging = true;
     try {
       const reply = await postToken(this.options.fetch ?? fetch, {
         grant_type: "authorization_code",

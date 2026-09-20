@@ -108,12 +108,17 @@ export type OpenAiCompatibleProvider = {
 };
 
 export type AnthropicProvider = {
-  /** Native Anthropic Messages API, available to the OpenAI ingress only. */
+  /** Native Anthropic Messages API. */
   type: "anthropic";
-  /** Console API key, or Claude Code's existing OAuth login read without refresh. */
+  /** Console API key, or Claude Code/ClaudeRipple OAuth accounts. */
   auth: "api-key" | "claude-code";
   /** Required for api-key unless ANTHROPIC_API_KEY is set. Never logged. */
   apiKey?: string;
+  /**
+   * Route Claude app/CLI Messages calls through the Claude OAuth account pool. Opt-in so existing
+   * native providers remain OpenAI-ingress-only and never start intercepting Claude traffic.
+   */
+  accountPool?: boolean;
   models?: ProviderModel[];
 };
 
@@ -307,9 +312,9 @@ export function validate(c: Config): string[] {
       else r.fallbacks.forEach((f, i) => {
         if (!f || typeof f !== "object") { errors.push(`route ${alias}: fallback ${i} must be an object`); return; }
         if (!c.providers[f.provider]) errors.push(`route ${alias}: fallback ${i} names unknown provider "${f.provider}"`);
-        // A native `anthropic` provider answers the OpenAI ingress only; a slot pointing at one
-        // makes every request 400 (§5). It is refused as a primary, so refuse it here too.
-        else if (c.providers[f.provider]!.type === "anthropic") errors.push(`route ${alias}: fallback ${i} names "${f.provider}", which serves the OpenAI ingress only`);
+        // A native `anthropic` provider is routable only when its Claude OAuth pool is explicitly
+        // enabled. Existing native providers remain ingress-only to avoid hijacking Claude traffic.
+        else if (c.providers[f.provider]!.type === "anthropic" && !(c.providers[f.provider] as AnthropicProvider).accountPool) errors.push(`route ${alias}: fallback ${i} names "${f.provider}", which serves the OpenAI ingress only`);
         if (!f.model || typeof f.model !== "string") errors.push(`route ${alias}: fallback ${i} missing model`);
         if (f.provider === r.provider && f.model === r.model) errors.push(`route ${alias}: fallback ${i} repeats the primary target`);
       });
@@ -388,6 +393,8 @@ export function validate(c: Config): string[] {
     } else if (p.type === "anthropic") {
       if (p.auth !== "api-key" && p.auth !== "claude-code") errors.push(`provider ${name}: auth must be "api-key" or "claude-code"`);
       if (p.apiKey !== undefined && typeof p.apiKey !== "string") errors.push(`provider ${name}: apiKey must be a string`);
+      if (p.accountPool !== undefined && typeof p.accountPool !== "boolean") errors.push(`provider ${name}: accountPool must be true or false`);
+      if (p.accountPool && p.auth !== "claude-code") errors.push(`provider ${name}: accountPool requires auth "claude-code"`);
       if (p.models !== undefined && !validModels(p.models)) {
         errors.push(`provider ${name}: models must be entries with string id, optional string name, and optional string[] effortLevels`);
       }

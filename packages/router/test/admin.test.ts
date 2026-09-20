@@ -10,6 +10,7 @@ import { startAdmin } from "../src/admin.ts";
 import { RequestLog } from "../src/requestlog.ts";
 import { PRESETS } from "../src/presets.ts";
 import { saveClaudeAuthFile, saveClaudeOAuthFile } from "../src/providers/anthropic-token-file.ts";
+import { listClaudeAccounts, readClaudeAccountsFile, saveClaudeOAuthAccount } from "../src/providers/anthropic-accounts.ts";
 import { ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
 
 function makeCfg(overrides: Partial<Config> = {}): Config {
@@ -100,15 +101,52 @@ test("the Claude subscription sign-in runs from the GUI: start, state, pasted co
     assert.equal(finished.running, false);
     assert.equal(finished.ok, true);
     assert.equal(calls[0]?.grant_type, "authorization_code");
-    const stored = JSON.parse(fs.readFileSync(path.join(home, "claude-auth.json"), "utf8")) as { source: string; token: string };
-    assert.equal(stored.source, "oauth");
-    assert.equal(stored.token, "at-secret");
-    const after = (await (await fetch(`${base()}:${port}/api/claude-oauth`)).json()) as { source: string | null };
-    assert.equal(after.source, "token-file");
+    const stored = readClaudeAccountsFile(home);
+    assert.equal(stored.length, 1);
+    assert.equal(stored[0]!.token, "at-secret");
+    const after = (await (await fetch(`${base()}:${port}/api/claude-oauth`)).json()) as { source: string | null; account: { id: string } | null };
+    assert.equal(after.source, null, "pool accounts are separate from the current external Claude login");
+    assert.equal(after.account?.id, stored[0]!.id);
     assert.doesNotMatch(JSON.stringify(after), /at-secret|rt-secret/);
     const nothingWaiting = await fetch(`${base()}:${port}/api/claude-oauth/code`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: "x" }) });
     assert.equal(nothingWaiting.status, 409);
   }, { claudeOAuthFetch, openBrowser: (url) => { opened.push(url); return true; } });
+});
+
+test("Claude account admin endpoints expose no secrets and rename or remove only stored accounts", async () => {
+  await withAdmin(makeCfg(), async ({ port, home }) => {
+    const account = saveClaudeOAuthAccount(home, {
+      accessToken: "admin-access-secret",
+      refreshToken: "admin-refresh-secret",
+      expiresAt: Date.now() + 3_600_000,
+      accountId: "upstream-account-secret",
+      email: "person@example.test",
+    });
+    const listed = await fetch(`${base()}:${port}/api/claude-accounts`);
+    assert.equal(listed.status, 200);
+    const body = await listed.json() as { current: unknown; accounts: { id: string; label: string }[] };
+    assert.equal(body.current, null);
+    assert.deepEqual(body.accounts, [{ id: account.id, label: "person@example.test", email: "person@example.test", expiresAt: account.expiresAt, needsReauth: false }]);
+    assert.doesNotMatch(JSON.stringify(body), /admin-access-secret|admin-refresh-secret|upstream-account-secret/);
+
+    const renamed = await fetch(`${base()}:${port}/api/claude-accounts/${encodeURIComponent(account.id)}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ label: "  Personal  " }),
+    });
+    assert.equal(renamed.status, 200);
+    assert.equal(listClaudeAccounts(home)[0]!.label, "Personal");
+
+    const current = await fetch(`${base()}:${port}/api/claude-accounts/current`, { method: "DELETE" });
+    assert.equal(current.status, 409);
+    const arbitrary = await fetch(`${base()}:${port}/api/claude-accounts/not-a-local-id`, { method: "DELETE" });
+    assert.equal(arbitrary.status, 400);
+    const removed = await fetch(`${base()}:${port}/api/claude-accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" });
+    assert.equal(removed.status, 200);
+    assert.deepEqual(listClaudeAccounts(home), []);
+    const missing = await fetch(`${base()}:${port}/api/claude-accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" });
+    assert.equal(missing.status, 404);
+  });
 });
 
 test("/readyz separates readiness from liveness and names each problem", async () => {
@@ -195,7 +233,7 @@ test("GET /api/status reports native Anthropic TCP reachability and token-file s
     const res = await fetch(`${base()}:${port}/api/status`);
     assert.equal(res.status, 200);
     const body = await res.json() as { providers: Record<string, { url: string; type: string; reachable: boolean; authSource: string | null }> };
-    assert.deepEqual(Object.keys(body.providers.native ?? {}).sort(), ["authSource", "reachable", "signedIn", "type", "url"]);
+    assert.deepEqual(Object.keys(body.providers.native ?? {}).sort(), ["accountCount", "authSource", "reachable", "signedIn", "type", "url"]);
     assert.equal(body.providers.native?.url, "https://api.anthropic.com");
     assert.equal(body.providers.native?.type, "anthropic");
     assert.equal(body.providers.native?.authSource, "token-file");
@@ -270,7 +308,7 @@ test("PUT /api/config rejects malformed JSON with 400", async () => {
 test("POST /api/providers/probe accepts native Claude Code auth and reports only the source name", async () => {
   await withAdmin(makeCfg(), async ({ port, home }) => {
     const missing = await fetch(`${base()}:${port}/api/providers/probe`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "anthropic", auth: "claude-code" }) });
-    assert.deepEqual(await missing.json(), { ok: false, auth: "missing", source: null, signedIn: null, models: [
+    assert.deepEqual(await missing.json(), { ok: false, auth: "missing", source: null, signedIn: null, accountCount: 0, models: [
       { id: "claude-fable-5-1", name: "Fable 5.1" }, { id: "claude-opus-5", name: "Opus 5" }, { id: "claude-sonnet-5", name: "Sonnet 5" }, { id: "claude-haiku-4-5", name: "Haiku 4.5" }, { id: "claude-fable-5", name: "Fable 5" }, { id: "claude-opus-4-8", name: "Opus 4.8" }, { id: "claude-opus-4-7", name: "Opus 4.7" }, { id: "claude-opus-4-6", name: "Opus 4.6" }, { id: "claude-sonnet-4-6", name: "Sonnet 4.6" },
     ] });
     saveClaudeAuthFile(home, "test-token", "2026-09-13T00:00:00.000Z");
@@ -589,6 +627,7 @@ test("GET / serves the UI index.html", async () => {
     assert.equal(res.status, 200);
     const text = await res.text();
     assert.match(text, /ClaudeRipple/);
+    assert.match(text, /<meta name="viewport" content="width=device-width, initial-scale=1" \/>/);
   });
 });
 
@@ -676,7 +715,7 @@ test("a POST from the GUI's own origin, or from a non-browser client, is allowed
 
 test("the Origin guard covers the other state-changing endpoints too", async () => {
   await withAdmin(makeCfg(), async ({ port }) => {
-    for (const p of ["/api/picker", "/api/agent-title", "/api/codex", "/api/claude-login", "/api/claude-logout", "/api/chatgpt-login", "/api/providers/probe"]) {
+    for (const p of ["/api/picker", "/api/agent-title", "/api/codex", "/api/claude-login", "/api/claude-logout", "/api/claude-accounts/fake", "/api/chatgpt-login", "/api/providers/probe"]) {
       const res = await fetch(`${base()}:${port}${p}`, { method: "POST", headers: { origin: "http://evil.example" } });
       assert.equal(res.status, 403, `${p} must refuse a cross-site POST`);
     }

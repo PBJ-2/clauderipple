@@ -5,7 +5,8 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { removeClaudeAuthFile, saveClaudeAuthFile } from "../../router/src/providers/anthropic-token-file.ts";
+import { saveClaudeAuthFile } from "../../router/src/providers/anthropic-token-file.ts";
+import { removeAllClaudeAccounts } from "../../router/src/providers/anthropic-accounts.ts";
 
 function isSetupToken(value: string): boolean {
   return /^sk-ant-oat01-[A-Za-z0-9._~-]{16,}$/.test(value);
@@ -111,5 +112,5 @@ export function claudeLogin(home: string, options: { binary?: string; pathValue?
 }
 
 export function claudeLogout(home: string): boolean {
-  return removeClaudeAuthFile(home);
+  return removeAllClaudeAccounts(home);
 }

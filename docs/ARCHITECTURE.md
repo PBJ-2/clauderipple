@@ -522,8 +522,9 @@ chat is out of reach for every approach, ours included.
   `api.anthropic.com/v1/messages` request (expires after 12 hours and vanishes
   on router restart), (2) `CLAUDE_CODE_OAUTH_TOKEN`, (3) Claude Code Keychain
   service `Claude Code-credentials`.claudeAiOauth, (4)
-  `~/.claude/.credentials.json`, then (5) ClaudeRipple's own
-  `<home>/claude-auth.json` setup-token file. The observed source retains only
+  `~/.claude/.credentials.json`, (5) ClaudeRipple's own
+  `<home>/claude-auth.json` setup-token file, then (6) OAuth accounts added to
+  `<home>/claude-accounts.json`. The observed source retains only
   `Authorization`, `anthropic-version`, `anthropic-beta`, `user-agent`,
   `x-app`, `x-stainless-*`, and `anthropic-client-*` request headers and sends
   that exact set upstream. It is never persisted, logged, included in RequestLog
@@ -545,17 +546,38 @@ chat is out of reach for every approach, ours included.
   `https://platform.claude.com/oauth/code/callback` and the user pastes
   `code#state` (or the redirect URL). State and PKCE verifier are per attempt; a callback
   with the wrong state is refused without ending the attempt; an attempt
-  expires after 5 minutes. The grant (access + refresh token, expiry) is stored
-  only in `<home>/claude-auth.json` (mode `0600`) as `source: "oauth"`; the
-  ingress refreshes it up to 5 minutes before expiry (one refresh shared by
-  concurrent requests) and a failed refresh becomes a clear 401 rather than a
-  dead token. The GUI drives the same flow through `POST/GET /api/claude-oauth`
-  and `POST /api/claude-oauth/code`; no token value ever appears in an admin
-  response or a log line. `--setup-token` keeps the previous path (`claude
-  setup-token` from a terminal, long-lived token, `source: "setup-token"`).
-  `claude-logout` removes the file either way. Wire facts are behaviorally
-  measured (the reference implementations do the same flow); they are not an
-  Anthropic guarantee, and reuse of a subscription is subject to its terms.
+  expires after 5 minutes. Each grant (access + refresh token, expiry) is stored
+  only in `<home>/claude-accounts.json` (mode `0600`). The upstream account UUID
+  is hashed before storage and used only to replace the same account on re-login;
+  admin surfaces expose a local opaque id, label, optional email and health, never
+  either token or the upstream UUID. The GUI drives the same flow through
+  `POST/GET /api/claude-oauth` and `POST /api/claude-oauth/code`; another sign-in
+  adds an account rather than overwriting an unrelated one. An existing OAuth
+  grant in the old `<home>/claude-auth.json` remains readable and is migrated
+  atomically on the first pool mutation. `--setup-token` keeps that old file for
+  its terminal-only long-lived token path; `claude-logout` removes both stores.
+  Wire facts are behaviorally measured (the reference implementations do the
+  same flow); they are not an Anthropic guarantee, and reuse of one or multiple
+  subscriptions is subject to Anthropic's terms and possible account restrictions.
+- A native `anthropic` provider remains OpenAI-ingress-only unless it explicitly
+  sets `accountPool: true`. With that flag and `auth: "claude-code"`, Claude
+  Desktop/Code Messages requests stay unmodified except for the routed model and
+  selected identity. The runtime pool is ordered current observed/env/Claude Code
+  login first, then ClaudeRipple-owned accounts. A conversation is sticky to the
+  account that answered so its prompt-cache prefix survives, including across that
+  account's token refresh. Before response headers reach the client, 401, 429, 402
+  and retryable HTTP failures such as 5xx may retry the same request on an untried
+  account; request-shape errors such as 400 do not, and no failover occurs after a
+  response starts. A 401 permanently marks only that stored token generation as
+  needing re-login; 429 and transient failures cool down without deleting it. Refresh
+  is per-account process-wide single-flight and persisted with compare-and-swap so a
+  stale refresh or rejection cannot overwrite a newer sign-in. Credential health uses
+  a token-generation runtime id while affinity and admin APIs use the durable local
+  account id, so a fresh login cannot inherit an old quarantine or lose its cache claim.
+  Retry replaces every previous identity header, and every sent
+  secret is added to error redaction. The OpenAI ingress for Codex uses the same
+  ordered projection only to choose one available credential; it deliberately does
+  not rotate accounts or retry a turn.
 - Readiness vs liveness (0.1.2): `/api/status.readiness` and `GET /readyz`
   (200 or 503 + `retry-after: 5`) list what stands between a request and a
   model: `settings` (Claude Code not pointed at us), `upstream` (consecutive
@@ -686,6 +708,7 @@ what we do not have yet — so that adding a provider does not start with readin
 | "Connect Claude subscription" from the tray/GUI failed with "setup-token failed": `claude setup-token` is an interactive terminal flow and neither place has a terminal (2026-09-15, Windows) | Without a TTY the error says to run `clauderipple claude-login` in a terminal and that an existing Claude Code login is reused anyway; other failures carry what `claude` printed. A button that cannot work where it is must say where it works. |
 | Closing Claude Desktop's window does not quit it; reopening hits `Not main instance, returning early` and the app silently keeps the OLD proxy setting. The user sees "I configured it and nothing happened" with no error anywhere (2026-09-14) | Tell the user that closing the window is not enough, and detect it: with picker mode on, the router knows whether the app is actually routing through it. Surface "configured, but the app has not restarted yet" rather than letting it fail silently. |
 | A subagent prompt carried `[[ripple: deepseek@high]]` while `aliases` had no `deepseek`; the marker resolved to a model id nobody declared, `resolve()` returned null, and the request went to Anthropic as an ordinary `PASS` — 30 × `404 model: deepseek-v4.1-flash` over two days, read by the session as "the model stopped working" (2026-09-19/20) | A non-`claude-*` model this router cannot route is **refused here, by name**: `400 invalid_request_error "ClaudeRipple: <reason>"`, tag `REFUSE`, reason in the request record (`unroutableReason`: undeclared / declared by two providers / ingress-only owner / unknown marker alias / alias to an undeclared model). Native `claude-*` ids keep passing through untouched — Claude traffic is never hijacked to say no. And the marker alias table is derived from the agent files themselves (§4), so an agent that exists is an alias that resolves. |
+| A rejected Claude account remained quarantined after its access/refresh token was replaced, because runtime health used the durable account id; keying affinity on that same generation id would instead move a healthy conversation after every refresh (found during multi-account implementation, 2026-09-20) | Runtime health keys on `<local-owner>:<token-generation-digest>`, while conversation affinity and admin state key on the durable local owner. A refresh or re-login receives fresh health without losing its prompt-cache claim; compare-and-swap prevents an old rejection from marking the new generation. |
 | The worker registry was four places that did not know each other — `providers.*.models`, `aliases`, `~/.claude/agents/*.md`, and prose in CLAUDE.md — and every new provider needed all four edited by hand; the one left out was the one that failed (2026-09-19, DeepSeek) | One source: a ticked model *is* a worker. Agent files and marker aliases are generated from `config.json` (§4 "worker definitions"); nothing about a worker is written twice. |
 | ChatGPT prompt-cache hit fell from 93% (2026-09-13) to 9% (2026-09-20) with nothing in our request changing — the backend had started keying the cache on the conversation's identity (`session-id`/`thread-id`/`x-client-request-id`/`client_metadata`), which we never sent; `prompt_cache_key` alone no longer earned a write | The adapter states the conversation's identity the way the Codex CLI does (§4) and echoes `x-codex-turn-state`. The acceptance metric (≥90% on translated providers) is watched per day in `requests.jsonl`; a fall with an unchanged request means the wire changed under us, and the reference to diff against is the real CLI captured through a local proxy, not our own memory of the protocol. |
 | Remote Control registration failed locally with 405 before Anthropic saw it: Claude Code 2.1.275 uses HTTPS absolute-form (`POST https://api.anthropic.com/v1/environments/bridge HTTP/1.1`) rather than CONNECT for registration, polling and heartbeats, while the forward-proxy socket accepted CONNECT only (issue #10, Windows 11) | Accept valid HTTPS absolute-form, strip proxy-only headers, replace Host, rewrite only the target to origin-form, and relay one request over direct TLS outside model routing. Force `Connection: close`: reusing that TLS socket could send a later proxy-form request to the first origin. Parser tests plus a live local TLS origin verify body and credential preservation. |

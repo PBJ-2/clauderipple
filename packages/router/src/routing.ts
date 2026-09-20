@@ -72,10 +72,13 @@ export function resolve(model: unknown, body: unknown, cfg: Config): Resolved | 
     effort = model.slice(at + 1) || undefined;
   }
 
-  // A native `anthropic` provider serves the OpenAI ingress only; it speaks the Messages API with
-  // its own credentials and has nothing to translate for a caller that already speaks it. A rule
-  // naming one is ignored here so the request passes through to Anthropic instead of failing.
-  const ingressOnly = (name: string): boolean => cfg.providers[name]?.type === "anthropic";
+  // Native Anthropic stays ingress-only unless the operator explicitly enables its OAuth account
+  // pool. That opt-in is what makes routing useful: the same Messages body goes to Anthropic under a
+  // selected account, with affinity and failover. Existing configs keep byte-for-byte passthrough.
+  const ingressOnly = (name: string): boolean => {
+    const provider = cfg.providers[name];
+    return provider?.type === "anthropic" && !provider.accountPool;
+  };
 
   const direct = cfg.direct.find((d) => base.startsWith(d.prefix));
   if (direct && ingressOnly(direct.provider)) return null;
@@ -203,7 +206,8 @@ export function unroutableReason(model: unknown, body: unknown, cfg: Config): st
   }
   if (owners.length === 1) {
     const owner = owners[0]!;
-    if (cfg.providers[owner]?.type === "anthropic") return `provider "${owner}" is ingress-only`;
+    const provider = cfg.providers[owner];
+    if (provider?.type === "anthropic" && !provider.accountPool) return `provider "${owner}" is ingress-only`;
     return null; // resolve() would have routed this; nothing to refuse.
   }
   // Nothing declares it. Say which name failed, and whether a marker introduced it.

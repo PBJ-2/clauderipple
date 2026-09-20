@@ -5,6 +5,8 @@
 import http from "node:http";
 import https from "node:https";
 import type { Socket } from "node:net";
+import os from "node:os";
+import path from "node:path";
 import type { Config, AnthropicCompatibleProvider, AnthropicProvider } from "../config.ts";
 import type { Logger } from "../log.ts";
 import { resolve } from "../routing.ts";
@@ -14,7 +16,8 @@ import { SseParser } from "../providers/chatgpt/sse.ts";
 import { ingressModels } from "./models.ts";
 import { requestId, type RequestLog, type RequestRecord, type RequestUsage } from "../requestlog.ts";
 import { credentialHeaderValues, redactErrorText } from "../redact.ts";
-import { CLAUDE_CODE_IDENTITY, ClaudeCodeAuthStore, fromClaudeCodeToolName, nativeAnthropicHeaders, observedAnthropicHeaders, toClaudeCodeToolName } from "../providers/anthropic.ts";
+import { CLAUDE_CODE_IDENTITY, fromClaudeCodeToolName, nativeAnthropicHeaders, toClaudeCodeToolName } from "../providers/anthropic.ts";
+import { ClaudeAccountAuthPool } from "../providers/anthropic-account-pool.ts";
 import { ObservedClaudeCodeAuth } from "../providers/anthropic-observed.ts";
 import {
   ResponsesEventMapper,
@@ -37,6 +40,9 @@ type IngressDeps = {
   /** Shared process-memory OAuth observation; never persisted or exposed by ingress. */
   observedClaudeCodeAuth?: ObservedClaudeCodeAuth;
   home?: string;
+  /** Test seams; production uses the local account projection and api.anthropic.com. */
+  claudeAccounts?: ClaudeAccountAuthPool;
+  nativeUpstream?: string;
 };
 
 export type IngressStats = {
@@ -127,16 +133,16 @@ export class OpenAiIngress {
   private readonly server: http.Server;
   private readonly agents = new Map<string, http.Agent | https.Agent>();
   private readonly sockets = new Set<Socket>();
-  private readonly claudeCodeAuth: ClaudeCodeAuthStore;
+  private readonly claudeAccounts: ClaudeAccountAuthPool;
   private readonly deps: IngressDeps;
   private draining = false;
 
   constructor(deps: IngressDeps) {
     this.deps = deps;
-    this.claudeCodeAuth = new ClaudeCodeAuthStore(undefined, {
+    this.claudeAccounts = deps.claudeAccounts ?? new ClaudeAccountAuthPool({
+      home: deps.home ?? (process.env.CLAUDERIPPLE_HOME?.trim() || path.join(os.homedir(), ".clauderipple")),
       ...(deps.observedClaudeCodeAuth ? { observed: deps.observedClaudeCodeAuth } : {}),
-      ...(deps.home ? { home: deps.home } : {}),
-      log: (line) => deps.log.info(line),
+      log: deps.log,
     });
     this.server = http.createServer({ maxHeaderSize: 64 * 1024 }, (req, res) => void this.handle(req, res));
     this.server.keepAliveTimeout = 65_000;
@@ -319,15 +325,17 @@ export class OpenAiIngress {
 
   private async forward(res: http.ServerResponse, provider: AnthropicCompatibleProvider | AnthropicProvider, wire: Json, model: string, chat: boolean, stream: boolean, onTerminal?: (outcome: Outcome) => void): Promise<Outcome> {
     const native = provider.type === "anthropic";
-    const upstream = new URL(native ? "https://api.anthropic.com" : provider.url);
+    const upstream = new URL(native ? (this.deps.nativeUpstream ?? "https://api.anthropic.com") : provider.url);
     const protocol = upstream.protocol === "https:" ? "https:" : "http:";
     const body = Buffer.from(JSON.stringify(wire));
     let authentication: Record<string, string>;
     if (native && provider.auth === "claude-code") {
-      await this.claudeCodeAuth.refreshIfNeeded();
-      const auth = this.claudeCodeAuth.get();
-      if (auth instanceof Error) return { status: 401, bytes: sendJson(res, 401, openAiError(auth.message, "authentication_error")), note: "Claude Code OAuth unavailable" };
-      authentication = auth.source === "observed" ? observedAnthropicHeaders(auth.observed) : nativeAnthropicHeaders(provider, auth.credentials);
+      // Codex ingress deliberately uses one credential per request and does not fail over. The shared
+      // projection preserves source precedence and keeps ClaudeRipple's added accounts as the fallback
+      // that the old single OAuth file provided before multi-account storage.
+      const credential = (await this.claudeAccounts.credentials())[0];
+      if (!credential) return { status: 401, bytes: sendJson(res, 401, openAiError("Claude login unavailable — connect a Claude subscription", "authentication_error")), note: "Claude OAuth unavailable" };
+      authentication = credential.headers;
     } else if (native) {
       try {
         authentication = nativeAnthropicHeaders(provider);
@@ -338,7 +346,7 @@ export class OpenAiIngress {
     const headers: Record<string, string> = { "content-type": "application/json", accept: stream ? "text/event-stream" : "application/json", "content-length": String(body.length), ...authentication };
     const lib = protocol === "https:" ? https : http;
     const response = await new Promise<http.IncomingMessage>((resolveP, reject) => {
-      const request = lib.request({ protocol, hostname: upstream.hostname, port: Number(upstream.port) || (protocol === "https:" ? 443 : 80), method: "POST", path: `${upstream.pathname.replace(/\/+$/, "")}/v1/messages`, headers, agent: this.agentFor(native ? "https://api.anthropic.com" : provider.url, protocol), ...(protocol === "https:" ? { servername: upstream.hostname } : {}) }, resolveP);
+      const request = lib.request({ protocol, hostname: upstream.hostname, port: Number(upstream.port) || (protocol === "https:" ? 443 : 80), method: "POST", path: `${upstream.pathname.replace(/\/+$/, "")}/v1/messages`, headers, agent: this.agentFor(upstream.origin, protocol), ...(protocol === "https:" ? { servername: upstream.hostname } : {}) }, resolveP);
       request.once("error", reject);
       res.once("close", () => request.destroy());
       request.end(body);

@@ -349,7 +349,7 @@ function help(): void {
   login             sign in to ChatGPT (opens your browser; tokens stay in the home dir)
   logout            forget the ChatGPT login made with "login"
   claude-login      connect a Claude subscription in the browser (--setup-token: via \`claude setup-token\`; --manual: paste the code)
-  claude-logout     remove ClaudeRipple's own Claude subscription credential
+  claude-logout     remove every Claude subscription added to ClaudeRipple
   picker on|off     show your mapped models by name in the Claude Desktop picker (trusts the CA in your login keychain, routes the app through ClaudeRipple)
   codex on|off      add/remove ClaudeRipple's local OpenAI provider and selection profile for Codex CLI
   agent-title on|off|status
@@ -457,11 +457,11 @@ try {
         await session.submitCode(code);
       }
       await session.result;
-      console.log(`✓ Claude subscription connected. Stored in ${homeDir()}/claude-auth.json; refreshed automatically.`);
+      console.log(`✓ Claude subscription added. Stored privately in ${homeDir()}/claude-accounts.json; refreshed automatically.`);
       break;
     }
     case "claude-logout":
-      console.log(claudeLogout(homeDir()) ? "✓ Claude subscription credential removed" : "no Claude subscription credential stored");
+      console.log(claudeLogout(homeDir()) ? "✓ ClaudeRipple Claude accounts removed" : "no ClaudeRipple Claude accounts stored");
       break;
     case "ui":
       ui();

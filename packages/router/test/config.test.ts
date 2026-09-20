@@ -29,9 +29,11 @@ test("validate accepts named anthropic-compatible model entries and rejects inva
   assert.ok(invalid.some((error) => error.includes("models must be entries")));
 });
 
-test("validate accepts native Anthropic API-key and Claude Code login providers", () => {
-  assert.deepEqual(validate({ ...DEFAULTS, providers: { api: { type: "anthropic", auth: "api-key" }, login: { type: "anthropic", auth: "claude-code", models: [{ id: "claude-sonnet-5" }] } } }), []);
+test("validate accepts native Anthropic providers and confines account pools to Claude login auth", () => {
+  assert.deepEqual(validate({ ...DEFAULTS, providers: { api: { type: "anthropic", auth: "api-key" }, login: { type: "anthropic", auth: "claude-code", accountPool: true, models: [{ id: "claude-sonnet-5" }] } } }), []);
   assert.ok(validate({ ...DEFAULTS, providers: { bad: { type: "anthropic", auth: "bad" as "api-key" } } }).some((error) => error.includes("auth must be")));
+  assert.ok(validate({ ...DEFAULTS, providers: { bad: { type: "anthropic", auth: "api-key", accountPool: true } } }).some((error) => error.includes('requires auth "claude-code"')));
+  assert.ok(validate({ ...DEFAULTS, providers: { bad: { type: "anthropic", auth: "claude-code", accountPool: "yes" as unknown as boolean } } }).some((error) => error.includes("must be true or false")));
 });
 
 test("validate accepts compatible caps and rejects invalid values", () => {

@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { CLAUDE_OAUTH, ClaudeOAuthSession, refreshClaudeOAuth } from "../src/providers/claude-oauth.ts";
+import { claudeAccountsPath, readClaudeAccountsFile } from "../src/providers/anthropic-accounts.ts";
 import { readClaudeAuthFile, saveClaudeOAuthFile } from "../src/providers/anthropic-token-file.ts";
 import { ClaudeCodeAuthStore, ClaudeCodeCredentialStore } from "../src/providers/anthropic.ts";
 
@@ -69,9 +70,14 @@ test("the authorize URL carries a PKCE challenge, and the loopback callback comp
   const challenge = crypto.createHash("sha256").update(String(exchange.code_verifier)).digest("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   assert.equal(challenge, u.searchParams.get("code_challenge"));
 
-  const stored = readClaudeAuthFile(home);
-  assert.deepEqual(stored, { token: "at-1", createdAt: stored!.createdAt, source: "oauth", refreshToken: "rt-1", expiresAt: 1_000_000 + 3600_000 });
-  assert.equal(fs.statSync(path.join(home, "claude-auth.json")).mode & 0o777, 0o600);
+  const [stored] = readClaudeAccountsFile(home);
+  assert.ok(stored);
+  assert.equal(stored.token, "at-1");
+  assert.equal(stored.refreshToken, "rt-1");
+  assert.equal(stored.expiresAt, 1_000_000 + 3600_000);
+  assert.equal(session.snapshot.account?.id, stored.id);
+  assert.doesNotMatch(JSON.stringify(session.snapshot), /at-1|rt-1/);
+  assert.equal(fs.statSync(claudeAccountsPath(home)).mode & 0o777, 0o600);
   // The listener is gone: the port is free again.
   const again = await new Promise<boolean>((r) => {
     const s = net.createServer();
@@ -125,6 +131,28 @@ test("manual mode uses the paste-the-code page and accepts code#state or the red
   fs.rmSync(home, { recursive: true, force: true });
 });
 
+test("overlapping code submissions exchange and store exactly once", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-claude-oauth-"));
+  let calls = 0;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const fetchImpl = async (): Promise<Response> => {
+    calls += 1;
+    await held;
+    return new Response(JSON.stringify({ access_token: "one-access", refresh_token: "one-refresh", expires_in: 3600 }), { status: 200 });
+  };
+  const session = new ClaudeOAuthSession({ home, manual: true, fetch: fetchImpl });
+  await session.start();
+  const first = session.submitCode("first");
+  const second = session.submitCode("second");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(calls, 1);
+  release();
+  await Promise.all([first, second, session.result]);
+  assert.equal(readClaudeAccountsFile(home).length, 1);
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
 test("a refused exchange fails the attempt with the endpoint's reason", async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-claude-oauth-"));
   const endpoint = tokenEndpoint({ error: "invalid_grant", error_description: "code already used" }, 400);
@@ -134,6 +162,24 @@ test("a refused exchange fails the attempt with the endpoint's reason", async ()
   await assert.rejects(session.result, /code already used/);
   assert.equal(readClaudeAuthFile(home), null);
   fs.rmSync(home, { recursive: true, force: true });
+});
+
+test("token endpoint errors cannot echo authorization or refresh secrets", async () => {
+  const refreshSecret = "refresh-secret-that-must-not-escape";
+  const endpoint = tokenEndpoint({
+    error: "invalid_grant",
+    error_description: `refresh_token=${refreshSecret}\nBearer reflected-secret-value`,
+  }, 400);
+  await assert.rejects(
+    refreshClaudeOAuth(refreshSecret, { fetch: endpoint.fetchImpl }),
+    (error: Error) => {
+      assert.doesNotMatch(error.message, new RegExp(refreshSecret));
+      assert.doesNotMatch(error.message, /reflected-secret-value/);
+      assert.match(error.message, /\[REDACTED\]/);
+      assert.doesNotMatch(error.message, /\n/);
+      return true;
+    },
+  );
 });
 
 test("the auth store refreshes our OAuth grant before it expires, once, and reports expiry after a failed refresh", async () => {

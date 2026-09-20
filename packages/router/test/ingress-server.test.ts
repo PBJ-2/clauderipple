@@ -6,6 +6,9 @@ import os from "node:os";
 import path from "node:path";
 import { OpenAiIngress } from "../src/ingress/server.ts";
 import { Logger } from "../src/log.ts";
+import { ClaudeAccountAuthPool } from "../src/providers/anthropic-account-pool.ts";
+import { saveClaudeOAuthAccount } from "../src/providers/anthropic-accounts.ts";
+import { ClaudeCodeAuthStore, ClaudeCodeCredentialStore } from "../src/providers/anthropic.ts";
 import { RequestLog } from "../src/requestlog.ts";
 import type { Config } from "../src/config.ts";
 
@@ -51,10 +54,10 @@ const requests = new RequestLog(path.join(root, "requests.jsonl"));
 const ingress = new OpenAiIngress({ config: () => config, log, requests });
 const ingressPort = await ingress.listen();
 
-async function call(pathname: string, body?: unknown): Promise<{ status: number; text: string }> {
+async function call(pathname: string, body?: unknown, port = ingressPort): Promise<{ status: number; text: string }> {
   const data = body === undefined ? undefined : JSON.stringify(body);
   return await new Promise((resolve, reject) => {
-    const req = http.request({ host: "127.0.0.1", port: ingressPort, path: pathname, method: body === undefined ? "GET" : "POST", headers: { authorization: "Bearer local", ...(data ? { "content-type": "application/json", "content-length": Buffer.byteLength(data) } : {}) } }, (res) => {
+    const req = http.request({ host: "127.0.0.1", port, path: pathname, method: body === undefined ? "GET" : "POST", headers: { authorization: "Bearer local", ...(data ? { "content-type": "application/json", "content-length": Buffer.byteLength(data) } : {}) } }, (res) => {
       let text = "";
       res.on("data", (chunk: Buffer) => { text += chunk.toString("utf8"); });
       res.on("end", () => resolve({ status: res.statusCode ?? 0, text }));
@@ -101,6 +104,40 @@ test("Responses reject previous_response_id to remain stateless", async () => {
   const response = await call("/v1/responses", { ...input, previous_response_id: "resp_old" });
   assert.equal(response.status, 400);
   assert.match(response.text, /previous_response_id unsupported/);
+});
+
+test("native ingress uses one added Claude account without enabling failover", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-ingress-claude-account-"));
+  const nativeSeen: http.IncomingHttpHeaders[] = [];
+  const native = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      nativeSeen.push(req.headers);
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ id: "msg_native", type: "message", role: "assistant", content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } }));
+    });
+  });
+  const nativePort = await listen(native);
+  saveClaudeOAuthAccount(home, { accessToken: "added-access", refreshToken: "added-refresh", expiresAt: Date.now() + 3_600_000, accountId: "added-account" });
+  const now = Date.now;
+  const noCurrent = new ClaudeCodeAuthStore(new ClaudeCodeCredentialStore(() => null, now), { home, env: {}, now });
+  const claudeAccounts = new ClaudeAccountAuthPool({ home, current: noCurrent, log });
+  const nativeConfig: Config = {
+    ...config,
+    providers: { claude: { type: "anthropic", auth: "claude-code", accountPool: true, models: [{ id: "claude-sonnet-5" }] } },
+    routes: { "claude-sonnet-5": { provider: "claude", model: "claude-sonnet-5" } },
+  };
+  const nativeIngress = new OpenAiIngress({ config: () => nativeConfig, log, requests, home, claudeAccounts, nativeUpstream: `http://127.0.0.1:${nativePort}` });
+  const nativeIngressPort = await nativeIngress.listen();
+  try {
+    const response = await call("/v1/responses", input, nativeIngressPort);
+    assert.equal(response.status, 200);
+    assert.equal(nativeSeen.length, 1);
+    assert.equal(nativeSeen[0]!.authorization, "Bearer added-access");
+  } finally {
+    await nativeIngress.drain(1);
+    await new Promise<void>((resolve) => native.close(() => resolve()));
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("cleanup", async () => {

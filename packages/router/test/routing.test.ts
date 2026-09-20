@@ -84,11 +84,20 @@ test("a model two providers carry still needs the operator to say which", () => 
   assert.equal(resolve("deepseek-v4-pro", body("hi"), declared), null, "guessing would send traffic to a vendor nobody chose");
 });
 
-test("the native anthropic provider's models are not a routing target", () => {
+test("the native anthropic provider's models are not a routing target until its account pool is enabled", () => {
   // The §5 failure this protects: a slot pointed at an ingress-only provider made every Claude
-  // request fail with 400. Auto-routing would have done it to a whole session without a rule.
+  // request fail with 400. Auto-routing is safe only after the explicit account-pool opt-in.
   assert.equal(resolve("claude-opus-5", body("hi"), declared), null);
   assert.equal(resolve("claude-haiku-4-5-20251001", body("hi"), declared), null, "dated form too");
+  const pooled: Config = {
+    ...declared,
+    providers: {
+      ...declared.providers,
+      anthropic: { type: "anthropic", auth: "claude-code", accountPool: true, models: [{ id: "claude-opus-5" }, { id: "claude-haiku-4-5" }] },
+    },
+  };
+  assert.equal(resolve("claude-opus-5", body("hi"), pooled)?.provider, "anthropic");
+  assert.equal(resolve("claude-haiku-4-5-20251001", body("hi"), pooled)?.provider, "anthropic");
 });
 
 test("rules still win over what a provider declares", () => {

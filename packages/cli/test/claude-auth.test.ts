@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { claudeAuthPath, readClaudeAuthFile } from "../../router/src/providers/anthropic-token-file.ts";
+import { claudeAccountsPath, saveClaudeOAuthAccount } from "../../router/src/providers/anthropic-accounts.ts";
 import { claudeLogin, claudeLogout, parseSetupToken } from "../src/claude-auth.ts";
 
 test("claude-login invokes PATH claude setup-token and saves only a 0600 credential file", () => {
@@ -25,8 +26,10 @@ test("claude-login invokes PATH claude setup-token and saves only a 0600 credent
   assert.doesNotMatch(output, new RegExp(token));
   assert.deepEqual(readClaudeAuthFile(home), { token, createdAt: readClaudeAuthFile(home)!.createdAt, source: "setup-token" });
   assert.equal(fs.statSync(claudeAuthPath(home)).mode & 0o777, 0o600);
-  assert.equal(execFileSync(process.execPath, [cli, "claude-logout"], { encoding: "utf8", env: { ...process.env, PATH: bin, CLAUDERIPPLE_HOME: home } }), "✓ Claude subscription credential removed\n");
+  saveClaudeOAuthAccount(home, { accessToken: "access", refreshToken: "refresh", expiresAt: Date.now() + 60_000, accountId: "second" });
+  assert.equal(execFileSync(process.execPath, [cli, "claude-logout"], { encoding: "utf8", env: { ...process.env, PATH: bin, CLAUDERIPPLE_HOME: home } }), "✓ ClaudeRipple Claude accounts removed\n");
   assert.equal(fs.existsSync(claudeAuthPath(home)), false);
+  assert.equal(fs.existsSync(claudeAccountsPath(home)), false);
 });
 
 test("setup-token parser rejects prose and extracts only explicit long tokens", () => {

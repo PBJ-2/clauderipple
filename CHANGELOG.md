@@ -4,6 +4,18 @@
 
 ### Added
 
+- **Claude subscription account rotation.** A native Anthropic provider can opt in
+  with `accountPool: true` and use the current Claude Code/Desktop login followed by
+  every OAuth account added through ClaudeRipple. Conversations stay on the account
+  that answered to preserve the prompt cache; before any response reaches the client,
+  429, 401 and transient upstream failures can move the same turn to the next account.
+  Stored grants refresh independently with single-flight and compare-and-swap safety,
+  rejected accounts are isolated until re-login, and the dashboard can rename or
+  remove them without exposing a token or upstream account id. Existing single-account
+  OAuth grants migrate to the private `~/.clauderipple/claude-accounts.json` file on
+  the first pool write. This applies to native Claude Desktop/Claude Code Messages;
+  the translated OpenAI ingress for Codex picks one highest-priority available login
+  per request but deliberately does not rotate accounts.
 - **ChatGPT subscription web search.** When `webSearch` explicitly names a
   ChatGPT provider, Claude Code's separate search request uses the subscription's
   Codex hosted-search tool instead of silently consuming Anthropic quota. The

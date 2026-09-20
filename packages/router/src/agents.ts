@@ -198,7 +198,7 @@ export function syncAgentFiles(cfg: Config, dir: string, log?: AgentLog, opts: S
   // Targets: each model declared by exactly one provider, that provider not ingress-only.
   const targets = new Map<string, { modelId: string; provider: string; suffix: string }>();
   for (const [providerName, provider] of Object.entries(cfg.providers)) {
-    if (provider.type === "anthropic") continue;
+    if (provider.type === "anthropic" && !provider.accountPool) continue;
     for (const model of provider.models ?? []) {
       const owners = declaredBy(model.id, cfg);
       if (owners.length !== 1) {

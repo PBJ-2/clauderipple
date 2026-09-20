@@ -290,6 +290,12 @@ label.check input { width: auto; }
 .provider-state > .provider-error { min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
 .provider-status { display: grid; grid-template-columns: minmax(120px, 1fr) auto; gap: 8px; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--border); }
 .provider-status:last-child { border-bottom: none; }
+.claude-account-list { display: grid; gap: 7px; margin-top: 10px; }
+.claude-account-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 9px; align-items: center; padding: 9px 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); }
+.claude-account-copy { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.claude-account-copy strong, .claude-account-copy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.claude-account-actions { display: flex; gap: 6px; }
+button.btn.compact { padding: 4px 9px; font-size: 14px; }
 .empty-card { color: var(--muted); padding: 28px 16px; border: 1px dashed var(--border); border-radius: 8px; text-align: center; }
 .toast-raw { margin-top: 5px; color: var(--muted); font: 10.5px/1.35 var(--mono); word-break: break-word; }
 .modal-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 18px; background: color-mix(in srgb, #000 38%, transparent); }
@@ -332,6 +338,8 @@ label.check input { width: auto; }
   .row { align-items: flex-start; flex-direction: column; gap: 4px; }
   .row .v { text-align: left; }
   .provider-status { grid-template-columns: 1fr; }
+  .claude-account-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .claude-account-actions { grid-column: 1 / -1; }
   .modal { padding: 19px 16px; }
 }
 

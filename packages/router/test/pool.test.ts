@@ -50,6 +50,20 @@ test("a conversation keeps its credential — moving it would cost the prompt ca
   assert.equal(pool.pick("p", all, "conv-2")?.id, "a", "a healthy credential is not spread for its own sake");
 });
 
+test("a token refresh keeps the conversation on its durable account without inheriting runtime health", () => {
+  const c = clock();
+  const pool = new CredentialPool({ now: c.now });
+  const old: Credential = { id: "account-a:old", ownerId: "account-a", headers: {} };
+  const other: Credential = { id: "account-b:generation", ownerId: "account-b", headers: {} };
+
+  assert.equal(pool.pick("p", [old, other], "conv")?.id, old.id);
+  const fresh: Credential = { id: "account-a:fresh", ownerId: "account-a", headers: {} };
+  assert.equal(pool.pick("p", [other, fresh], "conv")?.id, fresh.id, "the owner claim survives token rotation even when order changes");
+
+  pool.penalise("p", old.id, 401);
+  assert.equal(pool.pick("p", [other, fresh], "conv")?.id, fresh.id, "the fresh generation does not inherit the old generation's quarantine");
+});
+
 test("a failure moves the conversation on, and the parked credential is skipped", () => {
   const c = clock();
   const pool = new CredentialPool({ now: c.now });

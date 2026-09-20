@@ -30,6 +30,7 @@ import { openBrowser } from "../../cli/src/browser.ts";
 import { caTrusted, currentAppProxy } from "../../cli/src/picker.ts";
 import { ClaudeOAuthSession, type ClaudeOAuthState } from "./providers/claude-oauth.ts";
 import { readClaudeAuthFile } from "./providers/anthropic-token-file.ts";
+import { listClaudeAccounts, removeClaudeAccount, renameClaudeAccount } from "./providers/anthropic-accounts.ts";
 
 const MAX_BODY = 1024 * 1024;
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -253,7 +254,7 @@ export function chatgptSignedIn(mode: string | undefined): boolean {
 
 async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): Promise<Record<string, unknown>> {
   const cfg = deps.config();
-  const providers: Record<string, { url: string; type: string; reachable: boolean; authSource?: "observed" | "env" | "keychain" | "credentials-file" | "token-file" | null; signedIn?: "oauth" | "setup-token" | null }> = {};
+  const providers: Record<string, { url: string; type: string; reachable: boolean; authSource?: "observed" | "env" | "keychain" | "credentials-file" | "token-file" | null; signedIn?: "oauth" | "setup-token" | null; accountCount?: number }> = {};
   // Keyed in the order the config lists them. Assigning inside the Promise.all callbacks ordered
   // them by whichever TCP check answered first, so the Health list reshuffled on every poll.
   const checked = await Promise.all(
@@ -276,7 +277,8 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
         ...(p.type === "anthropic"
           ? {
               authSource: p.auth === "claude-code" ? claudeAuthStore(deps).describeSource() : null,
-              signedIn: p.auth === "claude-code" ? (readClaudeAuthFile(homeDir())?.source ?? null) : null,
+              signedIn: p.auth === "claude-code" ? (listClaudeAccounts(homeDir()).length > 0 ? "oauth" : readClaudeAuthFile(homeDir())?.source ?? null) : null,
+              accountCount: p.auth === "claude-code" ? listClaudeAccounts(homeDir()).length : 0,
             }
           : {}),
       }] as const;
@@ -469,11 +471,14 @@ async function probeAnthropicApiKey(apiKey: string, probeFetch: (url: string, in
   }
 }
 
-function probeClaudeCodeAuth(deps: AdminDeps): { ok: boolean; auth: "ok" | "missing"; source: "observed" | "env" | "keychain" | "credentials-file" | "token-file" | null; signedIn: "oauth" | "setup-token" | null; models: ModelEntry[] } {
+function probeClaudeCodeAuth(deps: AdminDeps): { ok: boolean; auth: "ok" | "missing"; source: "observed" | "env" | "keychain" | "credentials-file" | "token-file" | null; signedIn: "oauth" | "setup-token" | null; accountCount: number; models: ModelEntry[] } {
   const source = claudeAuthStore(deps).describeSource();
-  // Our own sign-in is reported separately: a Claude Desktop session outranks it, and without this
-  // the screen would answer a finished sign-in with the source it was already showing.
-  return { ok: source !== null, auth: source ? "ok" : "missing", source, signedIn: readClaudeAuthFile(homeDir())?.source ?? null, models: CLAUDE_MODEL_FALLBACK };
+  // Our own accounts are reported separately: a Claude Desktop session can outrank them, and without
+  // this the screen would answer a finished sign-in with the source it was already showing.
+  const accounts = listClaudeAccounts(homeDir());
+  const hasUsableAccount = accounts.some((account) => !account.needsReauth && account.expiresAt > Date.now());
+  const signedIn = accounts.length > 0 ? "oauth" : readClaudeAuthFile(homeDir())?.source ?? null;
+  return { ok: source !== null || hasUsableAccount, auth: source !== null || hasUsableAccount ? "ok" : "missing", source, signedIn, accountCount: accounts.length, models: CLAUDE_MODEL_FALLBACK };
 }
 
 function chatCompletionsUrl(base: string): string {
@@ -865,10 +870,61 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         sendJson(res, 200, { started: true });
         return;
       }
+      // Safe account metadata only. The current Claude Code/Desktop source remains externally owned;
+      // ClaudeRipple accounts can be renamed or removed by their local opaque id.
+      if (pathname === "/api/claude-accounts" && method === "GET") {
+        const source = claudeAuthStore(deps).describeSource();
+        sendJson(res, 200, {
+          current: source ? { id: "current", label: "Current Claude login", source, external: true } : null,
+          accounts: listClaudeAccounts(homeDir()),
+        });
+        return;
+      }
+      if (pathname.startsWith("/api/claude-accounts/") && (method === "PATCH" || method === "DELETE")) {
+        let id: string;
+        try {
+          id = decodeURIComponent(pathname.slice("/api/claude-accounts/".length));
+        } catch {
+          sendJson(res, 400, { error: "invalid account id" });
+          return;
+        }
+        const validId = id === "legacy" || /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
+        if (!validId || id === "current") {
+          sendJson(res, id === "current" ? 409 : 400, { error: id === "current" ? "the current Claude login is managed by Claude Code or Claude Desktop" : "invalid account id" });
+          return;
+        }
+        if (method === "DELETE") {
+          if (!removeClaudeAccount(homeDir(), id)) {
+            sendJson(res, 404, { error: "Claude account not found" });
+            return;
+          }
+          deps.log.info(`admin: removed Claude account ${id.slice(0, 8)}`);
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+        let label: unknown;
+        try {
+          label = (JSON.parse((await readBody(req)).toString("utf8")) as { label?: unknown }).label;
+        } catch {
+          sendJson(res, 400, { error: "invalid JSON" });
+          return;
+        }
+        if (typeof label !== "string" || !label.trim()) {
+          sendJson(res, 400, { error: "expected {label: non-empty string}" });
+          return;
+        }
+        if (!renameClaudeAccount(homeDir(), id, label)) {
+          sendJson(res, 404, { error: "Claude account not found" });
+          return;
+        }
+        deps.log.info(`admin: renamed Claude account ${id.slice(0, 8)}`);
+        sendJson(res, 200, { ok: true });
+        return;
+      }
       // Claude subscription sign-in of our own (browser, PKCE). The GUI starts it, polls the state,
       // and pastes the code when the loopback port could not be used. Tokens never leave the router.
       if (pathname === "/api/claude-oauth" && method === "GET") {
-        const state: ClaudeOAuthState & { source: string | null } = { ...(claudeOAuth?.snapshot ?? { running: false, url: null, manual: false, startedAt: null, finishedAt: null, ok: null, error: null }), source: claudeAuthStore(deps).describeSource() };
+        const state: ClaudeOAuthState & { source: string | null } = { ...(claudeOAuth?.snapshot ?? { running: false, url: null, manual: false, startedAt: null, finishedAt: null, ok: null, error: null, account: null }), source: claudeAuthStore(deps).describeSource() };
         sendJson(res, 200, state);
         return;
       }

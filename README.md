@@ -171,7 +171,13 @@ you map go to your provider, everything else goes to Anthropic byte for byte.
   a Claude name.
 - **Claude in the Codex app and Codex CLI.** A local OpenAI-compatible endpoint that
   Codex treats as a provider; Claude models appear in Codex's own model list. Uses
-  your Claude Code login or an Anthropic API key.
+  your current Claude Code login or an Anthropic API key.
+- **Multiple Claude accounts without breaking the prompt cache.** Opt a native Claude
+  provider into account rotation, add subscriptions from the dashboard, and each
+  conversation stays on the account that answered. Before the response starts, a
+  quota or authentication refusal moves that turn to the next account. This native
+  Claude Desktop/Code path is separate from the translated Codex ingress, which picks
+  one available login and does not rotate accounts.
 - **The full Claude Code harness, untouched.** Skills, hooks, MCP, `CLAUDE.md`,
   subagents, plan mode, Remote Control on your phone: nothing is turned off.
 - **Correct by construction.** Prompt caching preserved (Anthropic cache breakpoints
@@ -358,7 +364,7 @@ provider you configured is available the same way.
 | DeepSeek, Kimi, Z.ai GLM, MiniMax, Qwen (intl / cn) | Anthropic-compatible | API key | preset | verified against vendor docs |
 | xAI Grok, Mistral, Groq, Together, Fireworks | OpenAI-compatible | API key | discovered | translated (Chat Completions / Responses) |
 | Ollama, LM Studio | OpenAI-compatible, local | none | discovered | |
-| Anthropic | native | Claude Code login or API key | Claude models | for the Codex side |
+| Anthropic | native | Claude login(s) or API key | Claude models | optional sticky rotation for Claude Desktop/Code; Codex picks one login |
 | Anything else | custom | your choice | discovered | any Anthropic- or OpenAI-compatible endpoint |
 
 Requests to compatible providers are cleaned of Anthropic-only fields
@@ -390,8 +396,9 @@ Details with sources: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 ## Privacy
 
 Everything runs on 127.0.0.1. API keys live in `~/.clauderipple/config.json`
-(0600). The only network destinations are the providers you configure. There is no
-telemetry.
+and added Claude OAuth grants in `~/.clauderipple/claude-accounts.json` (both
+0600). Admin APIs and logs expose neither tokens nor upstream account ids. The only
+network destinations are the providers you configure. There is no telemetry.
 
 ## Status: alpha
 

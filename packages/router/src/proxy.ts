@@ -40,6 +40,7 @@ import { injectPickerModels, isBootstrapPath } from "./picker.ts";
 import { ResponseUsageTap, type RequestLog, type RequestRecord, type RequestUsage } from "./requestlog.ts";
 import { credentialHeaderValues, redactErrorText, redactHeaders } from "./redact.ts";
 import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
+import { ClaudeAccountAuthPool } from "./providers/anthropic-account-pool.ts";
 
 const MAX_BODY = 64 * 1024 * 1024;
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "host", "content-length"]);
@@ -89,12 +90,16 @@ export function absoluteProxyRequest(header: Buffer): AbsoluteProxyRequest | nul
 }
 
 /**
- * The same header list with one credential swapped for another. Only the names the replacement
- * carries are touched, so anything else the provider needs — a version, a beta flag, an account id
- * it does not authenticate with — survives the swap.
+ * The same header list with one credential swapped for another. Names carried by either credential
+ * are removed first: an observed Claude session can have fingerprint headers that a stored login
+ * does not, and leaving those behind would combine two distinct client identities on the retry.
  */
-export function withCredential(headers: readonly string[], credential: Record<string, string>): string[] {
-  const replaced = new Set(Object.keys(credential).map((k) => k.toLowerCase()));
+export function withCredential(
+  headers: readonly string[],
+  credential: Record<string, string>,
+  previous: Record<string, string> = {},
+): string[] {
+  const replaced = new Set([...Object.keys(previous), ...Object.keys(credential)].map((k) => k.toLowerCase()));
   const out: string[] = [];
   for (let i = 0; i < headers.length; i += 2) {
     if (replaced.has(headers[i]!.toLowerCase())) continue;
@@ -142,6 +147,9 @@ export type ProxyDeps = {
   agentDir?: string;
   /** TLS dialer for absolute-form proxy requests. Production uses node:tls; integration tests inject a local CA. */
   tlsConnect?: (options: tls.ConnectionOptions) => tls.TLSSocket;
+  /** Native Anthropic upstream seams for integration tests; production always uses port 443 and the default agent. */
+  upstreamAgent?: https.Agent;
+  upstreamPort?: number;
 };
 
 export type Stats = {
@@ -164,6 +172,7 @@ export class Proxy {
   private readonly providerAgents = new Map<string, http.Agent | https.Agent>();
   private readonly chatgptAdapters = new Map<string, { key: string; adapter: ChatGptAdapter }>();
   private readonly openaiAdapters = new Map<string, { key: string; adapter: OpenAiCompatibleAdapter }>();
+  private readonly claudeAccounts: ClaudeAccountAuthPool;
   private readonly deps: ProxyDeps;
   /**
    * Cooldowns, quarantines and conversation stickiness for provider credentials. In memory: a
@@ -223,6 +232,11 @@ export class Proxy {
 
   constructor(deps: ProxyDeps) {
     this.deps = deps;
+    this.claudeAccounts = new ClaudeAccountAuthPool({
+      home: deps.home,
+      log: deps.log,
+      ...(deps.observedClaudeCodeAuth ? { observed: deps.observedClaudeCodeAuth } : {}),
+    });
     this.httpServer = http.createServer({ maxHeaderSize: 64 * 1024 }, (req, res) => {
       void this.handle(req, res);
     });
@@ -591,7 +605,7 @@ export class Proxy {
     /** The credential this attempt is using, and so the one a failure is charged to. */
     let chosen: Credential | null = null;
     let penalised: { provider: string; id: string } | null = null;
-    let target: { protocol: "http:" | "https:"; host: string; port: number; agent: http.Agent | https.Agent; extraHeaders: Record<string, string>; basePath?: string; dropClientAuth?: boolean };
+    let target: { protocol: "http:" | "https:"; host: string; port: number; agent: http.Agent | https.Agent; extraHeaders: Record<string, string>; basePath?: string; dropClientAuth?: boolean; dropHeaders?: Set<string>; dropHeaderPrefixes?: string[] };
     if (route && json) {
       const provider = cfg.providers[route.provider];
       if (!provider) {
@@ -653,14 +667,41 @@ export class Proxy {
         }
         return;
       }
-      // Unreachable in practice: resolve() drops rules naming a native provider so the request
-      // passes through instead. Kept as a guard — reaching a native endpoint from here would send
-      // it a request assembled for a translating provider.
       if (provider.type === "anthropic") {
-        finish("400", 0, "native Anthropic provider is available through OpenAI ingress only", false);
-        res.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({ error: { type: "invalid_request_error", message: "native Anthropic provider is available through OpenAI ingress only" } }));
-        return;
-      }
+        if (!provider.accountPool || provider.auth !== "claude-code") {
+          finish("400", 0, "native Anthropic provider is available through OpenAI ingress only", false);
+          res.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({ error: { type: "invalid_request_error", message: "native Anthropic provider is available through OpenAI ingress only" } }));
+          return;
+        }
+        // Native Messages need no translation. Only authentication changes, so server-side threads,
+        // prompt caching, beta features and the client's exact tool contract remain first-party.
+        const credentials = await this.claudeAccounts.credentials();
+        if (credentials.length === 0) {
+          const out = JSON.stringify({ type: "error", error: { type: "authentication_error", message: "ClaudeRipple: no usable Claude account; sign in or reauthenticate an account" } });
+          res.writeHead(401, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
+          finish("401", out.length, "no usable Claude account");
+          return;
+        }
+        body = Buffer.from(JSON.stringify(json));
+        chosen = this.pool.pick(route.provider, credentials, conversationKey(json as AnthropicRequest));
+        const using = chosen ?? credentials[0]!;
+        chosen = using;
+        penalised = { provider: route.provider, id: using.id };
+        target = {
+          protocol: "https:",
+          host: cfg.upstream,
+          port: this.deps.upstreamPort ?? 443,
+          agent: this.deps.upstreamAgent ?? this.agentFor(route.provider, "https:"),
+          extraHeaders: using.headers,
+          dropClientAuth: true,
+          dropHeaders: new Set(credentials.flatMap((credential) => Object.keys(credential.headers).map((name) => name.toLowerCase()))),
+          dropHeaderPrefixes: ["anthropic-client-", "x-stainless-"],
+        };
+        record = { ...record, target: route.model, provider: route.provider };
+        const routeEffort = effortOf(json);
+        if (routeEffort) record.effort = routeEffort;
+        tag = `CLAUDE ${route.tag} account=${using.ownerId?.slice(0, 8) ?? "current"}`;
+      } else {
       const preset = provider.preset ? PRESETS.find((entry) => entry.id === provider.preset) : undefined;
       const modelEffortLevels = provider.models?.find((entry) => entry.id === route.model)?.effortLevels;
       compatCaps = resolveCompatibleCaps(
@@ -694,6 +735,7 @@ export class Proxy {
       // the first one, so the request carries real credentials rather than none, and so the answer
       // is charged to the credential that actually produced it.
       const using = chosen ?? credentials[0]!;
+      chosen = using;
       penalised = { provider: route.provider, id: using.id };
       target = {
         protocol,
@@ -715,6 +757,7 @@ export class Proxy {
       const routeEffort = effortOf(json);
       if (routeEffort) record.effort = routeEffort;
       tag = `${route.provider.toUpperCase()} ${route.tag} effort=${routeEffort ?? "-"}`;
+      }
     } else if (isApiHost) {
       target = { protocol: "https:", host: cfg.upstream, port: 443, agent: this.upstreamAgent, extraHeaders: {} };
       tag = `PASS ${typeof model === "string" ? model : "-"}`;
@@ -735,7 +778,7 @@ export class Proxy {
       if (HOP_BY_HOP.has(lk)) continue;
       // Bootstrap responses are edited: keep the client's accept-encoding as-is (some edges misbehave without it)
       // and decompress whatever comes back before editing.
-      if (lk in target.extraHeaders) continue;
+      if (lk in target.extraHeaders || target.dropHeaders?.has(lk) || target.dropHeaderPrefixes?.some((prefix) => lk.startsWith(prefix))) continue;
       if (target.dropClientAuth && CLIENT_AUTH.has(lk)) continue;
       // Anthropic beta flags opt into features most compatible providers have not implemented.
       if (compatCaps && !forwardCompatibleHeader(lk, compatCaps)) {
@@ -759,9 +802,12 @@ export class Proxy {
       }
       log.info(`PICKER request ${method} ${path.slice(0, 80)} headers: ${shown.join(" | ")}`);
     }
-    // Keep only actual credentials named by the outbound headers. This covers arbitrary vendor
-    // key formats when a provider reflects the key in its error body.
-    const errorSecrets = credentialHeaderValues(Array.from({ length: headers.length / 2 }, (_, i) => [headers[i * 2]!, headers[i * 2 + 1]!] as [string, string]));
+    // Keep every credential this turn sends. A retry can use an opaque token that does not match a
+    // known token shape; retaining its actual value is what keeps a reflected refusal out of logs.
+    const errorSecrets = new Set(credentialHeaderValues(Array.from({ length: headers.length / 2 }, (_, i) => [headers[i * 2]!, headers[i * 2 + 1]!] as [string, string])));
+    // Every retry is rebuilt from the first attempt's header list. Keep the union of identity header
+    // names already used so a current-session fingerprint cannot reappear on a third account.
+    let usedCredentialHeaders = { ...(chosen?.headers ?? {}) };
 
     const lib = target.protocol === "https:" ? https : http;
     /**
@@ -799,7 +845,10 @@ export class Proxy {
       if (!classify(status).retryable) return null;
       const provider = cfg.providers[route.provider];
       if (!provider) return null;
-      const rest = this.credentialsOf(route.provider, provider).filter((c) => !tried.has(c.id));
+      const available = provider.type === "anthropic" && provider.accountPool
+        ? this.claudeAccounts.peekCredentials()
+        : this.credentialsOf(route.provider, provider);
+      const rest = available.filter((c) => !tried.has(c.id));
       if (rest.length === 0) return null;
       return this.pool.pick(route.provider, rest, conversationKey(json as AnthropicRequest));
     };
@@ -843,8 +892,10 @@ export class Proxy {
       // stated reset so the next request takes another; an answer clears whatever it was carrying.
       // A 400 is our own request and is charged to nobody (see `classify`).
       if (penalised) {
-        if (status >= 400) this.pool.penalise(penalised.provider, penalised.id, status, retryAfterMs(upRes.headers));
-        else this.pool.succeed(penalised.provider, penalised.id);
+        if (status >= 400) {
+          this.pool.penalise(penalised.provider, penalised.id, status, retryAfterMs(upRes.headers));
+          if (status === 401 && cfg.providers[penalised.provider]?.type === "anthropic") this.claudeAccounts.reject(penalised.id);
+        } else this.pool.succeed(penalised.provider, penalised.id);
       }
 
       // Nothing has been written to the client yet, so a refused credential can still be replaced
@@ -852,14 +903,18 @@ export class Proxy {
       // turn is committed, because replacing a half-sent stream splices two answers together.
       const retry = status >= 400 ? nextCredential(status) : null;
       if (retry) {
-        log.info(`RETRY ${route!.provider}: ${penalised!.id} answered ${status}, trying ${retry.id}`);
+        const previousId = retry.ownerId ? penalised!.id.split(":", 1)[0]! : penalised!.id;
+        log.info(`RETRY ${route!.provider}: ${previousId} answered ${status}, trying ${retry.ownerId ?? retry.id}`);
         tried.add(retry.id);
+        usedCredentialHeaders = { ...usedCredentialHeaders, ...(chosen?.headers ?? {}), ...retry.headers };
+        chosen = retry;
         penalised = { provider: route!.provider, id: retry.id };
+        for (const secret of credentialHeaderValues(Object.entries(retry.headers))) errorSecrets.add(secret);
         upRes.resume();
         upRes.destroy();
-        // The credential headers are the only thing that changes; everything else about the request
-        // is the same one the provider just refused.
-        send(withCredential(headers, retry.headers));
+        // Remove every identity header used by any earlier attempt. The baseline is the first request,
+        // so removing only the immediately previous account would resurrect first-attempt fingerprints.
+        send(withCredential(headers, retry.headers, usedCredentialHeaders));
         return;
       }
 
@@ -895,7 +950,7 @@ export class Proxy {
               log.warn(`bootstrap inject failed: ${(e as Error).message}`);
             }
           } else if (isPickerBootstrap && status !== 200 && status !== 304) {
-            log.warn(`PICKER bootstrap upstream ${status}; headers: ${JSON.stringify(redactHeaders(upRes.headers))}; body: ${redactErrorText(out.toString("utf8"), errorSecrets, 300)}`);
+            log.warn(`PICKER bootstrap upstream ${status}; headers: ${JSON.stringify(redactHeaders(upRes.headers))}; body: ${redactErrorText(out.toString("utf8"), [...errorSecrets], 300)}`);
           } else if (status === 200 && isPickerBootstrap) {
             try {
               const j = JSON.parse(out.toString("utf8")) as Record<string, unknown>;
@@ -951,7 +1006,7 @@ export class Proxy {
         observedUsage = observed.usage;
         observedStopReason = observed.stopReason;
         res.end();
-        finish(String(status), bytes, status >= 400 ? `upstream ${status}: ${errorSnippet(Buffer.concat(errorHead), upRes.headers["content-encoding"], errorSecrets, upRes.headers["content-type"])}` : undefined);
+        finish(String(status), bytes, status >= 400 ? `upstream ${status}: ${errorSnippet(Buffer.concat(errorHead), upRes.headers["content-encoding"], [...errorSecrets], upRes.headers["content-type"])}` : undefined);
       });
       upRes.on("error", (e) => {
         finish(String(status), bytes, `upstream stream error ${(e as Error).message}`);
@@ -1043,6 +1098,9 @@ export class Proxy {
    */
   private canRunServerTools(name: string, cfg: Config): boolean {
     const provider = cfg.providers[name];
+    // A routed native account still calls Anthropic's Messages API unchanged, so Anthropic executes
+    // its own server tools. Only translated/compatible providers need an explicit measured capability.
+    if (provider?.type === "anthropic") return provider.accountPool === true && provider.auth === "claude-code";
     if (!provider || provider.type !== "anthropic-compatible") return false;
     const preset = provider.preset ? PRESETS.find((entry) => entry.id === provider.preset) : undefined;
     return resolveCompatibleCaps(preset ? { ...(preset.serverTools ? { serverTools: true } : {}) } : undefined, provider.caps).serverTools;
@@ -1059,10 +1117,12 @@ export class Proxy {
     if (!resolved.fallbacks?.length) return resolved;
     const usable = (name: string): boolean => {
       const provider = cfg.providers[name];
-      // A native `anthropic` provider serves the OpenAI ingress only; routing a turn to it answers
-      // 400 (§5). `resolve` already refuses to name one as a primary, and a fallback must not be
-      // the way back in — least of all on the day the primary is exhausted.
-      if (!provider || provider.type === "anthropic") return false;
+      if (!provider) return false;
+      if (provider.type === "anthropic") {
+        if (!provider.accountPool || provider.auth !== "claude-code") return false;
+        const accounts = this.claudeAccounts.peekCredentials();
+        return accounts.length > 0 && this.pool.hasUsable(name, accounts);
+      }
       return this.pool.hasUsable(name, this.credentialsOf(name, provider));
     };
     if (usable(resolved.provider)) return resolved;
@@ -1112,9 +1172,14 @@ export class Proxy {
     const cfg = this.deps.config();
     const out: Record<string, ReturnType<CredentialPool["report"]>> = {};
     for (const [name, provider] of Object.entries(cfg.providers)) {
-      const creds = this.credentialsOf(name, provider);
-      if (creds.length === 1 && creds[0]!.id === "default") continue; // nothing to report about a pool of one
-      out[name] = this.pool.report(name, creds);
+      const creds = provider.type === "anthropic" && provider.accountPool
+        ? this.claudeAccounts.peekCredentials()
+        : this.credentialsOf(name, provider);
+      if (creds.length === 0 || (creds.length === 1 && creds[0]!.id === "default")) continue; // nothing to report about a pool of one
+      out[name] = this.pool.report(name, creds).map((report) => {
+        const credential = creds.find((candidate) => candidate.id === report.id);
+        return credential?.ownerId ? { ...report, id: credential.ownerId } : report;
+      });
     }
     return out;
   }

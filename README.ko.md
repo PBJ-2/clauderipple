@@ -150,7 +150,11 @@ ClaudeRipple은 Claude Code 프로세스만 신뢰하는 작은 HTTPS 프록시�
   GPT-6 Astra를, 아니면 DeepSeek·Kimi·GLM·MiniMax·Qwen·Grok·Mistral·Groq·Together·Fireworks·OpenRouter(400+ 모델)·
   로컬 Ollama / LM Studio를. 피커에 실제 이름으로 띄우거나, Claude 이름에 매핑해서.
 - **Codex 앱과 Codex CLI에서 Claude를.** Codex가 프로바이더로 인식하는 로컬 OpenAI 호환 엔드포인트. Claude 모델이
-  Codex 자체 모델 목록에 뜹니다. Claude Code 로그인이나 Anthropic API 키를 씁니다.
+  Codex 자체 모델 목록에 뜹니다. 현재 Claude Code 로그인이나 Anthropic API 키를 씁니다.
+- **프롬프트 캐시를 깨지 않는 Claude 다계정.** 네이티브 Claude 프로바이더에서 계정 자동 전환을 켜고 대시보드로
+  구독 계정을 추가하면, 대화마다 답한 계정에 고정됩니다. 응답이 시작되기 전 한도·인증 거부가 오면 같은 요청을
+  다음 계정으로 넘깁니다. 이 Claude Desktop/Code 원형 경로는 번역을 거치는 Codex 입구와 별개이며, Codex 쪽은
+  사용 가능한 로그인 하나만 골라 쓰고 계정을 자동 전환하지 않습니다.
 - **Claude Code 하네스는 손대지 않습니다.** 스킬, 훅, MCP, `CLAUDE.md`, 서브에이전트, 플랜 모드, 휴대폰 Remote Control.
   아무것도 꺼지지 않습니다.
 - **구조적으로 올바르게.** 프롬프트 캐시 보존(Anthropic 캐시 브레이크포인트, 고정된 OpenAI 프리픽스), Claude Code의
@@ -314,7 +318,7 @@ Anthropic API 키로 갑니다. 구독 로그인 재사용은 Anthropic 약관�
 | DeepSeek, Kimi, Z.ai GLM, MiniMax, Qwen(국제/중국) | Anthropic 호환 | API 키 | 프리셋 | 벤더 공식 문서로 확인 |
 | xAI Grok, Mistral, Groq, Together, Fireworks | OpenAI 호환 | API 키 | 자동 검색 | 번역(Chat Completions / Responses) |
 | Ollama, LM Studio | OpenAI 호환, 로컬 | 없음 | 자동 검색 | |
-| Anthropic | 네이티브 | Claude Code 로그인 또는 API 키 | Claude 모델 | Codex 쪽에서 사용 |
+| Anthropic | 네이티브 | Claude 로그인(복수 가능) 또는 API 키 | Claude 모델 | Claude Desktop/Code는 선택적 대화 고정 자동 전환, Codex는 로그인 하나 선택 |
 | 그 밖의 무엇이든 | 직접 입력 | 자유 | 자동 검색 | Anthropic·OpenAI 호환 엔드포인트라면 무엇이든 |
 
 호환 프로바이더로 가는 요청에서는 Anthropic 전용 필드(서버 측 스레드, 지연 로딩 도구, 컨텍스트 관리, thinking 바인딩)를
@@ -342,8 +346,9 @@ Codex 앱 / CLI ──/v1/responses──▶ ClaudeRipple 입구 ──▶ Claud
 
 ## 개인정보
 
-전부 127.0.0.1에서 돕니다. API 키는 `~/.clauderipple/config.json`(0600)에만 있습니다. 네트워크 목적지는 직접 설정한
-프로바이더뿐입니다. 텔레메트리는 없습니다.
+전부 127.0.0.1에서 돕니다. API 키는 `~/.clauderipple/config.json`, 추가한 Claude OAuth 그랜트는
+`~/.clauderipple/claude-accounts.json`에만 있고 둘 다 권한은 0600입니다. 관리 API와 로그에는 토큰이나 업스트림
+계정 ID를 내보내지 않습니다. 네트워크 목적지는 직접 설정한 프로바이더뿐이며 텔레메트리는 없습니다.
 
 ## 상태: 알파
 

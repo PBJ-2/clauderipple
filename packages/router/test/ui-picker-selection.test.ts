@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 
 type Entry = { id: string; name?: string; provider: string; contextWindow?: number };
 type Config = {
-  providers: Record<string, { models?: { id: string; name?: string }[] }>;
+  providers: Record<string, { type?: string; accountPool?: boolean; models?: { id: string; name?: string }[] }>;
   cli?: { extraModels?: { model: string; name?: string; contextWindow?: number }[] };
   direct?: { prefix: string; provider: string }[];
 };
@@ -31,7 +31,17 @@ function loadApplyPickerSelections(): (next: Config, selections: Entry[]) => Con
   );
 }
 
+function loadGroupedModels(): (config: Config) => { name: string }[] {
+  const file = path.join(path.dirname(fileURLToPath(import.meta.url)), "../../ui/app.js");
+  const source = fs.readFileSync(file, "utf8");
+  const start = source.indexOf("function modelsOf");
+  const end = source.indexOf("function presetById");
+  assert.ok(start > 0 && end > start, "app.js no longer contains the provider-grouping block");
+  return new Function(`${source.slice(start, end)}; return groupedModels;`)() as (config: Config) => { name: string }[];
+}
+
 const apply = loadApplyPickerSelections();
+const groups = loadGroupedModels();
 
 function baseConfig(): Config {
   return {
@@ -50,6 +60,17 @@ function baseConfig(): Config {
     ],
   };
 }
+
+test("only an opted-in native Claude account pool appears in model mapping", () => {
+  const config: Config = {
+    providers: {
+      ingress: { type: "anthropic", models: [{ id: "claude-opus-5" }] },
+      pooled: { type: "anthropic", accountPool: true, models: [{ id: "claude-sonnet-5" }] },
+      other: { type: "anthropic-compatible", models: [{ id: "deepseek-v4-pro" }] },
+    },
+  };
+  assert.deepEqual(groups(config).map((group) => group.name), ["pooled", "other"]);
+});
 
 test("a model no provider offers any more leaves the picker, and takes its direct rule with it", () => {
   const next = apply(baseConfig(), [{ id: "z-ai/glm-5.3-flash", name: "GLM", provider: "openrouter" }]);

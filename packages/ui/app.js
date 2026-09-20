@@ -65,9 +65,9 @@ function uniqueName(name, providers) {
 function groupedModels(config) {
   const groups = [];
   for (const [name, provider] of Object.entries(config.providers || {})) {
-    // A native Claude provider serves the OpenAI ingress (Codex) only, so it is not a mapping
-    // target: the router ignores a slot pointed at it and passes the request through instead.
-    if (provider.type === "anthropic") continue;
+    // A native Claude provider becomes a mapping target only after the explicit account-pool opt-in.
+    // API-key and legacy login providers remain OpenAI-ingress-only.
+    if (provider.type === "anthropic" && !provider.accountPool) continue;
     let models = modelsOf(provider);
     if (!models.length && provider.type === "chatgpt") models = CHATGPT_MODELS;
     if (models.length) groups.push({ name, provider, models });
@@ -749,7 +749,7 @@ function providerCard(name, provider) {
   const draw = () => {
     const state = stateFor(name);
     const preset = provider.preset && presetById(provider.preset);
-    let kind = provider.type === "chatgpt" ? t("providers.chatgpt") : provider.type === "anthropic" ? `${t("providers.anthropic")} · ${provider.auth === "claude-code" ? t("providers.anthropicLoginReuse") : t("providers.apiKey")}` : preset ? preset.name : "";
+    let kind = provider.type === "chatgpt" ? t("providers.chatgpt") : provider.type === "anthropic" ? `${t("providers.anthropic")} · ${provider.auth === "claude-code" ? (provider.accountPool ? t("providers.anthropicPoolOn") : t("providers.anthropicLoginReuse")) : t("providers.apiKey")}` : preset ? preset.name : "";
     if (provider.type !== "chatgpt" && provider.type !== "anthropic") { try { kind = `${kind ? kind + " · " : ""}${new URL(provider.url).host}`; } catch { /* keep */ } }
     const live = status && status.providers && status.providers[name];
     stateLine.replaceChildren(...[
@@ -828,13 +828,22 @@ $("#providers-refresh").addEventListener("click", async () => {
 
 // ---- Provider modal -----------------------------------------------------------------
 
-function showModal(content) {
+let modalCleanup = null;
+function showModal(content, cleanup) {
+  if (modalCleanup) modalCleanup();
+  modalCleanup = cleanup || null;
   $("#modal-content").replaceChildren(content);
   $("#modal-backdrop").hidden = false;
   const first = $("#modal-content input, #modal-content button, #modal-content select");
   if (first) setTimeout(() => first.focus(), 0);
 }
-function closeModal() { $("#modal-backdrop").hidden = true; $("#modal-content").replaceChildren(); }
+function closeModal() {
+  const cleanup = modalCleanup;
+  modalCleanup = null;
+  if (cleanup) cleanup();
+  $("#modal-backdrop").hidden = true;
+  $("#modal-content").replaceChildren();
+}
 $("#modal-close").addEventListener("click", closeModal);
 $("#modal-backdrop").addEventListener("click", (event) => { if (event.target === $("#modal-backdrop")) closeModal(); });
 window.addEventListener("keydown", (event) => {
@@ -923,6 +932,7 @@ function anthropicSourceText(source) {
   return t("providers.anthropicSourceMissing");
 }
 function openAnthropicProviderForm(options) {
+  let formActive = true;
   const existing = options.provider;
   const displayName = options.name || t("providers.anthropic");
   const nameInput = el("input", { value: displayName, maxlength: "60" });
@@ -954,11 +964,54 @@ function openAnthropicProviderForm(options) {
   renderModels();
   const authField = inputRow(t("providers.credentials"), auth, t("providers.anthropicCredentialsHelp"));
   const keyField = el("div", { class: "form-field key-field" }, [el("span", { text: t("providers.apiKey") }), el("div", { class: "key-control" }, [keyInput, showKey]), el("small", { text: t("providers.keyHelp") })]);
-  const subscriptionActions = el("div", { class: "actions" }, [el("button", { class: "btn secondary", type: "button", text: t("providers.anthropicLogin") }), el("button", { class: "btn secondary", type: "button", text: t("providers.anthropicLogout") })]);
+  const subscriptionActions = el("div", { class: "actions" }, [el("button", { class: "btn secondary", type: "button", text: t("providers.anthropicLogin") }), el("button", { class: "btn secondary", type: "button", text: t("providers.anthropicLogoutAll") })]);
+  const accountPool = el("input", { type: "checkbox", checked: existing ? Boolean(existing.accountPool) : true });
+  const accountPoolField = el("label", { class: "check picker-check" }, [accountPool, el("span", { text: t("providers.anthropicPool") })]);
+  const accountPoolHelp = hint(t("providers.anthropicPoolHelp"));
+  const accountList = el("div", { class: "claude-account-list" });
+  async function loadClaudeAccounts() {
+    try {
+      const data = await api("/api/claude-accounts");
+      if (!formActive) return;
+      const rows = [];
+      if (data.current) rows.push(el("div", { class: "claude-account-row" }, [
+        el("div", { class: "claude-account-copy" }, [el("strong", { text: data.current.label }), el("span", { class: "small", text: anthropicSourceText(data.current.source) })]),
+        el("span", { class: "badge ok", text: t("providers.anthropicCurrent") }),
+      ]));
+      for (const account of Array.isArray(data.accounts) ? data.accounts : []) {
+        const copy = el("div", { class: "claude-account-copy" }, [
+          el("strong", { text: account.label }),
+          account.email && account.email !== account.label ? el("span", { class: "small", text: account.email }) : null,
+        ]);
+        const unavailable = account.needsReauth || account.expiresAt <= Date.now();
+        const state = el("span", { class: `badge ${unavailable ? "bad" : "ok"}`, text: unavailable ? t("providers.anthropicReauth") : t("pool.ready") });
+        const rename = el("button", { class: "btn secondary compact", type: "button", text: t("common.edit") });
+        rename.addEventListener("click", async () => {
+          const label = prompt(t("providers.anthropicRenamePrompt"), account.label);
+          if (!label || !label.trim() || label.trim() === account.label) return;
+          try { await api(`/api/claude-accounts/${encodeURIComponent(account.id)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ label }) }); if (formActive) await loadClaudeAccounts(); }
+          catch (error) { if (formActive) toast(t("common.actionFailed"), true, error.message); }
+        });
+        const remove = el("button", { class: "btn danger compact", type: "button", text: t("common.remove") });
+        remove.addEventListener("click", async () => {
+          if (!confirm(t("providers.anthropicRemoveConfirm", { name: account.label }))) return;
+          try { await api(`/api/claude-accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" }); if (formActive) { await loadClaudeAccounts(); await runProbe(); } }
+          catch (error) { if (formActive) toast(t("common.actionFailed"), true, error.message); }
+        });
+        rows.push(el("div", { class: "claude-account-row" }, [copy, state, el("div", { class: "claude-account-actions" }, [rename, remove])]));
+      }
+      accountList.replaceChildren(...(rows.length ? rows : [el("div", { class: "small", text: t("providers.anthropicNoAccounts") })]));
+    } catch (error) {
+      if (formActive) accountList.replaceChildren(el("div", { class: "bad-text small", text: error.message }));
+    }
+  }
   function syncAuthFields() {
     const reused = auth.value === "claude-code";
     keyField.hidden = reused;
     subscriptionActions.hidden = !reused;
+    accountPoolField.hidden = !reused;
+    accountPoolHelp.hidden = !reused;
+    accountList.hidden = !reused;
     sourceLine.hidden = !reused;
     signedInLine.hidden = !reused || !signedInLine.textContent;
   }
@@ -970,6 +1023,7 @@ function openAnthropicProviderForm(options) {
     try {
       const body = auth.value === "claude-code" ? { type: "anthropic", auth: "claude-code" } : { type: "anthropic", auth: "api-key", apiKey: keyInput.value || (existing && existing.apiKey) };
       const response = await api("/api/providers/probe", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      if (!formActive) return;
       sourceLine.textContent = anthropicSourceText(response.source);
       showSignedIn(response);
       const noCredits = response.ok && /^no-credits:/.test(response.error || "");
@@ -982,8 +1036,8 @@ function openAnthropicProviderForm(options) {
         selected = new Set(modelsOf(existing).length ? modelsOf(existing).map((model) => model.id) : foundModels.map((model) => model.id));
         renderModels();
       }
-    } catch (error) { result.replaceChildren(el("span", { class: "bad-text", text: t("providers.probeFailed") }), el("div", { class: "small", text: error.message })); }
-    finally { probeButton.disabled = false; }
+    } catch (error) { if (formActive) result.replaceChildren(el("span", { class: "bad-text", text: t("providers.probeFailed") }), el("div", { class: "small", text: error.message })); }
+    finally { if (formActive) probeButton.disabled = false; }
   }
   probeButton.addEventListener("click", () => void runProbe());
   // Our own browser sign-in (PKCE): start it, show the link in case no window opened, poll until the
@@ -998,7 +1052,7 @@ function openAnthropicProviderForm(options) {
       submit.addEventListener("click", async () => {
         submit.disabled = true;
         try { const done = await api("/api/claude-oauth/code", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: codeInput.value }) }); finishSignIn(done); }
-        catch (error) { finishSignIn({ ok: false, error: (error.body && error.body.error) || error.message }); }
+        catch (error) { if (formActive) finishSignIn({ ok: false, error: (error.body && error.body.error) || error.message }); }
       });
       parts.push(el("div", { class: "key-control" }, [codeInput, submit]));
     } else parts.push(el("div", { class: "small", text: t("providers.anthropicSignInWaiting") }));
@@ -1009,9 +1063,10 @@ function openAnthropicProviderForm(options) {
   }
   function finishSignIn(state) {
     clearInterval(signInPoll);
+    if (!formActive) return;
     // The probe refreshes the source and the stored-sign-in line, then the outcome is put back:
     // the probe's own wording would otherwise erase the answer to the button that was just pressed.
-    if (state.ok) { void runProbe().then(() => result.replaceChildren(el("span", { class: "ok-text", text: t("providers.anthropicLoginDone") }))); return; }
+    if (state.ok) { void Promise.all([runProbe(), loadClaudeAccounts()]).then(() => { if (formActive) result.replaceChildren(el("span", { class: "ok-text", text: t("providers.anthropicLoginDone") })); }); return; }
     const retry = el("button", { class: "btn secondary", type: "button", text: t("providers.anthropicSignInManual") });
     retry.addEventListener("click", () => void startSignIn(true));
     result.replaceChildren(el("span", { class: "bad-text", text: t("providers.anthropicSignInFailed") }), el("div", { class: "small", text: state.error || "" }), retry);
@@ -1020,22 +1075,29 @@ function openAnthropicProviderForm(options) {
     clearInterval(signInPoll);
     try {
       const state = await api("/api/claude-oauth", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ manual: Boolean(manual) }) });
+      if (!formActive) return;
       renderSignIn(state);
       signInPoll = setInterval(async () => {
         try { const now = await api("/api/claude-oauth"); if (!now.running) finishSignIn(now); }
         catch { /* the router may be busy; keep polling */ }
       }, 2000);
-    } catch (error) { result.replaceChildren(el("span", { class: "bad-text", text: t("common.actionFailed") }), el("div", { class: "small", text: error.message })); }
+    } catch (error) { if (formActive) result.replaceChildren(el("span", { class: "bad-text", text: t("common.actionFailed") }), el("div", { class: "small", text: error.message })); }
   }
   subscriptionActions.children[0].addEventListener("click", () => void startSignIn(false));
   subscriptionActions.children[1].addEventListener("click", async () => {
-    try { const response = await api("/api/claude-logout", { method: "POST" }); result.replaceChildren(el("span", { class: "ok-text", text: response.output })); await runProbe(); }
-    catch (error) { toast(t("common.actionFailed"), true, error.message); }
+    if (!confirm(t("providers.anthropicLogoutAllConfirm"))) return;
+    try { const response = await api("/api/claude-logout", { method: "POST" }); if (!formActive) return; result.replaceChildren(el("span", { class: "ok-text", text: response.output })); await Promise.all([runProbe(), loadClaudeAccounts()]); }
+    catch (error) { if (formActive) toast(t("common.actionFailed"), true, error.message); }
   });
+  const modeHint = hint("");
+  function syncModeHint() { modeHint.textContent = auth.value === "claude-code" && accountPool.checked ? t("providers.anthropicPoolRouting") : t("providers.anthropicIngressOnly"); }
+  accountPool.addEventListener("change", syncModeHint);
+  auth.addEventListener("change", syncModeHint);
+  syncModeHint();
   const form = el("div", { class: "provider-form" }, [
     el("h1", { id: "modal-title", text: existing ? t("providers.edit") : t("providers.addTitle") }),
-    inputRow(t("providers.name"), nameInput, t("providers.nameHelp")), authField, keyField, probeButton, sourceLine, signedInLine, result, subscriptionActions, modelArea,
-    hint(t("providers.anthropicIngressOnly")),
+    inputRow(t("providers.name"), nameInput, t("providers.nameHelp")), authField, keyField, accountPoolField, accountPoolHelp, accountList, probeButton, sourceLine, signedInLine, result, subscriptionActions, modelArea,
+    modeHint,
   ]);
   const saveButton = el("button", { class: "btn", type: "button", "data-default-action": "", text: existing ? t("common.save") : t("providers.add") });
   saveButton.addEventListener("click", async () => {
@@ -1044,18 +1106,18 @@ function openAnthropicProviderForm(options) {
     const next = clone(currentConfig);
     const providerName = existing ? options.name : uniqueName(typedName, next.providers);
     const checkedModels = form.querySelector(".model-picker").selected();
-    const provider = { type: "anthropic", auth: auth.value, ...(auth.value === "api-key" && (keyInput.value || (existing && existing.apiKey)) ? { apiKey: keyInput.value || existing.apiKey } : {}), models: checkedModels };
+    const provider = { type: "anthropic", auth: auth.value, ...(auth.value === "claude-code" && accountPool.checked ? { accountPool: true } : {}), ...(auth.value === "api-key" && (keyInput.value || (existing && existing.apiKey)) ? { apiKey: keyInput.value || existing.apiKey } : {}), models: checkedModels };
     next.providers[providerName] = provider;
-    // No picker/direct entries: these models are served to Codex through the OpenAI ingress, not
-    // routed from the Claude app, so a rule naming this provider would never fire.
+    // accountPool makes these models native Claude routing targets. Without it this remains the
+    // historical OpenAI ingress provider, and routing deliberately ignores it.
     saveButton.disabled = true;
     try { await configRequest(next); currentConfig = next; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); toast(t("common.saved")); }
     catch (error) { toast(t("common.saveFailed"), true, error.message); }
     finally { saveButton.disabled = false; }
   });
   form.appendChild(el("div", { class: "actions end" }, [el("button", { class: "btn secondary", type: "button", text: t("common.cancel"), onclick: closeModal }), saveButton]));
-  showModal(form);
-  if (auth.value === "claude-code") void runProbe();
+  showModal(form, () => { formActive = false; if (signInPoll) clearInterval(signInPoll); });
+  if (auth.value === "claude-code") void Promise.all([runProbe(), loadClaudeAccounts()]);
 }
 function openProviderForm(options) {
   const existing = options.provider;

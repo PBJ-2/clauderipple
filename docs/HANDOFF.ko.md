@@ -103,8 +103,9 @@ Git 2.55.0과 `/opt/homebrew/etc/gitconfig`를 삭제했다.
 주군이 GUI에서 체크를 빼면 파일도 빠진다. 세션이 config를 고치지 않는다.
 
 **2. 남은 GitHub:** 이슈 #7은 신고자의 현행 버전 재현 대기라 상태 댓글을 남기고 열어 뒀다. #8(Claude
-다계정)은 OAuth 그랜트 여러 개 저장·계정 라벨·대화 고정·갱신·쿼터/failover 정책이 필요한 유효 기능
-요청이라고 답하고 열어 뒀다. #9·#10과 PR #11·#12는 완료·종료됐다.
+다계정)은 2026-09-20 구현 완료, 전체 회귀와 실제 UI·라이브 계정 종단 검증 후 댓글·종료만 남았다. 현재 로그인 +
+추가 OAuth 계정, 계정 라벨/개별 삭제, 대화 고정, 독립 갱신, 응답 전 401·429·일시 장애 failover를 지원한다.
+#9·#10과 PR #11·#12는 완료·종료됐다.
 
 **3. 무자격증명 검색 백엔드는 미완료.** 신뢰성과 이용 조건을 모두 만족하는 키 없는 일반 검색 원천을
 찾지 못했다. 공개 SearXNG를 몰래 기본값으로 삼거나 DuckDuckGo HTML을 스크래핑하지 않는다.
@@ -689,8 +690,10 @@ GitHub의 0.1.1 zip을 직접 받아 확인: 헤더 수정·Haiku 수정 **전�
 **오픈코덱스 해부 후 같은 날 추가한 것 (커밋 2건째):**
 - **Claude 구독 브라우저 로그인** `packages/router/src/providers/claude-oauth.ts`: Claude Code 공개 클라이언트로 PKCE
   OAuth. 콜백은 `localhost:54545/callback`, 포트가 막히면 Anthropic의 코드 표시 페이지 → `code#state` 붙여넣기.
-  파일은 `<home>/claude-auth.json` `source:"oauth"`(access+refresh+expiresAt), 인그레스가 만료 5분 전에 자동 갱신
-  (`ClaudeCodeAuthStore.refreshIfNeeded`, 동시 호출 1회 공유). GUI는 `POST/GET /api/claude-oauth`,
+  당시 파일은 `<home>/claude-auth.json` `source:"oauth"`(access+refresh+expiresAt)였고 인그레스가 만료 5분 전에 자동 갱신했다.
+  2026-09-20 다계정 구현 뒤 OAuth는 `<home>/claude-accounts.json`(0600)으로 이동하며, 기존 파일은 첫 pool 변경 때
+  원자 마이그레이션된다. 계정별 single-flight 갱신 + refresh-token CAS로 새 로그인을 오래된 결과가 덮지 못한다.
+  GUI는 `POST/GET /api/claude-oauth`,
   `POST /api/claude-oauth/code`, `/cancel`. CLI `claude-login`이 기본 이 흐름, `--setup-token`이 옛 경로.
   **2026-09-16 14:00 실측 성공 (주군 맥, claude.ai 계정).** 두 가지를 고치고 나서다.
   ① authorize/token 엔드포인트를 Claude Code 2.1.272 바이너리에서 그대로 읽어 교체했다
@@ -985,7 +988,8 @@ JSON 파일을 그것으로 쓰지 말 것(`@electron/rebuild`가 파싱 못 해
 ## 2026-09-13 밤 2 — M4 완료
 - **OpenAI 입구**(`packages/router/src/ingress`, 포트 8793): Codex CLI가 `clauderipple codex on`으로 우리 라우터를 향하고 Claude를
   구독 로그인으로 쓴다. 실측: `CODEX_HOME=/tmp/… codex exec --profile clauderipple -m claude-haiku-4-5-20251001 "Reply ok"` → "ok".
-  구독 자격증명 우선순위: 프록시 트래픽에서 관찰(메모리, 12h) → env → 키체인 → ~/.claude/.credentials.json → `<home>/claude-auth.json`(setup-token 또는 0.1.2부터 자체 OAuth, 자동 갱신).
+  구독 자격증명 우선순위: 프록시 트래픽에서 관찰(메모리, 12h) → env → 키체인 → ~/.claude/.credentials.json → `<home>/claude-auth.json` setup-token → `<home>/claude-accounts.json` 추가 OAuth 계정.
+  Codex 입구는 이 순서에서 사용 가능한 하나만 고르고 다계정 failover는 하지 않는다. 자동 전환은 원형 Claude Desktop/Code Messages 경로만이다.
   **라우터 재시작 직후엔 관찰 토큰이 없어 Code 탭 요청이 한 번 지나가야 한다**(파일 지속화 추가 예정/완료 여부는 git log 확인).
 - **openai-compatible 프로바이더**(`providers/openai`): Grok·Mistral·Groq·Together·Fireworks·Ollama·LM Studio 프리셋. 실키 검증 없음(401 경로만).
 - **모델별 effort**: OpenRouter `supported_parameters`로 모델별 강도 지원 저장·표시·클램프.
