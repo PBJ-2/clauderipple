@@ -289,3 +289,40 @@ test("unroutableReason is null for a routable model, a rule, and every claude-* 
   assert.equal(resolve("claude-opus-5", body("hi"), declared), null, "and resolve agrees it is unrouted");
   assert.equal(unroutableReason(undefined, body("hi"), declared), null);
 });
+
+// 2026-09-20: a GPT-6 Astra session (prefix rule → chatgpt) delegated to `muse`; the marker changed
+// the model but the provider stayed `chatgpt`, which answered 400 "muse … is not supported". And the
+// marker it acted on was a quote inside a compaction summary, not a task prompt.
+test("a marker's model takes its own provider, even under a prefix rule on the session model", () => {
+  const cfg2: Config = {
+    ...DEFAULTS,
+    providers: {
+      chatgpt: { type: "chatgpt", models: [{ id: "gpt-6-astra" }] },
+      opencode: { type: "openai-compatible", url: "http://x", models: [{ id: "muse-spark-1.3-contributor" }] },
+    },
+    routes: {},
+    direct: [{ prefix: "gpt-", provider: "chatgpt" }],
+    aliases: { muse: "muse-spark-1.3-contributor" },
+  };
+  const r = resolve("gpt-6-astra", body("[[ripple: muse@high]]\n\nbuild it"), cfg2)!;
+  assert.equal(r.provider, "opencode");
+  assert.equal(r.model, "muse-spark-1.3-contributor");
+  assert.equal(r.effort, "high");
+  // A marker naming a gpt-* model still goes to the prefix rule's provider.
+  assert.equal(resolve("gpt-6-astra", body("[[ripple: gpt-5.6-sol@low]] x"), cfg2)!.provider, "chatgpt");
+  // A marker to a model nobody declares is a refusal, with the reason, not a 400 from ChatGPT.
+  assert.equal(resolve("gpt-6-astra", body("[[ripple: ghost@high]] x"), cfg2), null);
+  assert.equal(unroutableReason("gpt-6-astra", body("[[ripple: ghost@high]] x"), cfg2),
+    'marker alias "ghost" is not an alias and not an agent name');
+  // …but without a marker a prefix rule is never second-guessed here.
+  assert.equal(unroutableReason("gpt-6-astra", body("x"), cfg2), null);
+});
+
+test("a marker counts only at the top of a user message; a quoted one is prose", () => {
+  const summary = "This session is being continued from a previous conversation.\n\nSummary: the user ran " +
+    "[[ripple: muse@high]] to build the intro page …";
+  assert.equal(markerOverride(body(summary), cfg.aliases), null);
+  assert.equal(resolve("gpt-6-astra", body(summary), cfg)!.model, "gpt-6-astra");
+  assert.equal(markerOverride(body("  \n[[ripple: luna@low]]\n\ntask"), cfg.aliases)?.model, "gpt-5.6-luna", "leading whitespace is fine");
+  assert.equal(markerOverride(body("<system-reminder>x</system-reminder>[[ripple: luna]] task"), cfg.aliases)?.model, "gpt-5.6-luna", "a stripped reminder does not push it off the top");
+});

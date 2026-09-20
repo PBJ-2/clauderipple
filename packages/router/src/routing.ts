@@ -21,7 +21,10 @@ export type Resolved = {
 };
 
 const REMINDER = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
-const MARKER = /\[\[\s*(?:ripple|gpt)\s*:\s*([A-Za-z0-9.\-]+)\s*(?:@\s*([A-Za-z]+))?\s*\]\]/;
+// Anchored: the marker is honoured only at the very top of a user message. A subagent prompt starts
+// with it; a compaction summary that *quotes* one does not, and on 2026-09-20 such a quote in a
+// GPT-6 Astra session's summary re-routed the whole session to `muse` on ChatGPT (400 on every turn).
+const MARKER = /^\s*\[\[\s*(?:ripple|gpt)\s*:\s*([A-Za-z0-9.\-]+)\s*(?:@\s*([A-Za-z]+))?\s*\]\]/;
 
 type MessageBlock = { type?: string; text?: string };
 type Message = { role?: string; content?: string | MessageBlock[] };
@@ -78,6 +81,16 @@ export function resolve(model: unknown, body: unknown, cfg: Config): Resolved | 
     const ov = markerOverride(body, cfg.aliases);
     const finalModel = ov?.model ?? base;
     const finalEffort = ov?.effort ?? effort;
+    // The provider follows the model the marker names, not the model the session runs on. A
+    // `gpt-6-astra` session delegating to `muse` used to keep `chatgpt` as the provider and send
+    // it `muse-spark-1.3-contributor`, which ChatGPT refuses (2026-09-20). The marker's model is
+    // placed the way any requested model is: its own prefix rule, else its one declaring provider.
+    if (finalModel !== base) {
+      const ownDirect = cfg.direct.find((d) => finalModel.startsWith(d.prefix));
+      const provider = ownDirect ? ownDirect.provider : soleOwner(finalModel, cfg);
+      if (!provider || ingressOnly(provider)) return null;
+      return { provider, model: finalModel, effort: finalEffort, tag: `${model}->${finalModel}` };
+    }
     return { provider: direct.provider, model: finalModel, effort: finalEffort, tag: `${model}->${finalModel}` };
   }
 
@@ -129,6 +142,12 @@ export function resolve(model: unknown, body: unknown, cfg: Config): Resolved | 
  * Providers whose own `models` list carries this id. Dated and undated forms match each other, the
  * same way a slot lookup does. Ingress-only providers are included on purpose — see the call site.
  */
+/** The one provider declaring this id, or null when none or several do. */
+function soleOwner(id: string, cfg: Config): string | null {
+  const owners = declaredBy(id, cfg);
+  return owners.length === 1 ? owners[0]! : null;
+}
+
 export function declaredBy(id: string, cfg: Config): string[] {
   const undated = id.replace(/-\d{8}$/, "");
   const owners: string[] = [];
@@ -159,15 +178,20 @@ export function unroutableReason(model: unknown, body: unknown, cfg: Config): st
   const base = at > 0 ? model.slice(0, at) : model;
   const marker = scanMarker(body);
 
-  // A rule decides first, and `resolve` already honoured it — a null here means the rule is one it
-  // drops on purpose (an ingress-only provider), which the request should pass through, not refuse.
-  // Rules are keyed on the model the request names, never on the marker.
-  if (cfg.direct.some((d) => base.startsWith(d.prefix))) return null;
-  if (cfg.routes[base] || cfg.routes[base.replace(/-\d{8}$/, "")]) return null;
-
-  // No rule. `resolve` now consults the marker, then the providers' own `models` lists. Mirror it.
   const aliased = marker ? cfg.aliases[marker.name] : undefined;
   const effective = aliased ?? (marker ? marker.name : base);
+  const hasDirect = (id: string): boolean => cfg.direct.some((d) => id.startsWith(d.prefix));
+
+  // Mirror `resolve`. A prefix rule on the requested model honours the marker: the marker's model is
+  // then placed by its own prefix rule or its one declaring provider, and a null from `resolve` there
+  // is a real "nowhere to send this". Without a marker, a prefix rule or a slot on the requested model
+  // decided, and a null can only be the ingress-only drop — pass through, do not refuse. A slot ignores
+  // the marker entirely.
+  if (hasDirect(base)) {
+    if (effective === base || hasDirect(effective)) return null;
+  } else if (cfg.routes[base] || cfg.routes[base.replace(/-\d{8}$/, "")]) {
+    return null;
+  }
 
   const owners = declaredBy(effective, cfg);
   if (owners.length > 1) {
