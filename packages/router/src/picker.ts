@@ -59,22 +59,18 @@ export function injectPickerModels(json: Record<string, unknown>, extra: CliMode
       const entry: ModelEntry = { ...structuredClone(template), id: e.model, name: e.name };
       if (e.description) entry.description = e.description;
       else delete entry.description;
-      // These entries only borrow enough presentation metadata to make Claude Desktop offer the
-      // model. A copied Claude context window/usage state is not a statement about the external
-      // model and made the Desktop draw a fictitious 1M-token meter for GPT models.
-      for (const k of ["disabled", "disabled_reason", "notice", "selection_notice", "badge", "badge_tooltip", "tooltip", "minimum_tier", "is_default", "context_window", "contextWindow", "context_window_by_model", "contextWindowByModel", "context_usage", "contextUsage", "context_window_usage", "contextWindowUsage"]) delete entry[k];
+      for (const k of ["disabled", "disabled_reason", "notice", "selection_notice", "badge", "badge_tooltip", "tooltip", "minimum_tier", "is_default"]) delete entry[k];
       entry.section = "main";
       surface.models.push(entry);
       result.injected++;
     }
-    // A context window is model metadata, not a generic UI fallback. Advertising the global
-    // compaction threshold as a provider model's actual window makes Desktop's meter inaccurate.
-    // Leave unknown models unlabelled; only publish a window that the provider explicitly reported.
+    // Per-entry window first: routed models do not share one, and `contextWindow` is only the fallback.
     for (const key of ["context_window_by_model", "contextWindowByModel"]) {
       const map = surface[key];
       if (!map || typeof map !== "object") continue;
       for (const e of extra) {
-        if (e.contextWindow) (map as Record<string, number>)[e.model] = e.contextWindow;
+        const w = e.contextWindow ?? contextWindow;
+        if (w) (map as Record<string, number>)[e.model] = w;
       }
     }
     const recorded = result.surfaces[result.surfaces.length - 1]!;

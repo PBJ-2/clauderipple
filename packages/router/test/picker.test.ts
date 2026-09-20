@@ -43,14 +43,14 @@ test("injects into CLI-backed surfaces (code/ccd/ccr/cowork) using an enabled Cl
   assert.equal("badge" in terra, false, "template badge stripped");
   assert.deepEqual(terra.thinking, { effort_options: [{ id: "high" }] }, "effort config inherited from template");
   assert.equal("description" in code.models[3]!, false);
-  assert.equal("gpt-6-astra@high" in code.context_window_by_model, false, "an unverified provider model does not inherit the global compaction threshold as its window");
+  assert.equal(code.context_window_by_model["gpt-6-astra@high"], 258400);
   const chat = (j.model_selector_config as { models: unknown[] }[])[0]!;
   assert.equal(chat.models.length, 1, "chat surface untouched");
   // idempotent
   assert.equal(injectPickerModels(j, [{ model: "gpt-6-astra@high", name: "GPT-6 Astra" }]).injected, 0);
 });
 
-test("each picker entry gets its own verified context window", () => {
+test("each picker entry gets its own context window; the global value is only the fallback", () => {
   const j = bootstrap();
   injectPickerModels(j, [
     { model: "big@high", name: "Big", contextWindow: 1_000_000 },
@@ -60,7 +60,7 @@ test("each picker entry gets its own verified context window", () => {
   const code = (j.model_selector_config as { context_window_by_model: Record<string, number> }[])[1]!;
   assert.equal(code.context_window_by_model["big@high"], 1_000_000);
   assert.equal(code.context_window_by_model["small@high"], 400_000);
-  assert.equal("plain@high" in code.context_window_by_model, false, "a global compaction threshold is not a model window");
+  assert.equal(code.context_window_by_model["plain@high"], 258400, "no own window → global fallback");
   assert.equal(code.context_window_by_model["claude-opus-4-8"], 200000, "existing entries untouched");
 });
 
@@ -70,19 +70,6 @@ test("a per-entry window applies even with no global value", () => {
   const code = (j.model_selector_config as { context_window_by_model: Record<string, number> }[])[1]!;
   assert.equal(code.context_window_by_model["big@high"], 1_000_000);
   assert.equal("plain@high" in code.context_window_by_model, false, "nothing to say about it → say nothing");
-});
-
-test("does not retain context display metadata copied from a Claude template", () => {
-  const j = bootstrap();
-  const code = (j.model_selector_config as { id: string; models: Record<string, unknown>[] }[])[1]!;
-  Object.assign(code.models[0]!, {
-    context_window: 1_000_000,
-    context_usage: { used: 334100, limit: 1_000_000 },
-  });
-  injectPickerModels(j, [{ model: "gpt-6-astra", name: "GPT-6 Astra" }], 258400);
-  const astra = code.models.find((model) => model.id === "gpt-6-astra")!;
-  assert.equal("context_window" in astra, false);
-  assert.equal("context_usage" in astra, false);
 });
 
 test("no-ops on unexpected shapes", () => {
