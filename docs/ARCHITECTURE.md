@@ -158,6 +158,21 @@ chat is out of reach for every approach, ours included.
     (`gpt-` and `deepseek-v4-pro`), picker entries unchanged at 5, and **no model
     resolved anywhere different**. Picker exposure stays what the operator ticked; it is
     routing that stopped needing to be said twice.
+- **Worker definitions derive from the same list (2026-09-20).** A ticked model is
+  also a subagent the operator can name: for every id exactly one non-ingress
+  provider declares, the router writes `~/.claude/agents/<name>.md` (`agents.ts`;
+  `name` = the id with anything outside `[a-z0-9-]` folded to `-`, frontmatter
+  `model:` = the exact id, `@medium` when the provider offers that level). It
+  records what it wrote in `<home>/generated-agents.json` and touches **only**
+  those files: a hand-written agent of the same name wins and is left alone, an
+  unticked model removes its generated file and nothing else, identical content is
+  not rewritten. `cli.agentFiles: false` turns generation off. The marker alias
+  table is the union of `aliases` (explicit, wins) and every agent file's
+  `name → model` — so `[[ripple: <agent>@<effort>]]` resolves for any agent that
+  exists, generated or not, with no second registry to keep in step. Why: on
+  2026-09-20 a hand-written agent named `deepseek` had no matching alias; the
+  marker `[[ripple: deepseek@high]]` therefore named a model nobody declared, and
+  thirty requests went to Anthropic as `PASS` and came back 404 (§5).
 - **Anthropic-compatible providers** (DeepSeek, Kimi/Moonshot, GLM, MiniMax and
   others expose `/v1/messages`): host + model rewrite only, no translation. This
   is the whole reason `claude-code-router` works with just `ANTHROPIC_BASE_URL`.
@@ -212,7 +227,16 @@ chat is out of reach for every approach, ours included.
     response (`x-codex-primary-used-percent`, `-window-minutes`,
     `-reset-after-seconds`, `-reset-at`, `x-codex-plan-type`); the
     `codex.rate_limits` SSE event was not sent in any measured response. The
-    adapter reads both.
+    adapter reads both. Headers only arrive with traffic, though, and on a quiet
+    day the admin status sat at `1%` for eleven hours while the real figure was
+    `39%` (2026-09-20). So the adapter also **asks**: `GET
+    https://chatgpt.com/backend-api/wham/usage` with the same credentials (the
+    Codex CLI's own path — `/api/codex/usage` is a documented alias that answers
+    403 to us; measured), a JSON body whose windows are in seconds, mapped to the
+    header shape. `/api/status` refreshes when the snapshot is over 10 minutes
+    old or on `?refresh=1`, shares one in-flight lookup, and marks the answer
+    `stale: true` with a reason when the lookup fails rather than hiding the old
+    value. Once at startup too, after `listen()`, never awaited.
   - **Tool schema scrub.** The backend validates every `pattern` in
     `tools[].parameters` with a regex engine that rejects lookaround and
     backreferences, and one bad pattern fails the whole request with 400
@@ -634,6 +658,8 @@ what we do not have yet — so that adding a provider does not start with readin
 | The DeepSeek `401` stayed unexplained for a day: a provider error was logged as a status code only (2026-09-15) | Upstream 4xx/5xx bodies are logged (first 300 characters, key-shaped strings masked) and kept in the request record. This is the same rule already required of the translator above. |
 | "Connect Claude subscription" from the tray/GUI failed with "setup-token failed": `claude setup-token` is an interactive terminal flow and neither place has a terminal (2026-09-15, Windows) | Without a TTY the error says to run `clauderipple claude-login` in a terminal and that an existing Claude Code login is reused anyway; other failures carry what `claude` printed. A button that cannot work where it is must say where it works. |
 | Closing Claude Desktop's window does not quit it; reopening hits `Not main instance, returning early` and the app silently keeps the OLD proxy setting. The user sees "I configured it and nothing happened" with no error anywhere (2026-09-14) | Tell the user that closing the window is not enough, and detect it: with picker mode on, the router knows whether the app is actually routing through it. Surface "configured, but the app has not restarted yet" rather than letting it fail silently. |
+| A subagent prompt carried `[[ripple: deepseek@high]]` while `aliases` had no `deepseek`; the marker resolved to a model id nobody declared, `resolve()` returned null, and the request went to Anthropic as an ordinary `PASS` — 30 × `404 model: deepseek-v4.1-flash` over two days, read by the session as "the model stopped working" (2026-09-19/20) | A non-`claude-*` model this router cannot route is **refused here, by name**: `400 invalid_request_error "ClaudeRipple: <reason>"`, tag `REFUSE`, reason in the request record (`unroutableReason`: undeclared / declared by two providers / ingress-only owner / unknown marker alias / alias to an undeclared model). Native `claude-*` ids keep passing through untouched — Claude traffic is never hijacked to say no. And the marker alias table is derived from the agent files themselves (§4), so an agent that exists is an alias that resolves. |
+| The worker registry was four places that did not know each other — `providers.*.models`, `aliases`, `~/.claude/agents/*.md`, and prose in CLAUDE.md — and every new provider needed all four edited by hand; the one left out was the one that failed (2026-09-19, DeepSeek) | One source: a ticked model *is* a worker. Agent files and marker aliases are generated from `config.json` (§4 "worker definitions"); nothing about a worker is written twice. |
 
 ## 6. Blocked paths (measured, do not retry)
 

@@ -10,6 +10,7 @@ import path from "node:path";
 import { codexEnabled, writeCodexCatalog } from "../../cli/src/codex.ts";
 import { ingressModels } from "./ingress/models.ts";
 import { ConfigStore, configPath, homeDir, terminateHosts } from "./config.ts";
+import { defaultAgentDir, syncAgentFiles } from "./agents.ts";
 import { CertStore } from "./certs.ts";
 import { Logger } from "./log.ts";
 import { UpstreamHealth, EXIT_UPSTREAM_UNREACHABLE } from "./health.ts";
@@ -40,6 +41,13 @@ const store = new ConfigStore(undefined, (c, errors) => {
     if (codexEnabled()) writeCodexCatalog(ingressModels(c));
   } catch (e) {
     log?.warn(`codex catalog: ${(e as Error).message}`);
+  }
+  // One place for the truth: the agent files a worker's model comes from are derived from this
+  // config, so a model ticked here cannot disagree with the alias a marker resolves to.
+  try {
+    syncAgentFiles(c, defaultAgentDir(), log ?? console);
+  } catch (e) {
+    (log ?? console).warn(`agent files: ${(e as Error).message}`);
   }
 });
 const cfg0 = store.get();
@@ -130,6 +138,9 @@ proxy
     );
     const ingressPort = await ingress.listen();
     log!.info(`clauderipple OpenAI ingress listening on 127.0.0.1:${ingressPort}`);
+    // Quota only arrives on GPT response headers, so a quiet day left the status 11 hours stale
+    // (2026-09-20). Ask once now, after listen(), and never wait for the answer.
+    proxy.chatgptRefreshAll();
     const admin = await startAdmin({
       config: () => store.get(),
       configFile: configPath(),
@@ -138,7 +149,7 @@ proxy
       health: () => health.consecutiveFailures,
       version: VERSION,
       requests,
-      chatgpt: () => ({ quota: proxy.chatgptRateLimits, auth: proxy.chatgptAuthStatus() }),
+      chatgpt: () => ({ quota: proxy.chatgptRateLimits, auth: proxy.chatgptAuthStatus(), refresh: (name) => proxy.chatgptFetchRateLimits(name) }),
       credentials: () => proxy.credentialHealth(),
       picker: () => ({ enabled: !!store.get().picker?.enabled, hosts: terminateHosts(store.get()).slice(1), last: proxy.lastPickerInjection }),
       observedClaudeCodeAuth,

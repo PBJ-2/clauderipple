@@ -169,6 +169,12 @@ export type Config = {
     /** Fallback context window for routed models that do not declare their own (auto_compact_windows). */
     autoCompactWindow?: number;
     /**
+     * Generate `~/.claude/agents/*.md` for the models config declares, so an agent file and the
+     * alias a `[[ripple: xxx@effort]]` marker resolves to both come from one place. Only files this
+     * router wrote (recorded in `generated-agents.json`) are touched. Default true.
+     */
+    agentFiles?: boolean;
+    /**
      * Which model fills each of Claude Code's own slots, written into `~/.claude/settings.json`
      * env. Claude Code decides these before a request exists, so the router cannot reach them by
      * routing: a search, a session title or a subagent goes wherever the CLI already decided.
@@ -236,7 +242,7 @@ export const DEFAULTS: Config = {
   direct: [],
   aliases: {},
   effortClamp: { ultra: "max" },
-  cli: { extraModels: [] },
+  cli: { extraModels: [], agentFiles: true },
   health: { maxConsecutiveUpstreamFailures: 20 },
   log: { maxBytes: 5 * 1024 * 1024, keep: 3 },
 };
@@ -390,6 +396,7 @@ export function validate(c: Config): string[] {
     }
   }
   if (!(c.listen.port > 0 && c.listen.port < 65536)) errors.push("listen.port out of range");
+  if (c.cli.agentFiles !== undefined && typeof c.cli.agentFiles !== "boolean") errors.push("cli.agentFiles must be true or false");
   if (c.listen.openaiPort !== undefined && !(c.listen.openaiPort >= 0 && c.listen.openaiPort < 65536)) errors.push("listen.openaiPort out of range");
   return errors;
 }

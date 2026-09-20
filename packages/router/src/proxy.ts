@@ -24,7 +24,8 @@ import type { Config } from "./config.ts";
 import type { Logger } from "./log.ts";
 import { UpstreamHealth } from "./health.ts";
 import { BOOTSTRAP_PATH, injectBootstrap } from "./bootstrap.ts";
-import { THREAD_UNSUPPORTED, effortOf, resolve, rewriteBody, stripThreadFields, threadDecision, type Resolved } from "./routing.ts";
+import { THREAD_UNSUPPORTED, effortOf, resolve, rewriteBody, stripThreadFields, threadDecision, unroutableReason, type Resolved } from "./routing.ts";
+import { defaultAgentDir, withAgentAliases } from "./agents.ts";
 import { forwardCompatibleHeader, resolveCompatibleCaps, sanitizeForCompatible } from "./compat.ts";
 import { applyIdentityToAnthropicBody } from "./identity.ts";
 import { anthropicServerToolBackend, webPluginBackend, webSearchBlocks, webSearchErrorBlocks, webSearchMessage, webSearchQuery, webSearchSse, type WebSearchQuery } from "./websearch.ts";
@@ -99,6 +100,8 @@ export type ProxyDeps = {
   requests: RequestLog;
   /** Process-memory only; captures a real passthrough Claude Code OAuth header set. */
   observedClaudeCodeAuth?: ObservedClaudeCodeAuth;
+  /** Where agent definitions are read from. Defaults to `~/.claude/agents`; tests inject a tmp dir. */
+  agentDir?: string;
 };
 
 export type Stats = {
@@ -134,6 +137,24 @@ export class Proxy {
     const out: Record<string, Record<string, unknown> | null> = {};
     for (const [name, a] of this.chatgptAdapters) out[name] = a.adapter.lastRateLimits;
     return out;
+  }
+
+  /**
+   * Ask one chatgpt provider for its quota now. Adapters are created on first use, so a provider
+   * nobody has called yet is instantiated from config here — otherwise the admin status would
+   * report "no quota" until the first GPT turn of the day.
+   */
+  chatgptFetchRateLimits(name: string): Promise<Record<string, unknown> | null> {
+    const cfg = this.deps.config().providers[name];
+    if (!cfg || cfg.type !== "chatgpt") return Promise.resolve(null);
+    return this.chatgpt(name, cfg).fetchRateLimits();
+  }
+
+  /** Startup refresh: every configured chatgpt provider, in the background, never awaited. */
+  chatgptRefreshAll(): void {
+    for (const [name, p] of Object.entries(this.deps.config().providers)) {
+      if (p.type === "chatgpt") void this.chatgptFetchRateLimits(name);
+    }
   }
 
   chatgptAuthStatus(): Record<string, string> {
@@ -331,8 +352,10 @@ export class Proxy {
   // ---- per-request handling ----------------------------------------------------------
 
   private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const cfg = this.deps.config();
     const log = this.deps.log;
+    // The agent files' derived aliases join the config's own, so a marker naming a worker resolves
+    // the same way here as it does everywhere else. Explicit aliases win; the scan is mtime-cached.
+    const cfg = withAgentAliases(this.deps.config(), this.deps.agentDir ?? defaultAgentDir(), log);
     const t0 = Date.now();
     const method = req.method ?? "?";
     const path = req.url ?? "/";
@@ -434,6 +457,23 @@ export class Proxy {
     }
 
     const resolved = json ? resolve(model, json, cfg) : null;
+
+    // A non-Claude model this router cannot route is refused here, by name, instead of being
+    // forwarded to Anthropic. `PASS` on such a request answers 404 from Anthropic and looks like
+    // "the model vanished" (2026-09-20: an agent file named `deepseek` resolved, through a missing
+    // alias, to a model no provider declared — thirty of them came back 404). A native `claude-*`
+    // id is deliberately unrouted and must keep passing through (§5).
+    if (!resolved && isApiHost && isMessages && json && typeof model === "string" && !model.startsWith("claude-")) {
+      const reason = unroutableReason(model, json, cfg);
+      if (reason) {
+        const payload = JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: `ClaudeRipple: ${reason}` } });
+        res.writeHead(400, { "content-type": "application/json", "content-length": String(Buffer.byteLength(payload)) }).end(payload);
+        tag = `REFUSE ${model}`;
+        record = { ...record, provider: "refused" };
+        finish("400", payload.length, `ClaudeRipple: ${reason}`, true);
+        return;
+      }
+    }
     // A slot with fallbacks picks its provider before anything is sent, so a primary that is rate
     // limited for the next hour is skipped rather than rediscovered once per request. Failing over
     // mid-turn is not possible — once a byte of the answer has gone out, replacing it would splice

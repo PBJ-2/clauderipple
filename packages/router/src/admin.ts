@@ -57,7 +57,12 @@ export type AdminDeps = {
   version: string;
   requests: RequestLog;
   /** Optional: chatgpt providers' latest rate-limit snapshot and credential status. */
-  chatgpt?: () => { quota: Record<string, Record<string, unknown> | null>; auth: Record<string, string> };
+  chatgpt?: () => {
+    quota: Record<string, Record<string, unknown> | null>;
+    auth: Record<string, string>;
+    /** Active quota lookup by provider name; absent in tests. Returns null on failure. */
+    refresh?: (name: string) => Promise<Record<string, unknown> | null>;
+  };
   /**
    * Optional: per-credential cooldowns and quarantines, for providers that declare a pool. Ids and
    * labels only — never a header value.
@@ -246,7 +251,7 @@ export function chatgptSignedIn(mode: string | undefined): boolean {
   return mode === "own" ? own : mode === "borrow-codex" ? borrowed : own || borrowed;
 }
 
-async function buildStatus(deps: AdminDeps): Promise<Record<string, unknown>> {
+async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): Promise<Record<string, unknown>> {
   const cfg = deps.config();
   const providers: Record<string, { url: string; type: string; reachable: boolean; authSource?: "observed" | "env" | "keychain" | "credentials-file" | "token-file" | null; signedIn?: "oauth" | "setup-token" | null }> = {};
   // Keyed in the order the config lists them. Assigning inside the Promise.all callbacks ordered
@@ -279,6 +284,25 @@ async function buildStatus(deps: AdminDeps): Promise<Record<string, unknown>> {
   );
   for (const [name, entry] of checked) providers[name] = entry;
   const chatgpt = deps.chatgpt?.() ?? { quota: {}, auth: {} };
+  // A snapshot from response headers ages the moment GPT traffic stops: measured 2026-09-20, the
+  // status route showed 1% from 11 hours earlier while the account was at 40%. Past ten minutes,
+  // ask the backend directly. The lookup shares one in-flight promise per provider, so concurrent
+  // status polls (the GUI does one every 5s) collapse into a single request. A failed lookup keeps
+  // the last good numbers and says why, rather than blanking the read the budget decision uses.
+  const STALE_MS = 10 * 60 * 1000;
+  const staleReasons: Record<string, string> = {};
+  const refresh = deps.chatgpt?.().refresh;
+  if (refresh) {
+    const now = Date.now();
+    for (const [name, q] of Object.entries(chatgpt.quota)) {
+      const at = q && typeof q.at === "number" ? q.at : 0;
+      if (!opts.refresh && at && now - at < STALE_MS) continue;
+      const fresh = await refresh(name);
+      if (fresh) chatgpt.quota[name] = fresh;
+      else staleReasons[name] = opts.refresh ? "refresh requested but lookup failed" : "lookup failed; showing last known value";
+    }
+  }
+  const stale = Object.keys(staleReasons).length > 0;
   const signedIn: Record<string, boolean> = {};
   for (const [name, p] of Object.entries(cfg.providers)) {
     if (p.type !== "chatgpt") continue;
@@ -319,7 +343,7 @@ async function buildStatus(deps: AdminDeps): Promise<Record<string, unknown>> {
       pointsAtRouter: env.HTTPS_PROXY === wantProxy,
     },
     cliVersion: cliVersion(),
-    chatgpt: { ...chatgpt, signedIn },
+    chatgpt: { ...chatgpt, signedIn, ...(stale ? { stale: true, staleReason: staleReasons } : {}) },
     // Only present for providers that declare a pool; a provider with one credential has nothing
     // to report and would only add a row that never changes.
     credentials: deps.credentials?.() ?? {},
@@ -673,7 +697,8 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         return;
       }
       if (pathname === "/api/status" && method === "GET") {
-        sendJson(res, 200, await buildStatus(deps));
+        const refresh = new URL(url, "http://127.0.0.1").searchParams.get("refresh") === "1";
+        sendJson(res, 200, await buildStatus(deps, { refresh }));
         return;
       }
       if (pathname === "/api/presets" && method === "GET") {

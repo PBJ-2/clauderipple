@@ -7,6 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { Config } from "./config.ts";
+import { agentAliases } from "./agents.ts";
 
 export const BOOTSTRAP_PATH = "/api/claude_cli/bootstrap";
 
@@ -47,8 +48,13 @@ function routable(id: string, cfg: Config): boolean {
 
 export function injectBootstrap(body: Buffer, cfg: Config, agentDirs?: string[]): Buffer {
   const known = new Set(cfg.cli.extraModels.map((m) => m.model));
+  // The agent files' derived aliases are the same set a marker resolves against, so an id an agent
+  // file names (and its base) is routable here too — otherwise the CLI never lists it and the
+  // subagent silently falls back to the parent session's Claude model.
+  const aliasDir = agentDirs?.[0] ?? path.join(os.homedir(), ".claude", "agents");
+  const aliases = { ...agentAliases(aliasDir), ...cfg.aliases };
   const fromAgents = agentModelIds(agentDirs)
-    .filter((id) => !known.has(id) && routable(id, cfg))
+    .filter((id) => !known.has(id) && routable(id, { ...cfg, aliases }))
     .map((id) => {
       const [base, effort] = id.split("@");
       const named = cfg.cli.extraModels.find((m) => m.model === base);

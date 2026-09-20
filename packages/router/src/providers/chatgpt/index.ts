@@ -16,6 +16,10 @@ import { homeDir } from "../../config.ts";
 
 export const DEFAULT_BASE = "https://chatgpt.com/backend-api";
 const PING_MS = 15_000;
+/** Active quota lookup. Measured 2026-09-20: GET {base}/wham/usage → 200 JSON. The binary also
+ * carries `/api/codex/usage`, but that path answers 403 here; `wham` is the one that works. */
+const USAGE_PATH = "/wham/usage";
+const USAGE_TIMEOUT_MS = 10_000;
 
 export type ChatGptOutcome = { status: number; bytes: number; note?: string; usage?: RequestUsage; stopReason?: string };
 
@@ -79,6 +83,42 @@ export function rateLimitsFromHeaders(h: Headers): Record<string, unknown> | nul
   };
 }
 
+/**
+ * Map the `/wham/usage` JSON body onto the same shape as `rateLimitsFromHeaders`, so `/api/status`
+ * and the GUI read one thing whether the snapshot came from response headers or the active call.
+ * Shape measured 2026-09-20: `{plan_type, rate_limit: {primary_window:{used_percent,
+ * limit_window_seconds, reset_after_seconds, reset_at}, secondary_window}}`; window minutes are
+ * derived (the body reports seconds), and as with the headers a secondary window only counts when
+ * it has a real length.
+ */
+export function rateLimitsFromUsage(body: unknown): Record<string, unknown> | null {
+  const b = body as {
+    plan_type?: unknown;
+    rate_limit?: {
+      primary_window?: { used_percent?: unknown; limit_window_seconds?: unknown; reset_after_seconds?: unknown; reset_at?: unknown } | null;
+      secondary_window?: { used_percent?: unknown; limit_window_seconds?: unknown; reset_after_seconds?: unknown; reset_at?: unknown } | null;
+    } | null;
+  } | null;
+  const win = (w: { used_percent?: unknown; limit_window_seconds?: unknown; reset_after_seconds?: unknown; reset_at?: unknown } | null | undefined): Record<string, number> | null => {
+    const used = typeof w?.used_percent === "number" ? w.used_percent : undefined;
+    if (used === undefined) return null;
+    const out: Record<string, number> = { used_percent: used };
+    if (typeof w!.limit_window_seconds === "number") out.window_minutes = Math.round(w!.limit_window_seconds / 60);
+    if (typeof w!.reset_after_seconds === "number") out.reset_after_seconds = w!.reset_after_seconds;
+    if (typeof w!.reset_at === "number") out.reset_at = w!.reset_at;
+    return out;
+  };
+  const primary = win(b?.rate_limit?.primary_window);
+  if (!primary) return null;
+  const secondary = win(b?.rate_limit?.secondary_window);
+  return {
+    type: "codex.rate_limits",
+    plan_type: typeof b?.plan_type === "string" ? b.plan_type : undefined,
+    rate_limits: { primary, secondary: secondary && secondary.window_minutes ? secondary : null },
+    at: Date.now(),
+  };
+}
+
 export class ChatGptAdapter {
   readonly name: string;
   private readonly cfg: ChatGptProvider;
@@ -95,6 +135,63 @@ export class ChatGptAdapter {
 
   describeAuth(): string {
     return this.creds.describe();
+  }
+
+  /** One in-flight lookup shared by every caller (the status route and the startup refresh). */
+  private rateLimitsInFlight: Promise<Record<string, unknown> | null> | null = null;
+
+  /**
+   * Ask the backend for the current quota instead of waiting for a request to carry it in the
+   * response headers. Without this, `/api/status` shows the last time GPT traffic flowed — 11
+   * hours stale in one measurement (2026-09-20) — and the product's GPT budget read is wrong.
+   * Never throws and never clears a good snapshot; returns the new one, or null on failure.
+   */
+  fetchRateLimits(): Promise<Record<string, unknown> | null> {
+    if (this.rateLimitsInFlight) return this.rateLimitsInFlight;
+    this.rateLimitsInFlight = this.fetchRateLimitsOnce().finally(() => {
+      this.rateLimitsInFlight = null;
+    });
+    return this.rateLimitsInFlight;
+  }
+
+  private async fetchRateLimitsOnce(): Promise<Record<string, unknown> | null> {
+    const tokens = await this.creds.get();
+    if (tokens instanceof Error) {
+      this.log.warn(`chatgpt ${this.name}: rate-limit fetch skipped: ${tokens.message}`);
+      return null;
+    }
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), USAGE_TIMEOUT_MS);
+    let res: Response;
+    try {
+      res = await fetch(`${(this.cfg.url ?? DEFAULT_BASE).replace(/\/$/, "")}${USAGE_PATH}`, {
+        method: "GET",
+        headers: {
+          authorization: `Bearer ${tokens.accessToken}`,
+          "chatgpt-account-id": tokens.accountId,
+          originator: "codex_cli_rs",
+          accept: "application/json",
+        },
+        signal: ac.signal,
+      });
+    } catch (e) {
+      this.log.warn(`chatgpt ${this.name}: rate-limit fetch failed: ${(e as Error).message}`);
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!res.ok) {
+      if (res.status === 401) this.creds.invalidate();
+      this.log.warn(`chatgpt ${this.name}: rate-limit fetch HTTP ${res.status}`);
+      return null;
+    }
+    const parsed = rateLimitsFromUsage(await res.json().catch(() => null));
+    if (!parsed) {
+      this.log.warn(`chatgpt ${this.name}: rate-limit fetch returned no primary window`);
+      return null;
+    }
+    this.lastRateLimits = parsed;
+    return parsed;
   }
 
   /** Last measured total input (uncached + cached) per conversation, for the next message_start estimate. */

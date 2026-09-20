@@ -6,7 +6,7 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { ChatGptAdapter, rateLimitsFromHeaders } from "../src/providers/chatgpt/index.ts";
+import { ChatGptAdapter, rateLimitsFromHeaders, rateLimitsFromUsage } from "../src/providers/chatgpt/index.ts";
 import { Logger } from "../src/log.ts";
 import type { AnthropicRequest } from "../src/providers/chatgpt/translate.ts";
 
@@ -16,6 +16,19 @@ fs.writeFileSync(path.join(home, "chatgpt-auth.json"), JSON.stringify({ accessTo
 type Seen = { headers: http.IncomingHttpHeaders; body: Record<string, unknown>; path: string };
 const seen: Seen[] = [];
 let mode: "stream" | "error429" | "sse-error" = "stream";
+// Active quota lookup (GET /wham/usage): its own mode so it can be exercised independently.
+let usageMode: "ok" | "unauthorized" | "no-window" = "ok";
+let usageHits = 0;
+const usageAuth: string[] = [];
+let usageDelayMs = 0;
+const usageBody = {
+  plan_type: "prolite",
+  rate_limit: {
+    allowed: true,
+    primary_window: { used_percent: 40, limit_window_seconds: 604800, reset_after_seconds: 559014, reset_at: 1790432598 },
+    secondary_window: null,
+  },
+};
 
 const sse = (evs: Record<string, unknown>[]): string => evs.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join("");
 const happy = [
@@ -35,6 +48,22 @@ const backend = http.createServer((req, res) => {
   const chunks: Buffer[] = [];
   req.on("data", (c: Buffer) => chunks.push(c));
   req.on("end", () => {
+    if ((req.url ?? "").split("?")[0] === "/wham/usage") {
+      usageHits += 1;
+      usageAuth.push(String(req.headers.authorization ?? ""));
+      const respond = (): void => {
+        if (usageMode === "unauthorized") {
+          res.writeHead(401, { "content-type": "application/json" }).end(JSON.stringify({ detail: "unauthorized" }));
+        } else if (usageMode === "no-window") {
+          res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ plan_type: "prolite", rate_limit: { primary_window: null } }));
+        } else {
+          res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(usageBody));
+        }
+      };
+      if (usageDelayMs > 0) setTimeout(respond, usageDelayMs);
+      else respond();
+      return;
+    }
     seen.push({ headers: req.headers, body: JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown>, path: req.url ?? "" });
     if (mode === "error429") {
       res
@@ -171,6 +200,68 @@ test("SSE error event → streamed Anthropic error event", async () => {
   assert.equal(r.status, 200);
   assert.ok(r.text.includes("event: error"));
   assert.ok(r.text.includes("overloaded_error"));
+});
+
+test("fetchRateLimits: active lookup maps /wham/usage to the header shape and updates the snapshot", async () => {
+  mode = "stream";
+  usageMode = "ok";
+  usageHits = 0;
+  const before = adapter.lastRateLimits;
+  const out = await adapter.fetchRateLimits();
+  assert.equal(usageHits, 1);
+  assert.equal(usageAuth[0], "Bearer tok_test");
+  // Same shape as rateLimitsFromHeaders, so /api/status and the GUI read one thing either way.
+  assert.equal(out?.type, "codex.rate_limits");
+  assert.equal(out?.plan_type, "prolite");
+  const rl = out?.rate_limits as { primary: Record<string, number>; secondary: unknown };
+  assert.equal(rl.primary.used_percent, 40);
+  assert.equal(rl.primary.window_minutes, 10080); // 604800s reported as seconds, surfaced as minutes
+  assert.equal(rl.primary.reset_after_seconds, 559014);
+  assert.equal(rl.primary.reset_at, 1790432598);
+  assert.equal(rl.secondary, null);
+  assert.equal(typeof out?.at, "number");
+  assert.notEqual(out, before);
+  assert.equal(adapter.lastRateLimits, out, "snapshot updated in place");
+});
+
+test("fetchRateLimits: 401 → null, snapshot unchanged, and the cached credential is dropped", async () => {
+  usageMode = "ok";
+  const good = await adapter.fetchRateLimits();
+  assert.ok(good);
+  usageMode = "unauthorized";
+  usageHits = 0;
+  const out = await adapter.fetchRateLimits();
+  assert.equal(out, null);
+  assert.equal(usageHits, 1);
+  assert.equal(adapter.lastRateLimits, good, "a failed lookup never clears the last good snapshot");
+});
+
+test("fetchRateLimits: a body with no primary window → null", async () => {
+  usageMode = "no-window";
+  assert.equal(await adapter.fetchRateLimits(), null);
+});
+
+test("fetchRateLimits: concurrent callers share one in-flight request", async () => {
+  usageMode = "ok";
+  usageHits = 0;
+  usageDelayMs = 40;
+  const [a, b, c] = await Promise.all([adapter.fetchRateLimits(), adapter.fetchRateLimits(), adapter.fetchRateLimits()]);
+  usageDelayMs = 0;
+  assert.equal(usageHits, 1, "three concurrent lookups → one upstream call");
+  assert.equal(a, b);
+  assert.equal(b, c);
+});
+
+test("rateLimitsFromUsage: secondary counts only with a real window", () => {
+  const withSecondary = rateLimitsFromUsage({
+    plan_type: "pro",
+    rate_limit: {
+      primary_window: { used_percent: 5, limit_window_seconds: 18000 },
+      secondary_window: { used_percent: 1, limit_window_seconds: 0 },
+    },
+  }) as { rate_limits: { secondary: unknown } };
+  assert.equal(withSecondary.rate_limits.secondary, null, "zero-length secondary is not a window");
+  assert.equal(rateLimitsFromUsage({ rate_limit: { primary_window: null } }), null);
 });
 
 test("cleanup", () => {

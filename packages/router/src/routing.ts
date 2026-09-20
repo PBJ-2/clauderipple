@@ -26,7 +26,8 @@ const MARKER = /\[\[\s*(?:ripple|gpt)\s*:\s*([A-Za-z0-9.\-]+)\s*(?:@\s*([A-Za-z]
 type MessageBlock = { type?: string; text?: string };
 type Message = { role?: string; content?: string | MessageBlock[] };
 
-export function markerOverride(body: unknown, aliases: Record<string, string>): { model: string; effort?: string } | null {
+/** The raw `[[ripple: <name>@<effort>]]` the body carries, name lowercased. Does not resolve it. */
+function scanMarker(body: unknown): { name: string; effort?: string } | null {
   const messages = (body as { messages?: Message[] } | null)?.messages;
   if (!Array.isArray(messages)) return null;
   let seen = 0;
@@ -43,10 +44,17 @@ export function markerOverride(body: unknown, aliases: Record<string, string>): 
     if (hit) {
       const name = hit[1]!.toLowerCase();
       const effort = hit[2]?.toLowerCase();
-      return effort ? { model: aliases[name] ?? name, effort } : { model: aliases[name] ?? name };
+      return effort ? { name, effort } : { name };
     }
   }
   return null;
+}
+
+export function markerOverride(body: unknown, aliases: Record<string, string>): { model: string; effort?: string } | null {
+  const hit = scanMarker(body);
+  if (!hit) return null;
+  const model = aliases[hit.name] ?? hit.name;
+  return hit.effort ? { model, effort: hit.effort } : { model };
 }
 
 export function resolve(model: unknown, body: unknown, cfg: Config): Resolved | null {
@@ -121,7 +129,7 @@ export function resolve(model: unknown, body: unknown, cfg: Config): Resolved | 
  * Providers whose own `models` list carries this id. Dated and undated forms match each other, the
  * same way a slot lookup does. Ingress-only providers are included on purpose — see the call site.
  */
-function declaredBy(id: string, cfg: Config): string[] {
+export function declaredBy(id: string, cfg: Config): string[] {
   const undated = id.replace(/-\d{8}$/, "");
   const owners: string[] = [];
   for (const [name, provider] of Object.entries(cfg.providers)) {
@@ -130,6 +138,50 @@ function declaredBy(id: string, cfg: Config): string[] {
     if (models.some((m) => m.id === id || m.id === undated || m.id.replace(/-\d{8}$/, "") === undated)) owners.push(name);
   }
   return owners;
+}
+
+/**
+ * Why `resolve` returned null, named, or null when the request is not ours to refuse.
+ *
+ * A model that resolves needs no explanation. A native Claude id is deliberately unrouted — it
+ * passes through to Anthropic — so it is never a refusal either. Everything else reaching here is a
+ * request that would otherwise be forwarded to Anthropic and come back 404, which is what happened
+ * to a whole session on 2026-09-20: an agent file named `deepseek` resolved (through a missing
+ * alias) to a model no provider declared, and `PASS` sent thirty of them to Anthropic.
+ *
+ * Pure: it decides and explains, it does not send.
+ */
+export function unroutableReason(model: unknown, body: unknown, cfg: Config): string | null {
+  if (typeof model !== "string") return null;
+  if (model.startsWith("claude-")) return null;
+
+  const at = model.indexOf("@");
+  const base = at > 0 ? model.slice(0, at) : model;
+  const marker = scanMarker(body);
+
+  // A rule decides first, and `resolve` already honoured it — a null here means the rule is one it
+  // drops on purpose (an ingress-only provider), which the request should pass through, not refuse.
+  // Rules are keyed on the model the request names, never on the marker.
+  if (cfg.direct.some((d) => base.startsWith(d.prefix))) return null;
+  if (cfg.routes[base] || cfg.routes[base.replace(/-\d{8}$/, "")]) return null;
+
+  // No rule. `resolve` now consults the marker, then the providers' own `models` lists. Mirror it.
+  const aliased = marker ? cfg.aliases[marker.name] : undefined;
+  const effective = aliased ?? (marker ? marker.name : base);
+
+  const owners = declaredBy(effective, cfg);
+  if (owners.length > 1) {
+    return `"${effective}" is declared by two providers (${owners.join(", ")}); add a route or direct rule`;
+  }
+  if (owners.length === 1) {
+    const owner = owners[0]!;
+    if (cfg.providers[owner]?.type === "anthropic") return `provider "${owner}" is ingress-only`;
+    return null; // resolve() would have routed this; nothing to refuse.
+  }
+  // Nothing declares it. Say which name failed, and whether a marker introduced it.
+  if (marker && !aliased) return `marker alias "${marker.name}" is not an alias and not an agent name`;
+  if (aliased) return `marker alias "${marker!.name}" resolves to "${aliased}", which no provider declares`;
+  return `no provider declares "${effective}"`;
 }
 
 /** Apply a resolution to a parsed Messages request body (mutates and returns it). */

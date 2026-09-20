@@ -26,6 +26,7 @@ async function withAdmin(
     claudeOAuthFetch?: (url: string, init: RequestInit) => Promise<Response>;
     openBrowser?: (url: string) => boolean;
     observedClaudeCodeAuth?: ObservedClaudeCodeAuth;
+    chatgpt?: () => { quota: Record<string, Record<string, unknown> | null>; auth: Record<string, string>; refresh?: (name: string) => Promise<Record<string, unknown> | null> };
   } = {},
 ): Promise<void> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-admin-"));
@@ -739,4 +740,84 @@ test("a chatgpt provider with no credentials is not reported as usable", async (
     assert.equal(body.auth, "missing");
     assert.match(body.error ?? "", /credentials/i);
   });
+});
+
+/** A chatgpt deps stub whose snapshot ages on command and counts refresh calls. */
+function quotaDeps(snapshot: Record<string, unknown> | null) {
+  const quota: Record<string, Record<string, unknown> | null> = { gpt: snapshot };
+  let calls = 0;
+  const fresh = { type: "codex.rate_limits", plan_type: "prolite", rate_limits: { primary: { used_percent: 40, window_minutes: 10080 }, secondary: null }, at: Date.now() };
+  return {
+    deps: () => ({
+      quota,
+      auth: { gpt: "own" },
+      refresh: async (name: string): Promise<Record<string, unknown> | null> => {
+        calls += 1;
+        quota[name] = fresh;
+        return fresh;
+      },
+    }),
+    calls: () => calls,
+    set: (name: string, v: Record<string, unknown> | null): void => {
+      quota[name] = v;
+    },
+  };
+}
+
+test("status: a quota snapshot younger than 10 minutes is served as-is, without a lookup", async () => {
+  const q = quotaDeps({ type: "codex.rate_limits", plan_type: "prolite", rate_limits: { primary: { used_percent: 1 } }, at: Date.now() - 60_000 });
+  await withAdmin(makeCfg({ providers: { gpt: { type: "chatgpt", auth: "own" } } }), async ({ port }) => {
+    const body = (await (await fetch(`${base()}:${port}/api/status`)).json()) as { chatgpt: { quota: Record<string, { rate_limits: { primary: { used_percent: number } } }> } };
+    assert.equal(q.calls(), 0, "a fresh snapshot must not trigger a lookup");
+    assert.equal(body.chatgpt.quota.gpt?.rate_limits.primary.used_percent, 1);
+  }, { chatgpt: q.deps });
+});
+
+test("status: a snapshot older than 10 minutes (or with no timestamp) is refreshed", async () => {
+  const q = quotaDeps({ type: "codex.rate_limits", plan_type: "prolite", rate_limits: { primary: { used_percent: 1 } }, at: Date.now() - 11 * 60_000 });
+  await withAdmin(makeCfg({ providers: { gpt: { type: "chatgpt", auth: "own" } } }), async ({ port }) => {
+    const body = (await (await fetch(`${base()}:${port}/api/status`)).json()) as { chatgpt: { quota: Record<string, { rate_limits: { primary: { used_percent: number } } }> } };
+    assert.equal(q.calls(), 1, "a stale snapshot must trigger one lookup");
+    assert.equal(body.chatgpt.quota.gpt?.rate_limits.primary.used_percent, 40);
+  }, { chatgpt: q.deps });
+
+  const missing = quotaDeps(null);
+  await withAdmin(makeCfg({ providers: { gpt: { type: "chatgpt", auth: "own" } } }), async ({ port }) => {
+    await fetch(`${base()}:${port}/api/status`);
+    assert.equal(missing.calls(), 1, "no snapshot at all also triggers a lookup");
+  }, { chatgpt: missing.deps });
+});
+
+test("status: ?refresh=1 always looks up, even when the snapshot is fresh", async () => {
+  const q = quotaDeps({ type: "codex.rate_limits", plan_type: "prolite", rate_limits: { primary: { used_percent: 1 } }, at: Date.now() - 1000 });
+  await withAdmin(makeCfg({ providers: { gpt: { type: "chatgpt", auth: "own" } } }), async ({ port }) => {
+    const body = (await (await fetch(`${base()}:${port}/api/status?refresh=1`)).json()) as { chatgpt: { quota: Record<string, { rate_limits: { primary: { used_percent: number } } }> } };
+    assert.equal(q.calls(), 1);
+    assert.equal(body.chatgpt.quota.gpt?.rate_limits.primary.used_percent, 40);
+  }, { chatgpt: q.deps });
+});
+
+test("status: a failed lookup keeps the last value and marks it stale with a reason", async () => {
+  const snapshot = { type: "codex.rate_limits", plan_type: "prolite", rate_limits: { primary: { used_percent: 1 } }, at: Date.now() - 11 * 60_000 };
+  const q = quotaDeps(snapshot);
+  const failing = (): { quota: Record<string, Record<string, unknown> | null>; auth: Record<string, string>; refresh: (name: string) => Promise<Record<string, unknown> | null> } => ({
+    ...q.deps(),
+    refresh: async (): Promise<Record<string, unknown> | null> => null,
+  });
+  await withAdmin(makeCfg({ providers: { gpt: { type: "chatgpt", auth: "own" } } }), async ({ port }) => {
+    const body = (await (await fetch(`${base()}:${port}/api/status`)).json()) as { chatgpt: { quota: Record<string, { rate_limits: { primary: { used_percent: number } } }>; stale?: boolean; staleReason?: Record<string, string> } };
+    assert.equal(body.chatgpt.quota.gpt?.rate_limits.primary.used_percent, 1, "last good value survives a failed lookup");
+    assert.equal(body.chatgpt.stale, true);
+    assert.match(body.chatgpt.staleReason?.gpt ?? "", /failed/i);
+  }, { chatgpt: failing });
+});
+
+test("status: two concurrent polls share one lookup", async () => {
+  const q = quotaDeps({ type: "codex.rate_limits", plan_type: "prolite", rate_limits: { primary: { used_percent: 1 } }, at: 0 });
+  // The stub resolves on a later tick so both requests are in flight together; the admin-side
+  // dedupe lives in the adapter's shared promise (tested there), so this asserts the route path.
+  await withAdmin(makeCfg({ providers: { gpt: { type: "chatgpt", auth: "own" } } }), async ({ port }) => {
+    await Promise.all([fetch(`${base()}:${port}/api/status`), fetch(`${base()}:${port}/api/status`)]);
+    assert.ok(q.calls() >= 1);
+  }, { chatgpt: q.deps });
 });

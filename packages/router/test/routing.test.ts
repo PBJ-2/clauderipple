@@ -1,8 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { DEFAULTS, type Config } from "../src/config.ts";
-import { markerOverride, resolve, rewriteBody } from "../src/routing.ts";
+import { markerOverride, resolve, rewriteBody, unroutableReason } from "../src/routing.ts";
 import { injectBootstrap } from "../src/bootstrap.ts";
+import { withAgentAliases } from "../src/agents.ts";
 
 const cfg: Config = {
   ...DEFAULTS,
@@ -211,4 +215,77 @@ test("an ignored direct rule does not fall through to a mapping", () => {
     direct: [{ prefix: "claude-haiku-", provider: "native" }],
   };
   assert.equal(resolve("claude-haiku-4-5-20251001", body("hi"), native), null);
+});
+
+// ---- agent-derived aliases and the refusal reason ------------------------------------
+
+test("a marker naming an agent file resolves through the derived alias", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cr-routing-agents-"));
+  // An agent file named `deepseek`, whose model one provider declares. Before the derivation this
+  // exact shape resolved to the literal id "deepseek", which no provider declared → PASS → 404.
+  fs.writeFileSync(path.join(dir, "deepseek.md"), "---\nname: deepseek\nmodel: deepseek-v4-pro@medium\n---\n");
+  const cfg = withAgentAliases(declared, dir);
+  assert.equal(cfg.aliases.deepseek, "deepseek-v4-pro");
+
+  // The marker now resolves to a real id. `deepseek-v4-pro` is offered by two providers in
+  // `declared`, so it is still ambiguous — the alias resolves, and the ambiguity is what stops it.
+  const reason = unroutableReason("vendor-model", body("[[ripple: deepseek@high]] do it"), cfg);
+  assert.equal(reason, '"deepseek-v4-pro" is declared by two providers (opencode-go-chat, deepseek); add a route or direct rule');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a marker naming an agent file routes when exactly one provider declares its model", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cr-routing-agents2-"));
+  fs.writeFileSync(path.join(dir, "kimi.md"), "---\nname: kimi\nmodel: kimi-k3@low\n---\n");
+  const cfg = withAgentAliases(declared, dir);
+  const r = resolve("some-unknown-model", body("[[ripple: kimi@high]] do it"), cfg)!;
+  assert.equal(r.provider, "opencode-go-chat");
+  assert.equal(r.model, "kimi-k3");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("unroutableReason: marker alias that resolves to an undeclared model", () => {
+  const cfg: Config = { ...declared, aliases: { ...declared.aliases, deepseek: "deepseek-v4-pro" } };
+  // Two providers declare it → the ambiguity message, not the "undeclared" one.
+  assert.equal(unroutableReason("whatever", body("[[ripple: deepseek@high]]"), cfg),
+    '"deepseek-v4-pro" is declared by two providers (opencode-go-chat, deepseek); add a route or direct rule');
+  // An alias pointing at a model nobody has.
+  const ghost: Config = { ...declared, aliases: { ...declared.aliases, ghost: "no-such-model" } };
+  assert.equal(unroutableReason("whatever", body("[[ripple: ghost]]"), ghost),
+    'marker alias "ghost" resolves to "no-such-model", which no provider declares');
+});
+
+test("unroutableReason: a marker name that is neither alias nor agent", () => {
+  assert.equal(unroutableReason("whatever", body("[[ripple: nobody@high]]"), declared),
+    'marker alias "nobody" is not an alias and not an agent name');
+});
+
+test("unroutableReason: two providers declare the named model", () => {
+  assert.equal(unroutableReason("deepseek-v4-pro", body("hi"), declared),
+    '"deepseek-v4-pro" is declared by two providers (opencode-go-chat, deepseek); add a route or direct rule');
+});
+
+test("unroutableReason: no provider declares it, and an ingress-only provider is named", () => {
+  assert.equal(unroutableReason("some-model-nobody-has", body("hi"), declared), 'no provider declares "some-model-nobody-has"');
+  // A model only the native anthropic provider lists: the provider is named, not the model.
+  const onlyNative: Config = {
+    ...DEFAULTS,
+    providers: { anthropic: { type: "anthropic", auth: "claude-code", models: [{ id: "claude-haiku-4-5" }] } },
+    routes: {}, direct: [], aliases: {},
+  };
+  assert.equal(unroutableReason("claude-haiku-4-5", body("hi"), onlyNative), null, "a claude-* id is never a refusal");
+  const nonClaudeNative: Config = {
+    ...DEFAULTS,
+    providers: { anthropic: { type: "anthropic", auth: "claude-code", models: [{ id: "vendor-model" }] } },
+    routes: {}, direct: [], aliases: {},
+  };
+  assert.equal(unroutableReason("vendor-model", body("hi"), nonClaudeNative), 'provider "anthropic" is ingress-only');
+});
+
+test("unroutableReason is null for a routable model, a rule, and every claude-* id", () => {
+  assert.equal(unroutableReason("kimi-k3", body("hi"), declared), null, "routable");
+  assert.equal(unroutableReason("gpt-7-unreleased", body("hi"), declared), null, "a direct rule decides");
+  assert.equal(unroutableReason("claude-opus-5", body("hi"), declared), null);
+  assert.equal(resolve("claude-opus-5", body("hi"), declared), null, "and resolve agrees it is unrouted");
+  assert.equal(unroutableReason(undefined, body("hi"), declared), null);
 });
