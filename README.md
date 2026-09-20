@@ -290,23 +290,33 @@ a routed model and every subagent runs on it — no agent file, nothing else:
 { "subagent": "gpt-5.6-terra" }   // → CLAUDE_CODE_SUBAGENT_MODEL
 ```
 
-An agent file is only for a **named** subagent you want to call by name, with its
-own brief and effort. That is Claude Code's own feature, not something ClaudeRipple
-adds — the `model:` line just names a model the router already knows:
+**Every model you tick is also a named subagent.** The router writes
+`~/.claude/agents/<name>.md` for each model exactly one provider carries
+(`gpt-5.6-terra` → `gpt-5-6-terra`, `deepseek-v4.1-flash` → `deepseek-v4-1-flash`),
+so "have DeepSeek do it" needs nothing beyond ticking the model: the Agent tool
+lists it, `subagent_type: "deepseek-v4-1-flash"` runs it, and the task panel
+names it. Untick the model and its file goes away. The router only ever touches
+the files it wrote (recorded in `generated-agents.json`); an agent file you wrote
+yourself under the same name wins and is left alone, so a custom brief is still
+just Claude Code's own agent file with a `model:` the router knows:
 
 ```markdown
 ---
-name: gpt
-description: Delegate implementation, research and review to GPT-5.6 Terra.
-model: gpt-5.6-terra
+name: reviewer
+description: Independent review on GPT-5.6 Sol.
+model: gpt-5.6-sol@medium
 ---
-You are the worker for this session. Finish the task, verify it yourself, and
-report the conclusion only.
+You are the reviewer for this session. Verify the change yourself and report
+the conclusion only.
 ```
 
-Save it as `~/.claude/agents/gpt.md` (or `.claude/agents/` in a project) and call it
-with the Agent tool. Append an effort to the model (`gpt-5.6-terra@high`) to fix one,
-or let the caller choose per task with a `[[ripple: …]]` marker in the prompt.
+Per-call effort goes on the **first line** of the subagent prompt:
+`[[ripple: gpt-5-6-terra@high]]` — any agent name or model id works there. A
+marker anywhere else is prose and is ignored (a compaction summary that quotes
+one must not re-route the session). A model the router cannot place is refused
+by name (`400 ClaudeRipple: no provider declares "…"`) instead of being sent on
+to fail somewhere less legible; native Claude models always pass through.
+Set `"cli": { "agentFiles": false }` to turn generation off.
 
 ### Codex app and Codex CLI
 

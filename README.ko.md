@@ -257,22 +257,27 @@ node packages/cli/src/index.ts ui        # 브라우저에서 로컬 GUI 열기
 { "subagent": "gpt-5.6-terra" }   // → CLAUDE_CODE_SUBAGENT_MODEL
 ```
 
-에이전트 파일은 **이름을 붙여** 불러 쓰고 싶을 때, 그 에이전트만의 지시와 추론 강도를 주려고 만드는 것입니다.
-그건 Claude Code 자체 기능이지 ClaudeRipple이 더하는 게 아니고, `model:` 줄은 라우터가 이미 아는 모델 이름을
-적는 자리일 뿐입니다.
+**체크한 모델은 곧 이름 붙은 서브에이전트입니다.** 프로바이더 하나만 들고 있는 모델마다 라우터가
+`~/.claude/agents/<이름>.md`를 씁니다(`gpt-5.6-terra` → `gpt-5-6-terra`, `deepseek-v4.1-flash` →
+`deepseek-v4-1-flash`). 그래서 "딥시크한테 시켜"에 필요한 건 모델 체크뿐입니다 — Agent 도구 목록에 뜨고,
+`subagent_type: "deepseek-v4-1-flash"`로 돌고, 작업 패널에 그 이름이 보입니다. 체크를 빼면 파일도 사라집니다.
+라우터는 자기가 쓴 파일만 건드리고(`generated-agents.json`에 기록), 같은 이름으로 직접 쓴 파일이 있으면
+그쪽이 이기므로, 지시를 따로 주고 싶으면 Claude Code 에이전트 파일에 라우터가 아는 `model:`만 적으면 됩니다:
 
 ```markdown
 ---
-name: gpt
-description: 구현·조사·리뷰를 GPT-5.6 Terra에 위임할 때 쓴다.
-model: gpt-5.6-terra
+name: reviewer
+description: GPT-5.6 Sol로 독립 리뷰.
+model: gpt-5.6-sol@medium
 ---
-너는 이 세션의 실행자다. 위임받은 작업을 직접 끝내고 직접 검증해서 결론만 간결히 보고한다.
+너는 이 세션의 리뷰어다. 변경을 직접 검증해서 결론만 보고한다.
 ```
 
-`~/.claude/agents/gpt.md`(프로젝트 전용이면 `.claude/agents/`)로 저장하고 Agent 도구로 부르면 됩니다.
-모델 뒤에 강도를 붙여(`gpt-5.6-terra@high`) 고정하거나, 프롬프트의 `[[ripple: …]]` 표식으로
-부르는 쪽이 작업마다 고르게 할 수 있습니다.
+호출마다 강도를 바꾸려면 서브에이전트 프롬프트 **첫 줄**에 `[[ripple: gpt-5-6-terra@high]]`처럼 적습니다 —
+에이전트 이름이든 모델 id든 됩니다. 첫 줄이 아닌 곳의 표식은 그냥 글이라 무시합니다(압축 요약에 인용된
+표식이 세션을 엉뚱한 곳으로 보내면 안 되니까요). 라우터가 보낼 곳을 모르는 모델은 어디론가 흘려보내
+알 수 없는 에러로 죽게 두지 않고 이름을 대고 거부합니다(`400 ClaudeRipple: no provider declares "…"`).
+Claude 모델은 언제나 그대로 통과합니다. 생성을 끄려면 `"cli": { "agentFiles": false }`.
 
 ### Codex 앱과 Codex CLI
 
