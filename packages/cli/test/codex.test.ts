@@ -48,6 +48,28 @@ test("codex on writes a model catalog from Codex's cache and points config at it
   assert.equal(fs.existsSync(path.join(home, "clauderipple-models.json")), false);
 });
 
+// Codex saves a model picked from our catalog as its own default, outside our markers. Left behind,
+// that reference stopped Codex from loading any configuration at all (issue: "Model provider
+// `clauderipple` not found" after turning the Codex client off).
+test("codex off clears the selection Codex made from our catalog, so Codex still starts", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-codex-dangling-"));
+  const config = path.join(home, "config.toml");
+  fs.writeFileSync(config, 'model_reasoning_effort = "medium"\nmodel = "claude-sonnet-5"\nmodel_provider = "clauderipple"\n\n[plugins]\nenabled = true\n');
+  codexOn(18793, home);
+  codexOff(home);
+  assert.equal(fs.readFileSync(config, "utf8"), 'model_reasoning_effort = "medium"\n\n[plugins]\nenabled = true\n');
+});
+
+test("codex off keeps a model the user chose for someone else's provider", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-codex-theirs-"));
+  const config = path.join(home, "config.toml");
+  const theirs = 'model = "gpt-6-astra"\nmodel_provider = "openai"\n\n[plugins]\nenabled = true\n';
+  fs.writeFileSync(config, theirs);
+  codexOn(18793, home);
+  codexOff(home);
+  assert.equal(fs.readFileSync(config, "utf8"), theirs);
+});
+
 test("codex on without a Codex cache installs the provider only and keeps a user's own model_catalog_json", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-codex-nocache-"));
   const config = path.join(home, "config.toml");

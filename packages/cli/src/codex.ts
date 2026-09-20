@@ -130,6 +130,26 @@ model_provider = "clauderipple"
 ${PROFILE_END}`;
 }
 
+/** The head of a TOML document, before its first table header — where Codex keeps the default selection. */
+function beforeFirstTable(content: string): [head: string, rest: string] {
+  const at = content.search(/^[ \t]*\[/m);
+  return at < 0 ? [content, ""] : [content.slice(0, at), content.slice(at)];
+}
+
+/**
+ * Codex writes the model picked from our catalog into config.toml's own head, outside our markers:
+ * `model_provider = "clauderipple"` and the model id. Removing the provider block while that
+ * reference stays makes Codex refuse to start at all — "Model provider `clauderipple` not found",
+ * and no `codex` command runs until it is edited by hand — so `off` drops the dangling pair. The
+ * `model` line is ours to remove only while it names our provider; standing alone it is the user's.
+ */
+function withoutDanglingSelection(content: string): string {
+  const [head, rest] = beforeFirstTable(content);
+  const selectsUs = /^[ \t]*model_provider[ \t]*=[ \t]*(["'])clauderipple\1[ \t]*\r?\n?/m;
+  if (!selectsUs.test(head)) return content;
+  return head.replace(selectsUs, "").replace(/^[ \t]*model[ \t]*=[ \t]*(["'])[^\n]*\1[ \t]*\r?\n?/m, "") + rest;
+}
+
 export type CodexEdit = { changed: boolean; backup?: string; profileBackup?: string; config: string; profile: string };
 
 /** Install provider in config.toml plus selection in the dedicated `clauderipple` profile. */
@@ -156,7 +176,7 @@ export function codexOff(home = codexHome()): CodexEdit {
   const profile = profileFile(home);
   const beforeConfig = fs.existsSync(config) ? fs.readFileSync(config, "utf8") : "";
   const beforeProfile = fs.existsSync(profile) ? fs.readFileSync(profile, "utf8") : "";
-  const nextConfig = withoutOwnedBlock(withoutOwnedBlock(beforeConfig, START, END), CATALOG_START, CATALOG_END);
+  const nextConfig = withoutDanglingSelection(withoutOwnedBlock(withoutOwnedBlock(beforeConfig, START, END), CATALOG_START, CATALOG_END));
   const nextProfile = withoutOwnedBlock(beforeProfile, PROFILE_START, PROFILE_END);
   fs.rmSync(catalogFile(home), { force: true });
   if (nextConfig === beforeConfig && nextProfile === beforeProfile) return { changed: false, config, profile };
