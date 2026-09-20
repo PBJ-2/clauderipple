@@ -737,61 +737,240 @@ async function probeProvider(name, provider, onComplete) {
     renderHealthProviders();
   }
 }
-function providerCard(name, provider) {
-  const card = el("article", { class: "card provider-card" });
-  const title = el("h2", { text: name });
-  const stateLine = el("div", { class: "provider-state" });
-  const modelText = el("p", { class: "small" });
-  const effortText = el("p", { class: "small" });
-  const check = el("button", { class: "btn secondary", type: "button", text: t("providers.check") });
-  const edit = el("button", { class: "btn secondary", type: "button", text: t("common.edit") });
-  const remove = el("button", { class: "btn danger", type: "button", text: t("common.remove") });
-  const draw = () => {
-    const state = stateFor(name);
-    const preset = provider.preset && presetById(provider.preset);
-    let kind = provider.type === "chatgpt" ? t("providers.chatgpt") : provider.type === "anthropic" ? `${t("providers.anthropic")} · ${provider.auth === "claude-code" ? (provider.accountPool ? t("providers.anthropicPoolOn") : t("providers.anthropicLoginReuse")) : t("providers.apiKey")}` : preset ? preset.name : "";
-    if (provider.type !== "chatgpt" && provider.type !== "anthropic") { try { kind = `${kind ? kind + " · " : ""}${new URL(provider.url).host}`; } catch { /* keep */ } }
-    const live = status && status.providers && status.providers[name];
-    stateLine.replaceChildren(...[
-      providerState(name, provider),
-      live && live.needsLogin ? chatgptLoginButton(draw) : null,
-      live && live.needsLogin && chatgptLoginMessage ? el("span", { class: "small", text: chatgptLoginMessage }) : null,
-      el("span", { class: "small", text: kind }),
-      // Vendors answer with a whole JSON body. Printed in full it pushed the badge into a vertical
-      // sliver and the card into nonsense, so it is cut to one readable line with the rest on hover.
-      state && !state.ok && state.error ? el("span", { class: "small bad-text provider-error", text: shortError(state.error), title: state.error }) : null,
-    ].filter(Boolean));
-    const models = modelsOf(provider);
-    modelText.replaceChildren(...(models.length
-      ? models.flatMap((model, index) => [
-          index ? document.createTextNode(", ") : null,
-          document.createTextNode(labelOf(model)),
-          modelEffortTag(model) ? el("span", { class: `model-effort-tag ${model.effortLevels.length ? "has-effort" : "no-effort"}`, text: modelEffortTag(model) }) : null,
-        ].filter(Boolean))
-      : [document.createTextNode(t("providers.noModels"))]));
-    if (hasModelEffortData(provider)) effortText.hidden = true;
-    else {
-      const levels = effortLevelsFor(name, models[0] && models[0].id);
-      effortText.textContent = t("providers.effortLevels", { levels: levels.length ? levels.join(" · ") : t("providers.effortNone") });
-      effortText.hidden = false;
-    }
-  };
-  check.addEventListener("click", async () => { check.disabled = true; await probeProvider(name, provider); check.disabled = false; draw(); });
-  edit.addEventListener("click", () => openProviderForm({ name, provider }));
-  remove.addEventListener("click", async () => {
-    if (!confirm(t("providers.removeConfirm", { name }))) return;
-    const next = clone(currentConfig);
-    delete next.providers[name];
-    next.routes = Object.fromEntries(Object.entries(next.routes || {}).filter(([, route]) => route.provider !== name));
-    next.direct = (next.direct || []).filter((rule) => rule.provider !== name);
-    next.cli.extraModels = (next.cli.extraModels || []).filter((entry) => !modelsOf(provider).some((model) => model.id === entry.model));
-    try { await configRequest(next); currentConfig = next; providersLoaded = false; slotsLoaded = false; await loadProviders(); toast(t("common.saved")); } catch (error) { toast(t("common.saveFailed"), true, error.message); }
-  });
-  const quota = quotaLine(name);
-  card.append(el("div", { class: "toolbar" }, [title, el("div", { class: "right" }, [check, edit, remove])]), stateLine, modelText, effortText, quota ? el("div", { class: "small", text: quota }) : document.createTextNode(""));
-  draw();
-  return card;
+let selectedProviderName = null;
+let providerDetailTab = "overview";
+let providerSearch = "";
+let providerDetailGeneration = 0;
+
+function providerKind(name, provider) {
+  const preset = provider.preset && presetById(provider.preset);
+  if (provider.type === "chatgpt") return t("providers.chatgpt");
+  if (provider.type === "anthropic") return provider.auth === "claude-code"
+    ? `${t("providers.anthropic")} · ${provider.accountPool ? t("providers.rotationOn") : t("providers.rotationOff")}`
+    : `${t("providers.anthropic")} · ${t("providers.apiKey")}`;
+  if (preset) return preset.name;
+  try { return new URL(provider.url).host; } catch { return provider.type || name; }
 }
+
+function providerRailItem(name, provider) {
+  const selected = name === selectedProviderName;
+  const button = el("button", {
+    class: `provider-rail-item${selected ? " selected" : ""}`,
+    type: "button",
+    role: "option",
+    "aria-selected": String(selected),
+  }, [
+    el("span", { class: "provider-rail-copy" }, [
+      el("strong", { text: name }),
+      el("span", { text: t("providers.modelsCountShort", { count: modelsOf(provider).length }) }),
+    ]),
+    providerState(name, provider),
+  ]);
+  button.addEventListener("click", () => {
+    selectedProviderName = name;
+    providerDetailTab = provider.type === "anthropic" && provider.auth === "claude-code" ? "accounts" : "overview";
+    renderProviderWorkspace();
+  });
+  return button;
+}
+
+function renderProviderRail() {
+  const list = $("#providers-list");
+  const entries = Object.entries((currentConfig && currentConfig.providers) || {});
+  const query = providerSearch.trim().toLowerCase();
+  const visible = entries.filter(([name, provider]) => !query || name.toLowerCase().includes(query) || providerKind(name, provider).toLowerCase().includes(query));
+  list.replaceChildren(...visible.map(([name, provider]) => providerRailItem(name, provider)));
+  if (!entries.length) list.appendChild(el("div", { class: "provider-rail-empty", text: t("providers.empty") }));
+  else if (!visible.length) list.appendChild(el("div", { class: "provider-rail-empty", text: t("providers.noSelection") }));
+}
+
+async function removeProvider(name, provider) {
+  if (!confirm(t("providers.removeConfirm", { name }))) return;
+  const next = clone(currentConfig);
+  delete next.providers[name];
+  next.routes = Object.fromEntries(Object.entries(next.routes || {}).filter(([, route]) => route.provider !== name));
+  next.direct = (next.direct || []).filter((rule) => rule.provider !== name);
+  next.cli.extraModels = (next.cli.extraModels || []).filter((entry) => !modelsOf(provider).some((model) => model.id === entry.model));
+  try {
+    await configRequest(next);
+    currentConfig = next;
+    selectedProviderName = Object.keys(next.providers)[0] || null;
+    providerDetailTab = "overview";
+    slotsLoaded = false;
+    clientsLoaded = false;
+    renderProviderWorkspace();
+    toast(t("common.saved"));
+  } catch (error) { toast(t("common.saveFailed"), true, error.message); }
+}
+
+function providerTabs(name, provider) {
+  const tabs = [{ id: "overview", label: t("providers.overview") }];
+  if (provider.type === "anthropic" && provider.auth === "claude-code") tabs.push({ id: "accounts", label: t("providers.accounts") });
+  tabs.push({ id: "models", label: t("providers.modelsTab") });
+  return el("div", { class: "provider-tabs", role: "tablist" }, tabs.map((tab) => {
+    const button = el("button", { class: providerDetailTab === tab.id ? "active" : "", type: "button", role: "tab", "aria-selected": String(providerDetailTab === tab.id), text: tab.label });
+    button.addEventListener("click", () => { providerDetailTab = tab.id; renderProviderDetail(); });
+    return button;
+  }));
+}
+
+function providerOverview(name, provider) {
+  const state = stateFor(name);
+  const live = status && status.providers && status.providers[name];
+  const connection = el("section", { class: "detail-section" }, [
+    el("h3", { text: t("providers.connection") }),
+    el("div", { class: "detail-setting-row" }, [
+      el("div", { class: "setting-copy" }, [el("strong", { text: statusText(state) }), el("span", { text: providerKind(name, provider) })]),
+      providerState(name, provider),
+    ]),
+    state && !state.ok && state.error ? el("p", { class: "bad-text small provider-detail-error", text: shortError(state.error), title: state.error }) : null,
+    live && live.needsLogin ? chatgptLoginButton(renderProviderDetail) : null,
+  ].filter(Boolean));
+  const models = modelsOf(provider);
+  const modelSummary = el("section", { class: "detail-section" }, [
+    el("h3", { text: t("providers.selectedModels") }),
+    models.length ? el("div", { class: "model-chip-list" }, models.map((model) => el("span", { class: "model-chip", text: labelOf(model) }))) : hint(t("providers.noModels")),
+  ]);
+  const quota = quotaLine(name);
+  return el("div", { class: "provider-panel" }, [connection, quota ? el("section", { class: "detail-section" }, [el("h3", { text: t("health.quota", { percent: "", reset: "" }).trim() }), el("p", { text: quota })]) : null, modelSummary].filter(Boolean));
+}
+
+function providerModelsPanel(name, provider) {
+  const models = modelsOf(provider);
+  return el("div", { class: "provider-panel" }, [
+    el("section", { class: "detail-section" }, [
+      el("div", { class: "section-heading" }, [el("div", {}, [el("h3", { text: t("providers.selectedModels") }), hint(t("providers.modelsHelp"))]), el("button", { class: "btn secondary", type: "button", text: t("common.edit"), onclick: () => openProviderForm({ name, provider }) })]),
+      models.length ? el("div", { class: "provider-model-list" }, models.map((model) => el("div", { class: "provider-model-row" }, [el("strong", { text: labelOf(model) }), el("span", { class: "small", text: model.id }), modelEffortTag(model) ? el("span", { class: `model-effort-tag ${model.effortLevels.length ? "has-effort" : "no-effort"}`, text: modelEffortTag(model) }) : null].filter(Boolean)))) : hint(t("providers.noModels")),
+    ]),
+  ]);
+}
+
+async function saveAnthropicRotation(name, provider, enabled, control, message) {
+  control.disabled = true;
+  message.textContent = t("providers.rotationSaving");
+  const next = clone(currentConfig);
+  if (enabled) next.providers[name].accountPool = true;
+  else delete next.providers[name].accountPool;
+  try {
+    await configRequest(next);
+    currentConfig = next;
+    slotsLoaded = false;
+    clientsLoaded = false;
+    renderProviderWorkspace();
+    toast(t("providers.rotationSaved"));
+  } catch (error) {
+    control.checked = !enabled;
+    message.textContent = "";
+    toast(t("common.saveFailed"), true, error.message);
+  } finally { control.disabled = false; }
+}
+
+function renderClaudeAccountRows(target, data, name, generation) {
+  if (generation !== providerDetailGeneration) return;
+  const rows = [];
+  if (data.current) rows.push(el("article", { class: "account-card current" }, [
+    el("div", { class: "account-card-copy" }, [el("strong", { text: data.current.label }), el("span", { class: "small", text: anthropicSourceText(data.current.source) }), hint(t("providers.currentAccountHelp"))]),
+    el("span", { class: "badge ok", text: t("providers.anthropicCurrent") }),
+  ]));
+  for (const account of Array.isArray(data.accounts) ? data.accounts : []) {
+    const unavailable = account.needsReauth || account.expiresAt <= Date.now();
+    const rename = el("button", { class: "btn secondary compact", type: "button", text: t("common.edit") });
+    rename.addEventListener("click", async () => {
+      const label = prompt(t("providers.anthropicRenamePrompt"), account.label);
+      if (!label || !label.trim() || label.trim() === account.label) return;
+      try { await api(`/api/claude-accounts/${encodeURIComponent(account.id)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ label }) }); await refreshClaudeAccountPanel(name); }
+      catch (error) { toast(t("common.actionFailed"), true, error.message); }
+    });
+    const remove = el("button", { class: "btn danger compact", type: "button", text: t("common.remove") });
+    remove.addEventListener("click", async () => {
+      if (!confirm(t("providers.anthropicRemoveConfirm", { name: account.label }))) return;
+      try { await api(`/api/claude-accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" }); await refreshClaudeAccountPanel(name); }
+      catch (error) { toast(t("common.actionFailed"), true, error.message); }
+    });
+    const actions = [rename, remove];
+    if (unavailable) {
+      const reauth = el("button", { class: "btn secondary compact", type: "button", text: t("providers.reauthAction") });
+      reauth.addEventListener("click", () => openClaudeAccountConsent(name));
+      actions.unshift(reauth);
+    }
+    rows.push(el("article", { class: "account-card" }, [
+      el("div", { class: "account-card-copy" }, [el("strong", { text: account.label }), account.email && account.email !== account.label ? el("span", { class: "small", text: account.email }) : null, hint(t("providers.addedAccountHelp"))]),
+      el("span", { class: `badge ${unavailable ? "bad" : "ok"}`, text: unavailable ? t("providers.anthropicReauth") : t("pool.ready") }),
+      el("div", { class: "account-card-actions" }, actions),
+    ]));
+  }
+  target.replaceChildren(...(rows.length ? rows : [el("div", { class: "empty-card", text: t("providers.anthropicNoAccounts") })]));
+  const count = (data.current ? 1 : 0) + (Array.isArray(data.accounts) ? data.accounts.length : 0);
+  const countNode = $("#claude-account-count");
+  if (countNode) countNode.textContent = t("providers.accountCount", { count });
+}
+
+async function refreshClaudeAccountPanel(name) {
+  const target = $("#claude-account-rows");
+  if (!target || selectedProviderName !== name || providerDetailTab !== "accounts") return;
+  const generation = providerDetailGeneration;
+  try { renderClaudeAccountRows(target, await api("/api/claude-accounts"), name, generation); }
+  catch (error) { if (generation === providerDetailGeneration) target.replaceChildren(el("div", { class: "bad-text small", text: error.message })); }
+}
+
+function anthropicAccountsPanel(name, provider) {
+  const rotation = el("input", { type: "checkbox", checked: Boolean(provider.accountPool) });
+  const rotationMessage = el("span", { class: "small" });
+  rotation.addEventListener("change", () => void saveAnthropicRotation(name, provider, rotation.checked, rotation, rotationMessage));
+  const add = el("button", { class: "btn", type: "button", text: t("providers.addClaudeAccount") });
+  add.addEventListener("click", () => openClaudeAccountConsent(name));
+  const removeAll = el("button", { class: "btn danger", type: "button", text: t("providers.anthropicLogoutAll") });
+  removeAll.addEventListener("click", async () => {
+    if (!confirm(t("providers.anthropicLogoutAllConfirm"))) return;
+    try { await api("/api/claude-logout", { method: "POST" }); await refreshClaudeAccountPanel(name); }
+    catch (error) { toast(t("common.actionFailed"), true, error.message); }
+  });
+  const rows = el("div", { id: "claude-account-rows", class: "account-card-list" }, [el("div", { class: "small", text: t("providers.checking") })]);
+  const panel = el("div", { class: "provider-panel" }, [
+    el("section", { class: "detail-section account-summary" }, [
+      el("div", { class: "section-heading" }, [el("div", {}, [el("h3", { text: t("providers.accountPoolTitle") }), el("p", { id: "claude-account-count", class: "account-count", text: t("providers.accountCount", { count: 0 }) }), hint(t("providers.accountCountHelp"))]), add]),
+      el("div", { class: "detail-setting-row rotation-row" }, [el("div", { class: "setting-copy" }, [el("strong", { text: t("providers.anthropicPool") }), el("span", { text: t("providers.accountPoolSubtitle") })]), el("label", { class: "switch" }, [rotation, el("span")])]),
+      !provider.accountPool ? el("div", { class: "notice warn" }, [el("strong", { text: t("providers.rotationOff") }), el("span", { text: t("providers.rotationRequired") })]) : null,
+      rotationMessage,
+    ]),
+    el("section", { class: "detail-section" }, [rows]),
+    el("section", { class: "detail-section danger-section" }, [el("h3", { text: t("providers.dangerZone") }), hint(t("providers.anthropicLogoutAllConfirm")), removeAll]),
+  ]);
+  queueMicrotask(() => void refreshClaudeAccountPanel(name));
+  return panel;
+}
+
+function renderProviderDetail() {
+  const detail = $("#provider-detail");
+  providerDetailGeneration += 1;
+  const provider = currentConfig && currentConfig.providers && currentConfig.providers[selectedProviderName];
+  if (!provider) {
+    detail.replaceChildren(el("div", { class: "provider-detail-empty" }, [el("strong", { text: t("providers.noSelection") })]));
+    return;
+  }
+  const name = selectedProviderName;
+  const check = el("button", { class: "btn secondary", type: "button", text: t("providers.check") });
+  check.addEventListener("click", async () => { check.disabled = true; await probeProvider(name, provider); check.disabled = false; renderProviderWorkspace(); });
+  const edit = el("button", { class: "btn secondary", type: "button", text: t("common.edit"), onclick: () => openProviderForm({ name, provider }) });
+  const remove = el("button", { class: "btn danger", type: "button", text: t("common.remove"), onclick: () => void removeProvider(name, provider) });
+  const header = el("header", { class: "provider-detail-header" }, [
+    el("div", {}, [el("div", { class: "provider-title-line" }, [el("h2", { text: name }), providerState(name, provider)]), el("p", { class: "small", text: providerKind(name, provider) })]),
+    el("div", { class: "provider-detail-actions" }, [check, edit, remove]),
+  ]);
+  let content;
+  if (providerDetailTab === "accounts" && provider.type === "anthropic" && provider.auth === "claude-code") content = anthropicAccountsPanel(name, provider);
+  else if (providerDetailTab === "models") content = providerModelsPanel(name, provider);
+  else { providerDetailTab = "overview"; content = providerOverview(name, provider); }
+  detail.replaceChildren(header, providerTabs(name, provider), content);
+}
+
+function renderProviderWorkspace() {
+  const entries = Object.entries((currentConfig && currentConfig.providers) || {});
+  if (!selectedProviderName || !currentConfig.providers[selectedProviderName]) selectedProviderName = entries[0] ? entries[0][0] : null;
+  renderProviderRail();
+  renderProviderDetail();
+}
+
 async function loadClients() {
   clientsLoaded = true;
   try {
@@ -807,23 +986,21 @@ async function loadProviders() {
   try {
     await loadCatalogs();
     currentConfig = currentConfig || await api("/api/config");
-    const list = $("#providers-list");
-    list.replaceChildren(...Object.entries(currentConfig.providers || {}).map(([name, provider]) => providerCard(name, provider)));
-    if (!currentConfig.providers || !Object.keys(currentConfig.providers).length) list.appendChild(el("div", { class: "empty-card", text: t("providers.empty") }));
+    renderProviderWorkspace();
     void Promise.all(Object.entries(currentConfig.providers || {}).map(([name, provider]) => probeProvider(name, provider, () => {
-      const existing = $all(".provider-card").find((card) => card.querySelector("h2").textContent === name);
-      // Replace where it stands. Removing and appending re-sorted the whole list by whichever probe
-      // answered first, so the providers moved around every time the tab was opened.
-      if (existing) existing.replaceWith(providerCard(name, provider));
+      if ($("#view-providers").classList.contains("active")) renderProviderWorkspace();
     })));
   } catch (error) { toast(t("common.loadFailed"), true, error.message); }
 }
+$("#providers-search").addEventListener("input", (event) => { providerSearch = event.target.value; renderProviderRail(); });
 $("#providers-add").addEventListener("click", openProviderChooser);
 $("#providers-refresh").addEventListener("click", async () => {
   if (!currentConfig) return;
+  const button = $("#providers-refresh");
+  button.disabled = true;
   await Promise.all(Object.entries(currentConfig.providers).map(([name, provider]) => probeProvider(name, provider)));
-  providersLoaded = false;
-  await loadProviders();
+  button.disabled = false;
+  renderProviderWorkspace();
 });
 
 // ---- Provider modal -----------------------------------------------------------------
@@ -853,6 +1030,83 @@ window.addEventListener("keydown", (event) => {
     if (action && !action.disabled) { event.preventDefault(); action.click(); }
   }
 });
+
+function openClaudeAccountConsent(providerName) {
+  const accepted = el("input", { type: "checkbox" });
+  const proceed = el("button", { class: "btn", type: "button", "data-default-action": "", text: t("providers.anthropicOAuthContinue") });
+  proceed.disabled = true;
+  accepted.addEventListener("change", () => { proceed.disabled = !accepted.checked; });
+  proceed.addEventListener("click", () => void openClaudeAccountSignIn(providerName, false));
+  showModal(el("div", { class: "oauth-consent" }, [
+    el("h1", { id: "modal-title", text: t("providers.anthropicOAuthTitle") }),
+    el("div", { class: "notice warn" }, [el("strong", { text: t("providers.anthropicOAuthTitle") }), el("span", { text: t("providers.anthropicOAuthWarning") })]),
+    el("label", { class: "check oauth-accept" }, [accepted, el("span", { text: t("providers.anthropicOAuthAccept") })]),
+    el("div", { class: "actions end" }, [el("button", { class: "btn secondary", type: "button", text: t("common.cancel"), onclick: closeModal }), proceed]),
+  ]));
+}
+
+async function openClaudeAccountSignIn(providerName, manual) {
+  let active = true;
+  let poll = null;
+  const body = el("div", { class: "oauth-progress" });
+  function stopPolling() { if (poll) clearInterval(poll); poll = null; }
+  function showError(state) {
+    stopPolling();
+    if (!active) return;
+    const retry = el("button", { class: "btn secondary", type: "button", text: t("providers.anthropicSignInManual") });
+    retry.addEventListener("click", () => void openClaudeAccountSignIn(providerName, true));
+    body.replaceChildren(el("span", { class: "bad-text", text: t("providers.anthropicSignInFailed") }), state.error ? el("p", { class: "small", text: state.error }) : null, retry);
+  }
+  async function finish(state) {
+    stopPolling();
+    if (!active) return;
+    if (!state.ok) { showError(state); return; }
+    active = false;
+    closeModal();
+    if (selectedProviderName === providerName) {
+      providerDetailTab = "accounts";
+      renderProviderDetail();
+    }
+    toast(t("providers.anthropicLoginDone"));
+  }
+  function renderState(state) {
+    const controls = [
+      el("p", { text: state.manual ? t("providers.anthropicSignInPaste") : t("providers.anthropicSignInBrowser") }),
+      state.url ? el("a", { class: "login-link", href: state.url, target: "_blank", rel: "noreferrer", text: t("providers.anthropicSignInLink") }) : null,
+    ];
+    if (state.manual) {
+      const code = el("input", { type: "text", autocomplete: "off", placeholder: "code#state" });
+      const submit = el("button", { class: "btn", type: "button", text: t("providers.anthropicSignInSubmit") });
+      submit.addEventListener("click", async () => {
+        submit.disabled = true;
+        try { await finish(await api("/api/claude-oauth/code", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: code.value }) })); }
+        catch (error) { showError((error.body && { ok: false, error: error.body.error }) || { ok: false, error: error.message }); }
+      });
+      controls.push(el("div", { class: "key-control" }, [code, submit]));
+    } else controls.push(el("p", { class: "small", text: t("providers.anthropicSignInWaiting") }));
+    controls.push(el("button", { class: "btn secondary", type: "button", text: t("common.cancel"), onclick: closeModal }));
+    body.replaceChildren(...controls.filter(Boolean));
+  }
+  showModal(el("div", {}, [el("h1", { id: "modal-title", text: t("providers.anthropicOAuthTitle") }), body]), () => {
+    const wasActive = active;
+    active = false;
+    stopPolling();
+    if (wasActive) void api("/api/claude-oauth/cancel", { method: "POST" }).catch(() => {});
+  });
+  body.replaceChildren(el("p", { class: "small", text: t("providers.checking") }));
+  try {
+    const state = await api("/api/claude-oauth", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ manual: Boolean(manual) }) });
+    if (!active) return;
+    renderState(state);
+    poll = setInterval(async () => {
+      try {
+        const next = await api("/api/claude-oauth");
+        if (!next.running) await finish(next);
+      } catch { /* keep the last useful state while the router is busy */ }
+    }, 2000);
+  } catch (error) { showError({ ok: false, error: error.message }); }
+}
+
 function openProviderChooser() {
   const grid = el("div", { class: "chooser-grid" });
   const anthropic = el("button", { class: "chooser-tile", type: "button" }, [el("strong", { text: t("providers.anthropic") }), el("span", { text: t("providers.anthropicHelp") })]);
@@ -944,16 +1198,6 @@ function openAnthropicProviderForm(options) {
   const result = el("div", { class: "probe-result" });
   const probeButton = el("button", { class: "btn secondary", type: "button", text: t("providers.check") });
   const sourceLine = el("div", { class: "small" });
-  // Our own sign-in is stored even while a Claude Desktop session outranks it. Saying so is the
-  // only way a finished sign-in shows up on a screen whose source line does not change.
-  const signedInLine = el("div", { class: "small" });
-  function showSignedIn(response) {
-    const stored = response && response.signedIn;
-    signedInLine.hidden = !stored;
-    if (!stored) return;
-    signedInLine.textContent =
-      response.source === "token-file" ? t("providers.anthropicSignedInActive") : t("providers.anthropicSignedInStandby");
-  }
   let foundModels = modelsOf(existing).length ? modelsOf(existing) : claudeModels.map((model) => ({ id: model.id, name: labelOf(model) }));
   let selected = new Set(modelsOf(existing).length ? modelsOf(existing).map((model) => model.id) : foundModels.map((model) => model.id));
   const modelArea = el("div", { class: "form-field" });
@@ -964,56 +1208,11 @@ function openAnthropicProviderForm(options) {
   renderModels();
   const authField = inputRow(t("providers.credentials"), auth, t("providers.anthropicCredentialsHelp"));
   const keyField = el("div", { class: "form-field key-field" }, [el("span", { text: t("providers.apiKey") }), el("div", { class: "key-control" }, [keyInput, showKey]), el("small", { text: t("providers.keyHelp") })]);
-  const subscriptionActions = el("div", { class: "actions" }, [el("button", { class: "btn secondary", type: "button", text: t("providers.anthropicLogin") }), el("button", { class: "btn secondary", type: "button", text: t("providers.anthropicLogoutAll") })]);
-  const accountPool = el("input", { type: "checkbox", checked: existing ? Boolean(existing.accountPool) : true });
-  const accountPoolField = el("label", { class: "check picker-check" }, [accountPool, el("span", { text: t("providers.anthropicPool") })]);
-  const accountPoolHelp = hint(t("providers.anthropicPoolHelp"));
-  const accountList = el("div", { class: "claude-account-list" });
-  async function loadClaudeAccounts() {
-    try {
-      const data = await api("/api/claude-accounts");
-      if (!formActive) return;
-      const rows = [];
-      if (data.current) rows.push(el("div", { class: "claude-account-row" }, [
-        el("div", { class: "claude-account-copy" }, [el("strong", { text: data.current.label }), el("span", { class: "small", text: anthropicSourceText(data.current.source) })]),
-        el("span", { class: "badge ok", text: t("providers.anthropicCurrent") }),
-      ]));
-      for (const account of Array.isArray(data.accounts) ? data.accounts : []) {
-        const copy = el("div", { class: "claude-account-copy" }, [
-          el("strong", { text: account.label }),
-          account.email && account.email !== account.label ? el("span", { class: "small", text: account.email }) : null,
-        ]);
-        const unavailable = account.needsReauth || account.expiresAt <= Date.now();
-        const state = el("span", { class: `badge ${unavailable ? "bad" : "ok"}`, text: unavailable ? t("providers.anthropicReauth") : t("pool.ready") });
-        const rename = el("button", { class: "btn secondary compact", type: "button", text: t("common.edit") });
-        rename.addEventListener("click", async () => {
-          const label = prompt(t("providers.anthropicRenamePrompt"), account.label);
-          if (!label || !label.trim() || label.trim() === account.label) return;
-          try { await api(`/api/claude-accounts/${encodeURIComponent(account.id)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ label }) }); if (formActive) await loadClaudeAccounts(); }
-          catch (error) { if (formActive) toast(t("common.actionFailed"), true, error.message); }
-        });
-        const remove = el("button", { class: "btn danger compact", type: "button", text: t("common.remove") });
-        remove.addEventListener("click", async () => {
-          if (!confirm(t("providers.anthropicRemoveConfirm", { name: account.label }))) return;
-          try { await api(`/api/claude-accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" }); if (formActive) { await loadClaudeAccounts(); await runProbe(); } }
-          catch (error) { if (formActive) toast(t("common.actionFailed"), true, error.message); }
-        });
-        rows.push(el("div", { class: "claude-account-row" }, [copy, state, el("div", { class: "claude-account-actions" }, [rename, remove])]));
-      }
-      accountList.replaceChildren(...(rows.length ? rows : [el("div", { class: "small", text: t("providers.anthropicNoAccounts") })]));
-    } catch (error) {
-      if (formActive) accountList.replaceChildren(el("div", { class: "bad-text small", text: error.message }));
-    }
-  }
+  const accountPool = existing ? Boolean(existing.accountPool) : true;
   function syncAuthFields() {
     const reused = auth.value === "claude-code";
     keyField.hidden = reused;
-    subscriptionActions.hidden = !reused;
-    accountPoolField.hidden = !reused;
-    accountPoolHelp.hidden = !reused;
-    accountList.hidden = !reused;
     sourceLine.hidden = !reused;
-    signedInLine.hidden = !reused || !signedInLine.textContent;
   }
   auth.addEventListener("change", syncAuthFields);
   syncAuthFields();
@@ -1025,7 +1224,6 @@ function openAnthropicProviderForm(options) {
       const response = await api("/api/providers/probe", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
       if (!formActive) return;
       sourceLine.textContent = anthropicSourceText(response.source);
-      showSignedIn(response);
       const noCredits = response.ok && /^no-credits:/.test(response.error || "");
       result.replaceChildren(...[
         el("span", { class: response.ok && !noCredits ? "ok-text" : noCredits ? "warn-text" : "bad-text", text: noCredits ? t("providers.probeNoCredits") : response.ok ? t("providers.probeOk") : response.auth === "bad-key" ? t("providers.probeBadKey") : auth.value === "claude-code" ? anthropicSourceText(response.source) : t("providers.probeFailed") }),
@@ -1040,63 +1238,13 @@ function openAnthropicProviderForm(options) {
     finally { if (formActive) probeButton.disabled = false; }
   }
   probeButton.addEventListener("click", () => void runProbe());
-  // Our own browser sign-in (PKCE): start it, show the link in case no window opened, poll until the
-  // router has the credential. When the loopback port is taken the code is pasted here instead.
-  let signInPoll = null;
-  function renderSignIn(state) {
-    const parts = [el("div", { text: state.manual ? t("providers.anthropicSignInPaste") : t("providers.anthropicSignInBrowser") })];
-    if (state.url) parts.push(el("a", { href: state.url, target: "_blank", rel: "noreferrer", text: t("providers.anthropicSignInLink") }));
-    if (state.manual) {
-      const codeInput = el("input", { type: "text", autocomplete: "off", placeholder: "code#state" });
-      const submit = el("button", { class: "btn secondary", type: "button", text: t("providers.anthropicSignInSubmit") });
-      submit.addEventListener("click", async () => {
-        submit.disabled = true;
-        try { const done = await api("/api/claude-oauth/code", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: codeInput.value }) }); finishSignIn(done); }
-        catch (error) { if (formActive) finishSignIn({ ok: false, error: (error.body && error.body.error) || error.message }); }
-      });
-      parts.push(el("div", { class: "key-control" }, [codeInput, submit]));
-    } else parts.push(el("div", { class: "small", text: t("providers.anthropicSignInWaiting") }));
-    const cancel = el("button", { class: "btn secondary", type: "button", text: t("common.cancel") });
-    cancel.addEventListener("click", async () => { clearInterval(signInPoll); await api("/api/claude-oauth/cancel", { method: "POST" }).catch(() => {}); result.replaceChildren(); });
-    parts.push(cancel);
-    result.replaceChildren(el("div", { class: "sign-in" }, parts));
-  }
-  function finishSignIn(state) {
-    clearInterval(signInPoll);
-    if (!formActive) return;
-    // The probe refreshes the source and the stored-sign-in line, then the outcome is put back:
-    // the probe's own wording would otherwise erase the answer to the button that was just pressed.
-    if (state.ok) { void Promise.all([runProbe(), loadClaudeAccounts()]).then(() => { if (formActive) result.replaceChildren(el("span", { class: "ok-text", text: t("providers.anthropicLoginDone") })); }); return; }
-    const retry = el("button", { class: "btn secondary", type: "button", text: t("providers.anthropicSignInManual") });
-    retry.addEventListener("click", () => void startSignIn(true));
-    result.replaceChildren(el("span", { class: "bad-text", text: t("providers.anthropicSignInFailed") }), el("div", { class: "small", text: state.error || "" }), retry);
-  }
-  async function startSignIn(manual) {
-    clearInterval(signInPoll);
-    try {
-      const state = await api("/api/claude-oauth", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ manual: Boolean(manual) }) });
-      if (!formActive) return;
-      renderSignIn(state);
-      signInPoll = setInterval(async () => {
-        try { const now = await api("/api/claude-oauth"); if (!now.running) finishSignIn(now); }
-        catch { /* the router may be busy; keep polling */ }
-      }, 2000);
-    } catch (error) { if (formActive) result.replaceChildren(el("span", { class: "bad-text", text: t("common.actionFailed") }), el("div", { class: "small", text: error.message })); }
-  }
-  subscriptionActions.children[0].addEventListener("click", () => void startSignIn(false));
-  subscriptionActions.children[1].addEventListener("click", async () => {
-    if (!confirm(t("providers.anthropicLogoutAllConfirm"))) return;
-    try { const response = await api("/api/claude-logout", { method: "POST" }); if (!formActive) return; result.replaceChildren(el("span", { class: "ok-text", text: response.output })); await Promise.all([runProbe(), loadClaudeAccounts()]); }
-    catch (error) { if (formActive) toast(t("common.actionFailed"), true, error.message); }
-  });
   const modeHint = hint("");
-  function syncModeHint() { modeHint.textContent = auth.value === "claude-code" && accountPool.checked ? t("providers.anthropicPoolRouting") : t("providers.anthropicIngressOnly"); }
-  accountPool.addEventListener("change", syncModeHint);
+  function syncModeHint() { modeHint.textContent = auth.value === "claude-code" && accountPool ? t("providers.anthropicPoolRouting") : t("providers.anthropicIngressOnly"); }
   auth.addEventListener("change", syncModeHint);
   syncModeHint();
   const form = el("div", { class: "provider-form" }, [
     el("h1", { id: "modal-title", text: existing ? t("providers.edit") : t("providers.addTitle") }),
-    inputRow(t("providers.name"), nameInput, t("providers.nameHelp")), authField, keyField, accountPoolField, accountPoolHelp, accountList, probeButton, sourceLine, signedInLine, result, subscriptionActions, modelArea,
+    inputRow(t("providers.name"), nameInput, t("providers.nameHelp")), authField, keyField, probeButton, sourceLine, result, modelArea,
     modeHint,
   ]);
   const saveButton = el("button", { class: "btn", type: "button", "data-default-action": "", text: existing ? t("common.save") : t("providers.add") });
@@ -1106,18 +1254,18 @@ function openAnthropicProviderForm(options) {
     const next = clone(currentConfig);
     const providerName = existing ? options.name : uniqueName(typedName, next.providers);
     const checkedModels = form.querySelector(".model-picker").selected();
-    const provider = { type: "anthropic", auth: auth.value, ...(auth.value === "claude-code" && accountPool.checked ? { accountPool: true } : {}), ...(auth.value === "api-key" && (keyInput.value || (existing && existing.apiKey)) ? { apiKey: keyInput.value || existing.apiKey } : {}), models: checkedModels };
+    const provider = { type: "anthropic", auth: auth.value, ...(auth.value === "claude-code" && accountPool ? { accountPool: true } : {}), ...(auth.value === "api-key" && (keyInput.value || (existing && existing.apiKey)) ? { apiKey: keyInput.value || existing.apiKey } : {}), models: checkedModels };
     next.providers[providerName] = provider;
     // accountPool makes these models native Claude routing targets. Without it this remains the
     // historical OpenAI ingress provider, and routing deliberately ignores it.
     saveButton.disabled = true;
-    try { await configRequest(next); currentConfig = next; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); toast(t("common.saved")); }
+    try { await configRequest(next); currentConfig = next; selectedProviderName = providerName; providerDetailTab = auth.value === "claude-code" ? "accounts" : "overview"; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); toast(t("common.saved")); }
     catch (error) { toast(t("common.saveFailed"), true, error.message); }
     finally { saveButton.disabled = false; }
   });
   form.appendChild(el("div", { class: "actions end" }, [el("button", { class: "btn secondary", type: "button", text: t("common.cancel"), onclick: closeModal }), saveButton]));
-  showModal(form, () => { formActive = false; if (signInPoll) clearInterval(signInPoll); });
-  if (auth.value === "claude-code") void Promise.all([runProbe(), loadClaudeAccounts()]);
+  showModal(form, () => { formActive = false; });
+  if (auth.value === "claude-code") void runProbe();
 }
 function openProviderForm(options) {
   const existing = options.provider;
@@ -1314,6 +1462,8 @@ function openProviderForm(options) {
     try {
       await configRequest(next);
       currentConfig = next;
+      selectedProviderName = providerName;
+      providerDetailTab = "overview";
       slotsLoaded = false;
       providersLoaded = false;
       closeModal();

@@ -35,11 +35,18 @@
     <div class="card table-card"><table id="slots-table"><thead><tr><th data-i18n="slots.th.claude">When you choose this</th><th data-i18n="slots.th.target">It answers with</th><th data-i18n="slots.th.effort">Thinking depth</th><th></th></tr></thead><tbody></tbody></table></div>
   </section>
 
-  <section id="view-providers" class="view">
-    <h1 data-i18n="providers.title">Providers</h1>
-    <p class="subtitle" data-i18n="providers.subtitle">Connect an AI account, then choose the models you will use.</p>
-    <div class="toolbar"><button class="btn" id="providers-add" type="button" data-i18n="providers.add">+ Add provider</button><button class="btn secondary" id="providers-refresh" type="button" data-i18n="providers.refresh">Check connections</button></div>
-    <div id="providers-list"></div>
+  <section id="view-providers" class="view providers-view">
+    <div class="page-heading">
+      <div><h1 data-i18n="providers.title">Providers</h1><p class="subtitle" data-i18n="providers.subtitle">Connect an AI account, then choose the models you will use.</p></div>
+      <button class="btn" id="providers-add" type="button" data-i18n="providers.add">+ Add provider</button>
+    </div>
+    <div class="provider-workspace">
+      <aside class="provider-rail" aria-label="Providers">
+        <div class="provider-rail-tools"><input id="providers-search" type="search" data-i18n-placeholder="providers.search" placeholder="Search providers…" /><button class="icon-btn" id="providers-refresh" type="button" data-i18n-title="providers.refresh" title="Check connections" aria-label="Check connections">↻</button></div>
+        <div id="providers-list" class="provider-list" role="listbox"></div>
+      </aside>
+      <div id="provider-detail" class="provider-detail"></div>
+    </div>
   </section>
 
   <section id="view-clients" class="view">
