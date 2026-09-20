@@ -179,6 +179,8 @@ export class ChatGptAdapter {
       prompt_cache_key: id,
       client_metadata: { session_id: id, thread_id: id, turn_id: crypto.randomUUID(), "x-codex-window-id": `${id}:0` },
     };
+    const timeout = AbortSignal.timeout(60_000);
+    const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
     const res = await fetch(`${(this.cfg.url ?? DEFAULT_BASE).replace(/\/$/, "")}/codex/responses`, {
       method: "POST",
       headers: {
@@ -194,7 +196,7 @@ export class ChatGptAdapter {
         "x-codex-window-id": `${id}:0`,
       },
       body: JSON.stringify(body),
-      ...(signal ? { signal } : {}),
+      signal: requestSignal,
     });
     const rateLimits = rateLimitsFromHeaders(res.headers);
     if (rateLimits) this.lastRateLimits = rateLimits;
