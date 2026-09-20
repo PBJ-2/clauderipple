@@ -279,6 +279,15 @@ model: gpt-5.6-sol@medium
 알 수 없는 에러로 죽게 두지 않고 이름을 대고 거부합니다(`400 ClaudeRipple: no provider declares "…"`).
 Claude 모델은 언제나 그대로 통과합니다. 생성을 끄려면 `"cli": { "agentFiles": false }`.
 
+Claude Code의 `WebSearch`는 작은 모델에 별도 요청을 보냅니다. ChatGPT로 라우팅한 구성에서 그 요청만
+Anthropic 한도를 쓰지 않게 하려면 `config.json`에서 같은 ChatGPT 프로바이더를 검색 백엔드로 지정합니다:
+
+```jsonc
+{ "webSearch": { "provider": "chatgpt", "model": "gpt-5.6-terra" } }
+```
+
+명시해야만 켜집니다. `webSearch` 설정이 없으면 Claude Code의 기존 검색 경로는 바뀌지 않습니다.
+
 ### Codex 앱과 Codex CLI
 
 ```bash

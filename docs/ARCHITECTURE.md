@@ -1,6 +1,6 @@
 # ClaudeRipple — Architecture and verified facts
 
-Last verified: 2026-09-11 against Claude Desktop 1.52386.0, Claude Code CLI 2.1.266.
+Last verified: 2026-09-20 against Claude Desktop 1.52386.0, Claude Code CLI 2.1.275.
 Everything below is backed by a document, a file, or a measured log. Items marked
 **(assumption)** are not.
 
@@ -337,6 +337,17 @@ chat is out of reach for every approach, ours included.
       `annotations[].url_citation` (`title`, `url`); the side request's `allowed_domains` /
       `blocked_domains` map to `include_domains` / `exclude_domains`. Measured live: four
       citations, $0.0073 for the call.
+    - **ChatGPT subscription search (implemented and live-verified 2026-09-20).** A `chatgpt`
+      provider uses the same `CredentialStore` and Codex Responses endpoint as ordinary turns,
+      with `tools: [{type:"web_search", search_context_size:"low",
+      external_web_access:true}]` and `tool_choice:"required"`. The measured stream carries a
+      `web_search_call`, `url_citation` annotations, and
+      `response.completed.response.tool_usage.web_search.num_requests`. The adapter requires both
+      a real search count and at least one citation; it never turns uncited prose into a successful
+      result. `allowed_domains` becomes `filters.allowed_domains`. Codex exposes no corresponding
+      exclusion filter, so `blocked_domains` is refused rather than ignored. This path is opt-in
+      through `webSearch: {provider, model}`; with no setting, Claude Code's existing Haiku search
+      path is unchanged.
     - The reply is assembled as `server_tool_use` + `web_search_tool_result` + `text`, with
       `usage.server_tool_use.web_search_requests` — the field the CLI turns into "Did N searches".
     - A provider that runs the tool itself is asked in Anthropic's own shape instead
@@ -677,6 +688,8 @@ what we do not have yet — so that adding a provider does not start with readin
 | A subagent prompt carried `[[ripple: deepseek@high]]` while `aliases` had no `deepseek`; the marker resolved to a model id nobody declared, `resolve()` returned null, and the request went to Anthropic as an ordinary `PASS` — 30 × `404 model: deepseek-v4.1-flash` over two days, read by the session as "the model stopped working" (2026-09-19/20) | A non-`claude-*` model this router cannot route is **refused here, by name**: `400 invalid_request_error "ClaudeRipple: <reason>"`, tag `REFUSE`, reason in the request record (`unroutableReason`: undeclared / declared by two providers / ingress-only owner / unknown marker alias / alias to an undeclared model). Native `claude-*` ids keep passing through untouched — Claude traffic is never hijacked to say no. And the marker alias table is derived from the agent files themselves (§4), so an agent that exists is an alias that resolves. |
 | The worker registry was four places that did not know each other — `providers.*.models`, `aliases`, `~/.claude/agents/*.md`, and prose in CLAUDE.md — and every new provider needed all four edited by hand; the one left out was the one that failed (2026-09-19, DeepSeek) | One source: a ticked model *is* a worker. Agent files and marker aliases are generated from `config.json` (§4 "worker definitions"); nothing about a worker is written twice. |
 | ChatGPT prompt-cache hit fell from 93% (2026-09-13) to 9% (2026-09-20) with nothing in our request changing — the backend had started keying the cache on the conversation's identity (`session-id`/`thread-id`/`x-client-request-id`/`client_metadata`), which we never sent; `prompt_cache_key` alone no longer earned a write | The adapter states the conversation's identity the way the Codex CLI does (§4) and echoes `x-codex-turn-state`. The acceptance metric (≥90% on translated providers) is watched per day in `requests.jsonl`; a fall with an unchanged request means the wire changed under us, and the reference to diff against is the real CLI captured through a local proxy, not our own memory of the protocol. |
+| Remote Control registration failed locally with 405 before Anthropic saw it: Claude Code 2.1.275 uses HTTPS absolute-form (`POST https://api.anthropic.com/v1/environments/bridge HTTP/1.1`) rather than CONNECT for registration, polling and heartbeats, while the forward-proxy socket accepted CONNECT only (issue #10, Windows 11) | Accept valid HTTPS absolute-form, strip proxy-only headers, replace Host, rewrite only the target to origin-form, and relay one request over direct TLS outside model routing. Force `Connection: close`: reusing that TLS socket could send a later proxy-form request to the first origin. Parser tests plus a live local TLS origin verify body and credential preservation. |
+| Re-running `clauderipple install` as a normal Windows user rewrote the launcher, then `Register-ScheduledTask -Force` could answer `0x80070005 Access is denied` even though the existing per-user task was already correct (issue #9) | Reuse an existing task only when its entire intended definition matches: one PowerShell action and exact arguments, current user, limited interactive logon, one matching logon trigger, restart count/interval, no execution limit, IgnoreNew, and battery policy. A missing, stale or foreign same-named task still takes the normal registration/error path. |
 
 ## 6. Blocked paths (measured, do not retry)
 

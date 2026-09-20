@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **ChatGPT subscription web search.** When `webSearch` explicitly names a
+  ChatGPT provider, Claude Code's separate search request uses the subscription's
+  Codex hosted-search tool instead of silently consuming Anthropic quota. The
+  adapter requires a reported search and URL citations, preserves allowed-domain
+  filters, and refuses unsupported blocked-domain filters.
+
+### Fixed
+
+- **Remote Control works through the forward proxy.** Claude Code sends its
+  registration, polling and heartbeat requests in HTTPS absolute-form rather
+  than CONNECT. ClaudeRipple now rewrites only the request target, strips proxy
+  headers and relays it over TLS outside model routing. The connection closes
+  after one request so another proxy target cannot leak to the first origin.
+- **Windows reinstall is idempotent without elevation.** An existing scheduled
+  task is reused only when its action, principal, trigger, restart policy,
+  execution limit, instance policy and battery settings all match the intended
+  per-user task. A foreign or stale task is never trusted.
+
 ## 0.2.0 — 2026-09-16
 
 The first release published to npm, and the reason the number moves to 0.2:

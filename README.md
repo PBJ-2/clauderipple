@@ -318,6 +318,17 @@ by name (`400 ClaudeRipple: no provider declares "…"`) instead of being sent o
 to fail somewhere less legible; native Claude models always pass through.
 Set `"cli": { "agentFiles": false }` to turn generation off.
 
+Claude Code runs `WebSearch` as a separate small-model request. To keep a
+ChatGPT-routed setup from spending Anthropic quota for that request, select the
+same ChatGPT provider as the search backend in `config.json`:
+
+```jsonc
+{ "webSearch": { "provider": "chatgpt", "model": "gpt-5.6-terra" } }
+```
+
+This is opt-in. With no `webSearch` setting, Claude Code's existing search path
+is unchanged.
+
 ### Codex app and Codex CLI
 
 ```bash

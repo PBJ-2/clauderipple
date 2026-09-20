@@ -36,6 +36,12 @@ One thing the documentation does not settle: **how opencodex reaches Claude Desk
 (`claude-opus-4-8-<hash>`), but not whether 1P features survive. If it uses the gateway setting they
 are lost, and this is our moat. Worth establishing before assuming either way.
 
+Claude Code 2.1.272 also contains Anthropic's own `claude gateway`: an enterprise auth, telemetry and
+spend gateway with a model-to-upstream table. The measured provider families are Anthropic, Vertex,
+Bedrock and Foundry and its catalog is Claude-only, so it chooses **how to buy Claude**, not which
+vendor's model answers. The plumbing narrows the technical moat, but not the product distinction:
+ClaudeRipple is the multi-vendor route that keeps the 1P app.
+
 ## 2. The gap, in the order it matters
 
 Judge by "could someone using opencodex switch to us without losing something they use", not by
@@ -142,7 +148,11 @@ the hard part was knowing which providers qualify, which is a measurement and no
 client-side adapter with fourteen backends (Firecrawl, Tavily, Exa, Brave, SearXNG, DuckDuckGo by
 default …) chosen by `WEB_SEARCH_PROVIDER`, falling through the list when a credential is missing.
 Worth remembering only for the one idea we lack: **a default backend that needs no credential at
-all.** Everything we and opencodex offer assumes the user is already paying somebody.
+all.** Everything we and opencodex offer assumes the user is already paying somebody. A live check
+on 2026-09-20 found that DuckDuckGo's Instant Answer API is not general web search and its HTML
+endpoint serves a bot challenge to unattended calls, so that idea is not a backend we can ship by
+copying the label. Bing RSS answers without a key but its terms are not a safe default for a public
+product. This gap remains open rather than being filled with an unreliable scraper.
 
 **Fail closed, and say what was removed.** Their drops are logged by name and surfaced. This is the
 rule we learned the hard way with server tools: a capability that disappears silently is worse than
