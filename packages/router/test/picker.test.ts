@@ -10,7 +10,7 @@ const bootstrap = () => ({
     {
       id: "code",
       models: [
-        { id: "claude-opus-4-8", name: "Opus 4.8", description: "Best", section: "main", thinking: { effort_options: [{ id: "high" }] }, badge: "new" },
+        { id: "claude-opus-4-8", name: "Opus 4.8", description: "Best", section: "main", context_window: 1_000_000, thinking: { effort_options: [{ id: "high" }] }, badge: "new" },
         { id: "claude-opus-3-7", name: "Opus 3.7", section: "legacy", disabled: true },
       ],
       context_window_by_model: { "claude-opus-4-8": 200000 },
@@ -40,6 +40,7 @@ test("injects into CLI-backed surfaces (code/ccd/ccr/cowork) using an enabled Cl
   assert.equal(terra.name, "GPT-5.6 Terra");
   assert.equal(terra.description, "default GPT worker");
   assert.equal(terra.section, "main");
+  assert.equal(terra.context_window, 258400, "template Claude window is replaced for model switches");
   assert.equal("badge" in terra, false, "template badge stripped");
   assert.deepEqual(terra.thinking, { effort_options: [{ id: "high" }] }, "effort config inherited from template");
   assert.equal("description" in code.models[3]!, false);
@@ -57,10 +58,14 @@ test("each picker entry gets its own context window; the global value is only th
     { model: "small@high", name: "Small", contextWindow: 400_000 },
     { model: "plain@high", name: "Plain" },
   ], 258400);
-  const code = (j.model_selector_config as { context_window_by_model: Record<string, number> }[])[1]!;
+  const code = (j.model_selector_config as { models: Record<string, unknown>[]; context_window_by_model: Record<string, number> }[])[1]!;
   assert.equal(code.context_window_by_model["big@high"], 1_000_000);
   assert.equal(code.context_window_by_model["small@high"], 400_000);
   assert.equal(code.context_window_by_model["plain@high"], 258400, "no own window → global fallback");
+  const [big, small, plain] = code.models.slice(-3);
+  assert.equal(big?.context_window, 1_000_000);
+  assert.equal(small?.context_window, 400_000);
+  assert.equal(plain?.context_window, 258400);
   assert.equal(code.context_window_by_model["claude-opus-4-8"], 200000, "existing entries untouched");
 });
 
@@ -70,6 +75,8 @@ test("a per-entry window applies even with no global value", () => {
   const code = (j.model_selector_config as { context_window_by_model: Record<string, number> }[])[1]!;
   assert.equal(code.context_window_by_model["big@high"], 1_000_000);
   assert.equal("plain@high" in code.context_window_by_model, false, "nothing to say about it → say nothing");
+  const plain = (j.model_selector_config as { models: Record<string, unknown>[] }[])[1]!.models[3]!;
+  assert.equal("context_window" in plain, false, "must not inherit the Claude template window");
 });
 
 test("no-ops on unexpected shapes", () => {

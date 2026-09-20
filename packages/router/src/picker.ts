@@ -57,6 +57,9 @@ export function injectPickerModels(json: Record<string, unknown>, extra: CliMode
     for (const e of extra) {
       if (existing.has(e.model)) continue;
       const entry: ModelEntry = { ...structuredClone(template), id: e.model, name: e.name };
+      const w = e.contextWindow ?? contextWindow;
+      if (w) entry.context_window = w;
+      else delete entry.context_window;
       if (e.description) entry.description = e.description;
       else delete entry.description;
       for (const k of ["disabled", "disabled_reason", "notice", "selection_notice", "badge", "badge_tooltip", "tooltip", "minimum_tier", "is_default"]) delete entry[k];
