@@ -32,6 +32,13 @@ ingress 전용 / 모르는 마커 이름 / 미선언 모델로 풀리는 별칭)
 `~/Library/LaunchAgents/disabled/`), proxenos(8787)는 종료 + 바이너리 `proxenos-disabled`. 둘 다 9/14
 이후 요청 0건이었다. 관련 산문(전역 CLAUDE.md·에이전트 파일·프차리플 문서)도 전부 고쳤다.
 
+**8. ChatGPT 프롬프트 캐시가 돌아왔다 (`2d6ca0e`, 라이브 검증).** 9/13 93% → 9/20 9%까지 떨어진 원인은
+우리 요청이 아니라 백엔드였다 — 캐시를 `prompt_cache_key`가 아니라 **대화 정체성**(`session-id`/`thread-id`/
+`x-client-request-id`/`client_metadata`)으로 키잉하기 시작했고 우리는 그걸 안 보냈다. 진짜 Codex CLI를 로컬
+리버스 프록시(`chatgpt_base_url`, websocket 끔, `--ignore-user-config`)로 잡아 요청을 대조하고 요소별로
+가른 결과다. 어댑터가 Codex와 같은 세트를 `conversationKey`에서 파생해 보낸다. 실측: 2턴 83.6%, 3턴+ 99.6%,
+재시작 후 전체 95.5%. 캐시가 다시 떨어지면 **우리 기억이 아니라 진짜 CLI를 잡아서 diff**하라.
+
 **7. 워커 우선순위(주군 지시, 전역 CLAUDE.md):** `deepseek-v4-1-flash` → `gpt-5-6-terra`(high) →
 고지능 작업은 모델을 **제안하고 답을 받은 뒤** 띄운다. 뮤즈는 오늘 두 작업에서 40분간 코드 0줄이었고
 딥시크 플래시는 각각 10·13분에 끝냈다.
