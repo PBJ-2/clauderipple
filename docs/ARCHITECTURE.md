@@ -237,6 +237,22 @@ chat is out of reach for every approach, ours included.
     old or on `?refresh=1`, shares one in-flight lookup, and marks the answer
     `stale: true` with a reason when the lookup fails rather than hiding the old
     value. Once at startup too, after `listen()`, never awaited.
+  - **The prompt cache is keyed on the conversation's identity, not on
+    `prompt_cache_key` (since mid-September 2026).** Five turns with byte-identical
+    instructions, tools and input prefix, 3–6s apart under one key, all came back
+    `cached_tokens: 0` and `cache_write_tokens: 0` (measured 2026-09-20 on GPT-6
+    Astra; the same adapter read 93% on 2026-09-13, 9% that day). The Codex CLI got
+    99.8% the same afternoon. Its request, captured through a local reverse proxy
+    (`chatgpt_base_url`, websockets off) and bisected against ours: a **stable
+    per-conversation id** in `session-id`/`thread-id`, in `x-client-request-id`, or
+    in body `client_metadata` turns the cache on — any one of them; `x-codex-turn-
+    metadata` alone does not, nor does echoing `x-codex-turn-state` alone, nor a
+    UUID-shaped `prompt_cache_key`. The adapter now sends the CLI's set: the four
+    headers, `client_metadata` (`session_id`, `thread_id`, fresh `turn_id`,
+    `x-codex-window-id`), `prompt_cache_key` as the same UUID, and the previous
+    answer's `x-codex-turn-state` echoed back. All derive from `conversationKey`,
+    so cache, credential stickiness and identity name one conversation. Measured
+    after: turn 2 at 83.6%, turns 3+ at 99.6%.
   - **Tool schema scrub.** The backend validates every `pattern` in
     `tools[].parameters` with a regex engine that rejects lookaround and
     backreferences, and one bad pattern fails the whole request with 400
@@ -660,6 +676,7 @@ what we do not have yet — so that adding a provider does not start with readin
 | Closing Claude Desktop's window does not quit it; reopening hits `Not main instance, returning early` and the app silently keeps the OLD proxy setting. The user sees "I configured it and nothing happened" with no error anywhere (2026-09-14) | Tell the user that closing the window is not enough, and detect it: with picker mode on, the router knows whether the app is actually routing through it. Surface "configured, but the app has not restarted yet" rather than letting it fail silently. |
 | A subagent prompt carried `[[ripple: deepseek@high]]` while `aliases` had no `deepseek`; the marker resolved to a model id nobody declared, `resolve()` returned null, and the request went to Anthropic as an ordinary `PASS` — 30 × `404 model: deepseek-v4.1-flash` over two days, read by the session as "the model stopped working" (2026-09-19/20) | A non-`claude-*` model this router cannot route is **refused here, by name**: `400 invalid_request_error "ClaudeRipple: <reason>"`, tag `REFUSE`, reason in the request record (`unroutableReason`: undeclared / declared by two providers / ingress-only owner / unknown marker alias / alias to an undeclared model). Native `claude-*` ids keep passing through untouched — Claude traffic is never hijacked to say no. And the marker alias table is derived from the agent files themselves (§4), so an agent that exists is an alias that resolves. |
 | The worker registry was four places that did not know each other — `providers.*.models`, `aliases`, `~/.claude/agents/*.md`, and prose in CLAUDE.md — and every new provider needed all four edited by hand; the one left out was the one that failed (2026-09-19, DeepSeek) | One source: a ticked model *is* a worker. Agent files and marker aliases are generated from `config.json` (§4 "worker definitions"); nothing about a worker is written twice. |
+| ChatGPT prompt-cache hit fell from 93% (2026-09-13) to 9% (2026-09-20) with nothing in our request changing — the backend had started keying the cache on the conversation's identity (`session-id`/`thread-id`/`x-client-request-id`/`client_metadata`), which we never sent; `prompt_cache_key` alone no longer earned a write | The adapter states the conversation's identity the way the Codex CLI does (§4) and echoes `x-codex-turn-state`. The acceptance metric (≥90% on translated providers) is watched per day in `requests.jsonl`; a fall with an unchanged request means the wire changed under us, and the reference to diff against is the real CLI captured through a local proxy, not our own memory of the protocol. |
 
 ## 6. Blocked paths (measured, do not retry)
 

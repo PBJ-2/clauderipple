@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { StreamMapper, conversationKey, estimateTokens, formatSse, normalizeSchema, toResponsesRequest, toolNameForResponses, toolNameRestoreMap, type AnthropicRequest } from "../src/providers/chatgpt/translate.ts";
+import { StreamMapper, conversationId, conversationKey, estimateTokens, formatSse, normalizeSchema, toResponsesRequest, toolNameForResponses, toolNameRestoreMap, type AnthropicRequest } from "../src/providers/chatgpt/translate.ts";
 import { SseParser } from "../src/providers/chatgpt/sse.ts";
 
 const opts = { model: "gpt-5.6-terra", effort: "high", identity: true };
@@ -36,7 +36,12 @@ test("system → instructions with identity line; tools → function tools; cach
   assert.equal(r.parallel_tool_calls, true);
   assert.equal(r.store, false);
   assert.equal(r.reasoning.effort, "high");
-  assert.equal(r.prompt_cache_key, conversationKey(turn2), "cache key must not change across turns");
+  assert.equal(r.prompt_cache_key, conversationId(turn2), "cache key must not change across turns");
+  assert.match(r.prompt_cache_key, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/, "a UUID, as the CLI names a conversation");
+  assert.equal(r.client_metadata.session_id, r.prompt_cache_key);
+  assert.equal(r.client_metadata.thread_id, r.prompt_cache_key);
+  assert.equal(r.client_metadata["x-codex-window-id"], `${r.prompt_cache_key}:0`);
+  assert.match(r.client_metadata.turn_id, /^[0-9a-f-]{36}$/, "a fresh turn id per request");
 });
 
 // What the CLI sends beside a conversation: no metadata, one message, a different query each time.

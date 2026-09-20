@@ -21,6 +21,7 @@ let usageMode: "ok" | "unauthorized" | "no-window" = "ok";
 let usageHits = 0;
 const usageAuth: string[] = [];
 let usageDelayMs = 0;
+let turnStates = 0;
 const usageBody = {
   plan_type: "prolite",
   rate_limit: {
@@ -79,7 +80,10 @@ const backend = http.createServer((req, res) => {
         .end(JSON.stringify({ error: { message: "The usage limit has been reached", type: "usage_limit_reached" } }));
       return;
     }
-    res.writeHead(200, { "content-type": "text/event-stream" });
+    // Every real answer carries the backend's opaque turn token; count them so a test can tell
+    // which one the adapter echoed.
+    turnStates += 1;
+    res.writeHead(200, { "content-type": "text/event-stream", "x-codex-turn-state": `ts-${turnStates}` });
     if (mode === "sse-error") {
       res.end(sse([{ type: "response.created", response: {} }, { type: "error", error: { code: "server_is_overloaded", message: "overloaded" } }]));
       return;
@@ -144,6 +148,13 @@ test("streaming: headers, request body, and translated Anthropic SSE", async () 
   assert.equal(s.headers["chatgpt-account-id"], "acct_test");
   assert.equal(s.headers["openai-beta"], "responses=experimental");
   assert.equal(s.headers.originator, "codex_cli_rs");
+  // The conversation's identity rides in the headers the Codex CLI uses; the backend keys the
+  // prompt cache on it (2026-09-20). All four name the same conversation as the body does.
+  assert.equal(s.headers["session-id"], s.body.prompt_cache_key);
+  assert.equal(s.headers["thread-id"], s.body.prompt_cache_key);
+  assert.equal(s.headers["x-client-request-id"], s.body.prompt_cache_key);
+  assert.equal(s.headers["x-codex-window-id"], `${s.body.prompt_cache_key}:0`);
+  assert.equal((s.body.client_metadata as { session_id: string }).session_id, s.body.prompt_cache_key);
   assert.equal(s.body.model, "gpt-5.6-terra");
   assert.equal(s.body.stream, true);
   assert.equal(s.body.store, false);
@@ -262,6 +273,28 @@ test("rateLimitsFromUsage: secondary counts only with a real window", () => {
   }) as { rate_limits: { secondary: unknown } };
   assert.equal(withSecondary.rate_limits.secondary, null, "zero-length secondary is not a window");
   assert.equal(rateLimitsFromUsage({ rate_limit: { primary_window: null } }), null);
+});
+
+// 2026-09-20: five byte-identical-prefix turns 3–6s apart all came back `cached_tokens: 0` once the
+// backend started keying cache affinity on `x-codex-turn-state`. The Codex CLI echoes the token
+// from the previous answer; so does the adapter now, per conversation.
+test("x-codex-turn-state from the last answer is sent back on the conversation's next turn", async () => {
+  mode = "stream";
+  // Real conversations carry metadata; without it a one-message request shares the side-request
+  // class key (see conversationKey) and would inherit whatever token that class saw last.
+  const convA: AnthropicRequest = { ...request, metadata: { user_id: "u-turn-state" }, messages: [{ role: "user", content: "turn-state conversation A" }] };
+  const convB: AnthropicRequest = { ...request, metadata: { user_id: "u-turn-state" }, messages: [{ role: "user", content: "turn-state conversation B" }] };
+  await call(convA);
+  const first = seen.at(-1)!;
+  assert.equal(first.headers["x-codex-turn-state"], undefined, "nothing to echo on a conversation's first turn");
+  const issued = `ts-${turnStates}`;
+  await call({ ...convA, messages: [...convA.messages, { role: "assistant", content: "ok" }, { role: "user", content: "go on" }] });
+  assert.equal(seen.at(-1)!.headers["x-codex-turn-state"], issued, "the token the backend issued last time comes back");
+  await call(convB);
+  assert.equal(seen.at(-1)!.headers["x-codex-turn-state"], undefined, "another conversation does not borrow it");
+  const issuedA2 = `ts-${turnStates - 1}`;
+  await call({ ...convA, messages: [...convA.messages, { role: "assistant", content: "ok" }, { role: "user", content: "and more" }] });
+  assert.equal(seen.at(-1)!.headers["x-codex-turn-state"], issuedA2, "each answer replaces the token for its conversation");
 });
 
 test("cleanup", () => {

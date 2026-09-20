@@ -57,6 +57,8 @@ export type ResponsesRequest = {
   store: false;
   stream: true;
   prompt_cache_key: string;
+  /** Who this turn belongs to, in the shape the Codex CLI sends — see `conversationId`. */
+  client_metadata: { session_id: string; thread_id: string; turn_id: string; "x-codex-window-id": string };
 };
 
 export type TranslateOptions = {
@@ -108,6 +110,23 @@ export function conversationKey(req: AnthropicRequest): string {
     ? `side\n${systemText(req.system).slice(0, 4000)}`
     : `${userId ?? ""}\n${first ? blockText(first.content).slice(0, 4000) : ""}`;
   return crypto.createHash("sha256").update(seed).digest("hex").slice(0, 32);
+}
+
+/**
+ * The conversation key as a UUID, which is what the backend wants a conversation to be called.
+ *
+ * `prompt_cache_key` alone stopped earning a prompt cache between 2026-09-15 and 2026-09-19: five
+ * turns with byte-identical instructions, tools and input prefix, 3–6s apart under one key, all
+ * came back `cached_tokens: 0` and `cache_write_tokens: 0` (2026-09-20, GPT-6 Astra; the same
+ * adapter read 93% on 2026-09-13). The Codex CLI got 99.8% on the same day. Bisecting its request
+ * against ours: a stable per-conversation id in `session-id`/`thread-id`, `x-client-request-id`
+ * or body `client_metadata` turns the cache on (any one of them; `x-codex-turn-metadata` alone
+ * does not, nor does echoing `x-codex-turn-state` alone). The backend now keys the cache on the
+ * conversation's identity, not on the cache key. We send the same set the CLI sends, derived
+ * from the same seed the cache key is, so a conversation is one thing everywhere.
+ */
+export function conversationId(req: AnthropicRequest): string {
+  return conversationKey(req).replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, "$1-$2-$3-$4-$5");
 }
 
 // The Codex backend validates every `pattern` in a tool schema with a regex engine that has no
@@ -293,7 +312,8 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
     text: { verbosity: "medium" },
     store: false,
     stream: true,
-    prompt_cache_key: conversationKey(req),
+    prompt_cache_key: conversationId(req),
+    client_metadata: { session_id: conversationId(req), thread_id: conversationId(req), turn_id: crypto.randomUUID(), "x-codex-window-id": `${conversationId(req)}:0` },
   };
   if (tools.length > 0) {
     out.tools = tools;

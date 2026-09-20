@@ -197,6 +197,18 @@ export class ChatGptAdapter {
   /** Last measured total input (uncached + cached) per conversation, for the next message_start estimate. */
   private readonly lastInputByKey = new Map<string, number>();
 
+  /**
+   * The backend's `x-codex-turn-state` per conversation. Every response carries this opaque
+   * token and the Codex CLI sends it back on the conversation's next turn (it sits in the
+   * binary's request-header list beside `x-codex-installation-id`). Without it the backend
+   * answered `cached_tokens: 0` on every turn of a conversation whose prompt_cache_key,
+   * instructions, tools and input prefix were byte-identical 3–6s apart (measured 2026-09-20,
+   * five turns, GPT-6 Astra) — the same adapter read 93% on 2026-09-13, so the backend began
+   * keying cache affinity on this token in between. Keyed on the cache key, which is what a
+   * conversation is to us.
+   */
+  private readonly turnStateByKey = new Map<string, string>();
+
   private rememberInput(key: string, u: { input_tokens: number; cache_read_input_tokens: number }): void {
     const total = u.input_tokens + u.cache_read_input_tokens;
     if (total > 0) {
@@ -253,6 +265,7 @@ export class ChatGptAdapter {
     const onClose = (): void => ac.abort();
     res.on("close", onClose);
 
+    const turnState = this.turnStateByKey.get(cacheKey);
     const upstreamHeaders = {
       "content-type": "application/json",
       accept: "text/event-stream",
@@ -260,6 +273,13 @@ export class ChatGptAdapter {
       "chatgpt-account-id": tokens.accountId,
       "OpenAI-Beta": "responses=experimental",
       originator: "codex_cli_rs",
+      // The conversation's identity, as the Codex CLI states it. This is what the backend keys
+      // the prompt cache on since mid-September 2026 (see `conversationId` in translate.ts).
+      "session-id": cacheKey,
+      "thread-id": cacheKey,
+      "x-client-request-id": cacheKey,
+      "x-codex-window-id": `${cacheKey}:0`,
+      ...(turnState ? { "x-codex-turn-state": turnState } : {}),
     };
     const upstreamSecrets = credentialHeaderValues(Object.entries(upstreamHeaders));
     let upstream: Response;
@@ -280,6 +300,11 @@ export class ChatGptAdapter {
 
     const fromHeaders = rateLimitsFromHeaders(upstream.headers);
     if (fromHeaders) this.lastRateLimits = fromHeaders;
+    const nextTurnState = upstream.headers.get("x-codex-turn-state");
+    if (nextTurnState) {
+      this.turnStateByKey.set(cacheKey, nextTurnState);
+      if (this.turnStateByKey.size > 500) this.turnStateByKey.delete(this.turnStateByKey.keys().next().value!);
+    }
 
     if (!upstream.ok || !upstream.body) {
       const text = await upstream.text().catch(() => "");
