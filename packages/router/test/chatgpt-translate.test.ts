@@ -312,3 +312,24 @@ test("orphan tool_result (Claude Code side query) becomes user text, matched one
   assert.deepEqual(types, ["message", "function_call", "function_call_output"]);
   assert.ok(JSON.stringify(r.input[0]).includes("[Tool result]\\nbig file"));
 });
+
+test("tool result images are delivered as vision input after the function output", () => {
+  const r = toResponsesRequest(
+    {
+      model: "x",
+      max_tokens: 10,
+      messages: [
+        { role: "assistant", content: [{ type: "tool_use", id: "shot_1", name: "screenshot", input: {} }] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "shot_1", content: [
+          { type: "text", text: "Screenshot size: 800x600" },
+          { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } },
+        ] }] },
+      ],
+    } as never,
+    { model: "gpt-6-astra", effort: "max", identity: true },
+  );
+  assert.deepEqual(r.input.map((item) => item.type), ["function_call", "function_call_output", "message"]);
+  assert.equal((r.input[1] as { output: string }).output, "Screenshot size: 800x600");
+  assert.deepEqual((r.input[2] as { content: unknown[] }).content, [{ type: "input_image", image_url: "data:image/png;base64,AAAA" }]);
+  assert.equal(JSON.stringify(r.input).includes("[image omitted]"), false);
+});

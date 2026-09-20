@@ -68,6 +68,28 @@ test("orphan tool result becomes user text on both wires", () => {
   assert.match(JSON.stringify(responses.input[0]), /\[Tool result\]/);
 });
 
+test("tool result images survive on chat and responses wires", () => {
+  const screenshot: AnthropicRequest = {
+    model: "m",
+    messages: [
+      { role: "assistant", content: [{ type: "tool_use", id: "shot_1", name: "screenshot", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "shot_1", content: [
+        { type: "text", text: "Screenshot size: 800x600" },
+        { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } },
+      ] }] },
+    ],
+  };
+  const chat = toOpenAiRequest(screenshot, { model: "m", wire: "chat" }) as ChatRequest;
+  const responses = toOpenAiRequest(screenshot, { model: "m", wire: "responses" }) as ResponsesRequest;
+
+  assert.equal(chat.messages[2]?.role, "tool");
+  assert.equal(chat.messages[2]?.content, "Screenshot size: 800x600");
+  assert.deepEqual(chat.messages[3]?.content, [{ type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }]);
+  assert.deepEqual(responses.input.map((item) => item.type), ["function_call", "function_call_output", "message"]);
+  assert.deepEqual((responses.input[2] as { content: unknown[] }).content, [{ type: "input_image", image_url: "data:image/png;base64,AAAA" }]);
+  assert.equal(JSON.stringify({ chat, responses }).includes("[image omitted]"), false);
+});
+
 test("chat SSE mapper emits text, indexed tool calls and cached-token usage", () => {
   const mapper = new OpenAiStreamMapper("test", 88);
   const records = [

@@ -69,9 +69,18 @@ function textOf(content: string | AnthropicBlock[] | undefined): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content
-    .flatMap((block) => block.type === "text" ? [String((block as { text?: unknown }).text ?? "")] : block.type === "image" ? ["[image omitted]"] : [])
+    .filter((block) => block.type === "text")
+    .map((block) => String((block as { text?: unknown }).text ?? ""))
     .filter((text) => text.length > 0)
     .join("\n");
+}
+
+function imagesOf(content: string | AnthropicBlock[] | undefined): string[] {
+  if (!Array.isArray(content)) return [];
+  return content
+    .filter((block) => block.type === "image")
+    .map(imageUrl)
+    .filter((url): url is string => url !== null);
 }
 
 function imageUrl(block: AnthropicBlock): string | null {
@@ -178,9 +187,12 @@ export function toChatMessages(req: AnthropicRequest, opts?: OpenAiTranslateOpti
         flush();
         const result = block as { tool_use_id: string; content?: string | AnthropicBlock[]; is_error?: boolean };
         let output = textOf(result.content);
+        const images = imagesOf(result.content);
         if (result.is_error && !output) output = "Tool execution failed";
+        if (!output && images.length > 0) output = "Tool returned image content.";
         if (knownCalls.has(result.tool_use_id)) messages.push({ role: "tool", tool_call_id: result.tool_use_id, content: output });
         else parts.push({ type: "text", text: `[Tool result]\n${output}` });
+        for (const url of images) parts.push({ type: "image_url", image_url: { url } });
       }
     }
     flush();
@@ -220,9 +232,12 @@ export function toResponsesInput(req: AnthropicRequest): ResponseInput[] {
         flush();
         const result = block as { tool_use_id: string; content?: string | AnthropicBlock[]; is_error?: boolean };
         let output = textOf(result.content);
+        const images = imagesOf(result.content);
         if (result.is_error && !output) output = "Tool execution failed";
+        if (!output && images.length > 0) output = "Tool returned image content.";
         if (knownCalls.has(result.tool_use_id)) input.push({ type: "function_call_output", call_id: result.tool_use_id, output });
         else parts.push({ type: "input_text", text: `[Tool result]\n${output}` });
+        for (const image_url of images) parts.push({ type: "input_image", image_url });
       }
     }
     flush();

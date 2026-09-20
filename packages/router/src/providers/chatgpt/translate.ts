@@ -72,9 +72,35 @@ function blockText(c: string | AnthropicBlock[] | undefined): string {
   if (typeof c === "string") return c;
   if (!Array.isArray(c)) return "";
   return c
-    .map((b) => (b.type === "text" ? (b as { text: string }).text : b.type === "image" ? "[image omitted]" : ""))
+    .map((b) => (b.type === "text" ? (b as { text: string }).text : b.type === "image" ? "[image]" : ""))
     .filter((s) => s.length > 0)
     .join("\n");
+}
+
+function toolResultText(content: string | AnthropicBlock[] | undefined): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((block) => block.type === "text")
+    .map((block) => String((block as { text?: unknown }).text ?? ""))
+    .filter(Boolean)
+    .join("\n");
+}
+
+function imageUrl(block: AnthropicBlock): string | null {
+  const source = (block as { source?: { type?: unknown; media_type?: unknown; data?: unknown; url?: unknown } }).source;
+  if (!source || typeof source !== "object") return null;
+  if (source.type === "base64" && typeof source.data === "string") return `data:${typeof source.media_type === "string" ? source.media_type : "image/png"};base64,${source.data}`;
+  if (source.type === "url" && typeof source.url === "string") return source.url;
+  return null;
+}
+
+function toolResultImages(content: string | AnthropicBlock[] | undefined): string[] {
+  if (!Array.isArray(content)) return [];
+  return content
+    .filter((block) => block.type === "image")
+    .map(imageUrl)
+    .filter((url): url is string => url !== null);
 }
 
 // Claude Code's first system block is Anthropic billing telemetry ("x-anthropic-billing-header: …
@@ -275,10 +301,13 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
         case "tool_result": {
           flush();
           const tr = b as { tool_use_id: string; content?: string | AnthropicBlock[]; is_error?: boolean };
-          let out = blockText(tr.content);
+          let out = toolResultText(tr.content);
+          const images = toolResultImages(tr.content);
           if (tr.is_error && !out) out = "Tool execution failed";
+          if (!out && images.length > 0) out = "Tool returned image content.";
           if (knownCalls.has(tr.tool_use_id)) input.push({ type: "function_call_output", call_id: tr.tool_use_id, output: out });
           else pending.push({ type: "input_text", text: `[Tool result]\n${out}` });
+          for (const image_url of images) pending.push({ type: "input_image", image_url });
           break;
         }
         default:
