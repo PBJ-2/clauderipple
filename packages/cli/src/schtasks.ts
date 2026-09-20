@@ -42,7 +42,23 @@ function run(script: string): { ok: boolean; out: string } {
   }
 }
 
-type TaskDefinition = { actionCount?: number; execute?: string; arguments?: string; userId?: string; runLevel?: number };
+type TaskDefinition = {
+  actionCount?: number;
+  execute?: string;
+  arguments?: string;
+  userId?: string;
+  runLevel?: number;
+  logonType?: number;
+  triggerCount?: number;
+  triggerType?: string;
+  triggerUserId?: string;
+  restartCount?: number;
+  restartInterval?: string;
+  executionTimeLimit?: string;
+  multipleInstances?: number;
+  allowStartIfOnBatteries?: boolean;
+  dontStopIfGoingOnBatteries?: boolean;
+};
 
 export function taskDefinitionMatches(value: unknown, expected: { arguments: string; userId: string }): boolean {
   if (!value || typeof value !== "object") return false;
@@ -52,7 +68,17 @@ export function taskDefinitionMatches(value: unknown, expected: { arguments: str
     task.execute?.toLowerCase() === "powershell.exe" &&
     task.arguments === expected.arguments &&
     task.userId?.toLowerCase() === expected.userId.toLowerCase() &&
-    task.runLevel === 0
+    task.runLevel === 0 &&
+    task.logonType === 3 &&
+    task.triggerCount === 1 &&
+    task.triggerType === "MSFT_TaskLogonTrigger" &&
+    task.triggerUserId?.toLowerCase() === expected.userId.toLowerCase() &&
+    task.restartCount === 99 &&
+    task.restartInterval === "PT1M" &&
+    task.executionTimeLimit === "PT0S" &&
+    task.multipleInstances === 2 &&
+    task.allowStartIfOnBatteries === true &&
+    task.dontStopIfGoingOnBatteries === true
   );
 }
 
@@ -108,8 +134,8 @@ export function installAgent(opts: { program: string; args?: string[]; home: str
     [
       `$t = Get-ScheduledTask -TaskName ${ps(taskName())} -ErrorAction SilentlyContinue`,
       `if ($null -eq $t) { 'null'; exit 0 }`,
-      `$a = @($t.Actions); $p = $t.Principal`,
-      `[pscustomobject]@{ actionCount = $a.Count; execute = $a[0].Execute; arguments = $a[0].Arguments; userId = $p.UserId; runLevel = [int]$p.RunLevel } | ConvertTo-Json -Compress`,
+      `$a = @($t.Actions); $p = $t.Principal; $tr = @($t.Triggers); $s = $t.Settings`,
+      `[pscustomobject]@{ actionCount = $a.Count; execute = $a[0].Execute; arguments = $a[0].Arguments; userId = $p.UserId; runLevel = [int]$p.RunLevel; logonType = [int]$p.LogonType; triggerCount = $tr.Count; triggerType = $tr[0].CimClass.CimClassName; triggerUserId = $tr[0].UserId; restartCount = $s.RestartCount; restartInterval = [string]$s.RestartInterval; executionTimeLimit = [string]$s.ExecutionTimeLimit; multipleInstances = [int]$s.MultipleInstances; allowStartIfOnBatteries = $s.AllowStartIfOnBatteries; dontStopIfGoingOnBatteries = $s.DontStopIfGoingOnBatteries } | ConvertTo-Json -Compress`,
     ].join("; "),
   );
   let definition: unknown = null;

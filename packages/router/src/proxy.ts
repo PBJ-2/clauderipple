@@ -50,7 +50,7 @@ const CLIENT_AUTH = new Set(["authorization", "x-api-key"]);
 /** How much of an upstream error body is kept for the log. */
 const ERROR_HEAD_MAX = 4096;
 
-export type AbsoluteProxyRequest = { host: string; port: number; head: Buffer };
+export type AbsoluteProxyRequest = { host: string; port: number; path: string; head: Buffer };
 
 /**
  * Claude Code's Remote Control registration uses HTTPS absolute-form proxy requests instead of
@@ -61,7 +61,7 @@ export type AbsoluteProxyRequest = { host: string; port: number; head: Buffer };
 export function absoluteProxyRequest(header: Buffer): AbsoluteProxyRequest | null {
   const lines = header.toString("latin1").split("\r\n");
   const first = lines.shift() ?? "";
-  const match = /^(\S+)\s+(\S+)\s+(HTTP\/\d(?:\.\d)?)$/.exec(first);
+  const match = /^([!#$%&'*+.^_`|~0-9A-Za-z-]+)\s+(\S+)\s+(HTTP\/1\.[01])$/.exec(first);
   if (!match) return null;
   let url: URL;
   try {
@@ -69,14 +69,23 @@ export function absoluteProxyRequest(header: Buffer): AbsoluteProxyRequest | nul
   } catch {
     return null;
   }
-  if (url.protocol !== "https:" || url.username || url.password || !url.hostname) return null;
+  if (url.protocol !== "https:" || url.username || url.password || url.hash || !url.hostname) return null;
   const port = url.port ? Number(url.port) : 443;
   if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
-  const headers = lines.filter((line) => !/^proxy-(?:authorization|connection)\s*:/i.test(line) && !/^host\s*:/i.test(line));
+  // URL.hostname keeps brackets around IPv6 literals; net/tls expect the bare address while the
+  // HTTP Host field requires brackets. Keep those two representations separate.
+  const host = url.hostname.startsWith("[") && url.hostname.endsWith("]") ? url.hostname.slice(1, -1) : url.hostname;
+  const headers = lines.filter((line) =>
+    !/^proxy-(?:authorization|connection)\s*:/i.test(line) &&
+    !/^host\s*:/i.test(line) &&
+    !/^connection\s*:/i.test(line),
+  );
   const authority = url.port ? `${url.hostname}:${url.port}` : url.hostname;
   const path = `${url.pathname || "/"}${url.search}`;
-  const rewritten = [`${match[1]} ${path} ${match[3]}`, `Host: ${authority}`, ...headers].join("\r\n") + "\r\n\r\n";
-  return { host: url.hostname, port, head: Buffer.from(rewritten, "latin1") };
+  // One TLS connection serves one absolute-form request. Reusing it would send the next proxy-form
+  // request target directly to the origin, so explicitly ask both peers to close after the response.
+  const rewritten = [`${match[1]} ${path} ${match[3]}`, `Host: ${authority}`, "Connection: close", ...headers].join("\r\n") + "\r\n\r\n";
+  return { host, port, path, head: Buffer.from(rewritten, "latin1") };
 }
 
 /**
@@ -131,6 +140,8 @@ export type ProxyDeps = {
   observedClaudeCodeAuth?: ObservedClaudeCodeAuth;
   /** Where agent definitions are read from. Defaults to `~/.claude/agents`; tests inject a tmp dir. */
   agentDir?: string;
+  /** TLS dialer for absolute-form proxy requests. Production uses node:tls; integration tests inject a local CA. */
+  tlsConnect?: (options: tls.ConnectionOptions) => tls.TLSSocket;
 };
 
 export type Stats = {
@@ -290,7 +301,7 @@ export class Proxy {
       if (method !== "CONNECT" || !target) {
         const absolute = absoluteProxyRequest(head.subarray(0, end));
         if (absolute) {
-          log.info(`ABSOLUTE ${method ?? "?"} https://${absolute.host}:${absolute.port}${new URL(target!).pathname}`);
+          log.info(`ABSOLUTE ${method ?? "?"} https://${absolute.host}:${absolute.port}${absolute.path}`);
           this.forwardAbsolute(sock, absolute, rest);
           return;
         }
@@ -314,7 +325,7 @@ export class Proxy {
   /** Forward an HTTPS absolute-form request without terminating it through the routing layer. */
   private forwardAbsolute(sock: net.Socket, request: AbsoluteProxyRequest, rest: Buffer): void {
     const servername = net.isIP(request.host) ? undefined : request.host;
-    const up = tls.connect({ host: request.host, port: request.port, ...(servername ? { servername } : {}), ALPNProtocols: ["http/1.1"] });
+    const up = (this.deps.tlsConnect ?? tls.connect)({ host: request.host, port: request.port, ...(servername ? { servername } : {}), ALPNProtocols: ["http/1.1"] });
     const kill = (): void => {
       sock.destroy();
       up.destroy();
