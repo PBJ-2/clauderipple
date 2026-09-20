@@ -981,7 +981,7 @@ export class Proxy {
       return false;
     }
     const url = "url" in provider && typeof provider.url === "string" ? provider.url : undefined;
-    if (!url) {
+    if (!url && provider.type !== "chatgpt") {
       this.deps.log.warn(`web search: provider ${settings.provider} has no url; leaving the request alone`);
       return false;
     }
@@ -990,7 +990,7 @@ export class Proxy {
     // already parses; an openai-compatible one is asked through its chat web plugin.
     const common = {
       name: settings.provider,
-      url,
+      url: url ?? "",
       headers: ("headers" in provider && provider.headers) || {},
       model: settings.model,
       ...(settings.maxResults ? { maxResults: settings.maxResults } : {}),
@@ -1007,6 +1007,8 @@ export class Proxy {
       backend = anthropicServerToolBackend(common);
     } else if (provider.type === "openai-compatible") {
       backend = webPluginBackend(common);
+    } else if (provider.type === "chatgpt") {
+      backend = this.chatgpt(settings.provider, provider).webSearch(settings.model, settings.maxResults);
     } else {
       this.deps.log.warn(`web search: provider ${settings.provider} is a ${provider.type} provider, which has no search backend; leaving the request alone`);
       return false;

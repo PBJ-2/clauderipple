@@ -1,6 +1,7 @@
 // ChatGPT subscription adapter: serves an Anthropic Messages request by calling the
 // Codex backend (OpenAI Responses over SSE) and streaming the translated answer back.
 
+import crypto from "node:crypto";
 import http from "node:http";
 import type { ChatGptProvider } from "../../config.ts";
 import type { Logger } from "../../log.ts";
@@ -9,6 +10,7 @@ import { SseParser } from "./sse.ts";
 import { looksLikeAuth } from "../openai/index.ts";
 import { StreamMapper, conversationKey, estimateTokens, formatSse, serverToolNames, toResponsesRequest, toolNameRestoreMap, type AnthropicRequest } from "./translate.ts";
 import type { RequestUsage } from "../../requestlog.ts";
+import type { SearchBackend, SearchHit, WebSearchQuery } from "../../websearch.ts";
 import { credentialHeaderValues, redactErrorText } from "../../redact.ts";
 import fs from "node:fs";
 import path from "node:path";
@@ -135,6 +137,105 @@ export class ChatGptAdapter {
 
   describeAuth(): string {
     return this.creds.describe();
+  }
+
+  /**
+   * Hosted web search through the same Codex backend and credential as ordinary ChatGPT turns.
+   * Wire measured 2026-09-20 against the live backend: a `web_search` Responses tool emits one
+   * `web_search_call`, URL citation annotations on the final output text, and
+   * `response.completed.response.tool_usage.web_search.num_requests`.
+   */
+  webSearch(model: string, maxResults?: number): SearchBackend {
+    return {
+      name: this.name,
+      search: (query, signal) => this.searchWeb(model, query, maxResults, signal),
+    };
+  }
+
+  private async searchWeb(model: string, query: WebSearchQuery, maxResults = 10, signal?: AbortSignal): Promise<{ hits: SearchHit[]; text?: string }> {
+    // The Responses tool exposes an allowed-domain filter but no exclusion filter. Ignoring a block
+    // would violate the caller's request; fail visibly so the proxy can choose another backend.
+    if (query.blockedDomains?.length) throw new Error("ChatGPT web search does not support blocked_domains");
+    const tokens = await this.creds.get();
+    if (tokens instanceof Error) throw tokens;
+    const id = crypto.randomUUID();
+    const filters = query.allowedDomains?.length ? { allowed_domains: query.allowedDomains } : undefined;
+    const tool = {
+      type: "web_search",
+      search_context_size: "low",
+      external_web_access: true,
+      ...(filters ? { filters } : {}),
+    };
+    const body = {
+      model,
+      instructions: "Perform the requested web search. Answer briefly and cite every source used.",
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: query.query }] }],
+      tools: [tool],
+      tool_choice: "required",
+      reasoning: { effort: "low", summary: "auto" },
+      text: { verbosity: "low" },
+      store: false,
+      stream: true,
+      prompt_cache_key: id,
+      client_metadata: { session_id: id, thread_id: id, turn_id: crypto.randomUUID(), "x-codex-window-id": `${id}:0` },
+    };
+    const res = await fetch(`${(this.cfg.url ?? DEFAULT_BASE).replace(/\/$/, "")}/codex/responses`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "text/event-stream",
+        authorization: `Bearer ${tokens.accessToken}`,
+        "chatgpt-account-id": tokens.accountId,
+        "OpenAI-Beta": "responses=experimental",
+        originator: "codex_cli_rs",
+        "session-id": id,
+        "thread-id": id,
+        "x-client-request-id": id,
+        "x-codex-window-id": `${id}:0`,
+      },
+      body: JSON.stringify(body),
+      ...(signal ? { signal } : {}),
+    });
+    const rateLimits = rateLimitsFromHeaders(res.headers);
+    if (rateLimits) this.lastRateLimits = rateLimits;
+    if (!res.ok || !res.body) {
+      const text = await res.text().catch(() => "");
+      if (res.status === 401) this.creds.invalidate();
+      throw new Error(`ChatGPT web search: HTTP ${res.status}${text ? ` ${redactErrorText(text, [tokens.accessToken], 200)}` : ""}`);
+    }
+
+    const parser = new SseParser();
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    const hits: SearchHit[] = [];
+    let text = "";
+    let searches = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        for (const event of parser.feed(decoder.decode(value, { stream: true }))) {
+          if (event.type === "response.output_text.delta") text += String(event.delta ?? "");
+          if (event.type === "response.output_text.annotation.added") {
+            const a = event.annotation as { type?: unknown; title?: unknown; url?: unknown } | undefined;
+            if (a?.type === "url_citation" && typeof a.url === "string") hits.push({ title: typeof a.title === "string" && a.title ? a.title : a.url, url: a.url });
+          }
+          if (event.type === "response.completed") {
+            const completed = event.response as { tool_usage?: { web_search?: { num_requests?: unknown } }; usage?: { input_tokens?: number; input_tokens_details?: { cached_tokens?: number }; output_tokens?: number } } | undefined;
+            searches = typeof completed?.tool_usage?.web_search?.num_requests === "number" ? completed.tool_usage.web_search.num_requests : searches;
+          }
+          if (event.type === "error") throw new Error(`ChatGPT web search: ${String((event.error as { message?: unknown } | undefined)?.message ?? "backend error")}`);
+        }
+      }
+    } finally {
+      try { await reader.cancel(); } catch { /* already closed */ }
+    }
+    const unique = new Map<string, SearchHit>();
+    for (const hit of hits) if (!unique.has(hit.url)) unique.set(hit.url, hit);
+    const selected = [...unique.values()].slice(0, maxResults);
+    if (searches < 1 || selected.length === 0) throw new Error(`ChatGPT web search: no cited results returned (searches=${searches})`);
+    const prose = text.trim();
+    return prose ? { hits: selected, text: prose } : { hits: selected };
   }
 
   /** One in-flight lookup shared by every caller (the status route and the startup refresh). */

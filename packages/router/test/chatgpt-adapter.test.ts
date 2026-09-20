@@ -15,7 +15,7 @@ fs.writeFileSync(path.join(home, "chatgpt-auth.json"), JSON.stringify({ accessTo
 
 type Seen = { headers: http.IncomingHttpHeaders; body: Record<string, unknown>; path: string };
 const seen: Seen[] = [];
-let mode: "stream" | "error429" | "sse-error" = "stream";
+let mode: "stream" | "search" | "error429" | "sse-error" = "stream";
 // Active quota lookup (GET /wham/usage): its own mode so it can be exercised independently.
 let usageMode: "ok" | "unauthorized" | "no-window" = "ok";
 let usageHits = 0;
@@ -66,6 +66,18 @@ const backend = http.createServer((req, res) => {
       return;
     }
     seen.push({ headers: req.headers, body: JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown>, path: req.url ?? "" });
+    if (mode === "search") {
+      res.writeHead(200, { "content-type": "text/event-stream", "x-codex-primary-used-percent": "41" });
+      res.end(sse([
+        { type: "response.output_item.added", item: { id: "ws_1", type: "web_search_call", status: "in_progress" } },
+        { type: "response.web_search_call.completed", item_id: "ws_1" },
+        { type: "response.output_text.delta", delta: "Node 24.21.0 is current." },
+        { type: "response.output_text.annotation.added", annotation: { type: "url_citation", title: "Node.js downloads", url: "https://nodejs.org/en/download/current" } },
+        { type: "response.output_text.annotation.added", annotation: { type: "url_citation", title: "duplicate", url: "https://nodejs.org/en/download/current" } },
+        { type: "response.completed", response: { tool_usage: { web_search: { num_requests: 1 } }, usage: { input_tokens: 100, output_tokens: 10 } } },
+      ]));
+      return;
+    }
     if (mode === "error429") {
       res
         .writeHead(429, {
@@ -167,6 +179,35 @@ test("streaming: headers, request body, and translated Anthropic SSE", async () 
   assert.ok(r.text.includes('"partial_json":"{\\"file_path\\":\\"a\\"}"'));
   assert.ok(r.text.includes('"cache_read_input_tokens":450'));
   assert.equal(adapter.lastRateLimits?.plan_type, "prolite");
+});
+
+test("hosted web search sends the measured Responses tool and extracts cited results", async () => {
+  mode = "search";
+  const outcome = await adapter.webSearch("gpt-5.6-terra", 5).search({
+    query: "latest Node.js 24 release",
+    allowedDomains: ["nodejs.org"],
+  });
+  const s = seen.at(-1)!;
+  assert.equal(s.path, "/codex/responses");
+  assert.equal(s.headers.authorization, "Bearer tok_test");
+  assert.equal(s.body.tool_choice, "required");
+  assert.deepEqual(s.body.tools, [{
+    type: "web_search",
+    search_context_size: "low",
+    external_web_access: true,
+    filters: { allowed_domains: ["nodejs.org"] },
+  }]);
+  assert.deepEqual(outcome.hits, [{ title: "Node.js downloads", url: "https://nodejs.org/en/download/current" }]);
+  assert.equal(outcome.text, "Node 24.21.0 is current.");
+});
+
+test("hosted web search refuses a domain exclusion it cannot enforce", async () => {
+  const before = seen.length;
+  await assert.rejects(
+    () => adapter.webSearch("gpt-5.6-terra").search({ query: "x", blockedDomains: ["example.com"] }),
+    /does not support blocked_domains/,
+  );
+  assert.equal(seen.length, before, "nothing sent upstream");
 });
 
 test("non-streaming: assembled message", async () => {
