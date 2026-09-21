@@ -8,6 +8,7 @@ import type { Logger } from "../../log.ts";
 import type { RequestUsage } from "../../requestlog.ts";
 import { credentialHeaderValues, redactErrorText } from "../../redact.ts";
 import { SseParser } from "../chatgpt/sse.ts";
+import { fetchWithRetry } from "../retry.ts";
 import { estimateTokens, formatSse, OpenAiStreamMapper, toOpenAiRequest } from "./translate.ts";
 import { conversationKey, serverToolNames, toolNameRestoreMap } from "../chatgpt/translate.ts";
 import type { AnthropicRequest } from "../chatgpt/translate.ts";
@@ -127,12 +128,15 @@ export class OpenAiCompatibleAdapter {
 
     let upstream: Response;
     try {
-      upstream = await fetch(endpoint(this.cfg.url, wire), {
+      // Nothing has been written to the client yet, so a failure another attempt could answer is
+      // asked again here rather than handed to the user as an error they would have to retry by
+      // hand. Once this returns, the response is written straight through (see `fetchWithRetry`).
+      upstream = await fetchWithRetry(endpoint(this.cfg.url, wire), {
         method: "POST",
         headers: upstreamHeaders,
         body: requestBody,
         signal: controller.signal,
-      });
+      }, { log: (line) => this.log.info(`openai ${this.name}: ${line}`) });
     } catch (error) {
       res.off("close", onClose);
       if (controller.signal.aborted) return { status: 0, bytes: 0, note: "client closed" };

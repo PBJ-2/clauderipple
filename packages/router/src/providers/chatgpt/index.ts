@@ -7,6 +7,7 @@ import type { ChatGptProvider } from "../../config.ts";
 import type { Logger } from "../../log.ts";
 import { CredentialStore } from "./auth.ts";
 import { SseParser } from "./sse.ts";
+import { fetchWithRetry } from "../retry.ts";
 import { looksLikeAuth } from "../openai/index.ts";
 import { StreamMapper, conversationKey, estimateTokens, formatSse, serverToolNames, toResponsesRequest, toolNameRestoreMap, type AnthropicRequest } from "./translate.ts";
 import type { RequestUsage } from "../../requestlog.ts";
@@ -387,12 +388,14 @@ export class ChatGptAdapter {
     const upstreamSecrets = credentialHeaderValues(Object.entries(upstreamHeaders));
     let upstream: Response;
     try {
-      upstream = await fetch(`${(this.cfg.url ?? DEFAULT_BASE).replace(/\/$/, "")}/codex/responses`, {
+      // Retried here, before any status or byte reaches the client, so a relay's hiccup is absorbed
+      // inside the turn instead of arriving as an error the user has to retry by hand.
+      upstream = await fetchWithRetry(`${(this.cfg.url ?? DEFAULT_BASE).replace(/\/$/, "")}/codex/responses`, {
         method: "POST",
         headers: upstreamHeaders,
         body,
         signal: ac.signal,
-      });
+      }, { log: (line) => this.log.info(`chatgpt ${this.name}: ${line}`) });
     } catch (e) {
       res.off("close", onClose);
       if (ac.signal.aborted) return { status: 0, bytes: 0, note: "client closed" };
