@@ -178,6 +178,28 @@ test("GET /api/status returns a snapshot", async () => {
   });
 });
 
+// The Clients screen labels a model the router cannot search through, and only the router knows
+// which those are. The capability is measured per route, so it must not come from the vendor name —
+// nor from whether the model itself can search, which the router has no way to use.
+test("GET /api/status marks which providers can run a web search", async () => {
+  const cfg = makeCfg({
+    providers: {
+      translated: { type: "openai-compatible", url: "http://127.0.0.1:1" },
+      native: { type: "anthropic-compatible", url: "http://127.0.0.1:1", preset: "deepseek" },
+      // The same vendor through another route: it serves the model but runs no server tool.
+      via: { type: "anthropic-compatible", url: "http://127.0.0.1:1", preset: "opencode-go-anthropic" },
+    },
+  });
+  await withAdmin(cfg, async ({ port }) => {
+    const body = (await (await fetch(`${base()}:${port}/api/status`)).json()) as {
+      providers: Record<string, { webSearch?: boolean }>;
+    };
+    assert.equal(body.providers.native?.webSearch, true, "a measured server-tool provider can search");
+    assert.equal("webSearch" in (body.providers.translated ?? {}), false, "a translated path cannot");
+    assert.equal("webSearch" in (body.providers.via ?? {}), false, "the same model elsewhere still cannot");
+  });
+});
+
 test("GET /api/presets returns the provider catalog", async () => {
   await withAdmin(makeCfg(), async ({ port }) => {
     const res = await fetch(`${base()}:${port}/api/presets`);
