@@ -840,9 +840,9 @@ export class Proxy {
      * Only for a routed request whose provider has one we have not already spent — a failure that
      * is the request's own fault is not retried at all (see `classify`).
      */
-    const nextCredential = (status: number): Credential | null => {
+    const nextCredential = (status: number, body = ""): Credential | null => {
       if (!route || !penalised || res.headersSent) return null;
-      if (!classify(status).retryable) return null;
+      if (!classify(status, undefined, body).retryable) return null;
       const provider = cfg.providers[route.provider];
       if (!provider) return null;
       const available = provider.type === "anthropic" && provider.accountPool
@@ -858,6 +858,9 @@ export class Proxy {
     // this flag every cancelled turn charged the credential a failure and moved the conversation
     // off it, which costs the prompt cache — for a turn the user cancelled on purpose.
     let clientAborted = false;
+    // Set when a 403 body was read ahead of the forward, so the forward knows to write that body
+    // instead of the stream it came from.
+    let headFilled = false;
     const abortUpstream = (): void => {
       clientAborted = true;
       if (upReq && !upReq.destroyed) upReq.destroy();
@@ -888,12 +891,63 @@ export class Proxy {
     const onUpstreamResponse = (upRes: http.IncomingMessage): void => {
       if (target.host === cfg.upstream) this.deps.health.success();
       const status = upRes.statusCode ?? 0;
+      // A 403 is the one status whose meaning is in its body. A relay reporting a broken upstream
+      // must not be charged to the credential — that is what made one working key answer every turn
+      // with an authentication error for a minute (2026-09-21). Every other status is judged from
+      // the status alone, and its body is left for the forward below, untouched.
+      if (status === 403) {
+        bufferBody(upRes, ERROR_HEAD_MAX).then((whole) => onUpstreamJudged(upRes, status, whole)).catch((e: Error) => {
+          log.warn(`upstream ${status}: could not read the body: ${e.message}`);
+          finish(String(status), 0, `upstream ${status}: body read failed`);
+          res.destroy();
+        });
+        return;
+      }
+      onUpstreamJudged(upRes, status, "");
+    };
+
+    /**
+     * The whole of a small body, read before anything is decided or written.
+     *
+     * A 403's meaning is in its body and cannot be judged before it arrives, so the bytes are read
+     * and handed back as the head: `unshift` after a stream has ended throws, and reading a head and
+     * forwarding the rest mid-flow is where a body can be lost to a pause nothing resumes. A 403 is
+     * a refusal, so its body is small.
+     *
+     * Past `max` there is nothing worth identifying, so the rest is dropped — but the stream is
+     * never destroyed. Tearing the connection down over a body size would turn a refusal the user
+     * can read into a socket error, which is a worse bug than the one this handles; an unbounded
+     * relay answer instead reaches the forward above the cap and is reported there.
+     */
+    const bufferBody = (stream: http.IncomingMessage, max: number): Promise<string> => new Promise((resolveBody) => {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      stream.on("data", (c: Buffer) => {
+        const room = max - size;
+        if (room <= 0) { stream.resume(); return; }
+        chunks.push(c.subarray(0, room));
+        size += Math.min(c.length, room);
+      });
+      stream.once("end", () => {
+        const body = Buffer.concat(chunks, size);
+        headFilled = true;
+        resolveBody(body.toString("utf8"));
+      });
+      // A dropped or failed stream still hands over what arrived; the caller's own upstream error
+      // path is already attached, and duplicating it here would race it for the same response.
+      stream.once("error", () => {
+        headFilled = true;
+        resolveBody(Buffer.concat(chunks, size).toString("utf8"));
+      });
+    });
+
+    const onUpstreamJudged = (upRes: http.IncomingMessage, status: number, errBody: string): void => {
       // Charge the answer to the credential that produced it. A rate limit parks this one until its
       // stated reset so the next request takes another; an answer clears whatever it was carrying.
       // A 400 is our own request and is charged to nobody (see `classify`).
       if (penalised) {
         if (status >= 400) {
-          this.pool.penalise(penalised.provider, penalised.id, status, retryAfterMs(upRes.headers));
+          this.pool.penalise(penalised.provider, penalised.id, status, retryAfterMs(upRes.headers), errBody);
           if (status === 401 && cfg.providers[penalised.provider]?.type === "anthropic") this.claudeAccounts.reject(penalised.id);
         } else this.pool.succeed(penalised.provider, penalised.id);
       }
@@ -901,7 +955,7 @@ export class Proxy {
       // Nothing has been written to the client yet, so a refused credential can still be replaced
       // and the client answered on its first ask. Only here: once the answer starts flowing the
       // turn is committed, because replacing a half-sent stream splices two answers together.
-      const retry = status >= 400 ? nextCredential(status) : null;
+      const retry = status >= 400 ? nextCredential(status, errBody) : null;
       if (retry) {
         const previousId = retry.ownerId ? penalised!.id.split(":", 1)[0]! : penalised!.id;
         log.info(`RETRY ${route!.provider}: ${previousId} answered ${status}, trying ${retry.ownerId ?? retry.id}`);
@@ -989,6 +1043,15 @@ export class Proxy {
       // code was recorded (2026-09-15).
       const errorHead: Buffer[] = [];
       let errorHeadBytes = 0;
+      // The 403 body was read to judge it, so it is written here instead of read again from a
+      // stream that has already ended. Its `content-length` came from the upstream and still fits.
+      if (headFilled) {
+        const body = Buffer.from(errBody, "utf8");
+        bytes = body.length;
+        res.end(body);
+        finish(String(status), bytes, `upstream ${status}: ${redactErrorText(errBody, [...errorSecrets], 300)}`);
+        return;
+      }
       upRes.on("data", (c: Buffer) => {
         bytes += c.length;
         const writable = res.write(c);

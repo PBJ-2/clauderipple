@@ -48,14 +48,26 @@ const MAX_COOLDOWN_MS = 6 * 60 * 60_000;
  * What an upstream status means for the credential that produced it. `retryAfterMs` comes from a
  * `Retry-After` header or a vendor reset field when there is one; guessing is a last resort.
  */
-export function classify(status: number, retryAfterMs?: number): Verdict {
+export function classify(status: number, retryAfterMs?: number, body = ""): Verdict {
   const bounded = (ms: number): number => Math.max(1_000, Math.min(MAX_COOLDOWN_MS, Math.round(ms)));
   // 401 is the credential being rejected, and that does not heal: park it.
   if (status === 401) return { retryable: true, kind: "auth", cooldownMs: 0, quarantine: true };
   // 403 is not only that. It is also a content policy, a blocked region, a model the account may
   // not use, or an edge refusing what it took for a bot — none of which mean the key is dead.
   // Parking a working credential until someone notices is the worse mistake, so this waits instead.
-  if (status === 403) return { retryable: true, kind: "auth", cooldownMs: bounded(retryAfterMs ?? DEFAULT_RATE_LIMIT_MS), quarantine: false };
+  if (status === 403) {
+    // Except when the vendor says the refusal was not about us. A relay passing on a broken upstream
+    // answers 403, and that is not a statement about the credential at all: charging it a minute of
+    // cooldown made every turn in that minute come back to the user as an authentication error
+    // (2026-09-21, OpenCode Go relaying a 403 for DeepSeek). The credential did nothing, so it is
+    // held for no time at all rather than for a shorter time — any cooldown at all would move the
+    // conversation to another credential and take the prompt cache with it (§4). `bounded` is
+    // bypassed deliberately: its one-second floor is exactly the cache cost this avoids.
+    if (/upstream (request )?failed/i.test(body)) {
+      return { retryable: true, kind: "transient", cooldownMs: 0, quarantine: false };
+    }
+    return { retryable: true, kind: "auth", cooldownMs: bounded(retryAfterMs ?? DEFAULT_RATE_LIMIT_MS), quarantine: false };
+  }
   if (status === 429) return { retryable: true, kind: "rate-limit", cooldownMs: bounded(retryAfterMs ?? DEFAULT_RATE_LIMIT_MS), quarantine: false };
   if (status === 402) return { retryable: true, kind: "exhausted", cooldownMs: bounded(retryAfterMs ?? EXHAUSTED_MS), quarantine: false };
   // 408 and 425 are the server saying "ask again"; 5xx is the server being broken. Both may work
@@ -174,8 +186,8 @@ export class CredentialPool {
   }
 
   /** Record a failure. Returns the verdict so the caller can decide whether to try the next one. */
-  penalise(provider: string, id: string, status: number, retryAfterMs?: number): Verdict {
-    const verdict = classify(status, retryAfterMs);
+  penalise(provider: string, id: string, status: number, retryAfterMs?: number, body = ""): Verdict {
+    const verdict = classify(status, retryAfterMs, body);
     if (!verdict.retryable) return verdict;
     const h = this.healthOf(provider, id);
     h.failures++;

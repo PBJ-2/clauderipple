@@ -190,6 +190,26 @@ test("403 waits rather than parks, and 401 still parks", () => {
   assert.equal(rejected.retryable && rejected.quarantine, true);
 });
 
+// A relay in front of the vendor answers 403 when its own call upstream broke. That is not a
+// statement about our key, and treating it as one parked a working credential for a full minute —
+// every turn in that minute reached the user as an authentication error (2026-09-21).
+test("a 403 that reports a broken upstream is transient, not an auth failure", () => {
+  const relayed = classify(403, undefined, JSON.stringify({
+    error: { type: "server_error", code: "server_error", message: "Error from provider (Console Go): Upstream request failed: [server_error] Upstream response was not valid JSON" },
+  }));
+  assert.equal(relayed.retryable && relayed.kind, "transient");
+  // No cooldown at all: any wait would move the conversation off a credential that did nothing and
+  // take the prompt cache with it, which is the cost the pool exists to avoid.
+  assert.equal(relayed.retryable && relayed.cooldownMs, 0);
+  assert.equal(relayed.retryable && relayed.quarantine, false);
+
+  // No body, or a body about something else, is still judged the way it always was.
+  assert.equal((classify(403) as { kind: string }).kind, "auth");
+  const policy = classify(403, undefined, JSON.stringify({ error: { message: "This model is not available in your region" } }));
+  assert.equal(policy.retryable && policy.kind, "auth");
+  assert.equal(policy.retryable && policy.cooldownMs, 60_000);
+});
+
 // Requests overlap. A 200 arriving after a concurrent 429 does not mean the limit lifted, and
 // clearing the cooldown here would send the next turn straight back into it.
 test("an answer lifts a quarantine but does not cancel a live cooldown", () => {

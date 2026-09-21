@@ -60,6 +60,8 @@ async function upstream(reply: (n: number) => { status: number; headers?: Record
 
 type Rig = {
   send: (opts?: { cancel?: boolean; conversation?: string }) => Promise<number>;
+  /** The same turn, keeping the whole answer so a test can assert on the body too. */
+  sendDetailed: () => Promise<{ status: number; body: string }>;
   stop: () => Promise<void>;
 };
 
@@ -109,8 +111,29 @@ async function rig(providers: Config["providers"], routes: Config["routes"]): Pr
     return Number(/^HTTP\/1\.1 (\d{3})/.exec(first.toString("latin1"))?.[1] ?? 0);
   };
 
+  /** The same turn, keeping the whole answer so a test can assert on the body too. */
+  const sendDetailed = async (): Promise<{ status: number; body: string }> => {
+    const sock = net.connect(proxyPort, "127.0.0.1");
+    await new Promise<void>((r) => sock.once("connect", () => r()));
+    sock.write("CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: api.anthropic.com:443\r\n\r\n");
+    await new Promise<void>((r) => sock.once("data", () => r()));
+    const secure = tls.connect({ socket: sock, servername: "api.anthropic.com", ca: ca.certPem });
+    await new Promise<void>((r) => secure.once("secureConnect", () => r()));
+    const body = JSON.stringify({ model: "claude-opus-4-8", max_tokens: 1, metadata: { user_id: "user-1" }, messages: [{ role: "user", content: "hi" }] });
+    secure.write(
+      `POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
+    );
+    const first = await new Promise<Buffer>((r) => secure.once("data", (d: Buffer) => setTimeout(() => r(d), 120)));
+    secure.destroy();
+    const text = first.toString("utf8");
+    const status = Number(/^HTTP\/1\.1 (\d{3})/.exec(text)?.[1] ?? 0);
+    const split = text.indexOf("\r\n\r\n");
+    return { status, body: split >= 0 ? text.slice(split + 4) : "" };
+  };
+
   return {
     send,
+    sendDetailed,
     stop: async () => { proxy.close(); fs.rmSync(home, { recursive: true, force: true }); },
   };
 }
@@ -153,6 +176,42 @@ test("with every credential cooling, the request still carries one — not an em
     assert.ok(up.seen.length >= 3, `every turn reached the provider, got ${up.seen.length}`);
     // The point: never an unauthenticated request, whose 401 would quarantine an innocent key.
     for (const s of up.seen) assert.ok(s.key === "one" || s.key === "two", `credential present, got ${s.key}`);
+  } finally { await r.stop(); await up.close(); }
+});
+
+// A relay reporting a broken upstream answers 403, and that is not a statement about our key. It was
+// charged as an auth failure, so one bad minute parked a working credential for the next minute and
+// every turn in between reached the user as an authentication error (2026-09-21).
+test("a 403 about a broken upstream is not charged to the credential", async () => {
+  const relayError = JSON.stringify({ error: { type: "server_error", message: "Error from provider (Console Go): Upstream request failed: [server_error] Upstream response was not valid JSON" } });
+  // Every request is refused this way, so the pool has to stay usable turn after turn. If the first
+  // turn parked the credential, the second would come back with the auth error instead of the
+  // provider's own refusal.
+  const up = await upstream(() => ({ status: 403, body: relayError }));
+  const r = await rig({ p: pooled(up.port) }, { "claude-opus-4-8": { provider: "p", model: "m" } });
+  try {
+    assert.equal(await r.send(), 403);
+    assert.equal(await r.send(), 403, "the second turn is answered, not refused for a parked key");
+    // Turn 1 spends both credentials and ends on the second, so the pool holds the conversation
+    // there. Turn 2 must start on that same one. If the 403 had parked it, `pick` would have had
+    // nothing usable and fallen back to the first credential — which is what this rules out.
+    assert.equal(up.seen[2]?.key, "two", "turn 2 starts on the credential the conversation held");
+  } finally { await r.stop(); await up.close(); }
+});
+
+// The other half of the same bug: a 403 arriving with a body was answered by destroying the upstream
+// and never writing anything, so the turn died as a client-side socket reset rather than with the
+// provider's own message.
+test("a 403 keeps the provider's body instead of dropping the connection", async () => {
+  const relayError = JSON.stringify({ error: { type: "server_error", message: "Upstream request failed" } });
+  const up = await upstream(() => ({ status: 403, body: relayError }));
+  const r = await rig({ p: pooled(up.port) }, { "claude-opus-4-8": { provider: "p", model: "m" } });
+  try {
+    const res = await r.sendDetailed();
+    assert.equal(res.status, 403);
+    // Chunked, because the body is written from memory and its length is already decided then: the
+    // point is that the provider's own words arrive at all, where destroying the upstream sent none.
+    assert.match(res.body, /Upstream request failed/, "the refusal reached the client, not an empty socket");
   } finally { await r.stop(); await up.close(); }
 });
 
