@@ -44,8 +44,13 @@ async function api(path, opts) {
   return body;
 }
 
-function configRequest(next) {
-  return api("/api/config", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(next) });
+// The router writes `cli.models` to settings.json on this save (they only take effect there). If
+// that write could not happen it says so here — a slot that silently does nothing is the bug this
+// call used to be, so a failure must reach the screen rather than the router log.
+async function configRequest(next) {
+  const out = await api("/api/config", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(next) });
+  if (out && out.warning) toast(out.warning, true);
+  return out;
 }
 
 function modelsOf(provider) {
@@ -396,6 +401,13 @@ function renderClientPickerModels(enabled) {
 // why a routed session still searches on Claude quota until `smallFast` is pointed somewhere.
 const MODEL_SLOTS = ["smallFast", "subagent", "main"];
 
+// A provider the router measured as unable to search. Only the router can know this — it comes from
+// the status snapshot, never from the model's name — and the `smallFast` slot is exactly where it
+// matters, because a search sent to such a model comes back as invented prose or a visible failure.
+function providerCannotSearch(name) {
+  return Boolean(status && status.providers && status.providers[name] && status.providers[name].webSearch !== true);
+}
+
 function renderModelSlots() {
   const rows = $("#client-model-slots");
   if (!rows) return;
@@ -406,6 +418,11 @@ function renderModelSlots() {
     for (const group of groupedModels(currentConfig)) for (const model of group.models) {
       const option = el("option", { value: model.id, text: `${labelOf(model)} · ${group.name}` });
       if (chosen[slot] === model.id) option.selected = true;
+      // `smallFast` is what a WebSearch runs on, so an inability to search is fatal there and
+      // merely worth knowing everywhere else.
+      if (slot === "smallFast" && providerCannotSearch(group.name)) {
+        option.textContent += ` — ${t("slots.noWebSearch")}`;
+      }
       select.appendChild(option);
     }
     // A model the config names but no provider offers any more would otherwise vanish silently.
@@ -427,15 +444,21 @@ function renderModelSlots() {
 async function saveModelSlots() {
   if (!currentConfig) return;
   const next = clone(currentConfig);
+  // Every slot is recorded, empty ones included. A select put back to "default (Claude)" has to
+  // remove the env key, and the router tells "clear this" from "leave this alone" by whether the
+  // slot is present at all — so dropping empty values here would make the choice a silent no-op.
   const models = {};
-  for (const select of $all("#client-model-slots select")) {
-    if (select.value) models[select.dataset.slot] = select.value;
-  }
+  for (const select of $all("#client-model-slots select")) models[select.dataset.slot] = select.value;
   next.cli = { ...(next.cli || {}), models };
   try {
     await configRequest(next);
     currentConfig = next;
-    toast(t("slots.slotSaved"));
+    // Saying "saved" over a choice that will make every search fail is the same silent no-op this
+    // screen was already guilty of once. The label on the option warns before the fact; this catches
+    // a session that already had it selected.
+    const owners = models.smallFast ? providersOffering(next, models.smallFast) : [];
+    if (owners.length && providerCannotSearch(owners[0])) toast(t("slots.noWebSearchWarn"), true);
+    else toast(t("slots.slotSaved"));
   } catch (error) { toast(t("common.saveFailed"), true, error.message); }
 }
 

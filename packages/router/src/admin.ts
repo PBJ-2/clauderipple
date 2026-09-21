@@ -28,6 +28,8 @@ import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
 import { codexEnabled, codexHome } from "../../cli/src/codex.ts";
 import { openBrowser } from "../../cli/src/browser.ts";
 import { caTrusted, currentAppProxy } from "../../cli/src/picker.ts";
+import { certPaths } from "../../cli/src/certs.ts";
+import { syncModelSlots } from "../../cli/src/settings.ts";
 import { ClaudeOAuthSession, type ClaudeOAuthState } from "./providers/claude-oauth.ts";
 import { readClaudeAuthFile } from "./providers/anthropic-token-file.ts";
 import { listClaudeAccounts, removeClaudeAccount, renameClaudeAccount } from "./providers/anthropic-accounts.ts";
@@ -271,6 +273,18 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
         url,
         type: p.type,
         reachable,
+        // Whether the router could run a `WebSearch` side request through this provider, so the
+        // Clients screen can say so beside a model name. Nothing on that screen said which ones
+        // those are, and a `smallFast` slot pointed at one turns every search into a visible failure
+        // (2026-09-21: it was set to OpenCode Go's DeepSeek, which accepts the search request and
+        // answers with a fabricated one).
+        //
+        // It answers "can the router search here", not "can this model search". Those differ:
+        // measured 2026-09-21, OpenCode Go's Responses endpoint runs OpenAI's hosted `web_search`
+        // and cites real pages, but the wire is OpenAI-shaped while its hits come back as Responses
+        // events — a backend the router does not have, so a search still cannot go through it.
+        // Naming the provider's own capability instead would be a promise the router cannot keep.
+        ...(providerCanSearch(name, cfg) ? { webSearch: true } : {}),
         // Reaching the host says nothing about being able to use it: a chatgpt provider with no
         // credentials is not "connected", and calling it that sends the user off believing it works.
         ...(p.type === "chatgpt" ? { needsLogin: !chatgptSignedIn(p.auth) } : {}),
@@ -390,6 +404,53 @@ function runCli(args: string[], timeout = 180_000): Promise<{ ok: boolean; outpu
       resolveP({ ok: !err, output: `${stdout}${stderr}${err ? `\n${err.message}` : ""}`.trim() });
     });
   });
+}
+
+/**
+ * Whether this provider can actually run a web search — measured capability, not an assumption from
+ * the vendor name. The rule is the router's own (`Proxy.canRunServerTools`, mirrored here because
+ * that one is private to a live request): Anthropic runs its own server tools; an
+ * `anthropic-compatible` provider only when its preset says it was measured doing so; a `chatgpt`
+ * provider through its hosted search; an `openai-compatible` provider never — its web plugin is a
+ * vendor extension, and OpenCode Go's silently ignores it, leaving the model to answer with invented
+ * results. A configured `webSearch` backend is deliberately not counted here: it serves the search
+ * for the session, but a model still cannot search by itself, which is what a slot points at.
+ */
+function providerCanSearch(name: string, cfg: Config): boolean {
+  const p = cfg.providers[name];
+  if (!p) return false;
+  if (p.type === "chatgpt") return true;
+  if (p.type === "anthropic") return p.accountPool === true && p.auth === "claude-code";
+  if (p.type !== "anthropic-compatible") return false;
+  const preset = p.preset ? PRESETS.find((entry) => entry.id === p.preset) : undefined;
+  return resolveCompatibleCaps(preset ? { ...(preset.serverTools ? { serverTools: true } : {}) } : undefined, p.caps).serverTools;
+}
+
+/**
+ * Write `cli.models` into `~/.claude/settings.json` right after a GUI save, so a slot chosen on the
+ * Clients screen takes effect in the next session instead of waiting for an `install`.
+ *
+ * Returns a human-readable warning when the write could not happen, or null. A slot that silently
+ * does nothing is the exact bug this closes, so a failure has to come back to the screen rather
+ * than being swallowed into the router log.
+ */
+function syncModelSlotsForGui(cfg: Config): string | null {
+  try {
+    const home = homeDir();
+    syncModelSlots({
+      proxyUrl: `http://127.0.0.1:${cfg.listen.port}`,
+      caPath: certPaths(home).caPem,
+      force: false,
+      // Always an object, never omitted: `cli.models` absent means every slot should be back on
+      // Claude, and `syncModelSlots` reads an absent `models` as "do not touch these".
+      models: cfg.cli.models ?? {},
+    });
+    return null;
+  } catch (e) {
+    const message = (e as Error).message;
+    if (/not ours/.test(message)) return "settings.json has another proxy's HTTPS_PROXY; the model slots were not written. Run `clauderipple install --force` to take it over.";
+    return `model slots were not written to settings.json: ${message}`;
+  }
 }
 
 function readBody(req: http.IncomingMessage): Promise<Buffer> {
@@ -821,7 +882,11 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         fs.writeFileSync(tmp, JSON.stringify(parsed, null, 2) + "\n");
         fs.renameSync(tmp, deps.configFile);
         deps.log.info(`admin: config saved via GUI (${Object.keys(parsed.routes).length} routes, ${Object.keys(parsed.providers).length} providers)`);
-        sendJson(res, 200, { ok: true });
+        // `cli.models` cannot take effect through the router at all: Claude Code reads the slots
+        // before a request exists. So a GUI save has to write them to settings.json itself;
+        // otherwise the Clients screen shows a choice that only a later `install` would honour.
+        const slotWarning = syncModelSlotsForGui(parsed);
+        sendJson(res, 200, { ok: true, ...(slotWarning ? { warning: slotWarning } : {}) });
         return;
       }
       if (pathname === "/api/codex" && method === "GET") {

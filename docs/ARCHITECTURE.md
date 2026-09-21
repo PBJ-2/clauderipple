@@ -318,6 +318,32 @@ chat is out of reach for every approach, ours included.
       longer there. The GUI offers them on the Clients screen rather than leaving them to
       `config.json`, because they are the difference between a session that costs Claude quota and
       one that does not.
+      - **A GUI save writes them too.** `PUT /api/config` writes only `config.json` — the router
+        hot-reloads that on mtime — but nothing about the router can apply a slot, since the CLI
+        reads it before a request exists. So the handler calls `syncModelSlots` and returns a
+        `warning` the GUI has to show. Writing them on install alone was the bug (2026-09-21): the
+        Clients screen saved `smallFast: deepseek-v4.1-flash` into `config.json`, the screen showed
+        DeepSeek, and every search, title and classifier went on running on Haiku because
+        `env.ANTHROPIC_SMALL_FAST_MODEL` was never written. `syncModelSlots` is additive — a slot
+        the config does not name is left as it is, so a GUI save cannot undo a hand-set one — and it
+        refuses to write when `env.HTTPS_PROXY` belongs to another proxy.
+      - **The screen says which models the router cannot search through** (2026-09-21). A slot
+        pointed at such a model makes every `WebSearch` a visible failure, and nothing on the screen
+        warned. `GET /api/status` marks each provider with `webSearch: true` when the router could run
+        a search there, and the Clients screen appends "no web search here" to every `smallFast`
+        option without it. The flag answers *can the router search here*, not *can this model
+        search* — those differ, and the difference was measured: OpenCode Go's **Responses** endpoint
+        runs OpenAI's hosted `web_search` and cites real pages, but its wire is OpenAI-shaped while
+        its hits arrive as Responses events (`web_search_call`, `url_citation`), a backend the router
+        does not have. DeepSeek's own endpoint and the ChatGPT provider run Anthropic's server tool;
+        OpenCode Go's chat and Anthropic endpoints, and every `openai-compatible` provider, do not.
+    - **A model that cannot search does not merely decline — it invents.** Measured 2026-09-21
+      against OpenCode Go's chat endpoint: `plugins: [{id: "web"}]` is accepted and ignored (HTTP
+      200, no `annotations`, cache reporting no lookup), and the model answers a search-shaped
+      request with a confident answer built from plausible URLs. Pointed at an obscure query it
+      admits it ("There's no tool for web search provided"); pointed at a common one it does not.
+      This is why the router refuses such a side request instead of forwarding it — an answer shaped
+      like success, holding nothing, is worse than a visible failure.
     - This is the preferred path wherever it works. `cfg.webSearch` below is the fallback for
       providers that cannot, and for the translated paths, where the tool is not passed through but
       converted.
