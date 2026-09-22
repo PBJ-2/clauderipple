@@ -769,10 +769,14 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
 
   async function handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const url = req.url ?? "/";
-    const method = req.method ?? "GET";
+    // A HEAD is a GET whose body is discarded, and Node discards it for us: measured 2026-09-22,
+    // the response goes out with its `content-length` and no bytes after the headers. Normalising
+    // it here lets every read-only route answer one, where matching on "GET" alone fell through to
+    // 404 — which reads as a dead router to anything that checks with a HEAD.
+    const method = req.method === "HEAD" ? "GET" : (req.method ?? "GET");
     const pathname = url.split("?")[0] ?? "/";
     try {
-      if (method !== "GET" && method !== "HEAD" && crossSitePost(req)) {
+      if (method !== "GET" && crossSitePost(req)) {
         deps.log.warn(`admin: refused ${method} ${pathname} from origin ${String(req.headers.origin)}`);
         sendJson(res, 403, { error: "cross-site request refused" });
         return;

@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { DEFAULTS, type Config } from "../src/config.ts";
@@ -181,6 +182,38 @@ test("GET /api/status returns a snapshot", async () => {
 // The Clients screen labels a model the router cannot search through, and only the router knows
 // which those are. The capability is measured per route, so it must not come from the vendor name —
 // nor from whether the model itself can search, which the router has no way to use.
+// Anything that checks whether a service is up asks with a HEAD: the headers, no body. Every route
+// matched on "GET" alone, so a HEAD fell through to the 404 at the end and a healthy router reported
+// itself dead — while the CSRF check above it had been written to expect HEAD all along.
+test("HEAD answers a read-only route with its headers and no body", async () => {
+  await withAdmin(makeCfg(), async ({ port }) => {
+    // The contract is that a HEAD answers exactly as the GET does, whatever that answer is:
+    // `/readyz` is a 503 until the proxy reports ready, and a HEAD has to say the same thing.
+    for (const route of ["/readyz", "/api/status", "/style.css", "/"]) {
+      const get = await fetch(`${base()}:${port}${route}`);
+      const head = await fetch(`${base()}:${port}${route}`, { method: "HEAD" });
+      assert.notEqual(head.status, 404, `HEAD ${route} must reach its route`);
+      assert.equal(head.status, get.status, `HEAD ${route} answers as the GET does`);
+    }
+    // A static file is the same bytes on both calls, so its stated length can be compared exactly;
+    // `/api/status` carries live counters and would differ between two reads.
+    const [getCss, headCss] = [await fetch(`${base()}:${port}/style.css`), await fetch(`${base()}:${port}/style.css`, { method: "HEAD" })];
+    assert.ok(Number(getCss.headers.get("content-length")) > 0);
+    assert.equal(headCss.headers.get("content-length"), getCss.headers.get("content-length"), "the length of the body a GET would have sent");
+    // The body is the part a HEAD must not carry, and `fetch` never exposes one — read the wire.
+    const wire = await new Promise<string>((done, fail) => {
+      const sock = net.connect(port, "127.0.0.1", () => sock.write("HEAD /style.css HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"));
+      let text = "";
+      sock.on("data", (chunk: Buffer) => { text += chunk.toString("latin1"); });
+      sock.on("close", () => done(text));
+      sock.on("error", fail);
+    });
+    assert.match(wire, /^HTTP\/1\.1 200 OK/);
+    assert.match(wire, /content-length: [1-9]/i, "the length of the body a GET would have sent");
+    assert.equal(wire.split("\r\n\r\n")[1], "", "nothing after the headers");
+  });
+});
+
 test("GET /api/status marks which providers can run a web search", async () => {
   const cfg = makeCfg({
     providers: {
