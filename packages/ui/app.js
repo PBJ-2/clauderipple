@@ -745,6 +745,9 @@ async function saveSlots() {
 function statusText(state) {
   if (!state) return t("providerStatus.checking");
   if (state.ok) return t("providerStatus.connected");
+  // The key was accepted and the plan refused: saying "check your key" sends the operator to the
+  // one thing that is not wrong. Measured 2026-09-22 against OpenCode's free-tier 403.
+  if (state.auth === "not-entitled") return t("providerStatus.notEntitled");
   if (state.auth === "bad-key") return t("providerStatus.keyNeeded");
   return t("providerStatus.disconnected");
 }
@@ -1351,7 +1354,7 @@ function openAnthropicProviderForm(options) {
       sourceLine.textContent = anthropicSourceText(response.source);
       const noCredits = response.ok && /^no-credits:/.test(response.error || "");
       result.replaceChildren(...[
-        el("span", { class: response.ok && !noCredits ? "ok-text" : noCredits ? "warn-text" : "bad-text", text: noCredits ? t("providers.probeNoCredits") : response.ok ? t("providers.probeOk") : response.auth === "bad-key" ? t("providers.probeBadKey") : auth.value === "claude-code" ? anthropicSourceText(response.source) : t("providers.probeFailed") }),
+        el("span", { class: response.ok && !noCredits ? "ok-text" : noCredits ? "warn-text" : "bad-text", text: noCredits ? t("providers.probeNoCredits") : response.ok ? t("providers.probeOk") : response.auth === "not-entitled" ? t("providers.probeNotEntitled") : response.auth === "bad-key" ? t("providers.probeBadKey") : auth.value === "claude-code" ? anthropicSourceText(response.source) : t("providers.probeFailed") }),
         response.error ? el("div", { class: "small", text: response.error.replace(/^no-credits:\s*/, "") }) : null,
       ].filter(Boolean));
       if (Array.isArray(response.models) && response.models.length) {
@@ -1546,7 +1549,7 @@ function openProviderForm(options) {
     const response = await probeProvider(temporary, draft);
     probeButton.disabled = false;
     const noCredits = response.ok && /^no-credits:/.test(response.error || "");
-    const headline = noCredits ? t("providers.probeNoCredits") : response.ok ? t("providers.probeOk") : response.auth === "bad-key" ? t("providers.probeBadKey") : response.unavailable ? t("providers.apiSoon") : t("providers.probeFailed");
+    const headline = noCredits ? t("providers.probeNoCredits") : response.ok ? t("providers.probeOk") : response.auth === "not-entitled" ? t("providers.probeNotEntitled") : response.auth === "bad-key" ? t("providers.probeBadKey") : response.unavailable ? t("providers.apiSoon") : t("providers.probeFailed");
     result.replaceChildren(...[
       el("span", { class: response.ok && !noCredits ? "ok-text" : noCredits ? "warn-text" : "bad-text", text: headline }),
       response.error ? el("div", { class: "small", text: response.error.replace(/^no-credits:\s*/, "") }) : null,

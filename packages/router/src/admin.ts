@@ -94,7 +94,7 @@ export type AdminDeps = {
 /** One discovered/offered model. Exactly the config shape, so a preset's per-model override
  * (wire/url/authHeader) can be carried straight into a provider entry. */
 type ModelEntry = ProviderModel;
-type ProbeAuth = "ok" | "bad-key" | "unreachable" | "unknown" | "missing";
+type ProbeAuth = "ok" | "bad-key" | "not-entitled" | "unreachable" | "unknown" | "missing";
 type ProbeRequest = {
   type: "anthropic-compatible" | "openai-compatible";
   url: string;
@@ -628,6 +628,19 @@ async function fetchWithTimeout(url: string, init: RequestInit): Promise<Respons
   return fetch(url, { ...init, signal: AbortSignal.timeout(8_000) });
 }
 
+/**
+ * A 403 that refused the plan rather than the credential.
+ *
+ * Measured 2026-09-22: OpenCode answers a free-tier account with 403 FreeTierError, "OpenCode's
+ * free tier can only be used from within OpenCode", while a paid account out of balance answers
+ * 402. Reading every 403 as a bad key sent the operator to re-check a key that was working and said
+ * nothing about the plan that had actually refused — the same mistake the 402 branch below exists
+ * to avoid. Only a body that names the plan is read this way; a bare 403 is still a bad key.
+ */
+function refusedByPlan(detail: string): boolean {
+  return /free.?tier|data.?policy|region|entitle|upgrade|subscription/i.test(detail);
+}
+
 async function probeProvider(body: ProbeRequest, probeFetch: (url: string, init: RequestInit) => Promise<Response> = fetchWithTimeout): Promise<{ ok: boolean; auth: ProbeAuth; models: ModelEntry[]; error?: string }> {
   const source = headerValue(body.headers);
   let models: ModelEntry[] = [];
@@ -659,7 +672,11 @@ async function probeProvider(body: ProbeRequest, probeFetch: (url: string, init:
       },
       body: JSON.stringify(checkBody),
     });
-    if (response.status === 401 || response.status === 403) return { ok: false, auth: "bad-key", models, error: `${label} returned ${response.status}: ${snippet(await response.text())}` };
+    if (response.status === 401 || response.status === 403) {
+      const refusal = snippet(await response.text());
+      const auth: ProbeAuth = response.status === 403 && refusedByPlan(refusal) ? "not-entitled" : "bad-key";
+      return { ok: false, auth, models, error: `${label} returned ${response.status}: ${refusal}` };
+    }
     if (response.ok) return { ok: true, auth: "ok", models, ...(modelsError ? { error: modelsError } : {}) };
     const detail = snippet(await response.text());
     // A model-validation 400 still demonstrates that the endpoint reached the provider and the key was accepted.

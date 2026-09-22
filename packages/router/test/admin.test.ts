@@ -991,6 +991,60 @@ function stubFetch(status: (url: string, body: StubBody) => number): (url: strin
   };
 }
 
+// Measured 2026-09-22: a free-tier OpenCode account answers 403 FreeTierError, "OpenCode's free
+// tier can only be used from within OpenCode". Every 403 read as a bad key, so the screen told the
+// operator to check a key that was working and never mentioned the plan that had refused it.
+test("a 403 that names the plan is reported as the plan, not as a bad key", async () => {
+  const upstream = http.createServer((req, res) => {
+    if (req.url === "/v1/models") {
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ data: [{ id: "claude-fable-5" }] }));
+      return;
+    }
+    res.writeHead(403, { "content-type": "application/json" })
+      .end(JSON.stringify({ type: "error", error: { type: "FreeTierError", message: "OpenCode's free tier can only be used from within OpenCode" } }));
+  });
+  await new Promise<void>((resolveP) => upstream.listen(0, "127.0.0.1", resolveP));
+  const address = upstream.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    await withAdmin(makeCfg(), async ({ port }) => {
+      const res = await fetch(`${base()}:${port}/api/providers/probe`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "openai-compatible", url: `http://127.0.0.1:${address.port}/v1`, headers: { authorization: "Bearer sk-test" } }),
+      });
+      const out = (await res.json()) as { ok: boolean; auth: string; error?: string };
+      assert.equal(out.ok, false);
+      assert.equal(out.auth, "not-entitled", "the credential was accepted; the plan was not");
+      assert.match(out.error ?? "", /FreeTierError/, "the vendor's own words reach the screen");
+    });
+  } finally { upstream.close(); }
+});
+
+// A 403 with nothing about a plan in it is still what it always was.
+test("a bare 403 is still reported as a bad key", async () => {
+  const upstream = http.createServer((req, res) => {
+    if (req.url === "/v1/models") {
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ data: [{ id: "m" }] }));
+      return;
+    }
+    res.writeHead(403, { "content-type": "application/json" }).end(JSON.stringify({ error: { message: "Forbidden" } }));
+  });
+  await new Promise<void>((resolveP) => upstream.listen(0, "127.0.0.1", resolveP));
+  const address = upstream.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    await withAdmin(makeCfg(), async ({ port }) => {
+      const res = await fetch(`${base()}:${port}/api/providers/probe`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "openai-compatible", url: `http://127.0.0.1:${address.port}/v1`, headers: { authorization: "Bearer sk-test" } }),
+      });
+      assert.equal(((await res.json()) as { auth: string }).auth, "bad-key");
+    });
+  } finally { upstream.close(); }
+});
+
 test("POST /api/providers/measure runs in the background and polling settles the wire into the config", async () => {
   const cfg = makeCfg({
     providers: {
