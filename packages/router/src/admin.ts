@@ -23,6 +23,7 @@ import type { Stats } from "./proxy.ts";
 import type { RequestLog } from "./requestlog.ts";
 import { PRESETS, type ProviderPreset } from "./presets.ts";
 import { resolveCompatibleCaps } from "./compat.ts";
+import { CHATGPT_FALLBACK_MODELS } from "./providers/chatgpt/catalog.ts";
 import { measureModel, refusedByPlan, type Measured, type WireCandidate } from "./capabilities.ts";
 import { ClaudeCodeAuthStore, nativeAnthropicHeaders } from "./providers/anthropic.ts";
 import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
@@ -66,6 +67,12 @@ export type AdminDeps = {
     auth: Record<string, string>;
     /** Active quota lookup by provider name; absent in tests. Returns null on failure. */
     refresh?: (name: string) => Promise<Record<string, unknown> | null>;
+    /**
+     * The models one chatgpt provider can reach, from the Codex backend's own catalogue. Null when
+     * the catalogue cannot be read or the provider is not configured — the caller then shows its
+     * measured fallback list. Absent in tests.
+     */
+    models?: (name: string) => Promise<ProviderModel[] | null>;
   };
   /**
    * Optional: per-credential cooldowns and quarantines, for providers that declare a pool. Ids and
@@ -119,7 +126,6 @@ type ProbeRequest = {
 
 const ANTHROPIC_EFFORT_LEVELS = ["low", "medium", "high", "max"];
 const CHATGPT_DEFAULT_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
-const CHATGPT_LUNA_EFFORT_LEVELS = [...CHATGPT_DEFAULT_EFFORT_LEVELS, "ultra"];
 
 type ChatgptLogin = { running: boolean; startedAt?: string; finishedAt?: string; ok?: boolean; output?: string };
 let chatgptLogin: ChatgptLogin = { running: false };
@@ -133,15 +139,15 @@ export function effortLevels(cfg: Config): { providers: Record<string, { default
   };
   for (const [name, provider] of Object.entries(cfg.providers)) {
     if (provider.type === "chatgpt") {
-      providers[name] = {
-        default: CHATGPT_DEFAULT_EFFORT_LEVELS,
-        models: {
-          "gpt-5.6-luna": CHATGPT_LUNA_EFFORT_LEVELS,
-          "gpt-5.6-terra": CHATGPT_DEFAULT_EFFORT_LEVELS,
-          "gpt-5.6-sol": CHATGPT_DEFAULT_EFFORT_LEVELS,
-          "gpt-6-astra": CHATGPT_DEFAULT_EFFORT_LEVELS,
-        },
-      };
+      // The backend's catalogue is the truth about which models exist and what each supports, but
+      // it lives behind a login and a network call, so the measured fallback list carries the
+      // per-model ladders (ultra on astra/sol/5.6 terra+sol, not on either Luna) and any config
+      // entries the user has saved override them.
+      const models: Record<string, string[]> = Object.fromEntries(
+        CHATGPT_FALLBACK_MODELS.filter((model) => model.effortLevels !== undefined).map((model) => [model.id, [...model.effortLevels!]]),
+      );
+      for (const model of provider.models ?? []) if (model.effortLevels !== undefined) models[model.id] = [...model.effortLevels];
+      providers[name] = { default: CHATGPT_DEFAULT_EFFORT_LEVELS, ...(Object.keys(models).length ? { models } : {}) };
       continue;
     }
     const modelLevels = Object.fromEntries(
@@ -171,6 +177,7 @@ export function effortLevels(cfg: Config): { providers: Record<string, { default
 
 const CLAUDE_MODEL_FALLBACK: { id: string; name: string }[] = [
   { id: "claude-fable-5-1", name: "Fable 5.1" },
+  { id: "claude-opus-5-5", name: "Opus 5.5" },
   { id: "claude-opus-5", name: "Opus 5" },
   { id: "claude-sonnet-5", name: "Sonnet 5" },
   { id: "claude-haiku-4-5", name: "Haiku 4.5" },
@@ -1026,7 +1033,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           sendJson(res, 400, { error: "expected provider probe object" });
           return;
         }
-        const probe = parsed as { type?: unknown; auth?: unknown; apiKey?: unknown; url?: unknown; headers?: unknown; modelsUrl?: unknown; modelsAuthHeader?: unknown; probeModel?: unknown; sessionHeader?: unknown; preset?: unknown };
+        const probe = parsed as { type?: unknown; name?: unknown; auth?: unknown; apiKey?: unknown; url?: unknown; headers?: unknown; modelsUrl?: unknown; modelsAuthHeader?: unknown; probeModel?: unknown; sessionHeader?: unknown; preset?: unknown };
         if (probe.type === "anthropic") {
           if (probe.auth === "claude-code") {
             sendJson(res, 200, probeClaudeCodeAuth(deps));
@@ -1045,16 +1052,20 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         if (probe.type === "chatgpt") {
           const statuses = Object.values(deps.chatgpt?.().auth ?? {});
           const signed = chatgptSignedIn(typeof probe.auth === "string" ? probe.auth : undefined);
+          // Which provider to ask: the form knows the one it is editing, and a provider merely
+          // configured by hand is the only other candidate. Unknown name → ask nobody, show the
+          // measured fallback, which is also what an unreachable catalogue yields.
+          const providers = deps.config().providers;
+          const named = typeof probe.name === "string" && providers[probe.name]?.type === "chatgpt" ? probe.name : undefined;
+          const providerName = named ?? Object.entries(providers).find(([, p]) => p.type === "chatgpt")?.[0];
+          const live = providerName ? await deps.chatgpt?.().models?.(providerName) : undefined;
+          const models = live?.length ? live : CHATGPT_FALLBACK_MODELS;
           sendJson(res, 200, {
             ok: signed,
             auth: signed ? (statuses[0] ?? "ok") : "missing",
             ...(signed ? {} : { error: "no ChatGPT credentials: sign in from the tray menu, or install and sign in to the Codex CLI" }),
-            models: [
-              { id: "gpt-5.6-terra", name: "GPT-5.6 Terra" },
-              { id: "gpt-5.6-sol", name: "GPT-5.6 Sol" },
-              { id: "gpt-5.6-luna", name: "GPT-5.6 Luna" },
-              { id: "gpt-6-astra", name: "GPT-6 Astra" },
-            ],
+            models,
+            modelsSource: live?.length ? "catalog" : "fallback",
           });
           return;
         }

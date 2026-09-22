@@ -29,7 +29,7 @@ const CLAUDE_ID = /^claude-(opus|sonnet|haiku|fable)-(\d+(?:-\d+)*?)(?:-\d{8})?$
 
 /** Display names: config's picker names (e.g. "GPT-5.6 Terra" → "Terra"), then a built-in table. */
 function prettyNames(): Record<string, string> {
-  const out: Record<string, string> = { "gpt-5.6-terra": "Terra", "gpt-5.6-sol": "Sol", "gpt-5.6-luna": "Luna", "gpt-6-astra": "Astra" };
+  const out: Record<string, string> = { "gpt-5.6-terra": "Terra", "gpt-5.6-sol": "Sol", "gpt-5.6-luna": "Luna", "gpt-6-astra": "Astra", "gpt-6-sol": "Sol", "gpt-6-luna": "Luna" };
   const home = process.env.CLAUDERIPPLE_HOME ?? path.join(os.homedir(), ".clauderipple");
   try {
     const cfg = JSON.parse(fs.readFileSync(path.join(home, "config.json"), "utf8")) as {

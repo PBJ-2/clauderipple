@@ -84,11 +84,15 @@ function modelEffortLevels(provider, model) {
   const entry = modelsOf(provider).find((item) => item.id === model);
   return entry && Array.isArray(entry.effortLevels) ? entry.effortLevels : undefined;
 }
+// The ChatGPT ladders the Codex catalogue reports (measured 2026-09-23): every model takes
+// low..max, and only these add ultra. The live probe replaces this table when it can be reached.
+const CHATGPT_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
+const CHATGPT_ULTRA_MODELS = new Set(["gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra", "gpt-6-sol"]);
 function fallbackEffortLevels(provider, model) {
   if (!provider) return [];
   const explicit = modelEffortLevels(provider, model);
   if (explicit !== undefined) return explicit;
-  if (provider.type === "chatgpt") return model === "gpt-5.6-luna" ? ["low", "medium", "high", "xhigh", "max", "ultra"] : ["low", "medium", "high", "xhigh", "max"];
+  if (provider.type === "chatgpt") return CHATGPT_ULTRA_MODELS.has(model) ? [...CHATGPT_EFFORT_LEVELS, "ultra"] : [...CHATGPT_EFFORT_LEVELS];
   const preset = provider.preset && presetById(provider.preset);
   if (provider.type === "openai-compatible") return provider.caps && provider.caps.reasoning === "effort" && Array.isArray(provider.caps.effortLevels) ? provider.caps.effortLevels : [];
   return provider.caps && Array.isArray(provider.caps.effortLevels) ? provider.caps.effortLevels : (preset && preset.effortLevels) || [];
@@ -1267,11 +1271,12 @@ function inputRow(label, control, helpText) {
 // Checklist that stays usable with hundreds of models (OpenRouter lists 400+): a search box, checked
 // entries pinned first, at most 36 visible rows, and the selection kept in a Set so filtering never
 // loses ticks. `box.selected()` returns the chosen entries, each carrying whatever per-model override
-// it arrived with (effortLevels, and the wire/url/authHeader a preset gave it) so a save does not
-// strip the endpoint the model speaks.
+// it arrived with (effortLevels, contextWindow, and the wire/url/authHeader a preset gave it) so a
+// save does not strip the endpoint the model speaks.
 function modelOverrideFields(model) {
   return {
     ...(Array.isArray(model.effortLevels) ? { effortLevels: [...model.effortLevels] } : {}),
+    ...(typeof model.contextWindow === "number" ? { contextWindow: model.contextWindow } : {}),
     ...(model.wire ? { wire: model.wire } : {}),
     ...(model.url ? { url: model.url } : {}),
     ...(model.authHeader ? { authHeader: model.authHeader } : {}),
@@ -1573,6 +1578,38 @@ function openProviderForm(options) {
   // Editing a provider that can list models: fetch the full list right away so the saved picks are
   // shown among everything available, not as a two-entry list.
   if (existing && !isChatgpt && preset && preset.modelsUrl && existingKey) setTimeout(() => void runProbe(), 0);
+  // ChatGPT has no key field and no probe button, so without this the list stayed the built-in
+  // fallback and a model OpenAI shipped after this release never appeared. Ask the backend for its
+  // catalogue in the background: ticks survive, new models arrive unticked, and a failure just
+  // leaves the fallback list standing.
+  let formActive = true;
+  if (isChatgpt) {
+    const chat = advancedContent._chatgpt;
+    void (async () => {
+      let response;
+      try {
+        response = await api("/api/providers/probe", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ type: "chatgpt", auth: chat.auth.value, name: options.name }),
+        });
+      } catch { return; }
+      if (!formActive || !Array.isArray(response.models) || !response.models.length) return;
+      // Captured while the fetched list is checked, not against the fallback it is about to replace.
+      const keep = new Set([...currentChecked, ...modelArea.querySelector(".model-picker").selected().map((model) => model.id)]);
+      // A model the catalogue no longer lists but the config still names stays visible and ticked,
+      // so a save cannot drop it silently.
+      const named = new Set(response.models.map((model) => model.id));
+      foundModels = [...response.models, ...foundModels.filter((saved) => !named.has(saved.id))];
+      modelArea.querySelector(".model-picker").replaceWith(modelChecklist(foundModels, keep));
+      modelArea.replaceChildren(
+        el("span", { text: t("providers.models") }),
+        hint(t("providers.modelsHelp")),
+        hint(t("providers.modelsFoundLive", { n: response.models.length })),
+        modelArea.querySelector(".model-picker"),
+      );
+    })();
+  }
   const saveButton = el("button", { class: "btn", type: "button", "data-default-action": "", text: existing ? t("common.save") : t("providers.add") });
   saveButton.addEventListener("click", async () => {
     const typedName = nameInput.value.trim();
@@ -1614,7 +1651,7 @@ function openProviderForm(options) {
     } finally { saveButton.disabled = false; }
   });
   form.appendChild(el("div", { class: "actions end" }, [el("button", { class: "btn secondary", type: "button", text: t("common.cancel"), onclick: closeModal }), saveButton]));
-  showModal(form);
+  showModal(form, () => { if (isChatgpt) formActive = false; });
 }
 
 // ---- Logs ---------------------------------------------------------------------------

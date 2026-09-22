@@ -5,7 +5,7 @@ import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { DEFAULTS, type Config } from "../src/config.ts";
+import { DEFAULTS, type Config, type ProviderModel } from "../src/config.ts";
 import { Logger } from "../src/log.ts";
 import { startAdmin } from "../src/admin.ts";
 import { RequestLog } from "../src/requestlog.ts";
@@ -29,7 +29,7 @@ async function withAdmin(
     openBrowser?: (url: string) => boolean;
     observedClaudeCodeAuth?: ObservedClaudeCodeAuth;
     measureFetch?: (url: string, init: RequestInit) => Promise<Response>;
-    chatgpt?: () => { quota: Record<string, Record<string, unknown> | null>; auth: Record<string, string>; refresh?: (name: string) => Promise<Record<string, unknown> | null> };
+    chatgpt?: () => { quota: Record<string, Record<string, unknown> | null>; auth: Record<string, string>; refresh?: (name: string) => Promise<Record<string, unknown> | null>; models?: (name: string) => Promise<ProviderModel[] | null> };
   } = {},
 ): Promise<void> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-admin-"));
@@ -312,8 +312,22 @@ test("GET /api/effort-levels reports compatible defaults and ChatGPT model excep
     assert.deepEqual(body.providers.openrouter?.default, ["low", "medium", "high"]);
     assert.deepEqual(body.providers.openrouter?.models, { effort: ["low", "medium", "high"], "no-effort": [] });
     assert.deepEqual(body.providers.custom?.default, ["max"]);
-    assert.deepEqual(body.providers.gpt?.models?.["gpt-5.6-luna"], ["low", "medium", "high", "xhigh", "max", "ultra"]);
-    assert.deepEqual(body.providers.gpt?.models?.["gpt-5.6-terra"], ["low", "medium", "high", "xhigh", "max"]);
+    assert.deepEqual(body.providers.gpt?.models?.["gpt-5.6-luna"], ["low", "medium", "high", "xhigh", "max"], "Luna takes no ultra");
+    assert.deepEqual(body.providers.gpt?.models?.["gpt-5.6-terra"], ["low", "medium", "high", "xhigh", "max", "ultra"]);
+    assert.deepEqual(body.providers.gpt?.models?.["gpt-5.6-sol"], ["low", "medium", "high", "xhigh", "max", "ultra"]);
+    assert.deepEqual(body.providers.gpt?.models?.["gpt-6-sol"], ["low", "medium", "high", "xhigh", "max", "ultra"]);
+    assert.deepEqual(body.providers.gpt?.models?.["gpt-6-luna"], ["low", "medium", "high", "xhigh", "max"], "Luna takes no ultra");
+    assert.deepEqual(body.providers.gpt?.default, ["low", "medium", "high", "xhigh", "max"]);
+  });
+});
+
+test("GET /api/effort-levels lets a chatgpt config entry override the fallback ladder", async () => {
+  const cfg = makeCfg({ providers: { gpt: { type: "chatgpt", models: [{ id: "gpt-6-luna", effortLevels: ["low", "ultra"] }, { id: "something-new", effortLevels: ["high"] }] } } });
+  await withAdmin(cfg, async ({ port }) => {
+    const body = (await (await fetch(`${base()}:${port}/api/effort-levels`)).json()) as { providers: Record<string, { models?: Record<string, string[]> }> };
+    assert.deepEqual(body.providers.gpt?.models?.["gpt-6-luna"], ["low", "ultra"], "config wins over the built-in ladder");
+    assert.deepEqual(body.providers.gpt?.models?.["something-new"], ["high"], "a model the fallback does not know still reports what it takes");
+    assert.deepEqual(body.providers.gpt?.models?.["gpt-6-sol"], ["low", "medium", "high", "xhigh", "max", "ultra"], "untouched entries keep the fallback");
   });
 });
 
@@ -365,7 +379,7 @@ test("POST /api/providers/probe accepts native Claude Code auth and reports only
   await withAdmin(makeCfg(), async ({ port, home }) => {
     const missing = await fetch(`${base()}:${port}/api/providers/probe`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "anthropic", auth: "claude-code" }) });
     assert.deepEqual(await missing.json(), { ok: false, auth: "missing", source: null, signedIn: null, accountCount: 0, models: [
-      { id: "claude-fable-5-1", name: "Fable 5.1" }, { id: "claude-opus-5", name: "Opus 5" }, { id: "claude-sonnet-5", name: "Sonnet 5" }, { id: "claude-haiku-4-5", name: "Haiku 4.5" }, { id: "claude-fable-5", name: "Fable 5" }, { id: "claude-opus-4-8", name: "Opus 4.8" }, { id: "claude-opus-4-7", name: "Opus 4.7" }, { id: "claude-opus-4-6", name: "Opus 4.6" }, { id: "claude-sonnet-4-6", name: "Sonnet 4.6" },
+      { id: "claude-fable-5-1", name: "Fable 5.1" }, { id: "claude-opus-5-5", name: "Opus 5.5" }, { id: "claude-opus-5", name: "Opus 5" }, { id: "claude-sonnet-5", name: "Sonnet 5" }, { id: "claude-haiku-4-5", name: "Haiku 4.5" }, { id: "claude-fable-5", name: "Fable 5" }, { id: "claude-opus-4-8", name: "Opus 4.8" }, { id: "claude-opus-4-7", name: "Opus 4.7" }, { id: "claude-opus-4-6", name: "Opus 4.6" }, { id: "claude-sonnet-4-6", name: "Sonnet 4.6" },
     ] });
     saveClaudeAuthFile(home, "test-token", "2026-09-13T00:00:00.000Z");
     const available = await fetch(`${base()}:${port}/api/providers/probe`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "anthropic", auth: "claude-code" }) });
@@ -409,7 +423,7 @@ test("POST /api/providers/probe sends Anthropic API-key headers and treats a mod
   try {
     const res = await fetch(`${base()}:${admin.port}/api/providers/probe`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "anthropic", auth: "api-key", apiKey: "secret-key" }) });
     assert.deepEqual(await res.json(), { ok: true, auth: "ok", models: [
-      { id: "claude-fable-5-1", name: "Fable 5.1" }, { id: "claude-opus-5", name: "Opus 5" }, { id: "claude-sonnet-5", name: "Sonnet 5" }, { id: "claude-haiku-4-5", name: "Haiku 4.5" }, { id: "claude-fable-5", name: "Fable 5" }, { id: "claude-opus-4-8", name: "Opus 4.8" }, { id: "claude-opus-4-7", name: "Opus 4.7" }, { id: "claude-opus-4-6", name: "Opus 4.6" }, { id: "claude-sonnet-4-6", name: "Sonnet 4.6" },
+      { id: "claude-fable-5-1", name: "Fable 5.1" }, { id: "claude-opus-5-5", name: "Opus 5.5" }, { id: "claude-opus-5", name: "Opus 5" }, { id: "claude-sonnet-5", name: "Sonnet 5" }, { id: "claude-haiku-4-5", name: "Haiku 4.5" }, { id: "claude-fable-5", name: "Fable 5" }, { id: "claude-opus-4-8", name: "Opus 4.8" }, { id: "claude-opus-4-7", name: "Opus 4.7" }, { id: "claude-opus-4-6", name: "Opus 4.6" }, { id: "claude-sonnet-4-6", name: "Sonnet 4.6" },
     ] });
     assert.equal(seen.url, "https://api.anthropic.com/v1/messages");
     assert.equal(seen.headers?.get("x-api-key"), "secret-key");
@@ -884,6 +898,49 @@ test("a chatgpt provider with no credentials is not reported as usable", async (
     assert.equal(body.auth, "missing");
     assert.match(body.error ?? "", /credentials/i);
   });
+});
+
+test("POST /api/providers/probe[chatgpt] reports the live catalogue when it can be read", async () => {
+  // The model list is not ours to hardcode any more: a model OpenAI ships must appear without a
+  // release here, and the response says which of the two answers the list came from.
+  const live = [
+    { id: "gpt-6-sol", name: "GPT-6 Sol", effortLevels: ["low", "medium", "high", "xhigh", "max", "ultra"], contextWindow: 272000 },
+    { id: "gpt-6-omega", name: "GPT-6 Omega", effortLevels: ["low", "high"] },
+  ];
+  const seen: string[] = [];
+  await withAdmin(
+    makeCfg({ providers: { gpt: { type: "chatgpt", auth: "own" } } }),
+    async ({ port }) => {
+      const res = await fetch(`${base()}:${port}/api/providers/probe`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "chatgpt", auth: "own", name: "gpt" }),
+      });
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { models: { id: string }[]; modelsSource: string };
+      assert.equal(body.modelsSource, "catalog");
+      assert.deepEqual(body.models, live);
+    },
+    { chatgpt: () => ({ quota: { gpt: null }, auth: { gpt: "borrow-codex" }, models: (name: string) => { seen.push(name); return Promise.resolve(live); } }) },
+  );
+  assert.deepEqual(seen, ["gpt"], "the probe asks the provider the form named");
+});
+
+test("POST /api/providers/probe[chatgpt] falls back to the measured list when the catalogue is unreadable", async () => {
+  await withAdmin(
+    makeCfg({ providers: { gpt: { type: "chatgpt", auth: "own" } } }),
+    async ({ port }) => {
+      const res = await fetch(`${base()}:${port}/api/providers/probe`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "chatgpt", auth: "own" }),
+      });
+      const body = (await res.json()) as { models: { id: string }[]; modelsSource: string };
+      assert.equal(body.modelsSource, "fallback");
+      assert.deepEqual(body.models.map((m) => m.id), ["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]);
+    },
+    { chatgpt: () => ({ quota: { gpt: null }, auth: { gpt: "borrow-codex" }, models: () => Promise.resolve(null) }) },
+  );
 });
 
 /** A chatgpt deps stub whose snapshot ages on command and counts refresh calls. */

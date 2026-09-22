@@ -201,7 +201,25 @@ chat is out of reach for every approach, ours included.
     multi-turn tool-using session, measured from upstream
     `input_tokens_details.cached_tokens`.**
   - `output_config.effort`: `none…max` accepted by terra/sol/astra, `ultra`
-    rejected (luna accepts it). Clamp `ultra` → `max`.
+    rejected (luna accepts it). Clamp `ultra` → `max`. **Conflicts with the
+    catalogue (2026-09-23):** the Codex model catalogue now lists `ultra` for
+    gpt-5.6-terra/sol, gpt-6-astra/sol and *not* for either Luna. Not
+    re-measured — the subscription's weekly quota was at 100% that day. The
+    global `effortClamp` (`ultra → max`) means no `ultra` is sent either way, so
+    only the GUI's ladder follows the catalogue; re-measure before removing the
+    clamp.
+  - **Model catalogue (2026-09-23).** `GET {base}/codex/models?client_version=<v>`
+    with the same credentials answers `{ models: [{ slug, display_name,
+    visibility: "list"|"hide", context_window, supported_reasoning_levels:
+    [{effort}] }] }` — what the Codex CLI's picker shows. **The server filters by
+    `client_version`:** `0.146.0` omitted gpt-6-astra/sol/luna, `0.155.0`
+    listed them. The adapter (`catalog.ts`) asks with the higher of a floor and
+    `~/.codex/models_cache.json`'s `client_version`, drops `hide` entries, keeps
+    the list an hour, and falls back to a measured list in the same file. The
+    GUI's ChatGPT form fetches it on open; new models arrive unticked. Model ids
+    unknown to the backend answer `400 "… model is not supported when using
+    Codex with a ChatGPT account"` before any quota check, so a `429` for
+    gpt-6-sol/luna that day confirmed the ids without spending quota.
   - Model self-introduction is not evidence of routing. Verify by upstream
     usage records.
   - **Implemented 2026-09-11** in `packages/router/src/providers/chatgpt/`.

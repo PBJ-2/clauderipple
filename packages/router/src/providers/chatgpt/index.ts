@@ -3,7 +3,7 @@
 
 import crypto from "node:crypto";
 import http from "node:http";
-import type { ChatGptProvider } from "../../config.ts";
+import type { ChatGptProvider, ProviderModel } from "../../config.ts";
 import type { Logger } from "../../log.ts";
 import { CredentialStore } from "./auth.ts";
 import { SseParser } from "./sse.ts";
@@ -13,6 +13,7 @@ import { StreamMapper, conversationKey, estimateTokens, formatSse, serverToolNam
 import type { RequestUsage } from "../../requestlog.ts";
 import type { SearchBackend, SearchHit, WebSearchQuery } from "../../websearch.ts";
 import { credentialHeaderValues, redactErrorText } from "../../redact.ts";
+import { codexClientVersion, parseCodexCatalog } from "./catalog.ts";
 import fs from "node:fs";
 import path from "node:path";
 import { homeDir } from "../../config.ts";
@@ -23,6 +24,11 @@ const PING_MS = 15_000;
  * carries `/api/codex/usage`, but that path answers 403 here; `wham` is the one that works. */
 const USAGE_PATH = "/wham/usage";
 const USAGE_TIMEOUT_MS = 10_000;
+/** Model catalogue. Measured 2026-09-23: the backend filters this list by `client_version`, and an
+ * hour's cache is short enough that a model announced this morning shows up the same day. */
+const MODELS_PATH = "/codex/models";
+const MODELS_TIMEOUT_MS = 15_000;
+const MODELS_CACHE_MS = 60 * 60 * 1000;
 
 export type ChatGptOutcome = { status: number; bytes: number; note?: string; usage?: RequestUsage; stopReason?: string };
 
@@ -296,6 +302,68 @@ export class ChatGptAdapter {
     }
     this.lastRateLimits = parsed;
     return parsed;
+  }
+
+  /** One in-flight catalogue lookup shared by every caller, and the last good list for an hour. */
+  private modelsInFlight: Promise<ProviderModel[] | null> | null = null;
+  private modelsCache: { at: number; models: ProviderModel[] } | null = null;
+
+  /**
+   * The models this subscription can actually reach, from the backend's own catalogue. Without it
+   * a model OpenAI ships is invisible here until a router release names it (gpt-6-sol and gpt-6-luna,
+   * 2026-09-23). Never throws; null on any failure, and null
+   * rather than [] when parsing yields nothing, so the caller falls back instead of showing nothing.
+   */
+  fetchModels(): Promise<ProviderModel[] | null> {
+    if (this.modelsCache && Date.now() - this.modelsCache.at < MODELS_CACHE_MS) return Promise.resolve(this.modelsCache.models);
+    if (this.modelsInFlight) return this.modelsInFlight;
+    // A failed refresh keeps the last list it read: an expired catalogue is still closer to the
+    // backend than the fallback written into this repo.
+    this.modelsInFlight = this.fetchModelsOnce().then((models) => models ?? this.modelsCache?.models ?? null).finally(() => {
+      this.modelsInFlight = null;
+    });
+    return this.modelsInFlight;
+  }
+
+  private async fetchModelsOnce(): Promise<ProviderModel[] | null> {
+    const tokens = await this.creds.get();
+    if (tokens instanceof Error) {
+      this.log.warn(`chatgpt ${this.name}: model-catalog fetch skipped: ${tokens.message}`);
+      return null;
+    }
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), MODELS_TIMEOUT_MS);
+    let res: Response;
+    try {
+      res = await fetch(`${(this.cfg.url ?? DEFAULT_BASE).replace(/\/$/, "")}${MODELS_PATH}?client_version=${encodeURIComponent(codexClientVersion())}`, {
+        method: "GET",
+        headers: {
+          authorization: `Bearer ${tokens.accessToken}`,
+          "chatgpt-account-id": tokens.accountId,
+          originator: "codex_cli_rs",
+          accept: "application/json",
+        },
+        signal: ac.signal,
+      });
+    } catch (e) {
+      this.log.warn(`chatgpt ${this.name}: model-catalog fetch failed: ${(e as Error).message}`);
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!res.ok) {
+      // The status only: the body can echo the request, and the token rides on it.
+      if (res.status === 401) this.creds.invalidate();
+      this.log.warn(`chatgpt ${this.name}: model-catalog fetch HTTP ${res.status}`);
+      return null;
+    }
+    const models = parseCodexCatalog(await res.json().catch(() => null));
+    if (models.length === 0) {
+      this.log.warn(`chatgpt ${this.name}: model catalog returned no listed models`);
+      return null;
+    }
+    this.modelsCache = { at: Date.now(), models };
+    return models;
   }
 
   /** Last measured total input (uncached + cached) per conversation, for the next message_start estimate. */

@@ -19,6 +19,8 @@ const CHATGPT_MODELS = [
   { id: "gpt-5.6-sol", name: "GPT-5.6 Sol" },
   { id: "gpt-5.6-luna", name: "GPT-5.6 Luna" },
   { id: "gpt-6-astra", name: "GPT-6 Astra" },
+  { id: "gpt-6-sol", name: "GPT-6 Sol" },
+  { id: "gpt-6-luna", name: "GPT-6 Luna" },
 ];
 
 const FALLBACK_PRESETS = [

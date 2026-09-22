@@ -149,7 +149,7 @@ proxy
       health: () => health.consecutiveFailures,
       version: VERSION,
       requests,
-      chatgpt: () => ({ quota: proxy.chatgptRateLimits, auth: proxy.chatgptAuthStatus(), refresh: (name) => proxy.chatgptFetchRateLimits(name) }),
+      chatgpt: () => ({ quota: proxy.chatgptRateLimits, auth: proxy.chatgptAuthStatus(), refresh: (name) => proxy.chatgptFetchRateLimits(name), models: (name) => proxy.chatgptFetchModels(name) }),
       credentials: () => proxy.credentialHealth(),
       picker: () => ({ enabled: !!store.get().picker?.enabled, hosts: terminateHosts(store.get()).slice(1), last: proxy.lastPickerInjection }),
       observedClaudeCodeAuth,

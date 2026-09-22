@@ -20,7 +20,7 @@ import net from "node:net";
 import tls from "node:tls";
 import zlib from "node:zlib";
 import type { Duplex } from "node:stream";
-import type { Config } from "./config.ts";
+import type { Config, ProviderModel } from "./config.ts";
 import type { Logger } from "./log.ts";
 import { UpstreamHealth } from "./health.ts";
 import { BOOTSTRAP_PATH, injectBootstrap } from "./bootstrap.ts";
@@ -225,6 +225,17 @@ export class Proxy {
     const cfg = this.deps.config().providers[name];
     if (!cfg || cfg.type !== "chatgpt") return Promise.resolve(null);
     return this.chatgpt(name, cfg).fetchRateLimits();
+  }
+
+  /**
+   * The models that provider can reach, from the Codex backend's own catalogue, so a model OpenAI
+   * ships appears in the GUI and the picker without a release here. Null when the catalogue cannot
+   * be read; the caller falls back to a measured list.
+   */
+  chatgptFetchModels(name: string): Promise<ProviderModel[] | null> {
+    const cfg = this.deps.config().providers[name];
+    if (!cfg || cfg.type !== "chatgpt") return Promise.resolve(null);
+    return this.chatgpt(name, cfg).fetchModels();
   }
 
   /** Startup refresh: every configured chatgpt provider, in the background, never awaited. */
