@@ -110,24 +110,40 @@ export function withCredential(
 }
 
 /**
- * A compressed body decoded for reading, or the bytes unchanged when they cannot be decoded.
+ * A body decoded for reading, as text. Bytes that cannot be decoded are read as they arrived.
  *
- * Every caller reads: none of them may hand the result back to a client, because a body that
- * failed to decode returns unchanged and the client was promised `content-encoding`.
+ * Text and not bytes, deliberately. What every caller wants from a compressed body is what it
+ * says, and handing the bytes back is a one-way door: invalid UTF-8 sequences become U+FFFD and
+ * never come back, while `content-encoding` still stands in the response — which is
+ * `ERR_CONTENT_DECODING_FAILED` in the client (2026-09-22). Returning text leaves nothing here
+ * that a later caller could mistake for something a client may be given.
+ *
+ * A body read to a cap stops mid-stream, and a strict decode of that throws (`Z_BUF_ERROR`,
+ * measured Node 24), so these decode with a flush: it yields whatever completed, which is the head
+ * of the message and the whole reason the body is read. An intact stream decodes identically.
  */
-export function decodeBodyForReading(body: Buffer, encoding: string | string[] | undefined): Buffer {
+export function decodeBodyToText(body: Buffer, encoding: string | string[] | undefined): string {
   const enc = String(encoding ?? "").toLowerCase();
+  const zstd = (zlib as unknown as { zstdDecompressSync?: (b: Buffer, o?: unknown) => Buffer }).zstdDecompressSync;
+  const decode: ((b: Buffer) => Buffer) | undefined =
+    enc === "gzip" || enc === "x-gzip" ? (b) => zlib.gunzipSync(b, { finishFlush: zlib.constants.Z_SYNC_FLUSH })
+      : enc === "deflate" ? (b) => zlib.inflateSync(b, { finishFlush: zlib.constants.Z_SYNC_FLUSH })
+        : enc === "br" ? (b) => zlib.brotliDecompressSync(b, { finishFlush: zlib.constants.BROTLI_OPERATION_FLUSH })
+          // Chromium 152 asks for zstd, so anything the app talks to may answer with it.
+          : enc === "zstd" && typeof zstd === "function" ? (b) => zstd(b, { finishFlush: zlib.constants.ZSTD_e_flush })
+            : undefined;
+  if (!decode) return body.toString("utf8");
   try {
-    if (enc === "gzip" || enc === "x-gzip") return zlib.gunzipSync(body);
-    if (enc === "deflate") return zlib.inflateSync(body);
-    if (enc === "br") return zlib.brotliDecompressSync(body);
-    // Chromium 152 asks for zstd, so anything the app talks to may answer with it.
-    if (enc === "zstd" && typeof (zlib as unknown as { zstdDecompressSync?: unknown }).zstdDecompressSync === "function")
-      return (zlib as unknown as { zstdDecompressSync: (b: Buffer) => Buffer }).zstdDecompressSync(body);
+    const out = decode(body);
+    // A truncated zstd frame yields nothing at all and does not throw doing it, unlike the others
+    // (measured 2026-09-22). Describe that instead of returning an empty body, which would read as
+    // a provider that refused without saying anything.
+    if (out.length === 0 && body.length > 0) return `(${body.length}B of ${enc} that stops mid-stream and cannot be decoded)`;
+    return out.toString("utf8");
   } catch {
-    // A truncated compressed body decodes to nothing; fall through to what is readable.
+    // Nothing decodable even with a flush; fall through to what is readable in the bytes.
+    return body.toString("utf8");
   }
-  return body;
 }
 
 /**
@@ -139,7 +155,7 @@ export function errorSnippet(head: Buffer, encoding: string | string[] | undefin
   // vendor domain) or a login wall. Say that instead of quoting markup (measured 2026-09-13 with
   // OpenRouter answering 200 HTML when the /api prefix was lost).
   if (/text\/html/i.test(String(contentType ?? ""))) return `HTML page (${head.length}B) — the provider URL points at a website or a login page, not an API`;
-  const masked = redactErrorText(decodeBodyForReading(head, encoding).toString("utf8"), secrets, 300);
+  const masked = redactErrorText(decodeBodyToText(head, encoding), secrets, 300);
   return masked || "(empty body)";
 }
 
@@ -956,7 +972,7 @@ export class Proxy {
       const handOver = (): void => {
         errRaw = Buffer.concat(chunks, size);
         headFilled = true;
-        resolveBody(decodeBodyForReading(errRaw, stream.headers["content-encoding"]).toString("utf8"));
+        resolveBody(decodeBodyToText(errRaw, stream.headers["content-encoding"]));
       };
       stream.once("end", handOver);
       // A dropped or failed stream still hands over what arrived; the caller's own upstream error

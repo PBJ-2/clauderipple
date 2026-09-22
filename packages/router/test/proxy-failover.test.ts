@@ -5,6 +5,7 @@
 // cancelled turn being charged to the credential as a failure. These are those paths.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import net from "node:net";
@@ -302,6 +303,50 @@ test("a compressed relay 403 is still recognised, so the credential is not parke
     // must start there. Unreadable mojibake is not a relay report, so before the fix the 403 was
     // charged as an auth failure and turn 2 fell back to the first credential.
     assert.equal(up.seen[2]?.key, "two", "the compressed relay report was read, so nothing was parked");
+  } finally { await r.stop(); await up.close(); }
+});
+
+// A refusal longer than the reader's cap is the one 403 that cannot go back as it arrived: its bytes
+// stop mid-stream, so they are no longer a whole compressed body and neither the upstream's
+// `content-encoding` nor its `content-length` describes what is written. Leaving either in place is
+// the same ERR_CONTENT_DECODING_FAILED by a different route. Reaching the client readable at all
+// takes a flushing decode — a strict one throws `Z_BUF_ERROR` on a stream that stops (Node 24).
+test("a compressed 403 past the read cap arrives decoded, with nothing left promising an encoding", async () => {
+  const relayError = JSON.stringify({ error: { type: "server_error", message: "Upstream request failed" } });
+  // Random hex, because anything repetitive compresses to well under the cap and would not be truncated.
+  const packed = zlib.gzipSync(Buffer.from(relayError + crypto.randomBytes(20_000).toString("hex")));
+  assert.ok(packed.length > 4096, "the compressed body must exceed the read cap for this to test anything");
+  const up = await upstream(() => ({
+    status: 403,
+    headers: { "content-encoding": "gzip", "content-length": String(packed.length) },
+    body: packed,
+  }));
+  const r = await rig({ p: pooled(up.port) }, { "claude-opus-4-8": { provider: "p", model: "m" } });
+  try {
+    const res = await r.sendRaw();
+    assert.equal(res.status, 403);
+    assert.equal(res.headers["content-encoding"], undefined, "nothing may promise an encoding these bytes no longer carry");
+    assert.equal(res.headers["content-length"], undefined, "the upstream's length described the compressed body, not this one");
+    assert.match(res.body.toString("utf8"), /Upstream request failed/, "the head of the provider's own message arrived readable");
+  } finally { await r.stop(); await up.close(); }
+});
+
+// The judgement runs on the head, so a relay report too long to read whole must still be classified
+// from the part that arrived. Otherwise a 403 past the cap parks a credential that did nothing —
+// the original failure, reached by a body size instead of a compression.
+test("a relay 403 too long to read whole is still recognised from its head", async () => {
+  const relayError = JSON.stringify({ error: { type: "server_error", message: "Upstream request failed" } });
+  const packed = zlib.gzipSync(Buffer.from(relayError + crypto.randomBytes(20_000).toString("hex")));
+  const up = await upstream(() => ({
+    status: 403,
+    headers: { "content-encoding": "gzip", "content-length": String(packed.length) },
+    body: packed,
+  }));
+  const r = await rig({ p: pooled(up.port) }, { "claude-opus-4-8": { provider: "p", model: "m" } });
+  try {
+    assert.equal(await r.send(), 403);
+    assert.equal(await r.send(), 403, "the second turn is answered, not refused for a parked key");
+    assert.equal(up.seen[2]?.key, "two", "the truncated relay report was read, so nothing was parked");
   } finally { await r.stop(); await up.close(); }
 });
 
