@@ -8,6 +8,7 @@ import type { Socket } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import type { Config, AnthropicCompatibleProvider, AnthropicProvider } from "../config.ts";
+import { providerFor } from "../config.ts";
 import type { Logger } from "../log.ts";
 import { resolve } from "../routing.ts";
 import { PRESETS } from "../presets.ts";
@@ -278,12 +279,16 @@ export class OpenAiIngress {
         finish(400, bytes);
         return;
       }
-      const provider = cfg.providers[route.provider];
-      if (!provider) {
+      const configured = cfg.providers[route.provider];
+      if (!configured) {
         const bytes = sendJson(res, 500, openAiError(`Configured provider ${route.provider} is missing`, "server_error"));
         finish(500, bytes);
         return;
       }
+      // A model that speaks Anthropic Messages is servable here even when the rest of its provider
+      // is an OpenAI wire, which the refusal below would otherwise turn away on the provider's type
+      // alone. One subscription is one provider, so the model decides.
+      const provider = providerFor(configured, route.model);
       if (provider.type === "chatgpt" || provider.type === "openai-compatible") {
         const bytes = sendJson(res, 400, openAiError(`${provider.type === "chatgpt" ? "ChatGPT" : "OpenAI-compatible"} provider is not available through OpenAI ingress`, "invalid_request_error", "unsupported_provider"));
         finish(400, bytes, { note: `model ${requested} -> ${provider.type} provider unsupported` });

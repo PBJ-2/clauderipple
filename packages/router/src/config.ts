@@ -16,6 +16,29 @@ export type ProviderModel = {
   effortLevels?: string[];
   /** The model's context window, as the vendor's `/models` reported it (`context_length`). */
   contextWindow?: number;
+  /**
+   * The protocol this model speaks, when it is not the provider's own.
+   *
+   * One subscription can serve several on one key and one catalog: OpenCode Go answers Responses,
+   * Chat Completions and Anthropic Messages models on the same plan, and its `/models` lists them
+   * all together (measured 2026-09-18). `wire` used to sit only on the provider, so that one
+   * account had to be configured as three providers — a split the user saw, did not ask for, and
+   * had to repeat in every `direct` rule. It belongs to the model, which is what actually varies.
+   */
+  wire?: "chat" | "responses" | "anthropic";
+  /** This model's endpoint base, when its wire is served on another path than the provider's. */
+  url?: string;
+  /**
+   * The auth convention this model's wire expects, when it differs from the provider's. The
+   * provider's own key is re-sent under this header rather than restated here, so the key stays in
+   * exactly one place.
+   *
+   * Each endpoint follows the convention of the API it imitates: an Anthropic-wire one wants
+   * `x-api-key` while an OpenAI-wire one on the same key wants a bearer. Measured 2026-09-18 with a
+   * deliberately wrong key — the header an endpoint does not recognise answers "Missing API key",
+   * the one it does answers "Invalid API key".
+   */
+  authHeader?: "x-api-key" | "authorization-bearer";
 };
 
 /**
@@ -123,6 +146,68 @@ export type AnthropicProvider = {
 };
 
 export type Provider = AnthropicCompatibleProvider | ChatGptProvider | OpenAiCompatibleProvider | AnthropicProvider;
+
+/**
+ * The provider's own key, re-sent under the header another wire on the same account expects.
+ *
+ * The key is never restated in a model entry, so there is exactly one copy of it to rotate and one
+ * to leak. Every other header the provider set is kept: only the auth one is replaced, because
+ * sending both conventions at once would hand the endpoint a credential it did not ask for.
+ */
+function reauthorized(headers: Record<string, string> | undefined, kind: "x-api-key" | "authorization-bearer"): Record<string, string> | undefined {
+  if (!headers) return headers;
+  const kept: Record<string, string> = {};
+  let key: string | undefined;
+  for (const [name, value] of Object.entries(headers)) {
+    const lower = name.toLowerCase();
+    if (lower === "x-api-key") { key ??= value; continue; }
+    if (lower === "authorization") { key ??= value.replace(/^Bearer\s+/i, ""); continue; }
+    kept[name] = value;
+  }
+  // Nothing recognisable to move: leave the headers exactly as they were rather than inventing an
+  // empty credential, which would read to the endpoint as a missing key instead of a config error.
+  if (key === undefined) return headers;
+  if (kind === "x-api-key") kept["x-api-key"] = key;
+  else kept.authorization = `Bearer ${key}`;
+  return kept;
+}
+
+/**
+ * The provider shape a request for `model` is actually talking to.
+ *
+ * A model may speak another wire than the rest of its provider, on another path, under another auth
+ * convention (see `ProviderModel.wire`). Those overrides are folded back into an ordinary provider
+ * here, so every `provider.type` branch downstream keeps working against one unchanged contract —
+ * and one subscription stays one provider instead of three (2026-09-22).
+ *
+ * A provider with no override for this model is returned as it is, by identity, so nothing on the
+ * ordinary path pays for this.
+ */
+export function providerFor(provider: Provider, model: string | undefined): Provider {
+  if (!model || !("models" in provider) || !provider.models) return provider;
+  const entry = provider.models.find((m) => m.id === model);
+  if (!entry || (entry.wire === undefined && entry.url === undefined && entry.authHeader === undefined)) return provider;
+
+  const url = entry.url ?? ("url" in provider ? provider.url : undefined);
+  const headers = entry.authHeader
+    ? reauthorized("headers" in provider ? provider.headers : undefined, entry.authHeader)
+    : ("headers" in provider ? provider.headers : undefined);
+  const shared = {
+    ...provider,
+    ...(url !== undefined ? { url } : {}),
+    ...(headers !== undefined ? { headers } : {}),
+  };
+
+  // Anthropic Messages needs no translation, so this model is served by the anthropic-compatible
+  // adapter instead. The two `caps` shapes do not describe the same things, and only an effort
+  // ladder carries over; the rest fall back to the strict defaults `resolveCompatibleCaps` applies,
+  // which is what the separate provider did before this.
+  if (entry.wire === "anthropic") {
+    const { wire: _wire, caps: _caps, ...rest } = shared as OpenAiCompatibleProvider;
+    return { ...rest, type: "anthropic-compatible", url: url ?? "", caps: { effortLevels: entry.effortLevels ?? [] } } as AnthropicCompatibleProvider;
+  }
+  return { ...shared, type: "openai-compatible", url: url ?? "", ...(entry.wire ? { wire: entry.wire } : {}) } as OpenAiCompatibleProvider;
+}
 
 export type Route = {
   provider: string;
@@ -290,14 +375,23 @@ export function headerValueProblem(value: string): string | null {
   return null;
 }
 
+/** Named once because three provider kinds report it, and a drifting copy would describe the wrong shape. */
+const MODELS_SHAPE = 'models must be entries with a string id and optional name, effortLevels, url, wire ("chat" | "responses" | "anthropic") and authHeader ("x-api-key" | "authorization-bearer")';
+
 function validModels(models: unknown): boolean {
-  return Array.isArray(models) && models.every((model) =>
-    model !== null && typeof model === "object" &&
-    typeof (model as ProviderModel).id === "string" &&
-    ((model as ProviderModel).name === undefined || typeof (model as ProviderModel).name === "string") &&
-    ((model as ProviderModel).effortLevels === undefined ||
-      (Array.isArray((model as ProviderModel).effortLevels) && (model as ProviderModel).effortLevels!.every((level) => typeof level === "string"))),
-  );
+  return Array.isArray(models) && models.every((model) => {
+    if (model === null || typeof model !== "object") return false;
+    const m = model as ProviderModel;
+    if (typeof m.id !== "string") return false;
+    if (m.name !== undefined && typeof m.name !== "string") return false;
+    if (m.effortLevels !== undefined && (!Array.isArray(m.effortLevels) || m.effortLevels.some((level) => typeof level !== "string"))) return false;
+    // A model's own wire, endpoint and auth convention: wrong here and the request goes out in the
+    // wrong shape to the wrong path, which reads as a provider that rejects a working key.
+    if (m.wire !== undefined && m.wire !== "chat" && m.wire !== "responses" && m.wire !== "anthropic") return false;
+    if (m.url !== undefined && (typeof m.url !== "string" || !/^https?:\/\//.test(m.url))) return false;
+    if (m.authHeader !== undefined && m.authHeader !== "x-api-key" && m.authHeader !== "authorization-bearer") return false;
+    return true;
+  });
 }
 
 export function validate(c: Config): string[] {
@@ -358,7 +452,7 @@ export function validate(c: Config): string[] {
       if (!/^https?:\/\//.test(p.url)) errors.push(`provider ${name}: url must start with http:// or https://`);
       if (p.preset !== undefined && typeof p.preset !== "string") errors.push(`provider ${name}: preset must be a string`);
       if (p.models !== undefined && !validModels(p.models)) {
-        errors.push(`provider ${name}: models must be entries with string id, optional string name, and optional string[] effortLevels`);
+        errors.push(`provider ${name}: ${MODELS_SHAPE}`);
       }
       if (p.caps !== undefined) {
         const caps = p.caps;
@@ -372,7 +466,7 @@ export function validate(c: Config): string[] {
       }
     } else if (p.type === "chatgpt") {
       if (p.models !== undefined && !validModels(p.models)) {
-        errors.push(`provider ${name}: models must be entries with string id, optional string name, and optional string[] effortLevels`);
+        errors.push(`provider ${name}: ${MODELS_SHAPE}`);
       }
       if (p.url && !/^https?:\/\//.test(p.url)) errors.push(`provider ${name}: url must start with http:// or https://`);
     } else if (p.type === "openai-compatible") {
@@ -383,7 +477,7 @@ export function validate(c: Config): string[] {
         errors.push(`provider ${name}: headers must be a string record`);
       }
       if (p.models !== undefined && !validModels(p.models)) {
-        errors.push(`provider ${name}: models must be entries with string id, optional string name, and optional string[] effortLevels`);
+        errors.push(`provider ${name}: ${MODELS_SHAPE}`);
       }
       if (p.caps !== undefined && (!p.caps || typeof p.caps !== "object" || Array.isArray(p.caps) ||
         (p.caps.effortLevels !== undefined && (!Array.isArray(p.caps.effortLevels) || p.caps.effortLevels.some((level) => typeof level !== "string"))) ||
@@ -396,7 +490,7 @@ export function validate(c: Config): string[] {
       if (p.accountPool !== undefined && typeof p.accountPool !== "boolean") errors.push(`provider ${name}: accountPool must be true or false`);
       if (p.accountPool && p.auth !== "claude-code") errors.push(`provider ${name}: accountPool requires auth "claude-code"`);
       if (p.models !== undefined && !validModels(p.models)) {
-        errors.push(`provider ${name}: models must be entries with string id, optional string name, and optional string[] effortLevels`);
+        errors.push(`provider ${name}: ${MODELS_SHAPE}`);
       }
     } else {
       errors.push(`provider ${name}: unknown type "${(p as { type?: string }).type}"`);

@@ -34,7 +34,7 @@ import { PRESETS } from "./presets.ts";
 import { ChatGptAdapter } from "./providers/chatgpt/index.ts";
 import { OpenAiCompatibleAdapter } from "./providers/openai/index.ts";
 import { conversationKey, type AnthropicRequest } from "./providers/chatgpt/translate.ts";
-import { terminateHosts } from "./config.ts";
+import { providerFor, terminateHosts } from "./config.ts";
 import type { CertStore } from "./certs.ts";
 import { injectPickerModels, isBootstrapPath } from "./picker.ts";
 import { ResponseUsageTap, type RequestLog, type RequestRecord, type RequestUsage } from "./requestlog.ts";
@@ -635,12 +635,16 @@ export class Proxy {
     let penalised: { provider: string; id: string } | null = null;
     let target: { protocol: "http:" | "https:"; host: string; port: number; agent: http.Agent | https.Agent; extraHeaders: Record<string, string>; basePath?: string; dropClientAuth?: boolean; dropHeaders?: Set<string>; dropHeaderPrefixes?: string[] };
     if (route && json) {
-      const provider = cfg.providers[route.provider];
-      if (!provider) {
+      const configured = cfg.providers[route.provider];
+      if (!configured) {
         finish("500", 0, `unknown provider ${route.provider}`);
         res.writeHead(500, { "content-type": "application/json" }).end(JSON.stringify({ error: { type: "clauderipple_config", message: `unknown provider ${route.provider}` } }));
         return;
       }
+      // A model may speak another wire than the rest of its provider: one subscription serving
+      // several protocols is one provider, and this is where the model's own shape is folded in so
+      // the branches below pick the adapter it actually needs.
+      const provider = providerFor(configured, route.model);
       rewriteBody(json, route, cfg.effortClamp);
       if (provider.type === "chatgpt") {
         const td = threadDecision(json);
@@ -871,8 +875,11 @@ export class Proxy {
     const nextCredential = (status: number, body = ""): Credential | null => {
       if (!route || !penalised || res.headersSent) return null;
       if (!classify(status, undefined, body).retryable) return null;
-      const provider = cfg.providers[route.provider];
-      if (!provider) return null;
+      const owner = cfg.providers[route.provider];
+      if (!owner) return null;
+      // The model's own shape again: its credential pool is the provider's, but an auth convention
+      // this model overrides has to be the one the retry actually sends.
+      const provider = providerFor(owner, route.model);
       const available = provider.type === "anthropic" && provider.accountPool
         ? this.claudeAccounts.peekCredentials()
         : this.credentialsOf(route.provider, provider);
@@ -1137,11 +1144,14 @@ export class Proxy {
     record: { source?: string; target?: string },
     finish: (status: string, bytes: number, note?: string, failed?: boolean) => void,
   ): Promise<boolean> {
-    const provider = this.deps.config().providers[settings.provider];
-    if (!provider) {
+    const configured = this.deps.config().providers[settings.provider];
+    if (!configured) {
       this.deps.log.warn(`web search: unknown provider ${settings.provider}; leaving the request alone`);
       return false;
     }
+    // Which backend is chosen below depends on the wire the search model speaks, which may not be
+    // the provider's own.
+    const provider = providerFor(configured, settings.model);
     const url = "url" in provider && typeof provider.url === "string" ? provider.url : undefined;
     if (!url && provider.type !== "chatgpt") {
       this.deps.log.warn(`web search: provider ${settings.provider} has no url; leaving the request alone`);
