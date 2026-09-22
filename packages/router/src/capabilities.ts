@@ -116,6 +116,18 @@ function refusedLevel(status: number): boolean {
 }
 
 /**
+ * A refusal aimed at the plan rather than the credential.
+ *
+ * Measured 2026-09-22: OpenCode answers 403 FreeTierError, "OpenCode's free tier can only be used
+ * from within OpenCode", for every model whose id ends in `-free`. The key is accepted and the
+ * model exists; it simply cannot be reached from here, ever. Reading that as an auth failure sends
+ * the operator to re-check a key that is fine and leaves the model looking merely unmeasured.
+ */
+export function refusedByPlan(detail: string): boolean {
+  return /free.?tier|data.?policy|region|entitle|upgrade|subscription/i.test(detail);
+}
+
+/**
  * The levels worth trying: what the endpoint says it takes, else everything known.
  *
  * Asked for a level that cannot exist, some endpoints answer with their whole list — "expected one
@@ -187,7 +199,13 @@ export async function measureModel(id: string, candidates: WireCandidate[], ladd
       failure = `network: ${errorText(e)}`;
       continue;
     }
-    if (response.status === 401 || response.status === 403) return { id, error: "auth" };
+    if (response.status === 401) return { id, error: "auth" };
+    if (response.status === 403) {
+      // A plan refusing the model is a fact about the model, and worth reporting as one: no other
+      // wire will answer either, so there is nothing left to try.
+      const detail = snippet(await response.text());
+      return { id, error: refusedByPlan(detail) ? `not-entitled: ${detail}` : "auth" };
+    }
     if (response.ok) {
       if (ladder.length === 0) return { id, wire: candidate.wire };
       return { id, wire: candidate.wire, effortLevels: await measureLadder(id, candidate, ladder, deps) };

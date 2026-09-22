@@ -835,11 +835,19 @@ async function startMeasurement(providerName, provider) {
       if (job.state === "running") continue;
       measureStates.delete(providerName);
       if (job.state === "failed") { toast(t("measure.failed"), true, job.error); renderProviderWorkspace(); return; }
-      const summary = measureSummary(job.results || []);
+      const results = job.results || [];
+      // A model the plan refuses is not merely unmeasured: no wire will ever answer for it, so
+      // saying so once here is the only chance the operator gets before a session fails on it.
+      // Measured 2026-09-22: OpenCode answers every `-free` model with 403 FreeTierError.
+      const barred = results.filter((entry) => typeof entry.error === "string" && entry.error.startsWith("not-entitled"));
+      if (barred.length > 0) toast(t("measure.notEntitled", { models: barred.map((entry) => entry.id).join(", ") }), true);
+      const summary = measureSummary(results);
       // An auth failure is reported as itself: it says nothing about any model, and leaving it as
       // "nothing was measured" would send the operator looking at the wrong thing.
-      const refused = (job.results || []).some((entry) => entry.error === "auth");
-      toast(summary ? t("measure.done", { summary }) : refused ? t("measure.authFailed") : t("measure.nothing"), !summary);
+      const refused = results.some((entry) => entry.error === "auth");
+      // The barred models already had their own line; do not also call the round a failure when
+      // every other model measured fine.
+      if (summary || barred.length === 0) toast(summary ? t("measure.done", { summary }) : refused ? t("measure.authFailed") : t("measure.nothing"), !summary);
       await loadProviders();
       return;
     }

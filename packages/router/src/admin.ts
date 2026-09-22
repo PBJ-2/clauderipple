@@ -23,7 +23,7 @@ import type { Stats } from "./proxy.ts";
 import type { RequestLog } from "./requestlog.ts";
 import { PRESETS, type ProviderPreset } from "./presets.ts";
 import { resolveCompatibleCaps } from "./compat.ts";
-import { measureModel, type Measured, type WireCandidate } from "./capabilities.ts";
+import { measureModel, refusedByPlan, type Measured, type WireCandidate } from "./capabilities.ts";
 import { ClaudeCodeAuthStore, nativeAnthropicHeaders } from "./providers/anthropic.ts";
 import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
 import { codexEnabled, codexHome } from "../../cli/src/codex.ts";
@@ -626,19 +626,6 @@ function withPresetOverrides(models: ModelEntry[], presetId: string | undefined)
 
 async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
   return fetch(url, { ...init, signal: AbortSignal.timeout(8_000) });
-}
-
-/**
- * A 403 that refused the plan rather than the credential.
- *
- * Measured 2026-09-22: OpenCode answers a free-tier account with 403 FreeTierError, "OpenCode's
- * free tier can only be used from within OpenCode", while a paid account out of balance answers
- * 402. Reading every 403 as a bad key sent the operator to re-check a key that was working and said
- * nothing about the plan that had actually refused — the same mistake the 402 branch below exists
- * to avoid. Only a body that names the plan is read this way; a bare 403 is still a bad key.
- */
-function refusedByPlan(detail: string): boolean {
-  return /free.?tier|data.?policy|region|entitle|upgrade|subscription/i.test(detail);
 }
 
 /**

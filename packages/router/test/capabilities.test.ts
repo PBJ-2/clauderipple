@@ -180,3 +180,27 @@ test("levels the endpoint names in its complaint become the candidates, weakest 
   assert.deepEqual(tried, ["minimal", "low", "medium", "high", "xhigh", "max"], "only what it named, and `none` is not among them");
   assert.deepEqual(result.effortLevels, ["minimal", "low", "medium", "high", "xhigh"]);
 });
+
+// Measured 2026-09-22: OpenCode answers every model whose id ends in `-free` with 403 FreeTierError,
+// "OpenCode's free tier can only be used from within OpenCode". The key is accepted and the model
+// exists — it simply cannot be reached from here, by any wire. Reported as an auth failure it sent
+// the operator to re-check a working key, and the model looked merely unmeasured.
+test("a plan refusing the model is reported as that, not as an auth failure", async () => {
+  const { calls, fetch } = recorder(() => 403);
+  const withBody: MeasureDeps["fetch"] = async (url, init) => {
+    await fetch(url, init);
+    return new Response(JSON.stringify({ error: { type: "FreeTierError", message: "OpenCode's free tier can only be used from within OpenCode" } }), { status: 403 });
+  };
+  const result = await measureModel("mimo-v2.6-flash-free", wireCandidates, ["low"], { fetch: withBody });
+  assert.match(result.error ?? "", /^not-entitled: /);
+  assert.match(result.error ?? "", /FreeTierError/, "the vendor's own words travel with it");
+  assert.equal(result.wire, undefined, "no wire is invented for a model that cannot be reached");
+  assert.equal(calls.length, 1, "no other wire is tried: the plan refuses the model, not the path");
+});
+
+// A 403 that says nothing about a plan is what it has always been.
+test("a bare 403 is still an auth failure", async () => {
+  const { fetch } = recorder(() => 403);
+  const result = await measureModel("m", wireCandidates, [], { fetch });
+  assert.deepEqual(result, { id: "m", error: "auth" });
+});
