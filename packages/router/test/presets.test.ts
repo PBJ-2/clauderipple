@@ -81,3 +81,34 @@ test("Muse Spark's effort ladder tops out at xhigh, and does not include max", (
   assert.deepEqual(responses?.effortLevels, ["none", "minimal", "low", "medium", "high", "xhigh"]);
   assert.equal(responses?.effortLevels.includes("max"), false, "max is refused with invalid_request_error");
 });
+
+// Measured 2026-09-22: `/zen/v1/models` lists 76 models, `/zen/go/v1/models` 40, and neither is a
+// subset of the other. Treating them as one product is what sent a Zen key to a Go model and got
+// "This Go model requires Global regions" back, so the two presets must not drift into each other.
+test("OpenCode Zen and OpenCode Go are separate presets that cannot be mistaken for each other", () => {
+  const zen = PRESETS.find((preset) => preset.id === "opencode-zen");
+  const go = PRESETS.find((preset) => preset.id === "opencode-go");
+  assert.ok(zen && go, "both presets are in the catalog");
+  assert.equal(zen.anthropicBaseUrl, "https://opencode.ai/zen/v1");
+  assert.equal(go.anthropicBaseUrl, "https://opencode.ai/zen/go/v1");
+  assert.notEqual(zen.modelsUrl, go.modelsUrl, "each reads its own catalogue");
+  // Go refuses a request without it (400 MissingSessionID); Zen answered the same either way.
+  assert.equal(zen.sessionHeader, undefined, "Zen asks for no session header");
+  assert.equal(go.sessionHeader, "x-opencode-session");
+  // The catalogues overlap — measured 2026-09-22, gpt-5.6-luna and the Grok rows are on both — so
+  // the test asserts only where they genuinely part: Muse Spark and MiMo are absent from Zen, and
+  // Go carries no Claude row at all.
+  const zenIds = zen.fallbackModels.map((model) => model.id);
+  const goIds = go.fallbackModels.map((model) => model.id);
+  assert.equal(zenIds.some((id) => id.startsWith("muse-spark") || id.startsWith("mimo-")), false, "Muse Spark and MiMo are Go's");
+  assert.equal(goIds.some((id) => id.startsWith("claude-")), false, "the Claude rows are Zen's");
+  assert.ok(zenIds.some((id) => id.startsWith("claude-")), "and Zen offers them");
+});
+
+// An empty ladder means "this provider takes no effort", and a model with an empty ladder is never
+// measured — so a preset that cannot state its ladder must not state an empty one.
+test("OpenCode Zen offers a ladder for the measurement to narrow rather than none at all", () => {
+  const zen = PRESETS.find((preset) => preset.id === "opencode-zen")!;
+  assert.ok(zen.effortLevels.length > 0);
+  assert.ok(zen.fallbackModels.every((model) => model.effortLevels === undefined), "no model claims a ladder that was never measured");
+});

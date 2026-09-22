@@ -281,6 +281,57 @@ export const PRESETS: ProviderPreset[] = [
     notes: "One subscription and key, three endpoints by wire. Measured 2026-09-18. Responses: Muse Spark answers, effort ladder tops out at xhigh, prompt cache reached 96% on a repeated turn. Chat: glm-5.3, glm-5.3-flash, kimi-k3, kimi-k2.7-code, deepseek-v4.1-flash, deepseek-v4-pro, longcat-2.0 and mimo-v2.5-pro all answered. Anthropic: minimax-m3, qwen3.8-max and qwen3.8-flash answered with the prompt cache at 99% on a repeated turn, while union-alpha, the free row, answered \"Model is unavailable\". The Muse Spark Contributor tier is ~90% cheaper because Meta states those interactions improve its products, and OpenCode refuses the model until the workspace opts in (403 DataPolicyError); it is also limited to some regions.",
     docsUrl: "https://opencode.ai/docs/go/",
   },
+  // Docs: https://opencode.ai/docs/zen/
+  //
+  // Zen and Go are two products on one account, not two names for one thing. Measured 2026-09-22:
+  // `/zen/v1/models` lists 76 models and `/zen/go/v1/models` 40, and neither contains the other —
+  // Muse Spark and the MiMo rows are Go's, the Claude and GPT rows are Zen's. The key is shared: a
+  // Go key answered 402 on Zen rather than 401, so what separates them is the base URL. Pointing a
+  // Zen key at Go's preset is what answers "This Go model requires Global regions", because the
+  // model it then asks for is one of Go's.
+  //
+  // Zen bills from a balance, not from the Go subscription: on an account holding a Go plan and no
+  // Zen credit, all three wires answered 402 "Insufficient account funds".
+  //
+  // It wants no session header. Go refuses a request without `x-opencode-session` (400
+  // MissingSessionID); Zen answered the same with it and without it, so none is sent.
+  {
+    id: "opencode-zen",
+    kind: "openai-compatible",
+    name: "OpenCode Zen",
+    vendorUrl: "https://opencode.ai/zen",
+    anthropicBaseUrl: "https://opencode.ai/zen/v1",
+    authHeader: "authorization-bearer",
+    modelsUrl: "https://opencode.ai/zen/v1/models",
+    modelsAuthHeader: "authorization-bearer",
+    wire: "chat",
+    // Ids are from the live catalogue (2026-09-22); the wires are where each family is native, which
+    // is where a translation is not needed rather than where one was measured answering. Nothing
+    // here could be confirmed past 402: the account had no Zen balance. The per-model measurement
+    // settles all of it on the first save, which is what it is for.
+    fallbackModels: [
+      { id: "claude-opus-5", name: "Claude Opus 5", wire: "anthropic", url: "https://opencode.ai/zen", authHeader: "x-api-key" },
+      { id: "claude-sonnet-5", name: "Claude Sonnet 5", wire: "anthropic", url: "https://opencode.ai/zen", authHeader: "x-api-key" },
+      { id: "claude-fable-5-1", name: "Claude Fable 5.1", wire: "anthropic", url: "https://opencode.ai/zen", authHeader: "x-api-key" },
+      { id: "gpt-6-astra", name: "GPT-6 Astra", wire: "responses" },
+      { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", wire: "responses" },
+      { id: "gpt-5.6-terra", name: "GPT-5.6 Terra", wire: "responses" },
+      { id: "gpt-5.6-luna", name: "GPT-5.6 Luna", wire: "responses" },
+      { id: "gemini-3.8-flash", name: "Gemini 3.8 Flash", wire: "chat" },
+      { id: "grok-4.7", name: "Grok 4.7", wire: "chat" },
+      { id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash", wire: "chat" },
+      { id: "kimi-k3", name: "Kimi K3", wire: "chat" },
+      { id: "glm-5.3", name: "GLM-5.3", wire: "chat" },
+    ],
+    // A starting point for the measurement, not a measurement: an empty ladder would tell the
+    // router this provider takes no effort at all, and a model whose ladder is empty is never
+    // measured, so the levels Zen does take could never be found.
+    effortLevels: ["none", "minimal", "low", "medium", "high", "xhigh"],
+    thinking: "none",
+    verified: true,
+    notes: "Separate from OpenCode Go and separately billed: Zen draws on a credit balance while Go is the subscription, and the two catalogues differ (76 models against 40, neither a subset of the other). Measured 2026-09-22: the key is shared — a Go key reached Zen's billing rather than being refused — and all three wires answer on https://opencode.ai/zen/v1. No session header is required, unlike Go. Which wire and which effort levels each model actually takes was not confirmed past 402 Insufficient account funds; the per-model measurement establishes both on the first save.",
+    docsUrl: "https://opencode.ai/docs/zen/",
+  },
   // Docs: https://docs.mistral.ai/api/endpoint/chat and https://docs.mistral.ai/api/endpoint/models
   {
     id: "mistral",
