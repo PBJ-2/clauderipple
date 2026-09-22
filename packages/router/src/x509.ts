@@ -140,10 +140,15 @@ function newKeyPair(): { publicKey: crypto.KeyObject; privateKey: crypto.KeyObje
   return crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
 }
 
-/** Serial numbers must be positive and unpredictable; 16 random bytes with the top bit cleared. */
+/**
+ * Serial numbers must be positive and unpredictable: 16 random bytes, top bit cleared and the next
+ * one set. Without that second bit one serial in 128 led with 0x00, which the DER encoding strips
+ * or re-pads, so its length varied and Node reported it without the zero (`8C5C…`) — a positive
+ * serial that read as negative and failed the x509 test at random. 126 random bits remain.
+ */
 function serial(): Buffer {
   const b = crypto.randomBytes(16);
-  b[0] = b[0]! & 0x7f;
+  b[0] = (b[0]! & 0x7f) | 0x40;
   return b;
 }
 
