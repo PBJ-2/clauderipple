@@ -207,7 +207,12 @@ chat is out of reach for every approach, ours included.
     re-measured — the subscription's weekly quota was at 100% that day. The
     global `effortClamp` (`ultra → max`) means no `ultra` is sent either way, so
     only the GUI's ladder follows the catalogue; re-measure before removing the
-    clamp.
+    clamp. Measured the same day on the OpenAI API side (OpenCode Zen
+    `/zen/v1/responses`, not the Codex backend): gpt-6-sol, gpt-6-luna,
+    gpt-5.6-sol and gpt-5.6-luna all accept `none, low, medium, high, xhigh,
+    max` and answer `400 param: reasoning.effort` to both `minimal` and
+    `ultra`. So `ultra` is not a level that API takes on any of them; whether
+    the Codex backend does is still open.
   - **Model catalogue (2026-09-23).** `GET {base}/codex/models?client_version=<v>`
     with the same credentials answers `{ models: [{ slug, display_name,
     visibility: "list"|"hide", context_window, supported_reasoning_levels:
