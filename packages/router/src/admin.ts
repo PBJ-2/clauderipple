@@ -641,6 +641,25 @@ function refusedByPlan(detail: string): boolean {
   return /free.?tier|data.?policy|region|entitle|upgrade|subscription/i.test(detail);
 }
 
+/**
+ * The model a connection test should use, when the preset names one that speaks the wire the test
+ * speaks (Chat Completions).
+ *
+ * The catalogue's first entry is whatever the vendor happened to list first, and OpenCode lists its
+ * free tier there. Measured 2026-09-22: `big-pickle`, the head of Zen's catalogue, answers 403
+ * FreeTierError — "OpenCode's free tier can only be used from within OpenCode" — while
+ * `claude-fable-5` on the same key answers 402. Testing with the head therefore reported a paying
+ * account as refused, and pointed the operator at a key that was never the problem.
+ *
+ * The preset's own list is picked from deliberately, and only its Chat entries: the test posts to
+ * Chat Completions, so a Responses-only model like Muse Spark would answer 503 and look broken.
+ */
+function presetProbeModel(presetId: string | undefined): string | undefined {
+  const preset = presetId ? PRESETS.find((entry) => entry.id === presetId) : undefined;
+  if (!preset) return undefined;
+  return preset.fallbackModels.find((model) => (model.wire ?? preset.wire ?? "chat") === "chat")?.id;
+}
+
 async function probeProvider(body: ProbeRequest, probeFetch: (url: string, init: RequestInit) => Promise<Response> = fetchWithTimeout): Promise<{ ok: boolean; auth: ProbeAuth; models: ModelEntry[]; error?: string }> {
   const source = headerValue(body.headers);
   let models: ModelEntry[] = [];
@@ -658,9 +677,10 @@ async function probeProvider(body: ProbeRequest, probeFetch: (url: string, init:
 
   const openai = body.type === "openai-compatible";
   const checkUrl = openai ? chatCompletionsUrl(body.url) : messagesUrl(body.url);
+  const checkModel = presetProbeModel(body.preset) ?? models[0]?.id ?? body.probeModel ?? "test";
   const checkBody = openai
-    ? { model: models[0]?.id ?? body.probeModel ?? "test", max_tokens: 1, stream: false, messages: [{ role: "user", content: "hi" }] }
-    : { model: models[0]?.id ?? body.probeModel ?? "test", max_tokens: 1, messages: [{ role: "user", content: "hi" }] };
+    ? { model: checkModel, max_tokens: 1, stream: false, messages: [{ role: "user", content: "hi" }] }
+    : { model: checkModel, max_tokens: 1, messages: [{ role: "user", content: "hi" }] };
   const label = openai ? "chat completions endpoint" : "messages endpoint";
   try {
     const response = await probeFetch(checkUrl, {

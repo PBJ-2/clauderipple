@@ -991,6 +991,52 @@ function stubFetch(status: (url: string, body: StubBody) => number): (url: strin
   };
 }
 
+// Measured 2026-09-22: `big-pickle`, the first entry of OpenCode Zen's catalogue, answers 403
+// FreeTierError while `claude-fable-5` on the same key answers 402. Testing with whatever the
+// vendor listed first reported a paying account as refused.
+test("the connection test uses a model the preset names, not the head of the catalogue", async () => {
+  let asked = "";
+  const upstream = http.createServer((req, res) => {
+    if (req.url === "/v1/models") {
+      res.writeHead(200, { "content-type": "application/json" })
+        .end(JSON.stringify({ data: [{ id: "big-pickle" }, { id: "glm-5.3" }, { id: "kimi-k3" }] }));
+      return;
+    }
+    let raw = "";
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      asked = (JSON.parse(raw) as { model: string }).model;
+      // Only the free-tier head refuses, exactly as the vendor does.
+      if (asked === "big-pickle") {
+        res.writeHead(403, { "content-type": "application/json" })
+          .end(JSON.stringify({ error: { type: "FreeTierError", message: "free tier can only be used from within OpenCode" } }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ choices: [] }));
+    });
+  });
+  await new Promise<void>((resolveP) => upstream.listen(0, "127.0.0.1", resolveP));
+  const address = upstream.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    await withAdmin(makeCfg(), async ({ port }) => {
+      const res = await fetch(`${base()}:${port}/api/providers/probe`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          type: "openai-compatible", url: `http://127.0.0.1:${address.port}/v1`,
+          modelsUrl: `http://127.0.0.1:${address.port}/v1/models`,
+          headers: { authorization: "Bearer sk-test" }, preset: "opencode-go",
+        }),
+      });
+      assert.equal(((await res.json()) as { ok: boolean }).ok, true);
+      assert.notEqual(asked, "big-pickle", "the catalogue's head is not what the test asks for");
+      // Muse Spark heads the preset's list but speaks Responses; the test posts to Chat Completions.
+      assert.equal(asked, "glm-5.3", "the preset's first Chat model is what answers here");
+    });
+  } finally { upstream.close(); }
+});
+
 // Measured 2026-09-22: a free-tier OpenCode account answers 403 FreeTierError, "OpenCode's free
 // tier can only be used from within OpenCode". Every 403 read as a bad key, so the screen told the
 // operator to check a key that was working and never mentioned the plan that had refused it.
