@@ -631,6 +631,30 @@ function allKnownModelIds(config) { return new Set(groupedModels(config).flatMap
 // Which providers carry this exact id. One is what lets the router route it with no rule at all;
 // two is the ambiguity it refuses to guess through, and the only case a rule is still needed.
 function providersOffering(config, id) { return groupedModels(config).filter((group) => group.models.some((model) => model.id === id)).map((group) => group.name); }
+// Whose entry this is. A `direct` rule used to answer it, but since 2026-09-19 a model routes by
+// the provider that declares it and most models have no rule at all — so the answer is the
+// providers, with the rule kept only for the ambiguity they cannot settle: two offering one id.
+function pickerOwner(config, id) {
+  const offering = providersOffering(config, id);
+  if (offering.length < 2) return offering[0];
+  const rule = (config.direct || []).filter((entry) => id.startsWith(entry.prefix)).sort((a, b) => b.prefix.length - a.prefix.length)[0];
+  return rule && offering.includes(rule.provider) ? rule.provider : offering[0];
+}
+/**
+ * The picker entries belonging to every provider but the one being saved — the ones no checkbox on
+ * this form can speak for, and which the rebuild must therefore be told to keep.
+ *
+ * Asking `direct` who owned them dropped all of them: the rules stopped being written in 2026-09-19
+ * and only the legacy `gpt-` prefix still matched anything, so one save of any provider emptied the
+ * picker of every non-GPT model (measured 2026-09-22 — deepseek and five more went that way).
+ */
+function pickerSelectionsExcept(config, providerName) {
+  return ((config.cli && config.cli.extraModels) || [])
+    .filter((entry) => entry.model !== null && entry.model !== undefined)
+    // The window is part of the entry; rebuilding without it reset every other provider's.
+    .map((entry) => ({ id: entry.model, name: entry.name, contextWindow: entry.contextWindow, provider: pickerOwner(config, entry.model) }))
+    .filter((entry) => entry.provider && entry.provider !== providerName);
+}
 function applyPickerSelections(next, selections) {
   const known = allKnownModelIds(next);
   // An entry no provider offers any more has no checkbox — the list is built from the providers —
@@ -1485,10 +1509,9 @@ function openProviderForm(options) {
     const checkedModels = form.querySelector(".model-picker").selected();
     provider.models = checkedModels;
     next.providers[providerName] = provider;
-    const existingSelections = ((next.cli && next.cli.extraModels) || []).filter((entry) => entry.model !== null && entry.model !== undefined).map((entry) => {
-      const direct = (next.direct || []).filter((rule) => entry.model.startsWith(rule.prefix)).sort((a, b) => b.prefix.length - a.prefix.length)[0];
-      return { id: entry.model, name: entry.name, provider: direct && direct.provider };
-    }).filter((entry) => entry.provider && entry.provider !== options.name);
+    // Read after `next.providers` has been updated, so an unticked model is already undeclared here
+    // and falls out on its own, and a renamed provider answers to its new name.
+    const existingSelections = pickerSelectionsExcept(next, providerName);
     if (pickerInput.checked) {
       applyPickerSelections(next, [...existingSelections, ...checkedModels.map((model) => ({ ...model, provider: providerName }))]);
     } else {

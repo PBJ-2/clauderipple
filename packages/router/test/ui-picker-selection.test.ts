@@ -15,7 +15,12 @@ type Config = {
   direct?: { prefix: string; provider: string }[];
 };
 
-function loadApplyPickerSelections(): (next: Config, selections: Entry[]) => Config {
+type PickerBlock = {
+  applyPickerSelections: (next: Config, selections: Entry[]) => Config;
+  pickerSelectionsExcept: (config: Config, providerName: string) => Entry[];
+};
+
+function loadPickerBlock(): PickerBlock {
   const file = path.join(path.dirname(fileURLToPath(import.meta.url)), "../../ui/app.js");
   const source = fs.readFileSync(file, "utf8");
   const start = source.indexOf("function allKnownModelIds");
@@ -23,8 +28,8 @@ function loadApplyPickerSelections(): (next: Config, selections: Entry[]) => Con
   assert.ok(start > 0 && end > start, "app.js no longer contains the picker-selection block");
   const make = new Function(
     "groupedModels",
-    `${source.slice(start, end)}; return applyPickerSelections;`,
-  ) as (groupedModels: unknown) => (next: Config, selections: Entry[]) => Config;
+    `${source.slice(start, end)}; return { applyPickerSelections, pickerSelectionsExcept };`,
+  ) as (groupedModels: unknown) => PickerBlock;
   // The real helper groups a config's providers; only the model ids matter here.
   return make((config: Config) =>
     Object.entries(config.providers).map(([name, p]) => ({ name, models: p.models ?? [] })),
@@ -40,7 +45,7 @@ function loadGroupedModels(): (config: Config) => { name: string }[] {
   return new Function(`${source.slice(start, end)}; return groupedModels;`)() as (config: Config) => { name: string }[];
 }
 
-const apply = loadApplyPickerSelections();
+const { applyPickerSelections: apply, pickerSelectionsExcept: except } = loadPickerBlock();
 const groups = loadGroupedModels();
 
 function baseConfig(): Config {
@@ -133,4 +138,57 @@ test("a model's own context window survives the rebuild; a missing or unusable o
     { model: "z-ai/glm-5.3-flash", name: "GLM", contextWindow: 400000 },
     { model: "gpt-5.6-terra", name: "Terra" },
   ]);
+});
+
+// What one save of an unrelated provider must leave alone. The rebuild is fed the entries of every
+// OTHER provider, because no checkbox on that form can speak for them.
+function savedConfig(): Config {
+  return {
+    providers: {
+      chatgpt: { models: [{ id: "gpt-5.6-terra", name: "Terra" }] },
+      "opencode-go": { models: [{ id: "deepseek-v4.1-flash" }, { id: "muse-spark-1.3-contributor" }] },
+      openrouter: { models: [{ id: "z-ai/glm-5.3-flash", name: "GLM" }] },
+    },
+    cli: {
+      extraModels: [
+        { model: "gpt-5.6-terra", name: "Terra" },
+        { model: "deepseek-v4.1-flash", name: "deepseek-v4.1-flash", contextWindow: 200000 },
+        { model: "muse-spark-1.3-contributor", name: "muse-spark-1.3-contributor" },
+        { model: "z-ai/glm-5.3-flash", name: "GLM" },
+      ],
+    },
+    // The legacy prefix, and nothing else: rules stopped being written for unambiguous ids.
+    direct: [{ prefix: "gpt-", provider: "chatgpt" }],
+  };
+}
+
+test("saving one provider leaves every other provider's picker entries standing", () => {
+  // The regression this replaces asked `direct` who owned each entry. Only the `gpt-` prefix still
+  // matched anything, so saving openrouter emptied the picker of deepseek and muse as well.
+  const kept = except(savedConfig(), "openrouter");
+  assert.deepEqual(kept.map((entry) => [entry.id, entry.provider]), [
+    ["gpt-5.6-terra", "chatgpt"],
+    ["deepseek-v4.1-flash", "opencode-go"],
+    ["muse-spark-1.3-contributor", "opencode-go"],
+  ]);
+  assert.equal(kept.find((entry) => entry.id === "deepseek-v4.1-flash")?.contextWindow, 200000, "the window travels with the entry");
+});
+
+test("the saved provider's own entries are left to its checkboxes", () => {
+  const kept = except(savedConfig(), "opencode-go");
+  assert.deepEqual(kept.map((entry) => entry.id), ["gpt-5.6-terra", "z-ai/glm-5.3-flash"]);
+});
+
+test("a model the save just unticked is already undeclared, and is not carried back in", () => {
+  // The caller updates `next.providers` first, so an unticked model no longer appears anywhere.
+  const config = savedConfig();
+  config.providers["opencode-go"]!.models = [{ id: "muse-spark-1.3-contributor" }];
+  assert.equal(except(config, "chatgpt").some((entry) => entry.id === "deepseek-v4.1-flash"), false);
+});
+
+test("an id two providers offer is owned by the rule that says which deal was meant", () => {
+  const config = savedConfig();
+  config.providers.openrouter!.models = [{ id: "z-ai/glm-5.3-flash", name: "GLM" }, { id: "deepseek-v4.1-flash" }];
+  config.direct!.push({ prefix: "deepseek-v4.1-flash", provider: "openrouter" });
+  assert.equal(except(config, "chatgpt").find((entry) => entry.id === "deepseek-v4.1-flash")?.provider, "openrouter");
 });
