@@ -9,6 +9,9 @@ function el(tag, attrs, children) {
     if (key === "class") node.className = value;
     else if (key === "text") node.textContent = value;
     else if (key === "checked") node.checked = Boolean(value);
+    // A textarea ignores the `value` attribute, so a form reopened on a saved provider showed an
+    // empty box and its save wiped what was there (instructionsAppend, 2026-09-23).
+    else if (key === "value" && tag === "textarea") node.value = value;
     else if (key.startsWith("on") && typeof value === "function") node.addEventListener(key.slice(2), value);
     else if (value !== undefined && value !== null) node.setAttribute(key, value);
   }
@@ -1621,7 +1624,14 @@ function openProviderForm(options) {
     if (existing && providerName !== options.name) delete next.providers[options.name];
     const checkedModels = form.querySelector(".model-picker").selected();
     provider.models = checkedModels;
-    next.providers[providerName] = provider;
+    // The form rebuilds the provider from its own fields, so anything it has no field for
+    // (debugDump, a hand-written setting) is carried over from the saved one rather than dropped.
+    // A field the form owns is left to the draft, so clearing it in the form still clears it.
+    const formKeys = new Set(isChatgpt
+      ? ["type", "auth", "defaultEffort", "identity", "instructionsAppend", "models"]
+      : ["type", "url", "identity", "instructionsAppend", "preset", "sessionHeader", "wire", "caps", "headers", "models"]);
+    const kept = existing ? Object.fromEntries(Object.entries(existing).filter(([key]) => !formKeys.has(key))) : {};
+    next.providers[providerName] = { ...kept, ...provider };
     // Read after `next.providers` has been updated, so an unticked model is already undeclared here
     // and falls out on its own, and a renamed provider answers to its new name.
     const existingSelections = pickerSelectionsExcept(next, providerName);
