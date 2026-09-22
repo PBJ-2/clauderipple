@@ -250,3 +250,42 @@ test("the mangled name the vendor echoes is restored to the one Claude Code know
   responses.feed({ type: "response.output_item.added", output_index: 0, item: { type: "function_call", id: "fc_1", call_id: "call_1", name: mangled } }, "responses");
   assert.equal(toolName(responses), longMcp);
 });
+
+// Measured 2026-09-22 against OpenCode Go: mimo-v2.6-pro answers on the Chat Completions wire and
+// streams its thinking as `reasoning_content`, beside `content`. The mapper read only `content`, so
+// a 43-second reasoning turn reached Claude Code as 43 seconds of nothing, and a turn that reasoned
+// without concluding reached it as an empty message.
+test("chat SSE mapper relays reasoning as thinking, before the answer it precedes", () => {
+  const mapper = new OpenAiStreamMapper("mimo-v2.6-pro");
+  const records = [
+    { id: "c1", choices: [{ delta: { reasoning_content: "The user wants " }, finish_reason: null }] },
+    { id: "c1", choices: [{ delta: { reasoning_content: "one word." }, finish_reason: null }] },
+    { id: "c1", choices: [{ delta: { content: "ready" }, finish_reason: "stop" }] },
+  ];
+  const events = records.flatMap((record) => mapper.feed(record, "chat"));
+  const starts = events.filter((e) => e.event === "content_block_start").map((e) => (e.data.content_block as { type: string }).type);
+  assert.deepEqual(starts, ["thinking", "text"], "thinking opens its own block and the answer opens another");
+  const thinking = events.filter((e) => (e.data.delta as { type?: string })?.type === "thinking_delta").map((e) => (e.data.delta as { thinking: string }).thinking);
+  assert.deepEqual(thinking, ["The user wants ", "one word."]);
+  // The thinking block is closed before the answer's block opens, never left hanging.
+  const order = events.map((e) => e.event);
+  assert.ok(order.indexOf("content_block_stop") < order.lastIndexOf("content_block_start"));
+  assert.deepEqual(mapper.message().content, [
+    { type: "thinking", thinking: "The user wants one word." },
+    { type: "text", text: "ready" },
+  ]);
+});
+
+test("a turn that only reasons is no longer empty", () => {
+  const mapper = new OpenAiStreamMapper("mimo-v2.6-pro");
+  mapper.feed({ id: "c1", choices: [{ delta: { reasoning_content: "thinking out loud" }, finish_reason: "stop" }] }, "chat");
+  mapper.finish();
+  assert.deepEqual(mapper.message().content, [{ type: "thinking", thinking: "thinking out loud" }]);
+});
+
+// Vendors on this wire disagree on the field name; both must land in the same place.
+test("reasoning under the bare `reasoning` name is relayed too", () => {
+  const mapper = new OpenAiStreamMapper("other");
+  mapper.feed({ id: "c1", choices: [{ delta: { reasoning: "hmm" }, finish_reason: null }] }, "chat");
+  assert.deepEqual(mapper.message().content, [{ type: "thinking", thinking: "hmm" }]);
+});

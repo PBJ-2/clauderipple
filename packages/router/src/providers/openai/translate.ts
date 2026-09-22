@@ -294,9 +294,14 @@ export { conversationKey, estimateTokens };
 export type AnthropicUsage = { input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number };
 export type AnthropicEvent = { event: string; data: Record<string, unknown> };
 type TextOutputBlock = { type: "text"; text: string };
+// A reasoning model on the Chat Completions wire puts its thinking in `reasoning_content`, beside
+// `content` rather than inside it. Dropping it cost the turn its whole visible middle: measured
+// 2026-09-22, mimo-v2.6-pro at effort=high spent 43s emitting nothing else, so Claude Code showed a
+// blank screen for the whole turn, and one turn that reasoned without concluding arrived empty.
+type ThinkingOutputBlock = { type: "thinking"; thinking: string };
 type ToolOutputBlock = { type: "tool_use"; id: string; name: string; input: unknown; args: string; index: number };
-type OutputBlock = TextOutputBlock | ToolOutputBlock;
-type OpenBlock = { kind: "text" | "tool"; index: number; toolIndex?: number };
+type OutputBlock = TextOutputBlock | ThinkingOutputBlock | ToolOutputBlock;
+type OpenBlock = { kind: "text" | "thinking" | "tool"; index: number; toolIndex?: number };
 type ResponseItem = {
   id: string;
   kind: "text" | "tool";
@@ -349,7 +354,7 @@ export class OpenAiStreamMapper {
     return [{ event: "content_block_stop", data: { type: "content_block_stop", index } }];
   }
 
-  private openBlock(kind: "text" | "tool", contentBlock: Record<string, unknown>, toolIndex?: number): AnthropicEvent[] {
+  private openBlock(kind: "text" | "thinking" | "tool", contentBlock: Record<string, unknown>, toolIndex?: number): AnthropicEvent[] {
     const out = this.closeBlock();
     const index = ++this.blockIndex;
     this.open = { kind, index, ...(toolIndex === undefined ? {} : { toolIndex }) };
@@ -391,9 +396,22 @@ export class OpenAiStreamMapper {
     const out = [...this.start()];
     const usage = ev.usage;
     if (usage) this.setUsage(usage);
-    const choices = Array.isArray(ev.choices) ? ev.choices as { delta?: { content?: unknown; tool_calls?: unknown }; finish_reason?: unknown }[] : [];
+    const choices = Array.isArray(ev.choices) ? ev.choices as { delta?: { content?: unknown; reasoning_content?: unknown; reasoning?: unknown; tool_calls?: unknown }; finish_reason?: unknown }[] : [];
     for (const choice of choices) {
       const delta = choice.delta ?? {};
+      // Thinking arrives before the answer, so it opens the first block of the turn. `reasoning` is
+      // accepted alongside `reasoning_content` because vendors on this wire disagree on the name.
+      const reasoning = typeof delta.reasoning_content === "string" && delta.reasoning_content ? delta.reasoning_content
+        : typeof delta.reasoning === "string" && delta.reasoning ? delta.reasoning : "";
+      if (reasoning) {
+        if (!this.open || this.open.kind !== "thinking") {
+          this.content.push({ type: "thinking", thinking: "" });
+          out.push(...this.openBlock("thinking", { type: "thinking", thinking: "" }));
+        }
+        const last = this.content[this.content.length - 1];
+        if (last?.type === "thinking") last.thinking += reasoning;
+        out.push({ event: "content_block_delta", data: { type: "content_block_delta", index: this.open!.index, delta: { type: "thinking_delta", thinking: reasoning } } });
+      }
       if (typeof delta.content === "string" && delta.content) {
         if (!this.open || this.open.kind !== "text") {
           this.content.push({ type: "text", text: "" });
