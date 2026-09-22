@@ -787,6 +787,66 @@ async function probeProvider(name, provider, onComplete) {
     renderHealthProviders();
   }
 }
+// ---- Capability measurement ---------------------------------------------------------
+//
+// A model's wire and its effort ladder are measured by asking it, because a vendor's `/models`
+// reports ids and nothing else. That takes several small requests per model, far too long to hold a
+// save behind, so the save returns at once and this runs after it and settles the config when it
+// finishes. Provider name → { state, done, total }, for the line the detail view shows meanwhile.
+const measureStates = new Map();
+
+/** What the operator wants to know from a finished job: what was settled, and what would not answer. */
+function measureSummary(results) {
+  const measured = results.filter((entry) => entry.wire);
+  if (measured.length === 0) return "";
+  const failed = results.length - measured.length;
+  const parts = measured.map((entry) => `${entry.id} → ${entry.wire}${entry.effortLevels ? ` (${entry.effortLevels.length ? entry.effortLevels.join("/") : t("providers.effortNone")})` : ""}`);
+  return failed > 0 ? `${parts.join(", ")} · +${failed}` : parts.join(", ");
+}
+
+/**
+ * Measure the models of one provider, in the background, and show the config the result settled.
+ *
+ * Only models missing a wire or a ladder are sent: one the operator set is their decision, and the
+ * router will not overwrite it either, so measuring it again would spend requests to change nothing.
+ */
+async function startMeasurement(providerName, provider) {
+  if (!provider || (provider.type !== "openai-compatible" && provider.type !== "anthropic-compatible")) return;
+  const models = modelsOf(provider).filter((model) => !model.wire || !model.effortLevels).map((model) => model.id);
+  if (models.length === 0) return;
+  let jobId;
+  try {
+    const started = await api("/api/providers/measure", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: providerName, models }),
+    });
+    jobId = started.jobId;
+    measureStates.set(providerName, { state: "running", done: 0, total: started.total });
+    renderProviderWorkspace();
+  } catch { return; } // The router is older than this screen, or said no: the save itself stands.
+  try {
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      const job = await api(`/api/providers/measure/${jobId}`);
+      measureStates.set(providerName, { state: job.state, done: job.done, total: job.total });
+      renderProviderWorkspace();
+      if (job.state === "running") continue;
+      measureStates.delete(providerName);
+      if (job.state === "failed") { toast(t("measure.failed"), true, job.error); renderProviderWorkspace(); return; }
+      const summary = measureSummary(job.results || []);
+      // An auth failure is reported as itself: it says nothing about any model, and leaving it as
+      // "nothing was measured" would send the operator looking at the wrong thing.
+      const refused = (job.results || []).some((entry) => entry.error === "auth");
+      toast(summary ? t("measure.done", { summary }) : refused ? t("measure.authFailed") : t("measure.nothing"), !summary);
+      await loadProviders();
+      return;
+    }
+  } catch (error) {
+    measureStates.delete(providerName);
+    toast(t("measure.failed"), true, error.message);
+    renderProviderWorkspace();
+  }
+}
+
 let selectedProviderName = null;
 let providerDetailTab = "overview";
 let providerSearch = "";
@@ -881,6 +941,11 @@ function providerOverview(name, provider) {
     el("h3", { text: t("providers.selectedModels") }),
     models.length ? el("div", { class: "model-chip-list" }, models.map((model) => el("span", { class: "model-chip", text: labelOf(model) }))) : hint(t("providers.noModels")),
   ]);
+  const measuring = measureStates.get(name);
+  if (measuring && measuring.state === "running") {
+    modelSummary.appendChild(el("p", { class: "small", text: t("measure.running", { done: measuring.done, total: measuring.total }) }));
+    modelSummary.appendChild(hint(t("measure.help")));
+  }
   const quota = quotaLine(name);
   return el("div", { class: "provider-panel" }, [connection, quota ? el("section", { class: "detail-section" }, [el("h3", { text: t("health.quota", { percent: "", reset: "" }).trim() }), el("p", { text: quota })]) : null, modelSummary].filter(Boolean));
 }
@@ -1529,6 +1594,10 @@ function openProviderForm(options) {
       await loadProviders();
       toast(t("common.saved"));
       await offerPickerOn(pickerInput.checked && checkedModels.length > 0);
+      // Detached on purpose. Measuring asks every ticked model several questions, which is far
+      // longer than a save should take, and a model whose wire is still unknown works exactly as it
+      // did before — it is only unmeasured. The result lands in the config when it arrives.
+      void startMeasurement(providerName, next.providers[providerName]);
     } catch (error) {
       toast(t("common.saveFailed"), true, error.message);
     } finally { saveButton.disabled = false; }
