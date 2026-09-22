@@ -11,6 +11,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import tls from "node:tls";
+import zlib from "node:zlib";
 
 import { CertStore } from "../src/certs.ts";
 import { DEFAULTS, type Config, type Provider } from "../src/config.ts";
@@ -34,7 +35,7 @@ type Seen = { key: string | undefined; auth: string | undefined };
 type Upstream = { port: number; seen: Seen[]; close: () => Promise<void> };
 
 /** A provider that answers whatever `reply` says, and records the credential each request carried. */
-async function upstream(reply: (n: number) => { status: number; headers?: Record<string, string>; body?: string; delayMs?: number }): Promise<Upstream> {
+async function upstream(reply: (n: number) => { status: number; headers?: Record<string, string>; body?: string | Buffer; delayMs?: number }): Promise<Upstream> {
   const seen: Seen[] = [];
   const server = http.createServer((req, res) => {
     req.resume();
@@ -62,6 +63,8 @@ type Rig = {
   send: (opts?: { cancel?: boolean; conversation?: string }) => Promise<number>;
   /** The same turn, keeping the whole answer so a test can assert on the body too. */
   sendDetailed: () => Promise<{ status: number; body: string }>;
+  /** The same turn again, keeping the answer as bytes — a compressed body is not text. */
+  sendRaw: () => Promise<{ status: number; headers: Record<string, string>; body: Buffer }>;
   stop: () => Promise<void>;
 };
 
@@ -131,9 +134,41 @@ async function rig(providers: Config["providers"], routes: Config["routes"]): Pr
     return { status, body: split >= 0 ? text.slice(split + 4) : "" };
   };
 
+  /** The same turn again, keeping the answer as bytes — a compressed body is not text. */
+  const sendRaw = async (): Promise<{ status: number; headers: Record<string, string>; body: Buffer }> => {
+    const sock = net.connect(proxyPort, "127.0.0.1");
+    await new Promise<void>((r) => sock.once("connect", () => r()));
+    sock.write("CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: api.anthropic.com:443\r\n\r\n");
+    await new Promise<void>((r) => sock.once("data", () => r()));
+    const secure = tls.connect({ socket: sock, servername: "api.anthropic.com", ca: ca.certPem });
+    await new Promise<void>((r) => secure.once("secureConnect", () => r()));
+    const body = JSON.stringify({ model: "claude-opus-4-8", max_tokens: 1, metadata: { user_id: "user-1" }, messages: [{ role: "user", content: "hi" }] });
+    secure.write(
+      `POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
+    );
+    const chunks: Buffer[] = [];
+    secure.on("data", (d: Buffer) => chunks.push(d));
+    await new Promise<void>((r) => setTimeout(r, 250));
+    secure.destroy();
+    const all = Buffer.concat(chunks);
+    const split = all.indexOf("\r\n\r\n");
+    const head = all.subarray(0, split < 0 ? all.length : split).toString("latin1");
+    const headers: Record<string, string> = {};
+    for (const line of head.split("\r\n").slice(1)) {
+      const at = line.indexOf(":");
+      if (at > 0) headers[line.slice(0, at).trim().toLowerCase()] = line.slice(at + 1).trim();
+    }
+    return {
+      status: Number(/^HTTP\/1\.1 (\d{3})/.exec(head)?.[1] ?? 0),
+      headers,
+      body: split < 0 ? Buffer.alloc(0) : all.subarray(split + 4),
+    };
+  };
+
   return {
     send,
     sendDetailed,
+    sendRaw,
     stop: async () => { proxy.close(); fs.rmSync(home, { recursive: true, force: true }); },
   };
 }
@@ -212,6 +247,61 @@ test("a 403 keeps the provider's body instead of dropping the connection", async
     // Chunked, because the body is written from memory and its length is already decided then: the
     // point is that the provider's own words arrive at all, where destroying the upstream sent none.
     assert.match(res.body, /Upstream request failed/, "the refusal reached the client, not an empty socket");
+  } finally { await r.stop(); await up.close(); }
+});
+
+// The third part of the same bug, and the one that reached a user: reading the 403 body handed it
+// on as a UTF-8 string. A compressed body is arbitrary binary, so every invalid sequence became
+// U+FFFD and never came back — while `content-encoding` still stood in the response. Claude Desktop
+// showed `net::ERR_CONTENT_DECODING_FAILED` on every message for an hour, because its OAuth refresh
+// was answering 403 zstd (2026-09-22). Chromium 152 asks for zstd, so this is the ordinary case.
+for (const [encoding, compress] of [
+  ["zstd", (b: Buffer) => (zlib as unknown as { zstdCompressSync: (b: Buffer) => Buffer }).zstdCompressSync(b)],
+  ["gzip", (b: Buffer) => zlib.gzipSync(b)],
+  ["br", (b: Buffer) => zlib.brotliCompressSync(b)],
+] as const) {
+  test(`a ${encoding} 403 body reaches the client byte for byte`, async () => {
+    const relayError = JSON.stringify({ error: { type: "server_error", message: "Upstream request failed" } });
+    const packed = compress(Buffer.from(relayError));
+    const up = await upstream(() => ({
+      status: 403,
+      headers: { "content-encoding": encoding, "content-length": String(packed.length) },
+      body: packed,
+    }));
+    const r = await rig({ p: pooled(up.port) }, { "claude-opus-4-8": { provider: "p", model: "m" } });
+    try {
+      const res = await r.sendRaw();
+      assert.equal(res.status, 403);
+      assert.equal(res.headers["content-encoding"], encoding, "the encoding was promised, so it must still hold");
+      assert.deepEqual(res.body, packed, "the bytes came back unchanged");
+      // What the browser does with them. Before the fix this threw, which is the user-visible bug.
+      const decoded = encoding === "zstd"
+        ? (zlib as unknown as { zstdDecompressSync: (b: Buffer) => Buffer }).zstdDecompressSync(res.body)
+        : encoding === "gzip" ? zlib.gunzipSync(res.body) : zlib.brotliDecompressSync(res.body);
+      assert.equal(decoded.toString("utf8"), relayError);
+    } finally { await r.stop(); await up.close(); }
+  });
+}
+
+// The judgement that reads a 403 body is the reason it is read at all (§5). A compressed body used
+// to arrive at it as mojibake, so a relay's "upstream failed" was unreadable and the credential was
+// charged for it — the very failure the 403 body was introduced to prevent.
+test("a compressed relay 403 is still recognised, so the credential is not parked", async () => {
+  const relayError = JSON.stringify({ error: { type: "server_error", message: "Upstream request failed" } });
+  const packed = zlib.gzipSync(Buffer.from(relayError));
+  const up = await upstream(() => ({
+    status: 403,
+    headers: { "content-encoding": "gzip", "content-length": String(packed.length) },
+    body: packed,
+  }));
+  const r = await rig({ p: pooled(up.port) }, { "claude-opus-4-8": { provider: "p", model: "m" } });
+  try {
+    assert.equal(await r.send(), 403);
+    assert.equal(await r.send(), 403, "the second turn is answered, not refused for a parked key");
+    // Exactly as in the uncompressed case above: turn 1 ends on the second credential and turn 2
+    // must start there. Unreadable mojibake is not a relay report, so before the fix the 403 was
+    // charged as an auth failure and turn 2 fell back to the first credential.
+    assert.equal(up.seen[2]?.key, "two", "the compressed relay report was read, so nothing was parked");
   } finally { await r.stop(); await up.close(); }
 });
 

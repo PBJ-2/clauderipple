@@ -110,6 +110,27 @@ export function withCredential(
 }
 
 /**
+ * A compressed body decoded for reading, or the bytes unchanged when they cannot be decoded.
+ *
+ * Every caller reads: none of them may hand the result back to a client, because a body that
+ * failed to decode returns unchanged and the client was promised `content-encoding`.
+ */
+export function decodeBodyForReading(body: Buffer, encoding: string | string[] | undefined): Buffer {
+  const enc = String(encoding ?? "").toLowerCase();
+  try {
+    if (enc === "gzip" || enc === "x-gzip") return zlib.gunzipSync(body);
+    if (enc === "deflate") return zlib.inflateSync(body);
+    if (enc === "br") return zlib.brotliDecompressSync(body);
+    // Chromium 152 asks for zstd, so anything the app talks to may answer with it.
+    if (enc === "zstd" && typeof (zlib as unknown as { zstdDecompressSync?: unknown }).zstdDecompressSync === "function")
+      return (zlib as unknown as { zstdDecompressSync: (b: Buffer) => Buffer }).zstdDecompressSync(body);
+  } catch {
+    // A truncated compressed body decodes to nothing; fall through to what is readable.
+  }
+  return body;
+}
+
+/**
  * A bounded, decoded upstream error excerpt with credentials completely masked. Providers may
  * echo the key they rejected, including an opaque vendor-specific key format.
  */
@@ -118,16 +139,7 @@ export function errorSnippet(head: Buffer, encoding: string | string[] | undefin
   // vendor domain) or a login wall. Say that instead of quoting markup (measured 2026-09-13 with
   // OpenRouter answering 200 HTML when the /api prefix was lost).
   if (/text\/html/i.test(String(contentType ?? ""))) return `HTML page (${head.length}B) — the provider URL points at a website or a login page, not an API`;
-  let out = head;
-  const enc = String(encoding ?? "").toLowerCase();
-  try {
-    if (enc === "gzip" || enc === "x-gzip") out = zlib.gunzipSync(head);
-    else if (enc === "deflate") out = zlib.inflateSync(head);
-    else if (enc === "br") out = zlib.brotliDecompressSync(head);
-  } catch {
-    // A truncated compressed body decodes to nothing; fall through to what is readable.
-  }
-  const masked = redactErrorText(out.toString("utf8"), secrets, 300);
+  const masked = redactErrorText(decodeBodyForReading(head, encoding).toString("utf8"), secrets, 300);
   return masked || "(empty body)";
 }
 
@@ -861,6 +873,14 @@ export class Proxy {
     // Set when a 403 body was read ahead of the forward, so the forward knows to write that body
     // instead of the stream it came from.
     let headFilled = false;
+    // The 403 body exactly as it arrived. It is what the client is given: the judgement below
+    // reads a decoded copy, but a compressed body cannot survive a round trip through a UTF-8
+    // string — invalid sequences become U+FFFD and never come back. Returning that while
+    // `content-encoding` still stands is `ERR_CONTENT_DECODING_FAILED` in the app (2026-09-22).
+    let errRaw: Buffer = Buffer.alloc(0);
+    // Set when the body was longer than the read cap, so its bytes are no longer a whole
+    // compressed stream and only the decoded head can be forwarded.
+    let errTruncated = false;
     const abortUpstream = (): void => {
       clientAborted = true;
       if (upReq && !upReq.destroyed) upReq.destroy();
@@ -914,6 +934,10 @@ export class Proxy {
      * forwarding the rest mid-flow is where a body can be lost to a pause nothing resumes. A 403 is
      * a refusal, so its body is small.
      *
+     * What is returned is the body **decoded for reading**, because the judgement is about what the
+     * body says. The bytes themselves are kept in `errRaw` for the client: a compressed body is
+     * arbitrary binary, and text is a one-way door for it.
+     *
      * Past `max` there is nothing worth identifying, so the rest is dropped — but the stream is
      * never destroyed. Tearing the connection down over a body size would turn a refusal the user
      * can read into a socket error, which is a worse bug than the one this handles; an unbounded
@@ -924,21 +948,20 @@ export class Proxy {
       let size = 0;
       stream.on("data", (c: Buffer) => {
         const room = max - size;
-        if (room <= 0) { stream.resume(); return; }
+        if (room <= 0) { errTruncated = true; stream.resume(); return; }
+        if (c.length > room) errTruncated = true;
         chunks.push(c.subarray(0, room));
         size += Math.min(c.length, room);
       });
-      stream.once("end", () => {
-        const body = Buffer.concat(chunks, size);
+      const handOver = (): void => {
+        errRaw = Buffer.concat(chunks, size);
         headFilled = true;
-        resolveBody(body.toString("utf8"));
-      });
+        resolveBody(decodeBodyForReading(errRaw, stream.headers["content-encoding"]).toString("utf8"));
+      };
+      stream.once("end", handOver);
       // A dropped or failed stream still hands over what arrived; the caller's own upstream error
       // path is already attached, and duplicating it here would race it for the same response.
-      stream.once("error", () => {
-        headFilled = true;
-        resolveBody(Buffer.concat(chunks, size).toString("utf8"));
-      });
+      stream.once("error", handOver);
     });
 
     const onUpstreamJudged = (upRes: http.IncomingMessage, status: number, errBody: string): void => {
@@ -979,6 +1002,9 @@ export class Proxy {
         if (lk === "connection" || lk === "keep-alive" || lk === "transfer-encoding") continue;
         if (isBootstrap && (lk === "content-length" || lk === "content-encoding")) continue;
         if (isPickerBootstrap && (lk === "etag" || lk === "last-modified")) continue;
+        // A truncated 403 is forwarded decoded (its bytes are no longer a whole compressed
+        // stream), so neither the upstream's encoding nor its length describes what is sent.
+        if (errTruncated && (lk === "content-length" || lk === "content-encoding")) continue;
         outHeaders.push(r[i]!, r[i + 1]!);
       }
       let bytes = 0;
@@ -1044,9 +1070,11 @@ export class Proxy {
       const errorHead: Buffer[] = [];
       let errorHeadBytes = 0;
       // The 403 body was read to judge it, so it is written here instead of read again from a
-      // stream that has already ended. Its `content-length` came from the upstream and still fits.
+      // stream that has already ended. The bytes go back exactly as they arrived, so a compressed
+      // body still matches the `content-encoding` and `content-length` the upstream stated; only a
+      // truncated one is sent decoded, and both headers were dropped above for it.
       if (headFilled) {
-        const body = Buffer.from(errBody, "utf8");
+        const body = errTruncated ? Buffer.from(errBody, "utf8") : errRaw;
         bytes = body.length;
         res.end(body);
         finish(String(status), bytes, `upstream ${status}: ${redactErrorText(errBody, [...errorSecrets], 300)}`);
