@@ -720,7 +720,7 @@ test("GET /api/requests filters newest records and returns a summary", async () 
       assert.deepEqual((await list.json() as { requests: { id: string }[] }).requests.map((r) => r.id), ["older"]);
       const summary = await fetch(`${base()}:${extra.port}/api/requests/summary?since=3600`);
       const body = await summary.json() as { total: { count: number; ok: number; failed: number; cached: number } };
-      assert.deepEqual(body.total, { count: 2, ok: 1, failed: 1, input: 20, cached: 80, output: 7, cacheHitPercent: 80, avgMs: 200 });
+      assert.deepEqual(body.total, { count: 2, ok: 1, failed: 1, input: 20, cached: 80, cacheWrite: 0, output: 7, cacheHitPercent: 80, avgMs: 200 });
     } finally {
       extra.close();
     }

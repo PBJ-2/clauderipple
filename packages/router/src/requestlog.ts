@@ -37,6 +37,8 @@ type SummaryBucket = {
   failed: number;
   input: number;
   cached: number;
+  /** Tokens written to the prompt cache: part of the input, and not a hit. */
+  cacheWrite: number;
   output: number;
   cacheHitPercent: number;
   avgMs: number;
@@ -45,7 +47,7 @@ type SummaryBucket = {
 export type RequestSummary = { total: SummaryBucket; providers: Record<string, SummaryBucket> };
 
 function emptyBucket(): SummaryBucket {
-  return { count: 0, ok: 0, failed: 0, input: 0, cached: 0, output: 0, cacheHitPercent: 0, avgMs: 0 };
+  return { count: 0, ok: 0, failed: 0, input: 0, cached: 0, cacheWrite: 0, output: 0, cacheHitPercent: 0, avgMs: 0 };
 }
 
 function isRecord(value: unknown): value is RequestRecord {
@@ -114,8 +116,11 @@ export class RequestLog {
       if (record.usage) {
         bucket.input += record.usage.input;
         bucket.cached += record.usage.cached;
+        bucket.cacheWrite += record.usage.cacheWrite ?? 0;
         bucket.output += record.usage.output;
-        cacheBases.set(bucket, (cacheBases.get(bucket) ?? 0) + record.usage.input + record.usage.cached);
+        // A cache write is input the model read fresh, so it counts against the hit rate. Leaving it
+        // out read a turn that wrote 2,218 tokens and uncached 2 as a 100% hit (2026-09-23).
+        cacheBases.set(bucket, (cacheBases.get(bucket) ?? 0) + record.usage.input + record.usage.cached + (record.usage.cacheWrite ?? 0));
       }
     };
     for (const record of this.records) {

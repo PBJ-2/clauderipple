@@ -1686,7 +1686,7 @@ function timeOf(iso) {
   return `${two(at.getMonth() + 1)}-${two(at.getDate())} ${two(at.getHours())}:${two(at.getMinutes())}:${two(at.getSeconds())}`;
 }
 function providerClass(name) { return name === "anthropic" ? "provider-anthropic" : name === "chatgpt" ? "provider-chatgpt" : "provider-default"; }
-function summaryChip(label, value) { return el("div", { class: "logs-chip" }, [el("span", { class: "label", text: label }), el("span", { class: "value", text: value })]); }
+function summaryChip(label, value, sub) { return el("div", { class: "logs-chip" }, [el("span", { class: "label", text: label }), el("span", { class: "value", text: value }), sub ? el("span", { class: "sub", text: sub }) : null]); }
 
 function showLogsPanel(name) {
   logsPanel = name;
@@ -1709,7 +1709,9 @@ function renderSummary(summary) {
   $("#logs-summary").replaceChildren(
     summaryChip(t("logs.summary.requests"), formatNumber(total.count)),
     summaryChip(t("logs.summary.success"), `${formatNumber(total.ok)} / ${formatNumber(total.failed)}`),
-    summaryChip(t("logs.summary.input"), `${formatNumber(total.input)} · ${t("logs.cacheHit", { percent: total.cacheHitPercent || 0 })}`),
+    // On its own line: with the whole input counted the number runs to eight digits, and the
+    // ellipsis on one line cut the cache rate off entirely.
+    summaryChip(t("logs.summary.input"), formatNumber(totalInputOf(total)), t("logs.cacheHit", { percent: total.cacheHitPercent || 0 })),
     summaryChip(t("logs.summary.output"), formatNumber(total.output)),
     summaryChip(t("logs.summary.duration"), formatSeconds(total.avgMs)),
   );
@@ -1725,11 +1727,17 @@ function renderProviderFilter(records) {
   if (!names.includes(requestProvider)) requestProvider = "";
   if (before && before !== select.value) select.value = requestProvider;
 }
+/** Everything the model read: uncached, read from the cache, and written to it. */
+function totalInputOf(usage) {
+  return (usage.input || 0) + (usage.cached || 0) + (usage.cacheWrite || 0);
+}
 function requestDetail(record) {
   const details = [
     [t("logs.detail.id"), record.id],
     [t("logs.detail.kind"), record.kind],
     [t("logs.detail.stop"), record.stopReason || t("logs.none")],
+    [t("logs.detail.uncached"), record.usage ? formatNumber(record.usage.input) : t("logs.none")],
+    [t("logs.detail.cacheRead"), record.usage && record.usage.cached ? formatNumber(record.usage.cached) : t("logs.none")],
     [t("logs.detail.cacheWrite"), record.usage && record.usage.cacheWrite ? formatNumber(record.usage.cacheWrite) : t("logs.none")],
   ].map(([label, value]) => el("div", {}, [el("span", { class: "detail-label", text: label }), el("span", { class: "detail-value", text: value })]));
   if (record.note) details.push(el("div", { class: "request-note" }, [el("span", { class: "detail-label", text: t("logs.detail.note") }), el("span", { class: "detail-value", text: record.note })]));
@@ -1742,8 +1750,11 @@ function requestRow(record) {
     record.source && record.source !== record.target ? el("span", { class: "small", text: `(${record.source})` }) : null,
     el("span", { class: `provider-badge ${providerClass(record.provider)}`, text: record.provider }),
   ].filter(Boolean));
+  // The whole input, not the uncached remainder: a fully cached Anthropic turn reports `input: 2`,
+  // which read as a two-token request (2026-09-23). The split is in the detail row.
+  const totalInput = record.usage ? totalInputOf(record.usage) : 0;
   const input = record.usage
-    ? el("span", { class: "token-cell", text: formatNumber(record.usage.input) }, [el("span", { class: "cache-pill", text: t("logs.cacheHit", { percent: Math.round(record.usage.cached / Math.max(1, record.usage.input + record.usage.cached) * 100) }) })])
+    ? el("span", { class: "token-cell", text: formatNumber(totalInput) }, [el("span", { class: "cache-pill", text: t("logs.cacheHit", { percent: Math.round(record.usage.cached / Math.max(1, totalInput) * 100) }) })])
     : el("span", { class: "no-usage", text: t("common.notAvailable") });
   const status = el("span", { class: `status-text ${record.ok ? "ok" : "bad"}`, text: `${record.ok ? t("logs.status.ok") : t("logs.status.error")} ${record.status}` });
   row.append(

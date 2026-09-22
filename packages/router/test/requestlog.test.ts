@@ -44,11 +44,14 @@ test("RequestLog computes success, usage, cache and latency summaries", () => {
     const log = new RequestLog(path.join(dir, "requests.jsonl"));
     log.add(record("a", { at: "2026-09-13T10:00:00.000Z", ms: 100, usage: { input: 20, cached: 80, output: 9 } }));
     log.add(record("b", { at: "2026-09-13T10:01:00.000Z", ms: 300, ok: false, status: 502, provider: "moonshot", usage: { input: 50, cached: 0, output: 0 } }));
+    // A cache write is input that missed: 98 read of 2 + 98 + 100 is a 49% hit, not 98%.
+    log.add(record("c", { at: "2026-09-13T10:02:00.000Z", ms: 200, provider: "anthropic", usage: { input: 2, cached: 98, cacheWrite: 100, output: 1 } }));
     log.add(record("old", { at: "2026-09-13T09:00:00.000Z", usage: { input: 999, cached: 0, output: 999 } }));
     const summary = log.summary(Date.parse("2026-09-13T09:59:00.000Z"));
-    assert.deepEqual(summary.total, { count: 2, ok: 1, failed: 1, input: 70, cached: 80, output: 9, cacheHitPercent: 53.3, avgMs: 200 });
-    assert.deepEqual(summary.providers.chatgpt, { count: 1, ok: 1, failed: 0, input: 20, cached: 80, output: 9, cacheHitPercent: 80, avgMs: 100 });
-    assert.deepEqual(summary.providers.moonshot, { count: 1, ok: 0, failed: 1, input: 50, cached: 0, output: 0, cacheHitPercent: 0, avgMs: 300 });
+    assert.deepEqual(summary.total, { count: 3, ok: 2, failed: 1, input: 72, cached: 178, cacheWrite: 100, output: 10, cacheHitPercent: 50.9, avgMs: 200 });
+    assert.deepEqual(summary.providers.chatgpt, { count: 1, ok: 1, failed: 0, input: 20, cached: 80, cacheWrite: 0, output: 9, cacheHitPercent: 80, avgMs: 100 });
+    assert.deepEqual(summary.providers.moonshot, { count: 1, ok: 0, failed: 1, input: 50, cached: 0, cacheWrite: 0, output: 0, cacheHitPercent: 0, avgMs: 300 });
+    assert.deepEqual(summary.providers.anthropic, { count: 1, ok: 1, failed: 0, input: 2, cached: 98, cacheWrite: 100, output: 1, cacheHitPercent: 49, avgMs: 200 });
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
