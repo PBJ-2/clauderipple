@@ -523,13 +523,17 @@ export class ChatGptAdapter {
         if (mapper.isFinished) break;
       }
       if (!mapper.isFinished) {
-        // Upstream ended without response.completed: treat as done with what we have.
-        const tail = mapper.finish();
+        // Upstream ended without response.completed. This used to be finished as done-with-what-we-
+        // have, which gave the client an empty or cut-off turn it accepted as final (gpt-6-astra,
+        // 12 empty turns at a median 105s, 2026-09). Overloaded is what Claude Code retries.
+        const tail = parser.sawDone
+          ? mapper.finish()
+          : mapper.fail(`${model}: upstream stream ended before the response completed`, "server_is_overloaded");
         if (wantStream) for (const o of tail) bytes += write(res, formatSse(o));
       }
     } catch (e) {
       if (!ac.signal.aborted) {
-        const tail = mapper.fail(`stream interrupted: ${(e as Error).message}`);
+        const tail = mapper.fail(`stream interrupted: ${(e as Error).message}`, "server_is_overloaded");
         if (wantStream) for (const o of tail) bytes += write(res, formatSse(o));
       }
     } finally {
@@ -542,18 +546,24 @@ export class ChatGptAdapter {
       }
     }
 
+    const failure = mapper.failure;
+    const failedStatus = failure?.type === "overloaded_error" ? 529 : failure?.type === "rate_limit_error" ? 429 : 502;
     if (!wantStream) {
-      const msg = JSON.stringify(mapper.message());
-      res.writeHead(200, { "content-type": "application/json", "content-length": String(Buffer.byteLength(msg)) }).end(msg);
+      // A failed turn is an error here too, not a 200 carrying whatever arrived before it failed.
+      const msg = failure ? anthropicError(failedStatus, failure.type, failure.message).body : JSON.stringify(mapper.message());
+      res.writeHead(failure ? failedStatus : 200, { "content-type": "application/json", "content-length": String(Buffer.byteLength(msg)) }).end(msg);
       bytes = msg.length;
     } else if (!res.writableEnded) {
       res.end();
     }
     const u = mapper.usage;
     return {
-      status: 200,
+      // A stream has already sent 200; the record still says the turn failed.
+      status: failure ? failedStatus : 200,
       bytes,
-      note: `in=${u.input_tokens} cached=${u.cache_read_input_tokens} out=${u.output_tokens} stop=${mapper.stopReason}`,
+      note: failure
+        ? `${wantStream ? "mid-stream " : ""}${failure.type}: ${failure.message} (in=${u.input_tokens} cached=${u.cache_read_input_tokens} out=${u.output_tokens})`
+        : `in=${u.input_tokens} cached=${u.cache_read_input_tokens} out=${u.output_tokens} stop=${mapper.stopReason}`,
       usage: {
         input: u.input_tokens,
         cached: u.cache_read_input_tokens,

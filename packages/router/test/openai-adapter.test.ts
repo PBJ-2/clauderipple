@@ -6,7 +6,7 @@ import { Logger } from "../src/log.ts";
 import type { AnthropicRequest } from "../src/providers/chatgpt/translate.ts";
 
 const seen: { path: string; headers: http.IncomingHttpHeaders; body: Record<string, unknown> }[] = [];
-let mode: "chat" | "responses" | "error" = "chat";
+let mode: "chat" | "responses" | "error" | "cut-responses" | "cut-chat" | "done-chat" = "chat";
 const sse = (records: Record<string, unknown>[]) => records.map((record) => `data: ${JSON.stringify(record)}\n\n`).join("");
 
 const upstream = http.createServer((req, res) => {
@@ -19,6 +19,19 @@ const upstream = http.createServer((req, res) => {
       return;
     }
     res.writeHead(200, { "content-type": "text/event-stream" });
+    // Streams that stop without the vendor saying they are done, as muse's did (2026-09-19).
+    if (mode === "cut-responses") {
+      res.end(sse([{ type: "response.output_item.added", item: { type: "message", id: "msg_1" } }, { type: "response.output_text.delta", delta: "Hal" }]));
+      return;
+    }
+    if (mode === "cut-chat") {
+      res.end(sse([{ choices: [{ delta: { content: "Hal" }, finish_reason: null }] }]));
+      return;
+    }
+    if (mode === "done-chat") {
+      res.end(`${sse([{ choices: [{ delta: { content: "Hi" }, finish_reason: null }] }])}data: [DONE]\n\n`);
+      return;
+    }
     const records = mode === "chat"
       ? [
           { choices: [{ delta: { content: "Hi" }, finish_reason: null }] },
@@ -178,6 +191,41 @@ test("no session header is sent unless the provider asks for one", async () => {
   }, log);
   await call(request);
   assert.equal(seen.at(-1)!.headers["x-opencode-session"], undefined);
+});
+
+// A stream that closes before the vendor says it is done was cut off. Finishing it as end_turn gave
+// the worker an empty or half answer it took as final; overloaded_error is what Claude Code retries.
+test("a Responses stream cut off before response.completed ends in a retryable overloaded_error", async () => {
+  mode = "cut-responses";
+  adapter = new OpenAiCompatibleAdapter("fake", { type: "openai-compatible", url: `http://127.0.0.1:${upstreamPort}/v1`, wire: "responses" }, log);
+  const response = await call(request);
+  assert.match(response.text, /event: error\ndata: \{"type":"error","error":\{"type":"overloaded_error"/);
+  assert.doesNotMatch(response.text, /"stop_reason":"end_turn"/);
+  assert.doesNotMatch(response.text, /message_stop/);
+});
+
+test("a Chat stream cut off before any finish_reason ends in overloaded_error too", async () => {
+  mode = "cut-chat";
+  adapter = new OpenAiCompatibleAdapter("fake", { type: "openai-compatible", url: `http://127.0.0.1:${upstreamPort}/v1` }, log);
+  const response = await call(request);
+  assert.match(response.text, /"type":"overloaded_error"/);
+  assert.doesNotMatch(response.text, /message_stop/);
+});
+
+test("a Chat stream that ends on [DONE] without a finish_reason is complete, not cut off", async () => {
+  mode = "done-chat";
+  adapter = new OpenAiCompatibleAdapter("fake", { type: "openai-compatible", url: `http://127.0.0.1:${upstreamPort}/v1` }, log);
+  const response = await call(request);
+  assert.doesNotMatch(response.text, /event: error/);
+  assert.match(response.text, /"stop_reason":"end_turn"/);
+});
+
+test("a cut-off non-streaming turn is answered 529, not 200 with the fragment", async () => {
+  mode = "cut-responses";
+  adapter = new OpenAiCompatibleAdapter("fake", { type: "openai-compatible", url: `http://127.0.0.1:${upstreamPort}/v1`, wire: "responses" }, log);
+  const response = await call({ ...request, stream: false });
+  assert.equal(response.status, 529);
+  assert.equal(JSON.parse(response.text).error.type, "overloaded_error");
 });
 
 test("cleanup", () => {

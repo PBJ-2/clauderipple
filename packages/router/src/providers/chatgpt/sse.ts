@@ -2,6 +2,8 @@
 
 export class SseParser {
   private buf = "";
+  /** The stream's own end marker arrived — a vendor that ends on `[DONE]` finished on purpose. */
+  sawDone = false;
 
   /** Feed a chunk; returns the parsed JSON objects of complete events (non-JSON data is skipped). */
   feed(chunk: string): Record<string, unknown>[] {
@@ -16,6 +18,7 @@ export class SseParser {
         .filter((l) => l.startsWith("data:"))
         .map((l) => l.slice(5).replace(/^ /, ""))
         .join("\n");
+      if (data === "[DONE]") this.sawDone = true;
       if (!data || data === "[DONE]") continue;
       try {
         out.push(JSON.parse(data) as Record<string, unknown>);

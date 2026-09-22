@@ -21,6 +21,11 @@ function anthropicError(status: number, type: string, message: string): { status
   return { status, body: JSON.stringify({ type: "error", error: { type, message } }) };
 }
 
+/** The HTTP status Anthropic uses for each error type a mapper can report. */
+function failureStatus(failure: { type: string } | undefined): number {
+  return failure?.type === "overloaded_error" ? 529 : failure?.type === "rate_limit_error" ? 429 : 502;
+}
+
 function vendorMessage(text: string): string {
   try {
     const json = JSON.parse(text) as { error?: { message?: unknown }; message?: unknown; detail?: unknown };
@@ -184,12 +189,17 @@ export class OpenAiCompatibleAdapter {
         if (mapper.isFinished) break;
       }
       if (!mapper.isFinished) {
-        const tail = mapper.finish();
+        // Only a vendor that said it was done is finished. A stream that just stopped — muse went
+        // quiet for up to 300s and then closed, 2026-09-19 — is reported as overloaded so the
+        // client asks again, instead of taking an empty turn as the model's final answer.
+        const tail = mapper.completed || parser.sawDone
+          ? mapper.finish()
+          : mapper.fail(`${model}: upstream stream ended before the response completed`, "server_is_overloaded");
         if (wantStream) for (const event of tail) bytes += write(res, formatSse(event));
       }
     } catch (error) {
       if (!controller.signal.aborted) {
-        const tail = mapper.fail(`stream interrupted: ${(error as Error).message}`);
+        const tail = mapper.fail(`stream interrupted: ${(error as Error).message}`, "server_is_overloaded");
         if (wantStream) for (const event of tail) bytes += write(res, formatSse(event));
       }
     } finally {
@@ -198,18 +208,25 @@ export class OpenAiCompatibleAdapter {
       try { await reader.cancel(); } catch { /* already closed */ }
     }
 
+    const failure = mapper.failure;
+    const failedStatus = failureStatus(failure);
     if (!wantStream) {
-      const body = JSON.stringify(mapper.message());
+      // A failed turn is an error here too: answering it as a 200 with whatever content had
+      // arrived is the same silent truncation the stream path used to commit.
+      const body = failure ? anthropicError(failedStatus, failure.type, failure.message).body : JSON.stringify(mapper.message());
       bytes = Buffer.byteLength(body);
-      res.writeHead(200, { "content-type": "application/json", "content-length": String(bytes) }).end(body);
+      res.writeHead(failure ? failedStatus : 200, { "content-type": "application/json", "content-length": String(bytes) }).end(body);
     } else if (!res.writableEnded) {
       res.end();
     }
     const usage = mapper.usage;
     return {
-      status: 200,
+      // A stream has already sent 200; the record still says the turn failed.
+      status: failure ? failedStatus : 200,
       bytes,
-      note: `in=${usage.input_tokens} cached=${usage.cache_read_input_tokens} out=${usage.output_tokens} stop=${mapper.stopReason}`,
+      note: failure
+        ? `${wantStream ? "mid-stream " : ""}${failure.type}: ${failure.message} (in=${usage.input_tokens} cached=${usage.cache_read_input_tokens} out=${usage.output_tokens})`
+        : `in=${usage.input_tokens} cached=${usage.cache_read_input_tokens} out=${usage.output_tokens} stop=${mapper.stopReason}`,
       usage: { input: usage.input_tokens, cached: usage.cache_read_input_tokens, output: usage.output_tokens },
       stopReason: mapper.stopReason,
     };

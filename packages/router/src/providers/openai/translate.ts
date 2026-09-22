@@ -346,6 +346,18 @@ export class OpenAiStreamMapper {
 
   get isFinished(): boolean { return this.finished; }
 
+  /**
+   * Whether the vendor said the answer was over: `response.completed`/`response.incomplete` on
+   * Responses, a `finish_reason` on Chat. A stream that closes without either was cut off, and
+   * finishing it as `end_turn` hands the client an empty or half answer it accepts as final — the
+   * worker that "stalls and dies" (muse, 84 of 1,815 turns, 2026-09-18..22).
+   */
+  get completed(): boolean { return this.sawCompletion; }
+  private sawCompletion = false;
+
+  /** The error `fail` reported, so a non-streaming caller can answer with it instead of a 200. */
+  failure: { type: string; message: string } | undefined;
+
   start(): AnthropicEvent[] {
     if (this.started) return [];
     this.started = true;
@@ -440,7 +452,10 @@ export class OpenAiStreamMapper {
           }
         }
       }
-      if (typeof choice.finish_reason === "string" && choice.finish_reason) this.finishReason = choice.finish_reason;
+      if (typeof choice.finish_reason === "string" && choice.finish_reason) {
+        this.finishReason = choice.finish_reason;
+        this.sawCompletion = true;
+      }
     }
     return out;
   }
@@ -540,6 +555,7 @@ export class OpenAiStreamMapper {
       const response = ev.response as { usage?: unknown; incomplete_details?: { reason?: unknown } } | undefined;
       this.setUsage(response?.usage);
       if (response?.incomplete_details?.reason === "max_output_tokens") this.finishReason = "length";
+      this.sawCompletion = true;
     } else if (type === "response.failed" || type === "error") {
       const error = (type === "error" ? ev.error : (ev.response as { error?: unknown } | undefined)?.error) as { message?: unknown; code?: unknown } | undefined;
       return [...out, ...this.fail(typeof error?.message === "string" ? error.message : "upstream response failed", typeof error?.code === "string" ? error.code : undefined)];
@@ -569,7 +585,10 @@ export class OpenAiStreamMapper {
   fail(message: string, code?: string): AnthropicEvent[] {
     if (this.finished) return [];
     this.finished = true;
-    const type = code === "rate_limit_exceeded" ? "rate_limit_error" : "api_error";
+    // `overloaded_error` is the one mid-stream error Claude Code retries on its own (CLI 2.1.278
+    // matches `"type":"overloaded_error"` in the message); `api_error` ends the turn for good.
+    const type = code === "rate_limit_exceeded" ? "rate_limit_error" : code === "server_is_overloaded" ? "overloaded_error" : "api_error";
+    this.failure = { type, message };
     return [...this.start(), ...this.closeBlock(), { event: "error", data: { type: "error", error: { type, message } } }];
   }
 

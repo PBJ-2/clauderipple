@@ -402,6 +402,9 @@ export class StreamMapper {
     return this.finished;
   }
 
+  /** The error `fail` reported, so a non-streaming caller can answer with it instead of a 200. */
+  failure: { type: string; message: string } | undefined;
+
   start(): AnthropicEvent[] {
     if (this.started) return [];
     this.started = true;
@@ -557,6 +560,7 @@ export class StreamMapper {
     if (this.finished) return [];
     this.finished = true;
     const type = code === "server_is_overloaded" ? "overloaded_error" : code === "rate_limit_exceeded" || code === "usage_limit_reached" ? "rate_limit_error" : "api_error";
+    this.failure = { type, message };
     return [...this.start(), ...this.closeBlock(), { event: "error", data: { type: "error", error: { type, message } } }];
   }
 

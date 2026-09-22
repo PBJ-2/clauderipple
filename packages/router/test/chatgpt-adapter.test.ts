@@ -15,7 +15,7 @@ fs.writeFileSync(path.join(home, "chatgpt-auth.json"), JSON.stringify({ accessTo
 
 type Seen = { headers: http.IncomingHttpHeaders; body: Record<string, unknown>; path: string };
 const seen: Seen[] = [];
-let mode: "stream" | "search" | "error429" | "sse-error" = "stream";
+let mode: "stream" | "search" | "error429" | "sse-error" | "cut-off" = "stream";
 // Active quota lookup (GET /wham/usage): its own mode so it can be exercised independently.
 let usageMode: "ok" | "unauthorized" | "no-window" = "ok";
 let usageHits = 0;
@@ -98,6 +98,10 @@ const backend = http.createServer((req, res) => {
     res.writeHead(200, { "content-type": "text/event-stream", "x-codex-turn-state": `ts-${turnStates}` });
     if (mode === "sse-error") {
       res.end(sse([{ type: "response.created", response: {} }, { type: "error", error: { code: "server_is_overloaded", message: "overloaded" } }]));
+      return;
+    }
+    if (mode === "cut-off") {
+      res.end(sse([{ type: "response.created", response: {} }, { type: "response.output_text.delta", delta: "Hal" }]));
       return;
     }
     const body = sse(happy);
@@ -244,6 +248,18 @@ test("HTTP 429 upstream → Anthropic rate_limit_error 429", async () => {
 
 test("rateLimitsFromHeaders: missing headers → null", () => {
   assert.equal(rateLimitsFromHeaders(new Headers({ "content-type": "text/event-stream" })), null);
+});
+
+// The backend closing without response.completed used to be finished as end_turn with what had
+// arrived, which the client took as the model's final answer (gpt-6-astra, 12 empty turns).
+test("a stream cut off before response.completed → retryable overloaded_error, not end_turn", async () => {
+  mode = "cut-off";
+  const streamed = await call(request);
+  assert.match(streamed.text, /"type":"overloaded_error"/);
+  assert.doesNotMatch(streamed.text, /message_stop/);
+  const whole = await call({ ...request, stream: false });
+  assert.equal(whole.status, 529);
+  assert.equal(JSON.parse(whole.text).error.type, "overloaded_error");
 });
 
 test("SSE error event → streamed Anthropic error event", async () => {
