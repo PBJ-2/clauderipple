@@ -674,6 +674,23 @@ what we do not have yet — so that adding a provider does not start with readin
   then maps SSE back into Anthropic `message_start`, content-block, `message_delta`,
   and `message_stop` events. It supports text, base64/URL images, function tools,
   tool results, non-streaming replies, and local `count_tokens` estimates.
+- **A model may speak another wire than the rest of its provider.** One subscription can
+  serve several protocols on one key and one catalog: OpenCode Go answers Responses,
+  Chat Completions and Anthropic Messages models on the same plan, and its `/models`
+  lists them together (measured 2026-09-18). `wire` and `url` sat only on the provider,
+  so that one account had to be configured as three providers — a split the user saw in
+  the GUI and had to repeat in every `direct` rule. A model entry now overrides `wire`
+  (`chat`, `responses` or `anthropic`), `url` and `authHeader`, and `providerFor` in
+  `config.ts` folds those into an ordinary provider at the moment a request's model is
+  known, so every `provider.type` branch downstream works against one unchanged
+  contract. A provider with no override for that model is returned by identity.
+  `authHeader` names a convention rather than restating the key: the provider's own
+  credential is re-sent under the header that model's wire expects, so there is one copy
+  of the key to rotate. Each endpoint follows the API it imitates — an Anthropic-wire
+  model wants `x-api-key` where an OpenAI-wire one on the same key wants a bearer. A
+  config still written as three providers is folded on the way in and its `direct` and
+  `routes` references follow; nothing is rewritten on disk, so it stays readable by an
+  older router until the GUI saves it.
 - Translation deliberately strips `thinking`, `context_management`, `thread`,
   `diagnostics`, and `container`; `thread:continue` is refused exactly as in §4a so
   the CLI resends a full stateless history. The per-turn
