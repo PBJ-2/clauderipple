@@ -980,9 +980,13 @@ async function pollMeasure(port: number, jobId: string): Promise<Record<string, 
   throw new Error("measure job never finished");
 }
 
-function stubFetch(status: (url: string, body: { reasoning_effort?: string }) => number): (url: string, init: RequestInit) => Promise<Response> {
+/** Each wire names the effort differently — `reasoning_effort` on Chat, `reasoning.effort` on
+ * Responses, `output_config.effort` on Anthropic Messages — so a stub reads whichever is there. */
+type StubBody = { reasoning_effort?: string; reasoning?: { effort?: string }; output_config?: { effort?: string } };
+
+function stubFetch(status: (url: string, body: StubBody) => number): (url: string, init: RequestInit) => Promise<Response> {
   return async (url, init) => {
-    const body = init.body ? JSON.parse(String(init.body)) as { reasoning_effort?: string } : {};
+    const body = init.body ? JSON.parse(String(init.body)) as StubBody : {};
     return new Response(JSON.stringify({}), { status: status(url, body) });
   };
 }
@@ -1000,9 +1004,13 @@ test("POST /api/providers/measure runs in the background and polling settles the
       },
     },
   });
-  // The provider's own wire (Responses) is unavailable for this model, Chat answers, and `minimal`
-  // is the effort the vendor refuses — exactly the mimo-v2.6-pro shape measured 2026-09-22.
-  const measureFetch = stubFetch((url, body) => (url.endsWith("/responses") ? 503 : body.reasoning_effort === "minimal" ? 400 : 200));
+  // The provider's own wire (Responses) is unavailable for this model, Chat answers, and the vendor
+  // takes only these levels — exactly the mimo-v2.6-pro shape measured 2026-09-22. Every level the
+  // measurement knows of is offered, so what comes back is the endpoint's answer, not the config's.
+  const takes = new Set(["none", "low", "medium", "high"]);
+  const measureFetch = stubFetch((url, body) =>
+    url.endsWith("/responses") ? 503
+      : body.reasoning_effort === undefined || takes.has(String(body.reasoning_effort)) ? 200 : 400);
   await withAdmin(cfg, async ({ port, configFile }) => {
     const started = await fetch(`${base()}:${port}/api/providers/measure`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "oc", models: ["mimo"] }),
@@ -1015,10 +1023,12 @@ test("POST /api/providers/measure runs in the background and polling settles the
     assert.equal(job.state, "done");
     assert.equal(job.done, 1);
     assert.equal(job.total, 1);
-    assert.deepEqual(job.results, [{ id: "mimo", wire: "chat", effortLevels: ["none", "low"] }]);
+    assert.deepEqual(job.results, [{ id: "mimo", wire: "chat", effortLevels: ["none", "low", "medium", "high"] }]);
     const onDisk = JSON.parse(fs.readFileSync(configFile, "utf8")) as Config;
     assert.equal(onDisk.providers.oc?.models?.[0]?.wire, "chat");
-    assert.deepEqual(onDisk.providers.oc?.models?.[0]?.effortLevels, ["none", "low"]);
+    // `medium` and `high` are in although the provider declared neither: a measurement corrects the
+    // configuration in both directions, or a level the plan really offers stays out of reach.
+    assert.deepEqual(onDisk.providers.oc?.models?.[0]?.effortLevels, ["none", "low", "medium", "high"]);
   }, { measureFetch });
 });
 
@@ -1038,7 +1048,12 @@ test("measurement fills blank fields but never overwrites a wire or ladder the u
       },
     },
   });
-  const measureFetch = stubFetch(() => 200);
+  const takes = new Set(["none", "low"]);
+  // This provider stays on its own Responses wire, which carries the level as `reasoning.effort`.
+  const measureFetch = stubFetch((_url, body) => {
+    const level = body.reasoning?.effort;
+    return level === undefined || takes.has(level) ? 200 : 400;
+  });
   await withAdmin(cfg, async ({ port, configFile }) => {
     const started = await fetch(`${base()}:${port}/api/providers/measure`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "oc", models: ["muse", "fresh"] }),

@@ -53,15 +53,25 @@ test("a 401 stops everything as an auth problem: no wire is guessed and no furth
   assert.equal(calls.length, 1);
 });
 
-test("only the effort levels refused with 400 are dropped (mimo: minimal and xhigh, measured 2026-09-22)", async () => {
-  const { fetch } = recorder((_url, body) => (body.reasoning_effort === "minimal" || body.reasoning_effort === "xhigh" ? 400 : 200));
+test("only the levels the endpoint refuses are dropped (mimo: minimal and xhigh, measured 2026-09-22)", async () => {
+  const takes = new Set(["none", "low", "medium", "high"]);
+  const { calls, fetch } = recorder((_url, body) => (body.reasoning_effort === undefined || takes.has(String(body.reasoning_effort)) ? 200 : 400));
   const result = await measureModel("mimo-v2.6-pro", [{ wire: "chat", url: BASE }], ["none", "minimal", "low", "medium", "high", "xhigh"], { fetch });
   assert.equal(result.wire, "chat");
   assert.deepEqual(result.effortLevels, ["none", "low", "medium", "high"]);
+  // mimo names nothing in its complaint, so the whole known set is tried rather than the six the
+  // provider declared — which is how a level the configuration omits can still be found.
+  const tried = calls.map((call) => call.body.reasoning_effort).filter((level) => level !== undefined);
+  assert.ok(tried.includes("max"), "a level outside the provider's ladder is still offered to the endpoint");
 });
 
 test("a rate-limited or errored level stays in the ladder: a momentary failure is not a capability answer", async () => {
-  const { fetch } = recorder((_url, body) => (body.reasoning_effort === "low" ? 429 : body.reasoning_effort === "high" ? 500 : 200));
+  const { fetch } = recorder((_url, body) => {
+    const level = body.reasoning_effort;
+    if (level === "low") return 429;
+    if (level === "high") return 500;
+    return level === undefined || level === "medium" ? 200 : 400;
+  });
   const result = await measureModel("m", [{ wire: "chat", url: BASE }], ["low", "medium", "high"], { fetch });
   assert.deepEqual(result.effortLevels, ["low", "medium", "high"]);
 });
@@ -70,7 +80,8 @@ test("a dropped connection keeps the level too, rather than reading as unsupport
   const fetch = async (_url: string, init: RequestInit): Promise<Response> => {
     const body = JSON.parse(String(init.body)) as { reasoning_effort?: string };
     if (body.reasoning_effort === "medium") throw new Error("socket hang up");
-    return jsonResponse(200);
+    if (body.reasoning_effort === undefined || body.reasoning_effort === "low" || body.reasoning_effort === "high") return jsonResponse(200);
+    return jsonResponse(400);
   };
   const result = await measureModel("m", [{ wire: "chat", url: BASE }], ["low", "medium", "high"], { fetch });
   assert.deepEqual(result.effortLevels, ["low", "medium", "high"]);
@@ -101,19 +112,17 @@ test("each wire is asked in the shape the router actually sends, on the path tha
 });
 
 test("effort is carried the way each wire carries it: reasoning_effort, reasoning.effort, output_config.effort", async () => {
-  const seen: Record<string, unknown>[] = [];
-  const fetch: MeasureDeps["fetch"] = async (url, init) => {
-    if (/chat\/completions|\/responses|\/v1\/messages/.test(url)) seen.push(JSON.parse(String(init.body)) as Record<string, unknown>);
-    return jsonResponse(200);
+  const effortOf = (b: Record<string, unknown>): unknown =>
+    b.reasoning_effort ?? (b.reasoning as { effort?: unknown } | undefined)?.effort ?? (b.output_config as { effort?: unknown } | undefined)?.effort;
+  const run = async (candidate: WireCandidate): Promise<Record<string, unknown> | undefined> => {
+    const seen: Record<string, unknown>[] = [];
+    const fetch: MeasureDeps["fetch"] = async (_url, init) => { seen.push(JSON.parse(String(init.body)) as Record<string, unknown>); return jsonResponse(200); };
+    await measureModel("m", [candidate], ["low"], { fetch });
+    return seen.find((body) => effortOf(body) === "low");
   };
-  await measureModel("m", [{ wire: "chat", url: BASE }], ["low"], { fetch });
-  await measureModel("m", [{ wire: "responses", url: BASE }], ["low"], { fetch });
-  await measureModel("m", [{ wire: "anthropic", url: "https://x" }], ["low"], { fetch });
-  const effortRequests = seen.filter((b) => "reasoning_effort" in b || "reasoning" in b || "output_config" in b);
-  assert.equal(effortRequests.length, 3);
-  assert.equal(effortRequests[0]!.reasoning_effort, "low");
-  assert.deepEqual(effortRequests[1]!.reasoning, { effort: "low" });
-  assert.deepEqual(effortRequests[2]!.output_config, { effort: "low" });
+  assert.equal((await run({ wire: "chat", url: BASE }))?.reasoning_effort, "low");
+  assert.deepEqual((await run({ wire: "responses", url: BASE }))?.reasoning, { effort: "low" });
+  assert.deepEqual((await run({ wire: "anthropic", url: "https://x" }))?.output_config, { effort: "low" });
 });
 
 test("the session header rides every request with a fresh value, and the key moves to the wire's auth convention", async () => {
@@ -121,7 +130,7 @@ test("the session header rides every request with a fresh value, and the key mov
   await measureModel("m", [{ wire: "anthropic", url: "https://x", authHeader: "x-api-key" }], ["low"], {
     fetch, sessionHeader: "x-opencode-session", headers: { authorization: "Bearer sk-secret" },
   });
-  assert.equal(calls.length, 2);
+  assert.ok(calls.length >= 2);
   assert.equal(calls[0]!.headers["x-api-key"], "sk-secret");
   assert.equal(calls[0]!.headers.authorization, undefined, "the same key is not sent twice in two conventions");
   for (const call of calls) assert.match(call.headers["x-opencode-session"] ?? "", /^measure-[0-9a-f]{16}$/);
@@ -133,4 +142,41 @@ test("when no candidate answers, the failure is reported and no wire is invented
   const result = await measureModel("m", wireCandidates, [], { fetch });
   assert.equal(result.wire, undefined);
   assert.match(result.error ?? "", /^404 /);
+});
+
+// Measured 2026-09-22: `deepseek-v4.1-flash` answers 200 to `max`, which the OpenCode Go ladder does
+// not list, and refuses an impossible level with 422 rather than 400 — the status differs by model
+// on the very same plan. A measurement that trusted the configured ladder, or only 400, would have
+// recorded neither fact.
+test("a level the provider never declared is found, and a 422 refusal counts as one", async () => {
+  const takes = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "ultra", "max"]);
+  const { fetch } = recorder((_url, body) => {
+    const level = body.reasoning_effort;
+    if (level === undefined) return 200;
+    return takes.has(String(level)) ? 200 : 422;
+  });
+  const result = await measureModel("deepseek-v4.1-flash", [{ wire: "chat", url: BASE }], ["none", "low"], { fetch });
+  assert.deepEqual(result.effortLevels, ["none", "minimal", "low", "medium", "high", "xhigh", "ultra", "max"]);
+});
+
+// The endpoint answering an impossible level by listing the possible ones is the cheapest ladder
+// there is, and the only one that can name a level nobody here has heard of yet.
+test("levels the endpoint names in its complaint become the candidates, weakest first", async () => {
+  const tried: unknown[] = [];
+  const fetch: MeasureDeps["fetch"] = async (_url, init) => {
+    // The Responses wire carries the level as `reasoning.effort`, so that is where to read it.
+    const body = JSON.parse(String(init.body)) as { reasoning?: { effort?: string } };
+    const level = body.reasoning?.effort;
+    if (level === undefined) return jsonResponse(200);
+    if (level === "clauderipple-probe") {
+      return jsonResponse(400, { error: { message: "reasoning_effort 'clauderipple-probe' is not supported for model 'muse'. Supported values: [minimal, low, medium, high, xhigh, max]" } });
+    }
+    tried.push(level);
+    // Measured 2026-09-22: muse lists `max` among its supported values and then refuses it anyway,
+    // so the list is a candidate set and the call is what settles each one.
+    return jsonResponse(level === "max" ? 400 : 200);
+  };
+  const result = await measureModel("muse-spark-1.3-contributor", [{ wire: "responses", url: BASE }], ["none", "low"], { fetch });
+  assert.deepEqual(tried, ["minimal", "low", "medium", "high", "xhigh", "max"], "only what it named, and `none` is not among them");
+  assert.deepEqual(result.effortLevels, ["minimal", "low", "medium", "high", "xhigh"]);
 });

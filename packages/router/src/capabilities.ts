@@ -97,17 +97,64 @@ function requestBody(wire: WireCandidate["wire"], id: string, effort?: string): 
 }
 
 /**
- * Which of `ladder` this model accepts, one level at a time.
+ * Every effort level seen named by any endpoint here, weakest first.
  *
- * Only an explicit 400 is a capability answer — the "Invalid request parameters" body the vendor
- * sends for a level it does not take. A 429, a 5xx or a dropped connection says nothing about the
- * level itself, and dropping a level on one of those would quietly shrink the ladder the GUI offers
- * over a momentary hiccup. Those levels are kept, because an unmeasured level is not an absent one.
+ * A model can take a level its provider's configured ladder never lists: measured 2026-09-22,
+ * `deepseek-v4.1-flash` answers 200 to `max`, which is absent from the OpenCode Go ladder, so
+ * measuring only what the provider declared could narrow a ladder but never widen one and the level
+ * stayed invisible. The candidate set has to be wider than the configuration it is correcting.
+ */
+const KNOWN_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "ultra", "max"];
+
+/** A value no vendor defines, sent to make the endpoint name the ones it does. */
+const NOT_A_LEVEL = "clauderipple-probe";
+
+/** A refusal of the level itself, as opposed to anything that merely went wrong. OpenCode Go answers
+ * 400 for one model and 422 for another (measured 2026-09-22), so both count. */
+function refusedLevel(status: number): boolean {
+  return status === 400 || status === 422;
+}
+
+/**
+ * The levels worth trying: what the endpoint says it takes, else everything known.
+ *
+ * Asked for a level that cannot exist, some endpoints answer with their whole list — "expected one
+ * of `none`, `minimal`, … `ultra`, `max`", or "Supported values: [minimal, low, … max]" (measured
+ * 2026-09-22). That is a candidate list and nothing more: `muse-spark-1.3-contributor` names `max`
+ * among its supported values and then refuses it with a 400, so what a level actually does is still
+ * settled by sending it.
+ */
+async function candidateLevels(id: string, candidate: WireCandidate, ladder: string[], deps: MeasureDeps): Promise<string[]> {
+  let listed: string[] = [];
+  try {
+    const response = await deps.fetch(endpointFor(candidate.wire, candidate.url), { method: "POST", headers: requestHeaders(candidate, deps), body: requestBody(candidate.wire, id, NOT_A_LEVEL) });
+    if (!response.ok) listed = parseLevels(await response.text());
+  } catch { /* the endpoint said nothing; fall back to everything known */ }
+  const wanted = listed.length > 0 ? listed : [...ladder, ...KNOWN_EFFORTS];
+  const seen = new Set(wanted);
+  // Canonical order first so the GUI reads weakest to strongest, then anything newly named.
+  return [...KNOWN_EFFORTS.filter((level) => seen.has(level)), ...wanted.filter((level) => !KNOWN_EFFORTS.includes(level))]
+    .filter((level, index, all) => all.indexOf(level) === index);
+}
+
+/** The levels an endpoint listed in its complaint, or nothing when it did not list any. */
+export function parseLevels(message: string): string[] {
+  const listed = /supported values:\s*\[([^\]]+)\]/i.exec(message)?.[1] ?? /expected one of\s+(.+?)(?:\s+at line\b|$)/i.exec(message)?.[1];
+  if (!listed) return [];
+  return [...listed.matchAll(/[A-Za-z][A-Za-z0-9_-]*/g)].map((match) => match[0].toLowerCase()).filter((level) => level !== NOT_A_LEVEL);
+}
+
+/**
+ * Which levels this model accepts, one at a time.
+ *
+ * Only an explicit refusal is a capability answer. A 429, a 5xx or a dropped connection says nothing
+ * about the level itself, and dropping a level on one of those would quietly shrink the ladder the
+ * GUI offers over a momentary hiccup. Those levels are kept: an unmeasured level is not an absent one.
  */
 async function measureLadder(id: string, candidate: WireCandidate, ladder: string[], deps: MeasureDeps): Promise<string[]> {
   const supported: string[] = [];
   const url = endpointFor(candidate.wire, candidate.url);
-  for (const level of ladder) {
+  for (const level of await candidateLevels(id, candidate, ladder, deps)) {
     let response: Response;
     try {
       response = await deps.fetch(url, { method: "POST", headers: requestHeaders(candidate, deps), body: requestBody(candidate.wire, id, level) });
@@ -115,7 +162,7 @@ async function measureLadder(id: string, candidate: WireCandidate, ladder: strin
       supported.push(level); // transient — keep
       continue;
     }
-    if (response.ok || response.status !== 400) supported.push(level);
+    if (!refusedLevel(response.status)) supported.push(level);
   }
   return supported;
 }
