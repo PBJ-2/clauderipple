@@ -16,13 +16,14 @@ import path from "node:path";
 import http from "node:http";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import type { Config, ProviderModel } from "./config.ts";
+import type { Config, Provider, ProviderModel } from "./config.ts";
 import { homeDir, validate } from "./config.ts";
 import type { Logger } from "./log.ts";
 import type { Stats } from "./proxy.ts";
 import type { RequestLog } from "./requestlog.ts";
 import { PRESETS, type ProviderPreset } from "./presets.ts";
 import { resolveCompatibleCaps } from "./compat.ts";
+import { measureModel, type Measured, type WireCandidate } from "./capabilities.ts";
 import { ClaudeCodeAuthStore, nativeAnthropicHeaders } from "./providers/anthropic.ts";
 import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
 import { codexEnabled, codexHome } from "../../cli/src/codex.ts";
@@ -79,6 +80,10 @@ export type AdminDeps = {
   runCli?: (args: string[], timeout?: number) => Promise<{ ok: boolean; output: string }>;
   /** Test seam for the native Anthropic API-key probe. */
   probeFetch?: (url: string, init: RequestInit) => Promise<Response>;
+  /** Test seam for a provider model probe (`POST /api/providers/probe`), which in production uses a timeout. */
+  probeModelFetch?: (url: string, init: RequestInit) => Promise<Response>;
+  /** Test seam for the background capability measurement. Production uses a timeout-wrapped fetch. */
+  measureFetch?: (url: string, init: RequestInit) => Promise<Response>;
   /** Test seams for the Claude subscription sign-in: the token endpoint and the browser. */
   claudeOAuthFetch?: (url: string, init: RequestInit) => Promise<Response>;
   openBrowser?: (url: string) => boolean;
@@ -485,6 +490,15 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
   res.end(out);
 }
 
+/** Write the config file atomically. The one save path: the GUI's PUT and the capability
+ * measurement both go through it, so the router never picks up a half-written file either way. */
+function writeConfigFile(configFile: string, config: Config): void {
+  const tmp = `${configFile}.tmp-${process.pid}-${Date.now()}`;
+  fs.mkdirSync(path.dirname(configFile), { recursive: true });
+  fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + "\n");
+  fs.renameSync(tmp, configFile);
+}
+
 function headerValue(headers: Record<string, string> | undefined): { name: string; value: string } | null {
   if (!headers) return null;
   for (const [name, value] of Object.entries(headers)) {
@@ -614,13 +628,13 @@ async function fetchWithTimeout(url: string, init: RequestInit): Promise<Respons
   return fetch(url, { ...init, signal: AbortSignal.timeout(8_000) });
 }
 
-async function probeProvider(body: ProbeRequest): Promise<{ ok: boolean; auth: ProbeAuth; models: ModelEntry[]; error?: string }> {
+async function probeProvider(body: ProbeRequest, probeFetch: (url: string, init: RequestInit) => Promise<Response> = fetchWithTimeout): Promise<{ ok: boolean; auth: ProbeAuth; models: ModelEntry[]; error?: string }> {
   const source = headerValue(body.headers);
   let models: ModelEntry[] = [];
   let modelsError: string | undefined;
   if (body.modelsUrl) {
     try {
-      const response = await fetchWithTimeout(body.modelsUrl, { headers: authHeaders(source, body.modelsAuthHeader) });
+      const response = await probeFetch(body.modelsUrl, { headers: authHeaders(source, body.modelsAuthHeader) });
       if (response.status === 401 || response.status === 403) return { ok: false, auth: "bad-key", models: [], error: `models endpoint returned ${response.status}` };
       if (response.ok) models = withPresetOverrides(parsedModels(await response.json()), body.preset);
       else modelsError = `models endpoint returned ${response.status}`;
@@ -636,7 +650,7 @@ async function probeProvider(body: ProbeRequest): Promise<{ ok: boolean; auth: P
     : { model: models[0]?.id ?? body.probeModel ?? "test", max_tokens: 1, messages: [{ role: "user", content: "hi" }] };
   const label = openai ? "chat completions endpoint" : "messages endpoint";
   try {
-    const response = await fetchWithTimeout(checkUrl, {
+    const response = await probeFetch(checkUrl, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -663,8 +677,161 @@ async function probeProvider(body: ProbeRequest): Promise<{ ok: boolean; auth: P
   }
 }
 
-function pickerModels(deps: AdminDeps): { models: { id: string; name: string }[]; source: "picker" | "fallback" } {
-  const last = deps.picker?.().last;
+/**
+ * Measure what each model's wire and effort ladder actually is, in the background, and settle the
+ * answers into the config.
+ *
+ * A model absent from a preset's table inherits the provider's default wire and is sent to an
+ * endpoint that may not serve it — OpenCode Go answers 503 on the wrong wire (measured 2026-09-22),
+ * which surfaces as an unexplained 529. `/models` carries no capability metadata to avoid that, so
+ * the only source is a real request. A measurement sends several small ones, so it runs detached
+ * and the caller polls the job instead of holding a request open for it.
+ */
+type MeasureJob = { state: "running" | "done" | "failed"; done: number; total: number; results: Measured[]; error?: string; /** Epoch ms the job finished, for the TTL sweep. Internal: not part of the polled shape. */ finishedAt?: number };
+const MEASURE_JOBS = new Map<string, MeasureJob>();
+/** Measured capability does not change minute to minute, so a finished job is served for a while
+ * and then dropped: a test or a GUI that polls late should re-measure rather than hold the result
+ * (and its error strings) in memory for the life of the process. */
+const MEASURE_JOB_TTL_MS = 10 * 60 * 1000;
+const MEASURE_TIMEOUT_MS = 20_000;
+
+async function measureFetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+  return fetch(url, { ...init, signal: AbortSignal.timeout(MEASURE_TIMEOUT_MS) });
+}
+
+/** Drop finished jobs past their TTL. Run on each measure request, so no timer keeps the process up. */
+function sweepMeasureJobs(): void {
+  const cutoff = Date.now() - MEASURE_JOB_TTL_MS;
+  for (const [id, job] of MEASURE_JOBS) if (job.state !== "running" && job.finishedAt !== undefined && job.finishedAt < cutoff) MEASURE_JOBS.delete(id);
+}
+
+/**
+ * The wires a model of this provider might speak, in the order they are worth trying.
+ *
+ * The preset's own entry for this exact model goes first when there is one. Order decides the
+ * answer, because the first wire to reply wins — and a plan can serve one model on two of them:
+ * measured 2026-09-22, `minimax-m3` answers on both Chat Completions and Anthropic Messages, so
+ * trying the list in catalogue order made it measure as `chat` and quietly overrule the `anthropic`
+ * the preset recorded for it. A recorded wire is still only a starting point: it has to answer like
+ * any other candidate, and the rest of the list is tried when it does not.
+ */
+function measureCandidates(p: Provider, modelId?: string): WireCandidate[] {
+  const defaultWire: "chat" | "responses" | "anthropic" =
+    p.type === "anthropic-compatible" ? "anthropic"
+      : p.type === "openai-compatible" ? (p.wire ?? "chat")
+        : "chat";
+  const ownUrl = "url" in p ? p.url : "";
+  const ownHeader = "authHeader" in p ? (p as { authHeader?: "x-api-key" | "authorization-bearer" }).authHeader : undefined;
+  const own: WireCandidate = { wire: defaultWire, url: ownUrl, ...(ownHeader ? { authHeader: ownHeader } : {}) };
+  const candidates: WireCandidate[] = [];
+  const seen = new Set<string>();
+  const add = (c: WireCandidate): void => {
+    const key = `${c.wire}|${c.url}|${c.authHeader ?? ""}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    candidates.push(c);
+  };
+  const known = "preset" in p && p.preset
+    ? PRESETS.find((entry) => entry.id === p.preset)?.fallbackModels?.find((m) => m.id === modelId)
+    : undefined;
+  if (known?.wire) add({ wire: known.wire, url: known.url ?? ownUrl, ...(known.authHeader ? { authHeader: known.authHeader } : {}) });
+  add(own);
+  if (p.type === "openai-compatible" && p.preset) {
+    // One plan can serve several wires on one catalog. The preset's fallback list is the only place
+    // any of that mapping is written down, so it is what the remaining candidates are read from.
+    const preset = PRESETS.find((entry) => entry.id === p.preset);
+    for (const model of preset?.fallbackModels ?? []) add({ wire: model.wire ?? defaultWire, url: model.url ?? p.url, ...(model.authHeader ? { authHeader: model.authHeader } : {}) });
+  } else if (p.type === "openai-compatible") {
+    // No table to read: the two OpenAI wires this kind of provider could be serving.
+    add({ wire: "responses", url: p.url });
+    add({ wire: "chat", url: p.url });
+  } else if (p.type === "anthropic-compatible" && p.preset) {
+    const preset = PRESETS.find((entry) => entry.id === p.preset);
+    for (const model of preset?.fallbackModels ?? []) if (model.wire) add({ wire: model.wire, url: model.url ?? p.url, ...(model.authHeader ? { authHeader: model.authHeader } : {}) });
+  }
+  return candidates;
+}
+
+/** The effort ladder this provider offers, before any per-model override narrows it. */
+function providerLadder(p: Provider): string[] {
+  if (p.type === "openai-compatible") return p.caps?.reasoning === "effort" ? [...(p.caps.effortLevels ?? [])] : [];
+  if (p.type === "anthropic-compatible") return [...(p.caps?.effortLevels ?? [])];
+  return [];
+}
+
+/**
+ * Fold measurements into the config on disk.
+ *
+ * Read again here rather than reusing what the job started with: the user may have saved from the
+ * GUI while the measurements ran, and writing back a stale copy would silently revert that save.
+ * Only a model that is still present is touched, and only into a blank field — a `wire` or
+ * `effortLevels` already on the model is the user's, and an explicitly empty array is a decision
+ * (it disables the provider fallback), not an empty slot. A model whose measurement errored is
+ * left entirely alone. The result is validated with the same `validate` the GUI's save uses, so a
+ * bad edit is refused rather than written.
+ */
+function applyMeasurements(configFile: string, results: Measured[]): { applied: number } | { error: string } {
+  let current: Config;
+  try {
+    current = JSON.parse(fs.readFileSync(configFile, "utf8")) as Config;
+  } catch (e) {
+    return { error: `could not re-read config: ${errorText(e)}` };
+  }
+  let applied = 0;
+  for (const result of results) {
+    if (result.error || !result.wire) continue;
+    for (const provider of Object.values(current.providers)) {
+      if (!("models" in provider) || !provider.models) continue;
+      const model = provider.models.find((entry) => entry.id === result.id);
+      if (!model) continue;
+      const before = `${model.wire ?? ""}|${model.effortLevels ? model.effortLevels.join(",") : "∅"}`;
+      if (model.wire === undefined) model.wire = result.wire;
+      if (model.effortLevels === undefined && result.effortLevels !== undefined) model.effortLevels = result.effortLevels;
+      if (`${model.wire ?? ""}|${model.effortLevels ? model.effortLevels.join(",") : "∅"}` !== before) applied++;
+    }
+  }
+  const errors = validate(current);
+  if (errors.length > 0) return { error: `measured config did not validate: ${errors[0]}` };
+  writeConfigFile(configFile, current);
+  return { applied };
+}
+
+/** Run one provider measurement job to completion. Detached: the request that started it has already answered. */
+async function runMeasureJob(jobId: string, providerName: string, models: string[], deps: AdminDeps): Promise<void> {
+  const job = MEASURE_JOBS.get(jobId);
+  if (!job) return;
+  const provider = deps.config().providers[providerName];
+  if (!provider || (provider.type !== "openai-compatible" && provider.type !== "anthropic-compatible")) {
+    MEASURE_JOBS.set(jobId, { ...job, state: "failed", error: `provider "${providerName}" is not openai-compatible or anthropic-compatible` });
+    return;
+  }
+  const ladder = providerLadder(provider);
+  const fetchImpl = deps.measureFetch ?? measureFetchWithTimeout;
+  const headers = "headers" in provider ? provider.headers : undefined;
+  const sessionHeader = "sessionHeader" in provider ? provider.sessionHeader : undefined;
+  for (const id of models) {
+    // Per model, not once per job: the order depends on what the preset recorded for this id.
+    const candidates = measureCandidates(provider, id);
+    const measured = await measureModel(id, candidates, ladder, { fetch: fetchImpl, ...(sessionHeader ? { sessionHeader } : {}), ...(headers ? { headers } : {}) });
+    job.results.push(measured);
+    job.done++;
+    deps.log.info(`admin: measured ${providerName}/${id} -> ${measured.error ? `error ${measured.error}` : `wire ${measured.wire}${measured.effortLevels ? ` effort ${measured.effortLevels.join(",")}` : ""}`}`);
+  }
+  try {
+    const outcome = applyMeasurements(deps.configFile, job.results);
+    if ("error" in outcome) {
+      MEASURE_JOBS.set(jobId, { ...job, state: "failed", error: outcome.error, finishedAt: Date.now() });
+      deps.log.warn(`admin: measurement for ${providerName} was not applied: ${outcome.error}`);
+      return;
+    }
+    deps.log.info(`admin: measurement for ${providerName} applied to ${outcome.applied} model(s)`);
+    MEASURE_JOBS.set(jobId, { ...job, state: "done", finishedAt: Date.now() });
+  } catch (e) {
+    MEASURE_JOBS.set(jobId, { ...job, state: "failed", error: errorText(e), finishedAt: Date.now() });
+  }
+}
+
+function pickerModels(deps: AdminDeps): { models: { id: string; name: string }[]; source: "picker" | "fallback" } {  const last = deps.picker?.().last;
   if (last && typeof last === "object" && Array.isArray((last as { surfaces?: unknown }).surfaces)) {
     const entries = (last as { surfaces: { id?: unknown; entries?: unknown }[] }).surfaces
       .filter((surface) => surface.id === "code" || surface.id === "ccd")
@@ -887,8 +1054,49 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           ...(probe.modelsAuthHeader ? { modelsAuthHeader: probe.modelsAuthHeader } : {}),
           ...(typeof probe.preset === "string" && probe.preset ? { preset: probe.preset } : {}),
           ...(typeof probe.probeModel === "string" ? { probeModel: probe.probeModel } : {}),
-        });
+        }, deps.probeModelFetch ?? fetchWithTimeout);
         sendJson(res, 200, result);
+        return;
+      }
+      // Measure what each model's wire and effort ladder actually is, in the background: a job is
+      // several small upstream requests, and the caller polls /api/providers/measure/<jobId> rather
+      // than holding a request open for all of them.
+      if (pathname === "/api/providers/measure" && method === "POST") {
+        let body: { provider?: unknown; models?: unknown };
+        try {
+          body = JSON.parse((await readBody(req)).toString("utf8")) as { provider?: unknown; models?: unknown };
+        } catch {
+          sendJson(res, 400, { error: "invalid JSON" });
+          return;
+        }
+        if (typeof body.provider !== "string" || !Array.isArray(body.models) || body.models.some((m) => typeof m !== "string")) {
+          sendJson(res, 400, { error: "expected {provider: string, models: string[]}" });
+          return;
+        }
+        const provider = deps.config().providers[body.provider];
+        if (!provider || (provider.type !== "openai-compatible" && provider.type !== "anthropic-compatible")) {
+          sendJson(res, 400, { error: `provider "${body.provider}" is not openai-compatible or anthropic-compatible` });
+          return;
+        }
+        sweepMeasureJobs();
+        const jobId = crypto.randomBytes(12).toString("hex");
+        const job: MeasureJob = { state: "running", done: 0, total: body.models.length, results: [] };
+        MEASURE_JOBS.set(jobId, job);
+        deps.log.info(`admin: measuring ${body.provider} (${body.models.length} model(s)) -> ${jobId.slice(0, 8)}`);
+        void runMeasureJob(jobId, body.provider, body.models as string[], deps);
+        sendJson(res, 202, { jobId, total: job.total });
+        return;
+      }
+      if (pathname.startsWith("/api/providers/measure/") && method === "GET") {
+        const jobId = pathname.slice("/api/providers/measure/".length).split("/")[0] ?? "";
+        const job = MEASURE_JOBS.get(jobId);
+        if (!job) {
+          sendJson(res, 404, { error: "unknown or expired measure job" });
+          return;
+        }
+        // The polled shape, without the sweep's own bookkeeping field.
+        const { finishedAt: _finishedAt, ...view } = job;
+        sendJson(res, 200, view);
         return;
       }
       if (pathname === "/api/config" && method === "GET") {
@@ -915,10 +1123,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           sendJson(res, 400, { errors });
           return;
         }
-        const tmp = `${deps.configFile}.tmp-${process.pid}-${Date.now()}`;
-        fs.mkdirSync(path.dirname(deps.configFile), { recursive: true });
-        fs.writeFileSync(tmp, JSON.stringify(parsed, null, 2) + "\n");
-        fs.renameSync(tmp, deps.configFile);
+        writeConfigFile(deps.configFile, parsed);
         deps.log.info(`admin: config saved via GUI (${Object.keys(parsed.routes).length} routes, ${Object.keys(parsed.providers).length} providers)`);
         // `cli.models` cannot take effect through the router at all: Claude Code reads the slots
         // before a request exists. So a GUI save has to write them to settings.json itself;

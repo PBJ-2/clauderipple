@@ -28,6 +28,7 @@ async function withAdmin(
     claudeOAuthFetch?: (url: string, init: RequestInit) => Promise<Response>;
     openBrowser?: (url: string) => boolean;
     observedClaudeCodeAuth?: ObservedClaudeCodeAuth;
+    measureFetch?: (url: string, init: RequestInit) => Promise<Response>;
     chatgpt?: () => { quota: Record<string, Record<string, unknown> | null>; auth: Record<string, string>; refresh?: (name: string) => Promise<Record<string, unknown> | null> };
   } = {},
 ): Promise<void> {
@@ -963,4 +964,202 @@ test("status: two concurrent polls share one lookup", async () => {
     await Promise.all([fetch(`${base()}:${port}/api/status`), fetch(`${base()}:${port}/api/status`)]);
     assert.ok(q.calls() >= 1);
   }, { chatgpt: q.deps });
+});
+
+/**
+ * The measurement job: several small upstream requests per model, so it runs detached and the caller
+ * polls. These tests drive it with a `measureFetch` stub, so no socket leaves the process.
+ */
+async function pollMeasure(port: number, jobId: string): Promise<Record<string, unknown>> {
+  for (let i = 0; i < 100; i++) {
+    const res = await fetch(`${base()}:${port}/api/providers/measure/${jobId}`);
+    const job = (await res.json()) as { state: string };
+    if (job.state !== "running") return job as unknown as Record<string, unknown>;
+    await new Promise((resolveP) => setTimeout(resolveP, 5));
+  }
+  throw new Error("measure job never finished");
+}
+
+function stubFetch(status: (url: string, body: { reasoning_effort?: string }) => number): (url: string, init: RequestInit) => Promise<Response> {
+  return async (url, init) => {
+    const body = init.body ? JSON.parse(String(init.body)) as { reasoning_effort?: string } : {};
+    return new Response(JSON.stringify({}), { status: status(url, body) });
+  };
+}
+
+test("POST /api/providers/measure runs in the background and polling settles the wire into the config", async () => {
+  const cfg = makeCfg({
+    providers: {
+      oc: {
+        type: "openai-compatible",
+        url: "http://127.0.0.1:9/v1",
+        wire: "responses",
+        headers: { authorization: "Bearer sk-test" },
+        caps: { reasoning: "effort", effortLevels: ["none", "low", "minimal"] },
+        models: [{ id: "mimo", name: "MiMo" }],
+      },
+    },
+  });
+  // The provider's own wire (Responses) is unavailable for this model, Chat answers, and `minimal`
+  // is the effort the vendor refuses — exactly the mimo-v2.6-pro shape measured 2026-09-22.
+  const measureFetch = stubFetch((url, body) => (url.endsWith("/responses") ? 503 : body.reasoning_effort === "minimal" ? 400 : 200));
+  await withAdmin(cfg, async ({ port, configFile }) => {
+    const started = await fetch(`${base()}:${port}/api/providers/measure`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "oc", models: ["mimo"] }),
+    });
+    assert.equal(started.status, 202);
+    const { jobId, total } = (await started.json()) as { jobId: string; total: number };
+    assert.equal(typeof jobId, "string");
+    assert.equal(total, 1);
+    const job = await pollMeasure(port, jobId);
+    assert.equal(job.state, "done");
+    assert.equal(job.done, 1);
+    assert.equal(job.total, 1);
+    assert.deepEqual(job.results, [{ id: "mimo", wire: "chat", effortLevels: ["none", "low"] }]);
+    const onDisk = JSON.parse(fs.readFileSync(configFile, "utf8")) as Config;
+    assert.equal(onDisk.providers.oc?.models?.[0]?.wire, "chat");
+    assert.deepEqual(onDisk.providers.oc?.models?.[0]?.effortLevels, ["none", "low"]);
+  }, { measureFetch });
+});
+
+test("measurement fills blank fields but never overwrites a wire or ladder the user already set", async () => {
+  const cfg = makeCfg({
+    providers: {
+      oc: {
+        type: "openai-compatible",
+        url: "http://127.0.0.1:9/v1",
+        wire: "responses",
+        headers: { authorization: "Bearer sk-test" },
+        caps: { reasoning: "effort", effortLevels: ["none", "low"] },
+        models: [
+          { id: "muse", name: "Muse", wire: "responses", effortLevels: ["none"] },
+          { id: "fresh", name: "Fresh" },
+        ],
+      },
+    },
+  });
+  const measureFetch = stubFetch(() => 200);
+  await withAdmin(cfg, async ({ port, configFile }) => {
+    const started = await fetch(`${base()}:${port}/api/providers/measure`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "oc", models: ["muse", "fresh"] }),
+    });
+    assert.equal(started.status, 202);
+    await pollMeasure(port, ((await started.json()) as { jobId: string }).jobId);
+    const models = (JSON.parse(fs.readFileSync(configFile, "utf8")) as Config).providers.oc!.models!;
+    const muse = models.find((m) => m.id === "muse")!;
+    const fresh = models.find((m) => m.id === "fresh")!;
+    assert.equal(muse.wire, "responses", "an explicit wire is the user's, not the measurement's, to change");
+    assert.deepEqual(muse.effortLevels, ["none"], "an explicit ladder is left as it was");
+    assert.equal(fresh.wire, "responses");
+    assert.deepEqual(fresh.effortLevels, ["none", "low"], "the blank fields are the ones filled");
+  }, { measureFetch });
+});
+
+test("a preset provider measures across the wires the preset declares, the provider's own first", async () => {
+  const cfg = makeCfg({
+    providers: {
+      "opencode-go": {
+        type: "openai-compatible",
+        url: "https://opencode.ai/zen/go/v1",
+        wire: "responses",
+        preset: "opencode-go",
+        sessionHeader: "x-opencode-session",
+        headers: { authorization: "Bearer sk-test" },
+        caps: { reasoning: "effort", effortLevels: ["none", "low"] },
+        models: [{ id: "glm-new", name: "GLM New" }],
+      },
+    },
+  });
+  // The Responses wire the preset puts first does not serve this model; the Chat one does.
+  const seen: string[] = [];
+  const measureFetch = async (url: string, _init: RequestInit): Promise<Response> => {
+    seen.push(url);
+    return new Response("{}", { status: url.endsWith("/chat/completions") ? 200 : 503 });
+  };
+  await withAdmin(cfg, async ({ port, configFile }) => {
+    const started = await fetch(`${base()}:${port}/api/providers/measure`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "opencode-go", models: ["glm-new"] }),
+    });
+    await pollMeasure(port, ((await started.json()) as { jobId: string }).jobId);
+    assert.equal(seen[0], "https://opencode.ai/zen/go/v1/responses", "the provider's own wire is tried first");
+    const model = (JSON.parse(fs.readFileSync(configFile, "utf8")) as Config).providers["opencode-go"]!.models![0]!;
+    assert.equal(model.wire, "chat");
+  }, { measureFetch });
+});
+
+// Order decides the answer, because the first wire to reply wins. Measured 2026-09-22: minimax-m3
+// answers on Chat Completions as well as on Anthropic Messages, so trying the catalogue in its own
+// order settled it as `chat` and overruled the `anthropic` the preset had recorded for it.
+test("a model the preset already places is measured on that wire first, even when another would answer", async () => {
+  const cfg = makeCfg({
+    providers: {
+      "opencode-go": {
+        type: "openai-compatible",
+        url: "https://opencode.ai/zen/go/v1",
+        wire: "responses",
+        preset: "opencode-go",
+        sessionHeader: "x-opencode-session",
+        headers: { authorization: "Bearer sk-test" },
+        caps: { reasoning: "effort", effortLevels: [] },
+        models: [{ id: "minimax-m3", name: "MiniMax M3" }],
+      },
+    },
+  });
+  // Everything answers, so nothing but the order can decide which wire is recorded.
+  const seen: string[] = [];
+  const measureFetch = async (url: string, _init: RequestInit): Promise<Response> => {
+    seen.push(url);
+    return new Response("{}", { status: 200 });
+  };
+  await withAdmin(cfg, async ({ port, configFile }) => {
+    const started = await fetch(`${base()}:${port}/api/providers/measure`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "opencode-go", models: ["minimax-m3"] }),
+    });
+    await pollMeasure(port, ((await started.json()) as { jobId: string }).jobId);
+    assert.equal(seen[0], "https://opencode.ai/zen/go/v1/messages", "the preset's own placement is tried before the provider default");
+    assert.equal(seen.length, 1, "a wire that answers ends the search");
+    const model = (JSON.parse(fs.readFileSync(configFile, "utf8")) as Config).providers["opencode-go"]!.models![0]!;
+    assert.equal(model.wire, "anthropic");
+  }, { measureFetch });
+});
+
+test("an auth failure in measurement writes nothing: the wire is not guessed", async () => {
+  const cfg = makeCfg({
+    providers: {
+      oc: {
+        type: "openai-compatible",
+        url: "http://127.0.0.1:9/v1",
+        headers: { authorization: "Bearer sk-test" },
+        models: [{ id: "bad", name: "Bad" }],
+      },
+    },
+  });
+  const measureFetch = stubFetch(() => 401);
+  await withAdmin(cfg, async ({ port, configFile }) => {
+    const started = await fetch(`${base()}:${port}/api/providers/measure`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "oc", models: ["bad"] }),
+    });
+    const job = await pollMeasure(port, ((await started.json()) as { jobId: string }).jobId);
+    assert.deepEqual(job.results, [{ id: "bad", error: "auth" }]);
+    const model = (JSON.parse(fs.readFileSync(configFile, "utf8")) as Config).providers.oc!.models![0]!;
+    assert.equal("wire" in model, false);
+    assert.equal("effortLevels" in model, false);
+  }, { measureFetch });
+});
+
+test("POST /api/providers/measure refuses a provider that has no OpenAI or Anthropic wire", async () => {
+  await withAdmin(makeCfg({ providers: { gpt: { type: "chatgpt", auth: "own" } } }), async ({ port }) => {
+    const res = await fetch(`${base()}:${port}/api/providers/measure`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "gpt", models: ["x"] }),
+    });
+    assert.equal(res.status, 400);
+    assert.match(((await res.json()) as { error: string }).error, /not openai-compatible or anthropic-compatible/);
+  });
+});
+
+test("GET /api/providers/measure/<id> reports an unknown job as 404", async () => {
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const res = await fetch(`${base()}:${port}/api/providers/measure/deadbeef`);
+    assert.equal(res.status, 404);
+  });
 });
