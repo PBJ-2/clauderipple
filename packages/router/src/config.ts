@@ -394,6 +394,91 @@ function validModels(models: unknown): boolean {
   });
 }
 
+/**
+ * The presets one OpenCode Go account had to be split across, and what each third actually was.
+ *
+ * Keyed on `preset` rather than on the provider's name: the GUI chose those names itself
+ * (`opencode-go-responses`) and the user may have chosen others since.
+ */
+const SPLIT_BY_PRESET = {
+  "opencode-go": { wire: "responses", authHeader: "authorization-bearer" },
+  "opencode-go-chat": { wire: "chat", authHeader: "authorization-bearer" },
+  "opencode-go-anthropic": { wire: "anthropic", authHeader: "x-api-key" },
+} as const;
+
+/** The effort ladder a provider actually offered, so it can travel with the models that had it. */
+function ladderOf(p: Provider): string[] {
+  if (p.type === "openai-compatible") return p.caps?.reasoning === "effort" ? [...(p.caps.effortLevels ?? [])] : [];
+  if (p.type === "anthropic-compatible") return [...(p.caps?.effortLevels ?? [])];
+  return [];
+}
+
+/**
+ * The three providers one OpenCode Go account used to need, read as the single provider it is.
+ *
+ * `wire` and `url` sat on the provider, so an account whose models speak Responses, Chat
+ * Completions and Anthropic Messages had to be configured three times — and every `direct` rule had
+ * to name whichever third its model lived in. A model carries its own wire now, so a config written
+ * against the old shape is folded here on the way in.
+ *
+ * Nothing is rewritten on disk. A save from the GUI is what eventually settles it, and until then
+ * this stays reversible: the file still describes what an older router would read correctly.
+ *
+ * Every model keeps its own endpoint, wire and auth convention rather than inheriting the merged
+ * provider's, so which third happens to become the base cannot change where a request goes.
+ */
+function foldSplitProviders(c: Config): Config {
+  const parts = Object.entries(c.providers).filter(
+    ([, p]) => "preset" in p && typeof p.preset === "string" && p.preset in SPLIT_BY_PRESET,
+  );
+  // One of them on its own is not a split, and is left exactly as it is.
+  if (parts.length < 2) return c;
+
+  const [baseName, baseProvider] = parts.find(([, p]) => (p as { preset?: string }).preset === "opencode-go") ?? parts[0]!;
+  // Take the canonical name unless something outside the split already holds it.
+  const name = parts.some(([n]) => n === "opencode-go") || !("opencode-go" in c.providers) ? "opencode-go" : baseName;
+
+  const models: ProviderModel[] = [];
+  for (const [, p] of parts) {
+    const split = SPLIT_BY_PRESET[(p as { preset: keyof typeof SPLIT_BY_PRESET }).preset];
+    const ladder = ladderOf(p);
+    for (const model of ("models" in p && p.models) || []) {
+      // `/models` lists every model on the plan, so the same id can appear under more than one
+      // third. The first one wins: they describe one model, and a duplicate entry would shadow it.
+      if (models.some((m) => m.id === model.id)) continue;
+      models.push({
+        ...model,
+        wire: split.wire,
+        authHeader: split.authHeader,
+        ...("url" in p ? { url: p.url } : {}),
+        // The merged provider's caps no longer describe this model, so the ladder its own endpoint
+        // published travels with it. Inheriting the Responses one would start sending an effort to
+        // an endpoint that never accepted one.
+        effortLevels: model.effortLevels ?? ladder,
+      });
+    }
+  }
+
+  const providers: Config["providers"] = {};
+  for (const [n, p] of Object.entries(c.providers)) if (!parts.some(([partName]) => partName === n)) providers[n] = p;
+  providers[name] = { ...baseProvider, preset: "opencode-go", models } as Provider;
+
+  // Every reference to a name that has just gone follows it, or the config stops validating on a
+  // provider the user never removed.
+  const moved = new Map(parts.map(([n]) => [n, name] as const).filter(([from, to]) => from !== to));
+  const renamed = (of: string): string => moved.get(of) ?? of;
+  return {
+    ...c,
+    providers,
+    direct: c.direct.map((d) => ({ ...d, provider: renamed(d.provider) })),
+    routes: Object.fromEntries(Object.entries(c.routes).map(([alias, r]) => [alias, {
+      ...r,
+      provider: renamed(r.provider),
+      ...(r.fallbacks ? { fallbacks: r.fallbacks.map((f) => ({ ...f, provider: renamed(f.provider) })) } : {}),
+    }])),
+  };
+}
+
 export function validate(c: Config): string[] {
   const errors: string[] = [];
   for (const [alias, r] of Object.entries(c.routes)) {
@@ -532,7 +617,9 @@ export class ConfigStore {
     if (st.mtimeMs === this.mtimeMs) return;
     try {
       const parsed = JSON.parse(fs.readFileSync(this.file, "utf8")) as Partial<Config>;
-      const next = merge(DEFAULTS, parsed);
+      // Folded before validation, because the old three-provider shape is what is on disk and the
+      // references it carries have to be the ones that get checked.
+      const next = foldSplitProviders(merge(DEFAULTS, parsed));
       const errors = validate(next);
       if (errors.length === 0 || initial) this.current = next;
       this.mtimeMs = st.mtimeMs;

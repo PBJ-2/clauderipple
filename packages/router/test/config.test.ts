@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ConfigStore, DEFAULTS, validate } from "../src/config.ts";
+import { ConfigStore, DEFAULTS, providerFor, validate } from "../src/config.ts";
+import type { AnthropicCompatibleProvider, OpenAiCompatibleProvider } from "../src/config.ts";
 import { Logger } from "../src/log.ts";
 
 test("validate reports unknown providers and bad urls", () => {
@@ -81,6 +82,87 @@ test("ConfigStore hot-reloads on mtime change and keeps last good config on erro
   fs.writeFileSync(file, JSON.stringify({ listen: { port: 4321 } }));
   fs.utimesSync(file, new Date(Date.now() + 10000), new Date(Date.now() + 10000));
   assert.equal(store.get().listen.port, 4321);
+});
+
+// One OpenCode Go account needed three providers, because `wire` and `url` sat on the provider
+// while the models on that one key speak three different protocols. Every `direct` rule had to name
+// whichever third its model lived in, and the user saw a split they never asked for. A config
+// written that way is folded on the way in.
+test("the three providers one OpenCode Go account needed are read as one", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cr-fold-"));
+  const file = path.join(dir, "config.json");
+  const shared = { sessionHeader: "x-opencode-session", headers: { authorization: "Bearer sk-test" } };
+  fs.writeFileSync(file, JSON.stringify({
+    providers: {
+      "opencode-go-responses": {
+        type: "openai-compatible", url: "https://opencode.ai/zen/go/v1", preset: "opencode-go", wire: "responses",
+        caps: { effortLevels: ["low", "high", "xhigh"], reasoning: "effort" }, models: [{ id: "muse-spark-1.3-contributor" }], ...shared,
+      },
+      "opencode-go-chat": {
+        type: "openai-compatible", url: "https://opencode.ai/zen/go/v1", preset: "opencode-go-chat", wire: "chat",
+        caps: { effortLevels: [], reasoning: "none" }, models: [{ id: "deepseek-v4.1-flash" }], ...shared,
+      },
+      "opencode-go-anthropic": {
+        type: "anthropic-compatible", url: "https://opencode.ai/zen/go", preset: "opencode-go-anthropic",
+        models: [{ id: "minimax-m3" }], sessionHeader: "x-opencode-session", headers: { "x-api-key": "sk-test" },
+      },
+      other: { type: "anthropic", auth: "api-key" },
+    },
+    direct: [{ prefix: "deepseek-v4.1", provider: "opencode-go-chat" }, { prefix: "gpt-", provider: "other" }],
+  }));
+  let errors: string[] = ["not called"];
+  const cfg = new ConfigStore(file, (_c, e) => { errors = e; }).get();
+  // The folded config is what gets validated, so a reference left behind would surface here.
+  assert.deepEqual(errors, []);
+
+  assert.deepEqual(Object.keys(cfg.providers).sort(), ["opencode-go", "other"]);
+  const merged = cfg.providers["opencode-go"] as OpenAiCompatibleProvider;
+  assert.deepEqual(merged.models?.map((m) => m.id), ["muse-spark-1.3-contributor", "deepseek-v4.1-flash", "minimax-m3"]);
+  assert.equal(merged.sessionHeader, "x-opencode-session", "the cache key every third sent is still sent");
+  // A rule that named a third names the provider now, or the config stops validating on a provider
+  // the user never removed.
+  assert.deepEqual(cfg.direct, [{ prefix: "deepseek-v4.1", provider: "opencode-go" }, { prefix: "gpt-", provider: "other" }]);
+
+  // Each model kept the endpoint, wire and auth convention its own third had, so which one became
+  // the base cannot change where a request goes.
+  const responses = providerFor(merged, "muse-spark-1.3-contributor") as OpenAiCompatibleProvider;
+  assert.equal(responses.type, "openai-compatible");
+  assert.equal(responses.wire, "responses");
+  assert.equal(responses.url, "https://opencode.ai/zen/go/v1");
+
+  const chat = providerFor(merged, "deepseek-v4.1-flash") as OpenAiCompatibleProvider;
+  assert.equal(chat.wire, "chat");
+  // The Responses ladder must not follow it: the chat endpoint published no effort contract, and
+  // inheriting one would start sending an effort it never accepted.
+  assert.deepEqual(merged.models?.find((m) => m.id === "deepseek-v4.1-flash")?.effortLevels, []);
+  assert.deepEqual(merged.models?.find((m) => m.id === "muse-spark-1.3-contributor")?.effortLevels, ["low", "high", "xhigh"]);
+
+  // Anthropic Messages needs no translation, so this one is served by the other adapter, on the
+  // base that is deliberately one segment shorter, under the header that endpoint recognises — with
+  // the provider's key carried across rather than restated in the model entry.
+  const native = providerFor(merged, "minimax-m3") as AnthropicCompatibleProvider;
+  assert.equal(native.type, "anthropic-compatible");
+  assert.equal(native.url, "https://opencode.ai/zen/go");
+  assert.deepEqual(native.headers, { "x-api-key": "sk-test" }, "one copy of the key, under the convention this wire wants");
+});
+
+test("one OpenCode Go provider on its own is not a split, and is left alone", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cr-fold-one-"));
+  const file = path.join(dir, "config.json");
+  fs.writeFileSync(file, JSON.stringify({
+    providers: {
+      "opencode-go-chat": {
+        type: "openai-compatible", url: "https://opencode.ai/zen/go/v1", preset: "opencode-go-chat",
+        wire: "chat", models: [{ id: "deepseek-v4.1-flash" }],
+      },
+    },
+    direct: [{ prefix: "deepseek-v4.1", provider: "opencode-go-chat" }],
+  }));
+  const cfg = new ConfigStore(file).get();
+  assert.deepEqual(Object.keys(cfg.providers), ["opencode-go-chat"], "nothing to merge, so nothing is renamed");
+  assert.equal(cfg.direct[0]?.provider, "opencode-go-chat");
+  const only = cfg.providers["opencode-go-chat"] as OpenAiCompatibleProvider;
+  assert.equal(only.models?.[0]?.wire, undefined, "no override is invented where the provider still describes its models");
 });
 
 test("Logger rotates by size and keeps N files", () => {
