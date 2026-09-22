@@ -84,10 +84,13 @@ nav .nav-spacer { flex: 1 1 auto; }
 }
 .lang-toggle:hover { background: var(--border); color: var(--text); }
 
+/* The measure belongs to the views, not to `main`: a view that wanted more than `main` allowed got
+   it and turned the whole page into a horizontal scroll instead (2026-09-22). `min-width: 0` so a
+   flex item may shrink below its content rather than pushing the nav off screen. */
 main {
   flex: 1 1 auto;
+  min-width: 0;
   padding: 22px 28px;
-  max-width: 980px;
   overflow-x: auto;
 }
 
@@ -228,8 +231,11 @@ label.check input { width: auto; }
 .hint { color: var(--muted); font-size: 14px; line-height: 1.45; margin: 4px 0 0; }
 .small { font-size: 14px; color: var(--muted); }
 
-.view { display: none; }
+.view { display: none; max-width: 980px; }
 .view.active { display: block; }
+/* Two views are laid out in columns and hold wide tables, so the window is room they can use. A
+   paragraph only gets harder to read that way, which is why the rest keep a measure. */
+.providers-view, #view-logs { max-width: none; }
 .actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
 .actions.end { justify-content: flex-end; }
 .details { color: var(--muted); font-size: 14px; margin-top: 12px; }
@@ -283,7 +289,6 @@ label.check input { width: auto; }
 }
 .page-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
 .page-heading > .btn { flex: 0 0 auto; }
-.providers-view { width: min(1180px, calc(100vw - 224px)); }
 .provider-workspace { min-height: 610px; display: grid; grid-template-columns: 260px minmax(0, 1fr); overflow: hidden; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
 .provider-rail { min-width: 0; border-right: 1px solid var(--border); background: color-mix(in srgb, var(--bg) 74%, var(--panel)); }
 .provider-rail-tools { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; padding: 11px; border-bottom: 1px solid var(--border); }
@@ -380,7 +385,6 @@ button.btn.compact { padding: 4px 9px; font-size: 14px; }
 .client-divider { border-top: 1px solid var(--border); margin: 18px 0 14px; }
 
 @media (max-width: 860px) {
-  .providers-view { width: auto; }
   .provider-workspace { grid-template-columns: 220px minmax(0, 1fr); }
   .provider-detail-header { align-items: flex-start; }
   .provider-detail-actions { max-width: 220px; }
