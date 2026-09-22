@@ -283,7 +283,12 @@ export function toOpenAiRequest(req: AnthropicRequest, opts: OpenAiTranslateOpti
     const choice = mapResponsesToolChoice(req, responseTools);
     if (choice) out.tool_choice = choice;
   }
-  if (typeof req.max_tokens === "number") out.max_output_tokens = req.max_tokens;
+  // Responses will not accept a cap below sixteen, and answers a smaller one with a 400 naming the
+  // parameter. Anthropic Messages has no such floor, so a client that asks for a single token is
+  // asking something legal that this wire cannot express: Claude Code checks a model by requesting
+  // one token, and every switch to a Responses model failed on it (measured 2026-09-22). Raise the
+  // floor rather than pass the refusal on — a cap is a limit, and a larger one still obeys it.
+  if (typeof req.max_tokens === "number") out.max_output_tokens = Math.max(16, req.max_tokens);
   if (typeof req.temperature === "number") out.temperature = req.temperature;
   if (effort) out.reasoning = { effort };
   return out;

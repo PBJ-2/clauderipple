@@ -289,3 +289,17 @@ test("reasoning under the bare `reasoning` name is relayed too", () => {
   mapper.feed({ id: "c1", choices: [{ delta: { reasoning: "hmm" }, finish_reason: null }] }, "chat");
   assert.deepEqual(mapper.message().content, [{ type: "thinking", thinking: "hmm" }]);
 });
+
+// Claude Code checks a model it is switching to by asking it for a single token. Anthropic Messages
+// allows that; Responses does not, and answers "`max_output_tokens` The number must be >=" with a
+// 400 (measured 2026-09-22 against OpenCode). Every switch to a Responses model failed on it, so
+// the floor is raised here rather than handed to the user as a refusal.
+test("a Responses request asks for at least sixteen output tokens, whatever the client asked for", () => {
+  const one = toOpenAiRequest({ ...request, max_tokens: 1 }, { ...options, wire: "responses" }) as ResponsesRequest;
+  assert.equal(one.max_output_tokens, 16);
+  const many = toOpenAiRequest({ ...request, max_tokens: 4096 }, { ...options, wire: "responses" }) as ResponsesRequest;
+  assert.equal(many.max_output_tokens, 4096, "a cap above the floor is the client's to set");
+  // Chat Completions has no such floor, so nothing is raised there.
+  const chat = toOpenAiRequest({ ...request, max_tokens: 1 }, { ...options, wire: "chat" }) as ChatRequest;
+  assert.equal(chat.max_tokens, 1);
+});
