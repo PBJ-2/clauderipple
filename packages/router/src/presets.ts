@@ -305,23 +305,34 @@ export const PRESETS: ProviderPreset[] = [
     modelsUrl: "https://opencode.ai/zen/v1/models",
     modelsAuthHeader: "authorization-bearer",
     wire: "chat",
-    // Ids are from the live catalogue (2026-09-22); the wires are where each family is native, which
-    // is where a translation is not needed rather than where one was measured answering. Nothing
-    // here could be confirmed past 402: the account had no Zen balance. The per-model measurement
-    // settles all of it on the first save, which is what it is for.
+    // Every wire here is from the endpoint table OpenCode publishes per model
+    // (https://opencode.ai/docs/ko/zen/, read 2026-09-22), not from guessing by family — guessing
+    // put Grok on Chat when it is on Responses, and Gemini on Chat when it is on neither.
+    //
+    // Two families are left out on purpose. Gemini is served at /zen/v1/models/<id>, Google's own
+    // shape, and jev at /systemone; ClaudeRipple speaks Chat Completions, Responses and Anthropic
+    // Messages, so there is nothing here that could carry them. They are still in the catalogue, so
+    // discovery will offer them; the measurement then finds no wire that answers and writes none.
+    //
+    // The Chat rows come first because the connection test posts to Chat Completions and takes the
+    // preset's first Chat model — deepseek-v4.1-flash, which the table says is served there.
     fallbackModels: [
+      { id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash", wire: "chat" },
+      { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", wire: "chat" },
+      { id: "minimax-m3", name: "MiniMax M3", wire: "chat" },
+      { id: "glm-5.3", name: "GLM 5.3", wire: "chat" },
+      { id: "kimi-k3", name: "Kimi K3", wire: "chat" },
+      { id: "gpt-6-astra", name: "GPT 6 Astra", wire: "responses" },
+      { id: "gpt-5.6-sol", name: "GPT 5.6 Sol", wire: "responses" },
+      { id: "gpt-5.6-terra", name: "GPT 5.6 Terra", wire: "responses" },
+      { id: "gpt-5.6-luna", name: "GPT 5.6 Luna", wire: "responses" },
+      { id: "grok-4.7", name: "Grok 4.7", wire: "responses" },
+      { id: "muse-spark-1.3", name: "Muse Spark 1.3", wire: "responses" },
       { id: "claude-opus-5", name: "Claude Opus 5", wire: "anthropic", url: "https://opencode.ai/zen", authHeader: "x-api-key" },
       { id: "claude-sonnet-5", name: "Claude Sonnet 5", wire: "anthropic", url: "https://opencode.ai/zen", authHeader: "x-api-key" },
       { id: "claude-fable-5-1", name: "Claude Fable 5.1", wire: "anthropic", url: "https://opencode.ai/zen", authHeader: "x-api-key" },
-      { id: "gpt-6-astra", name: "GPT-6 Astra", wire: "responses" },
-      { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", wire: "responses" },
-      { id: "gpt-5.6-terra", name: "GPT-5.6 Terra", wire: "responses" },
-      { id: "gpt-5.6-luna", name: "GPT-5.6 Luna", wire: "responses" },
-      { id: "gemini-3.8-flash", name: "Gemini 3.8 Flash", wire: "chat" },
-      { id: "grok-4.7", name: "Grok 4.7", wire: "chat" },
-      { id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash", wire: "chat" },
-      { id: "kimi-k3", name: "Kimi K3", wire: "chat" },
-      { id: "glm-5.3", name: "GLM-5.3", wire: "chat" },
+      { id: "claude-haiku-4-5", name: "Claude Haiku 4.5", wire: "anthropic", url: "https://opencode.ai/zen", authHeader: "x-api-key" },
+      { id: "qwen3.8-flash", name: "Qwen3.8 Flash", wire: "anthropic", url: "https://opencode.ai/zen", authHeader: "x-api-key" },
     ],
     // A starting point for the measurement, not a measurement: an empty ladder would tell the
     // router this provider takes no effort at all, and a model whose ladder is empty is never
@@ -329,7 +340,7 @@ export const PRESETS: ProviderPreset[] = [
     effortLevels: ["none", "minimal", "low", "medium", "high", "xhigh"],
     thinking: "none",
     verified: true,
-    notes: "Separate from OpenCode Go and separately billed: Zen draws on a credit balance while Go is the subscription, and the two catalogues differ (76 models against 40, neither a subset of the other). Measured 2026-09-22: the key is shared — a Go key reached Zen's billing rather than being refused — and all three wires answer on https://opencode.ai/zen/v1. No session header is required, unlike Go. Which wire and which effort levels each model actually takes was not confirmed past 402 Insufficient account funds; the per-model measurement establishes both on the first save.",
+    notes: "Separate from OpenCode Go and separately billed: Zen draws on a credit balance while Go is the subscription, and the two catalogues differ (76 models against 40, neither a subset of the other). Measured 2026-09-22: the key is shared \u2014 a Go key reached Zen's billing rather than being refused \u2014 and no session header is required, unlike Go. Each model's endpoint is published per model and the three wires are split across families: DeepSeek, MiniMax, GLM and Kimi on Chat Completions, the GPT and Grok rows plus Muse Spark on Responses, and the Claude and Qwen rows on Anthropic Messages. Gemini (/zen/v1/models/<id>) and jev (/systemone) are served in shapes ClaudeRipple does not speak and are not offered here. Effort ladders are unverified: the account had no Zen balance, so the per-model measurement settles them on the first save.",
     docsUrl: "https://opencode.ai/docs/zen/",
   },
   // Docs: https://docs.mistral.ai/api/endpoint/chat and https://docs.mistral.ai/api/endpoint/models

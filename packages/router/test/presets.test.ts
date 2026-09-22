@@ -100,9 +100,13 @@ test("OpenCode Zen and OpenCode Go are separate presets that cannot be mistaken 
   // Go carries no Claude row at all.
   const zenIds = zen.fallbackModels.map((model) => model.id);
   const goIds = go.fallbackModels.map((model) => model.id);
-  assert.equal(zenIds.some((id) => id.startsWith("muse-spark") || id.startsWith("mimo-")), false, "Muse Spark and MiMo are Go's");
+  assert.equal(zenIds.some((id) => id.startsWith("mimo-")), false, "the MiMo rows are Go's");
   assert.equal(goIds.some((id) => id.startsWith("claude-")), false, "the Claude rows are Zen's");
   assert.ok(zenIds.some((id) => id.startsWith("claude-")), "and Zen offers them");
+  // Muse Spark is on both, under different ids: Zen sells muse-spark-1.3 and Go the Contributor
+  // tier, which is the cheaper one the workspace has to opt into. Neither id is on both.
+  assert.ok(zenIds.includes("muse-spark-1.3") && !zenIds.some((id) => id.endsWith("-contributor")));
+  assert.ok(goIds.includes("muse-spark-1.3-contributor") && !goIds.includes("muse-spark-1.3"));
 });
 
 // An empty ladder means "this provider takes no effort", and a model with an empty ladder is never
@@ -111,4 +115,20 @@ test("OpenCode Zen offers a ladder for the measurement to narrow rather than non
   const zen = PRESETS.find((preset) => preset.id === "opencode-zen")!;
   assert.ok(zen.effortLevels.length > 0);
   assert.ok(zen.fallbackModels.every((model) => model.effortLevels === undefined), "no model claims a ladder that was never measured");
+});
+
+// The connection test posts to Chat Completions and takes the preset's first Chat model, so that
+// model has to be one the vendor serves there. OpenCode publishes the endpoint per model
+// (https://opencode.ai/docs/ko/zen/, read 2026-09-22); reading Grok or Gemini as Chat, which an
+// earlier version of this preset did, made the test post to an endpoint neither is served on.
+test("every OpenCode Zen model carries the wire its published endpoint says, Chat first", () => {
+  const zen = PRESETS.find((preset) => preset.id === "opencode-zen")!;
+  const wireOf = (id: string): string | undefined => zen.fallbackModels.find((model) => model.id === id)?.wire;
+  assert.equal(zen.fallbackModels[0]?.wire, "chat", "the connection test takes the first Chat model");
+  for (const id of ["deepseek-v4.1-flash", "minimax-m3", "glm-5.3", "kimi-k3"]) assert.equal(wireOf(id), "chat", id);
+  for (const id of ["gpt-6-astra", "grok-4.7", "muse-spark-1.3"]) assert.equal(wireOf(id), "responses", id);
+  for (const id of ["claude-opus-5", "qwen3.8-flash"]) assert.equal(wireOf(id), "anthropic", id);
+  // Gemini is served at /zen/v1/models/<id> and jev at /systemone — shapes this router does not
+  // speak, so offering them would only produce a model that cannot answer.
+  assert.equal(zen.fallbackModels.some((model) => model.id.startsWith("gemini") || model.id.startsWith("jev")), false);
 });
