@@ -49,24 +49,29 @@ test("OpenCode Go is one preset whose models carry the wire each one speaks", ()
 
   const byId = new Map(preset.fallbackModels.map((m) => [m.id, m]));
   const wireOf = (id: string) => byId.get(id)?.wire ?? "responses";
-  // All three groups exist in the one list, and each model carries the wire its endpoint speaks.
+  // All three groups exist in the one list, and each model carries the wire its endpoint speaks,
+  // as published per model at https://opencode.ai/docs/ko/go/ (read 2026-09-22).
   assert.equal(wireOf("muse-spark-1.3-contributor"), "responses", "Muse Spark lives on Responses, the preset default");
   assert.equal(wireOf("deepseek-v4.1-flash"), "chat");
   assert.equal(wireOf("minimax-m3"), "anthropic");
+  // The two that reached a user as an unexplained 529 by inheriting the preset's Responses wire.
+  assert.equal(wireOf("mimo-v2.6-pro"), "chat");
+  assert.equal(wireOf("mimo-v2.6-flash"), "chat");
+  // Gone from the catalogue and from the docs: a preset row for a model the vendor no longer serves
+  // is one the operator can tick and never use.
+  assert.equal(byId.has("union-alpha"), false);
 
-  for (const id of ["glm-5.3", "glm-5.3-flash", "kimi-k3", "kimi-k2.7-code", "deepseek-v4.1-flash", "deepseek-v4-pro", "longcat-2.0", "mimo-v2.5-pro"]) {
-    // No per-model effort contract is published for the Chat endpoint; the empty ladder disables the
-    // preset's Responses ladder rather than sending an effort it never accepted.
-    assert.deepEqual(byId.get(id)?.effortLevels, [], `${id} must strip effort`);
-  }
-  for (const id of ["minimax-m3", "qwen3.8-max", "qwen3.8-flash", "union-alpha"]) {
+  // No model states an effort ladder. The blanket empty one was an assumption and measurably wrong
+  // — deepseek-v4.1-flash takes all eight levels — and an empty ladder is never measured, so it
+  // could not correct itself. Unstated, each is established on the first save.
+  for (const model of preset.fallbackModels) assert.equal(model.effortLevels, undefined, `${model.id} must not claim a ladder`);
+  for (const id of ["minimax-m3", "qwen3.8-max", "qwen3.8-flash", "qwen3.7-max"]) {
     const model = byId.get(id)!;
     // One segment shorter than the provider base: an anthropic-compatible base ending in /v1 asks for
     // /v1/v1/messages, which this vendor answers with an HTML 404. And it wants Anthropic's header
     // where the two OpenAI-wire groups on the same key want a bearer.
     assert.equal(model.url, "https://opencode.ai/zen/go", `${id} anthropic base`);
     assert.equal(model.authHeader, "x-api-key", `${id} anthropic auth convention`);
-    assert.deepEqual(model.effortLevels, [], `${id} must strip effort`);
   }
   // The Responses models deliberately carry no wire: they inherit the preset's own.
   for (const id of ["muse-spark-1.3-contributor", "muse-spark-1.2-contributor", "grok-4.6", "gpt-5.6-luna"]) {

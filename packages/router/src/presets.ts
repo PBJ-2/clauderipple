@@ -241,22 +241,41 @@ export const PRESETS: ProviderPreset[] = [
     sessionHeader: "x-opencode-session",
     modelsUrl: "https://opencode.ai/zen/go/v1/models",
     modelsAuthHeader: "authorization-bearer",
+    // Every wire below is from the endpoint table OpenCode publishes per model
+    // (https://opencode.ai/docs/ko/go/, read 2026-09-22) — the only place any of it is written
+    // down, since `/models` reports ids alone. Reading it off the family name instead is what left
+    // mimo-v2.6-pro on Responses, where the vendor answered 503 and the user saw an unexplained 529.
+    //
+    // No model states an effort ladder. The blanket empty one this list used to carry was an
+    // assumption rather than a measurement, and it was wrong: deepseek-v4.1-flash accepts all eight
+    // levels including max, and mimo-v2.6-pro accepts none/low/medium/high (measured 2026-09-22).
+    // It could not correct itself either — an empty ladder is never measured. Left unstated, each
+    // model's ladder is established on the first save.
     fallbackModels: [
-      // Responses (the preset's own wire, so no override).
+      // Responses — the preset's own wire, so these carry no override.
       { id: "muse-spark-1.3-contributor", name: "Muse Spark 1.3 (Contributor)" },
       { id: "muse-spark-1.2-contributor", name: "Muse Spark 1.2 (Contributor)" },
+      { id: "grok-4.7", name: "Grok 4.7" },
       { id: "grok-4.6", name: "Grok 4.6" },
       { id: "gpt-5.6-luna", name: "GPT-5.6 Luna" },
-      // Chat Completions. No per-model effort contract is published for this endpoint, so the
-      // empty ladder disables the preset's Responses ladder rather than guess one.
-      { id: "glm-5.3", name: "GLM-5.3", wire: "chat", effortLevels: [] },
-      { id: "glm-5.3-flash", name: "GLM-5.3 Flash", wire: "chat", effortLevels: [] },
-      { id: "kimi-k3", name: "Kimi K3", wire: "chat", effortLevels: [] },
-      { id: "kimi-k2.7-code", name: "Kimi K2.7 Code", wire: "chat", effortLevels: [] },
-      { id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash", wire: "chat", effortLevels: [] },
-      { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", wire: "chat", effortLevels: [] },
-      { id: "longcat-2.0", name: "LongCat 2.0", wire: "chat", effortLevels: [] },
-      { id: "mimo-v2.5-pro", name: "MiMo V2.5 Pro", wire: "chat", effortLevels: [] },
+      // Chat Completions.
+      { id: "glm-5.3", name: "GLM-5.3", wire: "chat" },
+      { id: "glm-5.3-flash", name: "GLM-5.3 Flash", wire: "chat" },
+      { id: "glm-5.2", name: "GLM-5.2", wire: "chat" },
+      { id: "glm-5.1", name: "GLM-5.1", wire: "chat" },
+      { id: "kimi-k3", name: "Kimi K3", wire: "chat" },
+      { id: "kimi-k2.7-code", name: "Kimi K2.7 Code", wire: "chat" },
+      { id: "kimi-k2.6", name: "Kimi K2.6", wire: "chat" },
+      { id: "longcat-2.0", name: "LongCat 2.0", wire: "chat" },
+      { id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash", wire: "chat" },
+      { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", wire: "chat" },
+      { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", wire: "chat" },
+      { id: "mimo-v2.6-pro", name: "MiMo V2.6 Pro", wire: "chat" },
+      { id: "mimo-v2.6-flash", name: "MiMo V2.6 Flash", wire: "chat" },
+      { id: "mimo-v2.5-pro", name: "MiMo V2.5 Pro", wire: "chat" },
+      { id: "mimo-v2.5", name: "MiMo V2.5", wire: "chat" },
+      { id: "hy4-preview", name: "Hy4 Preview", wire: "chat" },
+      { id: "hy3", name: "Hy3", wire: "chat" },
       // Anthropic Messages, which needs no translation. The url is deliberately one segment shorter
       // than the provider's: an openai-compatible provider appends the endpoint name (`/responses`),
       // so its base carries the `/v1`, but an anthropic-compatible one appends the caller's whole
@@ -265,10 +284,13 @@ export const PRESETS: ProviderPreset[] = [
       // the API it imitates, so these want Anthropic's header where the two OpenAI-wire groups on the
       // same key want a bearer: measured 2026-09-18 with a deliberately wrong key, the header it does
       // not recognise answers "Missing API key" and the one it does answers "Invalid API key".
-      { id: "minimax-m3", name: "MiniMax M3", wire: "anthropic", url: "https://opencode.ai/zen/go", authHeader: "x-api-key", effortLevels: [] },
-      { id: "qwen3.8-max", name: "Qwen3.8 Max", wire: "anthropic", url: "https://opencode.ai/zen/go", authHeader: "x-api-key", effortLevels: [] },
-      { id: "qwen3.8-flash", name: "Qwen3.8 Flash", wire: "anthropic", url: "https://opencode.ai/zen/go", authHeader: "x-api-key", effortLevels: [] },
-      { id: "union-alpha", name: "Union Alpha (free)", wire: "anthropic", url: "https://opencode.ai/zen/go", authHeader: "x-api-key", effortLevels: [] },
+      { id: "minimax-m3", name: "MiniMax M3", wire: "anthropic", url: "https://opencode.ai/zen/go", authHeader: "x-api-key" },
+      { id: "minimax-m2.7", name: "MiniMax M2.7", wire: "anthropic", url: "https://opencode.ai/zen/go", authHeader: "x-api-key" },
+      { id: "qwen3.8-max", name: "Qwen3.8 Max", wire: "anthropic", url: "https://opencode.ai/zen/go", authHeader: "x-api-key" },
+      { id: "qwen3.8-flash", name: "Qwen3.8 Flash", wire: "anthropic", url: "https://opencode.ai/zen/go", authHeader: "x-api-key" },
+      { id: "qwen3.7-max", name: "Qwen3.7 Max", wire: "anthropic", url: "https://opencode.ai/zen/go", authHeader: "x-api-key" },
+      { id: "qwen3.7-plus", name: "Qwen3.7 Plus", wire: "anthropic", url: "https://opencode.ai/zen/go", authHeader: "x-api-key" },
+      { id: "qwen3.6-plus", name: "Qwen3.6 Plus", wire: "anthropic", url: "https://opencode.ai/zen/go", authHeader: "x-api-key" },
     ],
     // Measured 2026-09-18 against the live endpoint, one effort at a time: none, minimal, low,
     // medium, high and xhigh are accepted; **max and ultra are refused** with invalid_request_error.
