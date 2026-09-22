@@ -737,6 +737,9 @@ async function probeProvider(name, provider, onComplete) {
         headers,
         modelsUrl: provider.modelsUrl || (provider.preset && presetById(provider.preset) && presetById(provider.preset).modelsUrl),
         modelsAuthHeader: provider.modelsAuthHeader || (provider.preset && presetById(provider.preset) && presetById(provider.preset).modelsAuthHeader),
+        // The router reads the preset's fallback list to tag each discovered model with the wire it
+        // speaks, since /models reports ids alone and one plan can serve several wires.
+        preset: provider.preset,
         probeModel: provider.probeModel || (provider.preset && presetById(provider.preset) && (presetById(provider.preset).fallbackModels || [])[0] && presetById(provider.preset).fallbackModels[0].id),
         // Some vendors refuse a request without it rather than merely losing the cache, so a test
         // that leaves it out reports a broken provider that works perfectly.
@@ -1163,10 +1166,20 @@ function inputRow(label, control, helpText) {
 }
 // Checklist that stays usable with hundreds of models (OpenRouter lists 400+): a search box, checked
 // entries pinned first, at most 36 visible rows, and the selection kept in a Set so filtering never
-// loses ticks. `box.selected()` returns the chosen {id,name} entries.
+// loses ticks. `box.selected()` returns the chosen entries, each carrying whatever per-model override
+// it arrived with (effortLevels, and the wire/url/authHeader a preset gave it) so a save does not
+// strip the endpoint the model speaks.
+function modelOverrideFields(model) {
+  return {
+    ...(Array.isArray(model.effortLevels) ? { effortLevels: [...model.effortLevels] } : {}),
+    ...(model.wire ? { wire: model.wire } : {}),
+    ...(model.url ? { url: model.url } : {}),
+    ...(model.authHeader ? { authHeader: model.authHeader } : {}),
+  };
+}
 function modelChecklist(models, checked) {
   const selected = new Map();
-  for (const model of models) if (checked.has(model.id)) selected.set(model.id, { id: model.id, name: labelOf(model), ...(Array.isArray(model.effortLevels) ? { effortLevels: [...model.effortLevels] } : {}) });
+  for (const model of models) if (checked.has(model.id)) selected.set(model.id, { id: model.id, name: labelOf(model), ...modelOverrideFields(model) });
   const wrap = el("div", { class: "model-picker" });
   const grid = el("div", { class: "model-checklist modal-checklist" });
   const note = el("div", { class: "small", text: "" });
@@ -1183,7 +1196,7 @@ function modelChecklist(models, checked) {
       input.dataset.model = model.id;
       input.dataset.name = labelOf(model);
       input.addEventListener("change", () => {
-        if (input.checked) selected.set(model.id, { id: model.id, name: labelOf(model), ...(Array.isArray(model.effortLevels) ? { effortLevels: [...model.effortLevels] } : {}) });
+        if (input.checked) selected.set(model.id, { id: model.id, name: labelOf(model), ...modelOverrideFields(model) });
         else selected.delete(model.id);
         note.textContent = summary(matches.length);
       });

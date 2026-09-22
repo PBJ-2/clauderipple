@@ -96,7 +96,7 @@ function ambiguousConfig(): Config {
   return {
     providers: {
       deepseek: { models: [{ id: "deepseek-v4-pro", name: "DeepSeek Pro" }] },
-      "opencode-go-chat": { models: [{ id: "deepseek-v4-pro", name: "DeepSeek Pro" }, { id: "kimi-k3", name: "Kimi" }] },
+      "opencode-go": { models: [{ id: "deepseek-v4-pro", name: "DeepSeek Pro" }, { id: "kimi-k3", name: "Kimi" }] },
     },
     cli: { extraModels: [] },
     direct: [{ prefix: "deepseek-v4-pro", provider: "deepseek" }],
@@ -105,13 +105,13 @@ function ambiguousConfig(): Config {
 
 test("an id two providers offer keeps its rule even though nothing ticked it", () => {
   // It is in no picker list, and dropping it because of that would stop it routing entirely.
-  const next = apply(ambiguousConfig(), [{ id: "kimi-k3", name: "Kimi", provider: "opencode-go-chat" }]);
+  const next = apply(ambiguousConfig(), [{ id: "kimi-k3", name: "Kimi", provider: "opencode-go" }]);
   assert.deepEqual(next.direct, [{ prefix: "deepseek-v4-pro", provider: "deepseek" }]);
   assert.equal(next.direct?.some((rule) => rule.prefix === "kimi-k3"), false, "the unambiguous one needs nothing");
 });
 
 test("ticking an ambiguous model writes the rule that says which provider was meant", () => {
-  const next = apply(ambiguousConfig(), [{ id: "deepseek-v4-pro", name: "DeepSeek Pro", provider: "opencode-go-chat" }]);
+  const next = apply(ambiguousConfig(), [{ id: "deepseek-v4-pro", name: "DeepSeek Pro", provider: "opencode-go" }]);
   assert.equal(next.direct?.length, 1);
   assert.equal(next.direct?.[0]?.provider, "deepseek", "an existing rule is the operator's answer and is not overwritten by a tick");
 });

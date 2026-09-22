@@ -30,7 +30,7 @@ function freePort(): Promise<number> {
 
 const PROVIDERS: Config["providers"] = {
   chatgpt: { type: "chatgpt", models: [{ id: "gpt-5.6-terra" }] },
-  "opencode-go-chat": { type: "openai-compatible", url: "http://127.0.0.1:8788", wire: "chat", models: [{ id: "deepseek-v4-pro" }] },
+  "opencode-go": { type: "openai-compatible", url: "http://127.0.0.1:8788", wire: "chat", models: [{ id: "deepseek-v4-pro" }] },
   deepseek: { type: "anthropic-compatible", url: "http://127.0.0.1:8789", models: [{ id: "deepseek-v4-pro" }] },
   anthropic: { type: "anthropic", auth: "claude-code", models: [{ id: "claude-opus-5" }] },
 };
@@ -102,7 +102,7 @@ test("an ambiguous model is refused 400 and names both providers", async () => {
   try {
     const { status, body } = await r.send("deepseek-v4-pro");
     assert.equal(status, 400);
-    assert.match((JSON.parse(body) as { error: { message: string } }).error.message, /declared by two providers \(opencode-go-chat, deepseek\)/);
+    assert.match((JSON.parse(body) as { error: { message: string } }).error.message, /declared by two providers \(opencode-go, deepseek\)/);
   } finally {
     r.stop();
   }

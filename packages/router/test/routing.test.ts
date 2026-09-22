@@ -64,7 +64,7 @@ const declared: Config = {
   ...DEFAULTS,
   providers: {
     chatgpt: { type: "chatgpt", models: [{ id: "gpt-5.6-terra" }, { id: "gpt-5.6-luna" }] },
-    "opencode-go-chat": { type: "openai-compatible", url: "http://127.0.0.1:8788", wire: "chat", models: [{ id: "kimi-k3" }, { id: "deepseek-v4-pro" }] },
+    "opencode-go": { type: "openai-compatible", url: "http://127.0.0.1:8788", wire: "chat", models: [{ id: "kimi-k3" }, { id: "deepseek-v4-pro" }] },
     deepseek: { type: "anthropic-compatible", url: "http://127.0.0.1:8789", models: [{ id: "deepseek-v4-pro" }] },
     anthropic: { type: "anthropic", auth: "claude-code", models: [{ id: "claude-opus-5" }, { id: "claude-haiku-4-5" }] },
   },
@@ -75,7 +75,7 @@ const declared: Config = {
 
 test("a model only one provider carries routes there without a rule", () => {
   const r = resolve("kimi-k3", body("hi"), declared)!;
-  assert.equal(r.provider, "opencode-go-chat");
+  assert.equal(r.provider, "opencode-go");
   assert.equal(r.model, "kimi-k3", "the model is not rewritten: the provider serves it under its own name");
   assert.equal(resolve("kimi-k3@low", body("hi"), declared)!.effort, "low");
 });
@@ -239,7 +239,7 @@ test("a marker naming an agent file resolves through the derived alias", () => {
   // The marker now resolves to a real id. `deepseek-v4-pro` is offered by two providers in
   // `declared`, so it is still ambiguous — the alias resolves, and the ambiguity is what stops it.
   const reason = unroutableReason("vendor-model", body("[[ripple: deepseek@high]] do it"), cfg);
-  assert.equal(reason, '"deepseek-v4-pro" is declared by two providers (opencode-go-chat, deepseek); add a route or direct rule');
+  assert.equal(reason, '"deepseek-v4-pro" is declared by two providers (opencode-go, deepseek); add a route or direct rule');
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -248,7 +248,7 @@ test("a marker naming an agent file routes when exactly one provider declares it
   fs.writeFileSync(path.join(dir, "kimi.md"), "---\nname: kimi\nmodel: kimi-k3@low\n---\n");
   const cfg = withAgentAliases(declared, dir);
   const r = resolve("some-unknown-model", body("[[ripple: kimi@high]] do it"), cfg)!;
-  assert.equal(r.provider, "opencode-go-chat");
+  assert.equal(r.provider, "opencode-go");
   assert.equal(r.model, "kimi-k3");
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -257,7 +257,7 @@ test("unroutableReason: marker alias that resolves to an undeclared model", () =
   const cfg: Config = { ...declared, aliases: { ...declared.aliases, deepseek: "deepseek-v4-pro" } };
   // Two providers declare it → the ambiguity message, not the "undeclared" one.
   assert.equal(unroutableReason("whatever", body("[[ripple: deepseek@high]]"), cfg),
-    '"deepseek-v4-pro" is declared by two providers (opencode-go-chat, deepseek); add a route or direct rule');
+    '"deepseek-v4-pro" is declared by two providers (opencode-go, deepseek); add a route or direct rule');
   // An alias pointing at a model nobody has.
   const ghost: Config = { ...declared, aliases: { ...declared.aliases, ghost: "no-such-model" } };
   assert.equal(unroutableReason("whatever", body("[[ripple: ghost]]"), ghost),
@@ -271,7 +271,7 @@ test("unroutableReason: a marker name that is neither alias nor agent", () => {
 
 test("unroutableReason: two providers declare the named model", () => {
   assert.equal(unroutableReason("deepseek-v4-pro", body("hi"), declared),
-    '"deepseek-v4-pro" is declared by two providers (opencode-go-chat, deepseek); add a route or direct rule');
+    '"deepseek-v4-pro" is declared by two providers (opencode-go, deepseek); add a route or direct rule');
 });
 
 test("unroutableReason: no provider declares it, and an ingress-only provider is named", () => {

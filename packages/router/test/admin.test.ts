@@ -187,7 +187,7 @@ test("GET /api/status marks which providers can run a web search", async () => {
       translated: { type: "openai-compatible", url: "http://127.0.0.1:1" },
       native: { type: "anthropic-compatible", url: "http://127.0.0.1:1", preset: "deepseek" },
       // The same vendor through another route: it serves the model but runs no server tool.
-      via: { type: "anthropic-compatible", url: "http://127.0.0.1:1", preset: "opencode-go-anthropic" },
+      via: { type: "anthropic-compatible", url: "http://127.0.0.1:1", preset: "opencode-go" },
     },
   });
   await withAdmin(cfg, async ({ port }) => {
@@ -493,6 +493,55 @@ test("POST /api/providers/probe discovers OpenAI-compatible models and probes Ch
     assert.equal(seen.tokens, 1);
   } finally {
     await new Promise<void>((resolveP, reject) => upstream.close((error) => error ? reject(error) : resolveP()));
+  }
+});
+
+// A provider built from a preset reaches several wires on one `/models` catalog, and the catalog
+// reports ids alone. The preset's fallback list is the only place each model's wire, endpoint and auth
+// convention is written, so discovery has to fold it in — a model left bare would be sent in the
+// provider's default shape to the wrong path.
+test("POST /api/providers/probe tags discovered models with the wire their preset declares", async () => {
+  const upstream = http.createServer((req, res) => {
+    if (req.url === "/v1/models") {
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ data: [
+        { id: "minimax-m3", name: "MiniMax M3" },
+        { id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" },
+        { id: "muse-spark-1.3-contributor", name: "Muse Spark 1.3 (Contributor)" },
+        // Not on the preset's list: it must come back bare and ride the provider default.
+        { id: "brand-new-model", name: "Brand New" },
+      ] }));
+      return;
+    }
+    if (req.url === "/v1/chat/completions") {
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ choices: [] }));
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  await new Promise<void>((resolveP) => upstream.listen(0, "127.0.0.1", resolveP));
+  const address = upstream.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}/v1`;
+  try {
+    await withAdmin(makeCfg(), async ({ port }) => {
+      const res = await fetch(`${base()}:${port}/api/providers/probe`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "openai-compatible", url: origin, headers: { authorization: "Bearer secret-key" }, modelsUrl: `${origin}/models`, modelsAuthHeader: "authorization-bearer", preset: "opencode-go" }),
+      });
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { models: { id: string; wire?: string; url?: string; authHeader?: string }[] };
+      const byId = new Map(body.models.map((m) => [m.id, m]));
+      assert.equal(byId.get("minimax-m3")?.wire, "anthropic");
+      assert.equal(byId.get("minimax-m3")?.url, "https://opencode.ai/zen/go", "one segment shorter than the OpenAI base");
+      assert.equal(byId.get("minimax-m3")?.authHeader, "x-api-key", "Anthropic's convention, not the provider bearer");
+      assert.equal(byId.get("deepseek-v4.1-flash")?.wire, "chat");
+      assert.equal(byId.get("deepseek-v4.1-flash")?.url, undefined, "the chat group uses the provider base");
+      assert.equal(byId.get("muse-spark-1.3-contributor")?.wire, undefined, "the Responses group rides the provider default");
+      assert.equal(byId.get("brand-new-model")?.wire, undefined, "an id the preset does not list stays bare");
+    });
+  } finally {
+    await new Promise<void>((resolveP, reject) => upstream.close((error) => (error ? reject(error) : resolveP())));
   }
 });
 

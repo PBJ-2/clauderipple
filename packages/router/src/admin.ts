@@ -16,7 +16,7 @@ import path from "node:path";
 import http from "node:http";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import type { Config } from "./config.ts";
+import type { Config, ProviderModel } from "./config.ts";
 import { homeDir, validate } from "./config.ts";
 import type { Logger } from "./log.ts";
 import type { Stats } from "./proxy.ts";
@@ -86,7 +86,9 @@ export type AdminDeps = {
   shutdown?: () => void;
 };
 
-type ModelEntry = { id: string; name?: string; effortLevels?: string[]; contextWindow?: number };
+/** One discovered/offered model. Exactly the config shape, so a preset's per-model override
+ * (wire/url/authHeader) can be carried straight into a provider entry. */
+type ModelEntry = ProviderModel;
 type ProbeAuth = "ok" | "bad-key" | "unreachable" | "unknown" | "missing";
 type ProbeRequest = {
   type: "anthropic-compatible" | "openai-compatible";
@@ -96,6 +98,12 @@ type ProbeRequest = {
   modelsAuthHeader?: string;
   /** Model id to use for the auth check when the provider has no listing endpoint (e.g. the preset's first fallback). */
   probeModel?: string;
+  /**
+   * The catalog preset this provider was built from. `/models` reports ids only, never the wire each
+   * one speaks, so the preset's own fallback list is the source for that: discovery fills each
+   * matching id with the preset's `wire`/`url`/`authHeader`. Absent, the models come back bare.
+   */
+  preset?: string;
   /**
    * A header the vendor recognises a conversation by. Not only a cache hint for some of them:
    * OpenCode Go refuses a request without `x-opencode-session` outright, so a connection test that
@@ -577,6 +585,31 @@ function snippet(text: string): string {
   return text.replace(/\s+/g, " ").trim().slice(0, 200);
 }
 
+/**
+ * Fill each discovered model with the wire, endpoint and auth convention its preset declares for it.
+ *
+ * `/models` reports ids alone, and one plan can serve several wires on one catalog (OpenCode Go's
+ * Responses, Chat and Anthropic groups). A discovered model left bare would be routed on the
+ * provider's default wire — the wrong shape on the wrong path for two of the three groups. The
+ * preset's fallback list is the only place that mapping is written down, so it is read here; an id
+ * not on it stays bare and gets the provider's own wire.
+ */
+function withPresetOverrides(models: ModelEntry[], presetId: string | undefined): ModelEntry[] {
+  if (!presetId) return models;
+  const preset = PRESETS.find((entry) => entry.id === presetId);
+  if (!preset) return models;
+  return models.map((model) => {
+    const known = preset.fallbackModels.find((fallback) => fallback.id === model.id);
+    if (!known) return model;
+    return {
+      ...model,
+      ...(known.wire !== undefined ? { wire: known.wire } : {}),
+      ...(known.url !== undefined ? { url: known.url } : {}),
+      ...(known.authHeader !== undefined ? { authHeader: known.authHeader } : {}),
+    };
+  });
+}
+
 async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
   return fetch(url, { ...init, signal: AbortSignal.timeout(8_000) });
 }
@@ -589,7 +622,7 @@ async function probeProvider(body: ProbeRequest): Promise<{ ok: boolean; auth: P
     try {
       const response = await fetchWithTimeout(body.modelsUrl, { headers: authHeaders(source, body.modelsAuthHeader) });
       if (response.status === 401 || response.status === 403) return { ok: false, auth: "bad-key", models: [], error: `models endpoint returned ${response.status}` };
-      if (response.ok) models = parsedModels(await response.json());
+      if (response.ok) models = withPresetOverrides(parsedModels(await response.json()), body.preset);
       else modelsError = `models endpoint returned ${response.status}`;
     } catch (e) {
       modelsError = `models endpoint: ${errorText(e)}`;
@@ -798,7 +831,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           sendJson(res, 400, { error: "expected provider probe object" });
           return;
         }
-        const probe = parsed as { type?: unknown; auth?: unknown; apiKey?: unknown; url?: unknown; headers?: unknown; modelsUrl?: unknown; modelsAuthHeader?: unknown; probeModel?: unknown; sessionHeader?: unknown };
+        const probe = parsed as { type?: unknown; auth?: unknown; apiKey?: unknown; url?: unknown; headers?: unknown; modelsUrl?: unknown; modelsAuthHeader?: unknown; probeModel?: unknown; sessionHeader?: unknown; preset?: unknown };
         if (probe.type === "anthropic") {
           if (probe.auth === "claude-code") {
             sendJson(res, 200, probeClaudeCodeAuth(deps));
@@ -848,6 +881,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           ...(probe.modelsUrl ? { modelsUrl: probe.modelsUrl } : {}),
           ...(typeof probe.sessionHeader === "string" && probe.sessionHeader ? { sessionHeader: probe.sessionHeader } : {}),
           ...(probe.modelsAuthHeader ? { modelsAuthHeader: probe.modelsAuthHeader } : {}),
+          ...(typeof probe.preset === "string" && probe.preset ? { preset: probe.preset } : {}),
           ...(typeof probe.probeModel === "string" ? { probeModel: probe.probeModel } : {}),
         });
         sendJson(res, 200, result);

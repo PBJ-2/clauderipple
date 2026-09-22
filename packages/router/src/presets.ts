@@ -2,6 +2,22 @@
 // Keep this catalog conservative: providers with only an OpenAI-compatible API belong
 // behind a translation adapter, not in this host-rewrite-only catalog.
 
+/**
+ * One model the preset suggests. Shaped to fit `ProviderModel` so a model can carry the wire it
+ * speaks, its own endpoint and its auth convention when those differ from the preset's own — one
+ * subscription that answers several protocols on one key stays one preset instead of three.
+ * `name` stays required: every entry here is user-facing and none is offered without one.
+ */
+export type PresetModel = {
+  id: string;
+  name: string;
+  wire?: "chat" | "responses" | "anthropic";
+  url?: string;
+  authHeader?: "x-api-key" | "authorization-bearer";
+  /** An empty array disables the provider fallback for this model, exactly as on a provider. */
+  effortLevels?: string[];
+};
+
 export type ProviderPreset = {
   id: string;
   /** Native Anthropic endpoint or OpenAI-compatible endpoint. */
@@ -19,7 +35,7 @@ export type ProviderPreset = {
    * some of them key their prompt cache on it and charge full price without it.
    */
   sessionHeader?: string;
-  fallbackModels: { id: string; name: string }[];
+  fallbackModels: PresetModel[];
   /** Empty means output_config.effort is stripped for this provider. */
   effortLevels: string[];
   /** Whether adaptive CLI thinking can safely become Anthropic enabled thinking. */
@@ -200,106 +216,69 @@ export const PRESETS: ProviderPreset[] = [
   },
   // Docs: https://opencode.ai/docs/go/
   //
-  // One subscription, three endpoints, split by which wire each model speaks: `/responses` for
-  // Muse Spark, Grok and GPT; `/chat/completions` for GLM, Kimi, DeepSeek and LongCat;
-  // `/messages` (Anthropic) for MiniMax and Qwen. A provider carries one url and one wire, so the
-  // other two are separate providers — this preset is the Responses one, which is where Muse Spark
-  // lives.
+  // One subscription, one key, one `/models` catalog, three endpoints by which wire each model
+  // speaks: `/responses` for Muse Spark, Grok and GPT; `/chat/completions` for GLM, Kimi, DeepSeek,
+  // LongCat and MiMo; `/messages` (Anthropic) for MiniMax and Qwen. This used to be three presets
+  // because a provider carried one url and one wire; now a model carries its own wire, url and auth
+  // header (`ProviderModel`), so the account is one preset and `providerFor` folds the override in
+  // when the model is known. The provider-level values below are the Responses base — which is where
+  // Muse Spark lives, and the wire a model with no override gets.
   //
   // `x-opencode-session` is not optional at all: the vendor answers 400 `MissingSessionID` without
   // it — "cannot be routed efficiently" — so it gates the request rather than just the cache.
+  //
+  // `/models` lists every model on the plan, the other two endpoints' models among them (measured
+  // 2026-09-18). Discovery therefore offers all three groups, and the wire each needs comes from
+  // this fallback list, which is the only place that fact is written down.
   {
     id: "opencode-go",
     kind: "openai-compatible",
-    name: "OpenCode Go (Responses)",
+    name: "OpenCode Go",
     vendorUrl: "https://opencode.ai/go",
     anthropicBaseUrl: "https://opencode.ai/zen/go/v1",
     authHeader: "authorization-bearer",
     wire: "responses",
     sessionHeader: "x-opencode-session",
-    // `/models` lists every model on the plan, including the ones the other two endpoints serve.
-    // The fallback list is therefore the Responses ones by name: a model from another group is
-    // offered by discovery but will not answer here.
     modelsUrl: "https://opencode.ai/zen/go/v1/models",
     modelsAuthHeader: "authorization-bearer",
     fallbackModels: [
+      // Responses (the preset's own wire, so no override).
       { id: "muse-spark-1.3-contributor", name: "Muse Spark 1.3 (Contributor)" },
       { id: "muse-spark-1.2-contributor", name: "Muse Spark 1.2 (Contributor)" },
       { id: "grok-4.6", name: "Grok 4.6" },
       { id: "gpt-5.6-luna", name: "GPT-5.6 Luna" },
+      // Chat Completions. No per-model effort contract is published for this endpoint, so the
+      // empty ladder disables the preset's Responses ladder rather than guess one.
+      { id: "glm-5.3", name: "GLM-5.3", wire: "chat", effortLevels: [] },
+      { id: "glm-5.3-flash", name: "GLM-5.3 Flash", wire: "chat", effortLevels: [] },
+      { id: "kimi-k3", name: "Kimi K3", wire: "chat", effortLevels: [] },
+      { id: "kimi-k2.7-code", name: "Kimi K2.7 Code", wire: "chat", effortLevels: [] },
+      { id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash", wire: "chat", effortLevels: [] },
+      { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", wire: "chat", effortLevels: [] },
+      { id: "longcat-2.0", name: "LongCat 2.0", wire: "chat", effortLevels: [] },
+      { id: "mimo-v2.5-pro", name: "MiMo V2.5 Pro", wire: "chat", effortLevels: [] },
+      // Anthropic Messages, which needs no translation. The url is deliberately one segment shorter
+      // than the provider's: an openai-compatible provider appends the endpoint name (`/responses`),
+      // so its base carries the `/v1`, but an anthropic-compatible one appends the caller's whole
+      // `/v1/messages` — a base ending in `/v1` would ask for `/v1/v1/messages`, which this vendor
+      // answers with its website, as a 404 page of HTML. Each endpoint follows the auth convention of
+      // the API it imitates, so these want Anthropic's header where the two OpenAI-wire groups on the
+      // same key want a bearer: measured 2026-09-18 with a deliberately wrong key, the header it does
+      // not recognise answers "Missing API key" and the one it does answers "Invalid API key".
+      { id: "minimax-m3", name: "MiniMax M3", wire: "anthropic", url: "https://opencode.ai/zen/go", authHeader: "x-api-key", effortLevels: [] },
+      { id: "qwen3.8-max", name: "Qwen3.8 Max", wire: "anthropic", url: "https://opencode.ai/zen/go", authHeader: "x-api-key", effortLevels: [] },
+      { id: "qwen3.8-flash", name: "Qwen3.8 Flash", wire: "anthropic", url: "https://opencode.ai/zen/go", authHeader: "x-api-key", effortLevels: [] },
+      { id: "union-alpha", name: "Union Alpha (free)", wire: "anthropic", url: "https://opencode.ai/zen/go", authHeader: "x-api-key", effortLevels: [] },
     ],
     // Measured 2026-09-18 against the live endpoint, one effort at a time: none, minimal, low,
     // medium, high and xhigh are accepted; **max and ultra are refused** with invalid_request_error.
     // The ladder therefore tops out at xhigh, which is unusual enough that reading it off the model
-    // card would have got it wrong twice — the first list here had max in it and no xhigh.
+    // card would have got it wrong twice — the first list here had max in it and no xhigh. It applies
+    // to the Responses models above; the Chat and Anthropic ones carry their own empty ladder.
     effortLevels: ["none", "minimal", "low", "medium", "high", "xhigh"],
     thinking: "none",
     verified: true,
-    notes: "Contributor tier: Meta states these interactions are used to improve its products, which is why they are ~90% cheaper, and OpenCode refuses the model until the workspace opts in (403 DataPolicyError, with the link). Measured: answers, effort ladder tops out at xhigh, prompt cache reached 96% on a repeated turn. Muse Spark is limited to some regions.",
-    docsUrl: "https://opencode.ai/docs/go/",
-  },
-  // The same subscription and the same key, on the endpoint the rest of the OpenAI-wire models use.
-  {
-    id: "opencode-go-chat",
-    kind: "openai-compatible",
-    name: "OpenCode Go (Chat)",
-    vendorUrl: "https://opencode.ai/go",
-    anthropicBaseUrl: "https://opencode.ai/zen/go/v1",
-    authHeader: "authorization-bearer",
-    wire: "chat",
-    sessionHeader: "x-opencode-session",
-    modelsUrl: "https://opencode.ai/zen/go/v1/models",
-    modelsAuthHeader: "authorization-bearer",
-    fallbackModels: [
-      { id: "glm-5.3", name: "GLM-5.3" },
-      { id: "glm-5.3-flash", name: "GLM-5.3 Flash" },
-      { id: "kimi-k3", name: "Kimi K3" },
-      { id: "kimi-k2.7-code", name: "Kimi K2.7 Code" },
-      { id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" },
-      { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro" },
-      { id: "longcat-2.0", name: "LongCat 2.0" },
-      { id: "mimo-v2.5-pro", name: "MiMo V2.5 Pro" },
-    ],
-    // No per-model effort contract is published for this endpoint; strip it rather than guess.
-    effortLevels: [],
-    thinking: "none",
-    verified: true,
-    notes: "Same subscription and key as the Responses entry; a different endpoint, so a separate provider. Measured 2026-09-18: glm-5.3, glm-5.3-flash, kimi-k3, kimi-k2.7-code, deepseek-v4.1-flash, deepseek-v4-pro, longcat-2.0 and mimo-v2.5-pro all answered.",
-    docsUrl: "https://opencode.ai/docs/go/",
-  },
-  // And the third endpoint, which speaks Anthropic Messages, so it needs no translation at all.
-  {
-    id: "opencode-go-anthropic",
-    kind: "anthropic-compatible",
-    name: "OpenCode Go (Anthropic)",
-    vendorUrl: "https://opencode.ai/go",
-    // Deliberately one segment shorter than the two OpenAI entries. The kinds mean different things
-    // by "base": an openai-compatible provider has the endpoint name appended (`/responses`), so its
-    // base carries the `/v1`; an anthropic-compatible one has the caller's whole `/v1/messages`
-    // appended, so a base ending in `/v1` asks for `/v1/v1/messages` — which this vendor answers
-    // with its website, as a 404 page of HTML.
-    anthropicBaseUrl: "https://opencode.ai/zen/go",
-    // Each endpoint follows the auth convention of the API it imitates: this one answers Anthropic
-    // Messages, so it wants Anthropic's header, while the two OpenAI-wire endpoints on the same key
-    // want a bearer. Measured 2026-09-18 with a deliberately wrong key: the header it does not
-    // recognise answers "Missing API key", the one it does answers "Invalid API key".
-    authHeader: "x-api-key",
-    // The same cache key the other two send. Left off here once already: the support was wired on
-    // both paths and the value was simply never put in this entry, which costs nothing visible and
-    // several times the tokens.
-    sessionHeader: "x-opencode-session",
-    modelsUrl: "https://opencode.ai/zen/go/v1/models",
-    modelsAuthHeader: "authorization-bearer",
-    fallbackModels: [
-      { id: "minimax-m3", name: "MiniMax M3" },
-      { id: "qwen3.8-max", name: "Qwen3.8 Max" },
-      { id: "qwen3.8-flash", name: "Qwen3.8 Flash" },
-      { id: "union-alpha", name: "Union Alpha (free)" },
-    ],
-    effortLevels: [],
-    thinking: "none",
-    verified: true,
-    notes: "Same subscription and key as the other two entries. Anthropic-wire models, so nothing is translated. Measured 2026-09-18: minimax-m3, qwen3.8-max and qwen3.8-flash answered, and the prompt cache reached 99% on a repeated turn. union-alpha, the free row, answered \"Model is unavailable\".",
+    notes: "One subscription and key, three endpoints by wire. Measured 2026-09-18. Responses: Muse Spark answers, effort ladder tops out at xhigh, prompt cache reached 96% on a repeated turn. Chat: glm-5.3, glm-5.3-flash, kimi-k3, kimi-k2.7-code, deepseek-v4.1-flash, deepseek-v4-pro, longcat-2.0 and mimo-v2.5-pro all answered. Anthropic: minimax-m3, qwen3.8-max and qwen3.8-flash answered with the prompt cache at 99% on a repeated turn, while union-alpha, the free row, answered \"Model is unavailable\". The Muse Spark Contributor tier is ~90% cheaper because Meta states those interactions improve its products, and OpenCode refuses the model until the workspace opts in (403 DataPolicyError); it is also limited to some regions.",
     docsUrl: "https://opencode.ai/docs/go/",
   },
   // Docs: https://docs.mistral.ai/api/endpoint/chat and https://docs.mistral.ai/api/endpoint/models
