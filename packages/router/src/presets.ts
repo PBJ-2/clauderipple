@@ -104,7 +104,13 @@ export const PRESETS: ProviderPreset[] = [
     vendorUrl: "https://z.ai/",
     anthropicBaseUrl: "https://api.z.ai/api/anthropic",
     authHeader: "authorization-bearer",
-    fallbackModels: [{ id: "glm-5.2", name: "GLM-5.2" }],
+    // No model list is served, so this list is the picker. glm-5.3-flash is named in
+    // https://docs.z.ai/guides/vlm/glm-5.3-flash; its FlashX sibling is not on the Coding Plan yet (issue #14).
+    fallbackModels: [
+      { id: "glm-5.3", name: "GLM-5.3" },
+      { id: "glm-5.3-flash", name: "GLM-5.3 Flash" },
+      { id: "glm-5.2", name: "GLM-5.2" },
+    ],
     // https://docs.z.ai/devpack/tool/others documents the endpoint but not an Anthropic effort/thinking contract.
     effortLevels: [],
     thinking: "none",
