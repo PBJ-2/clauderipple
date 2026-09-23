@@ -5,4 +5,4 @@
 // from the manifests. Until 0.1.1 the router and the CLI each carried their own literal, and both
 // still said "0.1.0" in the 0.1.1 release: after an update nobody could tell which router was
 // running, and the tray app had nothing to compare (2026-09-15, reported from a Windows install).
-export const VERSION = "0.3.1";
+export const VERSION = "0.4.0";

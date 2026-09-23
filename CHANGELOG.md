@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.4.0 — 2026-09-24
+
+Several ChatGPT accounts, for Claude Desktop and for Codex.
+
+### Added
+
+- **Several ChatGPT accounts.** `clauderipple login` (or **+ Add ChatGPT account**
+  in the dashboard) adds an account instead of replacing the one you had; the
+  sign-in asks who is signing in, so the browser's current ChatGPT session is not
+  silently reused. When an account hits its limit, the same request moves to the
+  next one before anything reaches the client, and the spent account rests until
+  the window the backend reports resets. A conversation stays on the account that
+  answered, to keep its prompt cache. A 401 gets one token refresh and a replay;
+  only a freshly minted token refused again asks for a new sign-in. Accounts live
+  in `~/.clauderipple/chatgpt-accounts.json` (0600); the old single login is moved
+  there on the first sign-in. The Codex CLI's own login still takes part, last.
+- **Accounts tab for ChatGPT** in the dashboard: each account's 5-hour and weekly
+  usage, when a resting one is back, and pause/resume, rename, remove, use now and
+  sign in again.
+- **Codex's GPT goes through the account pool.** `clauderipple codex on` now also
+  points Codex's built-in OpenAI provider at ClaudeRipple. Codex keeps its ChatGPT
+  sign-in; its GPT requests reach ChatGPT unchanged except for the account, so when
+  one account runs out Codex carries on with the next — no sign-out. With no account
+  added, or every one at its limit, Codex's own login is used. An `openai_base_url`
+  of your own is never overwritten; `clauderipple codex off` undoes it.
+
+### Changed
+
+- `clauderipple logout` removes every ChatGPT account added with `login`.
+- `/api/status` keeps `chatgpt.quota` (the account that answers next) and adds
+  `chatgpt.accounts`, one entry per account.
+
 ## 0.3.1 — 2026-09-24
 
 Fixes for three reports against 0.3.0.

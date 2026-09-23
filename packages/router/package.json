@@ -1,6 +1,6 @@
 {
   "name": "@clauderipple/router",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "description": "Local proxy that routes selected Claude Code model names to other providers and passes everything else to api.anthropic.com untouched.",
