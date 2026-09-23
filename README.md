@@ -139,19 +139,23 @@ Codex from one menu-bar app, runs both subscriptions side by side, and keeps the
 Claude Code harness intact: your skills, hooks, MCP servers, `CLAUDE.md`, subagents
 and claude.ai connectors keep working while another model does the thinking.
 
-| | ClaudeRipple | claude-code-router | Claude Desktop gateway (3P) mode |
-|---|---|---|---|
-| Claude **Desktop** Code tab **without** gateway (3P) mode | ✅ | ❌ | ❌ by definition |
-| Keeps claude.ai chat, Remote Control, cloud sessions, connectors | ✅ | ❌ | ❌ |
-| Claude and GPT subscriptions side by side | ✅ | ❌ | ❌ |
-| Real model names in the Desktop picker | ✅ | ❌ | partial |
-| Several ChatGPT accounts, switching when one runs out (Desktop and Codex) | ✅ | ❌ | ❌ |
-| Terminal `claude` CLI | ✅ | ✅ | ✅ |
-| Codex **app** and Codex CLI → Claude | ✅ | ❌ | ❌ |
-| Prompt cache on translated providers | **94–99 %** measured | varies | n/a |
-| Subagents named by real model in the task panel | ✅ | ❌ | ❌ |
-| Settings GUI, no terminal needed | ✅ | ❌ | ❌ |
-| Signed, notarized app with its own runtime | ✅ | ❌ | – |
+| | ClaudeRipple | opencodex / openclaude (checked 2026-09-16) | claude-code-router | Claude Desktop gateway (3P) mode |
+|---|---|---|---|---|
+| Claude **Desktop** Code tab **without** gateway (3P) mode | ✅ | ❌ ¹ | ❌ | ❌ by definition |
+| Keeps claude.ai chat, Remote Control, cloud sessions, connectors | ✅ | ❌ | ❌ | ❌ |
+| Claude and GPT subscriptions side by side | ✅ | ❌ all-or-nothing | ❌ | ❌ |
+| Real model names in the Desktop picker | ✅ | ❌ | ❌ | partial |
+| Several ChatGPT accounts, switching when one runs out (Desktop and Codex) | ✅ | ✅ | ❌ | ❌ |
+| Terminal `claude` CLI | ✅ | ✅ | ✅ | ✅ |
+| Codex **app** and Codex CLI → Claude | ✅ | ✅ | ❌ | ❌ |
+| Prompt cache on translated providers | **94–99 %** measured | not measured | varies | n/a |
+| Subagents named by real model in the task panel | ✅ | ❌ | ❌ | ❌ |
+| Settings GUI, no terminal needed | ✅ | ❌ | ❌ | ❌ |
+| Signed, notarized app with its own runtime | ✅ | ❌ | ❌ | – |
+
+¹ opencodex's README showed Claude Desktop in a demo but published no setup steps for it,
+in the repository or on its documentation site (checked 2026-09-16). At the time the only
+public way into the desktop app was the official gateway setting — the last column.
 
 The desktop app's own "third-party inference" setting flips the whole app into another
 mode: you lose claude.ai chat, Remote Control and cloud sessions. Tools that replace
