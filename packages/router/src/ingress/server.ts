@@ -7,6 +7,7 @@ import https from "node:https";
 import type { Socket } from "node:net";
 import os from "node:os";
 import path from "node:path";
+import zlib from "node:zlib";
 import type { Config, AnthropicCompatibleProvider, AnthropicProvider } from "../config.ts";
 import { providerFor } from "../config.ts";
 import type { Logger } from "../log.ts";
@@ -51,6 +52,21 @@ type IngressDeps = {
    */
   chatgpt?: (name: string | null) => ChatGptAdapter;
 };
+
+/**
+ * The request body as JSON text. Codex signed in to ChatGPT compresses what it sends with zstd
+ * (`content-encoding: zstd`, measured 2026-09-24 with the Codex CLI through `openai_base_url`), so
+ * reading it raw fails before the model is even known. Throws on an encoding we cannot read.
+ */
+export function decodeRequestBody(raw: Buffer, encoding: string | string[] | undefined): Buffer {
+  const name = (Array.isArray(encoding) ? encoding.join(",") : encoding ?? "").trim().toLowerCase();
+  if (!name || name === "identity") return raw;
+  if (name === "zstd") return zlib.zstdDecompressSync(raw);
+  if (name === "gzip" || name === "x-gzip") return zlib.gunzipSync(raw);
+  if (name === "deflate") return zlib.inflateSync(raw);
+  if (name === "br") return zlib.brotliDecompressSync(raw);
+  throw new Error(`unsupported content-encoding ${name}`);
+}
 
 /** A model Codex means for OpenAI: in the chatgpt provider's list, or named the way OpenAI names them. */
 export function isChatGptModel(model: string, cfg: Config): boolean {
@@ -287,7 +303,7 @@ export class OpenAiIngress {
       let raw: Buffer;
       try {
         raw = await readBody(req);
-        body = JSON.parse(raw.toString("utf8")) as Json;
+        body = JSON.parse(decodeRequestBody(raw, req.headers["content-encoding"]).toString("utf8")) as Json;
       } catch (error) {
         const bytes = sendJson(res, 400, openAiError(`Invalid JSON request: ${(error as Error).message}`));
         finish(400, bytes);
@@ -313,10 +329,15 @@ export class OpenAiIngress {
         && (explicitProvider ? explicitProvider.type === "chatgpt" : isChatGptModel(requested, cfg));
       if (toChatGpt) {
         const adapter = this.deps.chatgpt!(explicitProvider ? explicit!.provider : null);
+        // As sent, compressed or not; only a mapping to another model name means rewriting it (and
+        // then it goes out uncompressed).
         const renamed = explicit && explicit.model !== requested;
         const payload = renamed ? Buffer.from(JSON.stringify({ ...body, model: explicit.model })) : raw;
         record = { kind: "messages", source: requested, target: explicit?.model ?? requested, provider: adapter.name, stream: body.stream === true };
-        const outcome = await adapter.passthrough(req, res, path.slice("/v1".length), payload, codexConversation(req, body));
+        const outcome = await adapter.passthrough(req, res, path.slice("/v1".length), payload, codexConversation(req, body), {
+          bodyEncoded: !renamed,
+          onCompleted: (done) => { terminal = { status: done.status, bytes: done.bytes, ...(done.usage ? { usage: done.usage } : {}), ...(done.note ? { note: done.note } : {}) }; },
+        });
         finish(outcome.status, outcome.bytes, { ...(outcome.usage ? { usage: outcome.usage } : {}), ...(outcome.note ? { note: outcome.note } : {}) });
         return;
       }

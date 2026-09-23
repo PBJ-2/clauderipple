@@ -134,7 +134,7 @@ export function rateLimitsFromUsage(body: unknown): Record<string, unknown> | nu
  * session metadata. The caller's credential is not among them — the account decides that.
  */
 const CODEX_FORWARD_HEADERS = [
-  "content-type", "accept", "openai-beta", "originator", "version", "user-agent",
+  "content-type", "content-encoding", "accept", "openai-beta", "originator", "version", "user-agent",
   "session_id", "session-id", "thread-id", "x-client-request-id",
   "x-codex-beta-features", "x-codex-installation-id", "x-codex-parent-thread-id", "x-codex-turn-metadata",
   "x-codex-turn-state", "x-codex-window-id", "x-oai-attestation", "x-openai-subagent", "x-responsesapi-include-timing-metrics",
@@ -686,11 +686,21 @@ export class ChatGptAdapter {
    * With no account of ours signed in, or every one of them resting, the caller's own login — the
    * one Codex sent — is used as it is, so pointing Codex here never leaves it worse off.
    */
-  async passthrough(req: http.IncomingMessage, res: http.ServerResponse, subPath: string, body: Buffer | undefined, conversation: string | undefined): Promise<ChatGptOutcome> {
+  async passthrough(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    subPath: string,
+    body: Buffer | undefined,
+    conversation: string | undefined,
+    /** `onCompleted` fires at `response.completed`: Codex hangs up right after it, and that is a finished turn. */
+    opts: { bodyEncoded?: boolean; onCompleted?: (outcome: ChatGptOutcome) => void } = {},
+  ): Promise<ChatGptOutcome> {
     const ac = new AbortController();
     const onClose = (): void => ac.abort();
     res.on("close", onClose);
     const forwarded = codexForwardHeaders(req.headers);
+    // Codex's body goes out as it came, compressed; a rewritten one does not carry the old encoding.
+    if (!opts.bodyEncoded || !body) delete forwarded["content-encoding"];
     const clientTurnState = forwarded["x-codex-turn-state"];
     const method = req.method ?? "POST";
     const sent = await this.sendToAnAccount({
@@ -783,6 +793,7 @@ export class ChatGptAdapter {
                 const cached = u.input_tokens_details?.cached_tokens ?? 0;
                 usage = { input: (u.input_tokens ?? 0) - cached, cached, output: u.output_tokens ?? 0 };
               }
+              opts.onCompleted?.({ status: upstream.status, bytes, ...(usage ? { usage } : {}), note: `codex passthrough account=${owner ? owner.slice(0, 8) : "caller"}` });
             }
           }
         }

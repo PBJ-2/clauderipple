@@ -7,6 +7,7 @@ import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import zlib from "node:zlib";
 import { OpenAiIngress } from "../src/ingress/server.ts";
 import { ChatGptAdapter } from "../src/providers/chatgpt/index.ts";
 import { saveChatGptAccount } from "../src/providers/chatgpt/accounts.ts";
@@ -20,7 +21,7 @@ const log = new Logger(null, 1e9, 0, false);
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-ingress-gpt-"));
 const requests = new RequestLog(path.join(home, "requests.jsonl"));
 
-type Hit = { path: string; method: string; headers: http.IncomingHttpHeaders; body: string };
+type Hit = { path: string; method: string; headers: http.IncomingHttpHeaders; body: string; raw: Buffer };
 const hits: Hit[] = [];
 const behaviour = new Map<string, { status: number; headers?: Record<string, string>; body?: string }>();
 const answer = [
@@ -33,7 +34,8 @@ const backend = http.createServer((req, res) => {
   const chunks: Buffer[] = [];
   req.on("data", (c: Buffer) => chunks.push(c));
   req.on("end", () => {
-    hits.push({ path: req.url ?? "", method: req.method ?? "", headers: req.headers, body: Buffer.concat(chunks).toString("utf8") });
+    const raw = Buffer.concat(chunks);
+    hits.push({ path: req.url ?? "", method: req.method ?? "", headers: req.headers, body: raw.toString("utf8"), raw });
     const token = String(req.headers.authorization ?? "").replace(/^Bearer /, "");
     const planned = behaviour.get(token);
     if (planned && planned.status !== 200) {
@@ -138,6 +140,21 @@ test("remote compaction and Codex's catalogue refresh take the same route", asyn
   assert.equal(hits.at(-1)!.path, "/codex/models?client_version=0.160.0");
   assert.equal(hits.at(-1)!.method, "GET");
   assert.match(models.text, /gpt-6-sol/);
+});
+
+// Codex signed in to ChatGPT sends its body zstd-compressed (measured 2026-09-24); reading it raw
+// failed every GPT turn with "Invalid JSON" before the model was even known.
+test("a zstd-compressed Codex body is routed by its model and passed on still compressed", async () => {
+  const compressed = zlib.zstdCompressSync(Buffer.from(JSON.stringify(turn)));
+  const res = await new Promise<{ status: number }>((resolve, reject) => {
+    const req = http.request({ host: "127.0.0.1", port, path: "/v1/responses", method: "POST", headers: { authorization: "Bearer caller-token", "chatgpt-account-id": "ws-caller", "content-type": "application/json", "content-encoding": "zstd", "content-length": compressed.length, session_id: "sess-z" } }, (r) => { r.resume(); r.on("end", () => resolve({ status: r.statusCode ?? 0 })); });
+    req.on("error", reject);
+    req.end(compressed);
+  });
+  assert.equal(res.status, 200);
+  const hit = hits.at(-1)!;
+  assert.equal(hit.headers["content-encoding"], "zstd");
+  assert.ok(hit.raw.equals(compressed), "the compressed bytes go out as sent");
 });
 
 test("a WebSocket attempt is told 426, so Codex falls back to HTTP", async () => {
