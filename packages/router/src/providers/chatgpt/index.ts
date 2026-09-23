@@ -129,6 +129,34 @@ export function rateLimitsFromUsage(body: unknown): Record<string, unknown> | nu
   };
 }
 
+/**
+ * The request headers of Codex's that the backend reads, and nothing else: its protocol and
+ * session metadata. The caller's credential is not among them — the account decides that.
+ */
+const CODEX_FORWARD_HEADERS = [
+  "content-type", "accept", "openai-beta", "originator", "version", "user-agent",
+  "session_id", "session-id", "thread-id", "x-client-request-id",
+  "x-codex-beta-features", "x-codex-installation-id", "x-codex-parent-thread-id", "x-codex-turn-metadata",
+  "x-codex-turn-state", "x-codex-window-id", "x-oai-attestation", "x-openai-subagent", "x-responsesapi-include-timing-metrics",
+];
+
+export function codexForwardHeaders(headers: http.IncomingHttpHeaders): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const name of CODEX_FORWARD_HEADERS) {
+    const v = headers[name];
+    if (typeof v === "string") out[name] = v;
+    else if (Array.isArray(v)) out[name] = v.join(", ");
+  }
+  out.originator ??= "codex_cli_rs";
+  return out;
+}
+
+function sendOpenAiError(res: http.ServerResponse, status: number, type: string, message: string, note: string, resetsInSeconds?: number): ChatGptOutcome {
+  const body = JSON.stringify({ error: { type, message, ...(resetsInSeconds ? { resets_in_seconds: resetsInSeconds } : {}) } });
+  if (!res.headersSent) res.writeHead(status, { "content-type": "application/json", ...(resetsInSeconds ? { "retry-after": String(resetsInSeconds) } : {}) }).end(body);
+  return { status, bytes: Buffer.byteLength(body), note };
+}
+
 type Window = { used_percent?: number; reset_after_seconds?: number; reset_at?: number };
 
 /** When a window is back, in ms from now: its own countdown, else its reset time (epoch seconds). */
@@ -153,6 +181,16 @@ export function exhaustedForMs(snapshot: Record<string, unknown> | null | undefi
   }
   return out;
 }
+
+/** How a send across the accounts ended. Each caller speaks its own client's wire for the failures. */
+export type SendResult =
+  | { kind: "ok"; upstream: Response; credential: ChatGptCredential }
+  /** The last account's refusal (or the first one that was the request's fault), body redacted. */
+  | { kind: "refused"; status: number; text: string; headers: Headers; retryAfterSeconds?: number }
+  | { kind: "all-resting"; backMs?: number }
+  | { kind: "no-account" }
+  | { kind: "unreachable"; error: Error }
+  | { kind: "aborted" };
 
 /** One account as the dashboard shows it: who, whether it is in rotation, and its last known quota. */
 export type ChatGptAccountStatus = ChatGptAccountSummary & {
@@ -546,64 +584,49 @@ export class ChatGptAdapter {
    * - Any other 403, 5xx, or no connection at all: a short rest, and the next account.
    * - Anything else is the request's fault; another account would refuse it the same way.
    *
-   * Each account is tried at most once per turn (a refreshed token is the same account).
+   * Each account is tried at most once per turn (a refreshed token is the same account). The
+   * caller supplies everything but the credential, and turns a failure into its client's wire.
    */
-  private async sendToAnAccount(cacheKey: string, body: string, signal: AbortSignal): Promise<
-    | { upstream: Response; credential: ChatGptCredential }
-    | { error: { status: number; body: string; retryAfterSeconds?: number }; note: string; upstreamStatus?: number; aborted?: false; thrown?: undefined }
-    | { error: true; aborted: true; thrown?: undefined; note?: undefined; upstreamStatus?: undefined }
-    | { error: true; thrown: Error; aborted?: false; note?: undefined; upstreamStatus?: undefined }
-  > {
+  async sendToAnAccount(spec: {
+    /** Keeps the conversation on its account (the prompt cache lives there). */
+    conversation: string | undefined;
+    /** Backend path under the base, e.g. `/codex/responses`. */
+    path: string;
+    method?: string;
+    body?: string | Buffer;
+    signal: AbortSignal;
+    /** The request's own headers for this account; the account's credential is laid over them. */
+    headers: (credential: ChatGptCredential) => Record<string, string>;
+  }): Promise<SendResult> {
     const tried = new Set<string>();
     const replayed = new Set<string>();
     const refreshed = new Set<string>();
-    let last: { status: number; body: string; note: string; upstreamStatus: number; retryAfterSeconds?: number } | null = null;
+    let last: Extract<SendResult, { kind: "refused" }> | null = null;
     let lastThrown: Error | null = null;
     for (;;) {
-      const credential = await this.pick(cacheKey, tried);
-      if (credential === "none") {
-        const e = anthropicError(401, "authentication_error", "no ChatGPT credentials: run `clauderipple login`, or sign in to the Codex CLI once");
-        return { error: { status: e.status, body: e.body }, note: "no credentials" };
-      }
+      const credential = await this.pick(spec.conversation, tried);
+      if (credential === "none") return { kind: "no-account" };
       if (credential === null) {
-        if (last) return { error: { status: last.status, body: last.body, ...(last.retryAfterSeconds ? { retryAfterSeconds: last.retryAfterSeconds } : {}) }, note: last.note, upstreamStatus: last.upstreamStatus };
-        if (lastThrown) return { error: true, thrown: lastThrown };
+        if (last) return last;
+        if (lastThrown) return { kind: "unreachable", error: lastThrown };
         // Every account was already resting when the turn arrived.
         const backMs = this.soonestBackMs();
-        const when = backMs ? ` The first is usable again at ${new Date(Date.now() + backMs).toLocaleTimeString()}.` : "";
-        const e = anthropicError(429, "rate_limit_error", `ChatGPT: every signed-in account is at its usage limit.${when}`);
-        return { error: { status: 429, body: e.body, ...(backMs ? { retryAfterSeconds: Math.ceil(backMs / 1000) } : {}) }, note: "all accounts resting" };
+        return { kind: "all-resting", ...(backMs ? { backMs } : {}) };
       }
 
-      const turnKey = `${credential.ownerId}\0${cacheKey}`;
-      const turnState = this.turnStateByKey.get(turnKey);
-      const upstreamHeaders = {
-        "content-type": "application/json",
-        accept: "text/event-stream",
-        ...credential.headers,
-        "OpenAI-Beta": "responses=experimental",
-        originator: "codex_cli_rs",
-        // The conversation's identity, as the Codex CLI states it. This is what the backend keys
-        // the prompt cache on since mid-September 2026 (see `conversationId` in translate.ts).
-        "session-id": cacheKey,
-        "thread-id": cacheKey,
-        "x-client-request-id": cacheKey,
-        "x-codex-window-id": `${cacheKey}:0`,
-        // Turn state is issued per account; another account's would be meaningless to the backend.
-        ...(turnState ? { "x-codex-turn-state": turnState } : {}),
-      };
+      const upstreamHeaders = { ...spec.headers(credential), ...credential.headers };
       let upstream: Response;
       try {
         // Retried here on the same account, before any status or byte reaches the client, so a
         // relay's hiccup is absorbed inside the turn instead of arriving as an error to retry by hand.
-        upstream = await fetchWithRetry(`${(this.cfg.url ?? DEFAULT_BASE).replace(/\/$/, "")}/codex/responses`, {
-          method: "POST",
+        upstream = await fetchWithRetry(`${(this.cfg.url ?? DEFAULT_BASE).replace(/\/$/, "")}${spec.path}`, {
+          method: spec.method ?? "POST",
           headers: upstreamHeaders,
-          body,
-          signal,
+          ...(spec.body !== undefined ? { body: spec.body } : {}),
+          signal: spec.signal,
         }, { log: (line) => this.log.info(`chatgpt ${this.name}: ${line}`) });
       } catch (e) {
-        if (signal.aborted) return { error: true, aborted: true };
+        if (spec.signal.aborted) return { kind: "aborted" };
         this.pool.penalise(this.name, credential.id, 0);
         tried.add(credential.ownerId);
         lastThrown = e as Error;
@@ -612,16 +635,11 @@ export class ChatGptAdapter {
       }
 
       this.noteRateLimits(credential, rateLimitsFromHeaders(upstream.headers));
-      const nextTurnState = upstream.headers.get("x-codex-turn-state");
-      if (nextTurnState) {
-        this.turnStateByKey.set(turnKey, nextTurnState);
-        if (this.turnStateByKey.size > 500) this.turnStateByKey.delete(this.turnStateByKey.keys().next().value!);
-      }
 
       if (upstream.ok && upstream.body) {
         this.pool.succeed(this.name, credential.id);
         this.activeOwner = credential.ownerId;
-        return { upstream, credential };
+        return { kind: "ok", upstream, credential };
       }
 
       const text = await upstream.text().catch(() => "");
@@ -650,11 +668,134 @@ export class ChatGptAdapter {
       const retryHeader = headerRecord["retry-after"] ? retryAfterMs({ "retry-after": headerRecord["retry-after"] }) : undefined;
       const waitMs = retryHeader ?? exhaustedForMs(snapshot) ?? retryAfterMs(headerRecord);
       const verdict = this.pool.penalise(this.name, credential.id, credentialRefused ? 401 : status, waitMs, text);
-      const err = mapHttpError(status, safeText);
-      last = { status: err.status, body: err.body, note: `upstream ${status}`, upstreamStatus: status, ...(status === 429 && waitMs ? { retryAfterSeconds: Math.ceil(waitMs / 1000) } : {}) };
-      if (!verdict.retryable) return { error: { status: err.status, body: err.body }, note: last.note, upstreamStatus: status };
+      last = { kind: "refused", status, text: safeText, headers: upstream.headers, ...(status === 429 && waitMs ? { retryAfterSeconds: Math.ceil(waitMs / 1000) } : {}) };
+      if (!verdict.retryable) return last;
       tried.add(credential.ownerId);
     }
+  }
+
+  /** Which account issued each turn-state token Codex echoes back, so a moved conversation drops a foreign one. */
+  private readonly turnStateIssuer = new Map<string, string>();
+
+  /**
+   * Codex's own ChatGPT traffic, passed through unchanged except for the account: Codex already
+   * speaks the backend's wire (Responses, `store: false`, its session headers), so the body and its
+   * protocol headers go as they are and only `authorization` / `chatgpt-account-id` are chosen here.
+   * That is what lets Codex keep working on account 2 when account 1 runs out, without signing out.
+   *
+   * With no account of ours signed in, or every one of them resting, the caller's own login — the
+   * one Codex sent — is used as it is, so pointing Codex here never leaves it worse off.
+   */
+  async passthrough(req: http.IncomingMessage, res: http.ServerResponse, subPath: string, body: Buffer | undefined, conversation: string | undefined): Promise<ChatGptOutcome> {
+    const ac = new AbortController();
+    const onClose = (): void => ac.abort();
+    res.on("close", onClose);
+    const forwarded = codexForwardHeaders(req.headers);
+    const clientTurnState = forwarded["x-codex-turn-state"];
+    const method = req.method ?? "POST";
+    const sent = await this.sendToAnAccount({
+      conversation,
+      path: `/codex${subPath}`,
+      method,
+      ...(body ? { body } : {}),
+      signal: ac.signal,
+      headers: (credential) => {
+        const out = { ...forwarded };
+        // A token another account issued means nothing to this one (a conversation that moved).
+        const issuer = clientTurnState ? this.turnStateIssuer.get(clientTurnState) : undefined;
+        if (clientTurnState && issuer && issuer !== credential.ownerId) delete out["x-codex-turn-state"];
+        return out;
+      },
+    });
+
+    let upstream: Response;
+    let owner: string | null = null;
+    if (sent.kind === "ok") {
+      upstream = sent.upstream;
+      owner = sent.credential.ownerId;
+    } else if (sent.kind === "aborted") {
+      res.off("close", onClose);
+      return { status: 0, bytes: 0, note: "client closed" };
+    } else {
+      const callerAuth = typeof req.headers.authorization === "string" && typeof req.headers["chatgpt-account-id"] === "string";
+      // Out of accounts — none signed in, all resting, or the last one just ran out on this turn.
+      const outOfAccounts = sent.kind === "no-account" || sent.kind === "all-resting" || (sent.kind === "refused" && (sent.status === 429 || sent.status === 402));
+      if (outOfAccounts && callerAuth) {
+        // Codex's own login, exactly as it sent it. Not refreshed or stored: it is Codex's.
+        try {
+          upstream = await fetch(`${(this.cfg.url ?? DEFAULT_BASE).replace(/\/$/, "")}/codex${subPath}`, {
+            method,
+            headers: { ...forwarded, authorization: String(req.headers.authorization), "chatgpt-account-id": String(req.headers["chatgpt-account-id"]) },
+            ...(body ? { body } : {}),
+            signal: ac.signal,
+          });
+        } catch (e) {
+          res.off("close", onClose);
+          if (ac.signal.aborted) return { status: 0, bytes: 0, note: "client closed" };
+          return sendOpenAiError(res, 502, "api_error", `ChatGPT backend unreachable: ${(e as Error).message}`, "caller login unreachable");
+        }
+      } else {
+        res.off("close", onClose);
+        if (sent.kind === "unreachable") return sendOpenAiError(res, 502, "api_error", `ChatGPT backend unreachable: ${sent.error.message}`, "unreachable");
+        if (sent.kind === "no-account") return sendOpenAiError(res, 401, "invalid_request_error", "no ChatGPT account: run `clauderipple login`", "no credentials");
+        if (sent.kind === "all-resting") {
+          // The shape the backend itself uses, so Codex shows its own "usage limit" message and wait.
+          const seconds = sent.backMs ? Math.ceil(sent.backMs / 1000) : undefined;
+          return sendOpenAiError(res, 429, "usage_limit_reached", "Every ChatGPT account signed in to ClaudeRipple has reached its usage limit.", "all accounts resting", seconds);
+        }
+        // The backend's own refusal, as Codex would have seen it without us (secrets masked).
+        const text = sent.text || JSON.stringify({ error: { message: `HTTP ${sent.status}` } });
+        res.writeHead(sent.status, { "content-type": sent.headers.get("content-type") ?? "application/json", ...(sent.retryAfterSeconds ? { "retry-after": String(sent.retryAfterSeconds) } : {}) }).end(text);
+        return { status: sent.status, bytes: Buffer.byteLength(text), note: `upstream ${sent.status}` };
+      }
+    }
+
+    const issued = upstream.headers.get("x-codex-turn-state");
+    if (issued && owner) {
+      this.turnStateIssuer.set(issued, owner);
+      if (this.turnStateIssuer.size > 1000) this.turnStateIssuer.delete(this.turnStateIssuer.keys().next().value!);
+    }
+    // Relay status, the protocol headers Codex reads (rate limits, turn state, request ids) and the
+    // body byte for byte. The body is read alongside for the request log's token counts.
+    const outHeaders: Record<string, string> = {};
+    for (const [k, v] of upstream.headers) {
+      if (k === "content-type" || k === "cache-control" || k === "retry-after" || k.startsWith("x-codex-") || k.startsWith("openai-") || k === "x-request-id" || k === "x-oai-request-id") outHeaders[k] = v;
+    }
+    res.writeHead(upstream.status, outHeaders);
+    const parser = new SseParser();
+    const decoder = new TextDecoder();
+    let bytes = 0;
+    let usage: RequestUsage | undefined;
+    const isSse = /event-stream/i.test(upstream.headers.get("content-type") ?? "");
+    try {
+      if (upstream.body) {
+        const reader = upstream.body.getReader();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          bytes += value.length;
+          if (!res.writableEnded && !res.destroyed) res.write(value);
+          if (isSse) {
+            for (const ev of parser.feed(decoder.decode(value, { stream: true }))) {
+              if (ev.type !== "response.completed") continue;
+              const u = (ev.response as { usage?: { input_tokens?: number; input_tokens_details?: { cached_tokens?: number }; output_tokens?: number } } | undefined)?.usage;
+              if (u) {
+                const cached = u.input_tokens_details?.cached_tokens ?? 0;
+                usage = { input: (u.input_tokens ?? 0) - cached, cached, output: u.output_tokens ?? 0 };
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {
+      if (!ac.signal.aborted) this.log.warn(`chatgpt ${this.name}: codex passthrough interrupted: ${(e as Error).message}`);
+      res.destroy();
+      return { status: upstream.status, bytes, note: "stream interrupted" };
+    } finally {
+      res.off("close", onClose);
+    }
+    if (!res.writableEnded) res.end();
+    return { status: upstream.status, bytes, ...(usage ? { usage } : {}), note: `codex passthrough account=${owner ? owner.slice(0, 8) : "caller"}` };
   }
 
   /** Handle a fully-read Messages request. `model`/`effort` already resolved by routing. */
@@ -687,21 +828,63 @@ export class ChatGptAdapter {
     // One account answers the turn. Which one is decided here, and a refusal before any byte has
     // reached the client moves the same turn to the next account, so the client is answered on its
     // first ask. The conversation stays on the account that answered: moving it costs the cache.
-    const sent = await this.sendToAnAccount(cacheKey, body, ac.signal);
-    if ("error" in sent) {
+    const sent = await this.sendToAnAccount({
+      conversation: cacheKey,
+      path: "/codex/responses",
+      body,
+      signal: ac.signal,
+      headers: (credential) => {
+        // Turn state is issued per account; another account's would be meaningless to the backend.
+        const turnState = this.turnStateByKey.get(`${credential.ownerId}\0${cacheKey}`);
+        return {
+          "content-type": "application/json",
+          accept: "text/event-stream",
+          "OpenAI-Beta": "responses=experimental",
+          originator: "codex_cli_rs",
+          // The conversation's identity, as the Codex CLI states it. This is what the backend keys
+          // the prompt cache on since mid-September 2026 (see `conversationId` in translate.ts).
+          "session-id": cacheKey,
+          "thread-id": cacheKey,
+          "x-client-request-id": cacheKey,
+          "x-codex-window-id": `${cacheKey}:0`,
+          ...(turnState ? { "x-codex-turn-state": turnState } : {}),
+        };
+      },
+    });
+    if (sent.kind !== "ok") {
       res.off("close", onClose);
-      if (sent.aborted) return { status: 0, bytes: 0, note: "client closed" };
-      if (sent.thrown) {
-        const err = anthropicError(502, "api_error", `ChatGPT backend unreachable: ${sent.thrown.message}`);
+      if (sent.kind === "aborted") return { status: 0, bytes: 0, note: "client closed" };
+      if (sent.kind === "unreachable") {
+        const err = anthropicError(502, "api_error", `ChatGPT backend unreachable: ${sent.error.message}`);
         if (!res.headersSent) res.writeHead(err.status, { "content-type": "application/json" }).end(err.body);
-        throw sent.thrown; // let the proxy feed health with the connect error
+        throw sent.error; // let the proxy feed health with the connect error
       }
-      const { status, body: errBody, retryAfterSeconds } = sent.error;
-      if (this.cfg.debugDump && sent.upstreamStatus) this.dump(sent.upstreamStatus, json, upstreamReq, errBody);
-      res.writeHead(status, { "content-type": "application/json", ...(retryAfterSeconds ? { "retry-after": String(retryAfterSeconds) } : {}) }).end(errBody);
-      return { status, bytes: errBody.length, note: sent.note };
+      let err: { status: number; body: string };
+      let retryAfterSeconds: number | undefined;
+      let note: string;
+      if (sent.kind === "no-account") {
+        err = anthropicError(401, "authentication_error", "no ChatGPT credentials: run `clauderipple login`, or sign in to the Codex CLI once");
+        note = "no credentials";
+      } else if (sent.kind === "all-resting") {
+        const when = sent.backMs ? ` The first is usable again at ${new Date(Date.now() + sent.backMs).toLocaleTimeString()}.` : "";
+        err = anthropicError(429, "rate_limit_error", `ChatGPT: every signed-in account is at its usage limit.${when}`);
+        if (sent.backMs) retryAfterSeconds = Math.ceil(sent.backMs / 1000);
+        note = "all accounts resting";
+      } else {
+        err = mapHttpError(sent.status, sent.text);
+        retryAfterSeconds = sent.retryAfterSeconds;
+        note = `upstream ${sent.status}`;
+        if (this.cfg.debugDump) this.dump(sent.status, json, upstreamReq, sent.text);
+      }
+      res.writeHead(err.status, { "content-type": "application/json", ...(retryAfterSeconds ? { "retry-after": String(retryAfterSeconds) } : {}) }).end(err.body);
+      return { status: err.status, bytes: err.body.length, note };
     }
     const { upstream, credential } = sent;
+    const nextTurnState = upstream.headers.get("x-codex-turn-state");
+    if (nextTurnState) {
+      this.turnStateByKey.set(`${credential.ownerId}\0${cacheKey}`, nextTurnState);
+      if (this.turnStateByKey.size > 500) this.turnStateByKey.delete(this.turnStateByKey.keys().next().value!);
+    }
 
     if (this.cfg.debugDump === "all") this.dump(upstream.status, json, upstreamReq, "");
     const wantStream = json.stream === true;

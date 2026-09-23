@@ -20,6 +20,7 @@ import { credentialHeaderValues, redactErrorText } from "../redact.ts";
 import { CLAUDE_CODE_IDENTITY, fromClaudeCodeToolName, nativeAnthropicHeaders, toClaudeCodeToolName } from "../providers/anthropic.ts";
 import { ClaudeAccountAuthPool } from "../providers/anthropic-account-pool.ts";
 import { ObservedClaudeCodeAuth } from "../providers/anthropic-observed.ts";
+import type { ChatGptAdapter } from "../providers/chatgpt/index.ts";
 import {
   ResponsesEventMapper,
   chatToAnthropic,
@@ -44,7 +45,25 @@ type IngressDeps = {
   /** Test seams; production uses the local account projection and api.anthropic.com. */
   claudeAccounts?: ClaudeAccountAuthPool;
   nativeUpstream?: string;
+  /**
+   * The ChatGPT accounts Codex's own GPT traffic goes out on: the chatgpt provider `name` names,
+   * or the first one configured (null name), or — with none configured — Codex's own login alone.
+   */
+  chatgpt?: (name: string | null) => ChatGptAdapter;
 };
+
+/** A model Codex means for OpenAI: in the chatgpt provider's list, or named the way OpenAI names them. */
+export function isChatGptModel(model: string, cfg: Config): boolean {
+  if (/^(gpt-|codex-|chatgpt-|o\d)/i.test(model)) return true;
+  return Object.values(cfg.providers).some((p) => p.type === "chatgpt" && (p.models ?? []).some((m) => m.id === model));
+}
+
+/** The conversation a Codex request belongs to, as Codex names it: its session header, else the cache key. */
+function codexConversation(req: http.IncomingMessage, body: Json | null): string | undefined {
+  const header = req.headers.session_id ?? req.headers["session-id"] ?? req.headers["thread-id"];
+  if (typeof header === "string" && header) return header;
+  return body && typeof body.prompt_cache_key === "string" ? body.prompt_cache_key : undefined;
+}
 
 export type IngressStats = {
   inFlight: number;
@@ -147,6 +166,11 @@ export class OpenAiIngress {
     });
     this.server = http.createServer({ maxHeaderSize: 64 * 1024 }, (req, res) => void this.handle(req, res));
     this.server.keepAliveTimeout = 65_000;
+    // Codex tries a WebSocket for Responses first when its OpenAI provider points here. Answering
+    // 426 is what makes it fall back to SSE over HTTP; an unanswered upgrade leaves it hanging.
+    this.server.on("upgrade", (_req, socket) => {
+      socket.end("HTTP/1.1 426 Upgrade Required\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
+    });
     this.server.on("connection", (socket) => {
       this.sockets.add(socket);
       socket.once("close", () => this.sockets.delete(socket));
@@ -190,7 +214,7 @@ export class OpenAiIngress {
   private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const path = (req.url ?? "/").split("?")[0] ?? "/";
     const method = req.method ?? "GET";
-    const isCall = method === "POST" && (path === "/v1/responses" || path === "/v1/chat/completions");
+    const isCall = method === "POST" && (path === "/v1/responses" || path === "/v1/responses/compact" || path === "/v1/chat/completions");
     this.stats.started++;
     this.stats.inFlight++;
     if (isCall) this.stats.messagesInFlight++;
@@ -225,6 +249,15 @@ export class OpenAiIngress {
     });
 
     try {
+      const query = (req.url ?? "").includes("?") ? (req.url ?? "").slice((req.url ?? "").indexOf("?")) : "";
+      // Codex signed in to ChatGPT refreshes its model catalogue with `?client_version=`: that is the
+      // backend's list, so it comes from the backend, on one of the accounts.
+      if (path === "/v1/models" && method === "GET" && /[?&]client_version=/.test(query) && this.deps.chatgpt) {
+        req.resume();
+        const outcome = await this.deps.chatgpt(null).passthrough(req, res, `/models${query}`, undefined, undefined);
+        finish(outcome.status, outcome.bytes, { note: "codex models passthrough" });
+        return;
+      }
       if (path === "/v1/models" && method === "GET") {
         const data: Json[] = ingressModels(this.deps.config()).map((m) => ({ id: m.id, object: "model", created: 0, owned_by: m.provider }));
         const bytes = sendJson(res, 200, { object: "list", data });
@@ -251,8 +284,10 @@ export class OpenAiIngress {
         return;
       }
       let body: Json;
+      let raw: Buffer;
       try {
-        body = JSON.parse((await readBody(req)).toString("utf8")) as Json;
+        raw = await readBody(req);
+        body = JSON.parse(raw.toString("utf8")) as Json;
       } catch (error) {
         const bytes = sendJson(res, 400, openAiError(`Invalid JSON request: ${(error as Error).message}`));
         finish(400, bytes);
@@ -270,10 +305,30 @@ export class OpenAiIngress {
       }
       const requested = typeof body.model === "string" ? body.model : "";
       const cfg = this.deps.config();
+      const explicit = resolve(requested, {}, cfg);
+      const explicitProvider = explicit ? cfg.providers[explicit.provider] : undefined;
+      // Codex's own GPT traffic (its OpenAI provider pointed here): passed through to the ChatGPT
+      // backend on one of the signed-in accounts. A GPT model routed elsewhere on purpose is not.
+      const toChatGpt = path.startsWith("/v1/responses") && this.deps.chatgpt
+        && (explicitProvider ? explicitProvider.type === "chatgpt" : isChatGptModel(requested, cfg));
+      if (toChatGpt) {
+        const adapter = this.deps.chatgpt!(explicitProvider ? explicit!.provider : null);
+        const renamed = explicit && explicit.model !== requested;
+        const payload = renamed ? Buffer.from(JSON.stringify({ ...body, model: explicit.model })) : raw;
+        record = { kind: "messages", source: requested, target: explicit?.model ?? requested, provider: adapter.name, stream: body.stream === true };
+        const outcome = await adapter.passthrough(req, res, path.slice("/v1".length), payload, codexConversation(req, body));
+        finish(outcome.status, outcome.bytes, { ...(outcome.usage ? { usage: outcome.usage } : {}), ...(outcome.note ? { note: outcome.note } : {}) });
+        return;
+      }
+      if (path === "/v1/responses/compact") {
+        const bytes = sendJson(res, 400, openAiError("Remote compaction is only available for ChatGPT models", "invalid_request_error", "unsupported_endpoint"));
+        finish(400, bytes);
+        return;
+      }
       // Unmapped models default to the native `anthropic` provider when one is configured, so a
       // Codex user can name any Claude model directly (`-m claude-sonnet-5`) without a mapping.
       const fallback = Object.entries(cfg.providers).find(([, p]) => p.type === "anthropic");
-      const route = resolve(requested, {}, cfg) ?? (fallback && requested ? { provider: fallback[0], model: requested, effort: undefined, tag: `${requested}->${requested}` } : null);
+      const route = explicit ?? (fallback && requested ? { provider: fallback[0], model: requested, effort: undefined, tag: `${requested}->${requested}` } : null);
       if (!route) {
         const bytes = sendJson(res, 400, openAiError(`No ClaudeRipple route for model ${requested || "(missing)"}`, "invalid_request_error", "model_not_found"));
         finish(400, bytes);

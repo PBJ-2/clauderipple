@@ -276,6 +276,20 @@ export class Proxy {
     return out;
   }
 
+  /**
+   * The accounts Codex's own GPT traffic goes out on: the named chatgpt provider, else the first
+   * one configured, else Codex's own login alone — so pointing Codex here works before anyone has
+   * set a ChatGPT provider up, and shares the pool (cooldowns included) once someone has.
+   */
+  chatgptForCodex(name: string | null): ChatGptAdapter {
+    const providers = this.deps.config().providers;
+    const named = name ? providers[name] : undefined;
+    if (named?.type === "chatgpt") return this.chatgpt(name!, named);
+    const first = Object.entries(providers).find(([, p]) => p.type === "chatgpt");
+    if (first && first[1].type === "chatgpt") return this.chatgpt(first[0], first[1]);
+    return this.chatgpt("codex-login", { type: "chatgpt", auth: "borrow-codex" });
+  }
+
   /** Dashboard action: put one resting ChatGPT account back into rotation now. */
   chatgptClearCooldown(ownerId: string): void {
     for (const [name, p] of Object.entries(this.deps.config().providers)) {

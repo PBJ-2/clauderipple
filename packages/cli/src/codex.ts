@@ -12,6 +12,8 @@ const PROFILE_START = "# >>> ClaudeRipple Codex profile >>>";
 const PROFILE_END = "# <<< ClaudeRipple Codex profile <<<";
 const CATALOG_START = "# >>> ClaudeRipple Codex model catalog >>>";
 const CATALOG_END = "# <<< ClaudeRipple Codex model catalog <<<";
+const OPENAI_START = "# >>> ClaudeRipple OpenAI route >>>";
+const OPENAI_END = "# <<< ClaudeRipple OpenAI route <<<";
 export const CODEX_PROVIDER_MARKER = START;
 
 /** A model ClaudeRipple serves to Codex (Claude or an Anthropic-compatible provider's model). */
@@ -124,6 +126,28 @@ function withCatalog(content: string, file: string | undefined): string {
   return `${catalogBlock(file)}\n\n${stripped}`.replace(/\n+$/, "\n");
 }
 
+/**
+ * Codex's built-in `openai` provider pointed at our ingress (`openai_base_url`, a root key). Codex
+ * keeps its ChatGPT sign-in and sends GPT turns here; the ingress passes them to the ChatGPT backend
+ * on one of the signed-in accounts, so running out on one account moves Codex to the next without
+ * a sign-out. A user's own `openai_base_url` is left alone (and then this does not apply).
+ */
+function withOpenAiRoute(content: string, port: number | undefined): string {
+  const stripped = withoutOwnedBlock(content, OPENAI_START, OPENAI_END);
+  if (port === undefined || /^\s*openai_base_url\s*=/m.test(beforeFirstTable(stripped)[0])) return stripped;
+  const block = `${OPENAI_START}\nopenai_base_url = "http://127.0.0.1:${port}/v1"\n${OPENAI_END}`;
+  return `${block}\n\n${stripped}`.replace(/\n+$/, "\n");
+}
+
+/** Whether Codex's own GPT traffic goes through ClaudeRipple (our route block is in place). */
+export function codexOpenAiRouted(home = codexHome()): boolean {
+  try {
+    return fs.readFileSync(configFile(home), "utf8").includes(OPENAI_START);
+  } catch {
+    return false;
+  }
+}
+
 function profileBlock(): string {
   return `${PROFILE_START}
 model_provider = "clauderipple"
@@ -160,7 +184,7 @@ export function codexOn(port: number, home = codexHome(), models: CatalogModel[]
   const beforeConfig = fs.existsSync(config) ? fs.readFileSync(config, "utf8") : "";
   const beforeProfile = fs.existsSync(profile) ? fs.readFileSync(profile, "utf8") : "";
   const catalog = models.length ? writeCodexCatalog(models, home) : undefined;
-  const nextConfig = withCatalog(appendBlock(withoutOwnedBlock(beforeConfig, START, END), providerBlock(port)), catalog);
+  const nextConfig = withOpenAiRoute(withCatalog(appendBlock(withoutOwnedBlock(beforeConfig, START, END), providerBlock(port)), catalog), port);
   const nextProfile = appendBlock(withoutOwnedBlock(beforeProfile, PROFILE_START, PROFILE_END), profileBlock());
   if (nextConfig === beforeConfig && nextProfile === beforeProfile) return { changed: false, config, profile };
   const configBackup = backup(config);
@@ -176,7 +200,7 @@ export function codexOff(home = codexHome()): CodexEdit {
   const profile = profileFile(home);
   const beforeConfig = fs.existsSync(config) ? fs.readFileSync(config, "utf8") : "";
   const beforeProfile = fs.existsSync(profile) ? fs.readFileSync(profile, "utf8") : "";
-  const nextConfig = withoutDanglingSelection(withoutOwnedBlock(withoutOwnedBlock(beforeConfig, START, END), CATALOG_START, CATALOG_END));
+  const nextConfig = withoutDanglingSelection(withoutOwnedBlock(withoutOwnedBlock(withoutOwnedBlock(beforeConfig, START, END), CATALOG_START, CATALOG_END), OPENAI_START, OPENAI_END));
   const nextProfile = withoutOwnedBlock(beforeProfile, PROFILE_START, PROFILE_END);
   fs.rmSync(catalogFile(home), { force: true });
   if (nextConfig === beforeConfig && nextProfile === beforeProfile) return { changed: false, config, profile };

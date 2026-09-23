@@ -33,8 +33,12 @@ test("codex on writes a model catalog from Codex's cache and points config at it
   const on = codexOn(18793, home, [{ id: "claude-sonnet-5", name: "Claude Sonnet 5", provider: "anthropic", effortLevels: ["low", "medium", "high"] }]);
   assert.equal(on.changed, true);
   const text = fs.readFileSync(config, "utf8");
-  assert.ok(text.startsWith("# >>> ClaudeRipple Codex model catalog >>>\nmodel_catalog_json = "), text.slice(0, 80));
+  // Root keys, both before the first table: Codex's own OpenAI provider pointed at the ingress (its
+  // GPT turns then take the account pool), and our catalog.
+  assert.ok(text.startsWith('# >>> ClaudeRipple OpenAI route >>>\nopenai_base_url = "http://127.0.0.1:18793/v1"\n'), text.slice(0, 120));
+  assert.ok(text.includes("# >>> ClaudeRipple Codex model catalog >>>\nmodel_catalog_json = "));
   assert.ok(text.indexOf("model_catalog_json") < text.indexOf("[plugins]"));
+  assert.ok(text.indexOf("openai_base_url") < text.indexOf("[plugins]"));
   const catalog = JSON.parse(fs.readFileSync(path.join(home, "clauderipple-models.json"), "utf8")) as { models: Record<string, unknown>[] };
   assert.deepEqual(catalog.models.map((m) => m.slug), ["gpt-5.5", "gpt-6-astra", "claude-sonnet-5"]);
   const ours = catalog.models[2]!;
@@ -51,6 +55,18 @@ test("codex on writes a model catalog from Codex's cache and points config at it
 // Codex saves a model picked from our catalog as its own default, outside our markers. Left behind,
 // that reference stopped Codex from loading any configuration at all (issue: "Model provider
 // `clauderipple` not found" after turning the Codex client off).
+test("codex on never overrides a user's own openai_base_url", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-codex-own-base-"));
+  const config = path.join(home, "config.toml");
+  fs.writeFileSync(config, 'openai_base_url = "https://my-gateway.example/v1"\n');
+  codexOn(18793, home);
+  const text = fs.readFileSync(config, "utf8");
+  assert.equal(text.match(/openai_base_url/g)?.length, 1);
+  assert.ok(text.includes("my-gateway.example"));
+  codexOff(home);
+  assert.equal(fs.readFileSync(config, "utf8"), 'openai_base_url = "https://my-gateway.example/v1"\n');
+});
+
 test("codex off clears the selection Codex made from our catalog, so Codex still starts", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-codex-dangling-"));
   const config = path.join(home, "config.toml");
