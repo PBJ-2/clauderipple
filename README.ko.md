@@ -125,10 +125,11 @@ ClaudeRipple은 데스크톱 앱·터미널·Codex를 메뉴 막대 앱 하나�
 
 | | ClaudeRipple | opencodex / openclaude | claude-code-router | Claude Desktop 게이트웨이(3P) 모드 |
 |---|---|---|---|---|
-| 게이트웨이(3P) 모드 **없이** Claude **Desktop** Code 탭 | ✅ | ❌ ¹ | ❌ | ❌ (정의상 불가) |
-| claude.ai 채팅·Remote Control·클라우드 세션·커넥터 유지 | ✅ | ❌ | ❌ | ❌ |
-| Claude 구독과 GPT 구독 나란히 | ✅ | ❌ 전부 아니면 전무 | ❌ | ❌ |
-| Desktop 피커에 실제 모델 이름 | ✅ | ❌ | ❌ | 일부 |
+| 게이트웨이(3P) 모드 **없이** Claude **Desktop** Code 탭 | ✅ | ✅ ¹ | ❌ | ❌ (정의상 불가) |
+| claude.ai 채팅·Remote Control·클라우드 세션·커넥터 유지 | ✅ | ✅ ¹ | ❌ | ❌ |
+| Claude 구독과 GPT 구독 나란히 | ✅ | ✅ ¹ | ❌ | ❌ |
+| Desktop 피커에 실제 모델 이름 | ✅ | ❌ Claude 이름을 빌려 씀 ¹ | ❌ | 일부 |
+| ChatGPT 계정 여러 개, 한도 차면 자동 전환 (Desktop·Codex) | ✅ | ✅ | ❌ | ❌ |
 | 터미널 `claude` CLI | ✅ | ✅ | ✅ | ✅ |
 | Codex **앱**·Codex CLI → Claude | ✅ | ✅ | ❌ | ❌ |
 | 번역 프로바이더의 프롬프트 캐시 | **94~99 %** 실측 | 미측정 | 제각각 | 해당 없음 |
@@ -136,8 +137,9 @@ ClaudeRipple은 데스크톱 앱·터미널·Codex를 메뉴 막대 앱 하나�
 | 터미널 없이 쓰는 설정 GUI | ✅ | ❌ | ❌ | ❌ |
 | 런타임 내장, 서명·공증된 앱 | ✅ | ❌ | ❌ | – |
 
-¹ opencodex는 README에 Claude Desktop 데모를 걸어 두었지만, 저장소에도 문서 사이트에도 설치 절차가 없습니다
-(2026-09-16 확인). 데스크톱 앱으로 들어가는 공개된 경로는 공식 게이트웨이 설정, 즉 마지막 칸뿐입니다.
+¹ opencodex 기준(openclaude는 확인하지 않음). opencodex는 v2.61.0(2026-09-22)부터 게이트웨이 없이 Code 탭에
+들어갑니다. 다만 모델 선택기는 건드리지 않아서, 다른 모델은 Claude 모델 이름에 연결해(`modelMap`) 그 이름으로 고릅니다.
+ClaudeRipple은 선택기에 GPT·DeepSeek 등을 실제 이름으로 띄우고, 고른 추론 강도를 그대로 넘깁니다.
 
 데스크톱 앱의 "서드파티 추론" 설정은 앱 전체를 다른 모드로 바꿔 버립니다. claude.ai 채팅, Remote Control,
 클라우드 세션을 잃습니다. `ANTHROPIC_BASE_URL`을 바꿔치기하는 도구들은 데스크톱 앱에 아예 닿지 못합니다.
@@ -155,6 +157,10 @@ ClaudeRipple은 Claude Code 프로세스만 신뢰하는 작은 HTTPS 프록시�
   구독 계정을 추가하면, 대화마다 답한 계정에 고정됩니다. 응답이 시작되기 전 한도·인증 거부가 오면 같은 요청을
   다음 계정으로 넘깁니다. 이 Claude Desktop/Code 원형 경로는 번역을 거치는 Codex 입구와 별개이며, Codex 쪽은
   사용 가능한 로그인 하나만 골라 쓰고 계정을 자동 전환하지 않습니다.
+- **ChatGPT 계정 여러 개.** `clauderipple login`(또는 대시보드의 **+ ChatGPT 계정 추가**)을 할 때마다 계정이
+  늘어납니다. 한 계정이 한도에 걸리면 같은 요청을 다음 계정이 이어받고, 그 계정은 한도가 풀릴 때까지 쉽니다.
+  대화는 답한 계정에 고정되어 캐시를 지킵니다. Claude Desktop Code 탭·서브에이전트와 **Codex 앱·CLI의 GPT**에
+  모두 적용됩니다. Codex는 로그인을 그대로 두고, 로그아웃·재로그인 없이 다음 계정으로 넘어갑니다.
 - **Claude Code 하네스는 손대지 않습니다.** 스킬, 훅, MCP, `CLAUDE.md`, 서브에이전트, 플랜 모드, 휴대폰 Remote Control.
   아무것도 꺼지지 않습니다.
 - **구조적으로 올바르게.** 프롬프트 캐시 보존(Anthropic 캐시 브레이크포인트, 고정된 OpenAI 프리픽스), Claude Code의
@@ -299,6 +305,12 @@ clauderipple codex on     # ~/.codex/config.toml에 "clauderipple" 프로바이�
 codex --profile clauderipple -m claude-sonnet-5
 ```
 
+`codex on`은 Codex의 기본 OpenAI 경로(`openai_base_url`)도 ClaudeRipple로 돌립니다. Codex는 ChatGPT 로그인을
+그대로 쓰고, GPT 요청은 내용 그대로 ChatGPT로 넘어가되 계정만 ClaudeRipple에 추가한 계정 중에서 골라 끼웁니다.
+그래서 계정을 여러 개 추가해 두면 Codex도 한도가 찬 계정에서 다음 계정으로 넘어갑니다. 추가한 계정이 없거나
+전부 한도에 걸려 있으면 Codex 자신의 로그인으로 보냅니다. 직접 넣어 둔 `openai_base_url`이 있으면 건드리지 않습니다.
+`clauderipple codex off`로 되돌립니다.
+
 Claude 모델이 Codex 모델 목록에 이름 그대로 뜹니다(ClaudeRipple이 Codex 자체 카탈로그 옆에 모델 카탈로그를 씁니다).
 Claude는 Claude Code 로그인(실행 중인 Desktop 세션, 터미널 로그인, 또는 ClaudeRipple 자체 로그인 — **프로바이더 →
 Claude → Claude 구독 연결…**을 누르면 브라우저가 열리고 터미널은 필요 없습니다. `clauderipple claude-login`과 같습니다)이나
@@ -313,7 +325,7 @@ Anthropic API 키로 갑니다. 구독 로그인 재사용은 Anthropic 약관�
 
 | 프로바이더 | 종류 | 인증 | 모델 목록 | 비고 |
 |---|---|---|---|---|
-| ChatGPT 구독 | Codex 백엔드 | 로그인(또는 Codex 로그인 재사용) | Terra, Sol, Luna, Astra | 추론 강도 low…max(Luna는 ultra), 프롬프트 캐시 94~99 % |
+| ChatGPT 구독 | Codex 백엔드 | 로그인 여러 개, 한도 차면 자동 전환(Codex 로그인도 재사용) | Terra, Sol, Luna, Astra | 추론 강도 low…max(Luna는 ultra), 프롬프트 캐시 94~99 % |
 | OpenRouter | Anthropic 호환 | API 키 | 400+, 자동 검색 | 모델별 추론 강도 지원을 API에서 읽음 |
 | DeepSeek, Kimi, Z.ai GLM, MiniMax, Qwen(국제/중국) | Anthropic 호환 | API 키 | 프리셋 | 벤더 공식 문서로 확인 |
 | xAI Grok, Mistral, Groq, Together, Fireworks | OpenAI 호환 | API 키 | 자동 검색 | 번역(Chat Completions / Responses) |

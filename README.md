@@ -141,10 +141,11 @@ and claude.ai connectors keep working while another model does the thinking.
 
 | | ClaudeRipple | opencodex / openclaude | claude-code-router | Claude Desktop gateway (3P) mode |
 |---|---|---|---|---|
-| Claude **Desktop** Code tab **without** gateway (3P) mode | ✅ | ❌ ¹ | ❌ | ❌ by definition |
-| Keeps claude.ai chat, Remote Control, cloud sessions, connectors | ✅ | ❌ | ❌ | ❌ |
-| Claude and GPT subscriptions side by side | ✅ | ❌ all-or-nothing | ❌ | ❌ |
-| Real model names in the Desktop picker | ✅ | ❌ | ❌ | partial |
+| Claude **Desktop** Code tab **without** gateway (3P) mode | ✅ | ✅ ¹ | ❌ | ❌ by definition |
+| Keeps claude.ai chat, Remote Control, cloud sessions, connectors | ✅ | ✅ ¹ | ❌ | ❌ |
+| Claude and GPT subscriptions side by side | ✅ | ✅ ¹ | ❌ | ❌ |
+| Real model names in the Desktop picker | ✅ | ❌ borrows Claude names ¹ | ❌ | partial |
+| Several ChatGPT accounts, switching when one runs out (Desktop and Codex) | ✅ | ✅ | ❌ | ❌ |
 | Terminal `claude` CLI | ✅ | ✅ | ✅ | ✅ |
 | Codex **app** and Codex CLI → Claude | ✅ | ✅ | ❌ | ❌ |
 | Prompt cache on translated providers | **94–99 %** measured | not measured | varies | n/a |
@@ -152,9 +153,10 @@ and claude.ai connectors keep working while another model does the thinking.
 | Settings GUI, no terminal needed | ✅ | ❌ | ❌ | ❌ |
 | Signed, notarized app with its own runtime | ✅ | ❌ | ❌ | – |
 
-¹ opencodex's README shows Claude Desktop in a demo but publishes no setup steps for it,
-in the repository or on its documentation site (checked 2026-09-16). The only public way
-into the desktop app is the official gateway setting — the last column.
+¹ opencodex (openclaude not checked). Since v2.61.0 (2026-09-22) opencodex reaches the Code
+tab without the gateway. It leaves the model picker alone, so another model is chosen under a
+Claude model's name it is mapped to (`modelMap`). ClaudeRipple puts GPT, DeepSeek and the rest
+in the picker under their own names and passes the effort you pick.
 
 The desktop app's own "third-party inference" setting flips the whole app into another
 mode: you lose claude.ai chat, Remote Control and cloud sessions. Tools that replace
@@ -178,6 +180,12 @@ you map go to your provider, everything else goes to Anthropic byte for byte.
   quota or authentication refusal moves that turn to the next account. This native
   Claude Desktop/Code path is separate from the translated Codex ingress, which picks
   one available login and does not rotate accounts.
+- **Several ChatGPT accounts.** Each `clauderipple login` (or **+ Add ChatGPT account**
+  in the dashboard) adds one. When an account hits its limit, the next one takes over
+  the same request and the spent one rests until its window resets; a conversation
+  stays on the account that answered, to keep its cache. This covers the Claude Desktop
+  Code tab and subagents **and GPT in the Codex app and CLI** — Codex keeps its own
+  sign-in and moves to the next account without signing out.
 - **The full Claude Code harness, untouched.** Skills, hooks, MCP, `CLAUDE.md`,
   subagents, plan mode, Remote Control on your phone: nothing is turned off.
 - **Correct by construction.** Prompt caching preserved (Anthropic cache breakpoints
@@ -342,6 +350,12 @@ clauderipple codex on     # adds a "clauderipple" provider to ~/.codex/config.to
 codex --profile clauderipple -m claude-sonnet-5
 ```
 
+`codex on` also points Codex's built-in OpenAI provider at ClaudeRipple (`openai_base_url`).
+Codex keeps its ChatGPT sign-in; its GPT requests go on to ChatGPT unchanged, except that the
+account is chosen from the ones added to ClaudeRipple — so with several added, Codex too moves
+from a spent account to the next. With none added, or all of them at their limit, Codex's own
+login is used. An `openai_base_url` you set yourself is left alone. `clauderipple codex off` undoes it.
+
 Claude models show up in Codex's model list under their names (ClaudeRipple writes
 a model catalog next to Codex's own). Claude is reached through your Claude Code
 login (detected from the running Desktop session, the terminal login, or a
@@ -359,7 +373,7 @@ provider you configured is available the same way.
 
 | Provider | Kind | Auth | Model list | Notes |
 |---|---|---|---|---|
-| ChatGPT subscription | Codex backend | sign in (or reuse Codex login) | Terra, Sol, Luna, Astra | effort low…max (Luna: ultra), prompt cache 94–99 % |
+| ChatGPT subscription | Codex backend | several sign-ins, switching when one runs out (Codex login reused too) | Terra, Sol, Luna, Astra | effort low…max (Luna: ultra), prompt cache 94–99 % |
 | OpenRouter | Anthropic-compatible | API key | 400+, discovered | per-model effort support read from the API |
 | DeepSeek, Kimi, Z.ai GLM, MiniMax, Qwen (intl / cn) | Anthropic-compatible | API key | preset | verified against vendor docs |
 | xAI Grok, Mistral, Groq, Together, Fireworks | OpenAI-compatible | API key | discovered | translated (Chat Completions / Responses) |
