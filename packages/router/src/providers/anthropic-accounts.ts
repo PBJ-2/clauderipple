@@ -8,7 +8,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { lockSync } from "proper-lockfile";
+import { withFileLock, writeJsonAtomic } from "../locked-file.ts";
 import { readClaudeAuthFile, removeClaudeAuthFile } from "./anthropic-token-file.ts";
 
 export type ClaudeOAuthAccountGrant = {
@@ -37,34 +37,8 @@ export type ClaudeOAuthAccount = {
 
 type ClaudeAccountsFile = { version: 1; accounts: ClaudeOAuthAccount[] };
 
-const LOCK_STALE_MS = 30_000;
-const LOCK_WAIT_MS = 100;
-const LOCK_TIMEOUT_MS = 2_000;
-
 function withAccountLock<T>(home: string, mutate: () => T): T {
-  fs.mkdirSync(home, { recursive: true, mode: 0o700 });
-  const deadline = Date.now() + LOCK_TIMEOUT_MS;
-  let release: () => void;
-  for (;;) {
-    try {
-      release = lockSync(claudeAccountsPath(home), {
-        realpath: false,
-        stale: LOCK_STALE_MS,
-        update: 10_000,
-      });
-      break;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ELOCKED" || Date.now() >= deadline) {
-        throw error;
-      }
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_WAIT_MS);
-    }
-  }
-  try {
-    return mutate();
-  } finally {
-    release!();
-  }
+  return withFileLock(claudeAccountsPath(home), mutate);
 }
 
 export type ClaudeAccountSummary = {
@@ -153,37 +127,12 @@ export function legacyMigrationDurable(directoryDurable: boolean, platform = pro
 }
 
 function writeClaudeAccountsFile(home: string, accounts: ClaudeOAuthAccount[]): void {
-  fs.mkdirSync(home, { recursive: true, mode: 0o700 });
-  const file = claudeAccountsPath(home);
-  const tmp = `${file}.tmp-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
-  try {
-    const fd = fs.openSync(tmp, "wx", 0o600);
-    try {
-      fs.writeFileSync(fd, JSON.stringify({ version: 1, accounts } satisfies ClaudeAccountsFile, null, 2) + "\n", "utf8");
-      fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
-    }
-    fs.renameSync(tmp, file);
-    // Persist the directory entry where the filesystem supports it. POSIX keeps the legacy refresh
-    // token unless that succeeds; Windows has no directory fsync, so the flushed file + rename is its
-    // durability boundary and must complete migration rather than resurrect a removed legacy account.
-    let directoryDurable = false;
-    try {
-      const dir = fs.openSync(home, "r");
-      try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); }
-      directoryDurable = true;
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (process.platform !== "win32" && code !== "EINVAL" && code !== "ENOTSUP" && code !== "EBADF") throw error;
-    }
-    const legacy = readClaudeAuthFile(home);
-    if (legacyMigrationDurable(directoryDurable) && legacy?.source === "oauth") removeClaudeAuthFile(home);
-  } finally {
-    try { fs.unlinkSync(tmp); } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-  }
+  const { directoryDurable } = writeJsonAtomic(claudeAccountsPath(home), { version: 1, accounts } satisfies ClaudeAccountsFile);
+  // POSIX keeps the legacy refresh token unless the directory entry is durable; Windows has no
+  // directory fsync, so the flushed file + rename is its durability boundary and must complete
+  // migration rather than resurrect a removed legacy account.
+  const legacy = readClaudeAuthFile(home);
+  if (legacyMigrationDurable(directoryDurable) && legacy?.source === "oauth") removeClaudeAuthFile(home);
 }
 
 function subjectHash(accountId: string | undefined): string | undefined {
