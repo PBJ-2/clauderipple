@@ -162,7 +162,12 @@ type Window = { used_percent?: number; reset_after_seconds?: number; reset_at?: 
 /** When a window is back, in ms from now: its own countdown, else its reset time (epoch seconds). */
 function windowResetMs(w: Window, now: number): number | undefined {
   if (typeof w.reset_after_seconds === "number" && w.reset_after_seconds >= 0) return w.reset_after_seconds * 1000;
-  if (typeof w.reset_at === "number" && w.reset_at * 1000 > now) return w.reset_at * 1000 - now;
+  if (typeof w.reset_at === "number") {
+    // Epoch seconds as measured; a value already in milliseconds would otherwise park the account
+    // for decades (bounded to hours by the pool, still hours for nothing).
+    const at = w.reset_at > 1e12 ? w.reset_at : w.reset_at * 1000;
+    if (at > now) return at - now;
+  }
   return undefined;
 }
 
@@ -566,7 +571,7 @@ export class ChatGptAdapter {
       const dir = path.join(homeDir(), "debug");
       fs.mkdirSync(dir, { recursive: true });
       const file = path.join(dir, `upstream-${new Date().toISOString().replace(/[:.]/g, "-")}-${status}.json`);
-      fs.writeFileSync(file, JSON.stringify({ status, upstream: upstreamText, request: upstreamReq, anthropic }, null, 1));
+      fs.writeFileSync(file, JSON.stringify({ status, upstream: upstreamText, request: upstreamReq, anthropic }, null, 1), { mode: 0o600 });
       const files = fs.readdirSync(dir).filter((f) => f.startsWith("upstream-")).sort();
       for (const f of files.slice(0, Math.max(0, files.length - 60))) fs.rmSync(path.join(dir, f), { force: true });
     } catch (e) {
@@ -643,7 +648,8 @@ export class ChatGptAdapter {
       }
 
       const text = await upstream.text().catch(() => "");
-      const safeText = redactErrorText(text, credentialHeaderValues(Object.entries(upstreamHeaders)));
+      // The workspace id is masked too: the dashboard never shows it, and an echoing error body must not either.
+      const safeText = redactErrorText(text, [...credentialHeaderValues(Object.entries(upstreamHeaders)), credential.accountId]);
       const status = upstream.status;
       this.log.warn(`chatgpt ${this.name}: account ${credential.ownerId.slice(0, 8)} answered ${status}: ${safeText.slice(0, 400)}`);
       const credentialRefused = status === 401 || (status === 403 && looksLikeAuth(text));
@@ -656,9 +662,11 @@ export class ChatGptAdapter {
             this.log.info(`chatgpt ${this.name}: account ${credential.ownerId.slice(0, 8)} refreshed after ${status}; replaying`);
             continue;
           }
-        } else if (refreshed.has(credential.ownerId)) {
-          // A token minted a moment ago and refused anyway: the account itself is refused. A refresh
-          // that merely failed to reach OpenAI proves nothing and leaves the account alone.
+        } else if (refreshed.has(credential.ownerId) && status === 401) {
+          // A token minted a moment ago and refused with a 401 anyway: the account itself is refused.
+          // Only a 401 says that — a 403 that merely mentions a token is often about the request, and
+          // would otherwise sign every account out in one turn. A refresh that failed to reach
+          // OpenAI proves nothing either way and leaves the account alone.
           this.accounts.reject(credential);
         }
       }
@@ -667,7 +675,9 @@ export class ChatGptAdapter {
       const snapshot = rateLimitsFromHeaders(upstream.headers);
       const retryHeader = headerRecord["retry-after"] ? retryAfterMs({ "retry-after": headerRecord["retry-after"] }) : undefined;
       const waitMs = retryHeader ?? exhaustedForMs(snapshot) ?? retryAfterMs(headerRecord);
-      const verdict = this.pool.penalise(this.name, credential.id, credentialRefused ? 401 : status, waitMs, text);
+      // A refusal here is a rest, never a pool quarantine: "sign in again" is the store's to say
+      // (needsReauth, above), and a quarantine would outlive the new token a sign-in brings.
+      const verdict = this.pool.penalise(this.name, credential.id, credentialRefused ? 403 : status, waitMs, text);
       last = { kind: "refused", status, text: safeText, headers: upstream.headers, ...(status === 429 && waitMs ? { retryAfterSeconds: Math.ceil(waitMs / 1000) } : {}) };
       if (!verdict.retryable) return last;
       tried.add(credential.ownerId);
@@ -731,11 +741,14 @@ export class ChatGptAdapter {
       // Out of accounts — none signed in, all resting, or the last one just ran out on this turn.
       const outOfAccounts = sent.kind === "no-account" || sent.kind === "all-resting" || (sent.kind === "refused" && (sent.status === 429 || sent.status === 402));
       if (outOfAccounts && callerAuth) {
-        // Codex's own login, exactly as it sent it. Not refreshed or stored: it is Codex's.
+        // Codex's own login, exactly as it sent it. Not refreshed or stored: it is Codex's. A turn
+        // token one of our accounts issued means nothing to it.
+        const callerHeaders = { ...forwarded };
+        if (clientTurnState && this.turnStateIssuer.has(clientTurnState)) delete callerHeaders["x-codex-turn-state"];
         try {
           upstream = await fetch(`${(this.cfg.url ?? DEFAULT_BASE).replace(/\/$/, "")}/codex${subPath}`, {
             method,
-            headers: { ...forwarded, authorization: String(req.headers.authorization), "chatgpt-account-id": String(req.headers["chatgpt-account-id"]) },
+            headers: { ...callerHeaders, authorization: String(req.headers.authorization), "chatgpt-account-id": String(req.headers["chatgpt-account-id"]) },
             ...(body ? { body } : {}),
             signal: ac.signal,
           });
@@ -776,7 +789,9 @@ export class ChatGptAdapter {
     const decoder = new TextDecoder();
     let bytes = 0;
     let usage: RequestUsage | undefined;
-    const isSse = /event-stream/i.test(upstream.headers.get("content-type") ?? "");
+    // The backend answers Codex's streaming turns with no content-type at all (measured 2026-09-24),
+    // so anything not declared JSON is read as the event stream it is.
+    const isSse = !/json/i.test(upstream.headers.get("content-type") ?? "");
     try {
       if (upstream.body) {
         const reader = upstream.body.getReader();

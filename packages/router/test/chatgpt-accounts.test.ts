@@ -329,6 +329,33 @@ test("rotation: a backend 5xx that outlasts the in-place retries moves to the ne
   assert.equal(hits.at(-1)!.token, "tok-1");
 });
 
+// Review finding (2026-09-24): a 403 whose text mentions a token ("per-minute token limit") read as a
+// credential refusal, and after one refresh each account was marked for sign-in — one turn could
+// sign the whole pool out. Only a 401 on a fresh token means the account is refused.
+test("rotation: a 403 that mentions a token never signs accounts out", async () => {
+  const r = rig(2);
+  const refusal = { status: 403, body: JSON.stringify({ error: { message: "invalid token budget for this request" } }) };
+  behaviour.set("tok-0", refusal);
+  behaviour.set("rt-0-fresh", refusal);
+  behaviour.set("tok-1", refusal);
+  behaviour.set("rt-1-fresh", refusal);
+  const res = await call("conv-403");
+  assert.equal(res.status, 401, "the client hears an auth-looking 403 as it always did (mapHttpError)");
+  assert.deepEqual(readChatGptAccounts(r.home).map((a) => a.needsReauth === true), [false, false]);
+});
+
+// Review finding: the cooldown was keyed on the token, so a refresh or re-login brought a spent
+// account straight back into rotation for one more failure.
+test("rotation: a new token does not bring an account at its limit back early", async () => {
+  const r = rig(2);
+  behaviour.set("tok-0", usageLimit(3600));
+  await call("conv-spent");
+  saveChatGptAccount(r.home, { ...grant("ws-0", "u0@example.test"), accessToken: "tok-0-new", refreshToken: "rt-0-new" });
+  await call("conv-spent-2");
+  assert.equal(hits.at(-1)!.token, "tok-1");
+  assert.equal(adapter.accountStatus()[0]!.state, "cooling");
+});
+
 test("cleanup", () => {
   backend.close();
   front.close();

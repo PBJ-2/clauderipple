@@ -330,11 +330,11 @@ const refreshing = new Map<string, Promise<void>>();
 export type ChatGptCredential = Credential & { ownerId: string; accountId: string; accessToken: string };
 
 function credentialOf(ownerId: string, label: string, accessToken: string, accountId: string): ChatGptCredential {
-  // The generation is part of the runtime id so a fresh token does not inherit the old one's
-  // quarantine; the owner id is what keeps a conversation (and its cache) on the account.
-  const generation = crypto.createHash("sha256").update(accessToken).digest("hex").slice(0, 12);
+  // The runtime id is the account itself, not its token: a usage limit belongs to the account, and
+  // a refresh must not bring a spent account back early. Whether an account needs a new sign-in is
+  // kept in the store (needsReauth), never as a pool quarantine that a new token would have to undo.
   return {
-    id: `${ownerId}:${generation}`,
+    id: ownerId,
     ownerId,
     label,
     accountId,
