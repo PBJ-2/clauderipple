@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.1 — 2026-09-24
+
+### Fixed
+
+- **The tray starts from an npm install** (#8). After 0.3.1 it launched as
+  Electron but died at once with "exports is not defined in ES module scope": the
+  tray is CommonJS and the package root says `"type": "module"`. The tray now has
+  its own `package.json`. Checked by starting it from the packed package.
+
 ## 0.4.0 — 2026-09-24
 
 Several ChatGPT accounts, for Claude Desktop and for Codex.
