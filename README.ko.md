@@ -73,8 +73,10 @@ Claude에 돈을 내고 있다면 3P는 선택지가 아닙니다. 낸 돈의 �
 
 ### 클로드 데스크톱 앱에서 GPT를 쓸 수 있나요?
 
-됩니다. ClaudeRipple을 설치하고 Claude 모델 이름 하나를 GPT 모델에 매핑하면, Code 탭이 GPT로 답합니다.
-모델 피커에는 GPT의 실제 이름이 뜹니다. 앱 자체는 고치지도 않고, 다른 모드로 바꾸지도 않습니다.
+됩니다. **Code 탭**과 그 서브에이전트에서 됩니다. ClaudeRipple을 설치하고 ChatGPT Plus나 Pro 구독으로
+로그인하면, GPT(챗GPT의 GPT-6 Sol·Luna·Astra, GPT-5.6 Terra 등)가 모델 피커에 실제 이름으로 뜨고, 고른 추론 강도
+그대로 답합니다. 앱 자체는 고치지도 않고, 다른 모드로 바꾸지도 않습니다. 일반 **채팅** 탭은 Claude 그대로입니다.
+채팅까지 바꾸려면 앱 전체를 게이트웨이 모드로 돌려야 해서 어떤 도구도 못 합니다([1P냐 3P냐](#1p냐-3p냐--이-프로젝트가-존재하는-이유) 참고).
 
 ### Claude Code(터미널)에서 GPT를 쓰려면요?
 
@@ -116,6 +118,45 @@ x64 런타임은 에뮬레이션으로 확인했습니다.
 가지 않습니다. 프록시는 내 컴퓨터에서 돕니다. 요청은 설정한 프로바이더로만 가고, 자격증명은
 홈 디렉터리에만 저장됩니다. [개인정보](#개인정보) 절을 보세요.
 
+### Claude 계정이 정지(밴)되지 않나요? 약관 위반 아닌가요?
+
+ClaudeRipple이 Claude에 하는 일은 작고 확인할 수 있습니다. Claude로 가는 요청은 Claude Code가 보낸 그대로
+한 바이트도 바꾸지 않고 나가고, GPT 등 다른 프로바이더로 보낸 요청은 Anthropic에 아예 가지 않습니다. 앱을 고치는
+방식이 아니라, Claude Code가 회사 네트워크용으로 문서화해 둔 프록시·인증서 설정(`HTTPS_PROXY`,
+`NODE_EXTRA_CA_CERTS` — 공식 문서 [Enterprise network configuration](https://code.claude.com/docs/en/corporate-proxy))을 씁니다. 계정 정지 사례로 알려진 것은 반대 방향, 즉 Claude 구독 로그인을 **다른 프로그램**에서
+쓰는 경우입니다. ClaudeRipple에도 그런 선택 기능이 하나 있습니다. Codex 안에서 Claude를 구독 로그인으로 쓰는
+것인데, 이는 Anthropic 약관의 적용을 받습니다. Anthropic API 키로 쓰면 이 문제가 없습니다. Claude 구독 여러 개를
+돌려 쓰는 것도 같은 약관 아래 각자 판단할 일입니다. 계정을 어떻게 다룰지는 Anthropic만 정할 수 있으니, 여기 적은
+내용은 보장이 아닙니다.
+
+### ChatGPT 계정을 여러 개 쓸 수 있나요?
+
+됩니다. `clauderipple login`을 할 때마다(또는 대시보드의 **+ ChatGPT 계정 추가**) 계정이 하나씩 늘어납니다.
+한 계정이 한도에 걸리면 같은 요청을 다음 계정이 이어받고, 한도가 찬 계정은 풀릴 때까지 쉽니다. 대화는 답한 계정에
+고정되어 프롬프트 캐시를 지킵니다. Claude Desktop Code 탭, Claude Code, Codex 앱·CLI의 GPT에 모두 적용됩니다.
+
+### Codex에서 Claude를 쓸 수 있나요?
+
+됩니다. `clauderipple codex on`을 하면 ClaudeRipple이 프로바이더로 추가되고, Codex 앱과 CLI의 모델 목록에
+Claude 모델이 이름 그대로 뜹니다. Claude Code 로그인이나 Anthropic API 키로 답합니다.
+[Codex 앱과 Codex CLI](#codex-앱과-codex-cli) 절을 보세요.
+
+### Claude Code 안에서는 GPT 성능이 떨어지지 않나요?
+
+Claude Code의 시스템 프롬프트와 도구 설명은 Claude에 맞춰 쓰여 있어서, 다른 모델은 남에게 맞춘 지시를 읽는 셈이고
+자기 전용 앱에서와 조금 다르게 굴 수 있습니다. ClaudeRipple은 모델마다 자기 이름과 추론 강도를 알려 주고, 벤더가
+거부할 도구 스키마를 고쳐 넘기며, 프로바이더별로 지시문을 덧붙일 수 있게 합니다. 흔한 구성은 Claude를 메인으로 두고
+GPT나 DeepSeek을 서브에이전트로 쓰는 것입니다.
+
+### opencodex나 claude-code-router와 뭐가 다른가요?
+
+[비교표](#네-개-대신-하나)(2026-09-16 확인)를 보세요. 요약하면 ClaudeRipple은 앱이 Claude에 로그인된 채로 Claude
+**데스크톱 앱**의 Code 탭에 들어가고, 다른 모델을 피커에 실제 이름으로 보여 줍니다.
+
+### 무료인가요?
+
+무료입니다. GPL-3.0 오픈소스입니다. 이미 쓰고 있는 구독이나 API 키 비용만 듭니다.
+
 ## 네 개 대신 하나
 
 비슷한 도구들은 터미널용입니다. Claude Code CLI나 Codex CLI가 다른 모델을 쓰게는 해 주지만, Claude **데스크톱 앱**에는
@@ -147,8 +188,8 @@ ClaudeRipple은 Claude Code 프로세스만 신뢰하는 작은 HTTPS 프록시�
 
 ## 할 수 있는 것
 
-- **Claude Desktop과 Claude Code에서 어떤 모델이든.** ChatGPT Plus/Pro 구독으로 GPT-5.6 Terra / Sol / Luna와
-  GPT-6 Astra를, 아니면 DeepSeek·Kimi·GLM·MiniMax·Qwen·Grok·Mistral·Groq·Together·Fireworks·OpenRouter(400+ 모델)·
+- **Claude Desktop과 Claude Code에서 어떤 모델이든.** ChatGPT Plus/Pro 구독으로 GPT-6 Sol / Luna / Astra와
+  GPT-5.6 Terra / Sol / Luna를(OpenAI가 새 모델을 내면 그날 바로 뜹니다), 아니면 DeepSeek·Kimi·GLM·MiniMax·Qwen·Grok·Mistral·Groq·Together·Fireworks·OpenRouter(400+ 모델)·
   로컬 Ollama / LM Studio를. 피커에 실제 이름으로 띄우거나, Claude 이름에 매핑해서.
 - **Codex 앱과 Codex CLI에서 Claude를.** Codex가 프로바이더로 인식하는 로컬 OpenAI 호환 엔드포인트. Claude 모델이
   Codex 자체 모델 목록에 뜹니다. 현재 Claude Code 로그인이나 Anthropic API 키를 씁니다.
@@ -324,7 +365,7 @@ Anthropic API 키로 갑니다. 구독 로그인 재사용은 Anthropic 약관�
 
 | 프로바이더 | 종류 | 인증 | 모델 목록 | 비고 |
 |---|---|---|---|---|
-| ChatGPT 구독 | Codex 백엔드 | 로그인 여러 개, 한도 차면 자동 전환(Codex 로그인도 재사용) | Terra, Sol, Luna, Astra | 추론 강도 low…max(Luna는 ultra), 프롬프트 캐시 94~99 % |
+| ChatGPT 구독 | Codex 백엔드 | 로그인 여러 개, 한도 차면 자동 전환(Codex 로그인도 재사용) | 구독에서 자동으로 읽음(GPT-6 Sol·Luna·Astra, GPT-5.6 …) | 추론 강도 low…max(Luna는 ultra), 프롬프트 캐시 94~99 % |
 | OpenRouter | Anthropic 호환 | API 키 | 400+, 자동 검색 | 모델별 추론 강도 지원을 API에서 읽음 |
 | DeepSeek, Kimi, Z.ai GLM, MiniMax, Qwen(국제/중국) | Anthropic 호환 | API 키 | 프리셋 | 벤더 공식 문서로 확인 |
 | xAI Grok, Mistral, Groq, Together, Fireworks | OpenAI 호환 | API 키 | 자동 검색 | 번역(Chat Completions / Responses) |

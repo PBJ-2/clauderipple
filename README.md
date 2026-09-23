@@ -80,9 +80,12 @@ the model.
 
 ### Can I use GPT in the Claude Desktop app?
 
-Yes. Install ClaudeRipple, map a Claude model name to a GPT model, and the Code tab
-answers with GPT under its real name in the model picker. The app itself is not
-modified and not switched into any other mode.
+Yes — in the **Code tab** and its subagents. Install ClaudeRipple, sign in with a
+ChatGPT Plus or Pro subscription, and GPT (GPT-6 Sol, Luna, Astra, GPT-5.6 Terra and
+the rest) shows up under its real name in the model picker, with the reasoning effort
+you pick. The app itself is not modified and not switched into any other mode. The
+general **chat** tab stays Claude: no tool can route it without turning the whole app
+into gateway mode (see [1P, not 3P](#1p-not-3p-the-difference-this-whole-project-exists-for)).
 
 ### How do I use GPT in Claude Code?
 
@@ -129,6 +132,53 @@ measured on Windows 11 arm64; the x64 runtime is measured under emulation.
 No. The proxy runs on your own machine. Requests go to the provider you configured and
 nowhere else, and credentials stay in your home directory. See [Privacy](#privacy).
 
+### Will my Claude account get banned? Is this against Anthropic's terms?
+
+What ClaudeRipple does with Claude is small and checkable: a request that stays on Claude
+leaves your machine byte for byte as Claude Code sent it, and a request routed to GPT or
+another provider never reaches Anthropic at all. It works through the proxy and
+certificate settings Claude Code documents for corporate networks (`HTTPS_PROXY`,
+`NODE_EXTRA_CA_CERTS` — [Enterprise network configuration](https://code.claude.com/docs/en/corporate-proxy)),
+not by patching the app. The reports of banned accounts are about
+the opposite direction — a Claude subscription login used from **another** program.
+ClaudeRipple has one optional feature of that kind: Claude inside Codex using your
+subscription login. That use is subject to Anthropic's terms; an Anthropic API key avoids
+the question. Rotating several Claude subscriptions is likewise your call under those
+terms. Only Anthropic can say how an account is treated, so nothing here is a promise.
+
+### Can I use several ChatGPT accounts?
+
+Yes. Each `clauderipple login` (or **+ Add ChatGPT account** in the dashboard) adds one.
+When an account hits its usage limit, the same request moves to the next account and the
+spent one rests until its window resets; a conversation stays on the account that
+answered, to keep its prompt cache. This applies to the Claude Desktop Code tab, Claude
+Code, and GPT in the Codex app and CLI.
+
+### Can I use Claude inside Codex?
+
+Yes. `clauderipple codex on` adds ClaudeRipple as a provider, and Claude models appear in
+the Codex app's and CLI's model list under their own names. They answer through your
+Claude Code login or an Anthropic API key. See [Codex app and Codex CLI](#codex-app-and-codex-cli).
+
+### Does GPT do worse inside Claude Code?
+
+Claude Code's system prompt and tool descriptions are written for Claude, so another model
+reads instructions tuned for someone else, and it may behave a little differently than in
+its own client. ClaudeRipple tells each model its own name and effort, reshapes tool
+schemas a vendor would reject, and lets you append instructions per provider. A common
+setup is Claude as the main model with GPT or DeepSeek as subagents.
+
+### How is this different from opencodex or claude-code-router?
+
+See the [comparison table](#one-tool-instead-of-four) (checked 2026-09-16). In short:
+ClaudeRipple reaches the Claude **Desktop** Code tab while the app stays signed in to
+Claude, and shows other models in its picker under their real names.
+
+### Is it free?
+
+Yes. ClaudeRipple is open source under GPL-3.0. You pay only for the subscriptions or API
+keys you already use.
+
 ## One tool instead of four
 
 Similar tools are built for the terminal. They let the Claude Code CLI or Codex CLI
@@ -165,8 +215,9 @@ you map go to your provider, everything else goes to Anthropic byte for byte.
 
 ## What you get
 
-- **Any model in Claude Desktop and Claude Code.** GPT-5.6 Terra / Sol / Luna and
-  GPT-6 Astra through your ChatGPT Plus/Pro subscription, or DeepSeek, Kimi, GLM,
+- **Any model in Claude Desktop and Claude Code.** GPT-6 Sol / Luna / Astra and
+  GPT-5.6 Terra / Sol / Luna through your ChatGPT Plus/Pro subscription (new models
+  appear the day OpenAI serves them), or DeepSeek, Kimi, GLM,
   MiniMax, Qwen, Grok, Mistral, Groq, Together, Fireworks, OpenRouter (400+ models)
   and local Ollama / LM Studio. Under their real names in the picker, or mapped onto
   a Claude name.
@@ -372,7 +423,7 @@ provider you configured is available the same way.
 
 | Provider | Kind | Auth | Model list | Notes |
 |---|---|---|---|---|
-| ChatGPT subscription | Codex backend | several sign-ins, switching when one runs out (Codex login reused too) | Terra, Sol, Luna, Astra | effort low…max (Luna: ultra), prompt cache 94–99 % |
+| ChatGPT subscription | Codex backend | several sign-ins, switching when one runs out (Codex login reused too) | read from your subscription (GPT-6 Sol, Luna, Astra, GPT-5.6 …) | effort low…max (Luna: ultra), prompt cache 94–99 % |
 | OpenRouter | Anthropic-compatible | API key | 400+, discovered | per-model effort support read from the API |
 | DeepSeek, Kimi, Z.ai GLM, MiniMax, Qwen (intl / cn) | Anthropic-compatible | API key | preset | verified against vendor docs |
 | xAI Grok, Mistral, Groq, Together, Fireworks | OpenAI-compatible | API key | discovered | translated (Chat Completions / Responses) |
