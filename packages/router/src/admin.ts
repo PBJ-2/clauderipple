@@ -4,8 +4,10 @@
 //   GET  /api/config    raw config.json
 //   PUT  /api/config    validate + atomically save config.json (router picks it up via mtime)
 //   GET  /api/logs?n=   tail of router.log
-//   POST /api/chatgpt-login  begin ChatGPT browser login without holding the request open
+//   POST /api/chatgpt-login  begin ChatGPT browser login (adds an account) without holding the request open
 //   GET  /api/chatgpt-login  ChatGPT browser login state and credential status
+//   GET  /api/chatgpt-accounts?provider=   signed-in ChatGPT accounts, rotation state, quota (no tokens)
+//   PATCH/DELETE /api/chatgpt-accounts/:id rename, pause/resume, clear a cooldown; remove
 //   GET  /*             static files from packages/ui (the GUI itself)
 
 import crypto from "node:crypto";
@@ -35,6 +37,8 @@ import { syncModelSlots } from "../../cli/src/settings.ts";
 import { ClaudeOAuthSession, type ClaudeOAuthState } from "./providers/claude-oauth.ts";
 import { readClaudeAuthFile } from "./providers/anthropic-token-file.ts";
 import { listClaudeAccounts, removeClaudeAccount, renameClaudeAccount } from "./providers/anthropic-accounts.ts";
+import { readChatGptAccounts, removeChatGptAccount, summarize as summarizeChatGptAccount, updateChatGptAccount } from "./providers/chatgpt/accounts.ts";
+import type { ChatGptAccountStatus } from "./providers/chatgpt/index.ts";
 
 const MAX_BODY = 1024 * 1024;
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -73,6 +77,10 @@ export type AdminDeps = {
      * measured fallback list. Absent in tests.
      */
     models?: (name: string) => Promise<ProviderModel[] | null>;
+    /** Every chatgpt provider's accounts with rotation state and quota. Absent in tests. */
+    accounts?: () => Record<string, ChatGptAccountStatus[]>;
+    /** Put one resting account back into rotation now. Absent in tests. */
+    clearCooldown?: (accountId: string) => void;
   };
   /**
    * Optional: per-credential cooldowns and quarantines, for providers that declare a pool. Ids and
@@ -269,7 +277,7 @@ function tcpReachable(hostname: string, port: number, timeoutMs = 2000): Promise
  * the first request is ever made. "auto" accepts either our own login or a Codex CLI one.
  */
 export function chatgptSignedIn(mode: string | undefined): boolean {
-  const own = fs.existsSync(path.join(homeDir(), "chatgpt-auth.json"));
+  const own = readChatGptAccounts(homeDir()).length > 0;
   const borrowed = fs.existsSync(path.join(os.homedir(), ".codex", "auth.json"));
   return mode === "own" ? own : mode === "borrow-codex" ? borrowed : own || borrowed;
 }
@@ -379,7 +387,9 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
       pointsAtRouter: env.HTTPS_PROXY === wantProxy,
     },
     cliVersion: cliVersion(),
-    chatgpt: { ...chatgpt, signedIn, ...(stale ? { stale: true, staleReason: staleReasons } : {}) },
+    // `quota` stays one snapshot per provider (the account in use) for the readers that want one
+    // number; `accounts` is the per-account view, read after the refresh above so it is as fresh.
+    chatgpt: { ...chatgpt, signedIn, accounts: chatgpt.accounts?.() ?? {}, ...(stale ? { stale: true, staleReason: staleReasons } : {}) },
     // Only present for providers that declare a pool; a provider with one credential has nothing
     // to report and would only add a row that never changes.
     credentials: deps.credentials?.() ?? {},
@@ -1190,7 +1200,69 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
       }
       if (pathname === "/api/chatgpt-login" && method === "GET") {
         const provider = Object.values(deps.config().providers).find((candidate) => candidate.type === "chatgpt");
-        sendJson(res, 200, { ...chatgptLogin, signedIn: chatgptSignedIn(provider?.auth) });
+        sendJson(res, 200, { ...chatgptLogin, signedIn: chatgptSignedIn(provider?.auth), accountCount: readChatGptAccounts(homeDir()).length });
+        return;
+      }
+      // Safe account metadata only: labels, emails, plan, rotation state and quota. Tokens and the
+      // workspace id stay in the router.
+      if (pathname === "/api/chatgpt-accounts" && method === "GET") {
+        const all = deps.chatgpt?.().accounts?.() ?? {};
+        const wanted = new URL(url, "http://127.0.0.1").searchParams.get("provider");
+        const name = wanted && all[wanted] ? wanted : Object.keys(all)[0];
+        const accounts = name ? all[name]! : readChatGptAccounts(homeDir()).map(summarizeChatGptAccount);
+        sendJson(res, 200, { provider: name ?? null, accounts });
+        return;
+      }
+      if (pathname.startsWith("/api/chatgpt-accounts/") && (method === "PATCH" || method === "DELETE")) {
+        let id: string;
+        try {
+          id = decodeURIComponent(pathname.slice("/api/chatgpt-accounts/".length));
+        } catch {
+          sendJson(res, 400, { error: "invalid account id" });
+          return;
+        }
+        const own = id === "legacy" || /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
+        if (!own && id !== "codex") {
+          sendJson(res, 400, { error: "invalid account id" });
+          return;
+        }
+        if (method === "DELETE") {
+          if (id === "codex") {
+            sendJson(res, 409, { error: "the Codex CLI's login belongs to Codex; sign out there instead" });
+            return;
+          }
+          if (!removeChatGptAccount(homeDir(), id)) {
+            sendJson(res, 404, { error: "ChatGPT account not found" });
+            return;
+          }
+          deps.log.info(`admin: removed ChatGPT account ${id.slice(0, 8)}`);
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+        let change: { label?: unknown; paused?: unknown; clearCooldown?: unknown };
+        try {
+          change = JSON.parse((await readBody(req)).toString("utf8")) as typeof change;
+        } catch {
+          sendJson(res, 400, { error: "invalid JSON" });
+          return;
+        }
+        if ((change.label !== undefined && (typeof change.label !== "string" || !change.label.trim())) || (change.paused !== undefined && typeof change.paused !== "boolean")) {
+          sendJson(res, 400, { error: "expected {label?: non-empty string, paused?: boolean, clearCooldown?: true}" });
+          return;
+        }
+        if (change.clearCooldown === true) deps.chatgpt?.().clearCooldown?.(id);
+        if (change.label !== undefined || change.paused !== undefined) {
+          if (id === "codex") {
+            sendJson(res, 409, { error: "the Codex CLI's login cannot be renamed or paused here" });
+            return;
+          }
+          if (!updateChatGptAccount(homeDir(), id, { ...(typeof change.label === "string" ? { label: change.label } : {}), ...(typeof change.paused === "boolean" ? { paused: change.paused } : {}) })) {
+            sendJson(res, 404, { error: "ChatGPT account not found" });
+            return;
+          }
+        }
+        deps.log.info(`admin: updated ChatGPT account ${id.slice(0, 8)}`);
+        sendJson(res, 200, { ok: true });
         return;
       }
       if (pathname === "/api/chatgpt-login" && method === "POST") {

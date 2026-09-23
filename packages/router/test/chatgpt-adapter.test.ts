@@ -244,6 +244,15 @@ test("HTTP 429 upstream → Anthropic rate_limit_error 429", async () => {
   assert.equal(q.rate_limits.primary.window_minutes, 10080);
   assert.equal(q.rate_limits.primary.reset_after_seconds, 535755);
   assert.equal(q.rate_limits.secondary, null); // zero-minute window = not a real window
+  // The only account is now out until its window resets: the next turn is answered here, without
+  // asking the backend again, and says when to come back.
+  const before = seen.length;
+  const again = await call(request);
+  assert.equal(again.status, 429);
+  assert.equal(seen.length, before, "a resting account is not sent the turn");
+  assert.ok(Number(again.headers["retry-after"]) > 0);
+  assert.equal(adapter.accountStatus()[0]?.state, "cooling");
+  adapter.clearCooldown("legacy");
 });
 
 test("rateLimitsFromHeaders: missing headers → null", () => {

@@ -5,7 +5,8 @@ import crypto from "node:crypto";
 import http from "node:http";
 import type { ChatGptProvider, ProviderModel } from "../../config.ts";
 import type { Logger } from "../../log.ts";
-import { CredentialStore } from "./auth.ts";
+import { CredentialPool, retryAfterMs } from "../../pool.ts";
+import { ChatGptAccountPool, type ChatGptAccountSummary, type ChatGptCredential, type FetchLike } from "./accounts.ts";
 import { SseParser } from "./sse.ts";
 import { fetchWithRetry } from "../retry.ts";
 import { looksLikeAuth } from "../openai/index.ts";
@@ -128,22 +129,143 @@ export function rateLimitsFromUsage(body: unknown): Record<string, unknown> | nu
   };
 }
 
+type Window = { used_percent?: number; reset_after_seconds?: number; reset_at?: number };
+
+/** When a window is back, in ms from now: its own countdown, else its reset time (epoch seconds). */
+function windowResetMs(w: Window, now: number): number | undefined {
+  if (typeof w.reset_after_seconds === "number" && w.reset_after_seconds >= 0) return w.reset_after_seconds * 1000;
+  if (typeof w.reset_at === "number" && w.reset_at * 1000 > now) return w.reset_at * 1000 - now;
+  return undefined;
+}
+
+/**
+ * How long an account is out, from a rate-limit snapshot: the latest reset among the windows it
+ * has used up, since it is usable only once every full window has reset. Undefined when no window
+ * is full — the account is not out, whatever else the snapshot says.
+ */
+export function exhaustedForMs(snapshot: Record<string, unknown> | null | undefined, now = Date.now()): number | undefined {
+  const limits = (snapshot?.rate_limits ?? null) as { primary?: Window | null; secondary?: Window | null } | null;
+  let out: number | undefined;
+  for (const w of [limits?.primary, limits?.secondary]) {
+    if (!w || typeof w.used_percent !== "number" || w.used_percent < 100) continue;
+    const ms = windowResetMs(w, now) ?? 60_000;
+    out = Math.max(out ?? 0, ms);
+  }
+  return out;
+}
+
+/** One account as the dashboard shows it: who, whether it is in rotation, and its last known quota. */
+export type ChatGptAccountStatus = ChatGptAccountSummary & {
+  state: "ready" | "cooling" | "quarantined" | "paused" | "needs-login";
+  cooldownSeconds?: number;
+  quota: Record<string, unknown> | null;
+  active: boolean;
+};
+
 export class ChatGptAdapter {
   readonly name: string;
   private readonly cfg: ChatGptProvider;
-  private readonly creds: CredentialStore;
+  private readonly accounts: ChatGptAccountPool;
+  /** Cooldowns and conversation stickiness, shared with the proxy's other credential pools. */
+  private readonly pool: CredentialPool;
   private readonly log: Logger;
-  lastRateLimits: Record<string, unknown> | null = null;
+  /** Latest quota per account (owner id), from response headers or `/wham/usage`. */
+  private readonly rateLimitsByAccount = new Map<string, Record<string, unknown>>();
+  /** The account that answered last: the one whose quota the single-number readers see. */
+  private activeOwner: string | null = null;
 
-  constructor(name: string, cfg: ChatGptProvider, home: string, log: Logger) {
+  constructor(name: string, cfg: ChatGptProvider, home: string, log: Logger, pool = new CredentialPool(), fetchImpl?: FetchLike) {
     this.name = name;
     this.cfg = cfg;
     this.log = log;
-    this.creds = new CredentialStore(home, cfg.auth ?? "auto");
+    this.pool = pool;
+    this.accounts = new ChatGptAccountPool({ home, mode: cfg.auth ?? "auto", log, ...(fetchImpl ? { fetch: fetchImpl } : {}) });
+  }
+
+  /**
+   * The quota of the account in use, in the shape it always had. Readers that want one number
+   * (the tray, the health line, other tools reading `/api/status`) keep getting one; the
+   * per-account view is `accountStatus()`.
+   */
+  get lastRateLimits(): Record<string, unknown> | null {
+    const credentials = this.accounts.peekCredentials();
+    const active = credentials.find((c) => c.ownerId === this.activeOwner);
+    if (active && this.pool.hasUsable(this.name, [active]) && this.rateLimitsByAccount.has(active.ownerId)) return this.rateLimitsByAccount.get(active.ownerId)!;
+    // Otherwise the account the next turn would go to: a spent account's 100% is not what is left.
+    const next = credentials.find((c) => this.pool.hasUsable(this.name, [c]) && this.rateLimitsByAccount.has(c.ownerId))
+      ?? credentials.find((c) => this.rateLimitsByAccount.has(c.ownerId));
+    return next ? this.rateLimitsByAccount.get(next.ownerId)! : null;
+  }
+
+  /** Record a snapshot for an account; a full window takes it out of rotation until that window resets. */
+  private noteRateLimits(credential: ChatGptCredential, snapshot: Record<string, unknown> | null): void {
+    if (!snapshot) return;
+    this.rateLimitsByAccount.set(credential.ownerId, snapshot);
+    const outMs = exhaustedForMs(snapshot);
+    if (outMs !== undefined) this.pool.penalise(this.name, credential.id, 429, outMs);
   }
 
   describeAuth(): string {
-    return this.creds.describe();
+    const all = this.accounts.summaries();
+    const usable = this.accounts.peekCredentials().filter((c) => this.pool.hasUsable(this.name, [c])).length;
+    return `accounts=${all.length} usable=${usable} mode=${this.cfg.auth ?? "auto"}`;
+  }
+
+  /** Whether any account could answer now, for the proxy's choice between this provider and a fallback. */
+  hasUsable(): boolean {
+    return this.pool.hasUsable(this.name, this.accounts.peekCredentials());
+  }
+
+  signedIn(): boolean {
+    return this.accounts.signedIn();
+  }
+
+  /** Every account with its rotation state and last known quota. Metadata only — no token leaves. */
+  accountStatus(): ChatGptAccountStatus[] {
+    const credentials = this.accounts.peekCredentials();
+    const reports = new Map(this.pool.report(this.name, credentials).map((r) => [r.id, r]));
+    return this.accounts.summaries().map((summary) => {
+      const credential = credentials.find((c) => c.ownerId === summary.id);
+      const report = credential ? reports.get(credential.id) : undefined;
+      const state: ChatGptAccountStatus["state"] = summary.paused ? "paused" : !credential ? "needs-login" : report?.state ?? "ready";
+      return {
+        ...summary,
+        state,
+        ...(report?.cooldownSeconds ? { cooldownSeconds: report.cooldownSeconds } : {}),
+        quota: this.rateLimitsByAccount.get(summary.id) ?? null,
+        active: summary.id === this.activeOwner,
+      };
+    });
+  }
+
+  /** Put a cooling account back into rotation now (dashboard action). */
+  clearCooldown(ownerId: string): void {
+    for (const c of this.accounts.peekCredentials()) if (c.ownerId === ownerId) this.pool.clear(this.name, c.id);
+  }
+
+  /**
+   * An account for one turn: the conversation's own while it is healthy, else the first usable one.
+   * "none" when nothing is signed in; null when every account is cooling or already tried.
+   */
+  private async pick(conversation: string | undefined, tried: ReadonlySet<string> = new Set()): Promise<ChatGptCredential | "none" | null> {
+    const all = await this.accounts.credentials();
+    if (all.length === 0) return "none";
+    const rest = all.filter((c) => !tried.has(c.ownerId));
+    return (this.pool.pick(this.name, rest, conversation) as ChatGptCredential | null);
+  }
+
+  /** For side calls (search, catalogue, quota) with no conversation: a usable account, else any. */
+  private async anyCredential(): Promise<ChatGptCredential | Error> {
+    const all = await this.accounts.credentials();
+    if (all.length === 0) return new Error("no ChatGPT credentials: run `clauderipple login`, or sign in to the Codex CLI once");
+    return (this.pool.pick(this.name, all) as ChatGptCredential | null) ?? all[0]!;
+  }
+
+  /** The soonest any account is back, for the message when all of them are out. */
+  private soonestBackMs(): number | undefined {
+    const reports = this.pool.report(this.name, this.accounts.peekCredentials());
+    const cooling = reports.filter((r) => r.state === "cooling" && r.cooldownSeconds).map((r) => r.cooldownSeconds! * 1000);
+    return cooling.length ? Math.min(...cooling) : undefined;
   }
 
   /**
@@ -163,7 +285,7 @@ export class ChatGptAdapter {
     // The Responses tool exposes an allowed-domain filter but no exclusion filter. Ignoring a block
     // would violate the caller's request; fail visibly so the proxy can choose another backend.
     if (query.blockedDomains?.length) throw new Error("ChatGPT web search does not support blocked_domains");
-    const tokens = await this.creds.get();
+    const tokens = await this.anyCredential();
     if (tokens instanceof Error) throw tokens;
     const id = crypto.randomUUID();
     const filters = query.allowedDomains?.length ? { allowed_domains: query.allowedDomains } : undefined;
@@ -205,11 +327,10 @@ export class ChatGptAdapter {
       body: JSON.stringify(body),
       signal: requestSignal,
     });
-    const rateLimits = rateLimitsFromHeaders(res.headers);
-    if (rateLimits) this.lastRateLimits = rateLimits;
+    this.noteRateLimits(tokens, rateLimitsFromHeaders(res.headers));
     if (!res.ok || !res.body) {
       const text = await res.text().catch(() => "");
-      if (res.status === 401) this.creds.invalidate();
+      if (res.status === 401) void this.accounts.forceRefresh(tokens.ownerId);
       throw new Error(`ChatGPT web search: HTTP ${res.status}${text ? ` ${redactErrorText(text, [tokens.accessToken], 200)}` : ""}`);
     }
 
@@ -254,22 +375,29 @@ export class ChatGptAdapter {
    * Ask the backend for the current quota instead of waiting for a request to carry it in the
    * response headers. Without this, `/api/status` shows the last time GPT traffic flowed — 11
    * hours stale in one measurement (2026-09-20) — and the product's GPT budget read is wrong.
-   * Never throws and never clears a good snapshot; returns the new one, or null on failure.
+   * Every account is asked, so the dashboard can show each one and an account that is already
+   * spent leaves rotation before a turn finds out the hard way. Never throws and never clears a
+   * good snapshot; returns the active account's new one, or null when none could be read.
    */
   fetchRateLimits(): Promise<Record<string, unknown> | null> {
     if (this.rateLimitsInFlight) return this.rateLimitsInFlight;
-    this.rateLimitsInFlight = this.fetchRateLimitsOnce().finally(() => {
+    this.rateLimitsInFlight = this.fetchAllRateLimits().finally(() => {
       this.rateLimitsInFlight = null;
     });
     return this.rateLimitsInFlight;
   }
 
-  private async fetchRateLimitsOnce(): Promise<Record<string, unknown> | null> {
-    const tokens = await this.creds.get();
-    if (tokens instanceof Error) {
-      this.log.warn(`chatgpt ${this.name}: rate-limit fetch skipped: ${tokens.message}`);
+  private async fetchAllRateLimits(): Promise<Record<string, unknown> | null> {
+    const all = await this.accounts.credentials();
+    if (all.length === 0) {
+      this.log.warn(`chatgpt ${this.name}: rate-limit fetch skipped: no ChatGPT credentials`);
       return null;
     }
+    const results = await Promise.all(all.map((c) => this.fetchRateLimitsOnce(c)));
+    return results.some(Boolean) ? this.lastRateLimits : null;
+  }
+
+  private async fetchRateLimitsOnce(tokens: ChatGptCredential, replayed = false): Promise<Record<string, unknown> | null> {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), USAGE_TIMEOUT_MS);
     let res: Response;
@@ -291,8 +419,13 @@ export class ChatGptAdapter {
       clearTimeout(timer);
     }
     if (!res.ok) {
-      if (res.status === 401) this.creds.invalidate();
-      this.log.warn(`chatgpt ${this.name}: rate-limit fetch HTTP ${res.status}`);
+      // A bare 401 here is usually a token that went stale early: one refresh and one replay, and
+      // no more — asking again and again with a dead grant is the loop to avoid.
+      if (res.status === 401 && !replayed && await this.accounts.forceRefresh(tokens.ownerId)) {
+        const fresh = this.accounts.peekCredentials().find((c) => c.ownerId === tokens.ownerId);
+        if (fresh) return this.fetchRateLimitsOnce(fresh, true);
+      }
+      this.log.warn(`chatgpt ${this.name}: rate-limit fetch HTTP ${res.status} (account ${tokens.ownerId.slice(0, 8)})`);
       return null;
     }
     const parsed = rateLimitsFromUsage(await res.json().catch(() => null));
@@ -300,7 +433,7 @@ export class ChatGptAdapter {
       this.log.warn(`chatgpt ${this.name}: rate-limit fetch returned no primary window`);
       return null;
     }
-    this.lastRateLimits = parsed;
+    this.noteRateLimits(tokens, parsed);
     return parsed;
   }
 
@@ -326,7 +459,7 @@ export class ChatGptAdapter {
   }
 
   private async fetchModelsOnce(): Promise<ProviderModel[] | null> {
-    const tokens = await this.creds.get();
+    const tokens = await this.anyCredential();
     if (tokens instanceof Error) {
       this.log.warn(`chatgpt ${this.name}: model-catalog fetch skipped: ${tokens.message}`);
       return null;
@@ -353,7 +486,7 @@ export class ChatGptAdapter {
     }
     if (!res.ok) {
       // The status only: the body can echo the request, and the token rides on it.
-      if (res.status === 401) this.creds.invalidate();
+      if (res.status === 401) void this.accounts.forceRefresh(tokens.ownerId);
       this.log.warn(`chatgpt ${this.name}: model-catalog fetch HTTP ${res.status}`);
       return null;
     }
@@ -403,19 +536,133 @@ export class ChatGptAdapter {
     }
   }
 
+  /**
+   * Send one turn, moving to the next account while nothing has reached the client:
+   *
+   * - 401, or a 403 that reads as a credential refusal: one refresh of that account and a replay;
+   *   refused again, the account is quarantined (and marked for sign-in when it is ours).
+   * - 429 and 402: the account rests until its window resets, from `retry-after` or the
+   *   `x-codex-*` reset the backend reports, and the next account takes the turn.
+   * - Any other 403, 5xx, or no connection at all: a short rest, and the next account.
+   * - Anything else is the request's fault; another account would refuse it the same way.
+   *
+   * Each account is tried at most once per turn (a refreshed token is the same account).
+   */
+  private async sendToAnAccount(cacheKey: string, body: string, signal: AbortSignal): Promise<
+    | { upstream: Response; credential: ChatGptCredential }
+    | { error: { status: number; body: string; retryAfterSeconds?: number }; note: string; upstreamStatus?: number; aborted?: false; thrown?: undefined }
+    | { error: true; aborted: true; thrown?: undefined; note?: undefined; upstreamStatus?: undefined }
+    | { error: true; thrown: Error; aborted?: false; note?: undefined; upstreamStatus?: undefined }
+  > {
+    const tried = new Set<string>();
+    const replayed = new Set<string>();
+    const refreshed = new Set<string>();
+    let last: { status: number; body: string; note: string; upstreamStatus: number; retryAfterSeconds?: number } | null = null;
+    let lastThrown: Error | null = null;
+    for (;;) {
+      const credential = await this.pick(cacheKey, tried);
+      if (credential === "none") {
+        const e = anthropicError(401, "authentication_error", "no ChatGPT credentials: run `clauderipple login`, or sign in to the Codex CLI once");
+        return { error: { status: e.status, body: e.body }, note: "no credentials" };
+      }
+      if (credential === null) {
+        if (last) return { error: { status: last.status, body: last.body, ...(last.retryAfterSeconds ? { retryAfterSeconds: last.retryAfterSeconds } : {}) }, note: last.note, upstreamStatus: last.upstreamStatus };
+        if (lastThrown) return { error: true, thrown: lastThrown };
+        // Every account was already resting when the turn arrived.
+        const backMs = this.soonestBackMs();
+        const when = backMs ? ` The first is usable again at ${new Date(Date.now() + backMs).toLocaleTimeString()}.` : "";
+        const e = anthropicError(429, "rate_limit_error", `ChatGPT: every signed-in account is at its usage limit.${when}`);
+        return { error: { status: 429, body: e.body, ...(backMs ? { retryAfterSeconds: Math.ceil(backMs / 1000) } : {}) }, note: "all accounts resting" };
+      }
+
+      const turnKey = `${credential.ownerId}\0${cacheKey}`;
+      const turnState = this.turnStateByKey.get(turnKey);
+      const upstreamHeaders = {
+        "content-type": "application/json",
+        accept: "text/event-stream",
+        ...credential.headers,
+        "OpenAI-Beta": "responses=experimental",
+        originator: "codex_cli_rs",
+        // The conversation's identity, as the Codex CLI states it. This is what the backend keys
+        // the prompt cache on since mid-September 2026 (see `conversationId` in translate.ts).
+        "session-id": cacheKey,
+        "thread-id": cacheKey,
+        "x-client-request-id": cacheKey,
+        "x-codex-window-id": `${cacheKey}:0`,
+        // Turn state is issued per account; another account's would be meaningless to the backend.
+        ...(turnState ? { "x-codex-turn-state": turnState } : {}),
+      };
+      let upstream: Response;
+      try {
+        // Retried here on the same account, before any status or byte reaches the client, so a
+        // relay's hiccup is absorbed inside the turn instead of arriving as an error to retry by hand.
+        upstream = await fetchWithRetry(`${(this.cfg.url ?? DEFAULT_BASE).replace(/\/$/, "")}/codex/responses`, {
+          method: "POST",
+          headers: upstreamHeaders,
+          body,
+          signal,
+        }, { log: (line) => this.log.info(`chatgpt ${this.name}: ${line}`) });
+      } catch (e) {
+        if (signal.aborted) return { error: true, aborted: true };
+        this.pool.penalise(this.name, credential.id, 0);
+        tried.add(credential.ownerId);
+        lastThrown = e as Error;
+        this.log.info(`chatgpt ${this.name}: account ${credential.ownerId.slice(0, 8)} unreachable (${(e as Error).message}); trying another`);
+        continue;
+      }
+
+      this.noteRateLimits(credential, rateLimitsFromHeaders(upstream.headers));
+      const nextTurnState = upstream.headers.get("x-codex-turn-state");
+      if (nextTurnState) {
+        this.turnStateByKey.set(turnKey, nextTurnState);
+        if (this.turnStateByKey.size > 500) this.turnStateByKey.delete(this.turnStateByKey.keys().next().value!);
+      }
+
+      if (upstream.ok && upstream.body) {
+        this.pool.succeed(this.name, credential.id);
+        this.activeOwner = credential.ownerId;
+        return { upstream, credential };
+      }
+
+      const text = await upstream.text().catch(() => "");
+      const safeText = redactErrorText(text, credentialHeaderValues(Object.entries(upstreamHeaders)));
+      const status = upstream.status;
+      this.log.warn(`chatgpt ${this.name}: account ${credential.ownerId.slice(0, 8)} answered ${status}: ${safeText.slice(0, 400)}`);
+      const credentialRefused = status === 401 || (status === 403 && looksLikeAuth(text));
+
+      if (credentialRefused) {
+        if (!replayed.has(credential.ownerId)) {
+          replayed.add(credential.ownerId);
+          if (await this.accounts.forceRefresh(credential.ownerId)) {
+            refreshed.add(credential.ownerId);
+            this.log.info(`chatgpt ${this.name}: account ${credential.ownerId.slice(0, 8)} refreshed after ${status}; replaying`);
+            continue;
+          }
+        } else if (refreshed.has(credential.ownerId)) {
+          // A token minted a moment ago and refused anyway: the account itself is refused. A refresh
+          // that merely failed to reach OpenAI proves nothing and leaves the account alone.
+          this.accounts.reject(credential);
+        }
+      }
+
+      const headerRecord = Object.fromEntries(upstream.headers.entries());
+      const snapshot = rateLimitsFromHeaders(upstream.headers);
+      const retryHeader = headerRecord["retry-after"] ? retryAfterMs({ "retry-after": headerRecord["retry-after"] }) : undefined;
+      const waitMs = retryHeader ?? exhaustedForMs(snapshot) ?? retryAfterMs(headerRecord);
+      const verdict = this.pool.penalise(this.name, credential.id, credentialRefused ? 401 : status, waitMs, text);
+      const err = mapHttpError(status, safeText);
+      last = { status: err.status, body: err.body, note: `upstream ${status}`, upstreamStatus: status, ...(status === 429 && waitMs ? { retryAfterSeconds: Math.ceil(waitMs / 1000) } : {}) };
+      if (!verdict.retryable) return { error: { status: err.status, body: err.body }, note: last.note, upstreamStatus: status };
+      tried.add(credential.ownerId);
+    }
+  }
+
   /** Handle a fully-read Messages request. `model`/`effort` already resolved by routing. */
   async handle(req: http.IncomingMessage, res: http.ServerResponse, path: string, json: AnthropicRequest, model: string, effort: string | undefined): Promise<ChatGptOutcome> {
     if (path.startsWith("/v1/messages/count_tokens")) {
       const body = JSON.stringify({ input_tokens: estimateTokens(json) });
       res.writeHead(200, { "content-type": "application/json", "content-length": String(body.length) }).end(body);
       return { status: 200, bytes: body.length, note: "estimated" };
-    }
-
-    const tokens = await this.creds.get();
-    if (tokens instanceof Error) {
-      const e = anthropicError(401, "authentication_error", tokens.message);
-      res.writeHead(e.status, { "content-type": "application/json" }).end(e.body);
-      return { status: e.status, bytes: e.body.length, note: "no credentials" };
     }
 
     // Dropping a tool the model was meant to have is worth a line: the alternative to this drop is
@@ -437,60 +684,24 @@ export class ChatGptAdapter {
     const onClose = (): void => ac.abort();
     res.on("close", onClose);
 
-    const turnState = this.turnStateByKey.get(cacheKey);
-    const upstreamHeaders = {
-      "content-type": "application/json",
-      accept: "text/event-stream",
-      authorization: `Bearer ${tokens.accessToken}`,
-      "chatgpt-account-id": tokens.accountId,
-      "OpenAI-Beta": "responses=experimental",
-      originator: "codex_cli_rs",
-      // The conversation's identity, as the Codex CLI states it. This is what the backend keys
-      // the prompt cache on since mid-September 2026 (see `conversationId` in translate.ts).
-      "session-id": cacheKey,
-      "thread-id": cacheKey,
-      "x-client-request-id": cacheKey,
-      "x-codex-window-id": `${cacheKey}:0`,
-      ...(turnState ? { "x-codex-turn-state": turnState } : {}),
-    };
-    const upstreamSecrets = credentialHeaderValues(Object.entries(upstreamHeaders));
-    let upstream: Response;
-    try {
-      // Retried here, before any status or byte reaches the client, so a relay's hiccup is absorbed
-      // inside the turn instead of arriving as an error the user has to retry by hand.
-      upstream = await fetchWithRetry(`${(this.cfg.url ?? DEFAULT_BASE).replace(/\/$/, "")}/codex/responses`, {
-        method: "POST",
-        headers: upstreamHeaders,
-        body,
-        signal: ac.signal,
-      }, { log: (line) => this.log.info(`chatgpt ${this.name}: ${line}`) });
-    } catch (e) {
+    // One account answers the turn. Which one is decided here, and a refusal before any byte has
+    // reached the client moves the same turn to the next account, so the client is answered on its
+    // first ask. The conversation stays on the account that answered: moving it costs the cache.
+    const sent = await this.sendToAnAccount(cacheKey, body, ac.signal);
+    if ("error" in sent) {
       res.off("close", onClose);
-      if (ac.signal.aborted) return { status: 0, bytes: 0, note: "client closed" };
-      const err = anthropicError(502, "api_error", `ChatGPT backend unreachable: ${(e as Error).message}`);
-      if (!res.headersSent) res.writeHead(err.status, { "content-type": "application/json" }).end(err.body);
-      throw e; // let the proxy feed health with the connect error
+      if (sent.aborted) return { status: 0, bytes: 0, note: "client closed" };
+      if (sent.thrown) {
+        const err = anthropicError(502, "api_error", `ChatGPT backend unreachable: ${sent.thrown.message}`);
+        if (!res.headersSent) res.writeHead(err.status, { "content-type": "application/json" }).end(err.body);
+        throw sent.thrown; // let the proxy feed health with the connect error
+      }
+      const { status, body: errBody, retryAfterSeconds } = sent.error;
+      if (this.cfg.debugDump && sent.upstreamStatus) this.dump(sent.upstreamStatus, json, upstreamReq, errBody);
+      res.writeHead(status, { "content-type": "application/json", ...(retryAfterSeconds ? { "retry-after": String(retryAfterSeconds) } : {}) }).end(errBody);
+      return { status, bytes: errBody.length, note: sent.note };
     }
-
-    const fromHeaders = rateLimitsFromHeaders(upstream.headers);
-    if (fromHeaders) this.lastRateLimits = fromHeaders;
-    const nextTurnState = upstream.headers.get("x-codex-turn-state");
-    if (nextTurnState) {
-      this.turnStateByKey.set(cacheKey, nextTurnState);
-      if (this.turnStateByKey.size > 500) this.turnStateByKey.delete(this.turnStateByKey.keys().next().value!);
-    }
-
-    if (!upstream.ok || !upstream.body) {
-      const text = await upstream.text().catch(() => "");
-      const safeText = redactErrorText(text, upstreamSecrets);
-      if (upstream.status === 401) this.creds.invalidate();
-      const err = mapHttpError(upstream.status, safeText);
-      this.log.warn(`chatgpt ${this.name}: upstream ${upstream.status} for ${model}: ${safeText.slice(0, 400)}`);
-      if (this.cfg.debugDump) this.dump(upstream.status, json, upstreamReq, safeText);
-      res.off("close", onClose);
-      res.writeHead(err.status, { "content-type": "application/json" }).end(err.body);
-      return { status: err.status, bytes: err.body.length, note: `upstream ${upstream.status}` };
-    }
+    const { upstream, credential } = sent;
 
     if (this.cfg.debugDump === "all") this.dump(upstream.status, json, upstreamReq, "");
     const wantStream = json.stream === true;
@@ -507,7 +718,7 @@ export class ChatGptAdapter {
       }, PING_MS);
     }
 
-    const reader = upstream.body.getReader();
+    const reader = upstream.body!.getReader();
     const decoder = new TextDecoder();
     try {
       for (;;) {
@@ -515,7 +726,7 @@ export class ChatGptAdapter {
         if (done) break;
         for (const ev of parser.feed(decoder.decode(value, { stream: true }))) {
           const outEvents = mapper.feed(ev);
-          if (mapper.rateLimits) this.lastRateLimits = mapper.rateLimits;
+          if (mapper.rateLimits && mapper.rateLimits !== this.rateLimitsByAccount.get(credential.ownerId)) this.noteRateLimits(credential, mapper.rateLimits);
           this.rememberInput(cacheKey, mapper.usage);
           if (wantStream) for (const o of outEvents) bytes += write(res, formatSse(o));
           if (mapper.isFinished) break;

@@ -31,7 +31,7 @@ import { applyIdentityToAnthropicBody } from "./identity.ts";
 import { anthropicServerToolBackend, webPluginBackend, webSearchBlocks, webSearchErrorBlocks, webSearchMessage, webSearchQuery, webSearchSse, type WebSearchQuery } from "./websearch.ts";
 import { classify, CredentialPool, retryAfterMs, type Credential } from "./pool.ts";
 import { PRESETS } from "./presets.ts";
-import { ChatGptAdapter } from "./providers/chatgpt/index.ts";
+import { ChatGptAdapter, type ChatGptAccountStatus } from "./providers/chatgpt/index.ts";
 import { OpenAiCompatibleAdapter } from "./providers/openai/index.ts";
 import { conversationKey, type AnthropicRequest } from "./providers/chatgpt/translate.ts";
 import { providerFor, terminateHosts } from "./config.ts";
@@ -267,11 +267,27 @@ export class Proxy {
     return out;
   }
 
+  /** Every configured chatgpt provider's accounts: rotation state and last known quota, no tokens. */
+  chatgptAccounts(): Record<string, ChatGptAccountStatus[]> {
+    const out: Record<string, ChatGptAccountStatus[]> = {};
+    for (const [name, p] of Object.entries(this.deps.config().providers)) {
+      if (p.type === "chatgpt") out[name] = this.chatgpt(name, p).accountStatus();
+    }
+    return out;
+  }
+
+  /** Dashboard action: put one resting ChatGPT account back into rotation now. */
+  chatgptClearCooldown(ownerId: string): void {
+    for (const [name, p] of Object.entries(this.deps.config().providers)) {
+      if (p.type === "chatgpt") this.chatgpt(name, p).clearCooldown(ownerId);
+    }
+  }
+
   private chatgpt(name: string, cfg: Extract<Config["providers"][string], { type: "chatgpt" }>): ChatGptAdapter {
     const key = JSON.stringify(cfg);
     const cur = this.chatgptAdapters.get(name);
     if (cur && cur.key === key) return cur.adapter;
-    const adapter = new ChatGptAdapter(name, cfg, this.deps.home, this.deps.log);
+    const adapter = new ChatGptAdapter(name, cfg, this.deps.home, this.deps.log, this.pool);
     this.chatgptAdapters.set(name, { key, adapter });
     return adapter;
   }
@@ -687,14 +703,11 @@ export class Proxy {
         if (routeEffort) record.effort = routeEffort;
         tag = `CHATGPT ${route.tag} effort=${routeEffort ?? "-"}`;
         try {
+          // The adapter reports each account's outcome to the shared pool itself, so a slot pointing
+          // here fails over once every account is out (chooseTarget asks the adapter).
           const o = await this.chatgpt(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, effortOf(json));
-          // Without this the pool never hears about this provider, so it always looks healthy and a
-          // slot pointing at it can never fail over — which is most of the point on a subscription
-          // that runs out. The credential here is the adapter's own OAuth, so there is one of it.
-          this.recordOutcome(route.provider, o.status);
           finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...(o.usage ? { usage: o.usage } : {}), ...(o.stopReason ? { stopReason: o.stopReason } : {}) });
         } catch (e) {
-          this.recordOutcome(route.provider, 0);
           finish("-", 0, `chatgpt error ${(e as NodeJS.ErrnoException).code ?? ""} ${(e as Error).message}`);
           if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" }).end(JSON.stringify({ type: "error", error: { type: "api_error", message: (e as Error).message } }));
           else res.destroy();
@@ -1267,6 +1280,7 @@ export class Proxy {
         const accounts = this.claudeAccounts.peekCredentials();
         return accounts.length > 0 && this.pool.hasUsable(name, accounts);
       }
+      if (provider.type === "chatgpt") return this.chatgpt(name, provider).hasUsable();
       return this.pool.hasUsable(name, this.credentialsOf(name, provider));
     };
     if (usable(resolved.provider)) return resolved;

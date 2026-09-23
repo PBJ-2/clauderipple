@@ -341,6 +341,10 @@ label.check input { width: auto; }
 .account-card-copy strong, .account-card-copy > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .account-card-copy .hint { margin: 1px 0 0; }
 .account-card-actions { display: flex; gap: 6px; }
+/* Cards with more actions than fit beside the text keep them on their own row at every width. */
+.account-card.stacked { grid-template-columns: minmax(0, 1fr) auto; }
+.account-card.stacked .account-card-actions { grid-column: 1 / -1; flex-wrap: wrap; }
+.account-quota { margin: 0; }
 .danger-section { border-color: color-mix(in srgb, var(--bad) 30%, var(--border)); }
 .danger-section .btn { margin-top: 12px; }
 .oauth-consent .notice { margin: 14px 0; }

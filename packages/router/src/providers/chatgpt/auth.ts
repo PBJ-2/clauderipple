@@ -1,7 +1,8 @@
-// ChatGPT subscription credentials for the Codex backend.
+// ChatGPT subscription sign-in for the Codex backend: the OAuth flow, token identity, and the two
+// places a login can come from. Which accounts exist and which one answers is accounts.ts.
 //
-// Two sources:
-//   own          <home>/chatgpt-auth.json written by `clauderipple login` (OAuth PKCE). We refresh it.
+//   own          `clauderipple login` (OAuth PKCE), stored with the other accounts. We refresh these.
+//                <home>/chatgpt-auth.json is the single-login file from before there were several.
 //   borrow-codex ~/.codex/auth.json written by the Codex CLI. Read-only: refresh tokens rotate, and
 //                refreshing someone else's grant would break their login. If it expires, the user runs
 //                Codex once or logs in with us.
@@ -66,6 +67,32 @@ function expiryFromToken(token: string): number {
   return typeof exp === "number" ? exp * 1000 : 0;
 }
 
+export type TokenIdentity = { accountId?: string; email?: string; planType?: string; expiresAt?: number };
+
+/**
+ * Who a grant belongs to, from its JWT claims: the id token first (it carries the email), then the
+ * access token. The workspace is `https://api.openai.com/auth`.chatgpt_account_id; the email is a
+ * top-level claim of the id token or `https://api.openai.com/profile`.email of the access token.
+ */
+export function identityFromTokens(tokens: { accessToken: string; idToken?: string }): TokenIdentity {
+  const out: TokenIdentity = {};
+  for (const token of [tokens.idToken, tokens.accessToken]) {
+    const claims = token ? decodeJwt(token) : null;
+    if (!claims) continue;
+    const auth = claims["https://api.openai.com/auth"] as { chatgpt_account_id?: unknown; chatgpt_plan_type?: unknown } | undefined;
+    const profile = claims["https://api.openai.com/profile"] as { email?: unknown } | undefined;
+    const accountId = typeof auth?.chatgpt_account_id === "string" ? auth.chatgpt_account_id : typeof claims.chatgpt_account_id === "string" ? claims.chatgpt_account_id : undefined;
+    const email = typeof claims.email === "string" ? claims.email : typeof profile?.email === "string" ? profile.email : undefined;
+    const planType = typeof auth?.chatgpt_plan_type === "string" ? auth.chatgpt_plan_type : undefined;
+    if (!out.accountId && accountId) out.accountId = accountId;
+    if (!out.email && email) out.email = email.toLowerCase();
+    if (!out.planType && planType) out.planType = planType;
+  }
+  const exp = expiryFromToken(tokens.accessToken);
+  if (exp) out.expiresAt = exp;
+  return out;
+}
+
 export function readOwn(home: string): Tokens | null {
   try {
     const j = JSON.parse(fs.readFileSync(ownAuthPath(home), "utf8")) as Partial<Tokens>;
@@ -96,79 +123,14 @@ export function readBorrowed(): Tokens | null {
   }
 }
 
-function writeOwn(home: string, t: Tokens): void {
-  fs.mkdirSync(home, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(ownAuthPath(home), JSON.stringify(t, null, 2), { mode: 0o600 });
-}
-
-export async function refreshOwn(home: string, t: Tokens): Promise<Tokens> {
-  if (!t.refreshToken) throw new Error("no refresh token; run `clauderipple login`");
-  const res = await fetch(OAUTH.tokenUrl, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: t.refreshToken, client_id: OAUTH.clientId }),
-  });
-  if (!res.ok) throw new Error(`token refresh failed: HTTP ${res.status}`);
-  const j = (await res.json()) as { access_token: string; refresh_token?: string; id_token?: string; expires_in?: number };
-  const next: Tokens = {
-    accessToken: j.access_token,
-    refreshToken: j.refresh_token ?? t.refreshToken,
-    ...(j.id_token ? { idToken: j.id_token } : {}),
-    accountId: accountIdFromToken(j.access_token) ?? t.accountId,
-    expiresAt: j.expires_in ? Date.now() + j.expires_in * 1000 : expiryFromToken(j.access_token),
-    source: "own",
-  };
-  writeOwn(home, next);
-  return next;
-}
-
-export class CredentialStore {
-  private cached: Tokens | null = null;
-  private readonly home: string;
-  private readonly mode: "own" | "borrow-codex" | "auto";
-
-  constructor(home: string, mode: "own" | "borrow-codex" | "auto" = "auto") {
-    this.home = home;
-    this.mode = mode;
-  }
-
-  /** Valid tokens or an Error describing what the user must do. Never throws. */
-  async get(): Promise<Tokens | Error> {
-    const skew = 5 * 60 * 1000;
-    let t = this.cached;
-    if (!t || Date.now() > t.expiresAt - skew) {
-      t = this.mode === "borrow-codex" ? readBorrowed() : (readOwn(this.home) ?? (this.mode === "own" ? null : readBorrowed()));
-      if (!t) return new Error("no ChatGPT credentials: run `clauderipple login`, or sign in to the Codex CLI once");
-      if (Date.now() > t.expiresAt - skew) {
-        if (t.source === "own") {
-          try {
-            t = await refreshOwn(this.home, t);
-          } catch (e) {
-            return new Error(`ChatGPT login expired and refresh failed (${(e as Error).message}); run \`clauderipple login\``);
-          }
-        } else {
-          return new Error("borrowed Codex CLI login has expired; run `codex` once to refresh it, or `clauderipple login` for a login of our own");
-        }
-      }
-      this.cached = t;
-    }
-    return t;
-  }
-
-  invalidate(): void {
-    this.cached = null;
-  }
-
-  describe(): string {
-    const own = readOwn(this.home);
-    const bor = readBorrowed();
-    const fmt = (t: Tokens | null): string => (t ? `${t.source} (expires ${new Date(t.expiresAt).toISOString().slice(0, 16)}Z)` : "none");
-    return `own=${fmt(own)} borrow-codex=${fmt(bor)} mode=${this.mode}`;
-  }
-}
-
-/** Interactive OAuth PKCE login. Opens the browser; the user signs in themselves. Resolves when tokens are stored. */
-export async function login(home: string, openBrowser: (url: string) => void): Promise<Tokens> {
+/**
+ * Interactive OAuth PKCE login. Opens the browser; the user signs in themselves. Resolves with the
+ * grant; storing it is the caller's (accounts.ts `saveChatGptAccount`).
+ *
+ * `prompt=login` makes OpenAI ask who is signing in instead of silently reusing the browser's
+ * ChatGPT session — without it, "add another account" hands back the account already added.
+ */
+export async function login(openBrowser: (url: string) => void): Promise<Omit<Tokens, "source">> {
   const verifier = b64url(crypto.randomBytes(32));
   const challenge = b64url(crypto.createHash("sha256").update(verifier).digest());
   const state = crypto.randomBytes(16).toString("hex");
@@ -181,8 +143,10 @@ export async function login(home: string, openBrowser: (url: string) => void): P
     code_challenge: challenge,
     code_challenge_method: "S256",
     state,
+    id_token_add_organizations: "true",
     codex_cli_simplified_flow: "true",
     originator: "codex_cli_rs",
+    prompt: "login",
   }).toString();
 
   const code = await new Promise<string>((resolve, reject) => {
@@ -220,23 +184,11 @@ export async function login(home: string, openBrowser: (url: string) => void): P
   const j = (await res.json()) as { access_token: string; refresh_token?: string; id_token?: string; expires_in?: number };
   const accountId = accountIdFromToken(j.access_token) ?? (j.id_token ? accountIdFromToken(j.id_token) : null);
   if (!accountId) throw new Error("token has no chatgpt_account_id claim");
-  const t: Tokens = {
+  return {
     accessToken: j.access_token,
     ...(j.refresh_token ? { refreshToken: j.refresh_token } : {}),
     ...(j.id_token ? { idToken: j.id_token } : {}),
     accountId,
     expiresAt: j.expires_in ? Date.now() + j.expires_in * 1000 : expiryFromToken(j.access_token),
-    source: "own",
   };
-  writeOwn(home, t);
-  return t;
-}
-
-export function logout(home: string): boolean {
-  try {
-    fs.unlinkSync(ownAuthPath(home));
-    return true;
-  } catch {
-    return false;
-  }
 }

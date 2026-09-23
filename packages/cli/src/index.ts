@@ -346,8 +346,8 @@ function help(): void {
   config            print the config file path
   ui                open the dashboard in your browser
   tray [--install]  start the menu-bar / tray app (--install fetches Electron, ~270MB, once)
-  login             sign in to ChatGPT (opens your browser; tokens stay in the home dir)
-  logout            forget the ChatGPT login made with "login"
+  login             add a ChatGPT account (opens your browser; run again to add another — they take turns when one runs out)
+  logout            forget every ChatGPT account added with "login" (the Codex CLI's own login is left alone)
   claude-login      connect a Claude subscription in the browser (--setup-token: via \`claude setup-token\`; --manual: paste the code)
   claude-logout     remove every Claude subscription added to ClaudeRipple
   picker on|off     show your mapped models by name in the Claude Desktop picker (trusts the CA in your login keychain, routes the app through ClaudeRipple)
@@ -423,16 +423,23 @@ try {
     }
     case "login": {
       const { login } = await import("../../router/src/providers/chatgpt/auth.ts");
-      console.log("Opening your browser to sign in to ChatGPT. Sign in there; this window waits up to 5 minutes.");
-      const t = await login(homeDir(), (url) => {
+      const { saveChatGptAccount, readChatGptAccounts, chatgptAccountsPath } = await import("../../router/src/providers/chatgpt/accounts.ts");
+      const before = readChatGptAccounts(homeDir()).length;
+      console.log(before > 0
+        ? `Opening your browser to add a ChatGPT account (${before} signed in already). Sign in with the account to add; this window waits up to 5 minutes.`
+        : "Opening your browser to sign in to ChatGPT. Sign in there; this window waits up to 5 minutes.");
+      const grant = await login((url) => {
         if (!openBrowser(url)) console.log(`Open this URL manually:\n${url}`);
       });
-      console.log(`✓ signed in (account ${t.accountId.slice(0, 8)}…, token valid until ${new Date(t.expiresAt).toLocaleString()}). Stored in ${homeDir()}/chatgpt-auth.json`);
+      const saved = saveChatGptAccount(homeDir(), grant);
+      const total = readChatGptAccounts(homeDir()).length;
+      console.log(`${saved.added ? "✓ added" : "✓ signed in again as"} ${saved.email ?? saved.label} (token valid until ${new Date(grant.expiresAt).toLocaleString()}). ${total} ChatGPT account${total === 1 ? "" : "s"} in ${chatgptAccountsPath(homeDir())}`);
       break;
     }
     case "logout": {
-      const { logout } = await import("../../router/src/providers/chatgpt/auth.ts");
-      console.log(logout(homeDir()) ? "✓ ChatGPT login removed" : "no ChatGPT login stored");
+      const { removeAllChatGptAccounts } = await import("../../router/src/providers/chatgpt/accounts.ts");
+      const removed = removeAllChatGptAccounts(homeDir());
+      console.log(removed > 0 ? `✓ removed ${removed} ChatGPT account${removed === 1 ? "" : "s"}` : "no ChatGPT account stored");
       break;
     }
     case "claude-login": {

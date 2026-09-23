@@ -249,10 +249,14 @@ function chatgptLoginButton(onChange) {
   button.addEventListener("click", () => void startChatgptLogin(onChange));
   return button;
 }
-async function startChatgptLogin(onChange) {
+/**
+ * Runs the browser sign-in, which adds an account (or signs one in again). Finished is the sign-in
+ * process ending, not "signed in": with an account already there, "signed in" is true from the start.
+ */
+async function startChatgptLogin(onChange, adding) {
   if (chatgptLoginBusy) return;
   chatgptLoginBusy = true;
-  chatgptLoginMessage = t("providers.chatgptLoginWaiting");
+  chatgptLoginMessage = adding ? t("providers.chatgptAddWaiting") : t("providers.chatgptLoginWaiting");
   onChange && onChange();
   try {
     await api("/api/chatgpt-login", { method: "POST" });
@@ -260,8 +264,8 @@ async function startChatgptLogin(onChange) {
     while (Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 2000));
       const login = await api("/api/chatgpt-login");
-      if (login.signedIn) {
-        toast(t("providers.chatgptLoginDone"));
+      if (login.running === false && login.ok === true) {
+        toast(adding ? t("providers.chatgptAdded") : t("providers.chatgptLoginDone"));
         await refreshHealth();
         return;
       }
@@ -933,7 +937,7 @@ async function removeProvider(name, provider) {
 
 function providerTabs(name, provider) {
   const tabs = [{ id: "overview", label: t("providers.overview") }];
-  if (provider.type === "anthropic" && provider.auth === "claude-code") tabs.push({ id: "accounts", label: t("providers.accounts") });
+  if ((provider.type === "anthropic" && provider.auth === "claude-code") || provider.type === "chatgpt") tabs.push({ id: "accounts", label: t("providers.accounts") });
   tabs.push({ id: "models", label: t("providers.modelsTab") });
   return el("div", { class: "provider-tabs", role: "tablist" }, tabs.map((tab) => {
     const button = el("button", { class: providerDetailTab === tab.id ? "active" : "", type: "button", role: "tab", "aria-selected": String(providerDetailTab === tab.id), text: tab.label });
@@ -1073,6 +1077,124 @@ function anthropicAccountsPanel(name, provider) {
   return panel;
 }
 
+/** "5h 42%", "weekly 100% · resets 14:05" — the reset only matters once a window is full. */
+function chatgptQuotaText(quota) {
+  const limits = quota && quota.rate_limits;
+  if (!limits) return "";
+  const windowName = (w) => {
+    const minutes = w.window_minutes;
+    if (!minutes) return "";
+    if (minutes >= 7 * 24 * 60) return t("quota.windowWeek");
+    if (minutes === 300) return t("quota.window5h");
+    return t("quota.windowHours", { hours: Math.round(minutes / 60) });
+  };
+  return [limits.primary, limits.secondary].filter((w) => w && typeof w.used_percent === "number").map((w) => {
+    const line = t("quota.line", { window: windowName(w), percent: Math.round(w.used_percent) }).trim();
+    if (w.used_percent < 100) return line;
+    const at = typeof w.reset_after_seconds === "number" ? Date.now() + w.reset_after_seconds * 1000 : typeof w.reset_at === "number" ? w.reset_at * 1000 : null;
+    return at ? `${line} · ${t("quota.resetAt", { time: new Date(at).toLocaleString([], { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) })}` : line;
+  }).join(" · ");
+}
+
+/** A wait people read at a glance: "1시간 29분", "12분", "40초". */
+function durationText(seconds) {
+  const s = Math.max(0, Math.round(seconds || 0));
+  if (s >= 3600) return t("time.hoursMinutes", { h: Math.floor(s / 3600), m: Math.floor((s % 3600) / 60) });
+  if (s >= 60) return t("time.minutes", { m: Math.ceil(s / 60) });
+  return t("time.seconds", { s });
+}
+
+function chatgptStateBadge(account) {
+  if (account.state === "paused") return el("span", { class: "badge", text: t("providers.chatgptPaused") });
+  if (account.state === "needs-login" || account.state === "quarantined") return el("span", { class: "badge bad", text: t("providers.anthropicReauth") });
+  if (account.state === "cooling") return el("span", { class: "badge warn", text: t("pool.coolingFor", { duration: durationText(account.cooldownSeconds) }) });
+  return el("span", { class: "badge ok", text: account.active ? t("providers.chatgptInUse") : t("providers.chatgptStandby") });
+}
+
+async function patchChatgptAccount(name, id, change) {
+  try {
+    await api(`/api/chatgpt-accounts/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(change) });
+    await refreshChatgptAccountPanel(name);
+  } catch (error) { toast(t("common.actionFailed"), true, error.message); }
+}
+
+function renderChatgptAccountRows(target, data, name, generation) {
+  if (generation !== providerDetailGeneration) return;
+  const accounts = Array.isArray(data.accounts) ? data.accounts : [];
+  const rows = accounts.map((account) => {
+    const own = account.source !== "codex";
+    const actions = [];
+    if (account.state === "needs-login" || account.state === "quarantined") {
+      const reauth = el("button", { class: "btn secondary compact", type: "button", text: t("providers.reauthAction") });
+      reauth.addEventListener("click", () => void startChatgptLogin(() => void refreshChatgptAccountPanel(name), true));
+      if (own) actions.push(reauth);
+    }
+    if (account.state === "cooling") {
+      const now = el("button", { class: "btn secondary compact", type: "button", text: t("providers.chatgptClearCooldown") });
+      now.addEventListener("click", () => void patchChatgptAccount(name, account.id, { clearCooldown: true }));
+      actions.push(now);
+    }
+    if (own) {
+      const pause = el("button", { class: "btn secondary compact", type: "button", text: account.paused ? t("providers.chatgptResume") : t("providers.chatgptPause") });
+      pause.addEventListener("click", () => void patchChatgptAccount(name, account.id, { paused: !account.paused }));
+      const rename = el("button", { class: "btn secondary compact", type: "button", text: t("common.edit") });
+      rename.addEventListener("click", () => {
+        const label = prompt(t("providers.anthropicRenamePrompt"), account.label);
+        if (!label || !label.trim() || label.trim() === account.label) return;
+        void patchChatgptAccount(name, account.id, { label });
+      });
+      const remove = el("button", { class: "btn danger compact", type: "button", text: t("common.remove") });
+      remove.addEventListener("click", async () => {
+        if (!confirm(t("providers.chatgptRemoveConfirm", { name: account.label }))) return;
+        try { await api(`/api/chatgpt-accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" }); await refreshChatgptAccountPanel(name); }
+        catch (error) { toast(t("common.actionFailed"), true, error.message); }
+      });
+      actions.push(pause, rename, remove);
+    }
+    const quota = chatgptQuotaText(account.quota);
+    const detail = [account.email && account.email !== account.label ? account.email : null, account.planType || null].filter(Boolean).join(" · ");
+    const help = account.state === "needs-login" || account.state === "quarantined" ? t("providers.chatgptReauthHelp") : own ? t("providers.chatgptOwnHelp") : t("providers.chatgptCodexHelp");
+    return el("article", { class: `account-card stacked${account.active ? " current" : ""}` }, [
+      el("div", { class: "account-card-copy" }, [
+        el("strong", { text: account.label }),
+        detail ? el("span", { class: "small", text: detail }) : null,
+        quota ? el("p", { class: "small account-quota", text: quota }) : null,
+        hint(help),
+      ].filter(Boolean)),
+      chatgptStateBadge(account),
+      actions.length ? el("div", { class: "account-card-actions" }, actions) : null,
+    ].filter(Boolean));
+  });
+  target.replaceChildren(...(rows.length ? rows : [el("div", { class: "empty-card", text: t("providers.chatgptNoAccounts") })]));
+  const countNode = $("#chatgpt-account-count");
+  if (countNode) countNode.textContent = t("providers.chatgptAccountCount", { count: accounts.length });
+}
+
+async function refreshChatgptAccountPanel(name) {
+  const target = $("#chatgpt-account-rows");
+  if (!target || selectedProviderName !== name || providerDetailTab !== "accounts") return;
+  const generation = providerDetailGeneration;
+  try { renderChatgptAccountRows(target, await api(`/api/chatgpt-accounts?provider=${encodeURIComponent(name)}`), name, generation); }
+  catch (error) { if (generation === providerDetailGeneration) target.replaceChildren(el("div", { class: "bad-text small", text: error.message })); }
+}
+
+function chatgptAccountsPanel(name) {
+  const add = el("button", { class: "btn", type: "button", text: t("providers.addChatgptAccount") });
+  add.disabled = chatgptLoginBusy;
+  const waiting = el("p", { class: "small", text: chatgptLoginBusy ? t("providers.chatgptAddWaiting") : "" });
+  add.addEventListener("click", () => void startChatgptLogin(() => { renderProviderDetail(); void refreshChatgptAccountPanel(name); }, true));
+  const rows = el("div", { id: "chatgpt-account-rows", class: "account-card-list" }, [el("div", { class: "small", text: t("providers.checking") })]);
+  const panel = el("div", { class: "provider-panel" }, [
+    el("section", { class: "detail-section account-summary" }, [
+      el("div", { class: "section-heading" }, [el("div", {}, [el("h3", { text: t("providers.chatgptAccountsTitle") }), el("p", { id: "chatgpt-account-count", class: "account-count", text: t("providers.chatgptAccountCount", { count: 0 }) }), hint(t("providers.chatgptAccountsSubtitle"))]), add]),
+      waiting,
+    ]),
+    el("section", { class: "detail-section" }, [rows]),
+  ]);
+  queueMicrotask(() => void refreshChatgptAccountPanel(name));
+  return panel;
+}
+
 function renderProviderDetail() {
   const detail = $("#provider-detail");
   providerDetailGeneration += 1;
@@ -1092,6 +1214,7 @@ function renderProviderDetail() {
   ]);
   let content;
   if (providerDetailTab === "accounts" && provider.type === "anthropic" && provider.auth === "claude-code") content = anthropicAccountsPanel(name, provider);
+  else if (providerDetailTab === "accounts" && provider.type === "chatgpt") content = chatgptAccountsPanel(name);
   else if (providerDetailTab === "models") content = providerModelsPanel(name, provider);
   else { providerDetailTab = "overview"; content = providerOverview(name, provider); }
   detail.replaceChildren(header, providerTabs(name, provider), content);
