@@ -31,10 +31,16 @@ base-URL product cannot, and costs us a CA, a picker injection and a bootstrap r
 **The goal is to be a superset**: everything opencodex does, plus 1P. A router is singular — a user
 cannot run both — so a subset is not a choice anyone can make.
 
-One thing the documentation does not settle: **how opencodex reaches Claude Desktop.** It has
-`ocx claude desktop apply/export/import`, per-family profiles and hashed model aliases
-(`claude-opus-4-8-<hash>`), but not whether 1P features survive. If it uses the gateway setting they
-are lost, and this is our moat. Worth establishing before assuming either way.
+**How opencodex reaches Claude Desktop — settled 2026-09-23.** Since v2.61.0 (2026-09-22, PR #5319
+merged 2026-09-20) `ocx claude desktop apply` defaults to a **first-party** mode: it writes
+`HTTPS_PROXY` and `NODE_EXTRA_CA_CERTS` into `~/.claude/settings.json` and terminates TLS for
+`api.anthropic.com` only (`/v1/messages`, `/v1/messages/count_tokens`), so the app keeps claude.ai,
+connectors and Remote Control (`src/claude/desktop-first-party.ts`). The gateway (3P) profile is an
+explicit `--gateway` opt-in. What it does **not** do: touch the claude.ai bootstrap, so the Code-tab
+picker shows only Claude names and a routed model is reached through `modelMap` (a Claude name
+answering as GPT) — their own docs say model discovery is unavailable in that mode. Native Claude and
+routed models in one picker is their open issue #1213. 1P alone is no longer our distinction; the
+picker (models by their real names, effort passed through) is.
 
 Claude Code 2.1.272 also contains Anthropic's own `claude gateway`: an enterprise auth, telemetry and
 spend gateway with a model-to-upstream table. The measured provider families are Anthropic, Vertex,
@@ -51,7 +57,7 @@ counting config keys. They have roughly 300; most are per-vendor workarounds acc
 
 | Gap | What it is | Why it blocks |
 |---|---|---|
-| Account and key pools | Several accounts or API keys per provider, rotation, cooldown on `Retry-After`/quota reset, quarantine on reauth, session affinity | The main reason people run it. We hold one credential per provider, so an exhausted quota stops the work |
+| ~~Account and key pools~~ **closed** | Several accounts or API keys per provider, rotation, cooldown on `Retry-After`/quota reset, quarantine on reauth, session affinity | Key pools and Claude accounts shipped in 0.3.0; ChatGPT accounts, including Codex's own GPT traffic through the ingress, on 2026-09-24 (ARCHITECTURE §4, §4b). Not taken: their priority tiers, per-account auto-switch thresholds and round-robin/reset-first strategies — ours is fill-first in list order with pause |
 | Failover routing | One virtual model id over several targets | Same problem, other half: without it a dead provider is a dead session |
 | More adapters | `google` (AI Studio / Vertex / Antigravity), `azure-openai`, `ollama-native` | Presets cannot substitute: these speak wires our four adapters do not |
 | Vision sidecar | Describe an image with a vision-capable model, hand the text to a text-only model | An image sent to a text-only routed model breaks the turn today |

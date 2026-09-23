@@ -260,6 +260,34 @@ chat is out of reach for every approach, ours included.
     old or on `?refresh=1`, shares one in-flight lookup, and marks the answer
     `stale: true` with a reason when the lookup fails rather than hiding the old
     value. Once at startup too, after `listen()`, never awaited.
+  - **Several accounts (2026-09-24, `chatgpt/accounts.ts`).** Behaviour taken
+    as a spec from opencodex's Codex account pool (no code). `clauderipple
+    login` adds an account; the authorize URL carries `prompt=login` and
+    `id_token_add_organizations=true`, since without `prompt=login` the browser's
+    existing ChatGPT session is reused and "add another" returns the one already
+    added. Identity is `chatgpt_account_id` + email (one person can be in several
+    workspaces with separate limits; several people can share a workspace);
+    the same pair signing in again replaces its entry. Store:
+    `<home>/chatgpt-accounts.json`, 0600, cross-process lock, atomic write; the
+    pre-pool `chatgpt-auth.json` is read as account `legacy` and retired on the
+    first durable write. The Codex CLI's `~/.codex/auth.json` login joins last
+    (mode `auto`), read-only, never refreshed. Refresh is per account,
+    single-flight per token generation, five minutes ahead; only a structured
+    `invalid_grant` / `refresh_token_invalidated|expired|reused` code marks an
+    account for sign-in (prose only when no code, only on 400/401) — a 5xx
+    mentioning "revoked" must not retire a working account. Per turn: the
+    conversation's account while usable (the shared CredentialPool, keyed by
+    owner so a refreshed token keeps it); before any byte reaches the client,
+    429/402 rests that account until `retry-after`, else the latest reset among
+    its full `x-codex-*` windows, else primary reset-after; 401 (or a 403 that
+    reads as auth) gets one refresh and a replay, and a fresh token refused again
+    marks it for sign-in; 5xx/no connection rests it briefly; other 4xx are the
+    request's fault and go no further. A 200 whose headers report a window at
+    100% rests the account before the next turn can fail. `x-codex-turn-state`
+    is kept per (account, conversation). `/api/status` keeps `chatgpt.quota` as
+    one snapshot (the account that answers next — the tray and other readers
+    want one number) and adds `chatgpt.accounts` per account; `/wham/usage` is
+    asked for every account.
   - **The prompt cache is keyed on the conversation's identity, not on
     `prompt_cache_key` (since mid-September 2026).** Five turns with byte-identical
     instructions, tools and input prefix, 3–6s apart under one key, all came back
@@ -556,9 +584,32 @@ chat is out of reach for every approach, ours included.
   It provides `POST /v1/responses`, `POST /v1/chat/completions`, and
   `GET /v1/models`.
 - Both POST endpoints resolve their requested `model` with the same
-  `routes`/`aliases`/`direct` logic as the proxy. `chatgpt` and
-  `openai-compatible` targets are rejected: Codex already has native paths for
-  them. Targets are `anthropic-compatible`, or native `anthropic`.
+  `routes`/`aliases`/`direct` logic as the proxy. Targets are
+  `anthropic-compatible`, native `anthropic`, and (Responses only) `chatgpt`;
+  `openai-compatible` is rejected.
+- **Codex's own GPT traffic (2026-09-24).** This listener used to reject
+  `chatgpt` targets because "Codex already has a native path" (decided
+  2026-09-13). That left Codex's GPT turns outside the account pool, so an
+  opencodex user who rotates ChatGPT accounts in Codex could not switch — the
+  superset goal (OPENCODEX.md) overrules it. `clauderipple codex on` now also
+  writes a marked root `openai_base_url = "http://127.0.0.1:<openaiPort>/v1"`
+  (never over a user's own), which points Codex's built-in `openai` provider
+  here while Codex keeps its ChatGPT sign-in (behaviour of opencodex's loopback
+  injection, observed in its docs). A `/v1/responses*` request whose model is
+  routed to a `chatgpt` provider, or is unrouted and GPT-named
+  (`gpt-`/`codex-`/`o<digit>` or in a chatgpt provider's list), is **passed
+  through unchanged** to `{base}/codex/responses[/compact]`: body bytes as sent,
+  an allowlist of Codex's protocol headers (session, window, turn state/metadata,
+  beta features, installation id, originator), and the account's
+  `authorization` + `chatgpt-account-id` laid over them. The answer is relayed
+  byte for byte with its `x-codex-*` headers. `GET /v1/models?client_version=`
+  (Codex refreshing its catalogue) goes to `{base}/codex/models`. Account choice,
+  rotation and cooldowns are the provider's pool (§4, ChatGPT accounts); a turn
+  token Codex echoes is dropped when the conversation has moved to another
+  account. Out of accounts (none, all resting, or the last one hit its limit on
+  this turn), the caller's own `Authorization`/`chatgpt-account-id` is used
+  once as sent — pointing Codex here never leaves it worse off. A WebSocket
+  upgrade is answered 426 so Codex falls back to SSE.
 - Configure a native API-key target as
   `{ "type":"anthropic", "auth":"api-key", "apiKey":"…" }` (or set
   `ANTHROPIC_API_KEY`). Configure a compatible target as today, for example an
