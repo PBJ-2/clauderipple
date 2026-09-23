@@ -1745,9 +1745,13 @@ function requestDetail(record) {
 }
 function requestRow(record) {
   const row = el("tr", { class: "request-row", title: record.note || "", onclick: () => { expandedRequestId = expandedRequestId === record.id ? null : record.id; renderRequests(requestRows); } });
+  // The requested name's `@effort` is the agent file's default, not what was sent: a marker can
+  // override it, and `gpt-6-sol@medium` beside an effort of high read as a contradiction
+  // (2026-09-23). The effort column is the sent value, so the source is shown without it.
+  const source = record.source ? record.source.replace(/@[^@]*$/, "") : "";
   const model = el("div", { class: "request-models" }, [
     el("span", { class: "model", text: record.target }),
-    record.source && record.source !== record.target ? el("span", { class: "small", text: `(${record.source})` }) : null,
+    source && source !== record.target ? el("span", { class: "small", text: `(${source})` }) : null,
     el("span", { class: `provider-badge ${providerClass(record.provider)}`, text: record.provider }),
   ].filter(Boolean));
   // The whole input, not the uncached remainder: a fully cached Anthropic turn reports `input: 2`,
