@@ -25,6 +25,11 @@ execFileSync(npm, ["--workspace", "@clauderipple/app", "run", "build"], { cwd: r
 fs.cpSync(path.join(root, "packages", "ui"), path.join(dist, "ui"), { recursive: true });
 fs.cpSync(path.join(root, "packages", "app", "dist"), path.join(dist, "app", "dist"), { recursive: true });
 fs.cpSync(path.join(root, "packages", "app", "assets"), path.join(dist, "app", "assets"), { recursive: true });
+// The tray is compiled to CommonJS, but the package root says "type": "module", and the nearest
+// package.json decides: without this one Electron loaded main.js as an ES module and died with
+// "exports is not defined in ES module scope" (issue #8, Windows, 0.3.1). In a checkout
+// packages/app has its own package.json, which is why development never showed it.
+fs.writeFileSync(path.join(dist, "app", "package.json"), JSON.stringify({ private: true, type: "commonjs" }, null, 2) + "\n");
 
 const entry = path.join(dist, "cli", "src", "index.js");
 if (!fs.existsSync(entry)) throw new Error(`build produced no CLI entry point at ${entry}`);
