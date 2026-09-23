@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — 2026-09-23
+
+Everything on `main` since 0.2.0. The account rotation that issue #8 asked for
+was on `main` from 2026-09-20 while the README already described it, but no
+release carried it. A user looking for the setting in 0.2.0 could not find it.
 
 ### Added
 
@@ -21,8 +25,46 @@
   Codex hosted-search tool instead of silently consuming Anthropic quota. The
   adapter requires a reported search and URL citations, preserves allowed-domain
   filters, and refuses unsupported blocked-domain filters.
+- **New ChatGPT models appear without an update.** The model list is read from
+  the Codex catalogue the subscription serves, not from a list in the code, so
+  GPT-6 Sol and GPT-6 Luna showed up the day they shipped. If the catalogue
+  cannot be read, a built-in list is used instead. Newly found models are
+  offered unticked. Claude Opus 5.5 is in the Claude list.
+- **Credential pools and route fallbacks.** A provider can hold several keys. A
+  rate-limited or refused key rests until its cooldown ends, and the turn moves
+  to the next key before the client sees the failure. A model slot can name
+  fallback providers for when the primary has nothing usable left. The
+  dashboard shows which credential is resting, and until when.
+- **OpenCode Go and OpenCode Zen presets.** One OpenCode Go subscription is one
+  preset covering all three of its endpoints, each with the session header its
+  prompt cache needs. Each model's request format is taken from the vendor's
+  published endpoint table. After a provider is saved, its models are measured
+  for request format and effort levels instead of being assumed.
+- **A ticked model is a subagent.** Every model ticked in the GUI gets a
+  generated agent file. A model that only one provider carries routes there
+  without a hand-written rule. A model no provider carries is refused with a
+  message naming it, instead of being sent to Anthropic and coming back 404.
+- **Web search in a routed session.** It reaches a provider that runs the
+  search tool itself, uses ChatGPT's hosted search when configured, and is
+  refused with a reason where no provider can run it.
+- **Claude Code's own model slots as a setting.**
 
 ### Fixed
+
+- **A cut-off stream is retried, not taken as the answer.** An upstream that
+  closed the stream without finishing used to become an empty, successful
+  turn. A subagent then stopped silently, which is how long Muse runs appeared
+  to stall and die. The turn now fails as overloaded, and Claude Code retries it.
+- **The Codex prompt cache holds across turns again.** The conversation is
+  named to the Codex backend, which now keys its cache on that name.
+- **The provider form no longer wipes settings it does not show.** Saving a
+  ChatGPT provider in the GUI dropped fields such as `instructionsAppend`.
+- **The request log shows a request's whole input.** A fully cached Anthropic
+  turn used to read as a 2-token request. The model column no longer shows
+  the agent file's default effort next to the effort that was actually sent.
+- **Routed models keep their own context window,** including across a model
+  switch, and tool names the wire rejects are rewritten and restored.
+- **Screenshots in tool results survive translation.**
 
 - **Remote Control works through the forward proxy.** Claude Code sends its
   registration, polling and heartbeat requests in HTTPS absolute-form rather
