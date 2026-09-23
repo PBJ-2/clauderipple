@@ -110,6 +110,22 @@ export function withCredential(
 }
 
 /**
+ * A Claude account's headers for one turn, with the client's beta flags kept. The account supplies
+ * identity; the flags belong to the request, because they switch on body fields the client sent
+ * (`cache_control.scope`, `context_management`, …) and the API refuses those fields without their
+ * flag — `Extra inputs are not permitted` (issue #15). The account's own OAuth flags are added to
+ * the client's, never used in their place. Only for native Claude accounts: a compatible vendor's
+ * beta filtering happens elsewhere and must not be undone here.
+ */
+export function withClientBetas(credential: Record<string, string>, clientBeta: string | string[] | undefined): Record<string, string> {
+  if (clientBeta === undefined) return credential;
+  const name = Object.keys(credential).find((key) => key.toLowerCase() === "anthropic-beta") ?? "anthropic-beta";
+  const flags = (raw: string) => raw.split(",").map((flag) => flag.trim()).filter(Boolean);
+  const merged = [...new Set([...flags(([] as string[]).concat(clientBeta).join(",")), ...flags(credential[name] ?? "")])];
+  return { ...credential, [name]: merged.join(",") };
+}
+
+/**
  * A body decoded for reading, as text. Bytes that cannot be decoded are read as they arrived.
  *
  * Text and not bytes, deliberately. What every caller wants from a compressed body is what it
@@ -735,7 +751,7 @@ export class Proxy {
           host: cfg.upstream,
           port: this.deps.upstreamPort ?? 443,
           agent: this.deps.upstreamAgent ?? this.agentFor(route.provider, "https:"),
-          extraHeaders: using.headers,
+          extraHeaders: withClientBetas(using.headers, req.headers["anthropic-beta"]),
           dropClientAuth: true,
           dropHeaders: new Set(credentials.flatMap((credential) => Object.keys(credential.headers).map((name) => name.toLowerCase()))),
           dropHeaderPrefixes: ["anthropic-client-", "x-stainless-"],
@@ -891,12 +907,12 @@ export class Proxy {
       // The model's own shape again: its credential pool is the provider's, but an auth convention
       // this model overrides has to be the one the retry actually sends.
       const provider = providerFor(owner, route.model);
-      const available = provider.type === "anthropic" && provider.accountPool
-        ? this.claudeAccounts.peekCredentials()
-        : this.credentialsOf(route.provider, provider);
+      const native = provider.type === "anthropic" && provider.accountPool;
+      const available = native ? this.claudeAccounts.peekCredentials() : this.credentialsOf(route.provider, provider);
       const rest = available.filter((c) => !tried.has(c.id));
       if (rest.length === 0) return null;
-      return this.pool.pick(route.provider, rest, conversationKey(json as AnthropicRequest));
+      const next = this.pool.pick(route.provider, rest, conversationKey(json as AnthropicRequest));
+      return next && native ? { ...next, headers: withClientBetas(next.headers, req.headers["anthropic-beta"]) } : next;
     };
 
     // Destroying the upstream makes it emit ECONNRESET (measured, Node 24.15), which is

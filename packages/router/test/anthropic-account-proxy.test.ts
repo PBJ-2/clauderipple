@@ -30,7 +30,7 @@ function freePort(): Promise<number> {
   });
 }
 
-type Seen = { authorization?: string; currentOnly?: string; body: Record<string, unknown> };
+type Seen = { authorization?: string; currentOnly?: string; beta?: string; body: Record<string, unknown> };
 type Reply = { status: number; headers?: Record<string, string>; body?: string };
 
 async function nativeRig(reply: (seen: Seen, attempt: number) => Reply) {
@@ -49,6 +49,7 @@ async function nativeRig(reply: (seen: Seen, attempt: number) => Reply) {
       const item = {
         ...(typeof req.headers.authorization === "string" ? { authorization: req.headers.authorization } : {}),
         ...(typeof req.headers["anthropic-client-current-only"] === "string" ? { currentOnly: req.headers["anthropic-client-current-only"] } : {}),
+        ...(typeof req.headers["anthropic-beta"] === "string" ? { beta: req.headers["anthropic-beta"] } : {}),
         body,
       };
       seen.push(item);
@@ -132,6 +133,7 @@ async function nativeRig(reply: (seen: Seen, attempt: number) => Reply) {
       "content-type: application/json\r\n" +
       "authorization: Bearer caller-token\r\n" +
       "anthropic-client-current-only: caller-fingerprint\r\n" +
+      "anthropic-beta: claude-code-20250219,prompt-caching-scope-2026-01-05\r\n" +
       `content-length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
     );
     const first = await new Promise<Buffer>((resolve) => secure.once("data", (chunk: Buffer) => setTimeout(() => resolve(chunk), 30)));
@@ -184,6 +186,23 @@ test("a third account does not regain the first session's identity headers", asy
     assert.equal(await rig.send("three-account-conversation"), 200);
     assert.deepEqual(rig.seen.map((item) => item.authorization), ["Bearer current-token", "Bearer stored-token", "Bearer third-token"]);
     assert.deepEqual(rig.seen.map((item) => item.currentOnly), ["current-fingerprint", undefined, undefined]);
+  } finally {
+    await rig.stop();
+  }
+});
+
+test("every account keeps the client's beta flags alongside its own OAuth flags (issue #15)", async () => {
+  const rig = await nativeRig((_seen, attempt) => attempt === 1
+    ? { status: 429, headers: { "retry-after": "300" }, body: "{}" }
+    : { status: 200 });
+  try {
+    assert.equal(await rig.send("beta-conversation"), 200);
+    assert.equal(await rig.send("beta-conversation"), 200);
+    assert.equal(rig.seen[0]!.beta, "claude-code-20250219,prompt-caching-scope-2026-01-05", "an observed session without its own flags sends the client's");
+    for (const item of rig.seen.slice(1)) {
+      assert.equal(item.authorization, "Bearer stored-token");
+      assert.equal(item.beta, "claude-code-20250219,prompt-caching-scope-2026-01-05,oauth-2025-04-20", "stored account: client flags plus OAuth, no duplicates");
+    }
   } finally {
     await rig.stop();
   }
