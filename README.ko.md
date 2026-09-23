@@ -123,23 +123,19 @@ x64 런타임은 에뮬레이션으로 확인했습니다.
 ClaudeRipple은 데스크톱 앱·터미널·Codex를 메뉴 막대 앱 하나로 다루고, 두 구독을 나란히 쓰며, Claude Code 하네스를
 그대로 둡니다. 스킬·훅·MCP 서버·`CLAUDE.md`·서브에이전트·claude.ai 커넥터가 전부 살아 있는 채로 두뇌만 바뀝니다.
 
-| | ClaudeRipple | opencodex / openclaude | claude-code-router | Claude Desktop 게이트웨이(3P) 모드 |
-|---|---|---|---|---|
-| 게이트웨이(3P) 모드 **없이** Claude **Desktop** Code 탭 | ✅ | ✅ ¹ | ❌ | ❌ (정의상 불가) |
-| claude.ai 채팅·Remote Control·클라우드 세션·커넥터 유지 | ✅ | ✅ ¹ | ❌ | ❌ |
-| Claude 구독과 GPT 구독 나란히 | ✅ | ✅ ¹ | ❌ | ❌ |
-| Desktop 피커에 실제 모델 이름 | ✅ | ❌ Claude 이름을 빌려 씀 ¹ | ❌ | 일부 |
-| ChatGPT 계정 여러 개, 한도 차면 자동 전환 (Desktop·Codex) | ✅ | ✅ | ❌ | ❌ |
-| 터미널 `claude` CLI | ✅ | ✅ | ✅ | ✅ |
-| Codex **앱**·Codex CLI → Claude | ✅ | ✅ | ❌ | ❌ |
-| 번역 프로바이더의 프롬프트 캐시 | **94~99 %** 실측 | 미측정 | 제각각 | 해당 없음 |
-| 서브에이전트를 실제 모델 이름으로 표시 | ✅ | ❌ | ❌ | ❌ |
-| 터미널 없이 쓰는 설정 GUI | ✅ | ❌ | ❌ | ❌ |
-| 런타임 내장, 서명·공증된 앱 | ✅ | ❌ | ❌ | – |
-
-¹ opencodex 기준(openclaude는 확인하지 않음). opencodex는 v2.61.0(2026-09-22)부터 게이트웨이 없이 Code 탭에
-들어갑니다. 다만 모델 선택기는 건드리지 않아서, 다른 모델은 Claude 모델 이름에 연결해(`modelMap`) 그 이름으로 고릅니다.
-ClaudeRipple은 선택기에 GPT·DeepSeek 등을 실제 이름으로 띄우고, 고른 추론 강도를 그대로 넘깁니다.
+| | ClaudeRipple | claude-code-router | Claude Desktop 게이트웨이(3P) 모드 |
+|---|---|---|---|
+| 게이트웨이(3P) 모드 **없이** Claude **Desktop** Code 탭 | ✅ | ❌ | ❌ (정의상 불가) |
+| claude.ai 채팅·Remote Control·클라우드 세션·커넥터 유지 | ✅ | ❌ | ❌ |
+| Claude 구독과 GPT 구독 나란히 | ✅ | ❌ | ❌ |
+| Desktop 피커에 실제 모델 이름 | ✅ | ❌ | 일부 |
+| ChatGPT 계정 여러 개, 한도 차면 자동 전환 (Desktop·Codex) | ✅ | ❌ | ❌ |
+| 터미널 `claude` CLI | ✅ | ✅ | ✅ |
+| Codex **앱**·Codex CLI → Claude | ✅ | ❌ | ❌ |
+| 번역 프로바이더의 프롬프트 캐시 | **94~99 %** 실측 | 제각각 | 해당 없음 |
+| 서브에이전트를 실제 모델 이름으로 표시 | ✅ | ❌ | ❌ |
+| 터미널 없이 쓰는 설정 GUI | ✅ | ❌ | ❌ |
+| 런타임 내장, 서명·공증된 앱 | ✅ | ❌ | – |
 
 데스크톱 앱의 "서드파티 추론" 설정은 앱 전체를 다른 모드로 바꿔 버립니다. claude.ai 채팅, Remote Control,
 클라우드 세션을 잃습니다. `ANTHROPIC_BASE_URL`을 바꿔치기하는 도구들은 데스크톱 앱에 아예 닿지 못합니다.

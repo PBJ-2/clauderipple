@@ -139,24 +139,19 @@ Codex from one menu-bar app, runs both subscriptions side by side, and keeps the
 Claude Code harness intact: your skills, hooks, MCP servers, `CLAUDE.md`, subagents
 and claude.ai connectors keep working while another model does the thinking.
 
-| | ClaudeRipple | opencodex / openclaude | claude-code-router | Claude Desktop gateway (3P) mode |
-|---|---|---|---|---|
-| Claude **Desktop** Code tab **without** gateway (3P) mode | ✅ | ✅ ¹ | ❌ | ❌ by definition |
-| Keeps claude.ai chat, Remote Control, cloud sessions, connectors | ✅ | ✅ ¹ | ❌ | ❌ |
-| Claude and GPT subscriptions side by side | ✅ | ✅ ¹ | ❌ | ❌ |
-| Real model names in the Desktop picker | ✅ | ❌ borrows Claude names ¹ | ❌ | partial |
-| Several ChatGPT accounts, switching when one runs out (Desktop and Codex) | ✅ | ✅ | ❌ | ❌ |
-| Terminal `claude` CLI | ✅ | ✅ | ✅ | ✅ |
-| Codex **app** and Codex CLI → Claude | ✅ | ✅ | ❌ | ❌ |
-| Prompt cache on translated providers | **94–99 %** measured | not measured | varies | n/a |
-| Subagents named by real model in the task panel | ✅ | ❌ | ❌ | ❌ |
-| Settings GUI, no terminal needed | ✅ | ❌ | ❌ | ❌ |
-| Signed, notarized app with its own runtime | ✅ | ❌ | ❌ | – |
-
-¹ opencodex (openclaude not checked). Since v2.61.0 (2026-09-22) opencodex reaches the Code
-tab without the gateway. It leaves the model picker alone, so another model is chosen under a
-Claude model's name it is mapped to (`modelMap`). ClaudeRipple puts GPT, DeepSeek and the rest
-in the picker under their own names and passes the effort you pick.
+| | ClaudeRipple | claude-code-router | Claude Desktop gateway (3P) mode |
+|---|---|---|---|
+| Claude **Desktop** Code tab **without** gateway (3P) mode | ✅ | ❌ | ❌ by definition |
+| Keeps claude.ai chat, Remote Control, cloud sessions, connectors | ✅ | ❌ | ❌ |
+| Claude and GPT subscriptions side by side | ✅ | ❌ | ❌ |
+| Real model names in the Desktop picker | ✅ | ❌ | partial |
+| Several ChatGPT accounts, switching when one runs out (Desktop and Codex) | ✅ | ❌ | ❌ |
+| Terminal `claude` CLI | ✅ | ✅ | ✅ |
+| Codex **app** and Codex CLI → Claude | ✅ | ❌ | ❌ |
+| Prompt cache on translated providers | **94–99 %** measured | varies | n/a |
+| Subagents named by real model in the task panel | ✅ | ❌ | ❌ |
+| Settings GUI, no terminal needed | ✅ | ❌ | ❌ |
+| Signed, notarized app with its own runtime | ✅ | ❌ | – |
 
 The desktop app's own "third-party inference" setting flips the whole app into another
 mode: you lose claude.ai chat, Remote Control and cloud sessions. Tools that replace
