@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.1 — 2026-09-24
+
+Fixes for three reports against 0.3.0.
+
+### Fixed
+
+- **Claude account rotation no longer breaks requests with a 400** (#15). With
+  `accountPool` on, the account's `anthropic-beta` header replaced the client's,
+  so fields Claude Code enables per request (`cache_control.scope`,
+  `context_management`, …) were refused with `Extra inputs are not permitted`.
+  A conversation pinned to an added account failed on every retry, because a
+  400 does not move it. The account now supplies identity only: its OAuth flags
+  are added to the client's, on the first attempt and on every retry.
+- **The Windows tray appears** (#8). It was started with `ELECTRON_RUN_AS_NODE`
+  set to an empty string, which macOS Electron treats as unset and Windows
+  Electron treats as set, so on Windows the tray ran as plain Node and exited
+  while the CLI reported "tray started". The variable is now removed.
+- **GLM-5.3 and GLM-5.3 Flash in the Z.AI preset** (#14). Z.AI serves no model
+  list, so the preset's list is the whole picker, and it stopped at GLM-5.2.
+
 ## 0.3.0 — 2026-09-23
 
 Everything on `main` since 0.2.0. The account rotation that issue #8 asked for
