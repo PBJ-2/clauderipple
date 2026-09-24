@@ -34,32 +34,76 @@ async function withAdmin(
 ): Promise<void> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-admin-"));
   const prevHome = process.env.CLAUDERIPPLE_HOME;
+  const prevSettings = process.env.CLAUDE_SETTINGS_PATH;
   process.env.CLAUDERIPPLE_HOME = home;
-  const configFile = path.join(home, "config.json");
-  fs.writeFileSync(configFile, JSON.stringify(cfgInit, null, 2));
-  let cfg = cfgInit;
-  const log = new Logger(null, 1_000_000, 1, false);
-  const admin = await startAdmin({
-    config: () => cfg,
-    configFile,
-    log,
-    stats: () => ({ inFlight: 0, messagesInFlight: 0, started: 1, completed: 1, failed: 0 }),
-    health: () => 0,
-    version: "0.0.0-test",
-    requests: new RequestLog(path.join(home, "logs", "requests.jsonl")),
-    ...extraDeps,
-  });
+  // Saving admin config also syncs the Claude client settings (syncModelSlotsForGui). With only
+  // CLAUDERIPPLE_HOME isolated, `npm test` wrote HTTPS_PROXY and a NODE_EXTRA_CA_CERTS pointing into
+  // this temp dir into the real ~/.claude/settings.json, then deleted the dir: every new Code
+  // session on that machine failed with ECONNREFUSED (measured 2026-09-24, Ubuntu 24.04).
+  process.env.CLAUDE_SETTINGS_PATH = path.join(home, "claude-settings.json");
+  let admin: Awaited<ReturnType<typeof startAdmin>> | undefined;
   try {
+    const configFile = path.join(home, "config.json");
+    fs.writeFileSync(configFile, JSON.stringify(cfgInit, null, 2));
+    let cfg = cfgInit;
+    const log = new Logger(null, 1_000_000, 1, false);
+    admin = await startAdmin({
+      config: () => cfg,
+      configFile,
+      log,
+      stats: () => ({ inFlight: 0, messagesInFlight: 0, started: 1, completed: 1, failed: 0 }),
+      health: () => 0,
+      version: "0.0.0-test",
+      requests: new RequestLog(path.join(home, "logs", "requests.jsonl")),
+      ...extraDeps,
+    });
     await fn({ port: admin.port, configFile, home, setCfg: (c) => (cfg = c) });
   } finally {
-    admin.close();
+    admin?.close();
     if (prevHome === undefined) delete process.env.CLAUDERIPPLE_HOME;
     else process.env.CLAUDERIPPLE_HOME = prevHome;
+    if (prevSettings === undefined) delete process.env.CLAUDE_SETTINGS_PATH;
+    else process.env.CLAUDE_SETTINGS_PATH = prevSettings;
     fs.rmSync(home, { recursive: true, force: true });
   }
 }
 
 const base = () => `http://127.0.0.1`;
+
+test("admin config saves isolate client settings and restore the caller environment on failure", async () => {
+  const outer = fs.mkdtempSync(path.join(os.tmpdir(), "cr-admin-settings-"));
+  const settingsFile = path.join(outer, "settings.json");
+  const original = '{"env":{"KEEP_ME":"unchanged"}}\n';
+  fs.writeFileSync(settingsFile, original);
+  const prevSettings = process.env.CLAUDE_SETTINGS_PATH;
+  const prevHome = process.env.CLAUDERIPPLE_HOME;
+  process.env.CLAUDE_SETTINGS_PATH = settingsFile;
+  let isolatedHome = "";
+  try {
+    await assert.rejects(withAdmin(makeCfg(), async ({ port, home }) => {
+      isolatedHome = home;
+      assert.equal(process.env.CLAUDE_SETTINGS_PATH, path.join(home, "claude-settings.json"));
+      const res = await fetch(`${base()}:${port}/api/config`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(makeCfg()),
+      });
+      assert.equal(res.status, 200);
+      const settings = JSON.parse(fs.readFileSync(process.env.CLAUDE_SETTINGS_PATH!, "utf8"));
+      assert.equal(settings.env.NODE_EXTRA_CA_CERTS, path.join(home, "ca.pem"));
+      assert.equal(fs.readFileSync(settingsFile, "utf8"), original);
+      throw new Error("exercise fixture cleanup");
+    }), /exercise fixture cleanup/);
+    assert.equal(process.env.CLAUDE_SETTINGS_PATH, settingsFile);
+    assert.equal(process.env.CLAUDERIPPLE_HOME, prevHome);
+    assert.equal(fs.existsSync(isolatedHome), false);
+    assert.equal(fs.readFileSync(settingsFile, "utf8"), original);
+  } finally {
+    if (prevSettings === undefined) delete process.env.CLAUDE_SETTINGS_PATH;
+    else process.env.CLAUDE_SETTINGS_PATH = prevSettings;
+    fs.rmSync(outer, { recursive: true, force: true });
+  }
+});
 
 /** fetch()/undici normalize %2e-encoded dot segments client-side before sending; use a raw
  * http.request (path passed through untouched) to actually exercise the server's own guard. */
