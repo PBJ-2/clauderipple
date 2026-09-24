@@ -48,8 +48,8 @@ async function forwardedHeaders(providerHeaders: Record<string, string>): Promis
 async function roundTrip(
   providerHeaders: Record<string, string>,
   reply: ProviderReply,
-  options: { provider?: Partial<Provider>; system?: unknown } = {},
-): Promise<{ seen: http.IncomingHttpHeaders; seenBody: Record<string, unknown>; records: RequestRecord[]; clientStatus: number }> {
+  options: { provider?: Partial<Provider>; system?: unknown; body?: Record<string, unknown> } = {},
+): Promise<{ seen: http.IncomingHttpHeaders; seenBody: Record<string, unknown>; records: RequestRecord[]; clientStatus: number; clientBody: string; providerCalls: number }> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-proxy-headers-"));
   const ca = createCa({ cn: "clauderipple test" });
   fs.writeFileSync(path.join(home, "ca.pem"), ca.certPem);
@@ -57,7 +57,9 @@ async function roundTrip(
 
   let seen: http.IncomingHttpHeaders = {};
   let seenBody: Record<string, unknown> = {};
+  let providerCalls = 0;
   const provider = http.createServer((req, res) => {
+    providerCalls++;
     seen = req.headers;
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => chunks.push(c));
@@ -97,7 +99,7 @@ async function roundTrip(
   const secure = tls.connect({ socket: sock, servername: "api.anthropic.com", ca: ca.certPem });
   await new Promise<void>((r) => secure.once("secureConnect", () => r()));
 
-  const body = JSON.stringify({ model: "claude-opus-4-8", max_tokens: 1, messages: [{ role: "user", content: "hi" }], ...(options.system === undefined ? {} : { system: options.system }) });
+  const body = JSON.stringify({ model: "claude-opus-4-8", max_tokens: 1, messages: [{ role: "user", content: "hi" }], ...(options.system === undefined ? {} : { system: options.system }), ...options.body });
   secure.write(
     "POST /v1/messages HTTP/1.1\r\n" +
       "Host: api.anthropic.com\r\n" +
@@ -109,14 +111,16 @@ async function roundTrip(
       body,
   );
   const first = await new Promise<Buffer>((r) => secure.once("data", (d: Buffer) => setTimeout(() => r(d), 50)));
-  const clientStatus = Number(/^HTTP\/1\.1 (\d{3})/.exec(first.toString("latin1"))?.[1] ?? 0);
+  const firstText = first.toString("latin1");
+  const clientStatus = Number(/^HTTP\/1\.1 (\d{3})/.exec(firstText)?.[1] ?? 0);
+  const clientBody = firstText.slice(firstText.indexOf("\r\n\r\n") + 4);
 
   secure.destroy();
   proxy.close();
   await new Promise<void>((r) => provider.close(() => r()));
   const records = requests.list(10);
   fs.rmSync(home, { recursive: true, force: true });
-  return { seen, seenBody, records, clientStatus };
+  return { seen, seenBody, records, clientStatus, clientBody, providerCalls };
 }
 
 test("an x-api-key provider never receives the caller's authorization header", async () => {
@@ -202,4 +206,32 @@ test("an anthropic-compatible provider sends its session header, and the credent
 
   const without = await roundTrip({ "x-api-key": "provider-key" }, OK_REPLY);
   assert.equal(without.seen["x-opencode-session"], undefined, "nothing extra unless asked for");
+});
+
+// Claude Code sends later turns as `thread: {type:"continue"}` with only the new messages. An
+// Anthropic-shaped vendor holds no thread, so forwarding that delta hands it orphan tool_results
+// and no task (DeepSeek via Bailian, 2026-09-24). Refused, the CLI resends the turn stateless.
+test("an anthropic-compatible provider never receives a thread continue: the CLI is told to resend stateless", async () => {
+  const r = await roundTrip({ authorization: "Bearer PROVIDER-KEY" }, OK_REPLY, {
+    body: {
+      thread: { type: "continue", previous_message_id: "msg_1" },
+      messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "beta" }] }],
+    },
+  });
+  assert.equal(r.clientStatus, 400);
+  assert.equal((JSON.parse(r.clientBody) as { error: { details: { error_code: string } } }).error.details.error_code, "thread_unsupported_request");
+  assert.equal(r.providerCalls, 0, "the delta never reached the provider");
+  const record = r.records.find((x) => x.kind === "messages");
+  assert.match(record?.note ?? "", /thread continue refused/);
+});
+
+test("a thread create still reaches an anthropic-compatible provider, without the thread fields", async () => {
+  const r = await roundTrip({ authorization: "Bearer PROVIDER-KEY" }, OK_REPLY, {
+    body: { thread: { type: "create" }, diagnostics: { previous_message_id: null } },
+  });
+  assert.equal(r.clientStatus, 200);
+  assert.equal(r.providerCalls, 1);
+  assert.equal("thread" in r.seenBody, false);
+  assert.equal("diagnostics" in r.seenBody, false);
+  assert.deepEqual(r.seenBody.messages, [{ role: "user", content: "hi" }]);
 });
