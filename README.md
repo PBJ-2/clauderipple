@@ -172,11 +172,12 @@ its own client. ClaudeRipple tells each model its own name and effort, reshapes 
 schemas a vendor would reject, and lets you append instructions per provider. A common
 setup is Claude as the main model with GPT or DeepSeek as subagents.
 
-### How is this different from opencodex or claude-code-router?
+### How is this different from CC Switch, opencodex or claude-code-router?
 
-See the [comparison table](#one-tool-instead-of-four) (checked 2026-09-16). In short:
-ClaudeRipple reaches the Claude **Desktop** Code tab while the app stays signed in to
-Claude, and shows other models in its picker under their real names.
+See the [comparison table](#one-tool-instead-of-four). In short: ClaudeRipple reaches
+the Claude **Desktop** Code tab while the app stays signed in to Claude, and shows other
+models in its picker under their real names. CC Switch also reaches the desktop app, but
+by turning on its gateway (3P) mode.
 
 ### Is it free?
 
@@ -185,35 +186,46 @@ keys you already use.
 
 ## One tool instead of four
 
-Similar tools are built for the terminal. They let the Claude Code CLI or Codex CLI
-use other models, but they cannot reach the Claude **desktop app**, and the moment
-you switch models you lose the Claude-subscription side (claude.ai chat, Remote
-Control, cloud sessions). ClaudeRipple covers the desktop app, the terminal and
+Similar tools let the Claude Code CLI or Codex CLI use other models, but they either
+cannot reach the Claude **desktop app** or reach it only through its gateway (3P) mode,
+and the moment you switch models you lose the Claude-subscription side (claude.ai chat,
+Remote Control, cloud sessions). ClaudeRipple covers the desktop app, the terminal and
 Codex from one menu-bar app, runs both subscriptions side by side, and keeps the
 Claude Code harness intact: your skills, hooks, MCP servers, `CLAUDE.md`, subagents
 and claude.ai connectors keep working while another model does the thinking.
 
-| | ClaudeRipple | opencodex / openclaude (checked 2026-09-16) | claude-code-router | Claude Desktop gateway (3P) mode |
-|---|---|---|---|---|
-| Claude **Desktop** Code tab **without** gateway (3P) mode | ✅ | ❌ ¹ | ❌ | ❌ by definition |
-| Keeps claude.ai chat, Remote Control, cloud sessions, connectors | ✅ | ❌ | ❌ | ❌ |
-| Claude and GPT subscriptions side by side | ✅ | ❌ all-or-nothing | ❌ | ❌ |
-| Real model names in the Desktop picker | ✅ | ❌ | ❌ | partial |
-| Several ChatGPT accounts, switching when one runs out (Desktop and Codex) | ✅ | ✅ | ❌ | ❌ |
-| Terminal `claude` CLI | ✅ | ✅ | ✅ | ✅ |
-| Codex **app** and Codex CLI → Claude | ✅ | ✅ | ❌ | ❌ |
-| Prompt cache on translated providers | **94–99 %** measured | not measured | varies | n/a |
-| Subagents named by real model in the task panel | ✅ | ❌ | ❌ | ❌ |
-| Settings GUI, no terminal needed | ✅ | ❌ | ❌ | ❌ |
-| Signed, notarized app with its own runtime | ✅ | ❌ | ❌ | – |
+| | ClaudeRipple | CC Switch (checked 2026-09-24) | opencodex / openclaude (checked 2026-09-16) | claude-code-router | Claude Desktop gateway (3P) mode |
+|---|---|---|---|---|---|
+| Claude **Desktop** Code tab **without** gateway (3P) mode | ✅ | ❌ ² | ❌ ¹ | ❌ | ❌ by definition |
+| Keeps claude.ai chat, Remote Control, cloud sessions, connectors | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Claude and GPT subscriptions side by side | ✅ | ❌ one provider at a time | ❌ all-or-nothing | ❌ | ❌ |
+| Real model names in the Desktop picker | ✅ | ❌ `claude-*` role names ² | ❌ | ❌ | partial |
+| Several ChatGPT accounts, switching when one runs out (Desktop and Codex) | ✅ | ❌ switched by hand ³ | ✅ | ❌ | ❌ |
+| Terminal `claude` CLI | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Codex **app** and Codex CLI → Claude | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Prompt cache on translated providers | **94–99 %** measured | not measured | not measured | varies | n/a |
+| Subagents named by real model in the task panel | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Settings GUI, no terminal needed | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Signed, notarized app with its own runtime | ✅ | ✅ | ❌ | ❌ | – |
 
 ¹ opencodex's README showed Claude Desktop in a demo but published no setup steps for it,
 in the repository or on its documentation site (checked 2026-09-16). At the time the only
 public way into the desktop app was the official gateway setting — the last column.
 
+² CC Switch reaches Claude Desktop by writing the app's third-party profile
+(`Claude-3p/claude_desktop_config.json`, `"inferenceProvider": "gateway"`), which is the
+last column. Through its local gateway the picker shows only `claude-sonnet-*`,
+`claude-opus-*` and `claude-haiku-*` role names ([its manual](https://github.com/farion1231/cc-switch/blob/main/docs/user-manual/en/2-providers/2.6-claude-desktop.md)).
+CC Switch manages more tools than this table covers (Gemini CLI, OpenCode and others) and
+syncs MCP servers and skills across them.
+
+³ Each ChatGPT account is bound to its own provider card, and official ChatGPT cards are
+kept out of the failover queue (v3.20.0 release notes).
+
 The desktop app's own "third-party inference" setting flips the whole app into another
 mode: you lose claude.ai chat, Remote Control and cloud sessions. Tools that replace
-`ANTHROPIC_BASE_URL` never reach the desktop app at all. ClaudeRipple instead is a
+`ANTHROPIC_BASE_URL` never reach the desktop app, and the ones that do reach it write
+that same setting. ClaudeRipple instead is a
 tiny HTTPS proxy that only the Claude Code process trusts: requests for the models
 you map go to your provider, everything else goes to Anthropic byte for byte.
 

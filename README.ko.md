@@ -150,10 +150,11 @@ Claude Code의 시스템 프롬프트와 도구 설명은 Claude에 맞춰 쓰�
 거부할 도구 스키마를 고쳐 넘기며, 프로바이더별로 지시문을 덧붙일 수 있게 합니다. 흔한 구성은 Claude를 메인으로 두고
 GPT나 DeepSeek을 서브에이전트로 쓰는 것입니다.
 
-### opencodex나 claude-code-router와 뭐가 다른가요?
+### CC Switch, opencodex, claude-code-router와 뭐가 다른가요?
 
-[비교표](#네-개-대신-하나)(2026-09-16 확인)를 보세요. 요약하면 ClaudeRipple은 앱이 Claude에 로그인된 채로 Claude
-**데스크톱 앱**의 Code 탭에 들어가고, 다른 모델을 피커에 실제 이름으로 보여 줍니다.
+[비교표](#네-개-대신-하나)를 보세요. 요약하면 ClaudeRipple은 앱이 Claude에 로그인된 채로 Claude
+**데스크톱 앱**의 Code 탭에 들어가고, 다른 모델을 피커에 실제 이름으로 보여 줍니다. CC Switch도 데스크톱 앱에
+들어가지만, 앱의 게이트웨이(3P) 모드를 켜는 방식입니다.
 
 ### 무료인가요?
 
@@ -161,30 +162,38 @@ GPT나 DeepSeek을 서브에이전트로 쓰는 것입니다.
 
 ## 네 개 대신 하나
 
-비슷한 도구들은 터미널용입니다. Claude Code CLI나 Codex CLI가 다른 모델을 쓰게는 해 주지만, Claude **데스크톱 앱**에는
-닿지 못하고, 다른 모델로 바꾸는 순간 Claude 구독 쪽 기능(claude.ai 채팅, Remote Control, 클라우드 세션)을 잃습니다.
+비슷한 도구들은 Claude Code CLI나 Codex CLI가 다른 모델을 쓰게는 해 주지만, Claude **데스크톱 앱**에는 닿지 못하거나
+게이트웨이(3P) 모드로만 닿고, 다른 모델로 바꾸는 순간 Claude 구독 쪽 기능(claude.ai 채팅, Remote Control, 클라우드 세션)을 잃습니다.
 ClaudeRipple은 데스크톱 앱·터미널·Codex를 메뉴 막대 앱 하나로 다루고, 두 구독을 나란히 쓰며, Claude Code 하네스를
 그대로 둡니다. 스킬·훅·MCP 서버·`CLAUDE.md`·서브에이전트·claude.ai 커넥터가 전부 살아 있는 채로 두뇌만 바뀝니다.
 
-| | ClaudeRipple | opencodex / openclaude (2026-09-16 확인) | claude-code-router | Claude Desktop 게이트웨이(3P) 모드 |
-|---|---|---|---|---|
-| 게이트웨이(3P) 모드 **없이** Claude **Desktop** Code 탭 | ✅ | ❌ ¹ | ❌ | ❌ (정의상 불가) |
-| claude.ai 채팅·Remote Control·클라우드 세션·커넥터 유지 | ✅ | ❌ | ❌ | ❌ |
-| Claude 구독과 GPT 구독 나란히 | ✅ | ❌ 전부 아니면 전무 | ❌ | ❌ |
-| Desktop 피커에 실제 모델 이름 | ✅ | ❌ | ❌ | 일부 |
-| ChatGPT 계정 여러 개, 한도 차면 자동 전환 (Desktop·Codex) | ✅ | ✅ | ❌ | ❌ |
-| 터미널 `claude` CLI | ✅ | ✅ | ✅ | ✅ |
-| Codex **앱**·Codex CLI → Claude | ✅ | ✅ | ❌ | ❌ |
-| 번역 프로바이더의 프롬프트 캐시 | **94~99 %** 실측 | 미측정 | 제각각 | 해당 없음 |
-| 서브에이전트를 실제 모델 이름으로 표시 | ✅ | ❌ | ❌ | ❌ |
-| 터미널 없이 쓰는 설정 GUI | ✅ | ❌ | ❌ | ❌ |
-| 런타임 내장, 서명·공증된 앱 | ✅ | ❌ | ❌ | – |
+| | ClaudeRipple | CC Switch (2026-09-24 확인) | opencodex / openclaude (2026-09-16 확인) | claude-code-router | Claude Desktop 게이트웨이(3P) 모드 |
+|---|---|---|---|---|---|
+| 게이트웨이(3P) 모드 **없이** Claude **Desktop** Code 탭 | ✅ | ❌ ² | ❌ ¹ | ❌ | ❌ (정의상 불가) |
+| claude.ai 채팅·Remote Control·클라우드 세션·커넥터 유지 | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Claude 구독과 GPT 구독 나란히 | ✅ | ❌ 한 번에 프로바이더 하나 | ❌ 전부 아니면 전무 | ❌ | ❌ |
+| Desktop 피커에 실제 모델 이름 | ✅ | ❌ `claude-*` 역할 이름 ² | ❌ | ❌ | 일부 |
+| ChatGPT 계정 여러 개, 한도 차면 자동 전환 (Desktop·Codex) | ✅ | ❌ 수동 전환 ³ | ✅ | ❌ | ❌ |
+| 터미널 `claude` CLI | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Codex **앱**·Codex CLI → Claude | ✅ | ✅ | ✅ | ❌ | ❌ |
+| 번역 프로바이더의 프롬프트 캐시 | **94~99 %** 실측 | 미측정 | 미측정 | 제각각 | 해당 없음 |
+| 서브에이전트를 실제 모델 이름으로 표시 | ✅ | ❌ | ❌ | ❌ | ❌ |
+| 터미널 없이 쓰는 설정 GUI | ✅ | ✅ | ❌ | ❌ | ❌ |
+| 런타임 내장, 서명·공증된 앱 | ✅ | ✅ | ❌ | ❌ | – |
 
 ¹ opencodex는 README에 Claude Desktop 데모를 걸어 두었지만, 저장소에도 문서 사이트에도 설치 절차가 없었습니다
 (2026-09-16 확인). 당시 데스크톱 앱으로 들어가는 공개된 경로는 공식 게이트웨이 설정, 즉 마지막 칸뿐이었습니다.
 
+² CC Switch는 데스크톱 앱의 서드파티 프로필(`Claude-3p/claude_desktop_config.json`, `"inferenceProvider": "gateway"`)을
+써서 들어갑니다. 즉 마지막 칸과 같은 경로입니다. 로컬 게이트웨이를 거치면 피커에는 `claude-sonnet-*`·`claude-opus-*`·
+`claude-haiku-*` 역할 이름만 보입니다([CC Switch 매뉴얼](https://github.com/farion1231/cc-switch/blob/main/docs/user-manual/en/2-providers/2.6-claude-desktop.md)).
+CC Switch는 이 표보다 많은 도구(Gemini CLI, OpenCode 등)를 다루고, MCP 서버와 스킬을 도구 사이에 동기화합니다.
+
+³ ChatGPT 계정은 프로바이더 카드마다 하나씩 묶이고, 공식 ChatGPT 카드는 페일오버 대상에서 빠집니다(v3.20.0 릴리스 노트).
+
 데스크톱 앱의 "서드파티 추론" 설정은 앱 전체를 다른 모드로 바꿔 버립니다. claude.ai 채팅, Remote Control,
-클라우드 세션을 잃습니다. `ANTHROPIC_BASE_URL`을 바꿔치기하는 도구들은 데스크톱 앱에 아예 닿지 못합니다.
+클라우드 세션을 잃습니다. `ANTHROPIC_BASE_URL`을 바꿔치기하는 도구들은 데스크톱 앱에 닿지 못하고, 닿는 도구는 바로 그
+설정을 씁니다.
 ClaudeRipple은 Claude Code 프로세스만 신뢰하는 작은 HTTPS 프록시입니다. 매핑한 모델 요청만 프로바이더로 가고,
 나머지는 Anthropic으로 바이트 그대로 지나갑니다.
 
