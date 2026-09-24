@@ -47,15 +47,24 @@ export const MODEL_SLOT_ENV = {
 
 export type ModelSlots = Partial<Record<keyof typeof MODEL_SLOT_ENV, string>>;
 
+function refuseForeignProxy(existing: string | undefined, proxyUrl: string, force: boolean): void {
+  if (existing && existing !== proxyUrl && !force) {
+    throw new Error(`settings.json env.HTTPS_PROXY is already "${existing}". Re-run with --force to replace it, or uninstall the other proxy first.`);
+  }
+}
+
+/** The refusal `applyProxyEnv` would give, without writing: lets `install` fail before it registers anything. */
+export function checkProxyEnv(opts: { proxyUrl: string; force: boolean }): void {
+  refuseForeignProxy(currentProxyEnv().HTTPS_PROXY, opts.proxyUrl, opts.force);
+}
+
 export function applyProxyEnv(opts: { proxyUrl: string; caPath: string; force: boolean; maxContextTokens?: number; models?: ModelSlots; preserveUnnamedSlots?: boolean }): SettingsEdit {
   const file = settingsPath();
   const s = readSettings(file);
   const env = { ...((s.env as Record<string, string> | undefined) ?? {}) };
   const notes: string[] = [];
   const existing = env.HTTPS_PROXY;
-  if (existing && existing !== opts.proxyUrl && !opts.force) {
-    throw new Error(`settings.json env.HTTPS_PROXY is already "${existing}". Re-run with --force to replace it, or uninstall the other proxy first.`);
-  }
+  refuseForeignProxy(existing, opts.proxyUrl, opts.force);
   if (existing && existing !== opts.proxyUrl) notes.push(`replaced HTTPS_PROXY ${existing}`);
   const want: Record<string, string> = { HTTPS_PROXY: opts.proxyUrl, NODE_EXTRA_CA_CERTS: opts.caPath };
   if (opts.maxContextTokens) want.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(opts.maxContextTokens);

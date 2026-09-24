@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // clauderipple — install / uninstall / status / start / stop / restart / logs / config
 //
-// install:   generates the local CA + leaf, writes a starter config, points
-//            ~/.claude/settings.json env at the router, registers the launchd agent,
-//            then probes the whole chain end to end.
+// install:   generates the local CA + leaf, writes a starter config, registers the launchd
+//            agent, probes the whole chain end to end, and only then points
+//            ~/.claude/settings.json env at the router.
 // uninstall: reverses exactly that. Home dir is kept unless --purge.
 
 import fs from "node:fs";
@@ -14,7 +14,7 @@ import { execFileSync } from "node:child_process";
 import { ConfigStore, DEFAULTS, homeDir, configPath } from "../../router/src/config.ts";
 import { adminPort } from "../../router/src/admin.ts";
 import { certsExist, certPaths, generateCerts } from "./certs.ts";
-import { applyProxyEnv, currentProxyEnv, removeProxyEnv, settingsPath } from "./settings.ts";
+import { applyProxyEnv, checkProxyEnv, currentProxyEnv, removeProxyEnv, settingsPath } from "./settings.ts";
 import { agentDefinitionPath, agentState, installAgent, isSupported, isWindows, removeAgent, restartAgent, startAgent, stopAgent, supervisorName } from "./supervisor.ts";
 import { BUNDLE_ID, removeBundle, writeBundle } from "./bundle.ts";
 import { applyAppProxy, caTrusted, currentAppProxy, removeAppProxy, trustCa, untrustCa } from "./picker.ts";
@@ -38,6 +38,10 @@ async function pickerOn(): Promise<void> {
   const cfg = new ConfigStore(configPath()).get();
   const caPem = certPaths(home).caPem;
   if (!fs.existsSync(path.join(home, "ca.key"))) throw new Error("ca.key missing; run `clauderipple install` first");
+  // With picker mode on, every byte Claude Desktop sends goes through the router (ARCHITECTURE §5):
+  // pointing the app at one that is not answering leaves it a blank page, so check first.
+  const ready = await probe({ host: cfg.listen.host, port: cfg.listen.port, caPem, upstream: cfg.upstream });
+  if (!ready.ok) throw new Error(`the router is not answering (${ready.detail}); picker mode not enabled. Start it with \`clauderipple start\` and try again.`);
   console.log("Picker mode makes Claude Desktop's own claude.ai traffic go through ClaudeRipple so the model picker can list your GPT models.");
   console.log(
     isWindows
@@ -147,9 +151,10 @@ async function install(): Promise<void> {
   const proxyUrl = proxyUrlFor(cfg.listen.port);
   const caPath = certPaths(home).caPem;
   const maxCtx = opt("max-context-tokens");
-  const edit = applyProxyEnv({ proxyUrl, caPath, force: flag("force"), ...(maxCtx ? { maxContextTokens: Number(maxCtx) } : {}), models: cfg.cli.models ?? {} });
-  console.log(edit.changed ? `✓ ${settingsPath()} updated (backup: ${edit.backup ?? "none"})` : `✓ ${settingsPath()} already correct`);
-  for (const n of edit.notes) console.log(`  note: ${n}`);
+  // settings.json is written last, after the probe: from that write on, every new Claude Code
+  // session sends everything to this router, so it must not point at one that never came up.
+  // A foreign proxy is still refused here, before anything is registered.
+  checkProxyEnv({ proxyUrl, force: flag("force") });
 
   // Persist the single execution contract so the GUI, admin API, hooks, and supervisor all use
   // this installation's runtime rather than any Node installation on the user's PATH.
@@ -198,8 +203,15 @@ async function install(): Promise<void> {
 
   const p = await probeWithRetry({ host: cfg.listen.host, port: cfg.listen.port, caPem: caPath, upstream: cfg.upstream });
   console.log(p.ok ? `✓ end-to-end probe passed (${p.detail}, ${p.ms}ms)` : `✗ probe failed: ${p.detail}`);
-  if (!p.ok) process.exitCode = 1;
-  else console.log("\nDone. New Claude Desktop Code sessions go through ClaudeRipple. Existing sessions pick up settings.json env changes on their next request.");
+  if (!p.ok) {
+    process.exitCode = 1;
+    console.log(`${settingsPath()} was left as it was, so Claude Code does not depend on a router that is not answering. Fix the router, then run install again.`);
+    return;
+  }
+  const edit = applyProxyEnv({ proxyUrl, caPath, force: flag("force"), ...(maxCtx ? { maxContextTokens: Number(maxCtx) } : {}), models: cfg.cli.models ?? {} });
+  console.log(edit.changed ? `✓ ${settingsPath()} updated (backup: ${edit.backup ?? "none"})` : `✓ ${settingsPath()} already correct`);
+  for (const n of edit.notes) console.log(`  note: ${n}`);
+  console.log("\nDone. New Claude Desktop Code sessions go through ClaudeRipple. Existing sessions pick up settings.json env changes on their next request.");
 }
 
 function uninstall(): void {

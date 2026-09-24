@@ -6,7 +6,7 @@ import path from "node:path";
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cr-settings-"));
 process.env.CLAUDE_SETTINGS_PATH = path.join(dir, "settings.json");
-const { applyProxyEnv, removeProxyEnv, currentProxyEnv, syncModelSlots } = await import("../src/settings.ts");
+const { applyProxyEnv, checkProxyEnv, removeProxyEnv, currentProxyEnv, syncModelSlots } = await import("../src/settings.ts");
 
 test("applyProxyEnv adds keys, backs up, preserves other settings; remove restores", () => {
   const file = process.env.CLAUDE_SETTINGS_PATH!;
@@ -31,6 +31,21 @@ test("applyProxyEnv adds keys, backs up, preserves other settings; remove restor
   assert.equal(r.changed, true);
   const after = JSON.parse(fs.readFileSync(file, "utf8"));
   assert.deepEqual(after.env, { FOO: "1" });
+});
+
+// `install` writes settings.json only after the probe passes, so the foreign-proxy refusal has to
+// come first on its own: otherwise it would surface only after the supervisor was registered.
+test("checkProxyEnv refuses a foreign proxy up front and writes nothing", () => {
+  const file = process.env.CLAUDE_SETTINGS_PATH!;
+  const original = JSON.stringify({ env: { HTTPS_PROXY: "http://corp:3128" } });
+  fs.writeFileSync(file, original);
+  assert.throws(() => checkProxyEnv({ proxyUrl: "http://127.0.0.1:8790", force: false }), /already "http:\/\/corp:3128"/);
+  checkProxyEnv({ proxyUrl: "http://127.0.0.1:8790", force: true });
+  checkProxyEnv({ proxyUrl: "http://corp:3128", force: false });
+  assert.equal(fs.readFileSync(file, "utf8"), original);
+  fs.rmSync(file);
+  checkProxyEnv({ proxyUrl: "http://127.0.0.1:8790", force: false });
+  assert.equal(fs.existsSync(file), false);
 });
 
 test("removeProxyEnv leaves foreign proxy values alone", () => {
