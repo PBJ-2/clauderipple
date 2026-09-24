@@ -17,6 +17,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { windowsPowerShellEnv } from "./windows-powershell.ts";
 
 export const TASK_NAME = "ClaudeRippleRouter";
 
@@ -32,6 +33,7 @@ function ps(value: string): string {
 function run(script: string): { ok: boolean; out: string } {
   try {
     const out = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+      env: windowsPowerShellEnv(),
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
     }).toString();

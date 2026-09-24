@@ -2,6 +2,7 @@
 // router's admin API (sign-in started from the GUI).
 
 import { execFileSync } from "node:child_process";
+import { windowsPowerShellEnv } from "./windows-powershell.ts";
 
 /** Returns false if the platform command failed; the caller then shows the URL instead. */
 export function openBrowser(url: string): boolean {
@@ -11,7 +12,7 @@ export function openBrowser(url: string): boolean {
       // at its first parameter and the provider answers "missing_required_parameter" (observed
       // 2026-09-14). Start-Process takes the URL as one argument, quoted PowerShell-style.
       const quoted = `'${url.replace(/'/g, "''")}'`;
-      execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `Start-Process ${quoted}`], { stdio: "ignore", windowsHide: true });
+      execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `Start-Process ${quoted}`], { env: windowsPowerShellEnv(), stdio: "ignore", windowsHide: true });
     } else execFileSync(process.platform === "linux" ? "xdg-open" : "open", [url], { stdio: "ignore" });
     return true;
   } catch {

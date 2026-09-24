@@ -8,6 +8,7 @@ import { adminPort } from "../../router/src/admin.ts";
 import * as launchd from "./launchd.ts";
 import * as schtasks from "./schtasks.ts";
 import * as systemd from "./systemd.ts";
+import { windowsPowerShellEnv } from "./windows-powershell.ts";
 
 export type AgentState = "running" | "loaded" | "not-loaded";
 export type RestartResult = "drained" | "kickstarted" | "failed";
@@ -57,7 +58,7 @@ function askShutdown(): boolean {
     execFileSync(
       "powershell.exe",
       ["-NoProfile", "-NonInteractive", "-Command", `Invoke-RestMethod -Method Post -Uri '${adminUrl()}/api/shutdown' -TimeoutSec 10 | Out-Null`],
-      { stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
+      { env: windowsPowerShellEnv(), stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
     );
     return true;
   } catch {

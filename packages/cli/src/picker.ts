@@ -15,6 +15,7 @@ import crypto, { X509Certificate } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { windowsPowerShellEnv } from "./windows-powershell.ts";
 
 export const CA_NAME = "ClaudeRipple local CA";
 
@@ -136,6 +137,7 @@ function powershell(script: string, opts: { stdio?: "ignore" | "inherit" | "pipe
   const stdio = opts.stdio ?? "pipe";
   const args = ["-NoProfile", ...(opts.interactive ? [] : ["-NonInteractive"]), "-Command", script];
   return execFileSync("powershell.exe", args, {
+    env: windowsPowerShellEnv(),
     stdio: stdio === "pipe" ? ["ignore", "pipe", "pipe"] : stdio,
     windowsHide: !opts.interactive,
   })?.toString() ?? "";
