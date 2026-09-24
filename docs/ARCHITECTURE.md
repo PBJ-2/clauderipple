@@ -493,7 +493,9 @@ chat is out of reach for every approach, ours included.
   turn stateless and keeps the session stateless on that model. Accepting the delta
   instead made the model see an orphan `tool_result`, answer "무엇을 도와드릴까요?", and
   kept `cached_tokens` stuck at the tools prefix. `thread`/`diagnostics` are stripped
-  from `create` requests before forwarding.
+  from `create` requests before forwarding. An `anthropic-compatible` vendor holds no
+  thread either and is refused the same way: forwarding the stripped delta sent DeepSeek
+  (via Bailian) two orphan `tool_result`s and no task (measured 2026-09-24, CLI 2.1.280, #29).
 - **Per-turn billing telemetry.** The first system block is
   `x-anthropic-billing-header: … cch=<hash> …` and the hash changes every turn. Dropped
   from `instructions`, otherwise nothing after it is ever cached. With it dropped and
