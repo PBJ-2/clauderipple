@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.5.0 — 2026-09-24
+
+Linux, and four fixes from the first outside contributions.
+
+### Added
+
+- **Linux** (#28, #33, #34, by @grapefruit0205). `install`, `status`, `restart` and
+  `uninstall` work where there is a systemd user session: the router runs as
+  `~/.config/systemd/user/clauderipple.service`, with no sudo. A health self-exit is
+  restarted after two seconds, and a stop waits out the 90-second drain. Picker mode
+  trusts the local CA in the NSS database Chromium reads (`~/.pki/nssdb`, your user
+  only) and needs `certutil` (`libnss3-tools` / `nss-tools`). Measured by the
+  contributor on Ubuntu 24.04 x64 with Claude Desktop 2.2553.13.
+
+### Fixed
+
+- **`npm test` no longer rewrites your real `~/.claude/settings.json`** (#16, #26, #30).
+  The admin tests isolated the router's home but not the Claude settings path, so a
+  test run pointed `NODE_EXTRA_CA_CERTS` at a temp directory it then deleted, and every
+  Claude Code session on the machine failed until the file was fixed by hand.
+- **A failed install leaves `settings.json` alone** (#27, #31). The proxy settings are
+  now written only after the end-to-end probe passes, and `picker on` checks the
+  router is answering before it points Claude Desktop at it.
+- **Anthropic-compatible providers keep the conversation after a tool call** (#29, #32).
+  Claude Code's `thread: continue` carries only the new messages; the router stripped
+  the field and forwarded that delta, so the model got orphan tool results and no task.
+  It is now refused as for the translated providers, and the CLI resends the full turn.
+- **`picker on` and `status` from a PowerShell 7 terminal on Windows** (#35). Windows
+  PowerShell inherited PowerShell 7's module path and lost the `Cert:` drive: `picker on`
+  stopped at "Cannot find drive 'Cert'" and `status` called a trusted CA untrusted.
+  Every `powershell.exe` we start now drops the inherited `PSModulePath`. Reproduced
+  and checked in a Windows 11 VM.
+
 ## 0.4.1 — 2026-09-24
 
 ### Fixed

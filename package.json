@@ -1,6 +1,6 @@
 {
   "name": "clauderipple",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Use GPT (ChatGPT Plus/Pro), DeepSeek and 400+ other models in the Claude Desktop Code tab and Claude Code while staying signed in to your Claude subscription — no third-party gateway mode. Several ChatGPT accounts that take over when one runs out, in Codex too.",
   "license": "GPL-3.0-only",
   "workspaces": [
