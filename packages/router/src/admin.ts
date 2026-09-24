@@ -412,7 +412,7 @@ function pickerTrust(): { caTrusted: boolean; appProxy: boolean } {
   if (pickerTrustMemo && now - pickerTrustMemo.at < 60_000) return pickerTrustMemo.value;
   let value = { caTrusted: false, appProxy: false };
   try {
-    value = { caTrusted: caTrusted(), appProxy: currentAppProxy().ours };
+    value = { caTrusted: caTrusted(certPaths(homeDir()).caPem), appProxy: currentAppProxy().ours };
   } catch {
     // Unknown counts as not ready; the next poll tries again.
   }

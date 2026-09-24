@@ -1,6 +1,8 @@
 // `clauderipple picker on|off` — put real model names into Claude Desktop's model picker.
 //
-// on:  1. trust our CA in the login keychain (macOS asks the user for their password; we never see it)
+// on:  1. trust our CA for this user: login keychain (macOS asks for the password; we never see it),
+//         Cert:\CurrentUser\Root (Windows shows a confirmation dialog), or the NSS database Chromium
+//         reads on Linux (~/.pki/nssdb; no prompt, no sudo)
 //      2. point the app itself at the router: Config Library entry {egressProxyUrl} + _meta.json appliedId
 //         (~/Library/Application Support/Claude-3p/configLibrary/ — the app keeps its managed-config
 //         library under the "-3p" userData dir in BOTH deployment modes; read once at start, no MDM needed)
@@ -9,7 +11,7 @@
 // off: reverse all three.
 
 import { execFileSync } from "node:child_process";
-import crypto from "node:crypto";
+import crypto, { X509Certificate } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -39,6 +41,85 @@ function loginKeychain(): string {
 }
 
 const isWindows = process.platform === "win32";
+const isLinux = process.platform === "linux";
+
+// ---- Linux: the NSS database ------------------------------------------------------------
+//
+// Chromium on Linux takes locally added roots from the user's NSS database, not from /etc/ssl,
+// and Claude Desktop is Chromium: a CA only in the system bundle would leave the app a blank page
+// behind the router. certutil comes from libnss3-tools, which a desktop install does not always have.
+
+/** Test-only override; production always uses the database Chromium reads. */
+export function nssDb(): string {
+  return process.env.CLAUDERIPPLE_NSS_DB ?? path.join(os.homedir(), ".pki", "nssdb");
+}
+
+/**
+ * The fingerprint is part of the name so a CA from an earlier install is never taken for the
+ * current one: trusting the old one would pass a check by name and still fail every handshake.
+ */
+export function nssNickname(caPem: string): string {
+  return `${CA_NAME} ${new X509Certificate(fs.readFileSync(caPem)).fingerprint256.replace(/:/g, "").slice(0, 24)}`;
+}
+
+function certutil(args: string[]): string {
+  return execFileSync("certutil", ["-d", `sql:${nssDb()}`, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+}
+
+/** Every ClaudeRipple CA in the database, including ones left by an earlier install. */
+function nssOurNicknames(): string[] {
+  let out: string;
+  try {
+    out = certutil(["-L"]);
+  } catch {
+    return [];
+  }
+  // One line per certificate: the nickname, then its trust flags ("C,,") as the last column.
+  return out
+    .split("\n")
+    .map((line) => /^(.*\S)\s+\S*,\S*,\S*\s*$/.exec(line)?.[1])
+    .filter((name): name is string => !!name && name.startsWith(CA_NAME));
+}
+
+export function nssTrusted(caPem: string): boolean {
+  try {
+    const name = nssNickname(caPem);
+    const installed = new X509Certificate(certutil(["-L", "-n", name, "-a"]));
+    if (installed.fingerprint256 !== new X509Certificate(fs.readFileSync(caPem)).fingerprint256) return false;
+    // Validated as an SSL CA (-u L): that is the trust a handshake needs, not mere presence.
+    certutil(["-V", "-n", name, "-u", "L"]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function nssTrust(caPem: string): void {
+  if (nssTrusted(caPem)) return;
+  try {
+    fs.mkdirSync(nssDb(), { recursive: true, mode: 0o700 });
+    if (!fs.existsSync(path.join(nssDb(), "cert9.db"))) certutil(["-N", "--empty-password"]);
+    certutil(["-A", "-n", nssNickname(caPem), "-t", "C,,", "-i", caPem]);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error("certutil not found. Install it (Ubuntu/Debian: `sudo apt install libnss3-tools`, Fedora: `sudo dnf install nss-tools`), then run `clauderipple picker on` again");
+    }
+    throw e;
+  }
+}
+
+/** Removes every ClaudeRipple CA, current or left over from an earlier install. */
+export function nssUntrust(): boolean {
+  const names = nssOurNicknames();
+  for (const name of names) {
+    try {
+      certutil(["-D", "-n", name]);
+    } catch {
+      /* already gone */
+    }
+  }
+  return names.length > 0;
+}
 
 /** Single-quoted PowerShell literal; the only escape inside one is a doubled quote. */
 function ps(value: string): string {
@@ -61,14 +142,16 @@ function powershell(script: string, opts: { stdio?: "ignore" | "inherit" | "pipe
 }
 
 /**
- * Both platforms trust the CA for the current user only — never machine-wide, which would need
+ * Every platform trusts the CA for the current user only — never machine-wide, which would need
  * administrator rights and would affect everyone on the box.
  *   macOS   : login keychain, and the OS asks for the account password.
  *   Windows : Cert:\CurrentUser\Root, and the OS shows a confirmation dialog with the fingerprint.
+ *   Linux   : the user's NSS database (see nssDb), with no prompt at all.
  * Measured on Windows 11 (2026-09-14) as a standard user: the import succeeded with no UAC prompt,
  * only that dialog. Removal shows a second confirmation, so `picker off` prompts the user too.
  */
-export function caTrusted(): boolean {
+export function caTrusted(caPem: string): boolean {
+  if (isLinux) return nssTrusted(caPem);
   try {
     if (isWindows) {
       const out = powershell(`@(Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object { $_.Subject -eq 'CN=${CA_NAME}' }).Count`);
@@ -83,7 +166,8 @@ export function caTrusted(): boolean {
 
 /** Adds the CA as a trusted root for the current user. The OS shows its own prompt; we never see a password. */
 export function trustCa(caPem: string): void {
-  if (caTrusted()) return;
+  if (isLinux) return nssTrust(caPem);
+  if (caTrusted(caPem)) return;
   if (isWindows) {
     // stdio inherit: the confirmation dialog is the OS's, but errors should reach the user's terminal.
     powershell(`Import-Certificate -FilePath ${ps(caPem)} -CertStoreLocation Cert:\\CurrentUser\\Root -ErrorAction Stop | Out-Null`, { stdio: "inherit", interactive: true });
@@ -93,7 +177,8 @@ export function trustCa(caPem: string): void {
 }
 
 export function untrustCa(caPem: string): boolean {
-  if (!caTrusted()) return false;
+  if (isLinux) return nssUntrust();
+  if (!caTrusted(caPem)) return false;
   if (isWindows) {
     try {
       powershell(

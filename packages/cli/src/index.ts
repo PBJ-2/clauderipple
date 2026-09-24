@@ -17,7 +17,7 @@ import { certsExist, certPaths, generateCerts } from "./certs.ts";
 import { applyProxyEnv, checkProxyEnv, currentProxyEnv, removeProxyEnv, settingsPath } from "./settings.ts";
 import { agentDefinitionPath, agentState, installAgent, isLinux, isSupported, isWindows, removeAgent, restartAgent, startAgent, stopAgent, supervisorName } from "./supervisor.ts";
 import { BUNDLE_ID, removeBundle, writeBundle } from "./bundle.ts";
-import { applyAppProxy, caTrusted, currentAppProxy, removeAppProxy, trustCa, untrustCa } from "./picker.ts";
+import { applyAppProxy, caTrusted, currentAppProxy, nssDb, removeAppProxy, trustCa, untrustCa } from "./picker.ts";
 import { runtime } from "./runtime.ts";
 import { codexOff, codexOn } from "./codex.ts";
 import { ingressModels } from "../../router/src/ingress/models.ts";
@@ -38,9 +38,6 @@ async function pickerOn(): Promise<void> {
   const cfg = new ConfigStore(configPath()).get();
   const caPem = certPaths(home).caPem;
   if (!fs.existsSync(path.join(home, "ca.key"))) throw new Error("ca.key missing; run `clauderipple install` first");
-  // Linux has the Config Library (~/.config/Claude-3p, read from Claude Desktop 2.2553.13's bundle)
-  // but no CA trust step yet, and without it the app would reject the router's certificate.
-  if (isLinux) throw new Error("picker mode is not available on Linux yet. Model mapping works without it; the Desktop picker keeps showing Claude's own names.");
   // With picker mode on, every byte Claude Desktop sends goes through the router (ARCHITECTURE §5):
   // pointing the app at one that is not answering leaves it a blank page, so check first.
   const ready = await probe({ host: cfg.listen.host, port: cfg.listen.port, caPem, upstream: cfg.upstream });
@@ -49,11 +46,13 @@ async function pickerOn(): Promise<void> {
   console.log(
     isWindows
       ? "Step 1/3: trusting the ClaudeRipple CA for your Windows user account. Windows will show a confirmation dialog with the certificate fingerprint — answer Yes. No administrator rights are needed."
-      : "Step 1/3: trusting the ClaudeRipple CA in your login keychain. macOS will ask for your password (ClaudeRipple never sees it).",
+      : isLinux
+        ? `Step 1/3: trusting the ClaudeRipple CA in your NSS database (${nssDb()}), which Chromium and so Claude Desktop reads. Your user only; no password, no sudo.`
+        : "Step 1/3: trusting the ClaudeRipple CA in your login keychain. macOS will ask for your password (ClaudeRipple never sees it).",
   );
   trustCa(caPem);
-  if (!caTrusted()) throw new Error("CA is not trusted; picker mode not enabled");
-  console.log(isWindows ? "✓ CA trusted (current user only)" : "✓ CA trusted (login keychain only)");
+  if (!caTrusted(caPem)) throw new Error("CA is not trusted; picker mode not enabled");
+  console.log(isWindows || isLinux ? "✓ CA trusted (current user only)" : "✓ CA trusted (login keychain only)");
   const proxyUrl = proxyUrlFor(cfg.listen.port);
   const r = applyAppProxy(proxyUrl);
   console.log(`✓ Claude Desktop config library entry applied (${r.id}${r.replaced ? `, previous entry ${r.replaced} remembered` : ""}): egressProxyUrl=${proxyUrl}`);
@@ -80,7 +79,7 @@ function pickerOff(): void {
     /* no config */
   }
   if (isWindows) console.log("Removing the CA: Windows will ask you to confirm once more.");
-  const store = isWindows ? "your user certificate store" : "the login keychain";
+  const store = isWindows ? "your user certificate store" : isLinux ? `your NSS database (${nssDb()})` : "the login keychain";
   console.log(untrustCa(certPaths(home).caPem) ? `✓ CA removed from ${store}` : `✓ CA was not in ${store}`);
   console.log("\nQuit and reopen Claude Desktop to apply.");
 }
@@ -264,7 +263,7 @@ async function status(): Promise<void> {
   rows.push(["settings.json", env.HTTPS_PROXY === proxyUrl && env.NODE_EXTRA_CA_CERTS === caPath ? "points at ClaudeRipple" : `HTTPS_PROXY=${env.HTTPS_PROXY ?? "-"} NODE_EXTRA_CA_CERTS=${env.NODE_EXTRA_CA_CERTS ?? "-"}`]);
   rows.push([supervisorName(), agentState()]);
   const ap = currentAppProxy();
-  rows.push(["picker mode", cfg.picker?.enabled ? `on · CA ${caTrusted() ? "trusted" : "NOT trusted"} · app proxy ${ap.ours ? ap.egressProxyUrl : "NOT set"}` : `off${ap.ours ? " (app proxy entry still present — run `picker off`)" : ""}`]);
+  rows.push(["picker mode", cfg.picker?.enabled ? `on · CA ${caTrusted(caPath) ? "trusted" : "NOT trusted"} · app proxy ${ap.ours ? ap.egressProxyUrl : "NOT set"}` : `off${ap.ours ? " (app proxy entry still present — run `picker off`)" : ""}`]);
   const p = await probe({ host: cfg.listen.host, port: cfg.listen.port, caPem: caPath, upstream: cfg.upstream });
   rows.push(["probe", `${p.ok ? "ok" : "FAIL"}: ${p.detail} (${p.ms}ms)`]);
   for (const [name, p2] of Object.entries(cfg.providers)) {

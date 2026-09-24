@@ -128,7 +128,8 @@ Yes, on Windows and macOS, arm64 and x64. Install, dashboard, restart and uninst
 measured on Windows 11 arm64; the x64 runtime is measured under emulation. Linux works too
 where there is a systemd user session: install, a Code-tab request through the router, a
 restart in the middle of a streaming answer and uninstall are measured on Ubuntu 24.04 x64
-with Claude Desktop 2.2553.13. Picker mode is not available on Linux yet.
+with Claude Desktop 2.2553.13, and so is picker mode: models from `cli.extraModels` show
+in the Code-tab picker next to Claude's own.
 
 ### Is my code sent anywhere else?
 
@@ -279,8 +280,9 @@ curl -fsSL https://raw.githubusercontent.com/PBJ-2/clauderipple/main/scripts/ins
 ```
 
 The router runs as a per-user systemd service: `systemctl --user status clauderipple`, and
-`journalctl --user -u clauderipple` for what it printed. Picker mode is not available on Linux
-yet; model mapping works without it.
+`journalctl --user -u clauderipple` for what it printed. Picker mode trusts the local CA in the
+NSS database Chromium reads (`~/.pki/nssdb`, your user only, no sudo), which takes `certutil`:
+run `sudo apt install libnss3-tools` (Fedora: `sudo dnf install nss-tools`) before `clauderipple picker on`.
 
 That is the whole prerequisite list. The script uses a Node 24+ you already have, and
 downloads the official build into `~/.clauderipple/runtime` when you have none,
@@ -323,12 +325,13 @@ clauderipple restart
 Optional, for real names in the Desktop picker: **Clients → Claude Desktop → Model
 picker → on**, then quit and reopen Claude Desktop. To trust the local certificate
 for your user only, macOS asks for your login password and Windows shows a
-confirmation dialog with the fingerprint — ClaudeRipple never sees a password, and
-neither platform needs administrator rights.
+confirmation dialog with the fingerprint; Linux adds it to your NSS database without asking.
+ClaudeRipple never sees a password, and no platform needs administrator rights.
 
 > **Closing Claude Desktop's window is not enough.** It keeps running, and the next
 > launch reuses it without reading the new setting. Quit it properly (macOS: ⌘Q;
-> Windows: the tray icon, or Task Manager) or the picker will silently not change.
+> Windows: the tray icon, or Task Manager; Linux: Ctrl+Q or the tray icon, until
+> `pgrep -f claude-desktop` prints nothing) or the picker will silently not change.
 
 <details>
 <summary>From source (Node 24)</summary>
