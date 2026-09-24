@@ -19,6 +19,7 @@
   <a href="LICENSE"><img alt="GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-blue"></a>
   <img alt="macOS" src="https://img.shields.io/badge/macOS-arm64%20%7C%20x64-black">
   <img alt="Windows" src="https://img.shields.io/badge/Windows-arm64%20%7C%20x64-0078D4">
+  <img alt="Linux" src="https://img.shields.io/badge/Linux-x64%20(systemd)-FCC624">
   <img alt="Node" src="https://img.shields.io/badge/node-24%2B-success">
   <a href="README.md"><img alt="English" src="https://img.shields.io/badge/docs-English-blue"></a>
 </p>
@@ -432,6 +433,9 @@ Codex 앱 / CLI ──/v1/responses──▶ ClaudeRipple 입구 ──▶ Claud
 - **Windows 지원은 이제 막 들어갔습니다(2026-09-14).** 설치·설정·라우터·로그인·피커·실제 GPT 호출까지 x64
   실기에서 확인했고, 크래시 복구는 arm64에서 확인했습니다. 창은 아직 Windows 기본 제목 표시줄을 씁니다.
   Windows 빌드는 서명되지 않았습니다(위 설치 항목 참고).
+- **Linux 지원도 이제 막 들어갔습니다(2026-09-24).** 기여자가 Ubuntu 24.04 x64에서 설치·Code 탭 요청·스트리밍
+  도중 재시작·피커 모드·제거를 실측해 보내 주었습니다. systemd 사용자 세션이 필요하고, 다른 배포판과 arm64는
+  확인하지 않았습니다.
 - ChatGPT, OpenRouter, Codex 안의 Claude는 실제 계정으로 검증했습니다. 나머지 프리셋은 벤더 공식 문서를 따릅니다.
 - 피커에 추가한 모델은 다음 세션부터 쓸 수 있습니다.
 - Claude Code와 Codex는 통신 규약을 자주 바꿉니다. 클라이언트 업데이트가 번역을 깨뜨리면 ClaudeRipple이 따라잡을 때까지

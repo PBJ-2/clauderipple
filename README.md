@@ -20,6 +20,7 @@
   <a href="LICENSE"><img alt="GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-blue"></a>
   <img alt="macOS" src="https://img.shields.io/badge/macOS-arm64%20%7C%20x64-black">
   <img alt="Windows" src="https://img.shields.io/badge/Windows-arm64%20%7C%20x64-0078D4">
+  <img alt="Linux" src="https://img.shields.io/badge/Linux-x64%20(systemd)-FCC624">
   <img alt="Node" src="https://img.shields.io/badge/node-24%2B-success">
   <a href="README.ko.md"><img alt="한국어" src="https://img.shields.io/badge/docs-한국어-red"></a>
 </p>
@@ -500,6 +501,9 @@ In daily use by the author, but young. Expect rough edges:
   in, the picker and a live GPT call are verified on x64 hardware; crash recovery
   on arm64. The window still has the stock Windows title bar. Windows builds are
   unsigned; see the note under Install.
+- **Linux support is new (2026-09-24)**, contributed with measurements on Ubuntu
+  24.04 x64 (install, a Code-tab request, restart mid-stream, picker mode, uninstall).
+  It needs a systemd user session; other distributions and arm64 are untested.
 - ChatGPT, OpenRouter and Claude-in-Codex are verified with live accounts; the
   other presets follow the vendors' official documentation.
 - A model added to the picker is usable from the next session.
