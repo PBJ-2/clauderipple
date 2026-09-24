@@ -14,7 +14,8 @@ test("powershell.exe is started without an inherited PSModulePath, in any case, 
     const env = windowsPowerShellEnv();
     assert.equal(Object.keys(env).some((k) => k.toLowerCase() === "psmodulepath"), false);
     assert.equal(env.CR_TEST_KEEP, "1");
-    assert.equal(env.PATH, process.env.PATH);
+    // Every other key survives with its stored case (Windows keeps PATH as "Path").
+    for (const [k, v] of Object.entries(process.env)) if (k.toLowerCase() !== "psmodulepath") assert.equal(env[k], v, k);
   } finally {
     for (const k of keys) {
       if (saved[k] === undefined) delete process.env[k];
