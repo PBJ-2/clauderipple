@@ -25,6 +25,9 @@ const BINARY_NAMES = isWindows ? ["claude.exe", "claude.cmd", "claude.bat"] : ["
 
 /** Where Claude Desktop caches the CLI it downloads, per platform. */
 export function desktopClaudeCodeDirs(): string[] {
+  // Linux: Electron's userData is $XDG_CONFIG_HOME/Claude (seen with Claude Desktop 2.2553.13 on
+  // Ubuntu 24.04: ~/.config/Claude/claude-code/2.1.280/claude, a plain executable).
+  if (process.platform === "linux") return [path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "Claude", "claude-code")];
   if (!isWindows) return [path.join(os.homedir(), "Library", "Application Support", "Claude", "claude-code")];
   const roots = [
     process.env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local"),
@@ -35,6 +38,7 @@ export function desktopClaudeCodeDirs(): string[] {
 
 /** Launcher inside one cached version directory. The macOS build nests an .app bundle. */
 function versionBinaries(versionDir: string): string[] {
+  if (process.platform === "linux") return [path.join(versionDir, "claude")];
   return isWindows
     ? BINARY_NAMES.map((name) => path.join(versionDir, name))
     : [path.join(versionDir, "claude.app", "Contents", "MacOS", "claude")];

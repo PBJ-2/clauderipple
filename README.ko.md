@@ -111,7 +111,9 @@ ChatGPT 구독으로 GPT를 쓰고, OpenRouter나 직접 API 키로 DeepSeek·Ki
 ### 윈도우에서도 되나요?
 
 됩니다. macOS와 Windows, arm64와 x64 모두. 설치·대시보드·재시작·제거를 Windows 11 arm64에서 실측했고,
-x64 런타임은 에뮬레이션으로 확인했습니다.
+x64 런타임은 에뮬레이션으로 확인했습니다. systemd 사용자 세션이 있는 Linux에서도 됩니다. 설치, 라우터를 거친
+Code 탭 요청, 스트리밍 응답 도중의 재시작, 제거를 Ubuntu 24.04 x64와 Claude Desktop 2.2553.13에서
+실측했습니다. Linux에서는 아직 피커 모드를 쓸 수 없습니다.
 
 ### 제 코드가 다른 데로 가나요?
 
@@ -227,6 +229,16 @@ curl -fsSL https://raw.githubusercontent.com/PBJ-2/clauderipple/main/scripts/ins
 ```powershell
 irm https://raw.githubusercontent.com/PBJ-2/clauderipple/main/scripts/install.ps1 | iex
 ```
+
+**Linux** (systemd가 있는 데스크톱 세션)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/PBJ-2/clauderipple/main/scripts/install.sh | sh
+```
+
+라우터는 사용자 단위 systemd 서비스로 돕니다. 상태는 `systemctl --user status clauderipple`, 출력은
+`journalctl --user -u clauderipple`로 봅니다. Linux에서는 아직 피커 모드를 쓸 수 없습니다. 모델 매핑은
+피커 없이도 됩니다.
 
 준비물은 없습니다. 이미 Node 24 이상이 있으면 그것을 쓰고, 없으면 공식 빌드를 `~/.clauderipple/runtime`에
 내려받습니다. 내려받은 파일은 nodejs.org가 공개한 체크섬과 대조합니다. 그다음 설치까지 마칩니다. 로컬 인증서,

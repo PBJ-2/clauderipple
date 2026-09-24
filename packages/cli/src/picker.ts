@@ -24,6 +24,9 @@ function appSupport(): string {
   if (process.platform === "win32") {
     return path.join(process.env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local"), "Claude-3p");
   }
+  // Linux userData is $XDG_CONFIG_HOME/Claude, so the same "-3p" rule gives ~/.config/Claude-3p
+  // (Claude Desktop 2.2553.13's bundle: `${app.getPath("userData")}-3p`, no Linux special case).
+  if (process.platform === "linux") return path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "Claude-3p");
   return path.join(os.homedir(), "Library", "Application Support", "Claude-3p");
 }
 

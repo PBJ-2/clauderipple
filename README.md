@@ -125,7 +125,10 @@ through OpenRouter or a direct API key. Claude models keep working as they are.
 ### Does it work on Windows?
 
 Yes, on Windows and macOS, arm64 and x64. Install, dashboard, restart and uninstall are
-measured on Windows 11 arm64; the x64 runtime is measured under emulation.
+measured on Windows 11 arm64; the x64 runtime is measured under emulation. Linux works too
+where there is a systemd user session: install, a Code-tab request through the router, a
+restart in the middle of a streaming answer and uninstall are measured on Ubuntu 24.04 x64
+with Claude Desktop 2.2553.13. Picker mode is not available on Linux yet.
 
 ### Is my code sent anywhere else?
 
@@ -268,6 +271,16 @@ curl -fsSL https://raw.githubusercontent.com/PBJ-2/clauderipple/main/scripts/ins
 ```powershell
 irm https://raw.githubusercontent.com/PBJ-2/clauderipple/main/scripts/install.ps1 | iex
 ```
+
+**Linux** (a desktop session with systemd)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/PBJ-2/clauderipple/main/scripts/install.sh | sh
+```
+
+The router runs as a per-user systemd service: `systemctl --user status clauderipple`, and
+`journalctl --user -u clauderipple` for what it printed. Picker mode is not available on Linux
+yet; model mapping works without it.
 
 That is the whole prerequisite list. The script uses a Node 24+ you already have, and
 downloads the official build into `~/.clauderipple/runtime` when you have none,
