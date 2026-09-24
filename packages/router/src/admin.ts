@@ -33,6 +33,7 @@ import { codexEnabled, codexHome } from "../../cli/src/codex.ts";
 import { openBrowser } from "../../cli/src/browser.ts";
 import { caTrusted, currentAppProxy } from "../../cli/src/picker.ts";
 import { certPaths } from "../../cli/src/certs.ts";
+import { desktopClaudeCodeDirs } from "../../cli/src/claude-auth.ts";
 import { syncModelSlots } from "../../cli/src/settings.ts";
 import { ClaudeOAuthSession, type ClaudeOAuthState } from "./providers/claude-oauth.ts";
 import { readClaudeAuthFile } from "./providers/anthropic-token-file.ts";
@@ -240,17 +241,21 @@ function uiRevision(): string {
   }
 }
 
+/** Newest CLI the Desktop app has cached, from the same per-platform directories sign-in uses. */
 function cliVersion(): string {
-  const dir = path.join(os.homedir(), "Library", "Application Support", "Claude", "claude-code");
-  try {
-    const versions = fs
-      .readdirSync(dir)
-      .filter((d) => /^\d+\.\d+\.\d+$/.test(d))
-      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-    return versions.length ? versions[versions.length - 1]! : "none";
-  } catch {
-    return "n/a";
+  let readable = false;
+  const versions: string[] = [];
+  for (const dir of desktopClaudeCodeDirs()) {
+    try {
+      versions.push(...fs.readdirSync(dir).filter((d) => /^\d+\.\d+\.\d+$/.test(d)));
+      readable = true;
+    } catch {
+      /* not this platform's layout, or no Desktop app */
+    }
   }
+  if (!readable) return "n/a";
+  versions.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  return versions.at(-1) ?? "none";
 }
 
 function tcpReachable(hostname: string, port: number, timeoutMs = 2000): Promise<boolean> {

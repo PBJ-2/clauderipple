@@ -1,4 +1,5 @@
-// One supervisor interface, two implementations: launchd on macOS, Task Scheduler on Windows.
+// One supervisor interface, three implementations: launchd on macOS, Task Scheduler on Windows,
+// a systemd user service on Linux.
 // Everything outside this module talks to the router's lifecycle through here.
 
 import { execFileSync } from "node:child_process";
@@ -6,39 +7,42 @@ import { ConfigStore, configPath } from "../../router/src/config.ts";
 import { adminPort } from "../../router/src/admin.ts";
 import * as launchd from "./launchd.ts";
 import * as schtasks from "./schtasks.ts";
+import * as systemd from "./systemd.ts";
 
 export type AgentState = "running" | "loaded" | "not-loaded";
 export type RestartResult = "drained" | "kickstarted" | "failed";
 
 export const isWindows = process.platform === "win32";
-export const isSupported = isWindows || process.platform === "darwin";
+export const isLinux = process.platform === "linux";
+export const isSupported = isWindows || isLinux || process.platform === "darwin";
 
 /** What the supervisor is called on this platform, for messages the user reads. */
 export function supervisorName(): string {
-  return isWindows ? "scheduled task" : "launchd agent";
+  return isWindows ? "scheduled task" : isLinux ? "systemd user service" : "launchd agent";
 }
 
 export function installAgent(opts: { program: string; args?: string[]; bundleId?: string; home: string; env?: Record<string, string> }): string {
-  return isWindows ? schtasks.installAgent(opts) : launchd.installAgent(opts);
+  return isWindows ? schtasks.installAgent(opts) : isLinux ? systemd.installAgent(opts) : launchd.installAgent(opts);
 }
 
 export function removeAgent(): boolean {
-  return isWindows ? schtasks.removeAgent() : launchd.removeAgent();
+  return isWindows ? schtasks.removeAgent() : isLinux ? systemd.removeAgent() : launchd.removeAgent();
 }
 
 export function agentState(): AgentState {
-  return isWindows ? schtasks.agentState() : launchd.agentState();
+  return isWindows ? schtasks.agentState() : isLinux ? systemd.agentState() : launchd.agentState();
 }
 
 export function agentPid(): number | null {
-  return isWindows ? schtasks.agentPid() : launchd.agentPid();
+  return isWindows ? schtasks.agentPid() : isLinux ? systemd.agentPid() : launchd.agentPid();
 }
 
 export function startAgent(): "already-running" | "started" | "failed" {
-  return isWindows ? schtasks.startAgent() : launchd.startAgent();
+  return isWindows ? schtasks.startAgent() : isLinux ? systemd.startAgent() : launchd.startAgent();
 }
 
 export function stopAgent(): boolean {
+  if (isLinux) return systemd.stopAgent();
   if (!isWindows) return launchd.stopAgent();
   // Ask the router to drain first: a clean exit also ends the launcher's supervision loop, so the
   // task does not relaunch it. Then stop the task itself to clear anything left behind.
@@ -108,10 +112,10 @@ function restartWindows(opts: { waitMs?: number; onProgress?: (msg: string) => v
 }
 
 export function restartAgent(opts: { waitMs?: number; onProgress?: (msg: string) => void } = {}): RestartResult {
-  return isWindows ? restartWindows(opts) : launchd.restartAgent(opts);
+  return isWindows ? restartWindows(opts) : isLinux ? systemd.restartAgent(opts) : launchd.restartAgent(opts);
 }
 
 /** Path to the supervisor's own definition, for status output. */
 export function agentDefinitionPath(): string {
-  return isWindows ? `Task Scheduler\\${schtasks.taskName()}` : launchd.plistPath();
+  return isWindows ? `Task Scheduler\\${schtasks.taskName()}` : isLinux ? systemd.unitPath() : launchd.plistPath();
 }

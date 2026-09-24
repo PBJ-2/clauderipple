@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // clauderipple — install / uninstall / status / start / stop / restart / logs / config
 //
-// install:   generates the local CA + leaf, writes a starter config, registers the launchd
-//            agent, probes the whole chain end to end, and only then points
-//            ~/.claude/settings.json env at the router.
+// install:   generates the local CA + leaf, writes a starter config, registers the supervisor
+//            (launchd / Task Scheduler / systemd), probes the whole chain end to end, and only
+//            then points ~/.claude/settings.json env at the router.
 // uninstall: reverses exactly that. Home dir is kept unless --purge.
 
 import fs from "node:fs";
@@ -15,7 +15,7 @@ import { ConfigStore, DEFAULTS, homeDir, configPath } from "../../router/src/con
 import { adminPort } from "../../router/src/admin.ts";
 import { certsExist, certPaths, generateCerts } from "./certs.ts";
 import { applyProxyEnv, checkProxyEnv, currentProxyEnv, removeProxyEnv, settingsPath } from "./settings.ts";
-import { agentDefinitionPath, agentState, installAgent, isSupported, isWindows, removeAgent, restartAgent, startAgent, stopAgent, supervisorName } from "./supervisor.ts";
+import { agentDefinitionPath, agentState, installAgent, isLinux, isSupported, isWindows, removeAgent, restartAgent, startAgent, stopAgent, supervisorName } from "./supervisor.ts";
 import { BUNDLE_ID, removeBundle, writeBundle } from "./bundle.ts";
 import { applyAppProxy, caTrusted, currentAppProxy, removeAppProxy, trustCa, untrustCa } from "./picker.ts";
 import { runtime } from "./runtime.ts";
@@ -38,6 +38,9 @@ async function pickerOn(): Promise<void> {
   const cfg = new ConfigStore(configPath()).get();
   const caPem = certPaths(home).caPem;
   if (!fs.existsSync(path.join(home, "ca.key"))) throw new Error("ca.key missing; run `clauderipple install` first");
+  // Linux has the Config Library (~/.config/Claude-3p, read from Claude Desktop 2.2553.13's bundle)
+  // but no CA trust step yet, and without it the app would reject the router's certificate.
+  if (isLinux) throw new Error("picker mode is not available on Linux yet. Model mapping works without it; the Desktop picker keeps showing Claude's own names.");
   // With picker mode on, every byte Claude Desktop sends goes through the router (ARCHITECTURE §5):
   // pointing the app at one that is not answering leaves it a blank page, so check first.
   const ready = await probe({ host: cfg.listen.host, port: cfg.listen.port, caPem, upstream: cfg.upstream });
@@ -134,7 +137,7 @@ function proxyUrlFor(port: number): string {
 async function install(): Promise<void> {
   const home = homeDir();
   const port = Number(opt("port") ?? DEFAULTS.listen.port);
-  if (!isSupported) throw new Error(`install supports macOS and Windows; on ${process.platform} run the router manually.`);
+  if (!isSupported) throw new Error(`install supports macOS, Windows and Linux (systemd); on ${process.platform} run the router manually.`);
   fs.mkdirSync(home, { recursive: true, mode: 0o700 });
 
   if (!certsExist(home)) {
@@ -173,9 +176,9 @@ async function install(): Promise<void> {
       2,
     ) + "\n",
   );
-  // Windows registers node + the router script directly (schtasks.ts writes its own .cmd launcher);
-  // a macOS source checkout gets a small .app so the agent shows a real name in Login Items.
-  if (installedRuntime.packaged || isWindows) {
+  // Windows and Linux register node + the router script directly (schtasks.ts writes its own .cmd
+  // launcher); a macOS source checkout gets a small .app so the agent shows a real name in Login Items.
+  if (installedRuntime.packaged || isWindows || isLinux) {
     const plist = installAgent({
       program: installedRuntime.node,
       args: [installedRuntime.router],
@@ -183,7 +186,7 @@ async function install(): Promise<void> {
       home,
       env: { ...installedRuntime.env, ...(process.env.CLAUDE_SETTINGS_PATH ? { CLAUDE_SETTINGS_PATH: process.env.CLAUDE_SETTINGS_PATH } : {}) },
     });
-    console.log(`✓ ${supervisorName()} registered: ${plist} (shows as "ClaudeRipple" in Login Items)`);
+    console.log(`✓ ${supervisorName()} registered: ${plist}${isLinux ? "" : ' (shows as "ClaudeRipple" in Login Items)'}`);
   } else {
     const launcher = writeBundle({ home, node: installedRuntime.node, script: installedRuntime.router, version: VERSION });
     console.log(`✓ background item bundle written: ${path.dirname(path.dirname(path.dirname(launcher)))} (shows as "ClaudeRipple" in Login Items)`);

@@ -12,7 +12,7 @@ export function openBrowser(url: string): boolean {
       // 2026-09-14). Start-Process takes the URL as one argument, quoted PowerShell-style.
       const quoted = `'${url.replace(/'/g, "''")}'`;
       execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `Start-Process ${quoted}`], { stdio: "ignore", windowsHide: true });
-    } else execFileSync("open", [url], { stdio: "ignore" });
+    } else execFileSync(process.platform === "linux" ? "xdg-open" : "open", [url], { stdio: "ignore" });
     return true;
   } catch {
     return false;
