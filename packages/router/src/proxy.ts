@@ -788,6 +788,17 @@ export class Proxy {
         if (routeEffort) record.effort = routeEffort;
         tag = `CLAUDE ${route.tag} account=${using.ownerId?.slice(0, 8) ?? "current"}`;
       } else {
+      // An Anthropic-shaped endpoint keeps no server-side thread either, so a `continue` is refused
+      // here as it is for the translated providers. sanitizeForCompatible used to strip the field
+      // and forward the rest, which is only the delta: DeepSeek (via Bailian) received two orphan
+      // tool_results with no task and answered that none had been given (measured 2026-09-24, CLI
+      // 2.1.280). Refused, the CLI resends the turn with the full history.
+      if (threadDecision(json) === "refuse") {
+        const out = JSON.stringify(THREAD_UNSUPPORTED);
+        res.writeHead(400, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
+        finish("400", out.length, "thread continue refused → CLI resends stateless", false);
+        return;
+      }
       const preset = provider.preset ? PRESETS.find((entry) => entry.id === provider.preset) : undefined;
       const modelEffortLevels = provider.models?.find((entry) => entry.id === route.model)?.effortLevels;
       compatCaps = resolveCompatibleCaps(
