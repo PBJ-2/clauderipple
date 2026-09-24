@@ -113,7 +113,7 @@ ChatGPT 구독으로 GPT를 쓰고, OpenRouter나 직접 API 키로 DeepSeek·Ki
 됩니다. macOS와 Windows, arm64와 x64 모두. 설치·대시보드·재시작·제거를 Windows 11 arm64에서 실측했고,
 x64 런타임은 에뮬레이션으로 확인했습니다. systemd 사용자 세션이 있는 Linux에서도 됩니다. 설치, 라우터를 거친
 Code 탭 요청, 스트리밍 응답 도중의 재시작, 제거를 Ubuntu 24.04 x64와 Claude Desktop 2.2553.13에서
-실측했습니다. Linux에서는 아직 피커 모드를 쓸 수 없습니다.
+실측했습니다. 피커 모드도 됩니다. `cli.extraModels`의 모델이 Code 탭 피커에 Claude 모델과 나란히 뜹니다.
 
 ### 제 코드가 다른 데로 가나요?
 
@@ -237,8 +237,9 @@ curl -fsSL https://raw.githubusercontent.com/PBJ-2/clauderipple/main/scripts/ins
 ```
 
 라우터는 사용자 단위 systemd 서비스로 돕니다. 상태는 `systemctl --user status clauderipple`, 출력은
-`journalctl --user -u clauderipple`로 봅니다. Linux에서는 아직 피커 모드를 쓸 수 없습니다. 모델 매핑은
-피커 없이도 됩니다.
+`journalctl --user -u clauderipple`로 봅니다. 피커 모드는 Chromium이 읽는 NSS 데이터베이스
+(`~/.pki/nssdb`, 내 사용자에게만, sudo 없이)에 로컬 CA를 등록하므로 `certutil`이 필요합니다.
+`clauderipple picker on` 전에 `sudo apt install libnss3-tools`(Fedora는 `sudo dnf install nss-tools`)를 실행하세요.
 
 준비물은 없습니다. 이미 Node 24 이상이 있으면 그것을 쓰고, 없으면 공식 빌드를 `~/.clauderipple/runtime`에
 내려받습니다. 내려받은 파일은 nodejs.org가 공개한 체크섬과 대조합니다. 그다음 설치까지 마칩니다. 로컬 인증서,
@@ -278,11 +279,12 @@ clauderipple restart
 
 선택 사항, Desktop 피커에 실제 이름을 띄우려면: **클라이언트 → Claude Desktop → 모델 피커 → 켜기**. 그다음 Claude
 Desktop을 완전히 종료했다가 다시 엽니다. 로컬 인증서를 사용자 범위로만 신뢰시키는데, 이때 macOS는 로그인 암호를
-묻고 Windows는 지문이 적힌 확인 창을 띄웁니다. ClaudeRipple은 암호를 보지 않으며, 양쪽 다 관리자 권한이 필요
-없습니다.
+묻고 Windows는 지문이 적힌 확인 창을 띄웁니다. Linux는 묻지 않고 NSS 데이터베이스에 등록합니다. ClaudeRipple은
+암호를 보지 않으며, 어느 플랫폼도 관리자 권한이 필요 없습니다.
 
 > **Claude Desktop은 창을 닫아도 종료되지 않습니다.** 그 상태로 다시 열면 이전 인스턴스를 재사용해서 새 설정을
-> 읽지 않습니다. 제대로 종료하십시오(macOS는 ⌘Q, Windows는 트레이 아이콘 또는 작업 관리자). 안 그러면 피커가
+> 읽지 않습니다. 제대로 종료하십시오(macOS는 ⌘Q, Windows는 트레이 아이콘 또는 작업 관리자, Linux는 Ctrl+Q 또는
+> 트레이 아이콘. `pgrep -f claude-desktop`이 아무것도 출력하지 않을 때까지). 안 그러면 피커가
 > 아무 말 없이 그대로입니다.
 
 <details>
