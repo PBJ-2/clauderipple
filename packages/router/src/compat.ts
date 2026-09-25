@@ -110,6 +110,31 @@ function stripCacheControl(value: unknown): { value: unknown; count: number } {
   return { value: out, count };
 }
 
+// Claude Code's first system block is Anthropic billing telemetry
+// ("x-anthropic-billing-header: … cch=… cc_prompt_id=… cc_turn_origin=…"). The CLI adds those
+// per-turn fields only when it believes it is talking to api.anthropic.com — which, behind this
+// router's MITM proxy, it always does — and their values change on every turn. Left in, the block
+// sits at the head of the prefix and nothing after it is ever cached by a vendor that keeps a
+// plain stable-prefix cache. Measured 2026-09-25 on Bailian DeepSeek: all 399 requests of two days
+// reported cached=0 over 69.8M input tokens; two identical bodies cached 3,584 of ~3,700 tokens
+// with the block held constant and 0 on all three calls with its fields varied per request. The
+// translated providers drop it for the same reason (`systemText` in providers/chatgpt/translate.ts,
+// measured 2026-09-13), and it means nothing to a provider that is not Anthropic.
+const BILLING_BLOCK = /^x-anthropic-billing-header:/;
+
+function stripBillingHeader(system: unknown): { value: unknown; removed: number } {
+  if (typeof system === "string") {
+    const value = system.replace(/^x-anthropic-billing-header:[^\n]*\n*/, "");
+    return { value, removed: value === system ? 0 : 1 };
+  }
+  if (!Array.isArray(system)) return { value: system, removed: 0 };
+  const value = system.filter((block) => {
+    const source = record(block);
+    return !(source && typeof source.text === "string" && BILLING_BLOCK.test(source.text));
+  });
+  return { value, removed: system.length - value.length };
+}
+
 /**
  * Remove extensions Claude Code sends only to Anthropic. This deliberately retains content
  * verbatim except cache_control when the provider explicitly rejects prompt caching.
@@ -197,6 +222,16 @@ export function sanitizeForCompatible(json: Record<string, unknown>, caps: Resol
     if (toolChoice && typeof toolChoice.name === "string" && droppedNames.has(toolChoice.name)) {
       delete out.tool_choice;
       changes.push("tool_choice");
+    }
+  }
+
+  if ("system" in out) {
+    const next = stripBillingHeader(out.system);
+    if (next.removed > 0) {
+      // An emptied array would be a system the provider has to reject; the field goes with the block.
+      if (Array.isArray(next.value) && next.value.length === 0) delete out.system;
+      else out.system = next.value;
+      changes.push(`billing_header×${next.removed}`);
     }
   }
 

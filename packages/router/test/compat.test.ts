@@ -108,3 +108,45 @@ test("a provider that runs server tools keeps them; one that does not still lose
   assert.equal("tool_choice" in dropped.json, false);
   assert.ok(dropped.changes.includes("server_tools×1"));
 });
+
+// The billing header carries fields Claude Code rewrites every turn (`cc_prompt_id`, `cc_prev_req`,
+// `cc_turn_origin`) and sits at the head of the system prompt, so on a vendor with a plain
+// stable-prefix cache it costs the whole request. Measured 2026-09-25 on Bailian DeepSeek:
+// cached=0 on every one of 399 requests over two days (69.8M input tokens), and ~3.6k of ~3.7k
+// cached in a controlled pair once the block was held constant.
+test("the per-turn billing header is dropped, and a system that was only the header goes with it", () => {
+  const header =
+    "x-anthropic-billing-header: cc_version=2.1.280; cc_entrypoint=claude-desktop; " +
+    "cch=00000; cc_prompt_id=5d64fb90-dd33-47f1-9733-dd4ebb282e7e; cc_turn_origin=human;";
+
+  const withBlocks = sanitizeForCompatible({
+    model: "m",
+    messages: [],
+    system: [{ type: "text", text: header }, { type: "text", text: "You are a Claude agent." }],
+  }, STRICT_COMPAT_CAPS);
+  assert.deepEqual(withBlocks.json.system, [{ type: "text", text: "You are a Claude agent." }]);
+  assert.ok(withBlocks.changes.includes("billing_header×1"));
+
+  const stringForm = sanitizeForCompatible({
+    model: "m",
+    messages: [],
+    system: `${header}\n\nYou are a Claude agent.`,
+  }, STRICT_COMPAT_CAPS);
+  assert.equal(stringForm.json.system, "You are a Claude agent.");
+
+  const onlyHeader = sanitizeForCompatible({
+    model: "m",
+    messages: [],
+    system: [{ type: "text", text: header }],
+  }, STRICT_COMPAT_CAPS);
+  assert.equal("system" in onlyHeader.json, false);
+
+  // A block that merely mentions the header further down is content, not telemetry.
+  const midText = sanitizeForCompatible({
+    model: "m",
+    messages: [],
+    system: [{ type: "text", text: "see x-anthropic-billing-header: later" }],
+  }, STRICT_COMPAT_CAPS);
+  assert.deepEqual(midText.json.system, [{ type: "text", text: "see x-anthropic-billing-header: later" }]);
+  assert.equal(midText.changes.some((c) => c.startsWith("billing_header")), false);
+});
