@@ -92,6 +92,17 @@ NPM_CLI="$(dirname "$NODE")/../lib/node_modules/npm/bin/npm-cli.js"
 # Installed under our own prefix rather than the Node installation's: no permission prompt, no
 # EACCES on a Node that root owns, and uninstalling is removing one directory.
 
+# Until 0.6 the tray's Electron (~270MB) was fetched into the package's own node_modules, and
+# installing any other version deleted it with the old files. It now lives in ClaudeRipple's home;
+# one found in the old place is moved there rather than fetched again.
+HOME_DIR="${CLAUDERIPPLE_HOME:-$HOME/.clauderipple}"
+OLD_ELECTRON="$PREFIX/lib/node_modules/clauderipple/node_modules/electron"
+NEW_ELECTRON="$HOME_DIR/tray-runtime/node_modules/electron"
+if [ -d "$OLD_ELECTRON" ] && [ ! -e "$NEW_ELECTRON" ]; then
+  mkdir -p "$(dirname "$NEW_ELECTRON")"
+  mv "$OLD_ELECTRON" "$NEW_ELECTRON" && say "Moved the tray's Electron to $NEW_ELECTRON"
+fi
+
 say "Installing $PACKAGE…"
 "$NODE" "$NPM_CLI" install --global --prefix "$PREFIX" --loglevel error "$PACKAGE"
 

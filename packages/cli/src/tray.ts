@@ -11,21 +11,36 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
+import { homeDir } from "../../router/src/config.ts";
 import { runtime } from "./runtime.ts";
 
 /** Electron version to fetch on request. Kept in step with the one the app is developed against. */
 const ELECTRON_RANGE = "^38.1.0";
 
-/** The Electron executable installed alongside us, or null when the optional dependency is absent. */
-export function electronPath(): string | null {
+/**
+ * Where Electron is fetched to: ClaudeRipple's home, not the package. Until 0.6 it went into the
+ * installed package's own node_modules, and every update replaced that folder — measured
+ * 2026-09-28, `npm install -g` of another version left no trace of it, so the tray was gone after
+ * each update, and on Windows a running tray held electron.exe inside the folder being replaced.
+ */
+export function trayRuntimeDir(): string {
+  return path.join(homeDir(), "tray-runtime");
+}
+
+/** The electron package exports the path to its binary as its module value. */
+function resolveElectron(from: string): string | null {
   try {
-    const require = createRequire(import.meta.url);
-    // The electron package exports the path to its binary as its module value.
-    const value = require("electron") as unknown;
+    const value = createRequire(from)("electron") as unknown;
     return typeof value === "string" && fs.existsSync(value) ? value : null;
   } catch {
     return null;
   }
+}
+
+/** The Electron executable to run the tray with, or null when none has been fetched. */
+export function electronPath(): string | null {
+  // A checkout or an install from before 0.6 resolves it next to us.
+  return resolveElectron(path.join(trayRuntimeDir(), "package.json")) ?? resolveElectron(import.meta.url);
 }
 
 export type TrayStart = { ok: boolean; message: string };
@@ -91,8 +106,9 @@ export function installTrayRuntime(): TrayStart {
   if (electronPath()) return { ok: true, message: "✓ Electron is already installed" };
   const cli = npmCli();
   if (!cli) return { ok: false, message: `found no npm next to ${process.execPath}; install Electron yourself: npm install electron` };
-  const target = runtime().repo;
-  const result = spawnSync(process.execPath, [cli, "install", "--no-save", "--loglevel", "error", `electron@${ELECTRON_RANGE}`], {
+  const target = trayRuntimeDir();
+  fs.mkdirSync(target, { recursive: true });
+  const result = spawnSync(process.execPath, [cli, "install", "--prefix", target, "--no-package-lock", "--loglevel", "error", `electron@${ELECTRON_RANGE}`], {
     cwd: target,
     stdio: "inherit",
   });

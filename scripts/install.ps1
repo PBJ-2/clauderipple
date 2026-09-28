@@ -100,6 +100,26 @@ if (-not (Test-Path $npmCli)) {
 }
 if (-not (Test-Path $npmCli)) { throw "found Node at $node but no npm next to it" }
 
+# Until 0.6 the tray's Electron (~270MB) was fetched into the package's own node_modules, and
+# installing any other version deleted it with the old files — or failed, since a running tray
+# holds electron.exe open there. It now lives in ClaudeRipple's home; one found in the old place
+# is moved there rather than fetched again, and a tray running from it is started again at the end.
+$HomeDir = if ($env:CLAUDERIPPLE_HOME) { $env:CLAUDERIPPLE_HOME } else { Join-Path $HOME '.clauderipple' }
+$OldElectron = Join-Path $Prefix 'node_modules\clauderipple\node_modules\electron'
+$NewElectron = Join-Path $HomeDir 'tray-runtime\node_modules\electron'
+$RestartTray = $false
+if ((Test-Path $OldElectron) -and -not (Test-Path $NewElectron)) {
+  $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($OldElectron, [StringComparison]::OrdinalIgnoreCase) })
+  if ($running.Count -gt 0) {
+    $running | Stop-Process -Force
+    Start-Sleep -Seconds 1
+    $RestartTray = $true
+  }
+  New-Item -ItemType Directory -Force -Path (Split-Path $NewElectron -Parent) | Out-Null
+  Move-Item -Path $OldElectron -Destination $NewElectron
+  Write-Host "Moved the tray's Electron to $NewElectron"
+}
+
 # Installed under our own prefix rather than the Node installation's: nothing to elevate, and
 # uninstalling is removing one directory.
 Write-Host "Installing $Package..."
@@ -141,5 +161,6 @@ if ($env:CLAUDERIPPLE_NO_SETUP -eq '1') {
 
 Write-Host ''
 & $cmd install
+if ($RestartTray) { & $cmd tray }
 Write-Host ''
 Write-Host 'Open the dashboard with: clauderipple ui'
