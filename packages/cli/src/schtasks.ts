@@ -62,6 +62,26 @@ type TaskDefinition = {
   dontStopIfGoingOnBatteries?: boolean;
 };
 
+/**
+ * The account the task runs as, qualified with its domain. A bare name is looked up as a machine
+ * name too, so on a local account named after its computer (user X on host X) it resolves to
+ * nothing and Register-ScheduledTask fails with 0x80070057 (#38). `X\X` names the user.
+ */
+export function taskUser(username = os.userInfo().username, domain = process.env.USERDOMAIN): string {
+  return domain ? `${domain}\\${username}` : username;
+}
+
+/**
+ * Windows stores the qualified name as given on the trigger but the bare one on the principal
+ * (reported in #38), and a task registered before that fix carries the bare name on both, so
+ * either spelling of the same account is a match.
+ */
+function sameAccount(stored: string | undefined, expected: string): boolean {
+  if (stored === undefined) return false;
+  const bare = expected.slice(expected.lastIndexOf("\\") + 1);
+  return [expected, bare].some((name) => name.toLowerCase() === stored.toLowerCase());
+}
+
 export function taskDefinitionMatches(value: unknown, expected: { arguments: string; userId: string }): boolean {
   if (!value || typeof value !== "object") return false;
   const task = value as TaskDefinition;
@@ -69,12 +89,12 @@ export function taskDefinitionMatches(value: unknown, expected: { arguments: str
     task.actionCount === 1 &&
     task.execute?.toLowerCase() === "powershell.exe" &&
     task.arguments === expected.arguments &&
-    task.userId?.toLowerCase() === expected.userId.toLowerCase() &&
+    sameAccount(task.userId, expected.userId) &&
     task.runLevel === 0 &&
     task.logonType === 3 &&
     task.triggerCount === 1 &&
     task.triggerType === "MSFT_TaskLogonTrigger" &&
-    task.triggerUserId?.toLowerCase() === expected.userId.toLowerCase() &&
+    sameAccount(task.triggerUserId, expected.userId) &&
     task.restartCount === 99 &&
     task.restartInterval === "PT1M" &&
     task.executionTimeLimit === "PT0S" &&
@@ -124,31 +144,39 @@ function writeLauncher(opts: { program: string; args: string[]; home: string; en
   return launcher;
 }
 
-export function installAgent(opts: { program: string; args?: string[]; home: string; env?: Record<string, string> }): string {
-  const launcher = writeLauncher({ program: opts.program, args: opts.args ?? [], home: opts.home, ...(opts.env ? { env: opts.env } : {}) });
-  const user = `${os.userInfo().username}`;
-  const actionArgs = `-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "${launcher}"`;
-  // Updating the generated launcher does not require re-registering an otherwise correct task.
-  // Some Windows installations protect an existing per-user task's security descriptor so that
-  // even the same unelevated user gets E_ACCESSDENIED from Register-ScheduledTask -Force. Treat the
-  // verified existing definition as success; never silently accept a same-named foreign task.
+/**
+ * The registered task in the shape taskDefinitionMatches reads, or null. The settings object has
+ * no AllowStartIfOnBatteries/DontStopIfGoingOnBatteries — the switches of the same names set
+ * DisallowStartIfOnBatteries/StopIfGoingOnBatteries to false — so reading the switch names gave
+ * null, and until #38 no existing task ever matched: every install re-registered.
+ */
+export function existingTaskDefinition(): unknown {
   const existing = run(
     [
       `$t = Get-ScheduledTask -TaskName ${ps(taskName())} -ErrorAction SilentlyContinue`,
       `if ($null -eq $t) { 'null'; exit 0 }`,
       `$a = @($t.Actions); $p = $t.Principal; $tr = @($t.Triggers); $s = $t.Settings`,
-      `[pscustomobject]@{ actionCount = $a.Count; execute = $a[0].Execute; arguments = $a[0].Arguments; userId = $p.UserId; runLevel = [int]$p.RunLevel; logonType = [int]$p.LogonType; triggerCount = $tr.Count; triggerType = $tr[0].CimClass.CimClassName; triggerUserId = $tr[0].UserId; restartCount = $s.RestartCount; restartInterval = [string]$s.RestartInterval; executionTimeLimit = [string]$s.ExecutionTimeLimit; multipleInstances = [int]$s.MultipleInstances; allowStartIfOnBatteries = $s.AllowStartIfOnBatteries; dontStopIfGoingOnBatteries = $s.DontStopIfGoingOnBatteries } | ConvertTo-Json -Compress`,
+      `[pscustomobject]@{ actionCount = $a.Count; execute = $a[0].Execute; arguments = $a[0].Arguments; userId = $p.UserId; runLevel = [int]$p.RunLevel; logonType = [int]$p.LogonType; triggerCount = $tr.Count; triggerType = $tr[0].CimClass.CimClassName; triggerUserId = $tr[0].UserId; restartCount = $s.RestartCount; restartInterval = [string]$s.RestartInterval; executionTimeLimit = [string]$s.ExecutionTimeLimit; multipleInstances = [int]$s.MultipleInstances; allowStartIfOnBatteries = $s.DisallowStartIfOnBatteries -eq $false; dontStopIfGoingOnBatteries = $s.StopIfGoingOnBatteries -eq $false } | ConvertTo-Json -Compress`,
     ].join("; "),
   );
-  let definition: unknown = null;
-  if (existing.ok) {
-    try {
-      definition = JSON.parse(existing.out);
-    } catch {
-      // A malformed inspection result is not trusted; fall through to registration.
-    }
+  if (!existing.ok) return null;
+  try {
+    return JSON.parse(existing.out);
+  } catch {
+    // A malformed inspection result is not trusted; the caller falls through to registration.
+    return null;
   }
-  if (taskDefinitionMatches(definition, { arguments: actionArgs, userId: user })) return launcher;
+}
+
+export function installAgent(opts: { program: string; args?: string[]; home: string; env?: Record<string, string> }): string {
+  const launcher = writeLauncher({ program: opts.program, args: opts.args ?? [], home: opts.home, ...(opts.env ? { env: opts.env } : {}) });
+  const user = taskUser();
+  const actionArgs = `-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "${launcher}"`;
+  // Updating the generated launcher does not require re-registering an otherwise correct task.
+  // Some Windows installations protect an existing per-user task's security descriptor so that
+  // even the same unelevated user gets E_ACCESSDENIED from Register-ScheduledTask -Force. Treat the
+  // verified existing definition as success; never silently accept a same-named foreign task.
+  if (taskDefinitionMatches(existingTaskDefinition(), { arguments: actionArgs, userId: user })) return launcher;
   const script = [
     `$ErrorActionPreference = 'Stop'`,
     `$a = New-ScheduledTaskAction -Execute ${ps("powershell.exe")} -Argument ${ps(actionArgs)}`,
