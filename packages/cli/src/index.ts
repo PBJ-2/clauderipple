@@ -23,7 +23,8 @@ import { codexOff, codexOn } from "./codex.ts";
 import { ingressModels } from "../../router/src/ingress/models.ts";
 import { claudeLogin, claudeLogout, desktopClaudeCodeDirs } from "./claude-auth.ts";
 import { openBrowser } from "./browser.ts";
-import { installTrayRuntime, startTray } from "./tray.ts";
+import { electronPath, installTrayRuntime, startTray } from "./tray.ts";
+import { installKind, isNewer, latestVersion, PACKAGE, runUpdate } from "./update.ts";
 import { ClaudeOAuthSession } from "../../router/src/providers/claude-oauth.ts";
 
 function setPickerEnabled(enabled: boolean): void {
@@ -129,6 +130,17 @@ function starterConfig(port: number): string {
   ) + "\n";
 }
 
+/** The version the router on this admin port reports, or null when it does not answer. */
+async function runningVersion(port: number): Promise<string | null> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/api/status`, { signal: AbortSignal.timeout(10_000) });
+    const version = res.ok ? ((await res.json()) as { version?: unknown }).version : null;
+    return typeof version === "string" ? version : null;
+  } catch {
+    return null;
+  }
+}
+
 function proxyUrlFor(port: number): string {
   return `http://127.0.0.1:${port}`;
 }
@@ -202,6 +214,16 @@ async function install(): Promise<void> {
   // its logon trigger, so the router would only appear after the next sign-in. Start it either way.
   const started = startAgent();
   console.log(started === "failed" ? `✗ could not start the router (${supervisorName()})` : `✓ router ${started === "already-running" ? "already running" : "started"}`);
+  // Running the installer again is how an update arrives, and it replaces files, not the process:
+  // a router left alone keeps serving the old code until the next login. Restart one that
+  // answers with another version.
+  if (started === "already-running") {
+    const running = await runningVersion(adminPort(cfg));
+    if (running && running !== VERSION) {
+      console.log(`  the running router is ${running}; restarting it on ${VERSION}`);
+      console.log(describeRestart(restartAgent({ onProgress: (m) => console.log(`  ${m}`) })));
+    }
+  }
 
   const p = await probeWithRetry({ host: cfg.listen.host, port: cfg.listen.port, caPem: caPath, upstream: cfg.upstream });
   console.log(p.ok ? `✓ end-to-end probe passed (${p.detail}, ${p.ms}ms)` : `✗ probe failed: ${p.detail}`);
@@ -349,6 +371,46 @@ function logs(): void {
   });
 }
 
+/**
+ * `update --check [--json]` reports; `update` installs the latest version the way this copy was
+ * installed (update.ts) and fetches the tray's Electron again if the old copy had it.
+ */
+async function update(): Promise<void> {
+  const kind = installKind(installedRuntime);
+  // CLAUDERIPPLE_PACKAGE names what to install instead of the registry's latest (a tarball, say).
+  const override = process.env.CLAUDERIPPLE_PACKAGE;
+  const latest = override ? null : await latestVersion();
+  const newer = latest ? isNewer(latest, VERSION) : true;
+  if (flag("check")) {
+    if (flag("json")) console.log(JSON.stringify({ current: VERSION, latest, newer, kind: kind.kind }));
+    else console.log(newer ? `ClaudeRipple ${latest} is available (this is ${VERSION}). Update with: clauderipple update` : `ClaudeRipple ${VERSION} is the latest version`);
+    return;
+  }
+  if (kind.kind !== "script" && kind.kind !== "npm") {
+    process.exitCode = 1;
+    console.log(
+      kind.kind === "packaged" ? "This is the standalone app. Download the new version from https://github.com/PBJ-2/clauderipple/releases"
+      : kind.kind === "checkout" ? "This is a source checkout. Update it with git pull."
+      : `ClaudeRipple is installed at ${kind.root}, which is not a global npm install. Update it the way you installed it.`,
+    );
+    return;
+  }
+  if (!newer && !flag("force")) {
+    console.log(`✓ ClaudeRipple ${VERSION} is the latest version`);
+    return;
+  }
+  const hadTray = electronPath() !== null;
+  const spec = override ?? `${PACKAGE}@${latest}`;
+  console.log(`Updating ClaudeRipple ${VERSION} → ${latest ?? spec} (${kind.kind === "script" ? "install script" : "npm"}, ${kind.prefix})…`);
+  const result = runUpdate(kind, installedRuntime, spec);
+  if (result.ok && hadTray) {
+    // The new files decide where Electron lives; ask them, not this process's copy.
+    execFileSync(installedRuntime.node, [installedRuntime.cli, "tray", "--install"], { env: { ...process.env, ...installedRuntime.env }, stdio: "inherit" });
+  }
+  console.log(result.message);
+  if (!result.ok) process.exitCode = 1;
+}
+
 function help(): void {
   console.log(`clauderipple <command>
 
@@ -360,6 +422,7 @@ function help(): void {
   config            print the config file path
   ui                open the dashboard in your browser
   tray [--install]  start the menu-bar / tray app (--install fetches Electron, ~270MB, once)
+  update [--check]  install the latest version the way this one was installed (--check only reports)
   login             add a ChatGPT account (opens your browser; run again to add another — they take turns when one runs out)
   logout            forget every ChatGPT account added with "login" (the Codex CLI's own login is left alone)
   claude-login      connect a Claude subscription in the browser (--setup-token: via \`claude setup-token\`; --manual: paste the code)
@@ -486,6 +549,9 @@ try {
       break;
     case "ui":
       ui();
+      break;
+    case "update":
+      await update();
       break;
     case "tray": {
       const result = args.includes("--install") ? installTrayRuntime() : startTray();

@@ -280,12 +280,14 @@ clauderipple tray
 Electron으로 도는데 용량이 270MB라 기본 설치에는 넣지 않았습니다. `clauderipple tray --install`이 한 번만
 받아 옵니다. 나머지 기능은 Electron 없이도 다 돕니다.
 
-**업데이트.**
+**업데이트.** 새 버전이 나오면 트레이가 알려 줍니다(**업데이트 확인…**). 터미널에서는:
 
 ```sh
-npm install -g clauderipple@latest
-clauderipple restart
+clauderipple update
 ```
+
+설치한 방식 그대로(설치 스크립트 또는 npm) 업데이트하고, 라우터를 새 버전으로 다시 시작합니다. 트레이용
+Electron은 업데이트해도 그대로 남습니다.
 
 선택 사항, Desktop 피커에 실제 이름을 띄우려면: **클라이언트 → Claude Desktop → 모델 피커 → 켜기**. 그다음 Claude
 Desktop을 완전히 종료했다가 다시 엽니다. 로컬 인증서를 사용자 범위로만 신뢰시키는데, 이때 macOS는 로그인 암호를

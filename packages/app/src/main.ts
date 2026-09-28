@@ -8,6 +8,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+type QuotaWindow = { used_percent?: number; window_minutes?: number };
+type Quota = { rate_limits?: { primary?: QuotaWindow | null; secondary?: QuotaWindow | null } };
+
 type Status = {
   version: string;
   /** Reported from 0.1.2 on; an older router leaves it out. */
@@ -23,6 +26,8 @@ type Status = {
   settings: { HTTPS_PROXY?: string; NODE_EXTRA_CA_CERTS?: string };
   cliVersion: string;
   chatgpt?: { quota: Record<string, Record<string, unknown> | null>; auth: Record<string, string>; signedIn?: Record<string, boolean> };
+  /** Reported from 0.6.0 on, where a Claude subscription provider is configured. */
+  claude?: { accounts: { id: string; label: string; quota: Quota }[] };
   picker?: { enabled: boolean; hosts: string[]; last: unknown };
   agentTitle?: boolean;
 };
@@ -94,6 +99,23 @@ const STRINGS = {
     setupNeeded: "setup not finished",
     setupNeededDetail: "ClaudeRipple is installed but not set up yet",
     runSetup: "Finish setting up ClaudeRipple…",
+    claudeCurrent: "current login",
+    claudeUsage: (label: string, windows: string) => `Claude ${label} · ${windows}`,
+    window5h: "5h",
+    windowWeek: "weekly",
+    checkUpdates: "Check for Updates…",
+    updateAvailableItem: (v: string) => `Update to ClaudeRipple ${v}…`,
+    upToDate: (v: string) => `ClaudeRipple ${v} is the latest version.`,
+    updateAvailable: (latest: string, current: string) => `ClaudeRipple ${latest} is available (you have ${current}).`,
+    updateDetail: "The router restarts on the new version once requests in flight have finished. The tray reopens by itself.",
+    updateNow: "Update",
+    later: "Later",
+    updating: (v: string) => `Updating to ClaudeRipple ${v}…`,
+    updateDone: (v: string) => `Updated to ClaudeRipple ${v}`,
+    updateFailed: "The update did not finish",
+    updateCheckFailed: "Could not check for updates",
+    updatePackaged: "This is the standalone app. Download the new version from the releases page.",
+    updateCheckout: "This is a source checkout. Update it with git pull.",
   },
   ko: {
     healthy: "정상",
@@ -156,6 +178,23 @@ const STRINGS = {
     setupNeeded: "설정이 끝나지 않았습니다",
     setupNeededDetail: "설치는 됐지만 아직 설정하지 않았습니다",
     runSetup: "ClaudeRipple 설정 마치기…",
+    claudeCurrent: "현재 로그인",
+    claudeUsage: (label: string, windows: string) => `Claude ${label} · ${windows}`,
+    window5h: "5시간",
+    windowWeek: "주간",
+    checkUpdates: "업데이트 확인…",
+    updateAvailableItem: (v: string) => `새 버전 업데이트: ClaudeRipple ${v}…`,
+    upToDate: (v: string) => `최신 버전입니다: ClaudeRipple ${v}`,
+    updateAvailable: (latest: string, current: string) => `새 버전이 나왔습니다: ClaudeRipple ${latest} (지금 ${current})`,
+    updateDetail: "진행 중인 요청이 끝나면 라우터가 새 버전으로 다시 시작합니다. 트레이는 저절로 다시 열립니다.",
+    updateNow: "업데이트",
+    later: "나중에",
+    updating: (v: string) => `ClaudeRipple ${v} 업데이트 중…`,
+    updateDone: (v: string) => `ClaudeRipple ${v} 업데이트 완료`,
+    updateFailed: "업데이트를 마치지 못했습니다",
+    updateCheckFailed: "업데이트를 확인하지 못했습니다",
+    updatePackaged: "독립 실행 앱입니다. 릴리스 페이지에서 새 버전을 받으세요.",
+    updateCheckout: "소스 체크아웃입니다. git pull로 업데이트하세요.",
   },
 };
 
@@ -253,7 +292,8 @@ async function poll(): Promise<void> {
     last = null;
     lastError = (e as Error).message;
     downSince ??= Date.now();
-    if (!downNotified && Date.now() - downSince >= DOWN_NOTIFY_AFTER_MS) {
+    // An update restarts the router on purpose; that is not the outage the notification is for.
+    if (!downNotified && !updating && Date.now() - downSince >= DOWN_NOTIFY_AFTER_MS) {
       downNotified = true;
       notifyDown();
     }
@@ -420,12 +460,83 @@ function cliPaths(): CliRuntime {
 }
 
 function runCli(args: string[]): Promise<string> {
+  return runCliResult(args).then((r) => r.output);
+}
+
+function runCliResult(args: string[]): Promise<{ ok: boolean; output: string }> {
   const { node, env, cli } = cliPaths();
   return new Promise((resolve) => {
-    execFile(node, [cli, ...args], { env: { ...process.env, ...env, CLAUDERIPPLE_HOME: home } }, (err, stdout, stderr) => {
-      resolve(`${stdout}${stderr}${err ? `\n${err.message}` : ""}`.trim());
+    // An update prints npm's and the installer's own lines; the default 1MB buffer is not for that.
+    execFile(node, [cli, ...args], { env: { ...process.env, ...env, CLAUDERIPPLE_HOME: home }, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+      resolve({ ok: !err, output: `${stdout}${stderr}${err ? `\n${err.message}` : ""}`.trim() });
     });
   });
+}
+
+// ---- updates ----------------------------------------------------------------------------
+// The tray asks `clauderipple update --check` at start and twice a day, and offers the update in
+// the menu once there is one; "Check for Updates…" asks on demand (#39). The CLI does the work —
+// it knows how this copy was installed — and restarts the router; the tray then starts a fresh
+// tray from the new files and quits, since the process running now still holds the old code.
+
+type UpdateCheck = { current: string; latest: string | null; newer: boolean; kind: string };
+let availableUpdate: UpdateCheck | null = null;
+let updating = false;
+const UPDATE_CHECK_MS = 12 * 60 * 60 * 1000;
+
+async function checkForUpdate(): Promise<UpdateCheck | null> {
+  const r = await runCliResult(["update", "--check", "--json"]);
+  try {
+    const check = JSON.parse(r.output.split("\n").pop() ?? "") as UpdateCheck;
+    availableUpdate = check.newer ? check : null;
+    render();
+    return check;
+  } catch {
+    return null;
+  }
+}
+
+async function checkUpdatesInteractive(): Promise<void> {
+  const check = await checkForUpdate();
+  if (!check) {
+    await dialog.showMessageBox({ type: "warning", message: L.updateCheckFailed });
+    return;
+  }
+  if (!check.newer) {
+    await dialog.showMessageBox({ message: L.upToDate(check.current) });
+    return;
+  }
+  await offerUpdate(check);
+}
+
+async function offerUpdate(check: UpdateCheck): Promise<void> {
+  if (check.kind === "packaged") {
+    const choice = await dialog.showMessageBox({ message: L.updateAvailable(check.latest ?? "?", check.current), detail: L.updatePackaged, buttons: [L.updateNow, L.later], defaultId: 0, cancelId: 1 });
+    if (choice.response === 0) void shell.openExternal("https://github.com/PBJ-2/clauderipple/releases/latest");
+    return;
+  }
+  if (check.kind === "checkout") {
+    await dialog.showMessageBox({ message: L.updateAvailable(check.latest ?? "?", check.current), detail: L.updateCheckout });
+    return;
+  }
+  const choice = await dialog.showMessageBox({ message: L.updateAvailable(check.latest ?? "?", check.current), detail: L.updateDetail, buttons: [L.updateNow, L.later], defaultId: 0, cancelId: 1 });
+  if (choice.response !== 0 || updating) return;
+  updating = true;
+  render();
+  const version = check.latest ?? "";
+  if (Notification.isSupported()) new Notification({ title: "ClaudeRipple", body: L.updating(version) }).show();
+  const r = await runCliResult(["update"]);
+  updating = false;
+  if (!r.ok) {
+    render();
+    await dialog.showMessageBox({ type: "warning", message: L.updateFailed, detail: r.output.slice(-4000) });
+    return;
+  }
+  availableUpdate = null;
+  if (Notification.isSupported()) new Notification({ title: "ClaudeRipple", body: L.updateDone(version) }).show();
+  // A new tray from the new files, then this one goes.
+  await runCliResult(["tray"]);
+  app.quit();
 }
 
 // Offer setup only when there is no working installation at all. A developer who runs the router
@@ -467,6 +578,15 @@ async function promptForSetup(): Promise<void> {
   if (choice.response === 0) await setup();
 }
 
+/** "5h 14% · weekly 10%", the same reading the dashboard gives. */
+function windowsText(quota: Quota | undefined): string {
+  const limits = quota?.rate_limits;
+  return [limits?.primary, limits?.secondary]
+    .filter((w): w is QuotaWindow => !!w && typeof w.used_percent === "number")
+    .map((w) => `${w.window_minutes === 300 ? L.window5h : L.windowWeek} ${Math.round(w.used_percent!)}%`)
+    .join(" · ");
+}
+
 function render(): void {
   if (!tray) return;
   const state = healthy(last);
@@ -492,9 +612,18 @@ function render(): void {
     : unconfigured
       ? L.setupNeededDetail
       : L.downNotifyTitle;
+  // One line per Claude subscription account, current login first (#40).
+  const claudeLines = (s?.claude?.accounts ?? [])
+    .map((account) => ({ account, windows: windowsText(account.quota) }))
+    .filter(({ windows }) => windows)
+    .map(({ account, windows }) => ({ label: L.claudeUsage(account.id === "current" ? L.claudeCurrent : account.label, windows), click: () => void openDashboard() }) as Electron.MenuItemConstructorOptions);
   const template: Electron.MenuItemConstructorOptions[] = [
     { label: headline, click: () => void openDashboard() },
     ...(detail ? [{ label: detail, click: () => void openDashboard() } as Electron.MenuItemConstructorOptions] : []),
+    ...claudeLines,
+    ...(availableUpdate
+      ? [{ label: updating ? L.updating(availableUpdate.latest ?? "") : L.updateAvailableItem(availableUpdate.latest ?? ""), enabled: !updating, click: () => void offerUpdate(availableUpdate!) } as Electron.MenuItemConstructorOptions]
+      : []),
     { type: "separator" },
     // Enabled even when the router is down: it is started first, then the page is opened.
     { label: L.openDashboard, click: () => void openDashboard() },
@@ -515,6 +644,7 @@ function render(): void {
       : []),
     { label: L.connectClaudeSubscription, click: async () => void dialog.showMessageBox({ message: await runCli(["claude-login"]) }) },
     { type: "separator" },
+    { label: L.checkUpdates, enabled: !updating, click: () => void checkUpdatesInteractive() },
     { label: L.about, click: () => void dialog.showMessageBox({ title: "ClaudeRipple", message: `ClaudeRipple ${app.getVersion()}`, detail: L.aboutDetail }) },
     { label: L.quit, role: "quit" },
   ];
@@ -537,6 +667,9 @@ app.whenReady().then(() => {
   void poll();
   setInterval(() => void poll(), POLL_MS);
   if (needsSetup()) void promptForSetup();
+  // Not at the very start: a tray opened at login shares the first minute with everything else.
+  setTimeout(() => void checkForUpdate(), 60_000);
+  setInterval(() => void checkForUpdate(), UPDATE_CHECK_MS);
 });
 
 // A tray-only app owns no windows; without this Electron would quit the moment a dialog closes.

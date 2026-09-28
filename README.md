@@ -328,12 +328,14 @@ clauderipple tray
 It runs on Electron, which is about 270MB and is therefore not installed by default.
 `clauderipple tray --install` fetches it once; everything else works without it.
 
-**Updating.**
+**Updating.** The tray offers a new version when there is one (**Check for Updates…**), or:
 
 ```sh
-npm install -g clauderipple@latest
-clauderipple restart
+clauderipple update
 ```
+
+It updates the way you installed — the install script again, or npm — and restarts the router
+on the new version. The tray's Electron is kept across updates.
 
 Optional, for real names in the Desktop picker: **Clients → Claude Desktop → Model
 picker → on**, then quit and reopen Claude Desktop. To trust the local certificate
