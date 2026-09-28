@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.6.0 — 2026-09-28
+
+Both suggested in #8 by @artisthanbohee-del.
+
+### Added
+
+- **Updates from the tray and the CLI** (#39). The tray checks for a new version at start and
+  twice a day and offers it in its menu; **Check for Updates…** asks on demand. In a terminal:
+  `clauderipple update` (`--check` only reports). It updates the way ClaudeRipple was
+  installed — the install script again, or npm into the same prefix — and restarts the router
+  on the new version. The standalone app points to the releases page instead.
+- **Usage of each Claude subscription account** (#40): the five-hour and weekly limits of the
+  current Claude login and of every account added in ClaudeRipple, on the Health screen, in the
+  Claude provider's Accounts tab and in the tray menu. Read from the same endpoint Claude
+  Code's `/usage` uses, so an account that has not answered anything yet still has a number.
+- **The version in the tray's About box.**
+
+### Fixed
+
+- **Re-running the installer now restarts a router still running the old version.** Before,
+  the files changed but the router kept the old code until the next login — on Windows and
+  Linux always, since an unchanged task or service is not registered again.
+- **The tray survives updates.** Its Electron (~270MB) was fetched into the package folder, and
+  every update deleted it; on Windows a running tray could make the update fail. It now lives in
+  `~/.clauderipple/tray-runtime`, and the install scripts move an existing copy there instead of
+  fetching it again. An install made with plain `npm install -g` fetches it once more with
+  `clauderipple tray --install`.
+- **The tray installed from npm reports its own version**, not Electron's: its package manifest
+  carried none.
+
 ## 0.5.1 — 2026-09-28
 
 ### Fixed
