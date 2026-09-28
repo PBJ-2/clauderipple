@@ -118,8 +118,12 @@ if ($node.StartsWith($Runtime, [StringComparison]::OrdinalIgnoreCase)) {
   $entry = Join-Path $Prefix 'node_modules\clauderipple\bin\clauderipple.js'
   if (-not (Test-Path $entry)) { throw "the installed package has no entry point at $entry" }
   Set-Content -Path $cmd -Value "@`"$node`" `"$entry`" %*" -Encoding ASCII
-  Set-Content -Path (Join-Path $bin 'clauderipple.ps1') -Value "& `"$node`" `"$entry`" @args" -Encoding UTF8
 }
+
+# PowerShell picks clauderipple.ps1 over clauderipple.cmd, and under the default execution policy
+# a .ps1 does not run: `clauderipple ui` failed with PSSecurityException in a new window (#38).
+# Without it PowerShell falls through to the .cmd, which runs under any policy.
+Remove-Item -Path (Join-Path $bin 'clauderipple.ps1') -Force -ErrorAction SilentlyContinue
 
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if (-not $userPath) { $userPath = '' }
