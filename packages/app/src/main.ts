@@ -515,7 +515,7 @@ function render(): void {
       : []),
     { label: L.connectClaudeSubscription, click: async () => void dialog.showMessageBox({ message: await runCli(["claude-login"]) }) },
     { type: "separator" },
-    { label: L.about, click: () => void dialog.showMessageBox({ title: "ClaudeRipple", message: "ClaudeRipple", detail: L.aboutDetail }) },
+    { label: L.about, click: () => void dialog.showMessageBox({ title: "ClaudeRipple", message: `ClaudeRipple ${app.getVersion()}`, detail: L.aboutDetail }) },
     { label: L.quit, role: "quit" },
   ];
   tray.setContextMenu(Menu.buildFromTemplate(template));

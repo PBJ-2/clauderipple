@@ -29,7 +29,10 @@ fs.cpSync(path.join(root, "packages", "app", "assets"), path.join(dist, "app", "
 // package.json decides: without this one Electron loaded main.js as an ES module and died with
 // "exports is not defined in ES module scope" (issue #8, Windows, 0.3.1). In a checkout
 // packages/app has its own package.json, which is why development never showed it.
-fs.writeFileSync(path.join(dist, "app", "package.json"), JSON.stringify({ private: true, type: "commonjs" }, null, 2) + "\n");
+// It carries the version too: Electron's app.getVersion() reads it and, finding none, answers
+// with Electron's own version.
+const { version } = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+fs.writeFileSync(path.join(dist, "app", "package.json"), JSON.stringify({ private: true, version, type: "commonjs" }, null, 2) + "\n");
 
 const entry = path.join(dist, "cli", "src", "index.js");
 if (!fs.existsSync(entry)) throw new Error(`build produced no CLI entry point at ${entry}`);
