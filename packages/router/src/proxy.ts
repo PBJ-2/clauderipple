@@ -41,6 +41,7 @@ import { ResponseUsageTap, type RequestLog, type RequestRecord, type RequestUsag
 import { credentialHeaderValues, redactErrorText, redactHeaders } from "./redact.ts";
 import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
 import { ClaudeAccountAuthPool } from "./providers/anthropic-account-pool.ts";
+import { dropForeignThinking } from "./thinking.ts";
 
 const MAX_BODY = 64 * 1024 * 1024;
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "host", "content-length"]);
@@ -768,6 +769,7 @@ export class Proxy {
           finish("401", out.length, "no usable Claude account");
           return;
         }
+        dropForeignThinking(json);
         body = Buffer.from(JSON.stringify(json));
         chosen = this.pool.pick(route.provider, credentials, conversationKey(json as AnthropicRequest));
         const using = chosen ?? credentials[0]!;
@@ -858,6 +860,8 @@ export class Proxy {
     } else if (isApiHost) {
       target = { protocol: "https:", host: cfg.upstream, port: 443, agent: this.upstreamAgent, extraHeaders: {} };
       tag = `PASS ${typeof model === "string" ? model : "-"}`;
+      // Passthrough stays byte-exact unless another model's thinking would get the turn refused.
+      if (json && dropForeignThinking(json) > 0) body = Buffer.from(JSON.stringify(json));
     } else {
       target = { protocol: "https:", host: reqHost, port: 443, agent: this.agentFor(`host:${reqHost}`, "https:"), extraHeaders: {} };
       tag = `WEB ${reqHost}`;
