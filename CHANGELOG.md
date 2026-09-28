@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.5.1 — 2026-09-28
+
+### Fixed
+
+- **Prompt caching on anthropic-compatible providers** (#36, #37, by @grapefruit0205).
+  Claude Code's billing header opens the system prompt and changes every turn, so a
+  vendor with a plain prefix cache cached nothing after it: DeepSeek via Alibaba Bailian
+  reported 0.3% over two days. The header is now dropped for these providers, as it
+  already was for the translated ones; measured 99% on the next turns.
+- **Switching a session from a translated model to Claude.** The translated providers
+  return reasoning as unsigned, sometimes empty `thinking` blocks, and Anthropic refused
+  every turn after the switch with "each thinking block must contain thinking". Unsigned
+  thinking is now dropped before a request reaches Anthropic.
+- **Windows install when the user name equals the computer name** (#38, reported by
+  @haemilchu). The scheduled task is registered as `DOMAIN\user`; the bare name did not
+  resolve and registration failed with 0x80070057 before `settings.json` was written.
+- **Windows reinstall no longer re-registers a correct task.** The check read two
+  battery settings under names the task object does not have, so it never matched and
+  every install registered again — what fails on machines that protect the task.
+  Checked in a Windows 11 VM.
+- **`clauderipple` in a new PowerShell window** (#38). The installer leaves no `.ps1`
+  shim, so PowerShell runs the `.cmd` under the default execution policy.
+
 ## 0.5.0 — 2026-09-24
 
 Linux, and four fixes from the first outside contributions.
