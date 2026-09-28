@@ -105,7 +105,37 @@ export type AdminDeps = {
   openBrowser?: (url: string) => boolean;
   /** Begin a graceful drain and exit. Supplied by the router; absent in tests. */
   shutdown?: () => void;
+  /**
+   * Usage of each Claude subscription account, keyed by owner id ("current" for the Claude Code
+   * login, otherwise the account id `/api/claude-accounts` lists). Absent in tests.
+   */
+  claudeUsage?: () => Promise<Record<string, Record<string, unknown>>>;
 };
+
+/** Claude usage is looked up only where a Claude subscription provider is configured. */
+function hasClaudeSubscription(cfg: Config): boolean {
+  return Object.values(cfg.providers).some((p) => p.type === "anthropic" && p.auth === "claude-code");
+}
+
+/**
+ * One row per Claude account with a known usage, current login first. Labels only: the status is
+ * polled every few seconds and has no use for an email address.
+ */
+async function claudeAccountUsage(deps: AdminDeps): Promise<{ id: string; label: string; quota: Record<string, unknown> }[]> {
+  let usage: Record<string, Record<string, unknown>>;
+  try {
+    usage = (await deps.claudeUsage?.()) ?? {};
+  } catch {
+    return [];
+  }
+  const rows: { id: string; label: string; quota: Record<string, unknown> }[] = [];
+  if (usage.current) rows.push({ id: "current", label: "Current Claude login", quota: usage.current });
+  for (const account of listClaudeAccounts(homeDir())) {
+    const quota = usage[account.id];
+    if (quota) rows.push({ id: account.id, label: account.label, quota });
+  }
+  return rows;
+}
 
 /** One discovered/offered model. Exactly the config shape, so a preset's per-model override
  * (wire/url/authHeader) can be carried straight into a provider entry. */
@@ -395,6 +425,7 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
     // `quota` stays one snapshot per provider (the account in use) for the readers that want one
     // number; `accounts` is the per-account view, read after the refresh above so it is as fresh.
     chatgpt: { ...chatgpt, signedIn, accounts: chatgpt.accounts?.() ?? {}, ...(stale ? { stale: true, staleReason: staleReasons } : {}) },
+    ...(deps.claudeUsage && hasClaudeSubscription(cfg) ? { claude: { accounts: await claudeAccountUsage(deps) } } : {}),
     // Only present for providers that declare a pool; a provider with one credential has nothing
     // to report and would only add a row that never changes.
     credentials: deps.credentials?.() ?? {},
@@ -1294,9 +1325,11 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
       // ClaudeRipple accounts can be renamed or removed by their local opaque id.
       if (pathname === "/api/claude-accounts" && method === "GET") {
         const source = claudeAuthStore(deps).describeSource();
+        let usage: Record<string, Record<string, unknown>> = {};
+        if (hasClaudeSubscription(deps.config())) usage = (await deps.claudeUsage?.().catch(() => null)) ?? {};
         sendJson(res, 200, {
-          current: source ? { id: "current", label: "Current Claude login", source, external: true } : null,
-          accounts: listClaudeAccounts(homeDir()),
+          current: source ? { id: "current", label: "Current Claude login", source, external: true, ...(usage.current ? { quota: usage.current } : {}) } : null,
+          accounts: listClaudeAccounts(homeDir()).map((account) => (usage[account.id] ? { ...account, quota: usage[account.id] } : account)),
         });
         return;
       }

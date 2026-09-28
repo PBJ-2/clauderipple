@@ -41,6 +41,7 @@ import { ResponseUsageTap, type RequestLog, type RequestRecord, type RequestUsag
 import { credentialHeaderValues, redactErrorText, redactHeaders } from "./redact.ts";
 import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
 import { ClaudeAccountAuthPool } from "./providers/anthropic-account-pool.ts";
+import { ClaudeUsage } from "./providers/anthropic-usage.ts";
 import { dropForeignThinking } from "./thinking.ts";
 
 const MAX_BODY = 64 * 1024 * 1024;
@@ -218,6 +219,8 @@ export class Proxy {
   private readonly chatgptAdapters = new Map<string, { key: string; adapter: ChatGptAdapter }>();
   private readonly openaiAdapters = new Map<string, { key: string; adapter: OpenAiCompatibleAdapter }>();
   private readonly claudeAccounts: ClaudeAccountAuthPool;
+  /** Each Claude subscription account's usage, for the admin status (never a token). */
+  readonly claudeUsage: ClaudeUsage;
   private readonly deps: ProxyDeps;
   /**
    * Cooldowns, quarantines and conversation stickiness for provider credentials. In memory: a
@@ -322,6 +325,10 @@ export class Proxy {
       home: deps.home,
       log: deps.log,
       ...(deps.observedClaudeCodeAuth ? { observed: deps.observedClaudeCodeAuth } : {}),
+    });
+    this.claudeUsage = new ClaudeUsage(this.claudeAccounts, {
+      upstream: () => this.deps.config().upstream,
+      warn: (message) => deps.log.warn(message),
     });
     this.httpServer = http.createServer({ maxHeaderSize: 64 * 1024 }, (req, res) => {
       void this.handle(req, res);

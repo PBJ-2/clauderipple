@@ -335,6 +335,16 @@ function renderHealthProviders() {
     ].filter(Boolean));
     const quota = quotaLine(name);
     if (quota) line.appendChild(el("div", { class: "small", text: quota }));
+    // Claude subscription accounts, one line each: the current login and every account added here.
+    // Before the config has loaded the rows come from the status, which names the sign-in source
+    // rather than the auth mode.
+    if (provider.type === "anthropic" && (provider.auth === "claude-code" || (live && live.authSource))) {
+      const usage = ((status && status.claude && status.claude.accounts) || [])
+        .map((account) => ({ account, text: chatgptQuotaText(account.quota) }))
+        .filter(({ text }) => text)
+        .map(({ account, text }) => el("div", { text: `${claudeAccountLabel(account)} · ${text}` }));
+      if (usage.length) line.appendChild(el("div", { class: "small account-usage" }, usage));
+    }
     const pool = credentialLine(name);
     if (pool) line.appendChild(pool);
     return line;
@@ -1002,11 +1012,22 @@ async function saveAnthropicRotation(name, provider, enabled, control, message) 
   } finally { control.disabled = false; }
 }
 
+/** The current login is named by the router in English; everything else carries the user's own label. */
+function claudeAccountLabel(account) {
+  return account.id === "current" ? t("providers.anthropicCurrent") : account.label;
+}
+
+/** "5h 14% · weekly 10%" under a Claude account, or nothing while its usage is unknown. */
+function claudeQuotaNode(account) {
+  const text = chatgptQuotaText(account && account.quota);
+  return text ? el("p", { class: "small account-quota", text }) : null;
+}
+
 function renderClaudeAccountRows(target, data, name, generation) {
   if (generation !== providerDetailGeneration) return;
   const rows = [];
   if (data.current) rows.push(el("article", { class: "account-card current" }, [
-    el("div", { class: "account-card-copy" }, [el("strong", { text: data.current.label }), el("span", { class: "small", text: anthropicSourceText(data.current.source) }), hint(t("providers.currentAccountHelp"))]),
+    el("div", { class: "account-card-copy" }, [el("strong", { text: data.current.label }), el("span", { class: "small", text: anthropicSourceText(data.current.source) }), claudeQuotaNode(data.current), hint(t("providers.currentAccountHelp"))].filter(Boolean)),
     el("span", { class: "badge ok", text: t("providers.anthropicCurrent") }),
   ]));
   for (const account of Array.isArray(data.accounts) ? data.accounts : []) {
@@ -1031,7 +1052,7 @@ function renderClaudeAccountRows(target, data, name, generation) {
       actions.unshift(reauth);
     }
     rows.push(el("article", { class: "account-card" }, [
-      el("div", { class: "account-card-copy" }, [el("strong", { text: account.label }), account.email && account.email !== account.label ? el("span", { class: "small", text: account.email }) : null, hint(t("providers.addedAccountHelp"))]),
+      el("div", { class: "account-card-copy" }, [el("strong", { text: account.label }), account.email && account.email !== account.label ? el("span", { class: "small", text: account.email }) : null, claudeQuotaNode(account), hint(t("providers.addedAccountHelp"))].filter(Boolean)),
       el("span", { class: `badge ${unavailable ? "bad" : "ok"}`, text: unavailable ? t("providers.anthropicReauth") : t("pool.ready") }),
       el("div", { class: "account-card-actions" }, actions),
     ]));

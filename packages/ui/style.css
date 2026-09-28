@@ -355,6 +355,7 @@ label.check input { width: auto; }
 button.btn.compact { padding: 4px 9px; font-size: 14px; }
 .provider-status { display: grid; grid-template-columns: minmax(120px, 1fr) auto; gap: 8px; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--border); }
 .provider-status:last-child { border-bottom: none; }
+.provider-status .account-usage { grid-column: 1 / -1; display: grid; gap: 2px; }
 .empty-card { color: var(--muted); padding: 28px 16px; border: 1px dashed var(--border); border-radius: 8px; text-align: center; }
 .toast-raw { margin-top: 5px; color: var(--muted); font: 10.5px/1.35 var(--mono); word-break: break-word; }
 .modal-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 18px; background: color-mix(in srgb, #000 38%, transparent); }
