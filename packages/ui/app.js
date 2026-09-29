@@ -1504,7 +1504,7 @@ function openAnthropicProviderForm(options) {
   const probeButton = el("button", { class: "btn secondary", type: "button", text: t("providers.check") });
   const sourceLine = el("div", { class: "small" });
   let foundModels = modelsOf(existing).length ? modelsOf(existing) : claudeModels.map((model) => ({ id: model.id, name: labelOf(model) }));
-  let selected = new Set(modelsOf(existing).length ? modelsOf(existing).map((model) => model.id) : foundModels.map((model) => model.id));
+  let selected = new Set(existing ? modelsOf(existing).map((model) => model.id) : foundModels.map((model) => model.id));
   const modelArea = el("div", { class: "form-field" });
   function renderModels() {
     const modelsBox = modelChecklist(foundModels, selected);
@@ -1536,7 +1536,7 @@ function openAnthropicProviderForm(options) {
       ].filter(Boolean));
       if (Array.isArray(response.models) && response.models.length) {
         foundModels = response.models;
-        selected = new Set(modelsOf(existing).length ? modelsOf(existing).map((model) => model.id) : foundModels.map((model) => model.id));
+        selected = new Set(existing ? modelsOf(existing).map((model) => model.id) : foundModels.map((model) => model.id));
         renderModels();
       }
     } catch (error) { if (formActive) result.replaceChildren(el("span", { class: "bad-text", text: t("providers.probeFailed") }), el("div", { class: "small", text: error.message })); }
@@ -1599,7 +1599,10 @@ function openProviderForm(options) {
   const initialModels = modelsOf(existing).length ? modelsOf(existing) : (preset ? (preset.fallbackModels || []) : (isChatgpt ? CHATGPT_MODELS : []));
   let foundModels = initialModels;
   const currentChecked = new Set(modelsOf(existing).map((model) => model.id));
-  const modelsBox = modelChecklist(foundModels, currentChecked.size ? currentChecked : new Set(foundModels.map((model) => model.id)));
+  // Everything starts ticked only for a new provider. An existing one keeps its saved picks even
+  // when that is none: treating "no models" as "not decided yet" re-ticked the whole fallback list
+  // every time the form opened, and saving then declared all of them (2026-09-29, opencode-zen).
+  const modelsBox = modelChecklist(foundModels, existing ? currentChecked : new Set(foundModels.map((model) => model.id)));
   const providerEffortLevels = isChatgpt
     ? effortLevelsFor(options.name || "chatgpt", "gpt-5.6-terra")
     : (existing ? effortLevelsFor(options.name, initialModels[0] && initialModels[0].id) : fallbackEffortLevels({ ...(preset ? { preset: preset.id } : {}), ...(isCustom ? { caps: {} } : {}) }, initialModels[0] && initialModels[0].id));
@@ -1732,7 +1735,7 @@ function openProviderForm(options) {
       response.error ? el("div", { class: "small", text: response.error.replace(/^no-credits:\s*/, "") }) : null,
     ].filter(Boolean));
     foundModels = response.models && response.models.length ? response.models.map((model) => typeof model === "string" ? { id: model, name: model } : model) : (preset ? (preset.fallbackModels || []) : foundModels);
-    const keep = foundModels.length > 12 ? new Set([...currentChecked, ...modelArea.querySelector(".model-picker").selected().map((m) => m.id)]) : new Set(foundModels.map((model) => model.id));
+    const keep = existing || foundModels.length > 12 ? new Set([...currentChecked, ...modelArea.querySelector(".model-picker").selected().map((m) => m.id)]) : new Set(foundModels.map((model) => model.id));
     // Saved picks that the provider no longer lists stay visible and ticked so nothing is dropped silently.
     for (const saved of modelsOf(existing)) if (keep.has(saved.id) && !foundModels.some((m) => m.id === saved.id)) foundModels = [saved, ...foundModels];
     modelArea.querySelector(".model-picker").replaceWith(modelChecklist(foundModels, keep));
