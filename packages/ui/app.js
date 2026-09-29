@@ -377,6 +377,12 @@ function renderClients() {
   agentButton.className = agentEnabled ? "btn secondary" : "btn";
   agentButton.disabled = agentTitleBusy;
   agentButton.onclick = () => toggleAgentTitle(!agentEnabled);
+  const toolsLimited = Boolean(currentConfig.cli && currentConfig.cli.limitWorkerTools);
+  $("#client-worker-tools-rows").replaceChildren(el("div", { class: "row" }, [el("span", { class: "k", text: t("picker.state") }), toolsLimited ? badge("ok", t("workerTools.on")) : el("span", { class: "small", text: t("workerTools.off") })]));
+  const toolsButton = $("#client-worker-tools-toggle");
+  toolsButton.textContent = toolsLimited ? t("workerTools.turnOff") : t("workerTools.turnOn");
+  toolsButton.className = toolsLimited ? "btn secondary" : "btn";
+  toolsButton.onclick = () => toggleWorkerTools(!toolsLimited);
   void renderCodexClient();
   const mapped = Object.entries(currentConfig.routes || {}).map(([source, route]) => `${labelOf(claudeModels.find((model) => model.id === source) || { id: source })} → ${labelOf((groupedModels(currentConfig).find((group) => group.name === route.provider) || { models: [] }).models.find((model) => model.id === route.model) || { id: route.model })}`);
   $("#client-claude-code-rows").replaceChildren(el("div", { class: "small", text: mapped.join(" · ") || t("slots.noChanges") }));
@@ -536,6 +542,17 @@ async function toggleAgentTitle(enabled) {
     agentTitleBusy = false;
     void refreshHealth();
   }
+}
+async function toggleWorkerTools(enabled) {
+  if (!currentConfig) return;
+  const next = clone(currentConfig);
+  next.cli = { ...(next.cli || {}), limitWorkerTools: enabled };
+  try {
+    await configRequest(next);
+    currentConfig = next;
+    toast(t("common.saved"));
+  } catch (error) { toast(t("common.saveFailed"), true, error.message); }
+  renderClients();
 }
 async function renderCodexClient() {
   const rows = $("#client-codex-rows");

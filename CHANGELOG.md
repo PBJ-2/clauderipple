@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Worker tools** (`cli.limitWorkerTools`, off by default; a toggle in the dashboard). Generated
+  workers get only the read, edit, run, search and skill tools instead of inheriting every MCP
+  server and plugin tool of the session. One worker's first request fell from 32,942 to 8,823
+  tokens. Such a worker cannot use a browser or the iOS Simulator; keep those in an agent file of
+  your own.
+
 ## 0.6.0 — 2026-09-28
 
 Both suggested in #8 by @artisthanbohee-del.

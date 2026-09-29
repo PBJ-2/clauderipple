@@ -265,6 +265,12 @@ export type Config = {
      */
     agentFiles?: boolean;
     /**
+     * Give generated workers only the tools a worker uses (read, edit, run, search, skills) instead of
+     * every tool the session has. Each MCP server and plugin otherwise rides along on every worker
+     * request (agents.ts). Such a worker cannot drive a browser or a simulator. Default false.
+     */
+    limitWorkerTools?: boolean;
+    /**
      * Which model fills each of Claude Code's own slots, written into `~/.claude/settings.json`
      * env. Claude Code decides these before a request exists, so the router cannot reach them by
      * routing: a search, a session title or a subagent goes wherever the CLI already decided.
@@ -583,6 +589,7 @@ export function validate(c: Config): string[] {
   }
   if (!(c.listen.port > 0 && c.listen.port < 65536)) errors.push("listen.port out of range");
   if (c.cli.agentFiles !== undefined && typeof c.cli.agentFiles !== "boolean") errors.push("cli.agentFiles must be true or false");
+  if (c.cli.limitWorkerTools !== undefined && typeof c.cli.limitWorkerTools !== "boolean") errors.push("cli.limitWorkerTools must be true or false");
   if (c.listen.openaiPort !== undefined && !(c.listen.openaiPort >= 0 && c.listen.openaiPort < 65536)) errors.push("listen.openaiPort out of range");
   return errors;
 }

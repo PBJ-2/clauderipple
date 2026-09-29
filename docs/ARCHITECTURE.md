@@ -166,7 +166,11 @@ chat is out of reach for every approach, ours included.
   records what it wrote in `<home>/generated-agents.json` and touches **only**
   those files: a hand-written agent of the same name wins and is left alone, an
   unticked model removes its generated file and nothing else, identical content is
-  not rewritten. `cli.agentFiles: false` turns generation off. The marker alias
+  not rewritten. `cli.agentFiles: false` turns generation off;
+  `cli.limitWorkerTools: true` adds a `tools:` line so a worker does not inherit
+  every MCP and plugin tool of the session (first request 32,942 → 8,823 tokens,
+  2026-09-29), at the cost of browser and simulator tools. It is opt-in for that
+  reason. The marker alias
   table is the union of `aliases` (explicit, wins) and every agent file's
   `name → model` — so `[[ripple: <agent>@<effort>]]` resolves for any agent that
   exists, generated or not, with no second registry to keep in step. Why: on

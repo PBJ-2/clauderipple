@@ -413,6 +413,14 @@ by name (`400 ClaudeRipple: no provider declares "…"`) instead of being sent o
 to fail somewhere less legible; native Claude models always pass through.
 Set `"cli": { "agentFiles": false }` to turn generation off.
 
+By default a generated worker inherits every tool of the session, so each MCP
+server and plugin rides along on every worker request. `"cli": {
+"limitWorkerTools": true }` (or **Worker tools** in the dashboard) gives it only
+the read, edit, run, search and skill tools, which cut one worker's first
+request from about 33k to 9k tokens. Such a worker has no browser or simulator
+tools. A worker that needs them belongs in an agent file of your own, which is
+never touched.
+
 Claude Code runs `WebSearch` as a separate small-model request. To keep a
 ChatGPT-routed setup from spending Anthropic quota for that request, select the
 same ChatGPT provider as the search backend in `config.json`:
