@@ -144,6 +144,13 @@ ClaudeRipple이 Claude에 하는 일은 작고 확인할 수 있습니다. Claud
 Claude 모델이 이름 그대로 뜹니다. Claude Code 로그인이나 Anthropic API 키로 답합니다.
 [Codex 앱과 Codex CLI](#codex-앱과-codex-cli) 절을 보세요.
 
+### 이미지도 만들 수 있나요?
+
+됩니다. API 키 없이 ChatGPT 구독으로 만듭니다: `clauderipple image "빨간 종이배" -o boat.png --aspect square`.
+`--ref 파일`로 참고 이미지를, `--transparent`로 투명 배경을 줄 수 있습니다. 한 장에 30초쯤 걸리고, 해상도와 품질은
+구독 쪽이 정합니다. ClaudeRipple이 만든 서브에이전트에도 같은 방법이 적혀 있어 워커도 이미지를 만듭니다.
+[Claude Code](#claude-code-터미널-remote-control-서브에이전트) 절을 보세요.
+
 ### Claude Code 안에서는 GPT 성능이 떨어지지 않나요?
 
 Claude Code의 시스템 프롬프트와 도구 설명은 Claude에 맞춰 쓰여 있어서, 다른 모델은 남에게 맞춘 지시를 읽는 셈이고
@@ -219,6 +226,10 @@ ClaudeRipple은 Claude Code 프로세스만 신뢰하는 작은 HTTPS 프록시�
   서버 측 스레드 처리, 도구 호출과 이미지 왕복, 모델이 받는 범위로 추론 강도 클램프, 호환 벤더에는 Anthropic 전용 필드 제거.
 - **제대로 된 요청 로그.** 누가 물었고 어떤 모델이 답했는지, 입력·캐시·출력 토큰, 지연, 상태를 요청마다. 한 시간 요약 포함.
 - **서브에이전트 이름표.** 백그라운드 작업 패널에 "Agent" 대신 `Terra·high · Review`가 보입니다.
+- **ChatGPT 구독으로 이미지 생성.** `clauderipple image "<프롬프트>"`. 참고 이미지와 투명 배경도 됩니다. 서브에이전트에도
+  방법이 적혀 있어, GPT나 DeepSeek 워커가 이미지 도구 없이 이미지를 만들고 직접 확인합니다.
+- **원하면 가벼운 워커.** 스위치 하나로, 생성된 서브에이전트에 세션의 MCP·플러그인 도구 전부 대신 워커가 쓰는 도구만
+  줍니다. 워커 첫 요청이 3.3만에서 0.9만 토큰으로 줄었습니다.
 - **터미널이 싫은 사람을 위해.** 원클릭 연결 확인과 모델 자동 검색이 붙은 프로바이더 프리셋, 드롭다운 모델 매핑, 자동 저장,
   한국어·영어 UI. 런타임을 품고 첫 실행에 스스로 설치하는 메뉴 막대 앱. 서명·공증 완료.
 
@@ -310,7 +321,7 @@ node packages/cli/src/index.ts ui        # 브라우저에서 로컬 GUI 열기
 
 `uninstall`은 전부 되돌리고 `~/.claude/settings.json`을 백업에서 복원합니다. 그 밖의 명령: `status`, `start`, `stop`,
 `restart`, `logs -f`, `login`, `logout`, `claude-login`, `claude-logout`, `picker on|off`, `agent-title on|off`,
-`codex on|off`.
+`codex on|off`, `update`, `image "<프롬프트>"`.
 </details>
 
 ## 클라이언트

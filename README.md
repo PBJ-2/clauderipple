@@ -165,6 +165,15 @@ Yes. `clauderipple codex on` adds ClaudeRipple as a provider, and Claude models 
 the Codex app's and CLI's model list under their own names. They answer through your
 Claude Code login or an Anthropic API key. See [Codex app and Codex CLI](#codex-app-and-codex-cli).
 
+### Can it generate images?
+
+Yes, with a ChatGPT subscription and no API key:
+`clauderipple image "a red paper boat" -o boat.png --aspect square`. `--ref FILE` adds
+a reference image and `--transparent` a transparent background. One image takes about
+30 seconds, and the subscription chooses the resolution and quality. Subagents
+ClaudeRipple generates are told the same call, so they can make images too. See
+[Claude Code](#claude-code-terminal-remote-control-subagents).
+
 ### Does GPT do worse inside Claude Code?
 
 Claude Code's system prompt and tool descriptions are written for Claude, so another model
@@ -263,6 +272,12 @@ you map go to your provider, everything else goes to Anthropic byte for byte.
   latency, status, per request, with a one-hour summary.
 - **Subagent name tags.** The background-task panel shows `Terra·high · Review`
   instead of a generic "Agent".
+- **Images from your ChatGPT subscription.** `clauderipple image "<prompt>"`, with
+  reference images and transparent backgrounds. Subagents are told how, so a GPT or
+  DeepSeek worker can make an image and look at it without an image tool.
+- **Lean workers, if you want them.** One switch gives generated subagents only the
+  tools a worker uses instead of every MCP server and plugin of the session: one
+  worker's first request fell from 33k to 9k tokens.
 - **Made for people who don't want a terminal.** Provider presets with one-click
   connection tests and model discovery, drop-down model mapping, auto-save, Korean
   and English UI. A menu-bar app that carries its own runtime and sets itself up on
@@ -360,7 +375,7 @@ node packages/cli/src/index.ts ui        # open the local GUI in your browser
 `uninstall` reverses everything and restores `~/.claude/settings.json` from a backup.
 Other commands: `status`, `start`, `stop`, `restart`, `logs -f`, `login`, `logout`,
 `claude-login`, `claude-logout`, `picker on|off`, `agent-title on|off`,
-`codex on|off`.
+`codex on|off`, `update`, `image "<prompt>"`.
 </details>
 
 ## Clients
