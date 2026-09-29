@@ -39,9 +39,11 @@ import { ClaudeOAuthSession, type ClaudeOAuthState } from "./providers/claude-oa
 import { readClaudeAuthFile } from "./providers/anthropic-token-file.ts";
 import { listClaudeAccounts, removeClaudeAccount, renameClaudeAccount } from "./providers/anthropic-accounts.ts";
 import { readChatGptAccounts, removeChatGptAccount, summarize as summarizeChatGptAccount, updateChatGptAccount } from "./providers/chatgpt/accounts.ts";
-import type { ChatGptAccountStatus } from "./providers/chatgpt/index.ts";
+import { IMAGE_ASPECTS, IMAGE_BACKGROUNDS, IMAGE_FORMATS, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
 
 const MAX_BODY = 1024 * 1024;
+/** `/api/image` carries reference images inline, so it gets more room than a config save. */
+const MAX_IMAGE_BODY = 32 * 1024 * 1024;
 const here = path.dirname(fileURLToPath(import.meta.url));
 const STARTED_AT = new Date().toISOString();
 // packages/router/src → packages/ui in a checkout; dist/router/src → dist/ui in an npm install,
@@ -105,6 +107,8 @@ export type AdminDeps = {
   openBrowser?: (url: string) => boolean;
   /** Begin a graceful drain and exit. Supplied by the router; absent in tests. */
   shutdown?: () => void;
+  /** One image through the ChatGPT subscription (`POST /api/image`). */
+  image?: (req: ImageRequest, signal: AbortSignal) => Promise<ImageResult>;
   /**
    * Usage of each Claude subscription account, keyed by owner id ("current" for the Claude Code
    * login, otherwise the account id `/api/claude-accounts` lists). Absent in tests.
@@ -519,13 +523,44 @@ function syncModelSlotsForGui(cfg: Config): string | null {
   }
 }
 
-function readBody(req: http.IncomingMessage): Promise<Buffer> {
+/**
+ * The body of `POST /api/image`, checked: `{prompt, aspect?, format?, background?, images?}`,
+ * `images` being `data:image/...;base64,` URLs. A string is the reason it was refused.
+ */
+export function parseImageRequest(raw: unknown): ImageRequest | string {
+  if (!raw || typeof raw !== "object") return "expected a JSON object";
+  const body = raw as Record<string, unknown>;
+  if (typeof body.prompt !== "string" || !body.prompt.trim()) return "prompt is required";
+  const out: ImageRequest = { prompt: body.prompt };
+  const pick = <T extends string>(key: "aspect" | "format" | "background", allowed: readonly T[]): string | null => {
+    const value = body[key];
+    if (value === undefined) return null;
+    if (typeof value !== "string" || !allowed.includes(value as T)) return `${key} must be one of ${allowed.join(", ")}`;
+    (out as Record<string, unknown>)[key] = value;
+    return null;
+  };
+  const refused = pick("aspect", IMAGE_ASPECTS) ?? pick("format", IMAGE_FORMATS) ?? pick("background", IMAGE_BACKGROUNDS);
+  if (refused) return refused;
+  if (body.images !== undefined) {
+    if (!Array.isArray(body.images)) return "images must be a list of data: URLs";
+    const images: { mediaType: string; data: string }[] = [];
+    for (const url of body.images) {
+      const m = typeof url === "string" ? /^data:(image\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)$/i.exec(url) : null;
+      if (!m) return "each image must be a data:image/...;base64, URL";
+      images.push({ mediaType: m[1]!.toLowerCase(), data: m[2]!.replace(/\s/g, "") });
+    }
+    if (images.length) out.images = images;
+  }
+  return out;
+}
+
+function readBody(req: http.IncomingMessage, limit = MAX_BODY): Promise<Buffer> {
   return new Promise((resolveP, reject) => {
     const chunks: Buffer[] = [];
     let n = 0;
     req.on("data", (c: Buffer) => {
       n += c.length;
-      if (n > MAX_BODY) {
+      if (n > limit) {
         reject(new Error("body too large"));
         req.destroy();
         return;
@@ -1465,6 +1500,45 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         const r = await runCli(["picker", enabled ? "on" : "off"]);
         deps.log.info(`admin: picker ${enabled ? "on" : "off"} via GUI -> ${r.ok ? "ok" : "failed"}`);
         sendJson(res, r.ok ? 200 : 500, { ok: r.ok, output: r.output });
+        return;
+      }
+      if (pathname === "/api/image" && method === "POST") {
+        // The image itself is the response body, so `curl -o out.png` is the whole client. An error
+        // is JSON with a non-2xx status (`curl --fail-with-body` writes it to the same file).
+        if (!deps.image) {
+          sendJson(res, 501, { error: "image generation not available" });
+          return;
+        }
+        let parsed: ImageRequest | string;
+        try {
+          parsed = parseImageRequest(JSON.parse((await readBody(req, MAX_IMAGE_BODY)).toString("utf8")));
+        } catch (e) {
+          sendJson(res, 400, { error: /too large/.test((e as Error).message) ? "body too large (reference images over 32 MB)" : "invalid JSON" });
+          return;
+        }
+        if (typeof parsed === "string") {
+          sendJson(res, 400, { error: parsed });
+          return;
+        }
+        // A caller that gives up should not leave the generation running on the subscription.
+        const abort = new AbortController();
+        res.on("close", () => { if (!res.writableFinished) abort.abort(); });
+        const started = Date.now();
+        try {
+          const image = await deps.image(parsed, abort.signal);
+          deps.log.info(`admin: image ${image.size ?? "?"} ${image.quality ?? "?"} ${image.format}, ${parsed.images?.length ?? 0} reference(s), ${image.data.length} bytes in ${Date.now() - started} ms`);
+          res.writeHead(200, {
+            "content-type": `image/${image.format}`,
+            "content-length": String(image.data.length),
+            ...(image.size ? { "x-image-size": image.size } : {}),
+            ...(image.quality ? { "x-image-quality": image.quality } : {}),
+            ...(image.revisedPrompt ? { "x-revised-prompt": encodeURIComponent(image.revisedPrompt) } : {}),
+          });
+          res.end(image.data);
+        } catch (e) {
+          deps.log.warn(`admin: image failed after ${Date.now() - started} ms: ${(e as Error).message}`);
+          if (!res.headersSent) sendJson(res, 502, { error: (e as Error).message });
+        }
         return;
       }
       if (pathname === "/api/agent-title" && method === "POST") {

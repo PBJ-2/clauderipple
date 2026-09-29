@@ -31,7 +31,32 @@ const MODELS_PATH = "/codex/models";
 const MODELS_TIMEOUT_MS = 15_000;
 const MODELS_CACHE_MS = 60 * 60 * 1000;
 
-export type ChatGptOutcome = { status: number; bytes: number; note?: string; usage?: RequestUsage; stopReason?: string };
+/** One image took about 30 s at low quality (2026-09-29); high quality and references take longer. */
+const IMAGE_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * The shape, asked for in words. The subscription backend accepts the tool's `size` and `quality`
+ * and ignores them — even "999x1" and "bogus" came back 200 as a 1536x1024 image (2026-09-29) —
+ * while the prompt steers it: "square composition" gave 1254x1254. So the shape is a prompt hint,
+ * and quality is the backend's to choose.
+ */
+export const IMAGE_ASPECTS = ["square", "landscape", "portrait"] as const;
+export const IMAGE_FORMATS = ["png", "jpeg", "webp"] as const;
+export const IMAGE_BACKGROUNDS = ["auto", "transparent", "opaque"] as const;
+
+export type ImageRequest = {
+  prompt: string;
+  aspect?: (typeof IMAGE_ASPECTS)[number];
+  /** Honoured by the backend, as is `background` (measured 2026-09-29). */
+  format?: (typeof IMAGE_FORMATS)[number];
+  background?: (typeof IMAGE_BACKGROUNDS)[number];
+  /** Reference images, sent beside the prompt as `input_image`s. */
+  images?: { mediaType: string; data: string }[];
+};
+
+export type ImageResult = { data: Buffer; format: string; size?: string; quality?: string; revisedPrompt?: string };
+
+export type ChatGptOutcome ={ status: number; bytes: number; note?: string; usage?: RequestUsage; stopReason?: string };
 
 function anthropicError(status: number, type: string, message: string): { status: number; body: string } {
   return { status, body: JSON.stringify({ type: "error", error: { type, message } }) };
@@ -409,6 +434,98 @@ export class ChatGptAdapter {
     if (searches < 1 || selected.length === 0) throw new Error(`ChatGPT web search: no cited results returned (searches=${searches})`);
     const prose = text.trim();
     return prose ? { hits: selected, text: prose } : { hits: selected };
+  }
+
+  /**
+   * Hosted image generation, the same way `searchWeb` runs a hosted search: one Responses turn with
+   * the `image_generation` tool required. Wire measured 2026-09-29 against the live backend with a
+   * ChatGPT subscription: an `image_generation_call` output item whose `result` is the base64 image,
+   * beside the `size`, `quality` and `output_format` it chose and a `revised_prompt`; about 30 s.
+   */
+  async generateImage(model: string, req: ImageRequest, signal?: AbortSignal): Promise<ImageResult> {
+    const tokens = await this.anyCredential();
+    if (tokens instanceof Error) throw tokens;
+    const id = crypto.randomUUID();
+    const tool = {
+      type: "image_generation",
+      output_format: req.format ?? "png",
+      ...(req.background ? { background: req.background } : {}),
+    };
+    const prompt = req.aspect ? `${req.prompt}\n\nCompose it as a ${req.aspect} image.` : req.prompt;
+    const content: Record<string, unknown>[] = [{ type: "input_text", text: prompt }];
+    for (const image of req.images ?? []) content.push({ type: "input_image", image_url: `data:${image.mediaType};base64,${image.data}` });
+    const body = {
+      model,
+      instructions: "Generate the requested image. Use any attached images as references.",
+      input: [{ type: "message", role: "user", content }],
+      tools: [tool],
+      tool_choice: "required",
+      reasoning: { effort: "low", summary: "auto" },
+      store: false,
+      stream: true,
+      prompt_cache_key: id,
+      client_metadata: { session_id: id, thread_id: id, turn_id: crypto.randomUUID(), "x-codex-window-id": `${id}:0` },
+    };
+    const timeout = AbortSignal.timeout(IMAGE_TIMEOUT_MS);
+    const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+    const res = await fetch(`${(this.cfg.url ?? DEFAULT_BASE).replace(/\/$/, "")}/codex/responses`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "text/event-stream",
+        authorization: `Bearer ${tokens.accessToken}`,
+        "chatgpt-account-id": tokens.accountId,
+        "OpenAI-Beta": "responses=experimental",
+        originator: "codex_cli_rs",
+        "session-id": id,
+        "thread-id": id,
+        "x-client-request-id": id,
+        "x-codex-window-id": `${id}:0`,
+      },
+      body: JSON.stringify(body),
+      signal: requestSignal,
+    });
+    this.noteRateLimits(tokens, rateLimitsFromHeaders(res.headers));
+    if (!res.ok || !res.body) {
+      const text = await res.text().catch(() => "");
+      if (res.status === 401) void this.accounts.forceRefresh(tokens.ownerId);
+      throw new Error(`ChatGPT image generation: HTTP ${res.status}${text ? ` ${redactErrorText(text, [tokens.accessToken], 200)}` : ""}`);
+    }
+
+    const parser = new SseParser();
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let image: Record<string, unknown> | undefined;
+    let text = "";
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        for (const event of parser.feed(decoder.decode(value, { stream: true }))) {
+          if (event.type === "response.output_text.delta") text += String(event.delta ?? "");
+          if (event.type === "response.output_item.done") {
+            const item = event.item as Record<string, unknown> | undefined;
+            if (item?.type === "image_generation_call" && typeof item.result === "string" && item.result) image = item;
+          }
+          if (event.type === "error" || event.type === "response.failed") {
+            const error = (event.error ?? (event.response as { error?: unknown } | undefined)?.error) as { message?: unknown } | undefined;
+            throw new Error(`ChatGPT image generation: ${String(error?.message ?? "backend error")}`);
+          }
+        }
+      }
+    } finally {
+      try { await reader.cancel(); } catch { /* already closed */ }
+    }
+    // A refusal comes back as prose and no image; that prose is the only explanation there is.
+    if (!image) throw new Error(`ChatGPT image generation: no image returned${text.trim() ? `: ${text.trim().slice(0, 300)}` : ""}`);
+    const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
+    return {
+      data: Buffer.from(image.result as string, "base64"),
+      format: str(image.output_format) ?? req.format ?? "png",
+      ...(str(image.size) ? { size: str(image.size)! } : {}),
+      ...(str(image.quality) ? { quality: str(image.quality)! } : {}),
+      ...(str(image.revised_prompt) ? { revisedPrompt: str(image.revised_prompt)! } : {}),
+    };
   }
 
   /** One in-flight lookup shared by every caller (the status route and the startup refresh). */

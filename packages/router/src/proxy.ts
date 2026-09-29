@@ -31,7 +31,7 @@ import { applyIdentityToAnthropicBody } from "./identity.ts";
 import { anthropicServerToolBackend, webPluginBackend, webSearchBlocks, webSearchErrorBlocks, webSearchMessage, webSearchQuery, webSearchSse, type WebSearchQuery } from "./websearch.ts";
 import { classify, CredentialPool, retryAfterMs, type Credential } from "./pool.ts";
 import { PRESETS } from "./presets.ts";
-import { ChatGptAdapter, type ChatGptAccountStatus } from "./providers/chatgpt/index.ts";
+import { ChatGptAdapter, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
 import { OpenAiCompatibleAdapter } from "./providers/openai/index.ts";
 import { conversationKey, type AnthropicRequest } from "./providers/chatgpt/translate.ts";
 import { providerFor, terminateHosts } from "./config.ts";
@@ -292,6 +292,19 @@ export class Proxy {
     const first = Object.entries(providers).find(([, p]) => p.type === "chatgpt");
     if (first && first[1].type === "chatgpt") return this.chatgpt(first[0], first[1]);
     return this.chatgpt("codex-login", { type: "chatgpt", auth: "borrow-codex" });
+  }
+
+  /**
+   * One image for `/api/image`, on the first chatgpt provider and the first model it declares. The
+   * model only runs the tool call — the image comes from the backend's own image model — so which
+   * one it is barely matters.
+   */
+  generateImage(req: ImageRequest, signal?: AbortSignal): Promise<ImageResult> {
+    const first = Object.entries(this.deps.config().providers).find(([, p]) => p.type === "chatgpt");
+    if (!first || first[1].type !== "chatgpt") return Promise.reject(new Error("image generation needs a ChatGPT provider; add one in the dashboard"));
+    const model = first[1].models?.[0]?.id;
+    if (!model) return Promise.reject(new Error(`provider ${first[0]} declares no models`));
+    return this.chatgpt(first[0], first[1]).generateImage(model, req, signal);
   }
 
   /** Dashboard action: put one resting ChatGPT account back into rotation now. */

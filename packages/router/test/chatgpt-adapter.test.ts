@@ -15,7 +15,7 @@ fs.writeFileSync(path.join(home, "chatgpt-auth.json"), JSON.stringify({ accessTo
 
 type Seen = { headers: http.IncomingHttpHeaders; body: Record<string, unknown>; path: string };
 const seen: Seen[] = [];
-let mode: "stream" | "search" | "error429" | "sse-error" | "cut-off" = "stream";
+let mode: "stream" | "search" | "image" | "image-refused" | "error429" | "sse-error" | "cut-off" = "stream";
 // Active quota lookup (GET /wham/usage): its own mode so it can be exercised independently.
 let usageMode: "ok" | "unauthorized" | "no-window" = "ok";
 let usageHits = 0;
@@ -66,6 +66,20 @@ const backend = http.createServer((req, res) => {
       return;
     }
     seen.push({ headers: req.headers, body: JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown>, path: req.url ?? "" });
+    if (mode === "image" || mode === "image-refused") {
+      // The shape measured 2026-09-29: the image is an output item's base64 `result`; a refusal is prose alone.
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(sse(mode === "image" ? [
+        { type: "response.created", response: {} },
+        { type: "response.output_item.done", item: { id: "ig_1", type: "image_generation_call", status: "completed", output_format: "png", quality: "low", size: "1536x1024", revised_prompt: "a boat", result: Buffer.from("PNGDATA").toString("base64") } },
+        { type: "response.completed", response: { usage: { input_tokens: 2249, output_tokens: 75 } } },
+      ] : [
+        { type: "response.created", response: {} },
+        { type: "response.output_text.delta", delta: "I can't make that." },
+        { type: "response.completed", response: {} },
+      ]));
+      return;
+    }
     if (mode === "search") {
       res.writeHead(200, { "content-type": "text/event-stream", "x-codex-primary-used-percent": "41" });
       res.end(sse([
@@ -203,6 +217,33 @@ test("hosted web search sends the measured Responses tool and extracts cited res
   }]);
   assert.deepEqual(outcome.hits, [{ title: "Node.js downloads", url: "https://nodejs.org/en/download/current" }]);
   assert.equal(outcome.text, "Node 24.21.0 is current.");
+});
+
+test("image generation sends the hosted tool with references and returns the decoded image", async () => {
+  mode = "image";
+  const image = await adapter.generateImage("gpt-5.6-terra", {
+    prompt: "a paper boat",
+    aspect: "square",
+    background: "transparent",
+    images: [{ mediaType: "image/png", data: "QUJD" }],
+  });
+  const s = seen.at(-1)!;
+  assert.equal(s.path, "/codex/responses");
+  assert.equal(s.body.tool_choice, "required");
+  // No size or quality: the backend ignores both, so the shape travels in the prompt.
+  assert.deepEqual(s.body.tools, [{ type: "image_generation", output_format: "png", background: "transparent" }]);
+  const content = (s.body.input as { content: Record<string, unknown>[] }[])[0]!.content;
+  assert.deepEqual(content, [
+    { type: "input_text", text: "a paper boat\n\nCompose it as a square image." },
+    { type: "input_image", image_url: "data:image/png;base64,QUJD" },
+  ]);
+  assert.equal(image.data.toString(), "PNGDATA");
+  assert.deepEqual({ format: image.format, size: image.size, quality: image.quality, revisedPrompt: image.revisedPrompt }, { format: "png", size: "1536x1024", quality: "low", revisedPrompt: "a boat" });
+});
+
+test("image generation that comes back as prose alone fails with that prose", async () => {
+  mode = "image-refused";
+  await assert.rejects(() => adapter.generateImage("gpt-5.6-terra", { prompt: "x" }), /no image returned: I can't make that\./);
 });
 
 test("hosted web search refuses a domain exclusion it cannot enforce", async () => {

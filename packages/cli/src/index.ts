@@ -130,6 +130,44 @@ function starterConfig(port: number): string {
   ) + "\n";
 }
 
+const IMAGE_USAGE = 'usage: clauderipple image "<prompt>" [-o FILE] [--aspect square|landscape|portrait] [--format png|jpeg|webp] [--transparent] [--ref FILE ...]';
+
+/**
+ * One image through the running router's ChatGPT subscription (`POST /api/image`), written to a
+ * file whose path is printed — so a worker with nothing but Bash can make and then look at one.
+ */
+async function image(): Promise<void> {
+  const prompt = args[1];
+  if (!prompt || prompt.startsWith("-")) throw new Error(IMAGE_USAGE);
+  const images = args.flatMap((a, i) => (a === "--ref" && args[i + 1] ? [args[i + 1]!] : [])).map((file) => {
+    const ext = path.extname(file).slice(1).toLowerCase();
+    return `data:image/${ext === "jpg" ? "jpeg" : ext};base64,${fs.readFileSync(file).toString("base64")}`;
+  });
+  const format = opt("format") ?? "png";
+  const out = path.resolve(opt("o") ?? `image-${new Date().toISOString().replace(/[:.]/g, "-")}.${format === "jpeg" ? "jpg" : format}`);
+  const body = {
+    prompt,
+    format,
+    ...(opt("aspect") ? { aspect: opt("aspect") } : {}),
+    ...(flag("transparent") ? { background: "transparent" } : {}),
+    ...(images.length ? { images } : {}),
+  };
+  const port = adminPort(new ConfigStore(configPath()).get());
+  let res: Response;
+  try {
+    res = await fetch(`http://127.0.0.1:${port}/api/image`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  } catch {
+    throw new Error(`the router is not answering on 127.0.0.1:${port}; start it with: clauderipple start`);
+  }
+  if (!res.ok) {
+    const answer = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(answer.error ?? `HTTP ${res.status}`);
+  }
+  fs.mkdirSync(path.dirname(out), { recursive: true });
+  fs.writeFileSync(out, Buffer.from(await res.arrayBuffer()));
+  console.log(out);
+}
+
 /** The version the router on this admin port reports, or null when it does not answer. */
 async function runningVersion(port: number): Promise<string | null> {
   try {
@@ -427,6 +465,8 @@ function help(): void {
   logout            forget every ChatGPT account added with "login" (the Codex CLI's own login is left alone)
   claude-login      connect a Claude subscription in the browser (--setup-token: via \`claude setup-token\`; --manual: paste the code)
   claude-logout     remove every Claude subscription added to ClaudeRipple
+  image "<prompt>" [-o FILE] [--aspect square|landscape|portrait] [--transparent] [--ref FILE ...]
+                    generate an image with your ChatGPT subscription and print the file's path
   picker on|off     show your mapped models by name in the Claude Desktop picker (trusts the CA in your login keychain, routes the app through ClaudeRipple)
   codex on|off      add/remove ClaudeRipple's local OpenAI provider and selection profile for Codex CLI
   agent-title on|off|status
@@ -546,6 +586,9 @@ try {
     }
     case "claude-logout":
       console.log(claudeLogout(homeDir()) ? "✓ ClaudeRipple Claude accounts removed" : "no ClaudeRipple Claude accounts stored");
+      break;
+    case "image":
+      await image();
       break;
     case "ui":
       ui();

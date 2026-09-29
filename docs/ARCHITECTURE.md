@@ -170,7 +170,15 @@ chat is out of reach for every approach, ours included.
   `cli.limitWorkerTools: true` adds a `tools:` line so a worker does not inherit
   every MCP and plugin tool of the session (first request 32,942 → 8,823 tokens,
   2026-09-29), at the cost of browser and simulator tools. It is opt-in for that
-  reason. The marker alias
+  reason. With a chatgpt provider configured the body also tells a worker how to
+  make an image: `POST /api/image` on the admin port, which runs one Codex
+  Responses turn with the hosted `image_generation` tool required and answers
+  with the image bytes (`clauderipple image` is the same call). Measured
+  2026-09-29 on a subscription: the image is the `image_generation_call` output
+  item's base64 `result`, about 30 s; `output_format` and `background` are
+  honoured, `size` and `quality` are accepted and ignored (even "999x1" and
+  "bogus" returned 200), and the shape follows the prompt ("square composition"
+  → 1254x1254). So the API takes `aspect` and says it in words. The marker alias
   table is the union of `aliases` (explicit, wins) and every agent file's
   `name → model` — so `[[ripple: <agent>@<effort>]]` resolves for any agent that
   exists, generated or not, with no second registry to keep in step. Why: on

@@ -161,6 +161,7 @@ proxy
       picker: () => ({ enabled: !!store.get().picker?.enabled, hosts: terminateHosts(store.get()).slice(1), last: proxy.lastPickerInjection }),
       observedClaudeCodeAuth,
       claudeUsage: () => proxy.claudeUsage.snapshot(),
+      image: (req, signal) => proxy.generateImage(req, signal),
       shutdown: () => beginDrain("shutdown requested"),
     });
     log!.info(`clauderipple admin GUI on http://127.0.0.1:${admin.port}/`);

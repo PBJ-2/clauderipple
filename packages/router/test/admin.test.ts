@@ -8,6 +8,7 @@ import path from "node:path";
 import { DEFAULTS, type Config, type ProviderModel } from "../src/config.ts";
 import { Logger } from "../src/log.ts";
 import { startAdmin } from "../src/admin.ts";
+import type { ImageRequest } from "../src/providers/chatgpt/index.ts";
 import { RequestLog } from "../src/requestlog.ts";
 import { PRESETS } from "../src/presets.ts";
 import { saveClaudeAuthFile, saveClaudeOAuthFile } from "../src/providers/anthropic-token-file.ts";
@@ -321,6 +322,49 @@ test("GET /api/claude-models uses named entries from code and ccd picker surface
     const res = await fetch(`${base()}:${admin.port}/api/claude-models`);
     assert.equal(res.status, 200);
     assert.deepEqual(await res.json(), { source: "picker", models: [{ id: "claude-opus-5", name: "Opus 5" }] });
+  } finally {
+    admin.close();
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("POST /api/image answers with the image bytes, and refuses a bad request before generating", async () => {
+  const cfg = makeCfg();
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-image-admin-"));
+  const configFile = path.join(home, "config.json");
+  fs.writeFileSync(configFile, JSON.stringify(cfg));
+  const asked: ImageRequest[] = [];
+  const admin = await startAdmin({
+    config: () => cfg,
+    configFile,
+    log: new Logger(null, 1_000_000, 1, false),
+    stats: () => ({ inFlight: 0, messagesInFlight: 0, started: 0, completed: 0, failed: 0 }),
+    health: () => 0,
+    version: "0.0.0-test",
+    requests: new RequestLog(path.join(home, "logs", "requests.jsonl")),
+    image: async (req) => {
+      asked.push(req);
+      return { data: Buffer.from("PNGDATA"), format: "png", size: "1024x1024", revisedPrompt: "a boat, flat" };
+    },
+  });
+  const post = (body: unknown): Promise<Response> =>
+    fetch(`${base()}:${admin.port}/api/image`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  try {
+    const ok = await post({ prompt: "a boat", aspect: "portrait", images: ["data:image/png;base64,QUJD"] });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.headers.get("content-type"), "image/png");
+    assert.equal(decodeURIComponent(ok.headers.get("x-revised-prompt") ?? ""), "a boat, flat");
+    assert.equal(Buffer.from(await ok.arrayBuffer()).toString(), "PNGDATA");
+    assert.deepEqual(asked, [{ prompt: "a boat", aspect: "portrait", images: [{ mediaType: "image/png", data: "QUJD" }] }]);
+
+    const noPrompt = await post({ prompt: " " });
+    assert.equal(noPrompt.status, 400);
+    const badAspect = await post({ prompt: "x", aspect: "1024x1024" });
+    assert.equal(badAspect.status, 400);
+    assert.match(((await badAspect.json()) as { error: string }).error, /aspect must be one of/);
+    const badRef = await post({ prompt: "x", images: ["/tmp/a.png"] });
+    assert.equal(badRef.status, 400);
+    assert.equal(asked.length, 1, "nothing generated for a refused request");
   } finally {
     admin.close();
     fs.rmSync(home, { recursive: true, force: true });

@@ -421,6 +421,19 @@ request from about 33k to 9k tokens. Such a worker has no browser or simulator
 tools. A worker that needs them belongs in an agent file of your own, which is
 never touched.
 
+With a ChatGPT provider configured, images come from the same subscription:
+
+```bash
+clauderipple image "a red paper boat, flat illustration" -o boat.png --aspect square
+```
+
+`--transparent`, `--format png|jpeg|webp` and `--ref FILE` (a reference image,
+repeatable) are optional. One image takes about 30 seconds. The subscription
+backend picks the resolution and quality itself, so the shape is asked for in
+words (`--aspect`). The command is a client of `POST /api/image` on the admin
+port, which answers with the image bytes. Generated workers are told the `curl`
+form of it, so a worker with only Bash can make an image and read it back.
+
 Claude Code runs `WebSearch` as a separate small-model request. To keep a
 ChatGPT-routed setup from spending Anthropic quota for that request, select the
 same ChatGPT provider as the search backend in `config.json`:

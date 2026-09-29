@@ -9,6 +9,11 @@
   server and plugin tool of the session. One worker's first request fell from 32,942 to 8,823
   tokens. Such a worker cannot use a browser or the iOS Simulator; keep those in an agent file of
   your own.
+- **Images from the ChatGPT subscription.** `clauderipple image "<prompt>" -o file.png`, with
+  `--aspect square|landscape|portrait`, `--transparent`, `--format` and `--ref FILE` for reference
+  images. Underneath is `POST /api/image` on the admin port, which answers with the image itself.
+  Generated workers are told the `curl` form, so a worker with only Bash can make one. The backend
+  chooses resolution and quality; about 30 seconds an image.
 
 ## 0.6.0 — 2026-09-28
 
