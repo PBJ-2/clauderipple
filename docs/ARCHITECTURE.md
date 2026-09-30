@@ -624,6 +624,12 @@ chat is out of reach for every approach, ours included.
   this turn), the caller's own `Authorization`/`chatgpt-account-id` is used
   once as sent — pointing Codex here never leaves it worse off. A WebSocket
   upgrade is answered 426 so Codex falls back to SSE.
+- **Codex app model list.** `codex on` also points `model_catalog_json` at
+  `~/.codex/clauderipple-models.json`: Codex's own `models_cache.json` entries
+  plus ours. That file *replaces* Codex's list, so it must follow both sides —
+  the router rewrites it when its config loads and when Codex's cache changes
+  (checked once a minute; the app reads the catalog only at startup). With the
+  first alone, gpt-6.1-sol (2026-09-30) reached Codex's cache but not the app.
 - Configure a native API-key target as
   `{ "type":"anthropic", "auth":"api-key", "apiKey":"…" }` (or set
   `ANTHROPIC_API_KEY`). Configure a compatible target as today, for example an

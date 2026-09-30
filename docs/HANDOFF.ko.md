@@ -1042,7 +1042,7 @@ JSON 파일을 그것으로 쓰지 말 것(`@electron/rebuild`가 파싱 못 해
 - Codex→Claude 429 원인·수정(instructions를 첫 user 블록으로, effort 게이트), 완료 후 소켓 끊김을 200으로 기록, env_key 제거·Authorization 선택.
 - **Codex 모델 카탈로그**(`model_catalog_json`): 형식은 Codex 파싱 오류를 하나씩 읽어 알아냄 — `{models:[…]}`, 항목마다 `base_instructions`·
   `supports_parallel_tool_calls` 필수, `model_messages.instructions_template`이 있으면 그것이 시스템 프롬프트. gpt-5.5 항목 복제로 생성.
-  라우터가 설정 변경 시 자동 갱신(`codexEnabled()`일 때만).
+  라우터가 설정 변경 시 자동 갱신(`codexEnabled()`일 때만). 09-30부터 Codex 캐시가 바뀔 때도 갱신(ARCHITECTURE §4b).
 - GUI `?lang=en` 지원 → `scripts/make-media.mts`가 영어로 캡처. README 영/한 전면 개정(비교표·알파 섹션·언어 링크), 라이선스 GPL-3.0.
 - 디씨 댓글 "밴 아님?"에 대한 정확한 답: Claude Code→GPT는 문서화된 프록시 경로라 Claude 요청은 무변경. ChatGPT 구독을 Codex 백엔드로 빌리는 것과
   Claude 구독을 Codex에서 재사용하는 것은 각사 약관 회색지대(README엔 "약관의 적용을 받는다"만 적음).
