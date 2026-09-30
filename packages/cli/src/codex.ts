@@ -118,9 +118,10 @@ export function writeCodexCatalog(models: CatalogModel[], home = codexHome()): s
  * OpenAI released after the router started stayed missing from the app (gpt-6.1-sol, 2026-09-30 —
  * the copy was written at router start, Codex's cache gained the model half an hour later). Rewrite
  * the copy whenever the cache changes, while `codex on` is in effect. Polls, as Codex replaces the
- * file rather than editing it. Returns a stop function.
+ * file rather than editing it; once a minute is plenty, since the app reads the catalog only when it
+ * starts. Returns a stop function.
  */
-export function followCodexCache(models: () => CatalogModel[], home = codexHome(), intervalMs = 5000, onError: (e: Error) => void = () => {}): () => void {
+export function followCodexCache(models: () => CatalogModel[], home = codexHome(), intervalMs = 60_000, onError: (e: Error) => void = () => {}): () => void {
   const cache = path.join(home, "models_cache.json");
   const listener = (now: fs.Stats, before: fs.Stats): void => {
     if (now.mtimeMs === before.mtimeMs || !codexEnabled(home)) return;
