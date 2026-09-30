@@ -969,7 +969,7 @@ JSON 파일을 그것으로 쓰지 말 것(`@electron/rebuild`가 파싱 못 해
   2. 캐시 17%의 원인은 시스템 블록 첫 줄 `x-anthropic-billing-header … cch=<해시>`가 매 턴 바뀌는 것. 제거 후 연속 턴 94–99%.
   `providers.chatgpt.debugDump`는 true(실패만 덤프) / "all"(전부, 최근 60개). 실전 config는 지금 true.
 - **토큰 표시**: CLI는 스트리밍 블록마다 usage 스냅샷을 찍으므로 message_start에 입력 토큰 추정치를 넣었다(실측값은 message_delta). 앱 패널 숫자가 실제에 가깝게 나오는지 다음 서브에이전트 실행에서 확인.
-- **agent-title 훅**(서브에이전트 제목에 모델·강도): `clauderipple agent-title on|off`, 트레이 메뉴, `POST /api/agent-title`. GUI 토글은 아직 없음.
+- **agent-title 훅**(서브에이전트 제목에 모델·강도): `clauderipple agent-title on|off`, 트레이 메뉴, `POST /api/agent-title`. GUI 토글은 아직 없음. 09-30: 앱 작업 패널의 모델 줄은 Claude 모델만 표시하고, 세션을 다시 불러오면 부모가 쓴 원래 제목으로 돌아가므로(훅 수정분은 실시간일 때만) 생성 에이전트 파일 설명이 부모에게 같은 접두사를 쓰게 한다. 훅은 `[[ripple: …]]` 표식과 `effortClamp`를 라우터와 같게 따른다.
 - **GUI 전면 개편**(비개발자용, 프리셋·연결 확인·드롭다운 매핑) 커밋 ce1f9d6. 프리셋 카탈로그 `packages/router/src/presets.ts`(공식 문서 URL 주석). Grok·Mistral은 OpenAI 방식만이라 번역기 필요 → 미지원. 새 GUI는 격리 라우터에서 흐름 검증했고 실제 앱 창 스크린샷 검증은 못 했다(화면 접근 거부됨) — 주군이 직접 보고 어색한 문구·동작을 알려주면 고친다.
 
 ## 2026-09-13 밤 (릴리스 직전 상태)
