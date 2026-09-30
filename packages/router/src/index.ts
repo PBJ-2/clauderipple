@@ -7,7 +7,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { codexEnabled, writeCodexCatalog } from "../../cli/src/codex.ts";
+import { codexEnabled, followCodexCache, writeCodexCatalog } from "../../cli/src/codex.ts";
 import { ingressModels } from "./ingress/models.ts";
 import { ConfigStore, configPath, homeDir, terminateHosts } from "./config.ts";
 import { defaultAgentDir, syncAgentFiles } from "./agents.ts";
@@ -127,6 +127,10 @@ setInterval(() => {
   const oi = ingress.stats;
   log!.info(`stats proxy=${s.started}/${s.completed}/${s.failed} inFlight=${s.inFlight} ingress=${oi.started}/${oi.completed}/${oi.failed} inFlight=${oi.inFlight} consecutiveUpstreamFailures=${health.consecutiveFailures}`);
 }, statsEvery).unref();
+
+// The config callback above rewrites the Codex catalog when *our* models change; this covers
+// Codex's side (a new OpenAI model arriving in its cache).
+followCodexCache(() => ingressModels(store.get()), undefined, undefined, (e) => log!.warn(`codex catalog: ${e.message}`));
 
 proxy
   .listen()

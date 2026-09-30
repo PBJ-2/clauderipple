@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { codexOff, codexOn } from "../src/codex.ts";
+import { codexOff, codexOn, followCodexCache } from "../src/codex.ts";
 
 test("codex on/off owns only marked provider and profile blocks", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-codex-"));
@@ -94,4 +94,27 @@ test("codex on without a Codex cache installs the provider only and keeps a user
   const text = fs.readFileSync(config, "utf8");
   assert.equal(text.split("model_catalog_json").length, 2);
   assert.ok(text.includes("[model_providers.clauderipple]"));
+});
+
+// A model OpenAI released after the router started stayed out of the Codex app, because our
+// catalog was copied from Codex's cache only at router start (gpt-6.1-sol, 2026-09-30).
+test("the catalog follows Codex's cache when Codex refreshes it", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-codex-follow-"));
+  const cache = path.join(home, "models_cache.json");
+  const write = (slugs: string[]): void => fs.writeFileSync(cache, JSON.stringify({ models: slugs.map((slug) => ({ slug, model_messages: { instructions_template: "T" } })) }));
+  write(["gpt-5.5"]);
+  const models = [{ id: "claude-sonnet-5", provider: "anthropic", effortLevels: ["medium"] }];
+  codexOn(18793, home, models);
+  const stop = followCodexCache(() => models, home, 20);
+  try {
+    await new Promise((r) => setTimeout(r, 60));
+    write(["gpt-6.1-sol", "gpt-5.5"]);
+    fs.utimesSync(cache, new Date(), new Date(Date.now() + 5000)); // an mtime change even on a coarse clock
+    const catalog = path.join(home, "clauderipple-models.json");
+    const slugs = (): unknown[] => (JSON.parse(fs.readFileSync(catalog, "utf8")) as { models: { slug: unknown }[] }).models.map((m) => m.slug);
+    for (let i = 0; i < 100 && !slugs().includes("gpt-6.1-sol"); i++) await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual(slugs(), ["gpt-6.1-sol", "gpt-5.5", "claude-sonnet-5"]);
+  } finally {
+    stop();
+  }
 });

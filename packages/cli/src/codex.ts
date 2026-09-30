@@ -113,6 +113,27 @@ export function writeCodexCatalog(models: CatalogModel[], home = codexHome()): s
   return file;
 }
 
+/**
+ * Our catalog is a copy of Codex's cache, so it goes stale when Codex refreshes that cache: a model
+ * OpenAI released after the router started stayed missing from the app (gpt-6.1-sol, 2026-09-30 —
+ * the copy was written at router start, Codex's cache gained the model half an hour later). Rewrite
+ * the copy whenever the cache changes, while `codex on` is in effect. Polls, as Codex replaces the
+ * file rather than editing it. Returns a stop function.
+ */
+export function followCodexCache(models: () => CatalogModel[], home = codexHome(), intervalMs = 5000, onError: (e: Error) => void = () => {}): () => void {
+  const cache = path.join(home, "models_cache.json");
+  const listener = (now: fs.Stats, before: fs.Stats): void => {
+    if (now.mtimeMs === before.mtimeMs || !codexEnabled(home)) return;
+    try {
+      writeCodexCatalog(models(), home);
+    } catch (e) {
+      onError(e as Error);
+    }
+  };
+  fs.watchFile(cache, { interval: intervalMs, persistent: false }, listener);
+  return () => fs.unwatchFile(cache, listener);
+}
+
 function catalogBlock(file: string): string {
   return `${CATALOG_START}
 model_catalog_json = ${JSON.stringify(file)}
