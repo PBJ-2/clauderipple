@@ -373,6 +373,8 @@ button.btn.compact { padding: 4px 9px; font-size: 14px; }
 .chooser-tile strong { margin-bottom: 6px; }
 .chooser-tile span { color: var(--muted); font-size: 14px; line-height: 1.35; }
 .form-field { display: flex; flex-direction: column; gap: 5px; margin-top: 14px; color: var(--text); font-size: 15px; }
+/* An author `display` beats the UA's [hidden] rule, so a field a form hides would stay on screen. */
+.form-field[hidden] { display: none; }
 .form-field > small { color: var(--muted); font-size: 14px; line-height: 1.4; }
 .key-control { display: flex; gap: 6px; }
 .eye-button { all: unset; flex: 0 0 auto; cursor: pointer; padding: 0 9px; border: 1px solid var(--border); border-radius: 5px; font-size: 14px; color: var(--muted); }
