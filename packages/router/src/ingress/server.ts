@@ -365,8 +365,9 @@ export class OpenAiIngress {
       // is an OpenAI wire, which the refusal below would otherwise turn away on the provider's type
       // alone. One subscription is one provider, so the model decides.
       const provider = providerFor(configured, route.model);
-      if (provider.type === "chatgpt" || provider.type === "openai-compatible") {
-        const bytes = sendJson(res, 400, openAiError(`${provider.type === "chatgpt" ? "ChatGPT" : "OpenAI-compatible"} provider is not available through OpenAI ingress`, "invalid_request_error", "unsupported_provider"));
+      if (provider.type === "chatgpt" || provider.type === "openai-compatible" || provider.type === "google") {
+        const label = provider.type === "chatgpt" ? "ChatGPT" : provider.type === "google" ? "Google" : "OpenAI-compatible";
+        const bytes = sendJson(res, 400, openAiError(`${label} provider is not available through OpenAI ingress`, "invalid_request_error", "unsupported_provider"));
         finish(400, bytes, { note: `model ${requested} -> ${provider.type} provider unsupported` });
         return;
       }

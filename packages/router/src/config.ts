@@ -130,6 +130,30 @@ export type OpenAiCompatibleProvider = {
   caps?: { effortLevels?: string[]; reasoning?: "effort" | "none" };
 };
 
+export type GoogleProvider = {
+  /**
+   * Google Gemini, spoken on its own generative-language wire (Anthropic Messages translated to
+   * `generateContent`). `auth: "api-key"` is an AI Studio key; `auth: "antigravity"` (the Cloud
+   * Code Assist / Antigravity mode) is not implemented yet and is refused with a clear error rather
+   * than sent to the wrong endpoint. The transport is kept behind one interface so that mode can be
+   * added without touching the translation (providers/google/transport.ts).
+   */
+  type: "google";
+  auth: "api-key" | "antigravity";
+  /** AI Studio API key. Required for `api-key` unless GEMINI_API_KEY or GOOGLE_API_KEY is set. Never logged. */
+  apiKey?: string;
+  /** Override the API base (default https://generativelanguage.googleapis.com). */
+  url?: string;
+  /** Models offered in the GUI (the probe fills this from `GET /v1beta/models`). */
+  models?: ProviderModel[];
+  /** Prefix the system prompt with a one-line identity so the model knows what it is. Default true. */
+  identity?: boolean;
+  /** Fixed text appended to the system prompt. Must stay constant across turns or the prompt cache breaks. */
+  instructionsAppend?: string;
+  /** Reasoning effort when the request carries none. */
+  defaultEffort?: string;
+};
+
 export type AnthropicProvider = {
   /** Native Anthropic Messages API. */
   type: "anthropic";
@@ -145,7 +169,7 @@ export type AnthropicProvider = {
   models?: ProviderModel[];
 };
 
-export type Provider = AnthropicCompatibleProvider | ChatGptProvider | OpenAiCompatibleProvider | AnthropicProvider;
+export type Provider = AnthropicCompatibleProvider | ChatGptProvider | OpenAiCompatibleProvider | GoogleProvider | AnthropicProvider;
 
 /**
  * The provider's own key, re-sent under the header another wire on the same account expects.
@@ -574,6 +598,16 @@ export function validate(c: Config): string[] {
         (p.caps.effortLevels !== undefined && (!Array.isArray(p.caps.effortLevels) || p.caps.effortLevels.some((level) => typeof level !== "string"))) ||
         (p.caps.reasoning !== undefined && p.caps.reasoning !== "effort" && p.caps.reasoning !== "none"))) {
         errors.push(`provider ${name}: caps must contain effortLevels?: string[], reasoning?: "effort"|"none"`);
+      }
+    } else if (p.type === "google") {
+      if (p.auth !== "api-key" && p.auth !== "antigravity") errors.push(`provider ${name}: auth must be "api-key" or "antigravity"`);
+      // The api-key is required, but a key may also come from the environment. The router, not the
+      // GUI save, is where that is settled — so this only refuses a key of the wrong type.
+      if (p.apiKey !== undefined && typeof p.apiKey !== "string") errors.push(`provider ${name}: apiKey must be a string`);
+      if (p.url !== undefined && !/^https?:\/\//.test(p.url)) errors.push(`provider ${name}: url must start with http:// or https://`);
+      if (p.defaultEffort !== undefined && typeof p.defaultEffort !== "string") errors.push(`provider ${name}: defaultEffort must be a string`);
+      if (p.models !== undefined && !validModels(p.models)) {
+        errors.push(`provider ${name}: ${MODELS_SHAPE}`);
       }
     } else if (p.type === "anthropic") {
       if (p.auth !== "api-key" && p.auth !== "claude-code") errors.push(`provider ${name}: auth must be "api-key" or "claude-code"`);

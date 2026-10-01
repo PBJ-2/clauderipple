@@ -205,6 +205,13 @@ export function effortLevels(cfg: Config): { providers: Record<string, { default
       };
       continue;
     }
+    if (provider.type === "google") {
+      // Gemini exposes its ladder per model (the probe fills `effortLevels`); there is no
+      // provider-wide default, so the union of what the models declared is the fallback.
+      const levels = [...new Set((provider.models ?? []).flatMap((model) => model.effortLevels ?? []))];
+      providers[name] = { default: levels, ...(Object.keys(modelLevels).length ? { models: modelLevels } : {}) };
+      continue;
+    }
     if (provider.type === "anthropic") {
       providers[name] = { default: ANTHROPIC_EFFORT_LEVELS };
       continue;
@@ -328,7 +335,7 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
   // them by whichever TCP check answered first, so the Health list reshuffled on every poll.
   const checked = await Promise.all(
     Object.entries(cfg.providers).map(async ([name, p]) => {
-      const url = p.type === "anthropic" ? "https://api.anthropic.com" : p.type === "chatgpt" ? (p.url ?? "https://chatgpt.com/backend-api") : p.url;
+      const url = p.type === "anthropic" ? "https://api.anthropic.com" : p.type === "chatgpt" ? (p.url ?? "https://chatgpt.com/backend-api") : p.type === "google" ? (p.url ?? "https://generativelanguage.googleapis.com") : p.url;
       let reachable = false;
       try {
         const u = new URL(url);
@@ -650,6 +657,66 @@ function probeClaudeCodeAuth(deps: AdminDeps): { ok: boolean; auth: "ok" | "miss
   const hasUsableAccount = accounts.some((account) => !account.needsReauth && account.expiresAt > Date.now());
   const signedIn = accounts.length > 0 ? "oauth" : readClaudeAuthFile(homeDir())?.source ?? null;
   return { ok: source !== null || hasUsableAccount, auth: source !== null || hasUsableAccount ? "ok" : "missing", source, signedIn, accountCount: accounts.length, models: CLAUDE_MODEL_FALLBACK };
+}
+
+/** The reasoning levels a `GET /v1beta/models` entry says the model takes, or none to offer. */
+function googleEffortLevels(entry: { thinking?: unknown; id?: unknown }): string[] {
+  // `thinking: true` is the listing's own flag that a model reasons. The Generative Language API
+  // documents no per-model effort ladder, so a thinking model is offered the Gemini-3 levels this
+  // router maps onto (translate.ts): a model that only knows a subset clamps server-side.
+  return entry.thinking === true ? ["minimal", "low", "medium", "high"] : [];
+}
+
+/**
+ * `GET {base}/v1beta/models` with the key on `x-goog-api-key`, following `nextPageToken`.
+ *
+ * The auth check is the listing itself: Google answers a bad key with `400 API_KEY_INVALID` (or a
+ * 401/403), so there is no separate one-token request to make.
+ */
+async function probeGoogle(body: { apiKey?: unknown; url?: unknown }, probeFetch: (url: string, init: RequestInit) => Promise<Response> = fetchWithTimeout): Promise<{ ok: boolean; auth: ProbeAuth; models: ModelEntry[]; error?: string }> {
+  const apiKey = typeof body.apiKey === "string" && body.apiKey.length > 0 ? body.apiKey : (process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY);
+  if (!apiKey) return { ok: false, auth: "missing", models: [], error: "no API key; set one or GEMINI_API_KEY" };
+  const base = (typeof body.url === "string" && body.url ? body.url : "https://generativelanguage.googleapis.com").replace(/\/+$/, "");
+  const models: ModelEntry[] = [];
+  let pageToken: string | undefined;
+  try {
+    // Bounded: a catalogue that keeps handing back a token must not spin the admin request forever.
+    for (let page = 0; page < 20; page++) {
+      const url = `${base}/v1beta/models?pageSize=1000${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ""}`;
+      const response = await probeFetch(url, { headers: { "x-goog-api-key": apiKey } });
+      if (response.status === 401 || response.status === 403) return { ok: false, auth: "bad-key", models: [], error: `models endpoint returned ${response.status}` };
+      if (!response.ok) {
+        const detail = snippet(await response.text());
+        // A wrong key comes back 400 with `status: API_KEY_INVALID`; that is a bad key, not a bad base.
+        const badKey = /API_KEY_INVALID|API key not valid|invalid api key/i.test(detail);
+        return { ok: false, auth: badKey ? "bad-key" : response.status >= 500 ? "unreachable" : "unknown", models: [], error: `models endpoint returned ${response.status}: ${detail}` };
+      }
+      const parsed = await response.json() as { models?: unknown; nextPageToken?: unknown };
+      for (const raw of Array.isArray(parsed.models) ? parsed.models : []) {
+        if (!raw || typeof raw !== "object") continue;
+        const entry = raw as { name?: unknown; displayName?: unknown; inputTokenLimit?: unknown; supportedGenerationMethods?: unknown; thinking?: unknown };
+        if (typeof entry.name !== "string") continue;
+        const id = entry.name.replace(/^models\//, "");
+        // Only models that can actually answer `generateContent` are worth listing; embedding and
+        // prediction models share the catalogue but cannot serve a turn.
+        const methods = Array.isArray(entry.supportedGenerationMethods) ? entry.supportedGenerationMethods : [];
+        if (!methods.some((method) => method === "generateContent")) continue;
+        const levels = googleEffortLevels(entry);
+        models.push({
+          id,
+          ...(typeof entry.displayName === "string" ? { name: entry.displayName } : {}),
+          ...(typeof entry.inputTokenLimit === "number" && entry.inputTokenLimit > 0 ? { contextWindow: Math.floor(entry.inputTokenLimit) } : {}),
+          ...(levels.length > 0 ? { effortLevels: levels } : {}),
+        });
+      }
+      pageToken = typeof parsed.nextPageToken === "string" && parsed.nextPageToken ? parsed.nextPageToken : undefined;
+      if (!pageToken) break;
+    }
+    if (models.length === 0) return { ok: true, auth: "ok", models, error: "no generateContent models listed" };
+    return { ok: true, auth: "ok", models };
+  } catch (e) {
+    return { ok: false, auth: "unreachable", models, error: `models endpoint: ${errorText(e)}` };
+  }
 }
 
 function chatCompletionsUrl(base: string): string {
@@ -1158,6 +1225,10 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
             models,
             modelsSource: live?.length ? "catalog" : "fallback",
           });
+          return;
+        }
+        if (probe.type === "google") {
+          sendJson(res, 200, await probeGoogle({ apiKey: probe.apiKey, url: probe.url }, deps.probeFetch));
           return;
         }
         if (

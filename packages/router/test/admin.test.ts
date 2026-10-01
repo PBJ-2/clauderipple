@@ -29,6 +29,7 @@ async function withAdmin(
     claudeOAuthFetch?: (url: string, init: RequestInit) => Promise<Response>;
     openBrowser?: (url: string) => boolean;
     observedClaudeCodeAuth?: ObservedClaudeCodeAuth;
+    probeFetch?: (url: string, init: RequestInit) => Promise<Response>;
     measureFetch?: (url: string, init: RequestInit) => Promise<Response>;
     chatgpt?: () => { quota: Record<string, Record<string, unknown> | null>; auth: Record<string, string>; refresh?: (name: string) => Promise<Record<string, unknown> | null>; models?: (name: string) => Promise<ProviderModel[] | null> };
   } = {},
@@ -1062,6 +1063,93 @@ test("POST /api/providers/probe[chatgpt] falls back to the measured list when th
     },
     { chatgpt: () => ({ quota: { gpt: null }, auth: { gpt: "borrow-codex" }, models: () => Promise.resolve(null) }) },
   );
+});
+
+test("POST /api/providers/probe[google] lists generateContent models across pages and mints effortLevels", async () => {
+  const seen: { url: string; key: string | null }[] = [];
+  const pages: Record<string, unknown> = {
+    "": {
+      models: [
+        { name: "models/gemini-3-pro-preview", displayName: "Gemini 3 Pro Preview", inputTokenLimit: 1048576, supportedGenerationMethods: ["generateContent", "countTokens"], thinking: true },
+        { name: "models/text-embedding-004", displayName: "Embedding 004", supportedGenerationMethods: ["embedContent"] },
+        { name: "models/gemini-2.5-flash", displayName: "Gemini 2.5 Flash", inputTokenLimit: 1048576, supportedGenerationMethods: ["generateContent"] },
+      ],
+      nextPageToken: "page2",
+    },
+    page2: {
+      models: [
+        { name: "models/gemini-2.5-pro", displayName: "Gemini 2.5 Pro", inputTokenLimit: 2097152, supportedGenerationMethods: ["generateContent"], thinking: true },
+      ],
+    },
+  };
+  await withAdmin(
+    makeCfg(),
+    async ({ port }) => {
+      const res = await fetch(`${base()}:${port}/api/providers/probe`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "google", auth: "api-key", apiKey: "secret-key", url: "https://generativelanguage.googleapis.com" }),
+      });
+      assert.equal(res.status, 200);
+      assert.deepEqual(await res.json(), {
+        ok: true,
+        auth: "ok",
+        models: [
+          { id: "gemini-3-pro-preview", name: "Gemini 3 Pro Preview", contextWindow: 1048576, effortLevels: ["minimal", "low", "medium", "high"] },
+          { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", contextWindow: 1048576 },
+          { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", contextWindow: 2097152, effortLevels: ["minimal", "low", "medium", "high"] },
+        ],
+      });
+    },
+    {
+      probeFetch: async (url, init) => {
+        seen.push({ url, key: new Headers(init.headers).get("x-goog-api-key") });
+        const token = new URL(url).searchParams.get("pageToken") ?? "";
+        return new Response(JSON.stringify(pages[token]), { status: 200 });
+      },
+    },
+  );
+  // The key rides on x-goog-api-key, not in the URL, and the second page is followed.
+  assert.equal(seen[0]!.key, "secret-key");
+  assert.equal(seen.length, 2, "follows nextPageToken");
+  assert.match(seen[0]!.url, /\/v1beta\/models\?pageSize=1000$/);
+  assert.match(seen[1]!.url, /pageToken=page2/);
+});
+
+test("POST /api/providers/probe[google] reads a bad key as bad-key without exposing it", async () => {
+  await withAdmin(
+    makeCfg(),
+    async ({ port }) => {
+      const res = await fetch(`${base()}:${port}/api/providers/probe`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "google", auth: "api-key", apiKey: "leaky-secret-key", url: "https://generativelanguage.googleapis.com" }),
+      });
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { ok: boolean; auth: string; error?: string };
+      assert.equal(body.ok, false);
+      assert.equal(body.auth, "bad-key");
+      assert.doesNotMatch(JSON.stringify(body), /leaky-secret-key/, "the probe body never echoes the key");
+    },
+    {
+      probeFetch: async () =>
+        new Response(JSON.stringify({ error: { code: 400, message: "API key not valid. Please pass a valid API key.", status: "API_KEY_INVALID" } }), { status: 400 }),
+    },
+  );
+});
+
+test("POST /api/providers/probe[google] needs a key before it calls out", async () => {
+  const prev = process.env.GEMINI_API_KEY;
+  delete process.env.GEMINI_API_KEY;
+  delete process.env.GOOGLE_API_KEY;
+  try {
+    await withAdmin(makeCfg(), async ({ port }) => {
+      const res = await fetch(`${base()}:${port}/api/providers/probe`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "google", auth: "api-key" }) });
+      assert.deepEqual(await res.json(), { ok: false, auth: "missing", models: [], error: "no API key; set one or GEMINI_API_KEY" });
+    });
+  } finally {
+    if (prev !== undefined) process.env.GEMINI_API_KEY = prev;
+  }
 });
 
 /** A chatgpt deps stub whose snapshot ages on command and counts refresh calls. */

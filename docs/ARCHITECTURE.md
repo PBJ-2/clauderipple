@@ -810,6 +810,77 @@ what we do not have yet — so that adding a provider does not start with readin
   credit. Preset endpoint and capability claims cite the vendor's official docs in
   `packages/router/src/presets.ts`.
 
+### 4d. `google` providers (implemented 2026-10-01)
+
+Gemini is a translated provider, not an ingress-only one: it holds no server-side thread,
+so a `thread:continue` is refused exactly as in §4c and the CLI resends a stateless
+history. It routes by its declared models, its agent files are generated like any other
+provider's, and a `web_search` side request aimed at it is refused, not sent. The
+adapter lives in `packages/router/src/providers/google/` and separates translation
+(`translate.ts`), the wire (`transport.ts`) and the signature store
+(`thoughtSignatures.ts`) so Stage 2 (Antigravity Code Assist) is a new transport only.
+
+Wire facts, each with its source. **Stage 1 speaks AI Studio API-key mode only**; the
+`antigravity` auth is accepted by the schema and refused by name with a 400. No live key
+exists in this environment, so everything below is doc-derived and **not measured**:
+
+- Stream endpoint `POST {base}/v1beta/models/{model}:streamGenerateContent?alt=sse`,
+  the key on header `x-goog-api-key`, base default `https://generativelanguage.googleapis.com`
+  (https://ai.google.dev/api/generate-content#method:-models.streamgeneratecontent).
+- `systemInstruction` takes `{role:"user"|"model", parts:[…]}`; `contents` is the
+  `user`/`model` turn list; a part is `{text}`, `{inlineData:{mimeType,data}}`,
+  `{functionCall:{name,args}}` or `{functionResponse:{name,response}}`. The `role` of a
+  `functionResponse` part must be `user` (https://ai.google.dev/api/caching#Content).
+- Tools map to `tools[].functionDeclarations[].parametersJsonSchema` — a protobuf
+  `Value` carrying a full JSON Schema, mutually exclusive with the legacy `parameters`
+  (https://ai.google.dev/api/caching#FunctionDeclaration). We send `parametersJsonSchema`.
+- A function name is at most 64 characters, must start with a letter or underscore and
+  may contain letters, digits, underscores, dots, dashes and colons (same
+  `FunctionDeclaration.name`); longer ids are mangled and restored as in §4c.
+- `toolConfig.functionCallingConfig.mode` is `AUTO` / `ANY` / `NONE`; `ANY` may also
+  carry `allowedFunctionNames` (https://ai.google.dev/api/caching#FunctionCallingConfig).
+  Anthropic `tool` maps to `ANY` + `allowedFunctionNames`, `none` to `NONE`.
+- Gemini 3 reasons with `generationConfig.thinkingConfig.thinkingLevel`
+  (`minimal|low|medium|high`); Gemini 2.5 with `thinkingConfig.thinkingBudget`
+  (0..24576 flash, 128..32768 pro; 0 disables) (https://ai.google.dev/gemini-api/docs/thinking).
+  `output_config.effort` is clamped to the model family and to the provider's
+  `effortLevels` when set. **(assumption)** Some samples spell the REST field
+  `thinking_level` flatly; we emit the documented nested `generationConfig.thinkingConfig`
+  shape.
+- `usageMetadata` fields are `promptTokenCount`, `cachedContentTokenCount`,
+  `candidatesTokenCount`, `thoughtsTokenCount`
+  (https://ai.google.dev/api/generate-content#UsageMetadata). Input =
+  `promptTokenCount − cachedContentTokenCount`, cache read = `cachedContentTokenCount`,
+  output = `candidatesTokenCount + thoughtsTokenCount`.
+- A `finishReason` of `STOP` closes as `end_turn` (or `tool_use` when function calls
+  were seen); `MAX_TOKENS` as `max_tokens`; anything else as `end_turn` with a log. A
+  stream that ends with no `finishReason` is the §5 stalled-upstream shape: it becomes a
+  retryable `overloaded_error`, never a silent `end_turn`
+  (https://ai.google.dev/api/generate-content#FinishReason).
+- A wrong key answers `400` with `status: "API_KEY_INVALID"` (or a `401`/`403` whose
+  body names the key); that maps to Anthropic `authentication_error` (401). `429
+  RESOURCE_EXHAUSTED` maps to `rate_limit_error`, `5xx` to `overloaded_error`, other
+  `4xx` to `invalid_request_error`. A bare `403` is read as a permission/region problem,
+  not a bad key.
+- `GET {base}/v1beta/models?pageSize=1000` (key on `x-goog-api-key`) lists
+  `{name, displayName, inputTokenLimit, supportedGenerationMethods, thinking}` with a
+  `nextPageToken`; only entries whose `supportedGenerationMethods` include
+  `generateContent` are kept, `id` is `name` minus `models/`, and
+  `contextWindow = inputTokenLimit`
+  (https://ai.google.dev/api/models#method:-models.list).
+- **thoughtSignature (Gemini 3).** A `functionCall` part on a reasoning model may carry a
+  `thoughtSignature`, and a client replaying that call must return the same signature or
+  the API rejects the turn ("Function call is missing a thought_signature in
+  functionCall parts"). The store keeps signatures keyed by our minted `tool_use` id in a
+  bounded LRU (10,000) and re-attaches them on replay; per-part for parallel calls, where
+  Gemini signs only the first call of a step. On a turn with no cached signature at all (a
+  router restart, a history another model wrote) the documented sentinel
+  `skip_thought_signature_validator` goes on that turn's **first** call, Gemini 3 only. The
+  guide calls it a last resort that costs model performance, so it is never added to a turn
+  that has a real signature — the unsigned parallel calls of a healthy turn are normal
+  (https://cloud.google.com/vertex-ai/generative-ai/docs/thought-signatures, sentinel
+  paragraph read 2026-10-01).
+
 ## 5. Failure modes that must not exist in the product (all observed)
 
 | Observed | Product requirement |

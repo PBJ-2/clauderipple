@@ -327,7 +327,7 @@ async function status(): Promise<void> {
   const p = await probe({ host: cfg.listen.host, port: cfg.listen.port, caPem: caPath, upstream: cfg.upstream });
   rows.push(["probe", `${p.ok ? "ok" : "FAIL"}: ${p.detail} (${p.ms}ms)`]);
   for (const [name, p2] of Object.entries(cfg.providers)) {
-    const providerUrl = p2.type === "chatgpt" ? (p2.url ?? "https://chatgpt.com") : p2.type === "anthropic" ? "https://api.anthropic.com" : p2.url;
+    const providerUrl = p2.type === "chatgpt" ? (p2.url ?? "https://chatgpt.com") : p2.type === "anthropic" ? "https://api.anthropic.com" : p2.type === "google" ? (p2.url ?? "https://generativelanguage.googleapis.com") : p2.url;
     const u = new URL(providerUrl);
     rows.push([`provider ${name}`, await tcpCheck(u.hostname, Number(u.port) || (u.protocol === "https:" ? 443 : 80))]);
   }
