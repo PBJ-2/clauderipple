@@ -968,7 +968,7 @@ async function removeProvider(name, provider) {
 
 function providerTabs(name, provider) {
   const tabs = [{ id: "overview", label: t("providers.overview") }];
-  if ((provider.type === "anthropic" && provider.auth === "claude-code") || provider.type === "chatgpt") tabs.push({ id: "accounts", label: t("providers.accounts") });
+  if ((provider.type === "anthropic" && provider.auth === "claude-code") || provider.type === "chatgpt" || (provider.type === "google" && provider.auth === "antigravity")) tabs.push({ id: "accounts", label: t("providers.accounts") });
   tabs.push({ id: "models", label: t("providers.modelsTab") });
   return el("div", { class: "provider-tabs", role: "tablist" }, tabs.map((tab) => {
     const button = el("button", { class: providerDetailTab === tab.id ? "active" : "", type: "button", role: "tab", "aria-selected": String(providerDetailTab === tab.id), text: tab.label });
@@ -1212,6 +1212,114 @@ function renderChatgptAccountRows(target, data, name, generation) {
   if (countNode) countNode.textContent = t("providers.chatgptAccountCount", { count: accounts.length });
 }
 
+let googleLoginBusy = false;
+/**
+ * The Antigravity sign-in. Google's terms name this use as a breach and suspended accounts for it,
+ * so the warning is put in front of the user and the sign-in starts only on an explicit yes.
+ */
+async function startGoogleLogin(onChange) {
+  if (googleLoginBusy) return false;
+  if (!confirm(t("providers.googleWarning"))) return false;
+  googleLoginBusy = true;
+  onChange && onChange();
+  try {
+    const started = await api("/api/google-login", { method: "POST" });
+    if (started.opened === false && started.url) toast(t("providers.googleOpenManually"), false, started.url);
+    const deadline = Date.now() + 6 * 60 * 1000;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      const login = await api("/api/google-login");
+      if (login.running === false && login.ok === true) { toast(t("providers.googleAdded")); await refreshHealth(); return true; }
+      if (login.running === false && login.ok === false) { toast(t("common.actionFailed"), true, login.error); return false; }
+    }
+    return false;
+  } catch (error) {
+    toast(t("common.actionFailed"), true, error.message);
+    return false;
+  } finally {
+    googleLoginBusy = false;
+    onChange && onChange();
+  }
+}
+
+async function patchGoogleAccount(name, id, change) {
+  try {
+    await api(`/api/google-accounts/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(change) });
+    await refreshGoogleAccountPanel(name);
+  } catch (error) { toast(t("common.actionFailed"), true, error.message); }
+}
+
+function renderGoogleAccountRows(target, data, name, generation) {
+  if (generation !== providerDetailGeneration) return;
+  const accounts = Array.isArray(data.accounts) ? data.accounts : [];
+  const rows = accounts.map((account) => {
+    const actions = [];
+    if (account.state === "needs-login" || account.state === "quarantined") {
+      const reauth = el("button", { class: "btn secondary compact", type: "button", text: t("providers.reauthAction") });
+      reauth.addEventListener("click", () => void startGoogleLogin(() => void refreshGoogleAccountPanel(name)));
+      actions.push(reauth);
+    }
+    if (account.state === "cooling") {
+      const now = el("button", { class: "btn secondary compact", type: "button", text: t("providers.chatgptClearCooldown") });
+      now.addEventListener("click", () => void patchGoogleAccount(name, account.id, { clearCooldown: true }));
+      actions.push(now);
+    }
+    const pause = el("button", { class: "btn secondary compact", type: "button", text: account.paused ? t("providers.chatgptResume") : t("providers.chatgptPause") });
+    pause.addEventListener("click", () => void patchGoogleAccount(name, account.id, { paused: !account.paused }));
+    const rename = el("button", { class: "btn secondary compact", type: "button", text: t("common.edit") });
+    rename.addEventListener("click", () => {
+      const label = prompt(t("providers.anthropicRenamePrompt"), account.label);
+      if (!label || !label.trim() || label.trim() === account.label) return;
+      void patchGoogleAccount(name, account.id, { label });
+    });
+    const remove = el("button", { class: "btn danger compact", type: "button", text: t("common.remove") });
+    remove.addEventListener("click", async () => {
+      if (!confirm(t("providers.googleRemoveConfirm", { name: account.label }))) return;
+      try { await api(`/api/google-accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" }); await refreshGoogleAccountPanel(name); }
+      catch (error) { toast(t("common.actionFailed"), true, error.message); }
+    });
+    actions.push(pause, rename, remove);
+    const detail = [account.email && account.email !== account.label ? account.email : null, account.projectId ? t("providers.googleProject", { id: account.projectId }) : null].filter(Boolean).join(" · ");
+    return el("article", { class: `account-card stacked${account.active ? " current" : ""}` }, [
+      el("div", { class: "account-card-copy" }, [
+        el("strong", { text: account.label }),
+        detail ? el("span", { class: "small", text: detail }) : null,
+        hint(account.state === "needs-login" || account.state === "quarantined" ? t("providers.chatgptReauthHelp") : t("providers.googleOwnHelp")),
+      ].filter(Boolean)),
+      chatgptStateBadge(account),
+      el("div", { class: "account-card-actions" }, actions),
+    ].filter(Boolean));
+  });
+  target.replaceChildren(...(rows.length ? rows : [el("div", { class: "empty-card", text: t("providers.googleNoAccounts") })]));
+  const countNode = $("#google-account-count");
+  if (countNode) countNode.textContent = t("providers.chatgptAccountCount", { count: accounts.length });
+}
+
+async function refreshGoogleAccountPanel(name) {
+  const target = $("#google-account-rows");
+  if (!target || selectedProviderName !== name || providerDetailTab !== "accounts") return;
+  const generation = providerDetailGeneration;
+  try { renderGoogleAccountRows(target, await api(`/api/google-accounts?provider=${encodeURIComponent(name)}`), name, generation); }
+  catch (error) { if (generation === providerDetailGeneration) target.replaceChildren(el("div", { class: "bad-text small", text: error.message })); }
+}
+
+function googleAccountsPanel(name) {
+  const add = el("button", { class: "btn", type: "button", text: t("providers.addGoogleAccount") });
+  add.disabled = googleLoginBusy;
+  add.addEventListener("click", () => void startGoogleLogin(() => { renderProviderDetail(); void refreshGoogleAccountPanel(name); }));
+  const rows = el("div", { id: "google-account-rows", class: "account-card-list" }, [el("div", { class: "small", text: t("providers.checking") })]);
+  const panel = el("div", { class: "provider-panel" }, [
+    el("section", { class: "detail-section account-summary" }, [
+      el("div", { class: "section-heading" }, [el("div", {}, [el("h3", { text: t("providers.googleAccountsTitle") }), el("p", { id: "google-account-count", class: "account-count", text: t("providers.chatgptAccountCount", { count: 0 }) }), hint(t("providers.googleAccountsSubtitle"))]), add]),
+      googleLoginBusy ? el("p", { class: "small", text: t("providers.googleLoginWaiting") }) : null,
+      el("p", { class: "small warn-text", text: t("providers.googleWarningShort") }),
+    ].filter(Boolean)),
+    el("section", { class: "detail-section" }, [rows]),
+  ]);
+  queueMicrotask(() => void refreshGoogleAccountPanel(name));
+  return panel;
+}
+
 async function refreshChatgptAccountPanel(name) {
   const target = $("#chatgpt-account-rows");
   if (!target || selectedProviderName !== name || providerDetailTab !== "accounts") return;
@@ -1257,6 +1365,7 @@ function renderProviderDetail() {
   let content;
   if (providerDetailTab === "accounts" && provider.type === "anthropic" && provider.auth === "claude-code") content = anthropicAccountsPanel(name, provider);
   else if (providerDetailTab === "accounts" && provider.type === "chatgpt") content = chatgptAccountsPanel(name);
+  else if (providerDetailTab === "accounts" && provider.type === "google" && provider.auth === "antigravity") content = googleAccountsPanel(name);
   else if (providerDetailTab === "models") content = providerModelsPanel(name, provider);
   else { providerDetailTab = "overview"; content = providerOverview(name, provider); }
   detail.replaceChildren(header, providerTabs(name, provider), content);
@@ -1608,6 +1717,22 @@ function openGoogleProviderForm(options) {
   const showKey = el("button", { class: "eye-button", type: "button", text: t("common.show") });
   showKey.addEventListener("click", () => { const show = keyInput.type === "password"; keyInput.type = show ? "text" : "password"; showKey.textContent = show ? t("common.hide") : t("common.show"); });
   const keyField = el("div", { class: "form-field key-field" }, [el("span", { text: t("providers.apiKey") }), el("div", { class: "key-control" }, [keyInput, showKey]), el("small", { text: t("providers.googleKeyHelp") })]);
+  const auth = el("select", {}, [selectOption("api-key", t("providers.googleAuthApiKey")), selectOption("antigravity", t("providers.googleAntigravity"))]);
+  auth.value = (existing && existing.auth) || "api-key";
+  const authField = inputRow(t("providers.credentials"), auth, t("providers.googleAuthHelp"));
+  const login = el("button", { class: "btn secondary", type: "button", text: t("providers.addGoogleAccount") });
+  login.addEventListener("click", async () => {
+    login.disabled = true;
+    if (await startGoogleLogin()) await runProbe();
+    if (formActive) login.disabled = false;
+  });
+  const loginField = el("div", { class: "form-field" }, [el("span", { text: t("providers.googleLogin") }), login, el("small", { class: "warn-text", text: t("providers.googleWarningShort") })]);
+  function syncAuth() {
+    keyField.hidden = auth.value !== "api-key";
+    loginField.hidden = auth.value !== "antigravity";
+  }
+  auth.addEventListener("change", syncAuth);
+  syncAuth();
   const result = el("div", { class: "probe-result" });
   const probeButton = el("button", { class: "btn secondary", type: "button", text: t("providers.check") });
   let foundModels = modelsOf(existing);
@@ -1621,10 +1746,12 @@ function openGoogleProviderForm(options) {
     probeButton.disabled = true;
     result.textContent = t("providers.checking");
     try {
-      const response = await api("/api/providers/probe", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "google", auth: "api-key", apiKey: keyInput.value.trim() || (existing && existing.apiKey) }) });
+      const body = auth.value === "antigravity" ? { type: "google", auth: "antigravity" } : { type: "google", auth: "api-key", apiKey: keyInput.value.trim() || (existing && existing.apiKey) };
+      const response = await api("/api/providers/probe", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
       if (!formActive) return;
+      const failed = response.auth === "bad-key" ? t("providers.probeBadKey") : response.auth === "missing" && auth.value === "antigravity" ? t("providers.googleSignInFirst") : t("providers.probeFailed");
       result.replaceChildren(...[
-        el("span", { class: response.ok ? "ok-text" : "bad-text", text: response.ok ? t("providers.probeOk") : response.auth === "bad-key" ? t("providers.probeBadKey") : t("providers.probeFailed") }),
+        el("span", { class: response.ok ? "ok-text" : "bad-text", text: response.ok ? t("providers.probeOk") : failed }),
         response.error ? el("div", { class: "small", text: response.error }) : null,
       ].filter(Boolean));
       if (Array.isArray(response.models) && response.models.length) {
@@ -1648,7 +1775,7 @@ function openGoogleProviderForm(options) {
   ]));
   const form = el("div", { class: "provider-form" }, [
     el("h1", { id: "modal-title", text: existing ? t("providers.edit") : t("providers.addTitle") }),
-    inputRow(t("providers.name"), nameInput, t("providers.nameHelp")), keyField, probeButton, result, modelArea, advanced,
+    inputRow(t("providers.name"), nameInput, t("providers.nameHelp")), authField, keyField, loginField, probeButton, result, modelArea, advanced,
   ]);
   const saveButton = el("button", { class: "btn", type: "button", "data-default-action": "", text: existing ? t("common.save") : t("providers.add") });
   saveButton.addEventListener("click", async () => {
@@ -1656,10 +1783,10 @@ function openGoogleProviderForm(options) {
     if (!typedName) { toast(t("providers.nameRequired"), true); return; }
     const next = clone(currentConfig);
     const providerName = existing ? options.name : uniqueName(typedName, next.providers);
-    const apiKey = keyInput.value.trim() || (existing && existing.apiKey);
+    const apiKey = auth.value === "api-key" ? keyInput.value.trim() || (existing && existing.apiKey) : undefined;
     next.providers[providerName] = {
       type: "google",
-      auth: "api-key",
+      auth: auth.value,
       ...(apiKey ? { apiKey } : {}),
       ...(existing && existing.url ? { url: existing.url } : {}),
       identity: identity.checked,
@@ -1667,14 +1794,15 @@ function openGoogleProviderForm(options) {
       models: form.querySelector(".model-picker").selected(),
     };
     saveButton.disabled = true;
-    try { await configRequest(next); currentConfig = next; selectedProviderName = providerName; providerDetailTab = "overview"; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); toast(t("common.saved")); }
+    try { await configRequest(next); currentConfig = next; selectedProviderName = providerName; providerDetailTab = auth.value === "antigravity" ? "accounts" : "overview"; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); toast(t("common.saved")); }
     catch (error) { toast(t("common.saveFailed"), true, error.message); }
     finally { saveButton.disabled = false; }
   });
   form.appendChild(el("div", { class: "actions end" }, [el("button", { class: "btn secondary", type: "button", text: t("common.cancel"), onclick: closeModal }), saveButton]));
   showModal(form, () => { formActive = false; });
-  // An existing provider holds a key, so its full catalogue can be shown straight away.
-  if (existing && existing.apiKey) void runProbe();
+  // An existing provider can already reach its catalogue (a stored key or a signed-in account), so
+  // the full list is shown straight away.
+  if (existing && (existing.apiKey || existing.auth === "antigravity")) void runProbe();
 }
 function openProviderForm(options) {
   const existing = options.provider;

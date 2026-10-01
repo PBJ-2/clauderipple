@@ -98,8 +98,11 @@ export type GoogleOAuthState = {
   error: string | null;
   /** Safe metadata for the account just added; no token. */
   account: GoogleAccountSummary | null;
-  /** The terms warning, shown by the GUI when a sign-in starts. */
-  warning: string;
+  /**
+   * The terms warning, for a client to show before a sign-in starts. Not named `warning`: the GUI
+   * toasts any `warning` an admin response carries as an error, and the sign-in is polled every 2s.
+   */
+  termsWarning: string;
 };
 
 /**
@@ -124,7 +127,7 @@ export class GoogleOAuthSession {
 
   constructor(options: GoogleOAuthOptions, warning: string) {
     this.options = options;
-    this.stateSnapshot = { running: false, url: null, startedAt: null, finishedAt: null, ok: null, error: null, account: null, warning };
+    this.stateSnapshot = { running: false, url: null, startedAt: null, finishedAt: null, ok: null, error: null, account: null, termsWarning: warning };
     this.grant = new Promise<GoogleOAuthGrant>((resolve, reject) => {
       this.settle = { resolve, reject };
     });

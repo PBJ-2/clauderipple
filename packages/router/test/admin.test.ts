@@ -1578,15 +1578,15 @@ test("google login: the API returns the terms warning and account endpoints expo
     clearCooldown: () => {},
   });
   await withAdmin(makeCfg({ providers: { ag: { type: "google", auth: "antigravity" } } }), async ({ port }) => {
-    const idle = await (await fetch(`${base()}:${port}/api/google-login`)).json() as { running: boolean; warning: string };
+    const idle = await (await fetch(`${base()}:${port}/api/google-login`)).json() as { running: boolean; termsWarning: string };
     assert.equal(idle.running, false);
-    assert.match(idle.warning, /Antigravity terms|Gemini CLI FAQ/);
+    assert.match(idle.termsWarning, /Antigravity terms|Gemini CLI FAQ/);
 
     const started = await fetch(`${base()}:${port}/api/google-login`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
-    const startedBody = await started.json() as { running: boolean; url: string; warning: string };
+    const startedBody = await started.json() as { running: boolean; url: string; termsWarning: string };
     assert.equal(startedBody.running, true);
     assert.ok(startedBody.url.startsWith("https://accounts.google.com/o/oauth2/v2/auth"));
-    assert.match(startedBody.warning, /not affiliated with Google/);
+    assert.match(startedBody.termsWarning, /not affiliated with Google/);
 
     // Drive the loopback callback so the sign-in completes and an account is stored.
     const state = new URL(startedBody.url).searchParams.get("state")!;

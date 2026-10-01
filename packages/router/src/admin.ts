@@ -1601,7 +1601,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
       // Google (Antigravity) sign-in of our own (browser, PKCE, loopback callback). The GUI starts it
       // and polls the state; tokens never leave the router and never appear in any response.
       if (pathname === "/api/google-login" && method === "GET") {
-        const state: GoogleOAuthState = googleOAuth?.snapshot ?? { running: false, url: null, startedAt: null, finishedAt: null, ok: null, error: null, account: null, warning: ANTIGRAVITY_WARNING };
+        const state: GoogleOAuthState = googleOAuth?.snapshot ?? { running: false, url: null, startedAt: null, finishedAt: null, ok: null, error: null, account: null, termsWarning: ANTIGRAVITY_WARNING };
         sendJson(res, 200, state);
         return;
       }
@@ -1625,7 +1625,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           () => deps.log.info("admin: google sign-in via GUI -> ok"),
           (error: Error) => deps.log.info(`admin: google sign-in via GUI -> failed: ${error.message}`),
         );
-        sendJson(res, 200, { ...session.snapshot, opened, warning: ANTIGRAVITY_WARNING });
+        sendJson(res, 200, { ...session.snapshot, opened, termsWarning: ANTIGRAVITY_WARNING });
         return;
       }
       if (pathname === "/api/google-login/code" && method === "POST") {
