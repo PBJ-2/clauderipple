@@ -634,7 +634,7 @@ async function probeAnthropicApiKey(apiKey: string, probeFetch: (url: string, in
     if (response.status === 401 || response.status === 403) return { ok: false, auth: "bad-key", models, error: `${label} returned ${response.status}: ${snippet(await response.text())}` };
     if (response.ok) return { ok: true, auth: "ok", models };
     const detail = snippet(await response.text());
-    if (response.status === 400 && /model.{0,80}(not.?found|invalid|unsupported|does not exist)|unknown.{0,20}model/i.test(detail)) return { ok: true, auth: "ok", models };
+    if (refusedForModel(response.status, detail)) return { ok: true, auth: "ok", models };
     if (response.status === 402 || /insufficient|balance|credit|quota|billing/i.test(detail)) return { ok: true, auth: "ok", models, error: `no-credits: ${response.status} ${detail}` };
     return { ok: false, auth: response.status >= 500 ? "unreachable" : "unknown", models, error: `${label} returned ${response.status}: ${detail}` };
   } catch (e) {
@@ -685,6 +685,16 @@ function parsedModels(value: unknown): ModelEntry[] {
 
 function snippet(text: string): string {
   return text.replace(/\s+/g, " ").trim().slice(0, 200);
+}
+
+/**
+ * Whether a refused test request was refused for its model alone, which still shows the endpoint is
+ * right and the key was accepted. Anthropic's own wire says so with 404 not_found_error rather than
+ * 400 — abliteration.ai answers "Requested model was not found." (issue #42) — so 404 counts too,
+ * but only with a model named in the body: a bare 404 is a wrong URL.
+ */
+function refusedForModel(status: number, detail: string): boolean {
+  return (status === 400 || status === 404) && /model.{0,80}(not.?found|invalid|unsupported|does not exist)|unknown.{0,20}model/i.test(detail);
 }
 
 /**
@@ -774,8 +784,8 @@ async function probeProvider(body: ProbeRequest, probeFetch: (url: string, init:
     }
     if (response.ok) return { ok: true, auth: "ok", models, ...(modelsError ? { error: modelsError } : {}) };
     const detail = snippet(await response.text());
-    // A model-validation 400 still demonstrates that the endpoint reached the provider and the key was accepted.
-    if (response.status === 400 && /model.{0,80}(not.?found|invalid|unsupported|does not exist)|unknown.{0,20}model/i.test(detail)) {
+    // A model-validation refusal still demonstrates that the endpoint reached the provider and the key was accepted.
+    if (refusedForModel(response.status, detail)) {
       return { ok: true, auth: "ok", models, ...(modelsError ? { error: modelsError } : {}) };
     }
     // Key accepted but the account cannot pay: report auth ok so the user tops up instead of re-checking the key.

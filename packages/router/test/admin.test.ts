@@ -576,6 +576,39 @@ test("POST /api/providers/probe discovers models then accepts model-validation e
   }
 });
 
+test("POST /api/providers/probe tests a typed model id and reads a model 404 as authenticated, a bare 404 as not", async () => {
+  const seen: { model?: string } = {};
+  let modelNamed = true;
+  const upstream = http.createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      seen.model = (JSON.parse(Buffer.concat(chunks).toString("utf8")) as { model: string }).model;
+      // abliteration.ai's answer to an id it does not serve (issue #42).
+      res.writeHead(404, { "content-type": "application/json" }).end(modelNamed ? JSON.stringify({ type: "error", error: { type: "not_found_error", message: "Requested model was not found." } }) : "Not Found");
+    });
+  });
+  await new Promise<void>((resolveP) => upstream.listen(0, "127.0.0.1", resolveP));
+  const address = upstream.address();
+  assert.ok(address && typeof address === "object");
+  const probe = (port: number) => fetch(`${base()}:${port}/api/providers/probe`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ type: "anthropic-compatible", url: `http://127.0.0.1:${address.port}`, headers: { authorization: "Bearer secret-key" }, probeModel: "abliterated-model" }),
+  });
+  try {
+    await withAdmin(makeCfg(), async ({ port }) => {
+      assert.deepEqual(await (await probe(port)).json(), { ok: true, auth: "ok", models: [] });
+      assert.equal(seen.model, "abliterated-model");
+      modelNamed = false;
+      const bare = (await (await probe(port)).json()) as { ok: boolean };
+      assert.equal(bare.ok, false);
+    });
+  } finally {
+    await new Promise<void>((resolveP, reject) => upstream.close((error) => (error ? reject(error) : resolveP())));
+  }
+});
+
 test("POST /api/providers/probe discovers OpenAI-compatible models and probes Chat Completions", async () => {
   const seen: { auth?: string; model?: string; tokens?: number } = {};
   const upstream = http.createServer((req, res) => {
