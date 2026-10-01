@@ -133,10 +133,11 @@ export type OpenAiCompatibleProvider = {
 export type GoogleProvider = {
   /**
    * Google Gemini, spoken on its own generative-language wire (Anthropic Messages translated to
-   * `generateContent`). `auth: "api-key"` is an AI Studio key; `auth: "antigravity"` (the Cloud
-   * Code Assist / Antigravity mode) is not implemented yet and is refused with a clear error rather
-   * than sent to the wrong endpoint. The transport is kept behind one interface so that mode can be
-   * added without touching the translation (providers/google/transport.ts).
+   * `generateContent`). `auth: "api-key"` is an AI Studio key; `auth: "antigravity"` is a Google
+   * subscription signed in through `clauderipple google-login`, which streams through the Cloud Code
+   * Assist backend and rotates several accounts. The two share the translation and differ only in the
+   * transport (providers/google/transport.ts). Using Antigravity credentials from a third-party client
+   * is against Google's terms — the backend returns that warning to the GUI and the CLI prints it.
    */
   type: "google";
   auth: "api-key" | "antigravity";

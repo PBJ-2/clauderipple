@@ -465,6 +465,8 @@ function help(): void {
   logout            forget every ChatGPT account added with "login" (the Codex CLI's own login is left alone)
   claude-login      connect a Claude subscription in the browser (--setup-token: via \`claude setup-token\`; --manual: paste the code)
   claude-logout     remove every Claude subscription added to ClaudeRipple
+  google-login      add a Google account for the Antigravity (Cloud Code Assist) backend (prints Google's terms warning first)
+  google-logout     remove every Google account added to ClaudeRipple
   image "<prompt>" [-o FILE] [--aspect square|landscape|portrait] [--transparent] [--ref FILE ...]
                     generate an image with your ChatGPT subscription and print the file's path
   picker on|off     show your mapped models by name in the Claude Desktop picker (trusts the CA in your login keychain, routes the app through ClaudeRipple)
@@ -587,6 +589,30 @@ try {
     case "claude-logout":
       console.log(claudeLogout(homeDir()) ? "✓ ClaudeRipple Claude accounts removed" : "no ClaudeRipple Claude accounts stored");
       break;
+    case "google-login": {
+      const { GoogleOAuthSession } = await import("../../router/src/providers/google/login.ts");
+      const { ANTIGRAVITY_WARNING } = await import("../../router/src/providers/google/antigravity.ts");
+      const { readGoogleAccounts, googleAccountsPath } = await import("../../router/src/providers/google/accounts.ts");
+      // The terms warning is printed once, before anything else, so a sign-in is never accidental.
+      console.log(`⚠ ${ANTIGRAVITY_WARNING}\n`);
+      const before = readGoogleAccounts(homeDir()).length;
+      const session = new GoogleOAuthSession({ home: homeDir() }, ANTIGRAVITY_WARNING);
+      const { url } = await session.start();
+      console.log(before > 0
+        ? `Opening your browser to add a Google account (${before} signed in already). Sign in with the account to add; this window waits up to 5 minutes.`
+        : "Opening your browser to sign in with Google. Sign in there; this window waits up to 5 minutes.");
+      if (!openBrowser(url)) console.log(`Open this URL manually:\n${url}`);
+      await session.result;
+      const total = readGoogleAccounts(homeDir()).length;
+      console.log(`✓ Google account added. ${total} account${total === 1 ? "" : "s"} in ${googleAccountsPath(homeDir())}; refreshed automatically.`);
+      break;
+    }
+    case "google-logout": {
+      const { removeAllGoogleAccounts } = await import("../../router/src/providers/google/accounts.ts");
+      const removed = removeAllGoogleAccounts(homeDir());
+      console.log(removed > 0 ? `✓ removed ${removed} Google account${removed === 1 ? "" : "s"}` : "no Google account stored");
+      break;
+    }
     case "image":
       await image();
       break;

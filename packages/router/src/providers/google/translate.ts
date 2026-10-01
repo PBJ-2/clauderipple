@@ -46,7 +46,9 @@ export type FunctionDeclaration = {
 };
 
 export type GeminiTool = { functionDeclarations: FunctionDeclaration[] };
-export type FunctionCallingConfig = { mode: "AUTO" | "ANY" | "NONE"; allowedFunctionNames?: string[] };
+// "VALIDATED" is not part of the AI Studio wire; Cloud Code Assist's Antigravity backend forces it
+// for Claude models (transport.ts). The translation itself only ever emits AUTO/ANY/NONE.
+export type FunctionCallingConfig = { mode: "AUTO" | "ANY" | "NONE" | "VALIDATED"; allowedFunctionNames?: string[] };
 export type GeminiGenerationConfig = {
   maxOutputTokens?: number;
   temperature?: number;

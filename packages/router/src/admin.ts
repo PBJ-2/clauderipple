@@ -8,6 +8,10 @@
 //   GET  /api/chatgpt-login  ChatGPT browser login state and credential status
 //   GET  /api/chatgpt-accounts?provider=   signed-in ChatGPT accounts, rotation state, quota (no tokens)
 //   PATCH/DELETE /api/chatgpt-accounts/:id rename, pause/resume, clear a cooldown; remove
+//   POST /api/google-login   begin a Google (Antigravity) browser sign-in; GET polls the state
+//   POST /api/google-login/code  paste the code when no loopback callback could be used
+//   GET  /api/google-accounts?provider=   signed-in Google accounts, rotation state (no tokens)
+//   PATCH/DELETE /api/google-accounts/:id rename, pause/resume, clear a cooldown; remove
 //   GET  /*             static files from packages/ui (the GUI itself)
 
 import crypto from "node:crypto";
@@ -40,6 +44,10 @@ import { readClaudeAuthFile } from "./providers/anthropic-token-file.ts";
 import { listClaudeAccounts, removeClaudeAccount, renameClaudeAccount } from "./providers/anthropic-accounts.ts";
 import { readChatGptAccounts, removeChatGptAccount, summarize as summarizeChatGptAccount, updateChatGptAccount } from "./providers/chatgpt/accounts.ts";
 import { IMAGE_ASPECTS, IMAGE_BACKGROUNDS, IMAGE_FORMATS, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
+import type { GoogleAccountStatus } from "./providers/google/index.ts";
+import { ANTIGRAVITY_WARNING, staticAntigravityModels } from "./providers/google/antigravity.ts";
+import { readGoogleAccounts, removeGoogleAccount, summarize as summarizeGoogleAccount, updateGoogleAccount } from "./providers/google/accounts.ts";
+import { GoogleOAuthSession, type GoogleOAuthState } from "./providers/google/login.ts";
 
 const MAX_BODY = 1024 * 1024;
 /** `/api/image` carries reference images inline, so it gets more room than a config save. */
@@ -85,6 +93,19 @@ export type AdminDeps = {
     /** Put one resting account back into rotation now. Absent in tests. */
     clearCooldown?: (accountId: string) => void;
   };
+  /** Optional: google (Antigravity) providers' accounts and catalogue. Absent in tests. */
+  google?: () => {
+    /** Every antigravity provider's accounts with rotation state. Never a token. */
+    accounts: () => Record<string, GoogleAccountStatus[]>;
+    /** The models one antigravity provider can reach, from Cloud Code Assist's own catalogue. */
+    models?: (name: string) => Promise<ProviderModel[] | null>;
+    /** Put one resting account back into rotation now. */
+    clearCooldown?: (accountId: string) => void;
+  };
+  /** Test seam for the Google sign-in: the token/userinfo/CCA endpoints. */
+  googleOAuthFetch?: (url: string, init?: RequestInit) => Promise<Response>;
+  /** Test seam: the loopback port the Google sign-in binds instead of the Antigravity default. */
+  googleOAuthPort?: number;
   /**
    * Optional: per-credential cooldowns and quarantines, for providers that declare a pool. Ids and
    * labels only — never a header value.
@@ -174,6 +195,8 @@ type ChatgptLogin = { running: boolean; startedAt?: string; finishedAt?: string;
 let chatgptLogin: ChatgptLogin = { running: false };
 /** The Claude subscription sign-in in progress (or the last one), for GET /api/claude-oauth. */
 let claudeOAuth: ClaudeOAuthSession | null = null;
+/** The Google (Antigravity) sign-in in progress (or the last one), for GET /api/google-login. */
+let googleOAuth: GoogleOAuthSession | null = null;
 
 /** Shared catalog for the GUI: model-specific values override provider defaults. */
 export function effortLevels(cfg: Config): { providers: Record<string, { default: string[]; models?: Record<string, string[]> }> } {
@@ -719,6 +742,20 @@ async function probeGoogle(body: { apiKey?: unknown; url?: unknown }, probeFetch
   }
 }
 
+/**
+ * `{type:"google", auth:"antigravity"}`: whether any Google account is signed in, and the model list
+ * Cloud Code Assist returns for it (falling back to the static list). No network call is made here
+ * beyond the catalogue the provider already serves; a signed-out state is the common answer.
+ */
+async function probeGoogleAntigravity(deps: AdminDeps): Promise<{ ok: boolean; auth: ProbeAuth; models: ModelEntry[]; error?: string }> {
+  const accounts = deps.google?.().accounts?.() ?? {};
+  const signedIn = Object.values(accounts).some((list) => list.length > 0) || readGoogleAccounts(homeDir()).length > 0;
+  if (!signedIn) return { ok: false, auth: "missing", models: staticAntigravityModels(), error: "no Google account; run `clauderipple google-login`" };
+  const named = Object.keys(accounts)[0];
+  const models = named ? await deps.google?.().models?.(named).catch(() => null) ?? null : null;
+  return { ok: true, auth: "ok", models: models ?? staticAntigravityModels() };
+}
+
 function chatCompletionsUrl(base: string): string {
   return `${base.replace(/\/+$/, "")}/chat/completions`;
 }
@@ -1228,6 +1265,10 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           return;
         }
         if (probe.type === "google") {
+          if (probe.auth === "antigravity") {
+            sendJson(res, 200, await probeGoogleAntigravity(deps));
+            return;
+          }
           sendJson(res, 200, await probeGoogle({ apiKey: probe.apiKey, url: probe.url }, deps.probeFetch));
           return;
         }
@@ -1555,6 +1596,118 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         const r = await (deps.runCli ?? runCli)(["claude-logout"]);
         deps.log.info(`admin: claude-logout via GUI -> ${r.ok ? "ok" : "failed"}`);
         sendJson(res, r.ok ? 200 : 500, { ok: r.ok, output: r.output });
+        return;
+      }
+      // Google (Antigravity) sign-in of our own (browser, PKCE, loopback callback). The GUI starts it
+      // and polls the state; tokens never leave the router and never appear in any response.
+      if (pathname === "/api/google-login" && method === "GET") {
+        const state: GoogleOAuthState = googleOAuth?.snapshot ?? { running: false, url: null, startedAt: null, finishedAt: null, ok: null, error: null, account: null, warning: ANTIGRAVITY_WARNING };
+        sendJson(res, 200, state);
+        return;
+      }
+      if (pathname === "/api/google-login" && method === "POST") {
+        if (googleOAuth?.snapshot.running) {
+          sendJson(res, 200, googleOAuth.snapshot);
+          return;
+        }
+        const session = new GoogleOAuthSession({ home: homeDir(), ...(deps.googleOAuthFetch ? { fetch: deps.googleOAuthFetch } : {}), ...(deps.googleOAuthPort !== undefined ? { port: deps.googleOAuthPort } : {}) }, ANTIGRAVITY_WARNING);
+        googleOAuth = session;
+        let started: { url: string; port: number };
+        try {
+          started = await session.start();
+        } catch (error) {
+          sendJson(res, 500, { ...session.snapshot, error: (error as Error).message });
+          return;
+        }
+        const opened = deps.openBrowser ? deps.openBrowser(started.url) : openBrowser(started.url);
+        deps.log.info(`admin: google sign-in via GUI -> started (browser ${opened ? "opened" : "not opened"})`);
+        void session.result.then(
+          () => deps.log.info("admin: google sign-in via GUI -> ok"),
+          (error: Error) => deps.log.info(`admin: google sign-in via GUI -> failed: ${error.message}`),
+        );
+        sendJson(res, 200, { ...session.snapshot, opened, warning: ANTIGRAVITY_WARNING });
+        return;
+      }
+      if (pathname === "/api/google-login/code" && method === "POST") {
+        const session = googleOAuth;
+        if (!session?.snapshot.running) {
+          sendJson(res, 409, { error: "no Google sign-in is waiting for a code" });
+          return;
+        }
+        let code = "";
+        try {
+          code = String((JSON.parse((await readBody(req)).toString("utf8")) as { code?: unknown }).code ?? "");
+        } catch {
+          sendJson(res, 400, { error: "invalid JSON" });
+          return;
+        }
+        await session.submitCode(code);
+        await session.result.catch(() => {});
+        sendJson(res, session.snapshot.ok ? 200 : 400, session.snapshot);
+        return;
+      }
+      if (pathname === "/api/google-login/cancel" && method === "POST") {
+        googleOAuth?.cancel();
+        sendJson(res, 200, googleOAuth?.snapshot ?? { running: false });
+        return;
+      }
+      if (pathname === "/api/google-logout" && method === "POST") {
+        const r = await (deps.runCli ?? runCli)(["google-logout"]);
+        deps.log.info(`admin: google-logout via GUI -> ${r.ok ? "ok" : "failed"}`);
+        sendJson(res, r.ok ? 200 : 500, { ok: r.ok, output: r.output });
+        return;
+      }
+      // Safe account metadata only: labels, emails, project ids and rotation state. Tokens stay in
+      // the router and are never serialized.
+      if (pathname === "/api/google-accounts" && method === "GET") {
+        const all = deps.google?.().accounts?.() ?? {};
+        const wanted = new URL(url, "http://127.0.0.1").searchParams.get("provider");
+        const name = wanted && all[wanted] ? wanted : Object.keys(all)[0];
+        const accounts = name ? all[name]! : readGoogleAccounts(homeDir()).map(summarizeGoogleAccount);
+        sendJson(res, 200, { provider: name ?? null, accounts });
+        return;
+      }
+      if (pathname.startsWith("/api/google-accounts/") && (method === "PATCH" || method === "DELETE")) {
+        let id: string;
+        try {
+          id = decodeURIComponent(pathname.slice("/api/google-accounts/".length));
+        } catch {
+          sendJson(res, 400, { error: "invalid account id" });
+          return;
+        }
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
+          sendJson(res, 400, { error: "invalid account id" });
+          return;
+        }
+        if (method === "DELETE") {
+          if (!removeGoogleAccount(homeDir(), id)) {
+            sendJson(res, 404, { error: "Google account not found" });
+            return;
+          }
+          deps.log.info(`admin: removed Google account ${id.slice(0, 8)}`);
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+        let change: { label?: unknown; paused?: unknown; clearCooldown?: unknown };
+        try {
+          change = JSON.parse((await readBody(req)).toString("utf8")) as typeof change;
+        } catch {
+          sendJson(res, 400, { error: "invalid JSON" });
+          return;
+        }
+        if ((change.label !== undefined && (typeof change.label !== "string" || !change.label.trim())) || (change.paused !== undefined && typeof change.paused !== "boolean")) {
+          sendJson(res, 400, { error: "expected {label?: non-empty string, paused?: boolean, clearCooldown?: true}" });
+          return;
+        }
+        if (change.clearCooldown === true) deps.google?.().clearCooldown?.(id);
+        if (change.label !== undefined || change.paused !== undefined) {
+          if (!updateGoogleAccount(homeDir(), id, { ...(typeof change.label === "string" ? { label: change.label } : {}), ...(typeof change.paused === "boolean" ? { paused: change.paused } : {}) })) {
+            sendJson(res, 404, { error: "Google account not found" });
+            return;
+          }
+        }
+        deps.log.info(`admin: updated Google account ${id.slice(0, 8)}`);
+        sendJson(res, 200, { ok: true });
         return;
       }
       if (pathname === "/api/picker" && method === "POST") {

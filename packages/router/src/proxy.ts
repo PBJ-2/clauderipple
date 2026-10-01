@@ -33,7 +33,7 @@ import { classify, CredentialPool, retryAfterMs, type Credential } from "./pool.
 import { PRESETS } from "./presets.ts";
 import { ChatGptAdapter, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
 import { OpenAiCompatibleAdapter } from "./providers/openai/index.ts";
-import { GoogleAdapter } from "./providers/google/index.ts";
+import { GoogleAdapter, type GoogleAccountStatus } from "./providers/google/index.ts";
 import { conversationKey, type AnthropicRequest } from "./providers/chatgpt/translate.ts";
 import { providerFor, terminateHosts } from "./config.ts";
 import type { CertStore } from "./certs.ts";
@@ -338,9 +338,35 @@ export class Proxy {
     const key = JSON.stringify(cfg);
     const cur = this.googleAdapters.get(name);
     if (cur && cur.key === key) return cur.adapter;
-    const adapter = new GoogleAdapter(name, cfg, this.deps.log);
+    const adapter = new GoogleAdapter(name, cfg, this.deps.home, this.deps.log, this.pool);
     this.googleAdapters.set(name, { key, adapter });
     return adapter;
+  }
+
+  /**
+   * Every configured google provider's Antigravity accounts: rotation state only, never a token.
+   * Empty for api-key providers and for an adapter that has not been created yet.
+   */
+  googleAccounts(): Record<string, GoogleAccountStatus[]> {
+    const out: Record<string, GoogleAccountStatus[]> = {};
+    for (const [name, p] of Object.entries(this.deps.config().providers)) {
+      if (p.type === "google" && p.auth === "antigravity") out[name] = this.google(name, p).accountStatus();
+    }
+    return out;
+  }
+
+  /** The models a google provider can reach now, from Cloud Code Assist's own catalogue. */
+  googleFetchModels(name: string): Promise<ProviderModel[] | null> {
+    const cfg = this.deps.config().providers[name];
+    if (!cfg || cfg.type !== "google" || cfg.auth !== "antigravity") return Promise.resolve(null);
+    return this.google(name, cfg).fetchModels();
+  }
+
+  /** Dashboard action: put one resting Google account back into rotation now. */
+  googleClearCooldown(ownerId: string): void {
+    for (const [name, p] of Object.entries(this.deps.config().providers)) {
+      if (p.type === "google" && p.auth === "antigravity") this.google(name, p).clearCooldown(ownerId);
+    }
   }
 
   constructor(deps: ProxyDeps) {

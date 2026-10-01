@@ -1,7 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import http from "node:http";
-import { GoogleAdapter, googleLooksLikeAuth } from "../src/providers/google/index.ts";
+import os from "node:os";
+import path from "node:path";
+import { GoogleAdapter, googleLooksLikeAuth, googleRetryDelayMs } from "../src/providers/google/index.ts";
 import { Logger } from "../src/log.ts";
 import type { AnthropicRequest } from "../src/providers/chatgpt/translate.ts";
 
@@ -50,7 +53,8 @@ async function listen(server: http.Server): Promise<number> {
 
 const upstreamPort = await listen(upstream);
 const log = new Logger(null, 1_000_000, 1, false);
-let adapter = new GoogleAdapter("fake", { type: "google", auth: "api-key", apiKey: "test-key", url: `http://127.0.0.1:${upstreamPort}` }, log);
+const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-google-adapter-"));
+let adapter = new GoogleAdapter("fake", { type: "google", auth: "api-key", apiKey: "test-key", url: `http://127.0.0.1:${upstreamPort}` }, home, log);
 const front = http.createServer((req, res) => {
   const chunks: Buffer[] = [];
   req.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -78,7 +82,7 @@ const request: AnthropicRequest = { model: "claude", stream: true, system: "sys"
 
 test("adapter streams text, carries the API key, and maps usage", async () => {
   mode = "text";
-  adapter = new GoogleAdapter("fake", { type: "google", auth: "api-key", apiKey: "test-key", url: `http://127.0.0.1:${upstreamPort}` }, log);
+  adapter = new GoogleAdapter("fake", { type: "google", auth: "api-key", apiKey: "test-key", url: `http://127.0.0.1:${upstreamPort}` }, home, log);
   const response = await call(request);
   assert.equal(response.status, 200);
   assert.match(response.headers["content-type"] ?? "", /text\/event-stream/);
@@ -95,7 +99,7 @@ test("adapter streams text, carries the API key, and maps usage", async () => {
 
 test("a function call carries its signature into the store and it is replayed on the next turn", async () => {
   mode = "tool";
-  adapter = new GoogleAdapter("fake", { type: "google", auth: "api-key", apiKey: "test-key", url: `http://127.0.0.1:${upstreamPort}` }, log);
+  adapter = new GoogleAdapter("fake", { type: "google", auth: "api-key", apiKey: "test-key", url: `http://127.0.0.1:${upstreamPort}` }, home, log);
   const response = await call(request);
   assert.match(response.text, /"type":"tool_use"/);
   const id = /"id":"(toolu_[0-9a-f]+)"/.exec(response.text)?.[1];
@@ -120,7 +124,7 @@ test("a function call carries its signature into the store and it is replayed on
 
 test("a stream cut off with no finishReason ends in a retryable overloaded_error", async () => {
   mode = "cut";
-  adapter = new GoogleAdapter("fake", { type: "google", auth: "api-key", apiKey: "test-key", url: `http://127.0.0.1:${upstreamPort}` }, log);
+  adapter = new GoogleAdapter("fake", { type: "google", auth: "api-key", apiKey: "test-key", url: `http://127.0.0.1:${upstreamPort}` }, home, log);
   const response = await call(request);
   assert.match(response.text, /"type":"overloaded_error"/);
   assert.doesNotMatch(response.text, /message_stop/);
@@ -128,7 +132,7 @@ test("a stream cut off with no finishReason ends in a retryable overloaded_error
 
 test("a 400 with API_KEY_INVALID maps to an Anthropic authentication_error", async () => {
   mode = "badkey";
-  adapter = new GoogleAdapter("fake", { type: "google", auth: "api-key", apiKey: "test-key", url: `http://127.0.0.1:${upstreamPort}` }, log);
+  adapter = new GoogleAdapter("fake", { type: "google", auth: "api-key", apiKey: "test-key", url: `http://127.0.0.1:${upstreamPort}` }, home, log);
   const response = await call(request);
   assert.equal(response.status, 401);
   assert.equal((JSON.parse(response.text) as { error: { type: string } }).error.type, "authentication_error");
@@ -140,7 +144,13 @@ test("a 400 with API_KEY_INVALID maps to an Anthropic authentication_error", asy
   assert.equal(googleLooksLikeAuth(403, ""), false, "a bare 403 is a permission problem, not a bad key");
 });
 
-test("count tokens is local and an antigravity auth is refused by name", async () => {
+test("a Google 429 states its wait in a RetryInfo detail, not a header", () => {
+  const body = JSON.stringify({ error: { code: 429, status: "RESOURCE_EXHAUSTED", details: [{ "@type": "type.googleapis.com/google.rpc.RetryInfo", retryDelay: "37.2s" }] } });
+  assert.equal(googleRetryDelayMs(body), 37_200);
+  assert.equal(googleRetryDelayMs(JSON.stringify({ error: { code: 429, status: "RESOURCE_EXHAUSTED" } })), undefined);
+});
+
+test("count tokens is local and an antigravity provider with no account says so by name", async () => {
   const before = seen.length;
   const response = await call(request, "/v1/messages/count_tokens");
   assert.equal(response.status, 200);
@@ -148,11 +158,12 @@ test("count tokens is local and an antigravity auth is refused by name", async (
   assert.equal(seen.length, before, "no upstream call for a local count");
 
   const restore = adapter;
-  adapter = new GoogleAdapter("ag", { type: "google", auth: "antigravity" }, log);
+  const emptyHome = fs.mkdtempSync(path.join(os.tmpdir(), "cr-google-empty-"));
+  adapter = new GoogleAdapter("ag", { type: "google", auth: "antigravity" }, emptyHome, log);
   const refused = await call(request);
   adapter = restore;
-  assert.equal(refused.status, 400);
-  assert.match(refused.text, /Antigravity .* not implemented/);
+  assert.equal(refused.status, 401);
+  assert.match(refused.text, /no Google account: run `clauderipple google-login`/);
 });
 
 test("cleanup", () => {

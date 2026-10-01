@@ -820,9 +820,10 @@ adapter lives in `packages/router/src/providers/google/` and separates translati
 (`translate.ts`), the wire (`transport.ts`) and the signature store
 (`thoughtSignatures.ts`) so Stage 2 (Antigravity Code Assist) is a new transport only.
 
-Wire facts, each with its source. **Stage 1 speaks AI Studio API-key mode only**; the
-`antigravity` auth is accepted by the schema and refused by name with a 400. No live key
-exists in this environment, so everything below is doc-derived and **not measured**:
+Both modes are implemented: `api-key` (AI Studio) below, and `auth: "antigravity"` (Cloud
+Code Assist) in its own subsection. No live key or Antigravity subscription exists in this
+environment, so everything below is doc- and source-derived and **not measured** unless it
+says otherwise:
 
 - Stream endpoint `POST {base}/v1beta/models/{model}:streamGenerateContent?alt=sse`,
   the key on header `x-goog-api-key`, base default `https://generativelanguage.googleapis.com`
@@ -880,6 +881,95 @@ exists in this environment, so everything below is doc-derived and **not measure
   that has a real signature — the unsigned parallel calls of a healthy turn are normal
   (https://cloud.google.com/vertex-ai/generative-ai/docs/thought-signatures, sentinel
   paragraph read 2026-10-01).
+
+### 4d-ii. Google `auth: "antigravity"` (Cloud Code Assist) — implemented 2026-10-01
+
+A Google subscription signed in through `clauderipple google-login`, streaming through the
+Cloud Code Assist (CCA) backend, with several accounts rotating. Same translation as AI
+Studio; only `transport.ts` differs. Accounts live in `<home>/google-accounts.json` (0600,
+cross-process lock, atomic write, one account per email+project, a re-login replaces its own
+entry), the sign-in in `login.ts`, the account pool and refresh in `accounts.ts`, and the wire
+facts and model-id resolution in `antigravity.ts`. **Every wire fact below is taken from the
+reference implementation opencodex (GitHub `lidge-jun/opencodex`, read 2026-10-01 as a
+behavioral spec — no code copied; project rule) and is not measured live** — no Antigravity
+subscription exists in this environment. Files are under `src/`:
+
+- OAuth is Google's standard installed-app flow with PKCE S256. Client id
+  `1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com`, secret
+  `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` (public client values, overridable by env;
+  `oauth/google-antigravity.ts:17-20`). Authorize
+  `https://accounts.google.com/o/oauth2/v2/auth`, tokens
+  `https://oauth2.googleapis.com/token`, userinfo
+  `https://www.googleapis.com/oauth2/v2/userinfo`; scopes `cloud-platform`, `userinfo.email`,
+  `userinfo.profile`, `cclog`, `experimentsandconfigs`; `access_type=offline`,
+  `prompt=consent select_account`; loopback callback port 51121 preferred, path `/callback`,
+  any free port otherwise (`google-antigravity.ts:21-35,177-196`). The token body carries the
+  client id **and** secret and `code_verifier` (form-encoded).
+- Project discovery: `POST https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist` with
+  `{metadata:{ideType:"ANTIGRAVITY"}}`; without a project,
+  `POST https://daily-cloudcode-pa.googleapis.com/v1internal:onboardUser` with
+  `{tier_id:"free-tier", metadata:{ide_type, ide_name:"antigravity", ide_version}}`, polled up
+  to 5 times, 2 s apart, until `done:true` (`google-antigravity.ts:97-137`). The project id is
+  read from `cloudaicompanionProject | projectId | project[.id]`. A sign-in that finds no
+  project fails rather than storing a credential that would fail every call.
+- Request: `POST {base}/v1internal:streamGenerateContent?alt=sse` (non-streaming
+  `:generateContent`), base default `https://daily-cloudcode-pa.googleapis.com`
+  (`adapters/google.ts:1056-1160`; devlog `140.21`). Envelope
+  `{ model, userAgent:"antigravity", requestType:"agent", project, requestId:"agent-<uuid>",
+  request }`, where `request` is the standard Gemini body plus a nested camelCase
+  `sessionId` (`adapters/google.ts:1145-1158`; `google-antigravity-wire.ts:53-77`). Headers:
+  `Authorization: Bearer <token>` and `User-Agent: antigravity/ide/<ver> (os_type=…; arch=…;
+  aidev_client; auth_method=oauth)` — the IDE client family is required, the backend 404s
+  CLI-shaped UAs (`adapters/client-fingerprint.ts:44-65`). Response frames nest the standard
+  Gemini payload under `response` (`adapters/google.ts:1281,1591-1596`).
+- Model ids. CCA's wire ids carry the tier as a suffix (`gemini-3.8-flash-low`) or a
+  `-tiered` rename (`gemini-3.7-flash-tiered`), while the picker shows a collapsed base id.
+  Resolution, from `providers/antigravity-models.ts`: `gemini-3.8-flash` → its suffix per
+  effort (`…-low/medium/high`, no `thinkingLevel` beside it — the suffix IS the effort);
+  `gemini-3.1-pro` → `gemini-3.1-pro-low` / `gemini-pro-agent` with `thinkingLevel`;
+  `gemini-3.7-flash` → `gemini-3.7-flash-tiered` with `thinkingLevel`; a `claude-*` id takes a
+  `thinkingLevel` only (`resolveAntigravityThinkingLevel` clamps `xhigh/max/ultra`→`high`).
+  CCA's own catalogue is `POST {dailyApi}/v1internal:fetchAvailableModels` with `{project}`,
+  body `{models:{<wireId>:{maxTokens,…}}, agentModelSorts:[{groups:[{modelIds:[…]}]}],
+  tieredModelIds:{flash:[…]}}` (`providers/quota/antigravity.ts:166-168`,
+  `providers/antigravity-models.ts:489-560`); when it cannot be read we fall back to the
+  static collapsed list (`gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.1-pro`,
+  `gemini-3.1-flash-image`, `claude-sonnet-4-6`, `claude-opus-4-6-thinking`,
+  `gpt-oss-120b-medium`, context windows from CCA `maxTokens`).
+- Claude models on CCA force `toolConfig.functionCallingConfig.mode = "VALIDATED"`; a client
+  asking for no tools gets the declarations dropped instead (`adapters/google.ts:1109-1120`).
+- **thoughtSignature.** The CCA path sends a real signature back on the exact `functionCall`
+  the model signed and never adds the `skip_thought_signature_validator` sentinel (a fabricated
+  signature is not "real"). opencodex filters a stored signature with
+  `isLikelyRealThoughtSignature` (`google-antigravity-wire.ts:30-42`) to keep a foreign id
+  (`toolu_…`, `call_…`) out of the signature field, which Antigravity 400s
+  (`TYPE_BYTES`/Base64 decode failure). We do not need that filter: our store is keyed by the
+  `tool_use` id we minted and holds only a `thoughtSignature` the vendor itself sent, so a
+  foreign id is never placed in the field.
+- **Accounts and credentials (§4 Credential pools).** A conversation stays on the account that
+  answered while it is healthy (moving it costs the prompt cache); a refusal before any byte
+  reaches the client moves the turn to the next account: 401 (or a 403 that reads as a
+  credential refusal) gets one refresh and a replay, a fresh token refused with a 401 again
+  marks the account for sign-in; 429/402 rest the account to its `retry-after` (or a default);
+  another 403, 5xx or a connect failure rests it briefly; any other 4xx is the request's fault
+  and is not retried. Refresh is per account, single-flight per token generation, five minutes
+  ahead; only a structured `invalid_grant` marks an account for sign-in. Only the access token
+  and the account email/project id are ever in memory; no token reaches a log or an API response.
+- Session id and prompt cache. The real client puts a stable per-conversation id at
+  `request.sessionId` so provider-side replay can associate a signature with the call that made
+  it; instability loses it (`google-antigravity-wire.ts:62-88`). We derive it from the router's
+  own `conversationKey` (sha256 → BigEndian uint64 masked to 63 bits, left-padded with `-`,
+  CLIProxyAPI's `generateStableSessionID` shape). `requestId` is a fresh `agent-<uuid>` per
+  request, so it does not enter the cacheable body prefix.
+- **Terms.** Using Antigravity credentials from a non-Google client is against Google's terms
+  (Antigravity terms §6; the Gemini CLI FAQ) and Google blocked a large number of such accounts
+  in February 2026. The CLI prints this once before a sign-in and the sign-in API returns it in
+  a `warning` field for the GUI; the wording states only the fact. ClaudeRipple is not
+  affiliated with Google.
+- Admin: `POST/GET /api/google-login`, `POST /api/google-login/code`, `POST
+  /api/google-login/cancel`, `POST /api/google-logout`, `GET /api/google-accounts`,
+  `PATCH/DELETE /api/google-accounts/:id`, and `POST /api/providers/probe` with
+  `{type:"google", auth:"antigravity"}`. CLI: `clauderipple google-login` / `google-logout`.
 
 ## 5. Failure modes that must not exist in the product (all observed)
 

@@ -9,6 +9,7 @@ import { DEFAULTS, type Config, type ProviderModel } from "../src/config.ts";
 import { Logger } from "../src/log.ts";
 import { startAdmin } from "../src/admin.ts";
 import type { ImageRequest } from "../src/providers/chatgpt/index.ts";
+import type { GoogleAccountStatus } from "../src/providers/google/index.ts";
 import { RequestLog } from "../src/requestlog.ts";
 import { PRESETS } from "../src/presets.ts";
 import { saveClaudeAuthFile, saveClaudeOAuthFile } from "../src/providers/anthropic-token-file.ts";
@@ -32,6 +33,9 @@ async function withAdmin(
     probeFetch?: (url: string, init: RequestInit) => Promise<Response>;
     measureFetch?: (url: string, init: RequestInit) => Promise<Response>;
     chatgpt?: () => { quota: Record<string, Record<string, unknown> | null>; auth: Record<string, string>; refresh?: (name: string) => Promise<Record<string, unknown> | null>; models?: (name: string) => Promise<ProviderModel[] | null> };
+    google?: () => { accounts: () => Record<string, GoogleAccountStatus[]>; models?: (name: string) => Promise<ProviderModel[] | null>; clearCooldown?: (id: string) => void };
+    googleOAuthFetch?: (url: string, init?: RequestInit) => Promise<Response>;
+    googleOAuthPort?: number;
   } = {},
 ): Promise<void> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-admin-"));
@@ -1543,4 +1547,65 @@ test("GET /api/providers/measure/<id> reports an unknown job as 404", async () =
     const res = await fetch(`${base()}:${port}/api/providers/measure/deadbeef`);
     assert.equal(res.status, 404);
   });
+});
+
+test("google (antigravity) probe reports no account with the static catalogue and never a token", async () => {
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const res = await fetch(`${base()}:${port}/api/providers/probe`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "google", auth: "antigravity" }) });
+    const body = await res.json() as { ok: boolean; auth: string; models: { id: string }[]; error: string };
+    assert.equal(body.ok, false);
+    assert.equal(body.auth, "missing");
+    assert.match(body.error, /clauderipple google-login/);
+    assert.ok(body.models.some((m) => m.id === "gemini-3.8-flash"));
+  });
+});
+
+test("google login: the API returns the terms warning and account endpoints expose no token", async () => {
+  const googleToken = "ya29.SECRET-GOOGLE-TOKEN";
+  const seen: string[] = [];
+  const googleOAuthFetch = async (url: string): Promise<Response> => {
+    seen.push(url);
+    if (url.includes("oauth2.googleapis.com/token")) return new Response(JSON.stringify({ access_token: googleToken, refresh_token: "1//SECRET-REFRESH", expires_in: 3600 }), { status: 200 });
+    if (url.includes("userinfo")) return new Response(JSON.stringify({ email: "g@example.test", id: "1" }), { status: 200 });
+    if (url.includes("loadCodeAssist")) return new Response(JSON.stringify({ cloudaicompanionProject: "proj-1" }), { status: 200 });
+    return new Response("{}", { status: 200 });
+  };
+  const google = () => ({
+    accounts: () => ({ ag: [
+      { id: "acct-1", label: "g@example.test", email: "g@example.test", projectId: "proj-1", expiresAt: Date.now() + 3_600_000, needsReauth: false, paused: false, state: "ready" as const, active: true },
+    ] }),
+    models: async () => [{ id: "gemini-3.8-flash" }],
+    clearCooldown: () => {},
+  });
+  await withAdmin(makeCfg({ providers: { ag: { type: "google", auth: "antigravity" } } }), async ({ port }) => {
+    const idle = await (await fetch(`${base()}:${port}/api/google-login`)).json() as { running: boolean; warning: string };
+    assert.equal(idle.running, false);
+    assert.match(idle.warning, /Antigravity terms|Gemini CLI FAQ/);
+
+    const started = await fetch(`${base()}:${port}/api/google-login`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    const startedBody = await started.json() as { running: boolean; url: string; warning: string };
+    assert.equal(startedBody.running, true);
+    assert.ok(startedBody.url.startsWith("https://accounts.google.com/o/oauth2/v2/auth"));
+    assert.match(startedBody.warning, /not affiliated with Google/);
+
+    // Drive the loopback callback so the sign-in completes and an account is stored.
+    const state = new URL(startedBody.url).searchParams.get("state")!;
+    const callbackPort = new URL(startedBody.url).searchParams.get("redirect_uri")!;
+    await fetch(`${callbackPort}?code=good&state=${state}`).catch(() => {});
+    // Wait for the exchange to finish.
+    for (let i = 0; i < 50; i++) {
+      const s = await (await fetch(`${base()}:${port}/api/google-login`)).json() as { running: boolean };
+      if (!s.running) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const done = await (await fetch(`${base()}:${port}/api/google-login`)).json() as { ok: boolean; account: { email?: string; id: string } | null };
+    assert.equal(done.ok, true);
+    assert.equal(done.account?.email, "g@example.test");
+    assert.equal(JSON.stringify(done).includes(googleToken), false);
+
+    const accounts = await (await fetch(`${base()}:${port}/api/google-accounts?provider=ag`)).json() as { accounts: { state: string }[] };
+    assert.equal(accounts.accounts[0]?.state, "ready");
+    assert.equal(JSON.stringify(accounts).includes(googleToken), false);
+    assert.equal(JSON.stringify(accounts).includes("1//SECRET-REFRESH"), false);
+  }, { googleOAuthFetch, google, openBrowser: () => true, googleOAuthPort: 0 });
 });

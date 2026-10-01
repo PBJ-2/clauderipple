@@ -161,6 +161,11 @@ proxy
         accounts: () => proxy.chatgptAccounts(),
         clearCooldown: (id) => proxy.chatgptClearCooldown(id),
       }),
+      google: () => ({
+        accounts: () => proxy.googleAccounts(),
+        models: (name: string) => proxy.googleFetchModels(name),
+        clearCooldown: (id: string) => proxy.googleClearCooldown(id),
+      }),
       credentials: () => proxy.credentialHealth(),
       picker: () => ({ enabled: !!store.get().picker?.enabled, hosts: terminateHosts(store.get()).slice(1), last: proxy.lastPickerInjection }),
       observedClaudeCodeAuth,
