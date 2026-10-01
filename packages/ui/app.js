@@ -796,6 +796,8 @@ async function probeProvider(name, provider, onComplete) {
     const headers = provider.headers || {};
     const body = provider.type === "anthropic"
       ? { type: "anthropic", auth: provider.auth, ...(provider.auth === "api-key" && provider.apiKey ? { apiKey: provider.apiKey } : {}) }
+      : provider.type === "google"
+      ? { type: "google", auth: provider.auth, ...(provider.apiKey ? { apiKey: provider.apiKey } : {}), ...(provider.url ? { url: provider.url } : {}) }
       : {
         type: provider.type,
         url: provider.url,
@@ -905,6 +907,7 @@ let providerDetailGeneration = 0;
 function providerKind(name, provider) {
   const preset = provider.preset && presetById(provider.preset);
   if (provider.type === "chatgpt") return t("providers.chatgpt");
+  if (provider.type === "google") return `${t("providers.google")} · ${provider.auth === "antigravity" ? t("providers.googleAntigravity") : t("providers.apiKey")}`;
   if (provider.type === "anthropic") return provider.auth === "claude-code"
     ? `${t("providers.anthropic")} · ${provider.accountPool ? t("providers.rotationOn") : t("providers.rotationOff")}`
     : `${t("providers.anthropic")} · ${t("providers.apiKey")}`;
@@ -1410,6 +1413,9 @@ function openProviderChooser() {
   const chatgpt = el("button", { class: "chooser-tile", type: "button" }, [el("strong", { text: t("providers.chatgpt") }), el("span", { text: t("providers.chatgptHelp") })]);
   chatgpt.addEventListener("click", () => openProviderForm({ kind: "chatgpt" }));
   grid.appendChild(chatgpt);
+  const google = el("button", { class: "chooser-tile", type: "button" }, [el("strong", { text: t("providers.google") }), el("span", { text: t("providers.googleHelp") })]);
+  google.addEventListener("click", () => openProviderForm({ kind: "google" }));
+  grid.appendChild(google);
   const native = presets.filter((preset) => (preset.kind || "anthropic-compatible") === "anthropic-compatible");
   for (const preset of native) {
     const tile = el("button", { class: "chooser-tile", type: "button" }, [el("strong", { text: preset.name }), el("span", { text: t("providers.presetHelp") })]);
@@ -1594,6 +1600,82 @@ function openAnthropicProviderForm(options) {
   showModal(form, () => { formActive = false; });
   if (auth.value === "claude-code") void runProbe();
 }
+function openGoogleProviderForm(options) {
+  let formActive = true;
+  const existing = options.provider;
+  const nameInput = el("input", { value: options.name || t("providers.google"), maxlength: "60" });
+  const keyInput = el("input", { type: "password", autocomplete: "off", placeholder: existing && existing.apiKey ? t("providers.keySaved") : t("providers.keyPlaceholder") });
+  const showKey = el("button", { class: "eye-button", type: "button", text: t("common.show") });
+  showKey.addEventListener("click", () => { const show = keyInput.type === "password"; keyInput.type = show ? "text" : "password"; showKey.textContent = show ? t("common.hide") : t("common.show"); });
+  const keyField = el("div", { class: "form-field key-field" }, [el("span", { text: t("providers.apiKey") }), el("div", { class: "key-control" }, [keyInput, showKey]), el("small", { text: t("providers.googleKeyHelp") })]);
+  const result = el("div", { class: "probe-result" });
+  const probeButton = el("button", { class: "btn secondary", type: "button", text: t("providers.check") });
+  let foundModels = modelsOf(existing);
+  const currentChecked = new Set(foundModels.map((model) => model.id));
+  const modelArea = el("div", { class: "form-field" });
+  function renderModels(checked, help) {
+    modelArea.replaceChildren(el("span", { text: t("providers.models") }), hint(help || t("providers.modelsHelp")), modelChecklist(foundModels, checked, { allowCustom: true }));
+  }
+  renderModels(currentChecked);
+  async function runProbe() {
+    probeButton.disabled = true;
+    result.textContent = t("providers.checking");
+    try {
+      const response = await api("/api/providers/probe", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "google", auth: "api-key", apiKey: keyInput.value.trim() || (existing && existing.apiKey) }) });
+      if (!formActive) return;
+      result.replaceChildren(...[
+        el("span", { class: response.ok ? "ok-text" : "bad-text", text: response.ok ? t("providers.probeOk") : response.auth === "bad-key" ? t("providers.probeBadKey") : t("providers.probeFailed") }),
+        response.error ? el("div", { class: "small", text: response.error }) : null,
+      ].filter(Boolean));
+      if (Array.isArray(response.models) && response.models.length) {
+        const ticked = modelArea.querySelector(".model-picker").selected();
+        // The catalogue lists dozens of Gemini variants, so a new provider starts with none ticked
+        // rather than all of them; saved and typed picks stay ticked and visible.
+        const keep = new Set([...currentChecked, ...ticked.map((model) => model.id)]);
+        foundModels = [...ticked.filter((model) => !response.models.some((m) => m.id === model.id)), ...response.models];
+        renderModels(keep, t("providers.modelsFoundMany"));
+      }
+    } catch (error) { if (formActive) result.replaceChildren(el("span", { class: "bad-text", text: t("providers.probeFailed") }), el("div", { class: "small", text: error.message })); }
+    finally { if (formActive) probeButton.disabled = false; }
+  }
+  probeButton.addEventListener("click", () => void runProbe());
+  const advanced = el("details", { class: "details" }, [el("summary", { text: t("common.advanced") })]);
+  const identity = el("input", { type: "checkbox", checked: !(existing && existing.identity === false) });
+  const append = el("textarea", { rows: "2", value: (existing && existing.instructionsAppend) || "" });
+  advanced.appendChild(el("div", { class: "advanced-content" }, [
+    el("div", { class: "form-field" }, [el("label", { class: "check" }, [identity, el("span", { text: t("providers.identity") })]), el("small", { text: t("providers.identityHelp") })]),
+    inputRow(t("providers.append"), append, t("providers.appendHelp")),
+  ]));
+  const form = el("div", { class: "provider-form" }, [
+    el("h1", { id: "modal-title", text: existing ? t("providers.edit") : t("providers.addTitle") }),
+    inputRow(t("providers.name"), nameInput, t("providers.nameHelp")), keyField, probeButton, result, modelArea, advanced,
+  ]);
+  const saveButton = el("button", { class: "btn", type: "button", "data-default-action": "", text: existing ? t("common.save") : t("providers.add") });
+  saveButton.addEventListener("click", async () => {
+    const typedName = nameInput.value.trim();
+    if (!typedName) { toast(t("providers.nameRequired"), true); return; }
+    const next = clone(currentConfig);
+    const providerName = existing ? options.name : uniqueName(typedName, next.providers);
+    const apiKey = keyInput.value.trim() || (existing && existing.apiKey);
+    next.providers[providerName] = {
+      type: "google",
+      auth: "api-key",
+      ...(apiKey ? { apiKey } : {}),
+      ...(existing && existing.url ? { url: existing.url } : {}),
+      identity: identity.checked,
+      ...(append.value.trim() ? { instructionsAppend: append.value.trim() } : {}),
+      models: form.querySelector(".model-picker").selected(),
+    };
+    saveButton.disabled = true;
+    try { await configRequest(next); currentConfig = next; selectedProviderName = providerName; providerDetailTab = "overview"; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); toast(t("common.saved")); }
+    catch (error) { toast(t("common.saveFailed"), true, error.message); }
+    finally { saveButton.disabled = false; }
+  });
+  form.appendChild(el("div", { class: "actions end" }, [el("button", { class: "btn secondary", type: "button", text: t("common.cancel"), onclick: closeModal }), saveButton]));
+  showModal(form, () => { formActive = false; });
+  // An existing provider holds a key, so its full catalogue can be shown straight away.
+  if (existing && existing.apiKey) void runProbe();
+}
 function openProviderForm(options) {
   const existing = options.provider;
   const preset = options.preset || (existing && existing.preset && presetById(existing.preset));
@@ -1603,6 +1685,7 @@ function openProviderForm(options) {
   const isCustom = options.kind === "custom";
   const displayName = options.name || (preset && preset.name) || (isChatgpt ? t("providers.chatgpt") : isAnthropic ? t("providers.anthropic") : t("providers.customName"));
   if (isAnthropic) { openAnthropicProviderForm(options); return; }
+  if (options.kind === "google" || (existing && existing.type === "google")) { openGoogleProviderForm(options); return; }
   const nameInput = el("input", { value: displayName, maxlength: "60" });
   const keyInput = el("input", { type: "password", autocomplete: "off", placeholder: t("providers.keyPlaceholder") });
   const showKey = el("button", { class: "eye-button", type: "button", text: t("common.show") });
