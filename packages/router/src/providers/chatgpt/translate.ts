@@ -559,7 +559,9 @@ export class StreamMapper {
   fail(message: string, code?: string): AnthropicEvent[] {
     if (this.finished) return [];
     this.finished = true;
-    const type = code === "server_is_overloaded" ? "overloaded_error" : code === "rate_limit_exceeded" || code === "usage_limit_reached" ? "rate_limit_error" : "api_error";
+    const contextOverflow = code === "context_length_exceeded" || /input exceeds the context window/i.test(message);
+    const type = contextOverflow ? "invalid_request_error" : code === "server_is_overloaded" ? "overloaded_error" : code === "rate_limit_exceeded" || code === "usage_limit_reached" ? "rate_limit_error" : "api_error";
+    if (contextOverflow) message = `prompt is too long: ${message}`;
     this.failure = { type, message };
     return [...this.start(), ...this.closeBlock(), { event: "error", data: { type: "error", error: { type, message } } }];
   }
