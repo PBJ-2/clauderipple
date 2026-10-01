@@ -132,6 +132,15 @@ ClaudeRipple이 Claude에 하는 일은 작고 확인할 수 있습니다. Claud
 돌려 쓰는 것도 같은 약관 아래 각자 판단할 일입니다. 계정을 어떻게 다룰지는 Anthropic만 정할 수 있으니, 여기 적은
 내용은 보장이 아닙니다.
 
+### Gemini를 Google 계정으로 쓰면요?
+
+AI Studio API 키는 Google이 공식 지원하는 방식이고 안전합니다. Google 계정 로그인(Antigravity)은 다릅니다.
+Google [Antigravity 약관](https://antigravity.google/terms) 6조와 [Gemini CLI FAQ](https://geminicli.com/docs/resources/faq/)는
+그 로그인 정보를 다른 프로그램에서 쓰는 것을 위반으로 명시합니다. Google은 2026년 2월 이렇게 쓰인 계정을 정지했고(정지되면
+Gemini CLI와 Code Assist도 막혔습니다), [2차 위반은 영구 정지](https://github.com/google-gemini/gemini-cli/discussions/20632)라고
+밝혔습니다. ClaudeRipple은 다른 도구들도 제공하고 요청이 있어 이 로그인을 넣었으며, 시작 전에 이 경고를 보여 주고 트래픽을
+숨기는 일은 하지 않습니다. 쓰신다면 주 계정이 아닌 계정을 쓰세요.
+
 ### ChatGPT 계정을 여러 개 쓸 수 있나요?
 
 됩니다. `clauderipple login`을 할 때마다(또는 대시보드의 **+ ChatGPT 계정 추가**) 계정이 하나씩 늘어납니다.
@@ -419,6 +428,7 @@ Anthropic API 키로 갑니다. 구독 로그인 재사용은 Anthropic 약관�
 | 프로바이더 | 종류 | 인증 | 모델 목록 | 비고 |
 |---|---|---|---|---|
 | ChatGPT 구독 | Codex 백엔드 | 로그인 여러 개, 한도 차면 자동 전환(Codex 로그인도 재사용) | 구독에서 자동으로 읽음(GPT-6 Sol·Luna·Astra, GPT-5.6 …) | 추론 강도 low…max(Luna는 ultra), 프롬프트 캐시 94~99 % |
+| Google Gemini | Gemini API | AI Studio API 키, 또는 Google 계정 로그인(Antigravity, 위 FAQ 참고) | 자동 검색 | 번역(Messages ⇄ generateContent), 턴 사이 thought signature 유지 |
 | OpenRouter | Anthropic 호환 | API 키 | 400+, 자동 검색 | 모델별 추론 강도 지원을 API에서 읽음 |
 | DeepSeek, Kimi, Z.ai GLM, MiniMax, Qwen(국제/중국) | Anthropic 호환 | API 키 | 프리셋 | 벤더 공식 문서로 확인 |
 | xAI Grok, Mistral, Groq, Together, Fireworks | OpenAI 호환 | API 키 | 자동 검색 | 번역(Chat Completions / Responses) |

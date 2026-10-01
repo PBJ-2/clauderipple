@@ -151,6 +151,18 @@ subscription login. That use is subject to Anthropic's terms; an Anthropic API k
 the question. Rotating several Claude subscriptions is likewise your call under those
 terms. Only Anthropic can say how an account is treated, so nothing here is a promise.
 
+### What about Gemini through a Google account?
+
+An AI Studio API key is the way Google supports, and the safe one. The Google account
+sign-in (Antigravity) is different: Google's [Antigravity terms](https://antigravity.google/terms)
+(section 6) and the [Gemini CLI FAQ](https://geminicli.com/docs/resources/faq/) name using
+those credentials from another program as a breach. In February 2026 Google suspended
+accounts used this way — the suspension also cut off Gemini CLI and Code Assist — and
+[said](https://github.com/google-gemini/gemini-cli/discussions/20632) a second violation
+is permanent. ClaudeRipple offers the sign-in because others do and people asked, shows
+this warning before it starts, and does nothing to hide the traffic. Use a secondary
+account if you use it at all.
+
 ### Can I use several ChatGPT accounts?
 
 Yes. Each `clauderipple login` (or **+ Add ChatGPT account** in the dashboard) adds one.
@@ -243,7 +255,7 @@ you map go to your provider, everything else goes to Anthropic byte for byte.
 
 - **Any model in Claude Desktop and Claude Code.** GPT-6 Sol / Luna / Astra and
   GPT-5.6 Terra / Sol / Luna through your ChatGPT Plus/Pro subscription (new models
-  appear the day OpenAI serves them), or DeepSeek, Kimi, GLM,
+  appear the day OpenAI serves them), Google Gemini, or DeepSeek, Kimi, GLM,
   MiniMax, Qwen, Grok, Mistral, Groq, Together, Fireworks, OpenRouter (400+ models)
   and local Ollama / LM Studio. Under their real names in the picker, or mapped onto
   a Claude name.
@@ -491,6 +503,7 @@ provider you configured is available the same way.
 | Provider | Kind | Auth | Model list | Notes |
 |---|---|---|---|---|
 | ChatGPT subscription | Codex backend | several sign-ins, switching when one runs out (Codex login reused too) | read from your subscription (GPT-6 Sol, Luna, Astra, GPT-5.6 …) | effort low…max (Luna: ultra), prompt cache 94–99 % |
+| Google Gemini | Gemini API | AI Studio API key, or Google account sign-in (Antigravity, see below) | discovered | translated (Messages ⇄ generateContent), thought signatures kept across turns |
 | OpenRouter | Anthropic-compatible | API key | 400+, discovered | per-model effort support read from the API |
 | DeepSeek, Kimi, Z.ai GLM, MiniMax, Qwen (intl / cn) | Anthropic-compatible | API key | preset | verified against vendor docs |
 | xAI Grok, Mistral, Groq, Together, Fireworks | OpenAI-compatible | API key | discovered | translated (Chat Completions / Responses) |
@@ -509,7 +522,8 @@ Claude Desktop / claude CLI ──HTTPS_PROXY──▶ ClaudeRipple ──▶ ap
                                                │
                         mapped model ──────────┼──▶ chatgpt.com/backend-api (Responses ⇄ Messages)
                                                ├──▶ Anthropic-compatible vendors (+ compat layer)
-                                               └──▶ OpenAI-compatible vendors (Messages ⇄ Chat/Responses)
+                                               ├──▶ OpenAI-compatible vendors (Messages ⇄ Chat/Responses)
+                                               └──▶ Google Gemini (Messages ⇄ generateContent)
 Codex app / CLI ──/v1/responses──▶ ClaudeRipple ingress ──▶ Claude (your login or API key) / vendors
 ```
 
