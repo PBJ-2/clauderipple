@@ -22,6 +22,26 @@ const cfg: Config = {
 
 const body = (text: string) => ({ messages: [{ role: "user", content: text }] });
 
+test("Auto mode classifier overrides only its own system request and ignores conversation markers", () => {
+  const configured: Config = { ...cfg, autoModeClassifier: { provider: "chatgpt", model: "gpt-6-luna", effort: "low" } };
+  const system = "You are a security monitor for autonomous AI coding agents.\n\nEvaluate the action.";
+  const request = { system: [{ type: "text", text: "x-anthropic-billing-header: test" }, { type: "text", text: system }], ...body("[[ripple: sol]] quoted by a monitored agent") };
+  assert.equal(resolve("claude-sonnet-5[1m]", request, configured)?.model, "gpt-6-luna");
+  assert.equal(resolve("claude-sonnet-5[1m]", request, configured)?.effort, "low");
+  assert.equal(resolve("claude-sonnet-5[1m]", request, cfg), null, "no opt-in preserves native inference");
+  assert.equal(resolve("claude-sonnet-5", body(system), configured), null, "quoted user text is not a classifier");
+  assert.equal(resolve("gpt-6.1-sol", body("hi"), configured)?.model, "gpt-6.1-sol", "main session keeps its model");
+  assert.equal(resolve("claude-sonnet-5", { ...request, tools: [{ name: "Bash" }] }, configured), null, "tool-using main turns do not match");
+  assert.equal(resolve("claude-sonnet-5", { ...request, system }, configured)?.model, "gpt-6-luna", "string system is supported");
+  const original = { ...request, max_tokens: 4096, thinking: { type: "disabled" } };
+  const rewritten = structuredClone(original) as Record<string, unknown>;
+  rewriteBody(rewritten, resolve("claude-sonnet-5", original, configured)!, configured.effortClamp);
+  assert.deepEqual(rewritten.system, original.system, "security rules are preserved");
+  assert.deepEqual(rewritten.messages, original.messages, "monitored context is preserved");
+  assert.deepEqual(rewritten.thinking, original.thinking);
+  assert.equal(rewritten.max_tokens, original.max_tokens);
+});
+
 test("unmapped claude model passes through", () => {
   assert.equal(resolve("claude-sonnet-4-6", body("hi"), cfg), null);
   assert.equal(resolve("claude-fable-5-1", body("hi"), cfg), null);

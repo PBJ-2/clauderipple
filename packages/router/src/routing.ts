@@ -64,6 +64,18 @@ export function markerOverride(body: unknown, aliases: Record<string, string>): 
 
 export function resolve(model: unknown, body: unknown, cfg: Config): Resolved | null {
   if (typeof model !== "string") return null;
+  // Measured on Desktop's engine 2.1.284: the registered AUTO_MODE_MODEL env var is
+  // unused. Match the classifier's system prompt, never quoted conversation text.
+  // Its decision and wire format remain the engine's; only the inference target changes.
+  if (cfg.autoModeClassifier && isAutoModeClassifier(body)) {
+    const target = cfg.autoModeClassifier;
+    return {
+      provider: target.provider,
+      model: target.model,
+      effort: target.effort,
+      tag: `${model}->${target.model} (auto-mode classifier)`,
+    };
+  }
   let base = model;
   let effort: string | undefined;
   const at = model.indexOf("@");
@@ -143,6 +155,16 @@ export function resolve(model: unknown, body: unknown, cfg: Config): Resolved | 
   if (ingressOnly(owner)) return null;
 
   return { provider: owner, model: finalModel, effort: ov?.effort ?? effort, tag: `${model}->${finalModel}${ov ? " (marker)" : ""}` };
+}
+
+export function isAutoModeClassifier(body: unknown): boolean {
+  const request = body as { system?: unknown; tools?: unknown } | null;
+  if (!request || (Array.isArray(request.tools) && request.tools.length > 0)) return false;
+  const system = request.system;
+  const texts = typeof system === "string" ? [system] : Array.isArray(system)
+    ? system.filter((block) => block?.type === "text" && typeof block.text === "string").map((block) => block.text as string)
+    : [];
+  return texts.some((text) => text.trimStart().startsWith("You are a security monitor for autonomous AI coding agents."));
 }
 
 /**
