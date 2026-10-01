@@ -426,6 +426,8 @@ button.btn.compact { padding: 4px 9px; font-size: 14px; }
 
 .model-search { width: 100%; margin-top: 8px; }
 .model-picker .small { margin-top: 6px; }
+.model-add { margin-top: 8px; }
+.model-add input { flex: 1; min-width: 0; }
 .model-effort-tag { display: inline-block; margin-left: 5px; padding: 1px 5px; border-radius: 999px; font-size: 12px; line-height: 1.35; vertical-align: middle; white-space: nowrap; }
 .model-effort-tag.has-effort { color: var(--ok); background: color-mix(in srgb, var(--ok) 13%, transparent); }
 .model-effort-tag.no-effort { color: var(--muted); background: color-mix(in srgb, var(--muted) 12%, transparent); }

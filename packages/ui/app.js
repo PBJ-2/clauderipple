@@ -805,7 +805,8 @@ async function probeProvider(name, provider, onComplete) {
         // The router reads the preset's fallback list to tag each discovered model with the wire it
         // speaks, since /models reports ids alone and one plan can serve several wires.
         preset: provider.preset,
-        probeModel: provider.probeModel || (provider.preset && presetById(provider.preset) && (presetById(provider.preset).fallbackModels || [])[0] && presetById(provider.preset).fallbackModels[0].id),
+        // Without a preset the provider's own first model is the only id known to exist there.
+        probeModel: provider.probeModel || (provider.preset && presetById(provider.preset) && (presetById(provider.preset).fallbackModels || [])[0] && presetById(provider.preset).fallbackModels[0].id) || (modelsOf(provider)[0] && modelsOf(provider)[0].id),
         // Some vendors refuse a request without it rather than merely losing the cache, so a test
         // that leaves it out reports a broken provider that works perfectly.
         sessionHeader: provider.sessionHeader || (provider.preset && presetById(provider.preset) && presetById(provider.preset).sessionHeader),
@@ -1446,7 +1447,8 @@ function modelOverrideFields(model) {
     ...(model.authHeader ? { authHeader: model.authHeader } : {}),
   };
 }
-function modelChecklist(models, checked) {
+function modelChecklist(models, checked, options = {}) {
+  models = [...models];
   const selected = new Map();
   for (const model of models) if (checked.has(model.id)) selected.set(model.id, { id: model.id, name: labelOf(model), ...modelOverrideFields(model) });
   const wrap = el("div", { class: "model-picker" });
@@ -1480,6 +1482,26 @@ function modelChecklist(models, checked) {
   }
   if (search) { search.addEventListener("input", render); wrap.appendChild(search); }
   wrap.append(grid, note);
+  // A provider without a model list (or one that leaves a model off it) is otherwise unusable: the
+  // only ids on offer are the ones fetched, and abliteration.ai lists none (issue #42).
+  if (options.allowCustom) {
+    const idInput = el("input", { placeholder: t("providers.customModelPlaceholder"), autocomplete: "off", spellcheck: "false" });
+    const addButton = el("button", { class: "btn secondary", type: "button", text: t("providers.customModelAdd") });
+    function addTyped() {
+      const id = idInput.value.trim();
+      if (!id) return;
+      if (!models.some((model) => model.id === id)) models.unshift({ id, name: id });
+      const model = models.find((entry) => entry.id === id);
+      selected.set(id, { id, name: labelOf(model), ...modelOverrideFields(model) });
+      idInput.value = "";
+      if (search) search.value = "";
+      render();
+    }
+    addButton.addEventListener("click", addTyped);
+    // Enter here adds the id; left to bubble, the modal's own Enter handler would save the form too.
+    idInput.addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.isComposing) { event.preventDefault(); event.stopPropagation(); addTyped(); } });
+    wrap.appendChild(el("div", { class: "key-control model-add" }, [idInput, addButton]));
+  }
   wrap.selected = () => [...selected.values()];
   render();
   return wrap;
@@ -1602,7 +1624,8 @@ function openProviderForm(options) {
   // Everything starts ticked only for a new provider. An existing one keeps its saved picks even
   // when that is none: treating "no models" as "not decided yet" re-ticked the whole fallback list
   // every time the form opened, and saving then declared all of them (2026-09-29, opencode-zen).
-  const modelsBox = modelChecklist(foundModels, existing ? currentChecked : new Set(foundModels.map((model) => model.id)));
+  const checklistOptions = { allowCustom: !isChatgpt };
+  const modelsBox = modelChecklist(foundModels, existing ? currentChecked : new Set(foundModels.map((model) => model.id)), checklistOptions);
   const providerEffortLevels = isChatgpt
     ? effortLevelsFor(options.name || "chatgpt", "gpt-5.6-terra")
     : (existing ? effortLevelsFor(options.name, initialModels[0] && initialModels[0].id) : fallbackEffortLevels({ ...(preset ? { preset: preset.id } : {}), ...(isCustom ? { caps: {} } : {}) }, initialModels[0] && initialModels[0].id));
@@ -1718,6 +1741,12 @@ function openProviderForm(options) {
   function probeDraft() {
     const d = draftProvider();
     if (preset) { d.modelsUrl = preset.modelsUrl; d.modelsAuthHeader = preset.modelsAuthHeader; d.probeModel = (preset.fallbackModels || [])[0] && preset.fallbackModels[0].id; }
+    // With nothing to list models from, test with a model the user ticked rather than a made-up id
+    // the provider is bound to refuse.
+    else {
+      const ticked = modelArea.querySelector(".model-picker").selected();
+      if (ticked.length) d.probeModel = ticked[0].id;
+    }
     return d;
   }
   async function runProbe() {
@@ -1734,12 +1763,17 @@ function openProviderForm(options) {
       el("span", { class: response.ok && !noCredits ? "ok-text" : noCredits ? "warn-text" : "bad-text", text: headline }),
       response.error ? el("div", { class: "small", text: response.error.replace(/^no-credits:\s*/, "") }) : null,
     ].filter(Boolean));
-    foundModels = response.models && response.models.length ? response.models.map((model) => typeof model === "string" ? { id: model, name: model } : model) : (preset ? (preset.fallbackModels || []) : foundModels);
-    const keep = existing || foundModels.length > 12 ? new Set([...currentChecked, ...modelArea.querySelector(".model-picker").selected().map((m) => m.id)]) : new Set(foundModels.map((model) => model.id));
+    const listed = Boolean(response.models && response.models.length);
+    const ticked = modelArea.querySelector(".model-picker").selected();
+    foundModels = listed ? response.models.map((model) => typeof model === "string" ? { id: model, name: model } : model) : (preset ? (preset.fallbackModels || []) : foundModels);
+    const keep = existing || foundModels.length > 12 ? new Set([...currentChecked, ...ticked.map((m) => m.id)]) : new Set(foundModels.map((model) => model.id));
     // Saved picks that the provider no longer lists stay visible and ticked so nothing is dropped silently.
     for (const saved of modelsOf(existing)) if (keep.has(saved.id) && !foundModels.some((m) => m.id === saved.id)) foundModels = [saved, ...foundModels];
-    modelArea.querySelector(".model-picker").replaceWith(modelChecklist(foundModels, keep));
-    modelArea.replaceChildren(el("span", { text: t("providers.models") }), hint(response.ok ? (foundModels.length > 12 ? t("providers.modelsFoundMany") : t("providers.modelsFound")) : t("providers.modelsFallback")), modelArea.querySelector(".model-picker") || document.createTextNode(""));
+    // So do ids typed in before the test: the provider's list replacing them would undo the typing.
+    for (const typed of ticked) if (!foundModels.some((m) => m.id === typed.id)) { foundModels = [typed, ...foundModels]; keep.add(typed.id); }
+    modelArea.querySelector(".model-picker").replaceWith(modelChecklist(foundModels, keep, checklistOptions));
+    const listHint = listed ? (foundModels.length > 12 ? t("providers.modelsFoundMany") : t("providers.modelsFound")) : preset ? t("providers.modelsFallback") : t("providers.customModelHint");
+    modelArea.replaceChildren(el("span", { text: t("providers.models") }), hint(listHint), modelArea.querySelector(".model-picker") || document.createTextNode(""));
   }
   probeButton && probeButton.addEventListener("click", runProbe);
   // Editing a provider that can list models: fetch the full list right away so the saved picks are
