@@ -333,3 +333,9 @@ test("tool result images are delivered as vision input after the function output
   assert.deepEqual((r.input[2] as { content: unknown[] }).content, [{ type: "input_image", image_url: "data:image/png;base64,AAAA" }]);
   assert.equal(JSON.stringify(r.input).includes("[image omitted]"), false);
 });
+
+test("Claude Code's fast mode asks the ChatGPT backend for the Codex fast tier", () => {
+  assert.equal(toResponsesRequest({ ...turn1, speed: "fast" }, opts).service_tier, "priority");
+  assert.equal(toResponsesRequest(turn1, opts).service_tier, undefined);
+  assert.equal(toResponsesRequest({ ...turn1, speed: "standard" }, opts).service_tier, undefined);
+});

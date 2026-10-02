@@ -35,6 +35,7 @@ export type AnthropicRequest = {
   max_tokens?: number;
   output_config?: { effort?: string };
   metadata?: { user_id?: string };
+  speed?: string;
   [k: string]: unknown;
 };
 
@@ -57,6 +58,8 @@ export type ResponsesRequest = {
   store: false;
   stream: true;
   prompt_cache_key: string;
+  /** Fast mode. "priority" is the wire value the Codex CLI sends for it (codex-rs `ServiceTier::Fast`). */
+  service_tier?: "priority";
   /** Who this turn belongs to, in the shape the Codex CLI sends — see `conversationId`. */
   client_metadata: { session_id: string; thread_id: string; turn_id: string; "x-codex-window-id": string };
 };
@@ -349,6 +352,9 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
     out.parallel_tool_calls = !(tc?.disable_parallel_tool_use ?? false);
   }
   if (tool_choice) out.tool_choice = tool_choice;
+  // Claude Code's `/fast` arrives as `speed: "fast"` (Anthropic fast mode). The ChatGPT backend's
+  // equivalent is the Codex CLI's Fast mode, which bills the plan at a higher rate (Codex docs, Speed).
+  if (req.speed === "fast") out.service_tier = "priority";
   return out;
 }
 
