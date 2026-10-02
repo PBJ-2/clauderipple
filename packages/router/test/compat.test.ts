@@ -73,7 +73,8 @@ test("effort clamping is table-driven", () => {
   for (const row of [
     { requested: "xhigh", supported: ["low", "medium", "high"], expected: "high" },
     { requested: "max", supported: ["low", "high"], expected: "high" },
-    { requested: "medium", supported: ["low", "high", "max"], expected: "low" },
+    { requested: "medium", supported: ["low", "high", "max"], expected: "high" },
+    { requested: "medium", supported: ["high", "low"], expected: "high", note: "a tie goes up whatever the listing order" },
     { requested: "ultra", supported: ["low", "medium", "high", "xhigh", "max"], expected: "max" },
     { requested: "weird", supported: ["medium", "high"], expected: "medium" },
   ]) {

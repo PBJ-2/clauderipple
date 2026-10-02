@@ -73,6 +73,10 @@ export function forwardCompatibleHeader(name: string, caps: ResolvedCompatibleCa
 /**
  * Return the nearest supported canonical effort level. Unknown requested levels fall back
  * to the provider's lowest listed level, which is safer than forwarding a rejected value.
+ *
+ * Equally near on both sides goes up: `medium` on a `low`/`high`/`max` ladder — the shape most
+ * OpenCode Go models list (models.dev, 2026-10-02) — is `high`. Asking for medium means "more
+ * than low", and rounding it down cost a worker its reasoning for the sake of a tie.
  */
 export function clampEffort(effort: string, supported: string[]): string {
   if (supported.includes(effort)) return effort;
@@ -81,9 +85,11 @@ export function clampEffort(effort: string, supported: string[]): string {
     .map((value) => ({ value, index: EFFORT_LEVELS.indexOf(value as EffortLevel) }))
     .filter((entry) => entry.index >= 0);
   if (requested < 0 || canonical.length === 0) return supported[0] ?? effort;
-  return canonical.reduce((best, candidate) =>
-    Math.abs(candidate.index - requested) < Math.abs(best.index - requested) ? candidate : best,
-  ).value;
+  return canonical.reduce((best, candidate) => {
+    const distance = Math.abs(candidate.index - requested);
+    const bestDistance = Math.abs(best.index - requested);
+    return distance < bestDistance || (distance === bestDistance && candidate.index > best.index) ? candidate : best;
+  }).value;
 }
 
 function stripCacheControl(value: unknown): { value: unknown; count: number } {
