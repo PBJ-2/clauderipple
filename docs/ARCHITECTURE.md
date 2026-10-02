@@ -48,6 +48,27 @@ Why this path is stable:
 
 ## 2. What the app does with the official third-party setting (why competitors lose)
 
+### Optional Auto mode classifier target
+
+`autoModeClassifier: { provider, model, effort }` selects the inference target for
+Claude Code's tool-free security-monitor system requests. It is opt-in: without
+this setting, native routing remains unchanged. For example:
+
+```json
+"autoModeClassifier": {"provider": "codex", "model": "gpt-6-luna", "effort": "low"}
+```
+
+The named provider must exist and support outbound inference. Detection uses the
+security-monitor system prompt, never user messages or routing markers. The
+original security prompt, context, output format and native decision logic remain
+intact. Configure this field in the JSON config; the settings GUI has no control
+for it yet. Removing the field restores ordinary routing.
+
+Verified with Desktop's Claude Code 2.1.284: both classification stages used the
+configured target; an authorized temporary-file write proceeded and an explicitly
+forbidden deletion was denied. The registered `CLAUDE_CODE_AUTO_MODE_MODEL`
+environment variable did not change the actual native classifier requests.
+
 Verified in `app.asar` (`.vite/build/index.chunk-C0sgyfNn.js`, `-2CuMdv3h.js`):
 
 - The gateway setting (`inferenceGatewayBaseUrl`) is a **whole-app deployment

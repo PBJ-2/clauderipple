@@ -7,6 +7,14 @@ import { ConfigStore, DEFAULTS, providerFor, validate } from "../src/config.ts";
 import type { AnthropicCompatibleProvider, OpenAiCompatibleProvider } from "../src/config.ts";
 import { Logger } from "../src/log.ts";
 
+test("validate rejects an unusable Auto mode classifier target", () => {
+  const providers = { p: { type: "chatgpt" as const } };
+  assert.deepEqual(validate({ ...DEFAULTS, providers, autoModeClassifier: { provider: "p", model: "gpt-6-luna", effort: "low" } }), []);
+  assert.ok(validate({ ...DEFAULTS, providers, autoModeClassifier: { provider: "missing", model: "gpt-6-luna" } }).some((e) => e.includes("unknown provider")));
+  assert.ok(validate({ ...DEFAULTS, providers, autoModeClassifier: { provider: "p", model: "" } }).some((e) => e.includes("missing model")));
+  assert.ok(validate({ ...DEFAULTS, providers: { p: { type: "anthropic", auth: "claude-code" } }, autoModeClassifier: { provider: "p", model: "claude-sonnet-5" } }).some((e) => e.includes("ingress-only")));
+});
+
 test("validate reports unknown providers and bad urls", () => {
   const errs = validate({
     ...DEFAULTS,
