@@ -64,6 +64,14 @@ original security prompt, context, output format and native decision logic remai
 intact. Configure this field in the JSON config; the settings GUI has no control
 for it yet. Removing the field restores ordinary routing.
 
+This request is Auto mode's safety check: it decides whether an action the agent
+wants to take runs without asking. A target that judges worse than the model
+Claude Code chose lets more through, and nothing reports it, since an allowed
+action looks like any other. Choose the target for its judgement, not for its
+quota. Matching keys on the classifier prompt's opening sentence; if a Claude Code
+release rewords it, the requests stop matching and go back to the native
+classifier, which is the safe direction to fail in.
+
 Verified with Desktop's Claude Code 2.1.284: both classification stages used the
 configured target; an authorized temporary-file write proceeded and an explicitly
 forbidden deletion was denied. The registered `CLAUDE_CODE_AUTO_MODE_MODEL`
