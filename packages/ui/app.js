@@ -1773,9 +1773,13 @@ function openGoogleProviderForm(options) {
     el("div", { class: "form-field" }, [el("label", { class: "check" }, [identity, el("span", { text: t("providers.identity") })]), el("small", { text: t("providers.identityHelp") })]),
     inputRow(t("providers.append"), append, t("providers.appendHelp")),
   ]));
+  const pickerInput = el("input", { type: "checkbox", checked: Boolean(existing && modelsOf(existing).some((model) => ((currentConfig.cli && currentConfig.cli.extraModels) || []).some((extra) => extra.model === model.id))) });
   const form = el("div", { class: "provider-form" }, [
     el("h1", { id: "modal-title", text: existing ? t("providers.edit") : t("providers.addTitle") }),
-    inputRow(t("providers.name"), nameInput, t("providers.nameHelp")), authField, keyField, loginField, probeButton, result, modelArea, advanced,
+    inputRow(t("providers.name"), nameInput, t("providers.nameHelp")), authField, keyField, loginField, probeButton, result, modelArea,
+    el("label", { class: "check picker-check" }, [pickerInput, el("span", { text: t("providers.showInPicker") })]),
+    pickerModeOn() ? null : hint(t("providers.pickerOffHint")),
+    advanced,
   ]);
   const saveButton = el("button", { class: "btn", type: "button", "data-default-action": "", text: existing ? t("common.save") : t("providers.add") });
   saveButton.addEventListener("click", async () => {
@@ -1784,17 +1788,26 @@ function openGoogleProviderForm(options) {
     const next = clone(currentConfig);
     const providerName = existing ? options.name : uniqueName(typedName, next.providers);
     const apiKey = auth.value === "api-key" ? keyInput.value.trim() || (existing && existing.apiKey) : undefined;
+    const checkedModels = form.querySelector(".model-picker").selected();
+    // Fields this form has no control for (defaultEffort, a hand-written setting) survive the save.
+    const formKeys = new Set(["type", "auth", "apiKey", "identity", "instructionsAppend", "models"]);
+    const kept = existing ? Object.fromEntries(Object.entries(existing).filter(([key]) => !formKeys.has(key))) : {};
     next.providers[providerName] = {
+      ...kept,
       type: "google",
       auth: auth.value,
       ...(apiKey ? { apiKey } : {}),
       ...(existing && existing.url ? { url: existing.url } : {}),
       identity: identity.checked,
       ...(append.value.trim() ? { instructionsAppend: append.value.trim() } : {}),
-      models: form.querySelector(".model-picker").selected(),
+      models: checkedModels,
     };
+    // Same rule as the other provider forms: read after the provider is updated, so an unticked
+    // model is already undeclared and falls out of the picker on its own.
+    const existingSelections = pickerSelectionsExcept(next, providerName);
+    applyPickerSelections(next, pickerInput.checked ? [...existingSelections, ...checkedModels.map((model) => ({ ...model, provider: providerName }))] : existingSelections);
     saveButton.disabled = true;
-    try { await configRequest(next); currentConfig = next; selectedProviderName = providerName; providerDetailTab = auth.value === "antigravity" ? "accounts" : "overview"; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); toast(t("common.saved")); }
+    try { await configRequest(next); currentConfig = next; selectedProviderName = providerName; providerDetailTab = auth.value === "antigravity" ? "accounts" : "overview"; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); toast(t("common.saved")); await offerPickerOn(pickerInput.checked && checkedModels.length > 0); }
     catch (error) { toast(t("common.saveFailed"), true, error.message); }
     finally { saveButton.disabled = false; }
   });
