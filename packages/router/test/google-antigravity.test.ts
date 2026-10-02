@@ -440,3 +440,36 @@ test("401 gets one refresh and a replay on the same account", async () => {
     upstream.close();
   }
 });
+
+test("a 403 asking for account verification passes Google's page on, without a refresh or a rest", async () => {
+  const page = "https://accounts.google.com/signin/continue?sarp=1&scc=1&plt=x";
+  let verified = false;
+  const upstream = await ccaServer(() => (verified
+    ? { status: 200, frame: { response: { candidates: [{ content: { parts: [{ text: "ok" }] } }, { finishReason: "STOP" }] } } }
+    : { status: 403, text: JSON.stringify({ error: { code: 403, message: "Verify your account to continue.", status: "PERMISSION_DENIED", details: [{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "VALIDATION_REQUIRED", domain: "cloudcode-pa.googleapis.com", metadata: { validation_url: page } }] } }) }));
+  const home = tempHome();
+  saveGoogleAccount(home, grant("a@example.test", "proj-1", "tok-a"));
+  const tokenCalls: string[] = [];
+  const fetchImpl = async (url: string): Promise<Response> => {
+    tokenCalls.push(url);
+    return new Response("{}", { status: 200 });
+  };
+  const adapter = new GoogleAdapter("ag", { type: "google", auth: "antigravity", url: `http://127.0.0.1:${upstream.port}` }, home, log, new CredentialPool(), fetchImpl);
+  try {
+    const res = await callAdapter(adapter, request);
+    assert.equal(res.status, 403);
+    assert.match(res.text, /a@example\.test/);
+    assert.ok(res.text.includes(page), "the page is in the error the client shows");
+    assert.equal(tokenCalls.length, 0, "a fresh token would not help, so none is fetched");
+    const [account] = adapter.accountStatus();
+    assert.equal(account!.state, "needs-verification");
+    assert.equal(account!.verifyUrl, page);
+    assert.equal(adapter.hasUsable(), true, "the account stays in rotation");
+    verified = true;
+    const again = await callAdapter(adapter, request);
+    assert.equal(again.status, 200, "once the check is done the next turn is answered");
+    assert.equal(adapter.accountStatus()[0]!.state, "ready");
+  } finally {
+    upstream.close();
+  }
+});

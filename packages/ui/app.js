@@ -1149,6 +1149,7 @@ function durationText(seconds) {
 function chatgptStateBadge(account) {
   if (account.state === "paused") return el("span", { class: "badge", text: t("providers.chatgptPaused") });
   if (account.state === "needs-login" || account.state === "quarantined") return el("span", { class: "badge bad", text: t("providers.anthropicReauth") });
+  if (account.state === "needs-verification") return el("span", { class: "badge warn", text: t("providers.googleVerifyNeeded") });
   if (account.state === "cooling") return el("span", { class: "badge warn", text: t("pool.coolingFor", { duration: durationText(account.cooldownSeconds) }) });
   return el("span", { class: "badge ok", text: account.active ? t("providers.chatgptInUse") : t("providers.chatgptStandby") });
 }
@@ -1259,6 +1260,11 @@ function renderGoogleAccountRows(target, data, name, generation) {
       reauth.addEventListener("click", () => void startGoogleLogin(() => void refreshGoogleAccountPanel(name)));
       actions.push(reauth);
     }
+    // Only the person can finish Google's check, so the page opens in their browser; the account
+    // answers again on the next turn after that.
+    if (account.state === "needs-verification" && account.verifyUrl) {
+      actions.push(el("a", { class: "btn secondary compact", href: account.verifyUrl, target: "_blank", rel: "noreferrer", text: t("providers.googleVerifyAction") }));
+    }
     if (account.state === "cooling") {
       const now = el("button", { class: "btn secondary compact", type: "button", text: t("providers.chatgptClearCooldown") });
       now.addEventListener("click", () => void patchGoogleAccount(name, account.id, { clearCooldown: true }));
@@ -1284,7 +1290,7 @@ function renderGoogleAccountRows(target, data, name, generation) {
       el("div", { class: "account-card-copy" }, [
         el("strong", { text: account.label }),
         detail ? el("span", { class: "small", text: detail }) : null,
-        hint(account.state === "needs-login" || account.state === "quarantined" ? t("providers.chatgptReauthHelp") : t("providers.googleOwnHelp")),
+        hint(account.state === "needs-login" || account.state === "quarantined" ? t("providers.chatgptReauthHelp") : account.state === "needs-verification" ? t("providers.googleVerifyHelp") : t("providers.googleOwnHelp")),
       ].filter(Boolean)),
       chatgptStateBadge(account),
       el("div", { class: "account-card-actions" }, actions),

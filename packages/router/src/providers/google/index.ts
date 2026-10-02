@@ -80,6 +80,24 @@ export function googleRetryDelayMs(text: string): number | undefined {
   return match ? Math.ceil(Number(match[1]) * 1000) : undefined;
 }
 
+/**
+ * The page Google sends an account to when it wants the person behind it checked before Cloud
+ * Code Assist will answer: a 403 `PERMISSION_DENIED` whose ErrorInfo reason is
+ * `VALIDATION_REQUIRED`, with the page in `metadata.validation_url` (measured 2026-10-02 on a newly
+ * signed-in account). A fresh token does not help — only the person finishing that page does — so
+ * this is not read as a credential refusal. Only a Google accounts URL is passed on, because the
+ * dashboard turns it into a link.
+ */
+export function googleValidationUrl(text: string): string | undefined {
+  try {
+    const details = (JSON.parse(text) as { error?: { details?: { reason?: string; metadata?: { validation_url?: unknown } }[] } }).error?.details ?? [];
+    const url = details.find((d) => d.reason === "VALIDATION_REQUIRED")?.metadata?.validation_url;
+    return typeof url === "string" && url.startsWith("https://accounts.google.com/") ? url : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function mapHttpError(status: number, text: string): { status: number; body: string } {
   const message = `Google provider: ${vendorMessage(text)}`;
   if (status === 429) return anthropicError(429, "rate_limit_error", message);
@@ -97,15 +115,17 @@ function write(res: http.ServerResponse, value: string): number {
 
 /** One account as the dashboard shows it: who, whether it is in rotation, and why it is not. */
 export type GoogleAccountStatus = GoogleAccountSummary & {
-  state: "ready" | "cooling" | "quarantined" | "paused" | "needs-login";
+  state: "ready" | "cooling" | "quarantined" | "paused" | "needs-login" | "needs-verification";
   cooldownSeconds?: number;
+  /** Google's page for finishing the check, while the account is `needs-verification`. */
+  verifyUrl?: string;
   active: boolean;
 };
 
 /** How a send across the accounts ended. */
 type SendResult =
   | { kind: "ok"; upstream: Response; credential: GoogleCredential }
-  | { kind: "refused"; status: number; text: string; retryAfterSeconds?: number }
+  | { kind: "refused"; status: number; text: string; retryAfterSeconds?: number; verify?: { url: string; account: string } }
   | { kind: "all-resting"; backMs?: number }
   | { kind: "no-account" }
   | { kind: "unreachable"; error: Error }
@@ -123,6 +143,8 @@ export class GoogleAdapter {
   private readonly thoughtSignatures = new ThoughtSignatureStore();
   /** The account that answered last, for the dashboard's "active" mark. */
   private activeOwner: string | null = null;
+  /** Accounts Google wants checked, with its page for it; cleared when the account next answers. */
+  private readonly verifyUrls = new Map<string, string>();
   private modelsCache: { at: number; models: ProviderModel[] } | null = null;
   private modelsInFlight: Promise<ProviderModel[] | null> | null = null;
 
@@ -156,10 +178,12 @@ export class GoogleAdapter {
     return this.accounts.summaries().map((summary) => {
       const credential = credentials.find((c) => c.ownerId === summary.id);
       const report = credential ? reports.get(credential.id) : undefined;
-      const state: GoogleAccountStatus["state"] = summary.paused ? "paused" : !credential ? "needs-login" : report?.state ?? "ready";
+      const verifyUrl = this.verifyUrls.get(summary.id);
+      const state: GoogleAccountStatus["state"] = summary.paused ? "paused" : !credential ? "needs-login" : verifyUrl ? "needs-verification" : report?.state ?? "ready";
       return {
         ...summary,
         state,
+        ...(state === "needs-verification" && verifyUrl ? { verifyUrl } : {}),
         ...(report?.cooldownSeconds ? { cooldownSeconds: report.cooldownSeconds } : {}),
         active: summary.id === this.activeOwner,
       };
@@ -345,6 +369,11 @@ export class GoogleAdapter {
         err = anthropicError(429, "rate_limit_error", `Google Antigravity: every signed-in account is at its limit.${when}`);
         if (sent.backMs) retryAfterSeconds = Math.ceil(sent.backMs / 1000);
         note = "all accounts resting";
+      } else if (sent.verify) {
+        // Said plainly, with the page: the vendor's own line ("Verify your account to continue.")
+        // names neither the account nor where to go, and the URL sat past the cut of its body.
+        err = anthropicError(403, "permission_error", `Google wants the account ${sent.verify.account} verified before Antigravity will answer for it. Open this page in a browser signed in to that account, finish Google's check, then try again: ${sent.verify.url}`);
+        note = "upstream 403 verification required";
       } else {
         // A bare 403 here is a permission/region/policy problem, not a bad token (mapHttpError reads it).
         err = mapHttpError(sent.status, sent.text);
@@ -499,6 +528,7 @@ export class GoogleAdapter {
 
       if (upstream.ok && upstream.body) {
         this.pool.succeed(this.name, credential.id);
+        this.verifyUrls.delete(credential.ownerId);
         this.activeOwner = credential.ownerId;
         return { kind: "ok", upstream, credential };
       }
@@ -507,6 +537,16 @@ export class GoogleAdapter {
       const safeText = redactErrorText(text, secrets);
       const status = upstream.status;
       this.log.warn(`google ${this.name}: account ${credential.ownerId.slice(0, 8)} answered ${status}: ${safeText.slice(0, 400)}`);
+      // Not a rest and not a refresh: the account works again the moment its person finishes
+      // Google's page, so it stays in rotation and the next turn finds out.
+      const verifyUrl = status === 403 ? googleValidationUrl(text) : undefined;
+      if (verifyUrl) {
+        this.verifyUrls.set(credential.ownerId, verifyUrl);
+        const summary = this.accounts.summaries().find((s) => s.id === credential.ownerId);
+        last = { kind: "refused", status, text: safeText, verify: { url: verifyUrl, account: summary?.email ?? summary?.label ?? credential.ownerId.slice(0, 8) } };
+        tried.add(credential.ownerId);
+        continue;
+      }
       const credentialRefused = status === 401 || (status === 403 && googleLooksLikeAuth(status, text));
 
       if (credentialRefused) {
