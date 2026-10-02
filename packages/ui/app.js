@@ -350,25 +350,38 @@ function credentialLine(name) {
   return el("div", { class: `small ${resting ? "bad-text" : ""}`.trim(), text: parts.join(" · ") });
 }
 
-function providerState(name, provider) {
+/**
+ * One verdict on a provider's connection, which the badge and the detail heading both show. They
+ * used to decide separately: the heading kept a failure from a restart long after the badge had
+ * healed, and both read a check still running as "disconnected" (Gemini, 2026-10-02).
+ */
+function providerConnection(name) {
   const live = status && status.providers && status.providers[name];
   // Reaching the host is not the same as being able to use it. A ChatGPT provider with no
   // credentials would otherwise read "Connected" and send the user off believing it works.
-  if (live && live.needsLogin) return badge("warn", t("providerStatus.loginNeeded"));
-  if (live && live.needsVerification) return badge("warn", t("providers.googleVerifyNeeded"));
+  if (live && live.needsLogin) return { level: "warn", text: t("providerStatus.loginNeeded") };
+  if (live && live.needsVerification) return { level: "warn", text: t("providers.googleVerifyNeeded") };
   const state = stateFor(name);
+  if (state && state.pending) return { level: "warn", text: t("providerStatus.checking") };
   // A probe is the better evidence — it actually called the provider — but only while it is fresh.
   // One caught mid-restart used to sit there in red for the rest of the session, while the poll
   // every five seconds said the provider was fine and a fresh probe agreed. After PROBE_TTL_MS the
   // live reading takes over, so a stale failure heals itself instead of needing a manual re-check.
   if (state && !probeIsStale(state)) {
-    return state.ok ? badge("ok", t("providerStatus.connected"))
-      : state.auth === "bad-key" ? badge("bad", t("providerStatus.keyNeeded"))
-      : badge("bad", t("providerStatus.disconnected"));
+    if (state.ok) return { level: "ok", text: t("providerStatus.connected") };
+    // The key was accepted and the plan refused: saying "check your key" sends the operator to the
+    // one thing that is not wrong. Measured 2026-09-22 against OpenCode's free-tier 403.
+    if (state.auth === "not-entitled") return { level: "bad", text: t("providerStatus.notEntitled") };
+    if (state.auth === "bad-key") return { level: "bad", text: t("providerStatus.keyNeeded") };
+    return { level: "bad", text: t("providerStatus.disconnected") };
   }
-  if (live) return live.reachable ? badge("ok", t("providerStatus.connected")) : badge("bad", t("providerStatus.disconnected"));
-  if (state) return badge("bad", t("providerStatus.disconnected"));
-  return badge("warn", t("providerStatus.checking"));
+  if (live) return live.reachable ? { level: "ok", text: t("providerStatus.connected") } : { level: "bad", text: t("providerStatus.disconnected") };
+  if (state) return { level: "bad", text: t("providerStatus.disconnected") };
+  return { level: "warn", text: t("providerStatus.checking") };
+}
+function providerState(name) {
+  const verdict = providerConnection(name);
+  return badge(verdict.level, verdict.text);
 }
 function renderHealthProviders() {
   const box = $("#health-providers");
@@ -832,15 +845,6 @@ async function saveSlots() {
 
 // ---- Providers ----------------------------------------------------------------------
 
-function statusText(state) {
-  if (!state) return t("providerStatus.checking");
-  if (state.ok) return t("providerStatus.connected");
-  // The key was accepted and the plan refused: saying "check your key" sends the operator to the
-  // one thing that is not wrong. Measured 2026-09-22 against OpenCode's free-tier 403.
-  if (state.auth === "not-entitled") return t("providerStatus.notEntitled");
-  if (state.auth === "bad-key") return t("providerStatus.keyNeeded");
-  return t("providerStatus.disconnected");
-}
 async function probeProvider(name, provider, onComplete) {
   probeStates.set(name, { pending: true });
   renderHealthProviders();
@@ -1035,7 +1039,7 @@ function providerOverview(name, provider) {
   const connection = el("section", { class: "detail-section" }, [
     el("h3", { text: t("providers.connection") }),
     el("div", { class: "detail-setting-row" }, [
-      el("div", { class: "setting-copy" }, [el("strong", { text: statusText(state) }), el("span", { text: providerKind(name, provider) })]),
+      el("div", { class: "setting-copy" }, [el("strong", { text: providerConnection(name).text }), el("span", { text: providerKind(name, provider) })]),
       providerState(name, provider),
     ]),
     state && !state.ok && state.error ? el("p", { class: "bad-text small provider-detail-error", text: shortError(state.error), title: state.error }) : null,
