@@ -21,6 +21,8 @@ import { homeDir } from "../../config.ts";
 
 export const DEFAULT_BASE = "https://chatgpt.com/backend-api";
 const PING_MS = 15_000;
+/** How long a stream may hold its headers waiting for upstream's first item (see `handle`). Tests shorten it. */
+export const streamHold = { ms: 5_000 };
 /** Active quota lookup. Measured 2026-09-20: GET {base}/wham/usage → 200 JSON. The binary also
  * carries `/api/codex/usage`, but that path answers 403 here; `wham` is the one that works. */
 const USAGE_PATH = "/wham/usage";
@@ -1039,17 +1041,30 @@ export class ChatGptAdapter {
     // Keep early rejection as an HTTP error until an actual content block arrives.
     // A 200 followed by an error loses the status Claude uses for overflow recovery.
     const pendingEvents: ReturnType<StreamMapper["start"]> = [];
+    const openStream = (): void => {
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+    };
     const sendEvents = (events: ReturnType<StreamMapper["start"]>): void => {
       if (!wantStream) return;
       pendingEvents.push(...events);
       if (!res.headersSent) {
         if (mapper.failure?.type === "invalid_request_error") return;
         if (!pendingEvents.some((e) => e.event !== "message_start")) return;
-        res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+        openStream();
       }
       for (const ev of pendingEvents.splice(0)) bytes += write(res, formatSse(ev));
     };
+    // The hold waits for upstream's first item, which normally follows the request within a second
+    // — and an overflow rejection comes before it. Should it not come, the client must still hear
+    // something: past this deadline the stream opens with message_start and the pings keep it alive,
+    // as they did before the hold.
+    let holdDeadline: NodeJS.Timeout | null = null;
     if (wantStream) {
+      holdDeadline = setTimeout(() => {
+        if (res.headersSent || res.writableEnded || mapper.failure) return;
+        openStream();
+        for (const ev of [...pendingEvents.splice(0), ...mapper.start()]) bytes += write(res, formatSse(ev));
+      }, streamHold.ms);
       ping = setInterval(() => {
         if (res.headersSent && !res.writableEnded) bytes += write(res, formatSse({ event: "ping", data: { type: "ping" } }));
       }, PING_MS);
@@ -1086,6 +1101,7 @@ export class ChatGptAdapter {
       }
     } finally {
       if (ping) clearInterval(ping);
+      if (holdDeadline) clearTimeout(holdDeadline);
       res.off("close", onClose);
       try {
         await reader.cancel();

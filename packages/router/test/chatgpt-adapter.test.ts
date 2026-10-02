@@ -6,7 +6,7 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { ChatGptAdapter, rateLimitsFromHeaders, rateLimitsFromUsage } from "../src/providers/chatgpt/index.ts";
+import { ChatGptAdapter, rateLimitsFromHeaders, rateLimitsFromUsage, streamHold } from "../src/providers/chatgpt/index.ts";
 import { Logger } from "../src/log.ts";
 import type { AnthropicRequest } from "../src/providers/chatgpt/translate.ts";
 
@@ -15,7 +15,7 @@ fs.writeFileSync(path.join(home, "chatgpt-auth.json"), JSON.stringify({ accessTo
 
 type Seen = { headers: http.IncomingHttpHeaders; body: Record<string, unknown>; path: string };
 const seen: Seen[] = [];
-let mode: "stream" | "search" | "image" | "image-refused" | "error429" | "sse-error" | "cut-off" | "context-error" = "stream";
+let mode: "stream" | "search" | "image" | "image-refused" | "error429" | "sse-error" | "cut-off" | "context-error" | "slow-first-item" = "stream";
 // Active quota lookup (GET /wham/usage): its own mode so it can be exercised independently.
 let usageMode: "ok" | "unauthorized" | "no-window" = "ok";
 let usageHits = 0;
@@ -116,6 +116,12 @@ const backend = http.createServer((req, res) => {
     }
     if (mode === "sse-error") {
       res.end(sse([{ type: "response.created", response: {} }, { type: "error", error: { code: "server_is_overloaded", message: "overloaded" } }]));
+      return;
+    }
+    if (mode === "slow-first-item") {
+      // Headers and response.created at once, the first item only after the hold has run out.
+      res.write(sse([{ type: "response.created", response: {} }]));
+      setTimeout(() => res.end(sse(happy.slice(2))), 400);
       return;
     }
     if (mode === "cut-off") {
@@ -418,6 +424,32 @@ test("x-codex-turn-state from the last answer is sent back on the conversation's
   const issuedA2 = `ts-${turnStates - 1}`;
   await call({ ...convA, messages: [...convA.messages, { role: "assistant", content: "ok" }, { role: "user", content: "and more" }] });
   assert.equal(seen.at(-1)!.headers["x-codex-turn-state"], issuedA2, "each answer replaces the token for its conversation");
+});
+
+test("a stream whose first item is slow still opens once the hold runs out, and then answers in full", async () => {
+  mode = "slow-first-item";
+  const saved = streamHold.ms;
+  streamHold.ms = 100;
+  try {
+    const started = Date.now();
+    const { headersAt, status, text } = await new Promise<{ headersAt: number; status: number; text: string }>((resolve, reject) => {
+      const data = JSON.stringify({ ...request, stream: true });
+      const req = http.request({ host: "127.0.0.1", port: frontPort, method: "POST", path: "/v1/messages", headers: { "content-type": "application/json", "content-length": Buffer.byteLength(data) } }, (res) => {
+        const headersAt = Date.now() - started;
+        let text = "";
+        res.on("data", (c: Buffer) => (text += c.toString()));
+        res.on("end", () => resolve({ headersAt, status: res.statusCode ?? 0, text }));
+      });
+      req.on("error", reject);
+      req.end(data);
+    });
+    assert.equal(status, 200);
+    assert.ok(headersAt < 380, `headers came at ${headersAt}ms, before the first item`);
+    assert.equal((text.match(/event: message_start/g) ?? []).length, 1, "message_start is sent once");
+    assert.match(text, /event: message_stop/);
+  } finally {
+    streamHold.ms = saved;
+  }
 });
 
 test("cleanup", () => {
