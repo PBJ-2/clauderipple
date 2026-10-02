@@ -33,6 +33,7 @@ async function withAdmin(
     observedClaudeCodeAuth?: ObservedClaudeCodeAuth;
     probeFetch?: (url: string, init: RequestInit) => Promise<Response>;
     measureFetch?: (url: string, init: RequestInit) => Promise<Response>;
+    modelCatalog?: () => Promise<unknown>;
     chatgpt?: () => { quota: Record<string, Record<string, unknown> | null>; auth: Record<string, string>; refresh?: (name: string) => Promise<Record<string, unknown> | null>; models?: (name: string) => Promise<ProviderModel[] | null> };
     google?: () => { accounts: () => Record<string, GoogleAccountStatus[]>; models?: (name: string) => Promise<ProviderModel[] | null>; clearCooldown?: (id: string) => void };
     googleOAuthFetch?: (url: string, init?: RequestInit) => Promise<Response>;
@@ -1507,6 +1508,84 @@ test("a model the preset already places is measured on that wire first, even whe
     const model = (JSON.parse(fs.readFileSync(configFile, "utf8")) as Config).providers["opencode-go"]!.models![0]!;
     assert.equal(model.wire, "anthropic");
   }, { measureFetch });
+});
+
+// The catalogue states the ladder, so the only request is the one that settles the wire — and a
+// model newer than the preset's table is sent down the catalogue's wire first. Shapes as models.dev
+// served them 2026-10-02: space-bunny-free has no SDK of its own (so the provider's Chat one), and
+// glm-5.3-flash takes low/high/max although it answers 200 to more.
+test("a model the catalogue describes is measured with one request and takes the catalogue's ladder", async () => {
+  const cfg = makeCfg({
+    providers: {
+      "opencode-go": {
+        type: "openai-compatible",
+        url: "https://opencode.ai/zen/go/v1",
+        wire: "responses",
+        preset: "opencode-go",
+        sessionHeader: "x-opencode-session",
+        headers: { authorization: "Bearer sk-test" },
+        caps: { reasoning: "effort", effortLevels: ["none", "low"] },
+        models: [{ id: "space-bunny-free", name: "Space Bunny" }, { id: "glm-5.3-flash", name: "GLM" }, { id: "unlisted", name: "Unlisted" }],
+      },
+    },
+  });
+  const modelCatalog = async (): Promise<unknown> => ({
+    "opencode-go": {
+      npm: "@ai-sdk/openai-compatible",
+      models: {
+        "space-bunny-free": { reasoning: true, reasoning_options: [{ type: "effort", values: ["low", "medium", "high", "xhigh", "max"] }] },
+        "glm-5.3-flash": { reasoning: true, reasoning_options: [{ type: "effort", values: ["low", "high", "max"] }] },
+      },
+    },
+  });
+  const seen: { url: string; model: string }[] = [];
+  const measureFetch = async (url: string, init: RequestInit): Promise<Response> => {
+    seen.push({ url, model: (JSON.parse(String(init.body)) as { model: string }).model });
+    return new Response("{}", { status: url.endsWith("/chat/completions") ? 200 : 503 });
+  };
+  await withAdmin(cfg, async ({ port, configFile }) => {
+    const started = await fetch(`${base()}:${port}/api/providers/measure`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "opencode-go", models: ["space-bunny-free", "glm-5.3-flash", "unlisted"] }),
+    });
+    const job = await pollMeasure(port, ((await started.json()) as { jobId: string }).jobId);
+    assert.equal(job.state, "done");
+    const bunny = seen.filter((s) => s.model === "space-bunny-free");
+    assert.deepEqual(bunny.map((s) => s.url), ["https://opencode.ai/zen/go/v1/chat/completions"], "the catalogue's wire first, and nothing after it answers");
+    assert.equal(seen.filter((s) => s.model === "glm-5.3-flash").length, 1);
+    assert.ok(seen.filter((s) => s.model === "unlisted").length > 2, "a model the catalogue lacks is measured as before");
+    const models = (JSON.parse(fs.readFileSync(configFile, "utf8")) as Config).providers["opencode-go"]!.models!;
+    assert.deepEqual(models.find((m) => m.id === "space-bunny-free")?.effortLevels, ["low", "medium", "high", "xhigh", "max"]);
+    assert.deepEqual(models.find((m) => m.id === "glm-5.3-flash")?.effortLevels, ["low", "high", "max"]);
+    assert.equal(models.find((m) => m.id === "glm-5.3-flash")?.wire, "chat");
+  }, { measureFetch, modelCatalog });
+});
+
+test("a model the plan refuses is still reported when the catalogue lists it", async () => {
+  const cfg = makeCfg({
+    providers: {
+      "opencode-go": {
+        type: "openai-compatible",
+        url: "https://opencode.ai/zen/go/v1",
+        wire: "responses",
+        preset: "opencode-go",
+        headers: { authorization: "Bearer sk-test" },
+        caps: { reasoning: "effort", effortLevels: ["low"] },
+        models: [{ id: "x-free", name: "Free" }],
+      },
+    },
+  });
+  const modelCatalog = async (): Promise<unknown> => ({ "opencode-go": { models: { "x-free": { reasoning_options: [{ type: "effort", values: ["low"] }] } } } });
+  const measureFetch = async (): Promise<Response> => new Response("OpenCode's free tier can only be used from within OpenCode", { status: 403 });
+  await withAdmin(cfg, async ({ port, configFile }) => {
+    const started = await fetch(`${base()}:${port}/api/providers/measure`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "opencode-go", models: ["x-free"] }),
+    });
+    const job = await pollMeasure(port, ((await started.json()) as { jobId: string }).jobId);
+    const [result] = job.results as { error?: string; effortLevels?: string[] }[];
+    assert.match(result?.error ?? "", /^not-entitled/);
+    assert.equal(result?.effortLevels, undefined, "a model that did not answer is not given the catalogue's ladder");
+    assert.equal("effortLevels" in (JSON.parse(fs.readFileSync(configFile, "utf8")) as Config).providers["opencode-go"]!.models![0]!, false);
+  }, { measureFetch, modelCatalog });
 });
 
 test("an auth failure in measurement writes nothing: the wire is not guessed", async () => {

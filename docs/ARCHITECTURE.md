@@ -840,7 +840,16 @@ what we do not have yet — so that adding a provider does not start with readin
   `effortLevels` overrides provider defaults, including `[]` for “no effort”. When
   an OpenRouter `/models` entry has `supported_parameters`,
   `reasoning_effort` maps to `[low, medium, high]`; its absence maps to `[]`.
-  Vendors that do not report that field keep their configured fallback. Chat wire
+  Vendors that do not report that field keep their configured fallback. For the
+  OpenCode presets (`opencode-go`, `opencode-zen`) a model's ladder comes from
+  models.dev — the catalogue OpenCode's own client reads, whose `reasoning_options`
+  states it — and its `provider.npm` puts that wire first; one request then settles
+  the wire and catches a plan refusal. Asking every level instead took ~10 sequential
+  requests per model (glm-5.3-flash 1m54s, upstream latency 0.5–25s per one-token
+  request, 2026-10-02) and was less right: a 200 means "not refused", and
+  glm-5.3-flash accepted seven levels where the catalogue lists `low`/`high`/`max`.
+  A model the catalogue lacks, or a catalogue that cannot be fetched, is measured as
+  before (`catalog.ts`, `capabilities.ts`). Chat wire
   forwards Anthropic `stop_sequences` as `stop`; Responses wire deliberately omits
   them because its common stateless schema has no corresponding universal field.
 - We do not assert a provider-wide cache hit rate: the adapter records

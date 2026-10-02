@@ -256,7 +256,8 @@ export const PRESETS: ProviderPreset[] = [
     // assumption rather than a measurement, and it was wrong: deepseek-v4.1-flash accepts all eight
     // levels including max, and mimo-v2.6-pro accepts none/low/medium/high (measured 2026-09-22).
     // It could not correct itself either — an empty ladder is never measured. Left unstated, each
-    // model's ladder is established on the first save.
+    // model's ladder is established on the first save: from models.dev when it lists the model
+    // (catalog.ts — OpenCode's own catalogue, which does state ladders), by request otherwise.
     fallbackModels: [
       // Responses — the preset's own wire, so these carry no override.
       { id: "muse-spark-1.3-contributor", name: "Muse Spark 1.3 (Contributor)" },

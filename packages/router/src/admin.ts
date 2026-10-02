@@ -33,6 +33,7 @@ import { PRESETS, type ProviderPreset } from "./presets.ts";
 import { resolveCompatibleCaps } from "./compat.ts";
 import { CHATGPT_FALLBACK_MODELS } from "./providers/chatgpt/catalog.ts";
 import { measureModel, refusedByPlan, type Measured, type WireCandidate } from "./capabilities.ts";
+import { catalogEntry } from "./catalog.ts";
 import { ClaudeCodeAuthStore, nativeAnthropicHeaders } from "./providers/anthropic.ts";
 import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
 import { codexEnabled, codexHome } from "../../cli/src/codex.ts";
@@ -129,6 +130,9 @@ export type AdminDeps = {
   probeModelFetch?: (url: string, init: RequestInit) => Promise<Response>;
   /** Test seam for the background capability measurement. Production uses a timeout-wrapped fetch. */
   measureFetch?: (url: string, init: RequestInit) => Promise<Response>;
+  /** The public model catalogue (models.dev) a measurement reads before asking. Supplied by the
+   * router; absent in tests, which then measure everything by request as before. */
+  modelCatalog?: () => Promise<unknown>;
   /** Test seams for the Claude subscription sign-in: the token endpoint and the browser. */
   claudeOAuthFetch?: (url: string, init: RequestInit) => Promise<Response>;
   openBrowser?: (url: string) => boolean;
@@ -974,6 +978,8 @@ const MEASURE_JOBS = new Map<string, MeasureJob>();
  * (and its error strings) in memory for the life of the process. */
 const MEASURE_JOB_TTL_MS = 10 * 60 * 1000;
 const MEASURE_TIMEOUT_MS = 20_000;
+/** Models measured at once. One job is one provider and one key, so this is also its burst. */
+const MEASURE_CONCURRENCY = 4;
 
 async function measureFetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
   return fetch(url, { ...init, signal: AbortSignal.timeout(MEASURE_TIMEOUT_MS) });
@@ -994,8 +1000,12 @@ function sweepMeasureJobs(): void {
  * trying the list in catalogue order made it measure as `chat` and quietly overrule the `anthropic`
  * the preset recorded for it. A recorded wire is still only a starting point: it has to answer like
  * any other candidate, and the rest of the list is tried when it does not.
+ *
+ * `catalogWire` is the wire the public catalogue gives this model (catalog.ts). It goes first when
+ * the preset's own table says nothing about the model, so a model newer than that table is still
+ * settled in one request instead of walking the list.
  */
-function measureCandidates(p: Provider, modelId?: string): WireCandidate[] {
+function measureCandidates(p: Provider, modelId?: string, catalogWire?: WireCandidate["wire"]): WireCandidate[] {
   const defaultWire: "chat" | "responses" | "anthropic" =
     p.type === "anthropic-compatible" ? "anthropic"
       : p.type === "openai-compatible" ? (p.wire ?? "chat")
@@ -1028,6 +1038,10 @@ function measureCandidates(p: Provider, modelId?: string): WireCandidate[] {
   } else if (p.type === "anthropic-compatible" && p.preset) {
     const preset = PRESETS.find((entry) => entry.id === p.preset);
     for (const model of preset?.fallbackModels ?? []) if (model.wire) add({ wire: model.wire, url: model.url ?? p.url, ...(model.authHeader ? { authHeader: model.authHeader } : {}) });
+  }
+  if (!known?.wire && catalogWire) {
+    const at = candidates.findIndex((c) => c.wire === catalogWire);
+    if (at > 0) candidates.unshift(...candidates.splice(at, 1));
   }
   return candidates;
 }
@@ -1089,14 +1103,29 @@ async function runMeasureJob(jobId: string, providerName: string, models: string
   const fetchImpl = deps.measureFetch ?? measureFetchWithTimeout;
   const headers = "headers" in provider ? provider.headers : undefined;
   const sessionHeader = "sessionHeader" in provider ? provider.sessionHeader : undefined;
-  for (const id of models) {
+  const preset = "preset" in provider ? provider.preset : undefined;
+  const catalog = deps.modelCatalog ? await deps.modelCatalog().catch(() => undefined) : undefined;
+  const measureOne = async (id: string): Promise<void> => {
+    const listed = catalogEntry(catalog, preset, id);
     // Per model, not once per job: the order depends on what the preset recorded for this id.
-    const candidates = measureCandidates(provider, id);
-    const measured = await measureModel(id, candidates, ladder, { fetch: fetchImpl, ...(sessionHeader ? { sessionHeader } : {}), ...(headers ? { headers } : {}) });
+    const candidates = measureCandidates(provider, id, listed?.wire);
+    // A ladder the catalogue states is taken as stated; the wire is still asked, once, because that
+    // one request is also what finds a model the plan refuses (403 FreeTierError, DataPolicyError).
+    const stated = ladder.length > 0 ? listed?.effortLevels : undefined;
+    const known = stated !== undefined;
+    const measured = await measureModel(id, candidates, known ? [] : ladder, { fetch: fetchImpl, ...(sessionHeader ? { sessionHeader } : {}), ...(headers ? { headers } : {}) });
+    if (stated && measured.wire) measured.effortLevels = stated;
     job.results.push(measured);
     job.done++;
-    deps.log.info(`admin: measured ${providerName}/${id} -> ${measured.error ? `error ${measured.error}` : `wire ${measured.wire}${measured.effortLevels ? ` effort ${measured.effortLevels.join(",")}` : ""}`}`);
-  }
+    deps.log.info(`admin: measured ${providerName}/${id} -> ${measured.error ? `error ${measured.error}` : `wire ${measured.wire}${measured.effortLevels ? ` effort ${measured.effortLevels.join(",")}${known ? " (catalogue)" : ""}` : ""}`}`);
+  };
+  // Models are independent, so a few run at once and a slow upstream answer holds up only its own
+  // model. Levels inside one model stay sequential: a burst there invites 429s, and a level that
+  // meets one is kept rather than measured, which would quietly widen the ladder.
+  const queue = [...models];
+  await Promise.all(Array.from({ length: Math.min(MEASURE_CONCURRENCY, queue.length) }, async () => {
+    for (let id = queue.shift(); id !== undefined; id = queue.shift()) await measureOne(id);
+  }));
   try {
     const outcome = applyMeasurements(deps.configFile, job.results);
     if ("error" in outcome) {

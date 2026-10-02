@@ -16,6 +16,7 @@ import { Logger } from "./log.ts";
 import { UpstreamHealth, EXIT_UPSTREAM_UNREACHABLE } from "./health.ts";
 import { Proxy } from "./proxy.ts";
 import { startAdmin } from "./admin.ts";
+import { loadModelCatalog } from "./catalog.ts";
 import { RequestLog } from "./requestlog.ts";
 import { OpenAiIngress } from "./ingress/server.ts";
 import { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
@@ -172,6 +173,7 @@ proxy
       observedClaudeCodeAuth,
       claudeUsage: () => proxy.claudeUsage.snapshot(),
       image: (req, signal) => proxy.generateImage(req, signal),
+      modelCatalog: () => loadModelCatalog(),
       shutdown: () => beginDrain("shutdown requested"),
     });
     log!.info(`clauderipple admin GUI on http://127.0.0.1:${admin.port}/`);
