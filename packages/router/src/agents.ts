@@ -158,14 +158,17 @@ function capsEffortLevels(provider: Provider): string[] | undefined {
 }
 
 /**
- * The `@effort` suffix a generated file's `model:` carries: `@medium` when the provider or the model
- * offers medium reasoning, otherwise none. An empty `model.effortLevels` disables the provider
- * fallback (config.ts), so it is honoured rather than ignored.
+ * The `@effort` suffix a generated file's `model:` carries: `@high` when the provider or the model
+ * offers any reasoning effort, otherwise none. A ladder without `high` is fine — the request is
+ * clamped to the nearest level the model takes (compat.ts). It used to be `@medium`, which a ladder
+ * from the catalogue such as `low`/`high`/`max` does not hold, and the operator wants workers at
+ * high unless a marker says otherwise (2026-10-02). An empty `model.effortLevels` disables the
+ * provider fallback (config.ts), so it is honoured rather than ignored.
  */
 function effortSuffix(provider: Provider, modelId: string): string {
   const modelLevels = provider.models?.find((m) => m.id === modelId)?.effortLevels;
   const levels = modelLevels !== undefined ? modelLevels : capsEffortLevels(provider);
-  return levels?.includes("medium") ? "@medium" : "";
+  return levels && levels.length > 0 ? "@high" : "";
 }
 
 /**

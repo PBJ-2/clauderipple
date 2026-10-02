@@ -191,7 +191,8 @@ chat is out of reach for every approach, ours included.
   also a subagent the operator can name: for every id exactly one non-ingress
   provider declares, the router writes `~/.claude/agents/<name>.md` (`agents.ts`;
   `name` = the id with anything outside `[a-z0-9-]` folded to `-`, frontmatter
-  `model:` = the exact id, `@medium` when the provider offers that level). It
+  `model:` = the exact id, `@high` when the provider offers any effort level —
+  `@medium` until 2026-10-02). It
   records what it wrote in `<home>/generated-agents.json` and touches **only**
   those files: a hand-written agent of the same name wins and is left alone, an
   unticked model removes its generated file and nothing else, identical content is
