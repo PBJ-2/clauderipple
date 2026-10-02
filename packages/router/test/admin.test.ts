@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { DEFAULTS, type Config, type ProviderModel } from "../src/config.ts";
 import { Logger } from "../src/log.ts";
-import { startAdmin } from "../src/admin.ts";
+import { parseUpdateCheck, startAdmin } from "../src/admin.ts";
 import type { ImageRequest } from "../src/providers/chatgpt/index.ts";
 import type { GoogleAccountStatus } from "../src/providers/google/index.ts";
 import { RequestLog } from "../src/requestlog.ts";
@@ -27,6 +27,7 @@ async function withAdmin(
   extraDeps: {
     shutdown?: () => void;
     runCli?: (args: string[], timeout?: number) => Promise<{ ok: boolean; output: string }>;
+    startCliDetached?: (args: string[], log: string) => void;
     claudeOAuthFetch?: (url: string, init: RequestInit) => Promise<Response>;
     openBrowser?: (url: string) => boolean;
     observedClaudeCodeAuth?: ObservedClaudeCodeAuth;
@@ -1608,4 +1609,43 @@ test("google login: the API returns the terms warning and account endpoints expo
     assert.equal(JSON.stringify(accounts).includes(googleToken), false);
     assert.equal(JSON.stringify(accounts).includes("1//SECRET-REFRESH"), false);
   }, { googleOAuthFetch, google, openBrowser: () => true, googleOAuthPort: 0 });
+});
+
+test("update: the CLI decides what an update is; a POST starts it detached once, and only where it can run", async () => {
+  let check = { current: "1.0.0", latest: "1.1.0", newer: true, kind: "checkout" };
+  const started: { args: string[]; log: string }[] = [];
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const get = await fetch(`${base()}:${port}/api/update`);
+    assert.equal(get.status, 200);
+    assert.deepEqual(await get.json(), { ...check, running: false });
+
+    const post = () => fetch(`${base()}:${port}/api/update`, { method: "POST" });
+    assert.equal((await post()).status, 409, "a source checkout is not updated from the GUI");
+    check = { ...check, kind: "script", newer: false };
+    assert.equal((await post()).status, 409, "nothing newer, nothing to run");
+    assert.equal(started.length, 0);
+
+    check = { ...check, newer: true };
+    const first = await post();
+    assert.equal(first.status, 202);
+    assert.deepEqual(started.map((s) => s.args), [["update"]]);
+    assert.ok(started[0]!.log.endsWith(path.join("logs", "update.log")));
+    assert.equal((await post()).status, 409, "a second click while it runs starts nothing");
+    assert.equal(started.length, 1);
+    assert.equal(((await (await fetch(`${base()}:${port}/api/update`)).json()) as { running: boolean }).running, true);
+
+    const crossSite = await fetch(`${base()}:${port}/api/update`, { method: "POST", headers: { origin: "https://evil.example" } });
+    assert.equal(crossSite.status, 403);
+  }, {
+    runCli: async (args) => {
+      assert.deepEqual(args, ["update", "--check", "--json"]);
+      return { ok: true, output: `npm notice\n${JSON.stringify(check)}` };
+    },
+    startCliDetached: (args, log) => { started.push({ args, log }); },
+  });
+});
+
+test("update: a check the CLI could not answer is an error, not a guess", () => {
+  assert.equal(parseUpdateCheck("error: npm registry answered HTTP 503"), null);
+  assert.deepEqual(parseUpdateCheck('{"current":"1.0.0","latest":null,"newer":true,"kind":"npm"}'), { current: "1.0.0", latest: null, newer: true, kind: "npm" });
 });

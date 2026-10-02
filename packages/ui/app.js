@@ -201,12 +201,63 @@ async function refreshHealth() {
   if (clientsLoaded) renderClients();
   const details = $("#health-details");
   details.replaceChildren(
-    el("div", { class: "row" }, [el("span", { class: "k", text: t("health.version") }), el("span", { class: "v", text: status.version })]),
+    versionRow(),
     // Which files answer, and since when: the only way to see that an update actually replaced the router.
     ...(status.runtime ? [el("div", { class: "row" }, [el("span", { class: "k", text: t("health.runtime") }), el("span", { class: "v", text: `${status.runtime.router || "?"} · ${new Date(status.runtime.startedAt).toLocaleString()}` })])] : []),
     el("div", { class: "row" }, [el("span", { class: "k", text: t("health.routes") }), el("span", { class: "v", text: String(status.routes) })]),
     el("div", { class: "row" }, [el("span", { class: "k", text: t("health.cli") }), el("span", { class: "v", text: status.cliVersion })]),
   );
+}
+
+// The update check runs on a click, not with the 5-second refresh: it asks the npm registry. What an
+// update means depends on how this copy was installed, so the router's CLI decides and runs it; the
+// router restarts on the new version and the served-files check above reloads this page.
+let updateState = { busy: false, check: null };
+function versionRow() {
+  const check = updateState.check;
+  const children = [el("span", { class: "k", text: t("health.version") }), el("span", { class: "v", text: status.version })];
+  if (check && check.newer && check.kind === "checkout") {
+    children.push(el("span", { class: "small", text: t("update.checkout", { latest: check.latest }) }));
+  } else {
+    const action = check && check.newer;
+    const label = updateState.busy ? t("update.checking")
+      : check && check.running ? t("update.running")
+      : action ? (check.kind === "packaged" ? t("update.download", { latest: check.latest }) : t("update.install", { latest: check.latest }))
+      : t("update.check");
+    const button = el("button", { class: "btn secondary compact", type: "button", text: label });
+    button.disabled = updateState.busy || Boolean(check && check.running);
+    button.addEventListener("click", () => void (action ? startUpdate() : checkForUpdate()));
+    children.push(button);
+    if (check && !check.newer && !updateState.busy) children.push(el("span", { class: "small", text: t("update.latest") }));
+  }
+  return el("div", { class: "row", id: "health-version-row" }, children);
+}
+function renderVersionRow() {
+  const row = $("#health-version-row");
+  if (row) row.replaceWith(versionRow());
+}
+async function checkForUpdate() {
+  updateState = { busy: true, check: updateState.check };
+  renderVersionRow();
+  try { updateState = { busy: false, check: await api("/api/update") }; }
+  catch (error) { updateState = { busy: false, check: null }; toast(t("update.checkFailed"), true, error.message); }
+  renderVersionRow();
+}
+async function startUpdate() {
+  const check = updateState.check;
+  if (check.kind === "packaged") { window.open("https://github.com/PBJ-2/clauderipple/releases/latest", "_blank", "noreferrer"); return; }
+  if (!confirm(t("update.confirm", { latest: check.latest, current: check.current }))) return;
+  updateState = { busy: true, check };
+  renderVersionRow();
+  try {
+    await api("/api/update", { method: "POST" });
+    updateState = { busy: false, check: { ...check, running: true } };
+    toast(t("update.started"));
+  } catch (error) {
+    updateState = { busy: false, check };
+    toast(t("update.failed"), true, error.message);
+  }
+  renderVersionRow();
 }
 
 function quotaLine(name) {
