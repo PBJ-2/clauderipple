@@ -1035,3 +1035,17 @@ CC BY-NC-ND (no forks, no sponsors). CLI-targeting `claude-code-router` has
 37,180★, `opencodex` 14,300★ with two README sponsors. Open positions: English
 distribution, GPL-3.0 license (chosen 2026-09-13 over MIT: sole author, reversible later, blocks closed commercial repackaging), sponsor slots. Positioning: an **add-on for Claude
 subscribers**, not a replacement for people without one.
+
+
+### Codex context-overflow recovery
+
+The subscription backend can reject an oversized request with HTTP 200 followed by
+`response.failed` / `context_length_exceeded`. The Messages adapter maps this to
+`invalid_request_error` and prefixes `prompt is too long`, which Desktop CLI
+2.1.284 recognizes. Keep the initial message-start event pending until another
+translated event arrives so an early rejection can retain HTTP 400. Transient
+overloads and interrupted streams remain retryable.
+
+Both streaming and non-streaming early-rejection paths are covered by adapter
+tests. The client still needs to compact its history or otherwise reduce input;
+this mapping does not increase the backend's context limit.

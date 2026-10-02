@@ -1036,11 +1036,22 @@ export class ChatGptAdapter {
     let bytes = 0;
     let ping: NodeJS.Timeout | null = null;
 
+    // Keep early rejection as an HTTP error until an actual content block arrives.
+    // A 200 followed by an error loses the status Claude uses for overflow recovery.
+    const pendingEvents: ReturnType<StreamMapper["start"]> = [];
+    const sendEvents = (events: ReturnType<StreamMapper["start"]>): void => {
+      if (!wantStream) return;
+      pendingEvents.push(...events);
+      if (!res.headersSent) {
+        if (mapper.failure?.type === "invalid_request_error") return;
+        if (!pendingEvents.some((e) => e.event !== "message_start")) return;
+        res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+      }
+      for (const ev of pendingEvents.splice(0)) bytes += write(res, formatSse(ev));
+    };
     if (wantStream) {
-      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
-      for (const ev of mapper.start()) bytes += write(res, formatSse(ev));
       ping = setInterval(() => {
-        if (!res.writableEnded) bytes += write(res, formatSse({ event: "ping", data: { type: "ping" } }));
+        if (res.headersSent && !res.writableEnded) bytes += write(res, formatSse({ event: "ping", data: { type: "ping" } }));
       }, PING_MS);
     }
 
@@ -1054,7 +1065,7 @@ export class ChatGptAdapter {
           const outEvents = mapper.feed(ev);
           if (mapper.rateLimits && mapper.rateLimits !== this.rateLimitsByAccount.get(credential.ownerId)) this.noteRateLimits(credential, mapper.rateLimits);
           this.rememberInput(cacheKey, mapper.usage);
-          if (wantStream) for (const o of outEvents) bytes += write(res, formatSse(o));
+          sendEvents(outEvents);
           if (mapper.isFinished) break;
         }
         if (mapper.isFinished) break;
@@ -1066,12 +1077,12 @@ export class ChatGptAdapter {
         const tail = parser.sawDone
           ? mapper.finish()
           : mapper.fail(`${model}: upstream stream ended before the response completed`, "server_is_overloaded");
-        if (wantStream) for (const o of tail) bytes += write(res, formatSse(o));
+        sendEvents(tail);
       }
     } catch (e) {
       if (!ac.signal.aborted) {
         const tail = mapper.fail(`stream interrupted: ${(e as Error).message}`, "server_is_overloaded");
-        if (wantStream) for (const o of tail) bytes += write(res, formatSse(o));
+        sendEvents(tail);
       }
     } finally {
       if (ping) clearInterval(ping);
@@ -1084,8 +1095,8 @@ export class ChatGptAdapter {
     }
 
     const failure = mapper.failure;
-    const failedStatus = failure?.type === "overloaded_error" ? 529 : failure?.type === "rate_limit_error" ? 429 : 502;
-    if (!wantStream) {
+    const failedStatus = failure?.type === "invalid_request_error" ? 400 : failure?.type === "overloaded_error" ? 529 : failure?.type === "rate_limit_error" ? 429 : 502;
+    if (!wantStream || (failure && !res.headersSent)) {
       // A failed turn is an error here too, not a 200 carrying whatever arrived before it failed.
       const msg = failure ? anthropicError(failedStatus, failure.type, failure.message).body : JSON.stringify(mapper.message());
       res.writeHead(failure ? failedStatus : 200, { "content-type": "application/json", "content-length": String(Buffer.byteLength(msg)) }).end(msg);
