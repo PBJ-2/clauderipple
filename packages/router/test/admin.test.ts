@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { DEFAULTS, type Config, type ProviderModel } from "../src/config.ts";
 import { Logger } from "../src/log.ts";
-import { parseUpdateCheck, startAdmin } from "../src/admin.ts";
+import { googleHealth, parseUpdateCheck, startAdmin } from "../src/admin.ts";
 import type { ImageRequest } from "../src/providers/chatgpt/index.ts";
 import type { GoogleAccountStatus } from "../src/providers/google/index.ts";
 import { RequestLog } from "../src/requestlog.ts";
@@ -1648,4 +1648,13 @@ test("update: the CLI decides what an update is; a POST starts it detached once,
 test("update: a check the CLI could not answer is an error, not a guess", () => {
   assert.equal(parseUpdateCheck("error: npm registry answered HTTP 503"), null);
   assert.deepEqual(parseUpdateCheck('{"current":"1.0.0","latest":null,"newer":true,"kind":"npm"}'), { current: "1.0.0", latest: null, newer: true, kind: "npm" });
+});
+
+test("an Antigravity provider reads as usable only when an account can answer", () => {
+  const account = (state: GoogleAccountStatus["state"]): GoogleAccountStatus => ({ id: state, label: state, projectId: "p", expiresAt: 0, needsReauth: false, paused: state === "paused", state, active: false });
+  assert.deepEqual(googleHealth([]), { needsLogin: true });
+  assert.deepEqual(googleHealth([account("needs-login")]), { needsLogin: true });
+  assert.deepEqual(googleHealth([account("needs-verification")]), { needsLogin: false, needsVerification: true });
+  assert.deepEqual(googleHealth([account("needs-verification"), account("ready")]), { needsLogin: false });
+  assert.deepEqual(googleHealth([account("paused")]), { needsLogin: false });
 });

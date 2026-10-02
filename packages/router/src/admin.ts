@@ -371,6 +371,16 @@ export function chatgptSignedIn(mode: string | undefined): boolean {
   return mode === "own" ? own : mode === "borrow-codex" ? borrowed : own || borrowed;
 }
 
+/**
+ * An Antigravity provider is only as usable as its accounts: none signed in, or every one waiting on
+ * Google's verification page, answers nothing however reachable the host is.
+ */
+export function googleHealth(accounts: GoogleAccountStatus[]): { needsLogin: boolean; needsVerification?: true } {
+  if (accounts.every((a) => a.state === "needs-login")) return { needsLogin: true };
+  const inRotation = accounts.filter((a) => a.state !== "paused" && a.state !== "needs-login");
+  return inRotation.length > 0 && inRotation.every((a) => a.state === "needs-verification") ? { needsLogin: false, needsVerification: true } : { needsLogin: false };
+}
+
 async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): Promise<Record<string, unknown>> {
   const cfg = deps.config();
   const providers: Record<string, { url: string; type: string; reachable: boolean; authSource?: "observed" | "env" | "keychain" | "credentials-file" | "token-file" | null; signedIn?: "oauth" | "setup-token" | null; accountCount?: number }> = {};
@@ -405,6 +415,7 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
         // Reaching the host says nothing about being able to use it: a chatgpt provider with no
         // credentials is not "connected", and calling it that sends the user off believing it works.
         ...(p.type === "chatgpt" ? { needsLogin: !chatgptSignedIn(p.auth) } : {}),
+        ...(p.type === "google" && p.auth === "antigravity" ? googleHealth(deps.google?.().accounts?.()[name] ?? []) : {}),
         ...(p.type === "anthropic"
           ? {
               authSource: p.auth === "claude-code" ? claudeAuthStore(deps).describeSource() : null,

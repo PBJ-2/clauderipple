@@ -355,6 +355,7 @@ function providerState(name, provider) {
   // Reaching the host is not the same as being able to use it. A ChatGPT provider with no
   // credentials would otherwise read "Connected" and send the user off believing it works.
   if (live && live.needsLogin) return badge("warn", t("providerStatus.loginNeeded"));
+  if (live && live.needsVerification) return badge("warn", t("providers.googleVerifyNeeded"));
   const state = stateFor(name);
   // A probe is the better evidence — it actually called the provider — but only while it is fresh.
   // One caught mid-restart used to sit there in red for the rest of the session, while the poll
@@ -381,8 +382,8 @@ function renderHealthProviders() {
     const line = el("div", { class: "provider-status" }, [
       el("strong", { text: name }),
       providerState(name, provider),
-      live && live.needsLogin ? chatgptLoginButton(() => renderHealthProviders()) : null,
-      live && live.needsLogin && chatgptLoginMessage ? el("span", { class: "small", text: chatgptLoginMessage }) : null,
+      live && live.needsLogin && provider.type === "chatgpt" ? chatgptLoginButton(() => renderHealthProviders()) : null,
+      live && live.needsLogin && provider.type === "chatgpt" && chatgptLoginMessage ? el("span", { class: "small", text: chatgptLoginMessage }) : null,
     ].filter(Boolean));
     const quota = quotaLine(name);
     if (quota) line.appendChild(el("div", { class: "small", text: quota }));
@@ -1038,7 +1039,7 @@ function providerOverview(name, provider) {
       providerState(name, provider),
     ]),
     state && !state.ok && state.error ? el("p", { class: "bad-text small provider-detail-error", text: shortError(state.error), title: state.error }) : null,
-    live && live.needsLogin ? chatgptLoginButton(renderProviderDetail) : null,
+    live && live.needsLogin && provider.type === "chatgpt" ? chatgptLoginButton(renderProviderDetail) : null,
   ].filter(Boolean));
   const models = modelsOf(provider);
   const modelSummary = el("section", { class: "detail-section" }, [
