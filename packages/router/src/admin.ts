@@ -103,6 +103,8 @@ export type AdminDeps = {
     models?: (name: string) => Promise<ProviderModel[] | null>;
     /** Put one resting account back into rotation now. */
     clearCooldown?: (accountId: string) => void;
+    /** Ask Google again whether an account still needs its verification page. */
+    recheckVerification?: (accountId: string) => Promise<"verified" | "still-required" | "unknown">;
   };
   /** Test seam for the Google sign-in: the token/userinfo/CCA endpoints. */
   googleOAuthFetch?: (url: string, init?: RequestInit) => Promise<Response>;
@@ -1740,7 +1742,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           sendJson(res, 200, { ok: true });
           return;
         }
-        let change: { label?: unknown; paused?: unknown; clearCooldown?: unknown };
+        let change: { label?: unknown; paused?: unknown; clearCooldown?: unknown; recheck?: unknown };
         try {
           change = JSON.parse((await readBody(req)).toString("utf8")) as typeof change;
         } catch {
@@ -1748,7 +1750,13 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           return;
         }
         if ((change.label !== undefined && (typeof change.label !== "string" || !change.label.trim())) || (change.paused !== undefined && typeof change.paused !== "boolean")) {
-          sendJson(res, 400, { error: "expected {label?: non-empty string, paused?: boolean, clearCooldown?: true}" });
+          sendJson(res, 400, { error: "expected {label?: non-empty string, paused?: boolean, clearCooldown?: true, recheck?: true}" });
+          return;
+        }
+        if (change.recheck === true) {
+          const result = (await deps.google?.().recheckVerification?.(id)) ?? "unknown";
+          deps.log.info(`admin: rechecked Google verification for ${id.slice(0, 8)} -> ${result}`);
+          sendJson(res, 200, { ok: true, verification: result });
           return;
         }
         if (change.clearCooldown === true) deps.google?.().clearCooldown?.(id);

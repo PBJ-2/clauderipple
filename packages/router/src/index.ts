@@ -165,6 +165,7 @@ proxy
         accounts: () => proxy.googleAccounts(),
         models: (name: string) => proxy.googleFetchModels(name),
         clearCooldown: (id: string) => proxy.googleClearCooldown(id),
+        recheckVerification: (id: string) => proxy.googleRecheckVerification(id),
       }),
       credentials: () => proxy.credentialHealth(),
       picker: () => ({ enabled: !!store.get().picker?.enabled, hosts: terminateHosts(store.get()).slice(1), last: proxy.lastPickerInjection }),

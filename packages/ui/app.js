@@ -1301,6 +1301,15 @@ async function patchGoogleAccount(name, id, change) {
     await refreshGoogleAccountPanel(name);
   } catch (error) { toast(t("common.actionFailed"), true, error.message); }
 }
+async function recheckGoogleVerification(name, id) {
+  try {
+    const result = await api(`/api/google-accounts/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ recheck: true }) });
+    if (result.verification === "verified") toast(t("providers.googleVerified"));
+    else if (result.verification === "still-required") toast(t("providers.googleStillUnverified"), true);
+    else toast(t("providers.googleVerifyUnknown"), true);
+    await refreshGoogleAccountPanel(name);
+  } catch (error) { toast(t("common.actionFailed"), true, error.message); }
+}
 
 function renderGoogleAccountRows(target, data, name, generation) {
   if (generation !== providerDetailGeneration) return;
@@ -1315,7 +1324,12 @@ function renderGoogleAccountRows(target, data, name, generation) {
     // Only the person can finish Google's check, so the page opens in their browser; the account
     // answers again on the next turn after that.
     if (account.state === "needs-verification" && account.verifyUrl) {
-      actions.push(el("a", { class: "btn secondary compact", href: account.verifyUrl, target: "_blank", rel: "noreferrer", text: t("providers.googleVerifyAction") }));
+      const link = el("a", { class: "btn secondary compact", href: account.verifyUrl, target: "_blank", rel: "noreferrer", text: t("providers.googleVerifyAction") });
+      // Coming back to this window is the likeliest moment the page has been finished: ask then.
+      link.addEventListener("click", () => window.addEventListener("focus", () => void recheckGoogleVerification(name, account.id), { once: true }));
+      const recheck = el("button", { class: "btn secondary compact", type: "button", text: t("providers.googleRecheck") });
+      recheck.addEventListener("click", () => { recheck.disabled = true; void recheckGoogleVerification(name, account.id); });
+      actions.push(link, recheck);
     }
     if (account.state === "cooling") {
       const now = el("button", { class: "btn secondary compact", type: "button", text: t("providers.chatgptClearCooldown") });

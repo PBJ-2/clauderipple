@@ -190,6 +190,41 @@ export class GoogleAdapter {
     });
   }
 
+  /**
+   * Ask Google again whether an account still needs its verification page (dashboard action). The
+   * mark otherwise clears only when the account next answers a turn, so a person who had just
+   * finished the page kept seeing "verification needed" until they sent something (2026-10-02).
+   * One small turn on the provider's first model; only the status is read.
+   */
+  async recheckVerification(ownerId: string): Promise<"verified" | "still-required" | "unknown"> {
+    const credential = (await this.accounts.credentials()).find((c) => c.ownerId === ownerId);
+    if (!credential || !this.verifyUrls.has(ownerId)) return "unknown";
+    const model = this.cfg.models?.[0]?.id ?? staticAntigravityModels()[0]!.id;
+    const transport = createTransport("antigravity", this.cfg.url ? { url: this.cfg.url } : {});
+    const built = transport.build(
+      { contents: [{ role: "user", parts: [{ text: "ping" }] }], generationConfig: { maxOutputTokens: 16 } },
+      { model, stream: false, antigravity: { accessToken: credential.accessToken, projectId: credential.projectId, conversationKey: `recheck:${ownerId}` } },
+    );
+    try {
+      const upstream = await fetch(built.url, { method: "POST", headers: built.headers, body: built.body, signal: AbortSignal.timeout(30_000) });
+      const text = await upstream.text().catch(() => "");
+      if (upstream.ok) {
+        this.verifyUrls.delete(ownerId);
+        return "verified";
+      }
+      const verifyUrl = upstream.status === 403 ? googleValidationUrl(text) : undefined;
+      if (verifyUrl) {
+        this.verifyUrls.set(ownerId, verifyUrl);
+        return "still-required";
+      }
+      // Any other answer is not about verification; the next real turn sorts it out.
+      this.log.info(`google ${this.name}: verification recheck of ${ownerId.slice(0, 8)} answered ${upstream.status}`);
+      return "unknown";
+    } catch {
+      return "unknown";
+    }
+  }
+
   /** Put a cooling account back into rotation now (dashboard action). */
   clearCooldown(ownerId: string): void {
     for (const c of this.accounts.peekCredentials()) if (c.ownerId === ownerId) this.pool.clear(this.name, c.id);

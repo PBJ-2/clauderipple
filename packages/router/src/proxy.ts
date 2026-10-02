@@ -369,6 +369,16 @@ export class Proxy {
     }
   }
 
+  /** Ask again whether an account still needs Google's verification page; the first provider that knows answers. */
+  async googleRecheckVerification(ownerId: string): Promise<"verified" | "still-required" | "unknown"> {
+    for (const [name, p] of Object.entries(this.deps.config().providers)) {
+      if (p.type !== "google" || p.auth !== "antigravity") continue;
+      const result = await this.google(name, p).recheckVerification(ownerId);
+      if (result !== "unknown") return result;
+    }
+    return "unknown";
+  }
+
   constructor(deps: ProxyDeps) {
     this.deps = deps;
     this.claudeAccounts = new ClaudeAccountAuthPool({

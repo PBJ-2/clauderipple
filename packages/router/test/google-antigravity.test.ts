@@ -465,7 +465,12 @@ test("a 403 asking for account verification passes Google's page on, without a r
     assert.equal(account!.state, "needs-verification");
     assert.equal(account!.verifyUrl, page);
     assert.equal(adapter.hasUsable(), true, "the account stays in rotation");
+    assert.equal(await adapter.recheckVerification(account!.id), "still-required");
+    assert.equal(adapter.accountStatus()[0]!.state, "needs-verification");
     verified = true;
+    assert.equal(await adapter.recheckVerification(account!.id), "verified", "asking again clears the mark without a real turn");
+    assert.equal(adapter.accountStatus()[0]!.state, "ready");
+    assert.equal(await adapter.recheckVerification(account!.id), "unknown", "nothing to recheck once verified");
     const again = await callAdapter(adapter, request);
     assert.equal(again.status, 200, "once the check is done the next turn is answered");
     assert.equal(adapter.accountStatus()[0]!.state, "ready");
