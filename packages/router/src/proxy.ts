@@ -38,6 +38,7 @@ import { conversationKey, type AnthropicRequest } from "./providers/chatgpt/tran
 import { providerFor, terminateHosts } from "./config.ts";
 import type { CertStore } from "./certs.ts";
 import { injectPickerModels, isBootstrapPath } from "./picker.ts";
+import { effortLevelsForModel } from "./admin.ts";
 import { ResponseUsageTap, type RequestLog, type RequestRecord, type RequestUsage } from "./requestlog.ts";
 import { credentialHeaderValues, redactErrorText, redactHeaders } from "./redact.ts";
 import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
@@ -1220,7 +1221,7 @@ export class Proxy {
           } else if (status === 200 && isPickerBootstrap) {
             try {
               const j = JSON.parse(out.toString("utf8")) as Record<string, unknown>;
-              const r = injectPickerModels(j, cfg.cli.extraModels, cfg.cli.autoCompactWindow);
+              const r = injectPickerModels(j, cfg.cli.extraModels, cfg.cli.autoCompactWindow, (model) => effortLevelsForModel(cfg, model));
               if (r.surfaces.length > 0) {
                 this.lastPickerInjection = { at: new Date().toISOString(), ...r };
                 out = Buffer.from(JSON.stringify(j));

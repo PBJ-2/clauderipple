@@ -143,6 +143,14 @@ chat is out of reach for every approach, ours included.
   router logs `PICKER injected … surfaces: …` on each bootstrap.
 - Injecting `additional_model_options` into the Claude Code bootstrap response
   does **not** reach the app picker (measured; the app never reads that field).
+- **The effort menu is per entry.** The Code tab reads each model's own
+  `thinking.effort_options` (ids from `low/medium/high/xhigh/max`; an option may
+  carry `recommended`, which the app falls back to when the selected level is not
+  listed) — read from the app's cached web bundle, 2026-10-02. A cloned Claude
+  entry therefore offered Claude's ladder for every routed model; the injected
+  entry now keeps only the template options whose id the model's ladder holds,
+  recommends high (or the nearest), and drops `thinking` when none remain. The
+  real bootstrap's option fields beyond `id`/`recommended` were not captured.
 - **Windows uses the same mechanism** (measured end to end in a Windows 11 VM,
   2026-09-14: picker listed the GPT models, a call routed, the model answered).
   Two things differ and nothing else does:

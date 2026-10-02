@@ -84,3 +84,28 @@ test("no-ops on unexpected shapes", () => {
   assert.equal(injectPickerModels({ model_selector_config: "nope" }, [{ model: "m", name: "M" }]).injected, 0);
   assert.equal(injectPickerModels({ model_selector_config: [{ id: "code", models: [{ id: "other-model" }] }] }, [{ model: "m", name: "M" }]).injected, 0, "no Claude template → skip");
 });
+
+// The app builds each entry's effort menu from its own `thinking.effort_options` (Code tab bundle,
+// read 2026-10-02), so a cloned Claude template offered Claude's ladder for every routed model.
+test("a routed model's effort menu is narrowed to the levels it takes, with high recommended", () => {
+  const j = {
+    model_selector_config: [{
+      id: "code",
+      models: [{
+        id: "claude-opus-5-5", name: "Opus 5.5",
+        thinking: { type: "effort", effort_options: ["low", "medium", "high", "xhigh", "max"].map((id) => ({ id, name: id.toUpperCase(), ...(id === "xhigh" ? { recommended: true } : {}) })) },
+      }],
+    }],
+  };
+  const levels: Record<string, string[]> = { "deepseek-v4.1-flash": ["low", "high", "max"], "mimo": [], "odd": ["none", "minimal"], "kimi-k3": ["max"] };
+  injectPickerModels(j, ["deepseek-v4.1-flash", "mimo", "odd", "kimi-k3", "unknown", "gpt-x@medium"].map((model) => ({ model, name: model })), undefined, (model) => model === "gpt-x" ? ["low", "medium"] : levels[model]);
+  const by = Object.fromEntries(j.model_selector_config[0]!.models.map((m) => [m.id, m as { thinking?: { type?: string; effort_options: { id: string; name: string; recommended?: boolean }[] } }]));
+  assert.deepEqual(by["deepseek-v4.1-flash"]!.thinking, { type: "effort", effort_options: [{ id: "low", name: "LOW" }, { id: "high", name: "HIGH", recommended: true }, { id: "max", name: "MAX" }] }, "the template's own labels, three of them");
+  assert.equal("thinking" in by["mimo"]!, false, "no effort → no effort menu");
+  assert.equal("thinking" in by["odd"]!, false, "levels the app has no id for are not invented");
+  assert.deepEqual(by["kimi-k3"]!.thinking?.effort_options, [{ id: "max", name: "MAX", recommended: true }], "the nearest to high when high is absent");
+  assert.equal(by["unknown"]!.thinking?.effort_options.length, 5, "a model nobody declares keeps the template menu");
+  assert.deepEqual(by["gpt-x@medium"]!.thinking?.effort_options.map((o) => o.id), ["low", "medium"], "looked up by the id without its @effort");
+  assert.equal(by["claude-opus-5-5"]!.thinking?.effort_options.length, 5, "the Claude entry itself is untouched");
+  assert.equal(by["claude-opus-5-5"]!.thinking?.effort_options.find((o) => o.id === "xhigh")?.recommended, true);
+});

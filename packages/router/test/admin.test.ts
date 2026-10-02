@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { DEFAULTS, type Config, type ProviderModel } from "../src/config.ts";
 import { Logger } from "../src/log.ts";
-import { googleHealth, parseUpdateCheck, startAdmin } from "../src/admin.ts";
+import { effortLevelsForModel, googleHealth, parseUpdateCheck, startAdmin } from "../src/admin.ts";
 import type { ImageRequest } from "../src/providers/chatgpt/index.ts";
 import type { GoogleAccountStatus } from "../src/providers/google/index.ts";
 import { RequestLog } from "../src/requestlog.ts";
@@ -1508,6 +1508,22 @@ test("a model the preset already places is measured on that wire first, even whe
     const model = (JSON.parse(fs.readFileSync(configFile, "utf8")) as Config).providers["opencode-go"]!.models![0]!;
     assert.equal(model.wire, "anthropic");
   }, { measureFetch });
+});
+
+test("effortLevelsForModel: the model's own ladder, else its provider's, else nothing", () => {
+  const cfg = makeCfg({
+    providers: {
+      "opencode-go": {
+        type: "openai-compatible",
+        url: "https://opencode.ai/zen/go/v1",
+        caps: { reasoning: "effort", effortLevels: ["none", "low", "medium", "high", "xhigh"] },
+        models: [{ id: "glm-5.3-flash", effortLevels: ["low", "high", "max"] }, { id: "muse" }],
+      },
+    },
+  });
+  assert.deepEqual(effortLevelsForModel(cfg, "glm-5.3-flash"), ["low", "high", "max"]);
+  assert.deepEqual(effortLevelsForModel(cfg, "muse"), ["none", "low", "medium", "high", "xhigh"]);
+  assert.equal(effortLevelsForModel(cfg, "nobody-declares-me"), undefined);
 });
 
 // The catalogue states the ladder, so the only request is the one that settles the wire — and a

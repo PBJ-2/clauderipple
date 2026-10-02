@@ -274,6 +274,19 @@ export function effortLevels(cfg: Config): { providers: Record<string, { default
   return { providers };
 }
 
+/** One routed model's ladder, from the provider that declares it — what the picker's effort menu
+ * should offer for it. Undefined when no provider declares the id: the menu is then left alone. */
+export function effortLevelsForModel(cfg: Config, modelId: string): string[] | undefined {
+  const catalog = effortLevels(cfg).providers;
+  for (const [name, provider] of Object.entries(cfg.providers)) {
+    if (provider.type === "anthropic") continue;
+    const own = catalog[name];
+    if (own?.models?.[modelId]) return own.models[modelId];
+    if (own && provider.models?.some((model) => model.id === modelId)) return own.default;
+  }
+  return undefined;
+}
+
 const CLAUDE_MODEL_FALLBACK: { id: string; name: string }[] = [
   { id: "claude-fable-5-1", name: "Fable 5.1" },
   { id: "claude-opus-5-5", name: "Opus 5.5" },
