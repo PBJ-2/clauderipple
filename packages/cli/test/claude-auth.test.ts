@@ -6,7 +6,57 @@ import os from "node:os";
 import path from "node:path";
 import { claudeAuthPath, readClaudeAuthFile } from "../../router/src/providers/anthropic-token-file.ts";
 import { claudeAccountsPath, saveClaudeOAuthAccount } from "../../router/src/providers/anthropic-accounts.ts";
-import { claudeLogin, claudeLogout, parseSetupToken } from "../src/claude-auth.ts";
+import { claudeLogin, claudeLogout, desktopClaudeCodeDirs, latestDesktopClaude, parseSetupToken } from "../src/claude-auth.ts";
+
+const desktopBinary = process.platform === "linux"
+  ? "claude"
+  : process.platform === "win32"
+    ? "claude.exe"
+    : path.join("claude.app", "Contents", "MacOS", "claude");
+
+/**
+ * Runs `fn` with every platform's Desktop cache root (XDG_CONFIG_HOME, LOCALAPPDATA, APPDATA, HOME)
+ * in a scratch dir, handing it the first claude-code directory and a way to place a launcher, then
+ * puts everything back.
+ */
+function withDesktopCache(fn: (dir: string, place: (...parts: string[]) => string) => void): void {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cr-claude-cache-"));
+  const keys = ["XDG_CONFIG_HOME", "LOCALAPPDATA", "APPDATA", "HOME"] as const;
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  for (const k of keys) process.env[k] = root;
+  try {
+    const [dir] = desktopClaudeCodeDirs();
+    const place = (...parts: string[]): string => {
+      const binary = path.join(dir!, ...parts, desktopBinary);
+      fs.mkdirSync(path.dirname(binary), { recursive: true });
+      fs.writeFileSync(binary, "", { mode: 0o755 });
+      return binary;
+    };
+    fn(dir!, place);
+  } finally {
+    for (const k of keys) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("finds the newest Desktop-cached CLI inside a hashed directory", () =>
+  withDesktopCache((dir, place) => {
+    place("2.1.284", "3f4bed3e44ad");
+    const latest = place("2.1.286", "635c1867224a");
+    // A version directory with no launcher yet is one the app is still downloading.
+    fs.mkdirSync(path.join(dir, "2.1.290"), { recursive: true });
+    assert.equal(latestDesktopClaude(), latest);
+  }));
+
+test("prefers a flat Desktop-cached CLI over a hashed one in the same version", () =>
+  withDesktopCache((_dir, place) => {
+    const flat = place("2.1.300");
+    place("2.1.300", "abcdef123456");
+    assert.equal(latestDesktopClaude(), flat);
+  }));
 
 test("claude-login invokes PATH claude setup-token and saves only a 0600 credential file", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cr-claude-login-"));
@@ -18,9 +68,12 @@ test("claude-login invokes PATH claude setup-token and saves only a 0600 credent
   fs.writeFileSync(fake, `#!/bin/sh\n[ "$1" = "setup-token" ] || exit 64\nprintf 'CLAUDE_CODE_OAUTH_TOKEN=%s\\n' '${token}'\n`);
   fs.chmodSync(fake, 0o755);
   const cli = path.resolve(import.meta.dirname, "..", "src", "index.ts");
+  // The Desktop cache roots point into the scratch dir too. Where the fake is not a launcher (an
+  // extensionless file on Windows), the lookup falls back to the Desktop-cached CLI, and a real one
+  // would run its interactive `setup-token` and wait for a pasted code that never comes.
   const output = execFileSync(process.execPath, [cli, "claude-login", "--setup-token"], {
     encoding: "utf8",
-    env: { ...process.env, PATH: bin, CLAUDERIPPLE_HOME: home, CLAUDERIPPLE_ASSUME_TTY: "1" },
+    env: { ...process.env, PATH: bin, CLAUDERIPPLE_HOME: home, CLAUDERIPPLE_ASSUME_TTY: "1", APPDATA: root, LOCALAPPDATA: root, XDG_CONFIG_HOME: root },
   });
   assert.match(output, /Claude subscription connected/);
   assert.doesNotMatch(output, new RegExp(token));

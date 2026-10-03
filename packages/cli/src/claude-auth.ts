@@ -44,6 +44,37 @@ function versionBinaries(versionDir: string): string[] {
     : [path.join(versionDir, "claude.app", "Contents", "MacOS", "claude")];
 }
 
+/**
+ * The launcher of one cached version: in the version directory itself, else one directory below it,
+ * newest first. Claude Desktop 2.19675 on Windows caches CLI 2.1.286 as <version>\<12 hex>\claude.exe
+ * beside .payload and .verified files, and moved the 2.1.284 it already had into the same shape, so
+ * no version directory held a launcher directly any more (2026-10-02).
+ */
+function cachedBinary(versionDir: string): string | null {
+  const flat = versionBinaries(versionDir).find((candidate) => fs.existsSync(candidate));
+  if (flat) return flat;
+  try {
+    const subdirectories = fs.readdirSync(versionDir)
+      .flatMap((entry) => {
+        const directory = path.join(versionDir, entry);
+        try {
+          const stat = fs.statSync(directory);
+          return stat.isDirectory() ? [{ directory, mtimeMs: stat.mtimeMs }] : [];
+        } catch {
+          return [];
+        }
+      })
+      .sort((left, right) => right.mtimeMs - left.mtimeMs);
+    for (const { directory } of subdirectories) {
+      const binary = versionBinaries(directory).find((candidate) => fs.existsSync(candidate));
+      if (binary) return binary;
+    }
+  } catch {
+    // A missing or unreadable version directory has no usable binary.
+  }
+  return null;
+}
+
 export function latestDesktopClaude(): string | null {
   for (const directory of desktopClaudeCodeDirs()) {
     try {
@@ -51,7 +82,7 @@ export function latestDesktopClaude(): string | null {
         .filter((entry) => /^\d+\.\d+\.\d+$/.test(entry))
         .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
       for (const version of versions.reverse()) {
-        const binary = versionBinaries(path.join(directory, version)).find((candidate) => fs.existsSync(candidate));
+        const binary = cachedBinary(path.join(directory, version));
         if (binary) return binary;
       }
     } catch {
