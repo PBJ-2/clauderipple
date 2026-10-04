@@ -4,7 +4,7 @@
 
 import crypto from "node:crypto";
 import { clampEffort } from "../../compat.ts";
-import { conversationKey, estimateTokens, normalizeSchema, serverToolNames, systemText, toolNameForResponses, type AnthropicBlock, type AnthropicRequest, type AnthropicTool } from "../chatgpt/translate.ts";
+import { conversationKey, estimateTokens, normalizeSchema, serverToolNames, systemWithDroppedToolNote, toolNameForResponses, type AnthropicBlock, type AnthropicRequest, type AnthropicTool } from "../chatgpt/translate.ts";
 import { identityPrefix, instructionsSuffix } from "../../identity.ts";
 
 export type OpenAiWire = "chat" | "responses";
@@ -141,7 +141,7 @@ function mappedEffort(opts: OpenAiTranslateOptions): string | undefined {
 /** Convert every Anthropic message into OpenAI Chat Completion messages without inventing unstable text. */
 export function toChatMessages(req: AnthropicRequest, opts?: OpenAiTranslateOptions): ChatMessage[] {
   const messages: ChatMessage[] = [];
-  const sys = systemText(req.system);
+  const sys = systemWithDroppedToolNote(req);
   const content = opts ? systemWithIdentity(sys, opts) : sys;
   if (content) messages.push({ role: "system", content });
   const knownCalls = new Set<string>();
@@ -275,7 +275,7 @@ export function toOpenAiRequest(req: AnthropicRequest, opts: OpenAiTranslateOpti
     input: toResponsesInput(req),
     stream: true,
   };
-  const instructions = systemWithIdentity(systemText(req.system), opts);
+  const instructions = systemWithIdentity(systemWithDroppedToolNote(req), opts);
   if (instructions) out.instructions = instructions;
   if (responseTools.length) {
     out.tools = responseTools;

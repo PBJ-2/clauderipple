@@ -141,6 +141,16 @@ test("server tools are dropped, and a choice that named one with them", () => {
   assert.equal(out.toolConfig, undefined);
 });
 
+test("a dropped server tool's instructions are withdrawn after the system prompt", () => {
+  const advisor: AnthropicRequest = {
+    ...request,
+    tools: [...(request.tools ?? []), { type: "advisor_20260301", name: "advisor", model: "claude-fable-5-1" } as never],
+  };
+  const text = (r: AnthropicRequest): string => toGeminiRequest(r, { model: "gemini-3-pro" }).systemInstruction?.parts[0]?.text ?? "";
+  assert.match(text(advisor), /You are a coding agent\.\n\nNot available in this session: `advisor`\. /);
+  assert.doesNotMatch(text(request), /Not available in this session/, "no server tool, no note");
+});
+
 const longMcp = "mcp__claude_ai_Korea_Investment_Securities__get_overseas_stock_chart"; // 68 chars
 const mangled = toolNameForResponses(longMcp);
 

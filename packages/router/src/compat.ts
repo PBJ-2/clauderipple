@@ -2,6 +2,8 @@
 // an Anthropic-shaped Messages endpoint without implementing Anthropic's full feature set.
 // Pure: callers receive a new object and an audit list; the input is never mutated.
 
+import { droppedServerToolNote } from "./providers/chatgpt/translate.ts";
+
 export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max", "ultra"] as const;
 export type EffortLevel = (typeof EFFORT_LEVELS)[number];
 
@@ -122,6 +124,13 @@ function stripCacheControl(value: unknown): { value: unknown; count: number } {
 // measured 2026-09-13), and it means nothing to a provider that is not Anthropic.
 const BILLING_BLOCK = /^x-anthropic-billing-header:/;
 
+function appendSystemText(system: unknown, text: string): unknown {
+  if (system === undefined || system === null || system === "") return text;
+  if (typeof system === "string") return `${system}\n\n${text}`;
+  if (Array.isArray(system)) return [...system, { type: "text", text }];
+  return system;
+}
+
 function stripBillingHeader(system: unknown): { value: unknown; removed: number } {
   if (typeof system === "string") {
     const value = system.replace(/^x-anthropic-billing-header:[^\n]*\n*/, "");
@@ -222,6 +231,14 @@ export function sanitizeForCompatible(json: Record<string, unknown>, caps: Resol
     if (toolChoice && typeof toolChoice.name === "string" && droppedNames.has(toolChoice.name)) {
       delete out.tool_choice;
       changes.push("tool_choice");
+    }
+    // The instruction text for a dropped tool stays in the prompt unless withdrawn (see the note's
+    // own comment). Appended after the caller's blocks, without cache_control, so the prefix up to
+    // Claude Code's breakpoints is untouched.
+    const note = droppedServerToolNote(droppedNames);
+    if (note) {
+      out.system = appendSystemText(out.system, note);
+      changes.push("server_tool_note");
     }
   }
 

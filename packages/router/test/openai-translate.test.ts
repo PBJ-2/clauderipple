@@ -197,6 +197,21 @@ test("server tools are dropped on the responses wire too", () => {
   assert.equal(out.tool_choice, undefined);
 });
 
+// Claude Code explains the advisor in text on every subagent (CLI 2.1.286); with the declaration
+// gone, that text has to be withdrawn too, on both wires.
+const advisorRequest: AnthropicRequest = {
+  ...request,
+  tools: [...(request.tools ?? []), { type: "advisor_20260301", name: "advisor", model: "claude-fable-5-1" } as never],
+};
+
+test("a dropped server tool's instructions are withdrawn after the system prompt, on both wires", () => {
+  const chat = toOpenAiRequest(advisorRequest, { ...options, wire: "chat" }) as ChatRequest;
+  assert.match(String(chat.messages[0]?.content), /You are a coding agent\.\n\nNot available in this session: `advisor`\. /);
+  const responses = toOpenAiRequest(advisorRequest, { ...options, wire: "responses" }) as ResponsesRequest;
+  assert.match(responses.instructions ?? "", /You are a coding agent\.\n\nNot available in this session: `advisor`\. /);
+  assert.doesNotMatch(String((toOpenAiRequest(request, { ...options, wire: "chat" }) as ChatRequest).messages[0]?.content), /Not available in this session/, "no server tool, no note");
+});
+
 // OpenAI function names take the same `^[a-zA-Z0-9_-]{1,64}$` as the Codex backend, and one
 // over-long name fails the whole request. Claude Code's MCP names pass 64 routinely (issue #1).
 const longMcp = "mcp__claude_ai_Korea_Investment_Securities__get_overseas_stock_chart"; // 68
