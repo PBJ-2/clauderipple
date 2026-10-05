@@ -287,7 +287,9 @@ you map go to your provider, everything else goes to Anthropic byte for byte.
 - **The route, where you type.** A Claude Code mod puts one line above the prompt:
   where your last request went, its effort, cache hit and time. `Log` (or `/ripple-log`)
   opens the request log in a side pane, color-coded by provider and result; `×` (or
-  `/ripple-bar`) hides the line. One switch on the Clients screen, or `clauderipple mod on`.
+  `/ripple-bar`) hides the line. The same mod keeps a worker on its own model when the
+  Agent call names another, and reads its `[[ripple: name@level]]` marker wherever it sits
+  in the prompt. One switch on the Clients screen, or `clauderipple mod on`.
 - **Images from your ChatGPT subscription.** `clauderipple image "<prompt>"`, with
   reference images and transparent backgrounds. Subagents are told how, so a GPT or
   DeepSeek worker can make an image and look at it without an image tool.

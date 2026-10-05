@@ -4,6 +4,28 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { setStatusMod, statusModEnabled, STATUS_MOD_NAME } from "../src/settings.ts";
+import { agentModel, fixSpawn } from "../../mod/hooks/worker.ts";
+
+test("a worker spawn keeps its own model and takes its marker's level from anywhere in the prompt", () => {
+  const file = "deepseek-v4.1-flash@high";
+  const spawn = (prompt: string, model?: string) => fixSpawn({ subagentType: "deepseek-v4-1-flash", prompt, ...(model ? { model } : {}) }, file);
+
+  assert.equal(spawn("Do the thing."), null, "nothing to fix");
+  assert.deepEqual(spawn("Do the thing.", "sonnet"), { prompt: "Do the thing.", model: file, dropped: "sonnet" });
+  assert.equal(spawn("Do the thing.", "deepseek-v4.1-flash@low"), null, "its own id with another level is not a stray model");
+
+  assert.deepEqual(spawn("[[ripple: deepseek-v4-1-flash@low]]\nDo the thing."), { prompt: "Do the thing.", model: "deepseek-v4.1-flash@low" }, "at the top");
+  assert.deepEqual(spawn("Context first.\n[[ripple: deepseek-v4.1-flash@max]] Do the thing."), { prompt: "Context first.\n Do the thing.", model: "deepseek-v4.1-flash@max" }, "below the top, named by model id");
+  assert.deepEqual(spawn("[[ripple: deepseek-v4-1-flash]]\nGo.", "opus"), { prompt: "Go.", model: file, dropped: "opus" }, "no level keeps the file's");
+
+  assert.equal(spawn("[[ripple: astra@high]]\nGo."), null, "another alias already at the top is the router's");
+  assert.deepEqual(spawn("Go.\n[[ripple: astra@high]]"), { prompt: "[[ripple: astra@high]]\nGo.\n", model: file }, "another alias below the top is moved up");
+});
+
+test("an agent file's model is read from its frontmatter only", () => {
+  assert.equal(agentModel("---\nname: x\nmodel: gpt-6-astra@high\ntools: Read\n---\nmodel: not-this\n"), "gpt-6-astra@high");
+  assert.equal(agentModel("no frontmatter\nmodel: x\n"), undefined);
+});
 
 /** A plugin folder carrying `name` in its manifest. */
 function pluginDir(root: string, folder: string, name: string): string {

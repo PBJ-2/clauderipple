@@ -179,8 +179,19 @@ request went, and a `Pane` holds the request log.
   router keeps it on the request record and `/api/requests?session=` filters by
   it. A record without the field means a router older than this; the mod says
   so rather than show another session's route.
-- **Read-only.** The mod only reads the admin API (port from `config.json` as
-  `adminPort` works it out). It hooks no request, prompt or tool.
+- **The display only reads** the admin API (port from `config.json` as
+  `adminPort` works it out).
+- **It also sets worker spawns right** (`hooks/worker.ts`, `agent.spawn`), for
+  the agents named in `generated-agents.json` only. A `model` argument on the
+  Agent call is replaced by the agent file's own id (a Claude alias there ran
+  the worker on Claude with its output cut to 64 tokens), with a toast. A
+  `[[ripple: name@level]]` marker anywhere in the prompt that names this worker
+  becomes the id's `@level` and leaves the prompt; one naming another alias is
+  moved to the first line, the only place `routing.ts` reads it. Measured on
+  CLI 2.1.286 (2026-10-05): the hook's `model` is what the subagent runs on —
+  `model: "sonnet"` plus the marker on the second line reached the router as
+  `deepseek-v4.1-flash@low`, effort low. Without the mod, the first-line rule
+  and the no-`model` rule stand as before.
 - **Where it can draw.** The desktop app's header icons (terminal, diff,
   browser) are the app's own; the mod API (CLI 2.1.286 types) has no place for
   a plugin's button there. Its sites are the band, the status line, panes,

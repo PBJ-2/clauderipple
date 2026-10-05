@@ -3,20 +3,51 @@
 // the prompt shows where the last one went, with a button to the request log and an × that puts
 // the band away (`/ripple-bar` brings it back); `/ripple-log` opens the log too. The log is the
 // router's request records, not its text log: one entry per model request with what matters
-// (model, provider, effort, tokens, cache, time, result). The mod only reads the router's admin
-// API; it changes nothing in the session.
+// (model, provider, effort, tokens, cache, time, result). All of that only reads the router's
+// admin API. The one thing the mod changes is a spawn of a ClaudeRipple worker (./worker.ts).
 
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { StatusRequest } from '../types'
+import { agentModel, fixSpawn } from './worker'
+import type { Spawn, WorkerFix } from './worker'
 
 // The router's admin port, as the router itself works it out (packages/router/src/admin.ts
 // `adminPort`): `admin.port`, else one above the proxy port; 8792 when the config cannot be read.
+async function userHome($: EngineInterface): Promise<string> {
+  return (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE')) ?? '~'
+}
+
+/** Where ClaudeRipple keeps its config (packages/router/src/config.ts `homeDir`). */
+async function rippleHome($: EngineInterface): Promise<string> {
+  return (await $.env.get('CLAUDERIPPLE_HOME')) ?? `${await userHome($)}/.clauderipple`
+}
+
+/** Claude Code's own folder, where the generated agent files live. */
+async function claudeHome($: EngineInterface): Promise<string> {
+  return (await $.env.get('CLAUDE_CONFIG_DIR')) ?? `${await userHome($)}/.claude`
+}
+
+/**
+ * The fix for a spawn of one of ClaudeRipple's workers (./worker.ts), or null. A worker is a name
+ * the router lists in generated-agents.json; anything else, Claude's own agents included, is left
+ * alone, as is every spawn when either file cannot be read.
+ */
+async function workerFix($: EngineInterface, spawn: Spawn): Promise<WorkerFix | null> {
+  try {
+    const listed = JSON.parse(await $.fs.read(`${await rippleHome($)}/generated-agents.json`)) as { agents?: string[] }
+    if (!listed.agents?.includes(spawn.subagentType)) return null
+    const fileModel = agentModel(await $.fs.read(`${await claudeHome($)}/agents/${spawn.subagentType}.md`))
+    return fileModel ? fixSpawn(spawn, fileModel) : null
+  } catch {
+    return null
+  }
+}
+
 async function adminUrl($: EngineInterface): Promise<string> {
   try {
-    const home = (await $.env.get('CLAUDERIPPLE_HOME')) ?? `${(await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE'))}/.clauderipple`
-    const config = JSON.parse(await $.fs.read(`${home}/config.json`)) as { admin?: { port?: number }; listen?: { port?: number } }
+    const config = JSON.parse(await $.fs.read(`${await rippleHome($)}/config.json`)) as { admin?: { port?: number }; listen?: { port?: number } }
     const port = config.admin?.port ?? (config.listen?.port ?? 8791) + 1
     return `http://127.0.0.1:${port}`
   } catch {
@@ -169,6 +200,15 @@ export const register: Register = on => {
     $.clock.after(1, () => void refresh())
     $.clock.every(EVERY_MS, () => void refresh())
     return result
+  })
+
+  // A worker runs on its own agent file's model, at the level its marker asks for wherever the
+  // marker sits (./worker.ts). A fork inherits the parent's model and is not a worker spawn.
+  on('agent.spawn', async ($, e, next) => {
+    const fix = e.fork ? null : await workerFix($, e)
+    if (!fix) return next(e)
+    if (fix.dropped) $.ui.toast(`ClaudeRipple: ${e.subagentType} runs on its own model, not "${fix.dropped}"`)
+    return next({ ...e, prompt: fix.prompt, model: fix.model })
   })
 
   on('command.run', { command: 'ripple-log' }, async $ => ({ text: (await toggleLog($)) ? 'ClaudeRipple log opened.' : 'ClaudeRipple log closed.' }))
