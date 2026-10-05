@@ -377,6 +377,20 @@ chat is out of reach for every approach, ours included.
     from the start; the ChatGPT and openai-compatible translators do the same, and a `tool_choice`
     that named a dropped tool is dropped with it. The adapter logs each drop by name, because the
     failure it replaces is silent.
+  - **A dropped server tool's instructions are withdrawn too (issue #47).** The advisor does reach
+    adapters: Claude Code 2.1.286 declares `{ type: "advisor_20260301", name: "advisor", model }`
+    on every subagent whatever its `tools:` list says, and explains it in an `isMeta` user message
+    (`# Advisor Tool`, "call advisor BEFORE substantive work"). Measured 2026-10-04: `dropped server
+    tools for gpt-6-astra: advisor` on every worker request, and 26 of 28 routed worker transcripts
+    reporting the tool missing. Dropping only the declaration leaves an instruction the model cannot
+    follow. Each translated path that drops server tools therefore appends one line after the
+    caller's system text naming them and telling the model to disregard instructions to call them
+    (`droppedServerToolNote`), the same move the CLI makes when it removes the advisor itself ("The
+    advisor tool is no longer available; disregard the earlier advisor instructions."). The CLI's
+    wording is not matched or stripped, since it changes between releases. Names are sorted, so one
+    set yields one byte sequence and the cached prefix holds. An anthropic-compatible provider with
+    `serverTools: true` keeps every server tool and gets no line; whether DeepSeek runs `advisor` is
+    unmeasured.
   - **Where web search actually runs (measured 2026-09-17).** Claude Code does not put `web_search`
     in the main request. `WebSearch` opens a *separate side request* — system prompt "You are an
     assistant for performing a web search tool use", one message "Perform a web search for the
@@ -1015,6 +1029,7 @@ subscription exists in this environment. Files are under `src/`:
 | Tool names over 64 characters were forwarded to the Responses API unchanged, so a single connected MCP server — the product's own use case (§2) — failed every request of that turn (found by reading the source, issue #1, 2026-09-17) | Any name a translated provider sends is mangled into the provider's constraint deterministically and restored on the way back (§4). A translator must validate what it forwards against the wire it forwards to, not only what it builds itself. |
 | Unknown-model context window defaulted to 200K, compaction fired at 151K; fixed via `CLAUDE_CODE_MAX_CONTEXT_TOKENS=272000` (applies only to models not in the CLI's built-in table; Claude models unaffected) | Installer sets this env for mapped models; document that it does not affect Claude models. |
 | Server tools (`web_search`) were declared to translated providers as ordinary functions: a tool the model can call and nothing can run. Not observed live, because Claude Code currently routes its web search elsewhere (§4) — the failure was one server-side flag away, and its shape is an empty answer with nothing logged (issue #4, 2026-09-17) | A translator declares only what the provider can actually execute, and says in the log what it removed. A capability that silently disappears is worse than one that visibly fails. |
+| Routed workers were told to call the `advisor` after its declaration was dropped: Claude Code explains the tool in a user message the router left in place, so 26 of 28 worker transcripts reported it missing, every turn (issue #47, 2026-10-04) | Removing a capability includes withdrawing what was said about it. A translator that drops a tool adds one stable line saying so, rather than editing the caller's text. |
 | One context window was written to every routed model and every slot, because `cli.autoCompactWindow` is a single number while `auto_compact_windows` and `context_window_by_model` are per-model maps. Routed models do not share a window: set it high and the smaller model overflows before it compacts, set it low and the larger throws away most of its own (issue #2, 2026-09-17) | A window belongs to a model, not to the router. `CliModel.contextWindow` and `Route.contextWindow` win, then whatever the vendor's `/models` reported as `context_length`, then the global value as the fallback it always was. A value the config can only express once must not be injected into a map that is keyed per model. |
 | proxenos sends only the 7-day quota window, so the app shows a "weekly limit" banner | Quota reporting must mirror the shape Anthropic returns. |
 | After a reboot the router listened 4 minutes after login (26s of it between exec and `listen()`), and for that whole window Claude Desktop was a blank page with `ERR_PROXY_CONNECTION_FAILED` — in picker mode every byte the app sends goes through us, so a router that is merely slow reads as an app that is broken (2026-09-14 09:59 boot → 10:15:59 listening) | The launchd agent is `ProcessType=Interactive`, never `Background` (that key throttles CPU and I/O — launchd.plist(5)). `listen()` comes before certificate minting and any other startup work, so a client waits rather than being refused. Every startup logs its budget (`startup Nms: node …, config …, listen …`). |

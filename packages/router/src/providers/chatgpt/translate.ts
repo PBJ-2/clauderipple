@@ -221,10 +221,11 @@ export function toolNameForResponses(name: string): string {
 // worst failure shape there is. `compat.ts` has dropped them on the anthropic-compatible path from
 // the start; the rule belongs here too, and is the same rule, not a second one.
 //
-// These do not arrive today. Claude Code runs its web search as a separate side request on a fixed
-// small model — measured 2026-09-17: an Opus session and a DeepSeek-routed session both sent it to
-// `claude-haiku-4-5`, which passes through to Anthropic and never reaches an adapter. Which model
-// that is, is a server-side flag we do not own, so this guards the day it changes.
+// `web_search` does not arrive today. Claude Code runs its web search as a separate side request on a
+// fixed small model — measured 2026-09-17: an Opus session and a DeepSeek-routed session both sent it
+// to `claude-haiku-4-5`, which passes through to Anthropic and never reaches an adapter. Which model
+// that is, is a server-side flag we do not own, so this guards the day it changes. The `advisor`
+// server tool does arrive: see `droppedServerToolNote`.
 export function isServerTool(tool: AnthropicTool): boolean {
   const type = (tool as { type?: unknown }).type;
   return type !== undefined && type !== "custom";
@@ -235,6 +236,27 @@ export function serverToolNames(tools: AnthropicTool[] | undefined): Set<string>
   const names = new Set<string>();
   for (const t of tools ?? []) if (typeof t.name === "string" && isServerTool(t)) names.add(t.name);
   return names;
+}
+
+// Dropping the declaration is half of it (issue #47). Claude Code also tells the model, in text, how
+// to use the tool: the advisor comes with an `isMeta` user message ("# Advisor Tool / You have access
+// to an `advisor` tool…") on every subagent, whatever its `tools:` list says (CLI 2.1.286, measured
+// 2026-10-04: `dropped server tools for gpt-6-astra: advisor` on every worker request). A routed
+// worker reads the instruction, finds no such tool, and says so in each report. The CLI withdraws its
+// own instruction with one line when it removes the tool ("The advisor tool is no longer available;
+// disregard the earlier advisor instructions."); a line does the same here, without matching wording
+// that changes from release to release. Sorted, so one set always yields the same bytes and the
+// cached prefix does not move.
+/** One line withdrawing the instructions for the server tools a request had to drop; "" when none. */
+export function droppedServerToolNote(dropped: Set<string>): string {
+  if (dropped.size === 0) return "";
+  const names = [...dropped].sort().map((n) => `\`${n}\``).join(", ");
+  return `Not available in this session: ${names}. Anthropic runs these tools on its own servers, so this model cannot call them. Disregard any instruction to use them and carry on without them; there is no need to mention that they are missing.`;
+}
+
+/** The caller's system text with that line after it, so every translator places it the same way. */
+export function systemWithDroppedToolNote(req: AnthropicRequest): string {
+  return [systemText(req.system), droppedServerToolNote(serverToolNames(req.tools))].filter(Boolean).join("\n\n");
 }
 
 /**
@@ -257,7 +279,7 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
   // Effort is named here because the model cannot see its own reasoning setting and will otherwise guess.
   // Constant per (model, effort): changing effort mid-session costs one cache miss, which is acceptable.
   if (opts.identity) parts.push(identityLine(opts.model, opts.effort));
-  const sys = systemText(req.system);
+  const sys = systemWithDroppedToolNote(req);
   if (sys) parts.push(sys);
   if (opts.instructionsAppend) parts.push(opts.instructionsAppend);
 

@@ -13,7 +13,7 @@
 
 import crypto from "node:crypto";
 import { clampEffort } from "../../compat.ts";
-import { estimateTokens, normalizeSchema, serverToolNames, systemText, toolNameForResponses, type AnthropicBlock, type AnthropicRequest, type AnthropicTool } from "../chatgpt/translate.ts";
+import { estimateTokens, normalizeSchema, serverToolNames, systemWithDroppedToolNote, toolNameForResponses, type AnthropicBlock, type AnthropicRequest, type AnthropicTool } from "../chatgpt/translate.ts";
 import { identityPrefix, instructionsSuffix } from "../../identity.ts";
 
 // ---- Gemini wire -------------------------------------------------------------------
@@ -397,7 +397,7 @@ function mapToolChoice(req: AnthropicRequest, tools: FunctionDeclaration[]): Gem
 
 export function toGeminiRequest(req: AnthropicRequest, opts: GoogleTranslateOptions): GeminiRequest {
   const out: GeminiRequest = { contents: toContents(req, opts) };
-  const sys = systemForGoogle(systemText(req.system), opts);
+  const sys = systemForGoogle(systemWithDroppedToolNote(req), opts);
   if (sys) out.systemInstruction = { parts: [{ text: sys }] };
   const tools = functionTools(req);
   if (tools.length > 0) {

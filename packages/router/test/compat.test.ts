@@ -36,8 +36,13 @@ test("sanitizeForCompatible removes Anthropic-only request features and expands 
   assert.ok(result.changes.includes("server_tools×1"));
   assert.ok(result.changes.includes("tool_choice"));
   assert.ok(result.changes.includes("effort xhigh→high"));
-  // Default cacheControl is deliberately permissive.
-  assert.deepEqual(result.json.system, input.system);
+  // Default cacheControl is deliberately permissive: the caller's blocks keep their breakpoints, and
+  // the line withdrawing the dropped tool's instructions comes after them.
+  const system = result.json.system as { type: string; text: string }[];
+  assert.deepEqual(system.slice(0, 1), input.system);
+  assert.match(system[1]!.text, /^Not available in this session: `computer`\. /);
+  assert.equal(system.length, 2);
+  assert.ok(result.changes.includes("server_tool_note"));
   assert.deepEqual(result.json.messages, input.messages);
   assert.equal((input.tools[0] as { defer_loading?: boolean }).defer_loading, true, "input remains pure");
 });
@@ -107,6 +112,29 @@ test("a provider that runs server tools keeps them; one that does not still lose
   assert.deepEqual((dropped.json.tools as { name: string }[]).map((t) => t.name), ["Read"]);
   assert.equal("tool_choice" in dropped.json, false);
   assert.ok(dropped.changes.includes("server_tools×1"));
+});
+
+// Claude Code explains the advisor in text on every subagent (CLI 2.1.286). Where the declaration is
+// dropped, the text is withdrawn; where the provider keeps server tools, nothing is added.
+test("a dropped server tool's instructions are withdrawn, whatever shape the system prompt has", () => {
+  const advisor = { type: "advisor_20260301", name: "advisor", model: "claude-fable-5-1" };
+  const read = { type: "custom", name: "Read" };
+  const note = /^Not available in this session: `advisor`\. /;
+
+  const asString = sanitizeForCompatible({ system: "You are Claude Code.", tools: [advisor, read], messages: [] }, STRICT_COMPAT_CAPS);
+  const [head, tail] = String(asString.json.system).split("\n\n");
+  assert.equal(head, "You are Claude Code.");
+  assert.match(tail!, note);
+
+  const none = sanitizeForCompatible({ tools: [advisor, read], messages: [] }, STRICT_COMPAT_CAPS);
+  assert.match(String(none.json.system), note, "no system prompt: the note becomes it");
+
+  const kept = sanitizeForCompatible({ system: "s", tools: [advisor, read], messages: [] }, { ...STRICT_COMPAT_CAPS, serverTools: true });
+  assert.equal(kept.json.system, "s", "a provider that keeps server tools gets no note");
+  assert.equal(kept.changes.includes("server_tool_note"), false);
+
+  const plain = sanitizeForCompatible({ system: "s", tools: [read], messages: [] }, STRICT_COMPAT_CAPS);
+  assert.equal(plain.json.system, "s", "no server tool, no note");
 });
 
 // The billing header carries fields Claude Code rewrites every turn (`cc_prompt_id`, `cc_prev_req`,

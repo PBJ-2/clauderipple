@@ -295,6 +295,38 @@ test("a request that is only a server tool declares no tools at all", () => {
   assert.equal(r.tool_choice, undefined);
 });
 
+// Claude Code declares the advisor on every subagent and explains it in an `isMeta` user message
+// (CLI 2.1.286). The declaration is dropped above; the explanation would stay and send a routed
+// worker looking for a tool it does not have.
+const advisorTurn: AnthropicRequest = {
+  ...turn1,
+  tools: [...(turn1.tools ?? []), { type: "advisor_20260301", name: "advisor", model: "claude-fable-5-1" } as never],
+  messages: [{ role: "user", content: [{ type: "text", text: "<system-reminder>\n# Advisor Tool\n\nYou have access to an `advisor` tool…\n</system-reminder>" }, { type: "text", text: "read foo.ts" }] }],
+};
+
+test("a dropped server tool's instructions are withdrawn in one line after the system prompt", () => {
+  const r = toResponsesRequest(advisorTurn, opts);
+  assert.deepEqual(r.tools?.map((t) => t.name), ["Read"]);
+  assert.match(r.instructions, /You are Claude Code\.\n\nNot available in this session: `advisor`\. /, "right after the caller's system text");
+  assert.match(r.instructions, /Disregard any instruction to use them/);
+  assert.equal(toResponsesRequest(advisorTurn, opts).instructions, r.instructions, "same request, same bytes: the cached prefix must not move");
+});
+
+test("no server tool, no note", () => {
+  assert.doesNotMatch(toResponsesRequest(turn1, opts).instructions, /Not available in this session/);
+});
+
+test("the note names every dropped tool once, in a fixed order", () => {
+  const both = (order: "ab" | "ba"): AnthropicRequest => {
+    const a = { type: "advisor_20260301", name: "advisor" } as never;
+    const w = { type: "web_search_20250305", name: "web_search", max_uses: 8 } as never;
+    return { ...turn1, tools: order === "ab" ? [a, w] : [w, a] };
+  };
+  const r = toResponsesRequest(both("ab"), opts);
+  assert.match(r.instructions, /Not available in this session: `advisor`, `web_search`\./);
+  assert.equal(toResponsesRequest(both("ba"), opts).instructions, r.instructions, "declaration order does not change the bytes");
+});
+
 test("orphan tool_result (Claude Code side query) becomes user text, matched ones stay function_call_output", () => {
   const r = toResponsesRequest(
     {
