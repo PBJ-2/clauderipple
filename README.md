@@ -284,6 +284,10 @@ you map go to your provider, everything else goes to Anthropic byte for byte.
   latency, status, per request, with a one-hour summary.
 - **Subagent name tags.** The background-task panel shows `Terra·high · Review`
   instead of a generic "Agent".
+- **The route, where you type.** A Claude Code mod puts one line above the prompt:
+  where your last request went, its effort, cache hit and time. `Log` (or `/ripple-log`)
+  opens the request log in a side pane, color-coded by provider and result; `×` (or
+  `/ripple-bar`) hides the line. One switch on the Clients screen, or `clauderipple mod on`.
 - **Images from your ChatGPT subscription.** `clauderipple image "<prompt>"`, with
   reference images and transparent backgrounds. Subagents are told how, so a GPT or
   DeepSeek worker can make an image and look at it without an image tool.
@@ -386,7 +390,7 @@ node packages/cli/src/index.ts ui        # open the local GUI in your browser
 
 `uninstall` reverses everything and restores `~/.claude/settings.json` from a backup.
 Other commands: `status`, `start`, `stop`, `restart`, `logs -f`, `login`, `logout`,
-`claude-login`, `claude-logout`, `picker on|off`, `agent-title on|off`,
+`claude-login`, `claude-logout`, `picker on|off`, `agent-title on|off`, `mod on|off`,
 `codex on|off`, `update`, `image "<prompt>"`.
 </details>
 

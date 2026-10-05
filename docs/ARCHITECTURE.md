@@ -165,6 +165,36 @@ chat is out of reach for every approach, ours included.
   The app's own log line confirms the proxy took effect:
   `[egress-proxy] pinned to fixed proxy at 127.0.0.1:<port>; OS proxy settings ignored`.
 
+### 3a. The status mod (packages/mod)
+
+Claude Code mods (function hooks in a plugin, announced 2026-10-01; on by default
+from CLI 2.1.287, and already loading in the desktop app's 2.1.286 on 2026-10-05)
+draw inside the session itself, on the terminal and on the desktop alike.
+`packages/mod` is one: the `AbovePrompt` band shows where this session's last
+request went, and a `Pane` holds the request log.
+
+- **How a session's requests are found.** Claude Code sends its session id as
+  `X-Claude-Code-Session-Id` on every `/v1/messages` (captured from CLI 2.1.286
+  with a local listener, 2026-10-05: the header equalled `--session-id`). The
+  router keeps it on the request record and `/api/requests?session=` filters by
+  it. A record without the field means a router older than this; the mod says
+  so rather than show another session's route.
+- **Read-only.** The mod only reads the admin API (port from `config.json` as
+  `adminPort` works it out). It hooks no request, prompt or tool.
+- **Where it can draw.** The desktop app's header icons (terminal, diff,
+  browser) are the app's own; the mod API (CLI 2.1.286 types) has no place for
+  a plugin's button there. Its sites are the band, the status line, panes,
+  transcript rows and slash commands.
+- **A pane's open state is the engine's.** A module reload drops its pane
+  without a `ui.close` the module hears, while `$.state` survives the reload: a
+  flag kept there stuck the Log button on "Close log" (2026-10-05). The mod asks
+  `$.ui.panes()` instead.
+- **Enabling it** is `env.CLAUDE_CODE_PLUGIN_DIRS` in `~/.claude/settings.json`,
+  the one place a desktop-started session reads plugin folders from. It is a
+  path list other plugins may share, so only the entry whose manifest is named
+  `clauderipple-status` is added or removed (`clauderipple mod on|off`, the
+  Clients screen switch).
+
 ## 4. Provider adapters
 
 - **Declared models route themselves (2026-09-19).** A provider's `models` list —

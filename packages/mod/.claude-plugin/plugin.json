@@ -1,0 +1,1 @@
+{ "name": "clauderipple-status", "version": "0.1.0", "description": "Shows where ClaudeRipple sent this session's last model request, above the prompt.", "types": "./types/index.d.ts" }

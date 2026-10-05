@@ -62,6 +62,11 @@
         "to": "clauderipple/packages/ui"
       },
       {
+        "from": "../mod",
+        "to": "clauderipple/packages/mod",
+        "filter": ["**/*", "!.claude-plugin/types/**"]
+      },
+      {
         "from": "../../LICENSE",
         "to": "clauderipple/LICENSE"
       },

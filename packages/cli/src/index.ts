@@ -473,6 +473,7 @@ function help(): void {
   codex on|off      add/remove ClaudeRipple's local OpenAI provider and selection profile for Codex CLI
   agent-title on|off|status
                     prefix subagent titles with the real model and thinking depth ("Terra·high · …") via a Claude Code hook
+  mod on|off|status show where each request went above the Claude Code prompt, and the request log in a pane (/ripple-log), via a Claude Code mod
 
 Home directory: ${homeDir()}  (override with CLAUDERIPPLE_HOME)`);
 }
@@ -538,6 +539,18 @@ try {
         if (r.backup) console.log(`  backup: ${r.backup}`);
         console.log("Applies to new subagents from the next message on; no restart needed.");
       } else console.log(agentTitleHookEnabled() ? "on" : "off");
+      break;
+    }
+    case "mod": {
+      const sub = args[1];
+      const { setStatusMod, statusModEnabled } = await import("./settings.ts");
+      if (sub === "on" || sub === "off") {
+        const r = setStatusMod(sub === "on", installedRuntime.modDir);
+        for (const n of r.notes) console.log(`✓ ${n}`);
+        if (!r.changed) console.log(`✓ already ${sub}`);
+        if (r.backup) console.log(`  backup: ${r.backup}`);
+        console.log("Applies to Claude Code sessions started from now on.");
+      } else console.log(statusModEnabled() ? "on" : "off");
       break;
     }
     case "login": {

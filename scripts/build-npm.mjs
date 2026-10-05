@@ -8,6 +8,7 @@
 //   dist/cli/src/index.js        the CLI, and with it the supervisor and installer
 //   dist/router/src/index.js     the router
 //   dist/ui/                     the dashboard, served by the router's admin API
+//   dist/mod/                    the status mod, a plugin folder Claude Code loads
 //   dist/app/dist/main.js        the tray, with dist/app/assets next to it as it expects
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -23,6 +24,12 @@ execFileSync(npm, ["exec", "--", "tsc", "-p", "tsconfig.build.json"], { cwd: roo
 execFileSync(npm, ["--workspace", "@clauderipple/app", "run", "build"], { cwd: root, stdio: "inherit" });
 
 fs.cpSync(path.join(root, "packages", "ui"), path.join(dist, "ui"), { recursive: true });
+// The status mod is loaded by Claude Code itself, as TypeScript; the API types it writes beside the
+// manifest when it loads one are its own and are left out.
+fs.cpSync(path.join(root, "packages", "mod"), path.join(dist, "mod"), {
+  recursive: true,
+  filter: (source) => !source.includes(`${path.sep}.claude-plugin${path.sep}types`),
+});
 fs.cpSync(path.join(root, "packages", "app", "dist"), path.join(dist, "app", "dist"), { recursive: true });
 fs.cpSync(path.join(root, "packages", "app", "assets"), path.join(dist, "app", "assets"), { recursive: true });
 // The tray is compiled to CommonJS, but the package root says "type": "module", and the nearest

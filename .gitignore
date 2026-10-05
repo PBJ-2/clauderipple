@@ -14,3 +14,6 @@ packages/app/release-win/
 packages/app/release-native/
 
 clauderipple-*.tgz
+
+# Written by Claude Code when it loads the mod (its API types); regenerated, never edited.
+packages/mod/.claude-plugin/types/

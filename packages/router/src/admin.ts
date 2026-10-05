@@ -41,7 +41,7 @@ import { openBrowser } from "../../cli/src/browser.ts";
 import { caTrusted, currentAppProxy } from "../../cli/src/picker.ts";
 import { certPaths } from "../../cli/src/certs.ts";
 import { desktopClaudeCodeDirs } from "../../cli/src/claude-auth.ts";
-import { syncModelSlots } from "../../cli/src/settings.ts";
+import { statusModEnabled, syncModelSlots } from "../../cli/src/settings.ts";
 import { ClaudeOAuthSession, type ClaudeOAuthState } from "./providers/claude-oauth.ts";
 import { readClaudeAuthFile } from "./providers/anthropic-token-file.ts";
 import { listClaudeAccounts, removeClaudeAccount, renameClaudeAccount } from "./providers/anthropic-accounts.ts";
@@ -515,6 +515,7 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
     credentials: deps.credentials?.() ?? {},
     picker,
     agentTitle: agentTitleHookEnabled(),
+    statusMod: statusModEnabled(),
     pickerModels: cfg.cli.extraModels.map((m) => m.name || m.model),
     uiRevision: uiRevision(),
   };
@@ -1925,6 +1926,24 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         }
         const r = await runCli(["agent-title", enabled ? "on" : "off"]);
         deps.log.info(`admin: agent-title ${enabled ? "on" : "off"} via GUI -> ${r.ok ? "ok" : "failed"}`);
+        sendJson(res, r.ok ? 200 : 500, { ok: r.ok, output: r.output });
+        return;
+      }
+      if (pathname === "/api/status-mod" && method === "POST") {
+        // Through the CLI, like agent-title: it knows where this install keeps packages/mod.
+        let enabled: unknown;
+        try {
+          enabled = (JSON.parse((await readBody(req)).toString("utf8")) as { enabled?: unknown }).enabled;
+        } catch {
+          sendJson(res, 400, { error: "invalid JSON" });
+          return;
+        }
+        if (typeof enabled !== "boolean") {
+          sendJson(res, 400, { error: "expected {enabled: boolean}" });
+          return;
+        }
+        const r = await runCli(["mod", enabled ? "on" : "off"]);
+        deps.log.info(`admin: status mod ${enabled ? "on" : "off"} via GUI -> ${r.ok ? "ok" : "failed"}`);
         sendJson(res, r.ok ? 200 : 500, { ok: r.ok, output: r.output });
         return;
       }

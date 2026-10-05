@@ -12,6 +12,8 @@ export type Runtime = {
   cli: string;
   router: string;
   hookScript: string;
+  /** The status mod's plugin folder (packages/mod; dist/mod in an npm install). */
+  modDir: string;
   repo: string;
   /** The tray's entry point, which differs between a packaged app, an npm install and a checkout. */
   trayMain: string;
@@ -35,6 +37,7 @@ export function runtime(): Runtime {
       cli: path.join(resources, "packages", "cli", "src", "index.ts"),
       router: path.join(resources, "packages", "router", "src", "index.ts"),
       hookScript: path.join(resources, "packages", "cli", "src", "hooks", "agent-title.ts"),
+      modDir: path.join(resources, "packages", "mod"),
       repo: resources,
       trayMain: "",
       packaged: true,
@@ -52,6 +55,7 @@ export function runtime(): Runtime {
       cli: path.join(resources, "packages", "cli", "src", "index.ts"),
       router: path.join(resources, "packages", "router", "src", "index.ts"),
       hookScript: path.join(resources, "packages", "cli", "src", "hooks", "agent-title.ts"),
+      modDir: path.join(resources, "packages", "mod"),
       repo: resources,
       trayMain: "",
       packaged: true,
@@ -71,6 +75,7 @@ export function runtime(): Runtime {
     cli,
     router: path.resolve(here, `../../router/src/index${ext}`),
     hookScript: path.resolve(here, `hooks/agent-title${ext}`),
+    modDir: path.resolve(here, "../../..", ext === ".ts" ? "packages/mod" : "dist/mod"),
     repo: path.resolve(here, "../../.."),
     trayMain: path.resolve(here, "../../..", ext === ".ts" ? "packages/app/dist/main.js" : "dist/app/dist/main.js"),
     packaged: false,

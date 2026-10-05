@@ -426,6 +426,7 @@ function renderHealthProviders() {
 }
 
 let agentTitleBusy = false;
+let statusModBusy = false;
 let codexBusy = false;
 function renderClients() {
   if (!currentConfig || !status) return;
@@ -451,6 +452,13 @@ function renderClients() {
   agentButton.className = agentEnabled ? "btn secondary" : "btn";
   agentButton.disabled = agentTitleBusy;
   agentButton.onclick = () => toggleAgentTitle(!agentEnabled);
+  const modEnabled = Boolean(status.statusMod);
+  $("#client-status-mod-rows").replaceChildren(el("div", { class: "row" }, [el("span", { class: "k", text: t("picker.state") }), modEnabled ? badge("ok", t("agentTitle.on")) : el("span", { class: "small", text: t("agentTitle.off") })]));
+  const modButton = $("#client-status-mod-toggle");
+  modButton.textContent = modEnabled ? t("statusMod.turnOff") : t("statusMod.turnOn");
+  modButton.className = modEnabled ? "btn secondary" : "btn";
+  modButton.disabled = statusModBusy;
+  modButton.onclick = () => toggleStatusMod(!modEnabled);
   const toolsLimited = Boolean(currentConfig.cli && currentConfig.cli.limitWorkerTools);
   $("#client-worker-tools-rows").replaceChildren(el("div", { class: "row" }, [el("span", { class: "k", text: t("picker.state") }), toolsLimited ? badge("ok", t("workerTools.on")) : el("span", { class: "small", text: t("workerTools.off") })]));
   const toolsButton = $("#client-worker-tools-toggle");
@@ -614,6 +622,19 @@ async function toggleAgentTitle(enabled) {
     toast(t("common.actionFailed"), true, error.message);
   } finally {
     agentTitleBusy = false;
+    void refreshHealth();
+  }
+}
+async function toggleStatusMod(enabled) {
+  if (statusModBusy) return;
+  statusModBusy = true;
+  try {
+    await api("/api/status-mod", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled }) });
+    toast(t("statusMod.saved"));
+  } catch (error) {
+    toast(t("common.actionFailed"), true, error.message);
+  } finally {
+    statusModBusy = false;
     void refreshHealth();
   }
 }

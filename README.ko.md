@@ -235,6 +235,9 @@ ClaudeRipple은 Claude Code 프로세스만 신뢰하는 작은 HTTPS 프록시�
   서버 측 스레드 처리, 도구 호출과 이미지 왕복, 모델이 받는 범위로 추론 강도 클램프, 호환 벤더에는 Anthropic 전용 필드 제거.
 - **제대로 된 요청 로그.** 누가 물었고 어떤 모델이 답했는지, 입력·캐시·출력 토큰, 지연, 상태를 요청마다. 한 시간 요약 포함.
 - **서브에이전트 이름표.** 백그라운드 작업 패널에 "Agent" 대신 `Terra·high · Review`가 보입니다.
+- **입력창에서 보이는 경로.** Claude Code mod가 입력창 위에 한 줄을 띄웁니다. 마지막 요청이 어디로 갔는지, 추론 강도·캐시
+  적중률·시간까지. `Log`(또는 `/ripple-log`)로 요청 로그를 옆 패널에 프로바이더·결과별 색으로 띄우고, `×`(또는
+  `/ripple-bar`)로 줄을 숨깁니다. 클라이언트 화면의 스위치 하나, 또는 `clauderipple mod on`.
 - **ChatGPT 구독으로 이미지 생성.** `clauderipple image "<프롬프트>"`. 참고 이미지와 투명 배경도 됩니다. 서브에이전트에도
   방법이 적혀 있어, GPT나 DeepSeek 워커가 이미지 도구 없이 이미지를 만들고 직접 확인합니다.
 - **원하면 가벼운 워커.** 스위치 하나로, 생성된 서브에이전트에 세션의 MCP·플러그인 도구 전부 대신 워커가 쓰는 도구만
@@ -329,7 +332,7 @@ node packages/cli/src/index.ts ui        # 브라우저에서 로컬 GUI 열기
 ```
 
 `uninstall`은 전부 되돌리고 `~/.claude/settings.json`을 백업에서 복원합니다. 그 밖의 명령: `status`, `start`, `stop`,
-`restart`, `logs -f`, `login`, `logout`, `claude-login`, `claude-logout`, `picker on|off`, `agent-title on|off`,
+`restart`, `logs -f`, `login`, `logout`, `claude-login`, `claude-logout`, `picker on|off`, `agent-title on|off`, `mod on|off`,
 `codex on|off`, `update`, `image "<프롬프트>"`.
 </details>
 

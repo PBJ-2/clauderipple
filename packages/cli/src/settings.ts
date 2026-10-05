@@ -217,3 +217,53 @@ export function agentTitleHookEnabled(): boolean {
     return false;
   }
 }
+
+// ---- Status mod (packages/mod) ------------------------------------------------------------
+
+/** The `name` in packages/mod/.claude-plugin/plugin.json: how our entry is told from anyone else's. */
+export const STATUS_MOD_NAME = "clauderipple-status";
+const PLUGIN_DIRS = "CLAUDE_CODE_PLUGIN_DIRS";
+
+function isStatusMod(dir: string): boolean {
+  try {
+    return (JSON.parse(fs.readFileSync(path.join(dir, ".claude-plugin", "plugin.json"), "utf8")) as { name?: unknown }).name === STATUS_MOD_NAME;
+  } catch {
+    return false;
+  }
+}
+
+function pluginDirs(env: Record<string, string>): string[] {
+  return (env[PLUGIN_DIRS] ?? "").split(path.delimiter).filter(Boolean);
+}
+
+/**
+ * Registers or removes the status mod in settings.json's `env.CLAUDE_CODE_PLUGIN_DIRS`, the one
+ * place a session the desktop app starts reads plugin folders from (Claude Code docs, plugin
+ * authoring reference, CLI 2.1.286). The variable is a path list other plugins may share: only
+ * entries that are this mod are touched — by its manifest's name, so an install that moved
+ * (a checkout, then the app) leaves no stale entry behind — and the variable goes only when we
+ * were its last entry.
+ */
+export function setStatusMod(enabled: boolean, dir: string): SettingsEdit {
+  const file = settingsPath();
+  const s = readSettings(file);
+  const env = { ...((s.env as Record<string, string> | undefined) ?? {}) };
+  const before = pluginDirs(env);
+  const kept = before.filter((entry) => path.resolve(entry) !== path.resolve(dir) && !isStatusMod(entry));
+  const after = enabled ? [...kept, dir] : kept;
+  if (after.join(path.delimiter) === before.join(path.delimiter)) return { changed: false, backup: null, notes: [], wroteSlots: [] };
+  if (after.length > 0) env[PLUGIN_DIRS] = after.join(path.delimiter);
+  else delete env[PLUGIN_DIRS];
+  const b = backup(file);
+  s.env = env;
+  write(file, s);
+  return { changed: true, backup: b, notes: [`env.${PLUGIN_DIRS}: ClaudeRipple status mod ${enabled ? "added" : "removed"}`], wroteSlots: [] };
+}
+
+export function statusModEnabled(): boolean {
+  try {
+    return pluginDirs((readSettings(settingsPath()).env as Record<string, string> | undefined) ?? {}).some(isStatusMod);
+  } catch {
+    return false;
+  }
+}

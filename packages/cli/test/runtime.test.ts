@@ -45,4 +45,5 @@ test("outside a packaged app the runtime points at files that exist, in this lay
   assert.equal(value.trayMain, path.join(value.repo, "packages", "app", "dist", "main.js"));
   // The dashboard the router serves is found by the same relative walk, from the router's own file.
   assert.ok(fs.existsSync(path.resolve(path.dirname(value.router), "../../ui/index.html")), "the dashboard sits next to the router");
+  assert.ok(fs.existsSync(path.join(value.modDir, ".claude-plugin", "plugin.json")), "the status mod is a plugin folder");
 });
