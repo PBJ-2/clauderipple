@@ -107,6 +107,7 @@ async function roundTrip(
       `authorization: ${CLIENT_TOKEN}\r\n` +
       `x-api-key: ${CLIENT_KEY}\r\n` +
       "anthropic-version: 2023-06-01\r\n" +
+      "x-claude-code-session-id: 11111111-2222-4333-8444-555555555555\r\n" +
       `content-length: ${Buffer.byteLength(body)}\r\n\r\n` +
       body,
   );
@@ -161,6 +162,11 @@ test("errorSnippet decodes gzip, masks bearer tokens and explicit opaque credent
   assert.equal(errorSnippet(Buffer.alloc(0), undefined), "(empty body)");
   assert.match(errorSnippet(Buffer.from("<html><body>Sign in</body></html>"), undefined, [], "text/html; charset=utf-8"), /^HTML page \(\d+B\)/);
   assert.ok(errorSnippet(Buffer.from("x".repeat(1000)), undefined).length <= 301);
+});
+
+test("a request is recorded under the Claude Code session that sent it", async () => {
+  const { records } = await roundTrip({ "x-api-key": "PROVIDER-KEY" }, OK_REPLY);
+  assert.equal(records[0]?.session, "11111111-2222-4333-8444-555555555555");
 });
 
 test("non-credential headers still reach the provider", async () => {

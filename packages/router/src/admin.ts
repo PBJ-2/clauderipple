@@ -1933,9 +1933,10 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         const requested = Number(query.get("n") ?? 200);
         const n = Number.isFinite(requested) ? Math.min(2000, Math.max(1, Math.floor(requested))) : 200;
         const provider = query.get("provider") || undefined;
+        const session = query.get("session") || undefined;
         const kindValue = query.get("kind");
         const kind = kindValue === "messages" || kindValue === "count_tokens" || kindValue === "other" ? kindValue : undefined;
-        sendJson(res, 200, { requests: deps.requests.list(n, { ...(provider ? { provider } : {}), ...(kind ? { kind } : {}) }) });
+        sendJson(res, 200, { requests: deps.requests.list(n, { ...(provider ? { provider } : {}), ...(kind ? { kind } : {}), ...(session ? { session } : {}) }) });
         return;
       }
       if (pathname === "/api/requests/summary" && method === "GET") {

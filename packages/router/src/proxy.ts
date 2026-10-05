@@ -614,6 +614,8 @@ export class Proxy {
       provider: "anthropic",
       stream: false,
     };
+    const session = req.headers["x-claude-code-session-id"];
+    if (typeof session === "string" && /^[\w-]{1,128}$/.test(session)) record.session = session;
     let observedUsage: RequestUsage | undefined;
     let observedStopReason: string | undefined;
     // `failed` counts requests that did not get a proper response (vanished, upstream error,

@@ -31,8 +31,12 @@ test("RequestLog keeps a bounded ring and reloads persisted JSONL", () => {
     log.add(record("three"));
     assert.deepEqual(log.list(10).map((r) => r.id), ["three", "two"]);
     assert.deepEqual(log.list(10, { provider: "chatgpt" }).map((r) => r.id), ["three"]);
+    log.add(record("four", { session: "s-1" }));
+    assert.deepEqual(log.list(10, { session: "s-1" }).map((r) => r.id), ["four"]);
+    assert.deepEqual(log.list(10, { session: "s-2" }), []);
     const reloaded = new RequestLog(file, 2);
-    assert.deepEqual(reloaded.list(10).map((r) => r.id), ["three", "two"]);
+    assert.deepEqual(reloaded.list(10).map((r) => r.id), ["four", "three"]);
+    assert.equal(reloaded.list(1)[0]!.session, "s-1");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

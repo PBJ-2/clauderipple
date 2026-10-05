@@ -28,9 +28,15 @@ export type RequestRecord = {
   usage?: RequestUsage;
   note?: string;
   stream: boolean;
+  /**
+   * The Claude Code session the request came from: its `X-Claude-Code-Session-Id` header (sent on
+   * every `/v1/messages`, the session's own id — captured from CLI 2.1.286, 2026-10-05). Lets a
+   * session ask what happened to its own requests.
+   */
+  session?: string;
 };
 
-type RequestFilter = { provider?: string; kind?: RequestRecord["kind"] };
+type RequestFilter = { provider?: string; kind?: RequestRecord["kind"]; session?: string };
 type SummaryBucket = {
   count: number;
   ok: number;
@@ -98,6 +104,7 @@ export class RequestLog {
       const record = this.records[i]!;
       if (filter.provider && record.provider !== filter.provider) continue;
       if (filter.kind && record.kind !== filter.kind) continue;
+      if (filter.session && record.session !== filter.session) continue;
       out.push(record);
     }
     return out;
