@@ -56,6 +56,15 @@ async function configRequest(next) {
   return out;
 }
 
+// A save sends the whole config, so it starts from what the router holds now rather than the copy
+// this screen loaded: the router writes config.json too (measured wires and effort ladders, hand
+// edits), and a save built on an old copy put all of that back. Seen 2026-10-02: adding a provider
+// restored three OpenCode ladders realigned five hours earlier, so the app's effort menus never narrowed.
+async function latestConfig() {
+  try { currentConfig = await api("/api/config"); } catch { /* the save that follows reports an unreachable router */ }
+  return currentConfig;
+}
+
 function modelsOf(provider) {
   const value = (provider && provider.models) || [];
   return value.map((model) => typeof model === "string" ? { id: model, name: model } : model).filter((model) => model && model.id);
@@ -535,7 +544,7 @@ function renderModelSlots() {
 
 async function saveModelSlots() {
   if (!currentConfig) return;
-  const next = clone(currentConfig);
+  const next = clone(await latestConfig());
   // Every slot is recorded, empty ones included. A select put back to "default (Claude)" has to
   // remove the env key, and the router tells "clear this" from "leave this alone" by whether the
   // slot is present at all — so dropping empty values here would make the choice a silent no-op.
@@ -564,7 +573,7 @@ function clientPickerSelections() {
 }
 async function saveClientPickerModels() {
   if (!currentConfig) return;
-  const next = applyPickerSelections(clone(currentConfig), clientPickerSelections());
+  const next = applyPickerSelections(clone(await latestConfig()), clientPickerSelections());
   try { await configRequest(next); currentConfig = next; toast(t("slots.saved")); } catch (error) { toast(t("common.saveFailed"), true, error.message); }
 }
 function pickerModeOn() {
@@ -610,7 +619,7 @@ async function toggleAgentTitle(enabled) {
 }
 async function toggleWorkerTools(enabled) {
   if (!currentConfig) return;
-  const next = clone(currentConfig);
+  const next = clone(await latestConfig());
   next.cli = { ...(next.cli || {}), limitWorkerTools: enabled };
   try {
     await configRequest(next);
@@ -821,7 +830,7 @@ function scheduleSlotsSave() {
 async function saveSlots() {
   if (!currentConfig || slotsSaving) return;
   slotsSaving = true;
-  const next = clone(currentConfig);
+  const next = clone(await latestConfig());
   const routes = {};
   const seen = new Set();
   for (const row of $all("#slots-table tbody tr")) {
@@ -1005,7 +1014,7 @@ function renderProviderRail() {
 
 async function removeProvider(name, provider) {
   if (!confirm(t("providers.removeConfirm", { name }))) return;
-  const next = clone(currentConfig);
+  const next = clone(await latestConfig());
   delete next.providers[name];
   next.routes = Object.fromEntries(Object.entries(next.routes || {}).filter(([, route]) => route.provider !== name));
   next.direct = (next.direct || []).filter((rule) => rule.provider !== name);
@@ -1072,7 +1081,7 @@ function providerModelsPanel(name, provider) {
 async function saveAnthropicRotation(name, provider, enabled, control, message) {
   control.disabled = true;
   message.textContent = t("providers.rotationSaving");
-  const next = clone(currentConfig);
+  const next = clone(await latestConfig());
   if (enabled) next.providers[name].accountPool = true;
   else delete next.providers[name].accountPool;
   try {
@@ -1458,7 +1467,7 @@ async function loadClients() {
   clientsLoaded = true;
   try {
     await loadCatalogs();
-    currentConfig = currentConfig || await api("/api/config");
+    currentConfig = await api("/api/config");
     if (!status) status = await api("/api/status");
     renderClients();
   } catch (error) { toast(t("common.loadFailed"), true, error.message); }
@@ -1468,7 +1477,7 @@ async function loadProviders() {
   providersLoaded = true;
   try {
     await loadCatalogs();
-    currentConfig = currentConfig || await api("/api/config");
+    currentConfig = await api("/api/config");
     renderProviderWorkspace();
     void Promise.all(Object.entries(currentConfig.providers || {}).map(([name, provider]) => probeProvider(name, provider, () => {
       if ($("#view-providers").classList.contains("active")) renderProviderWorkspace();
@@ -1638,6 +1647,12 @@ function modelOverrideFields(model) {
     ...(model.authHeader ? { authHeader: model.authHeader } : {}),
   };
 }
+// A provider form holds the per-model fields from when it opened, and has no control for them; a
+// measurement may have landed since. So a model the router already has keeps the router's values.
+function withSavedModelFields(models, saved) {
+  const known = new Map(modelsOf(saved).map((model) => [model.id, model]));
+  return models.map((model) => known.has(model.id) ? { ...model, ...modelOverrideFields(known.get(model.id)) } : model);
+}
 function modelChecklist(models, checked, options = {}) {
   models = [...models];
   const selected = new Map();
@@ -1769,9 +1784,9 @@ function openAnthropicProviderForm(options) {
   saveButton.addEventListener("click", async () => {
     const typedName = nameInput.value.trim();
     if (!typedName) { toast(t("providers.nameRequired"), true); return; }
-    const next = clone(currentConfig);
+    const next = clone(await latestConfig());
     const providerName = existing ? options.name : uniqueName(typedName, next.providers);
-    const checkedModels = form.querySelector(".model-picker").selected();
+    const checkedModels = withSavedModelFields(form.querySelector(".model-picker").selected(), existing && next.providers[options.name]);
     const provider = { type: "anthropic", auth: auth.value, ...(auth.value === "claude-code" && accountPool ? { accountPool: true } : {}), ...(auth.value === "api-key" && (keyInput.value || (existing && existing.apiKey)) ? { apiKey: keyInput.value || existing.apiKey } : {}), models: checkedModels };
     next.providers[providerName] = provider;
     // accountPool makes these models native Claude routing targets. Without it this remains the
@@ -1861,13 +1876,14 @@ function openGoogleProviderForm(options) {
   saveButton.addEventListener("click", async () => {
     const typedName = nameInput.value.trim();
     if (!typedName) { toast(t("providers.nameRequired"), true); return; }
-    const next = clone(currentConfig);
+    const next = clone(await latestConfig());
     const providerName = existing ? options.name : uniqueName(typedName, next.providers);
     const apiKey = auth.value === "api-key" ? keyInput.value.trim() || (existing && existing.apiKey) : undefined;
-    const checkedModels = form.querySelector(".model-picker").selected();
+    const saved = existing && (next.providers[options.name] || existing);
+    const checkedModels = withSavedModelFields(form.querySelector(".model-picker").selected(), saved);
     // Fields this form has no control for (defaultEffort, a hand-written setting) survive the save.
     const formKeys = new Set(["type", "auth", "apiKey", "identity", "instructionsAppend", "models"]);
-    const kept = existing ? Object.fromEntries(Object.entries(existing).filter(([key]) => !formKeys.has(key))) : {};
+    const kept = saved ? Object.fromEntries(Object.entries(saved).filter(([key]) => !formKeys.has(key))) : {};
     next.providers[providerName] = {
       ...kept,
       type: "google",
@@ -2117,10 +2133,11 @@ function openProviderForm(options) {
     if (!typedName) { toast(t("providers.nameRequired"), true); return; }
     const provider = draftProvider();
     if (!isChatgpt && (!provider.url || !/^https?:\/\//.test(provider.url))) { toast(t("providers.urlRequired"), true); return; }
-    const next = clone(currentConfig);
+    const next = clone(await latestConfig());
     const providerName = existing ? options.name : uniqueName(typedName, next.providers);
+    const saved = existing && (next.providers[options.name] || existing);
     if (existing && providerName !== options.name) delete next.providers[options.name];
-    const checkedModels = form.querySelector(".model-picker").selected();
+    const checkedModels = withSavedModelFields(form.querySelector(".model-picker").selected(), saved);
     provider.models = checkedModels;
     // The form rebuilds the provider from its own fields, so anything it has no field for
     // (debugDump, a hand-written setting) is carried over from the saved one rather than dropped.
@@ -2128,7 +2145,7 @@ function openProviderForm(options) {
     const formKeys = new Set(isChatgpt
       ? ["type", "auth", "defaultEffort", "identity", "instructionsAppend", "models"]
       : ["type", "url", "identity", "instructionsAppend", "preset", "sessionHeader", "wire", "caps", "headers", "models"]);
-    const kept = existing ? Object.fromEntries(Object.entries(existing).filter(([key]) => !formKeys.has(key))) : {};
+    const kept = saved ? Object.fromEntries(Object.entries(saved).filter(([key]) => !formKeys.has(key))) : {};
     next.providers[providerName] = { ...kept, ...provider };
     // Read after `next.providers` has been updated, so an unticked model is already undeclared here
     // and falls out on its own, and a renamed provider answers to its new name.
