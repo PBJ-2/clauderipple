@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.8.0 — 2026-10-05
+
+### Added
+
+- **The route, where you type** (Claude Code mods; a switch on the Clients screen, or
+  `clauderipple mod on`). A line above the Claude Code prompt says where your last request
+  went: model, provider, effort, cache hit and time, colored by provider and result. `Log` or
+  `/ripple-log` opens the request log in a side pane, all sessions or just this one; `×` or
+  `/ripple-bar` puts the line away. The router now records which Claude Code session sent each
+  request (`X-Claude-Code-Session-Id`), and `/api/requests?session=` filters by it.
+- **Workers stay on their own model.** The same mod catches a `model` argument on an Agent call
+  that would have put a ClaudeRipple worker on a Claude alias (its output cut to 64 tokens) and
+  runs it on its own model, and reads a `[[ripple: name@level]]` marker wherever it sits in the
+  prompt, not only on the first line.
+- **Google Gemini**, on its own wire: an AI Studio key, or a Google account through the
+  Antigravity backend with several accounts in rotation. Google's terms name the account route
+  as a breach and accounts were suspended for it; the sign-in says so before it starts.
+- **Each routed model gets its own effort menu in the Claude app.** DeepSeek and GLM show
+  low/high/max instead of Claude's whole ladder; a model that takes no effort shows none.
+- **Fast mode on GPT.** `/fast` in Claude Code asks the ChatGPT backend for the Codex fast tier.
+- **Updates from the dashboard**: the version row checks and starts an update.
+- **A typed model ID** for a provider that lists no models (#42).
+- **An explicit Auto mode classifier target** (`autoModeClassifier`, JSON only; #43 by
+  @Sociopacific). The README says what pointing it at a weaker model gives up.
+
+### Changed
+
+- **Measuring an OpenCode provider takes one request per model**, its effort ladder read from
+  models.dev, four models at a time, instead of about ten sequential requests each (three
+  OpenCode Go models had taken 2m33s). The ladders are the catalogue's: glm-5.3-flash is
+  low/high/max, where requests had accepted seven levels.
+- **Generated workers run at `@high`** unless a marker says otherwise.
+- **A clamping tie goes up**: medium on a low/high/max model is high, not low.
+
+### Fixed
+
+- **A settings save no longer undoes what the router wrote.** The dashboard saved the whole
+  config from the copy it loaded when it opened, so measured ladders and hand edits came back
+  with the next unrelated save. Every save now starts from the router's current config.
+- **Routed workers are no longer told to call `advisor`** after the tool was dropped (#47, #48
+  by @115dkk).
+- **`claude-login` finds the Desktop-cached CLI** in its new `<version>/<hash>/` folder (#45,
+  #46 by @115dkk). macOS had the same layout.
+- **Codex context overflow** is answered as "prompt is too long", so Claude Code compacts
+  instead of retrying the same request (#44 by @Sociopacific); a stream held for that opens
+  after five seconds regardless.
+- The Codex app sees a GPT model released after the router started; subagent titles keep the
+  model and effort under Desktop's new task panel; a provider's connection test reads a
+  model-not-found 404 as an accepted key; a Gemini provider waiting on Google's verification
+  is not shown as connected, and the page to open is passed on.
+
 ## 0.7.0 — 2026-09-29
 
 ### Added
