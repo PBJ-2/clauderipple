@@ -54,6 +54,8 @@ const HOP_BY_HOP = new Set(["connection", "keep-alive", "proxy-connection", "tra
 const CLIENT_AUTH = new Set(["authorization", "x-api-key"]);
 /** How much of an upstream error body is kept for the log. */
 const ERROR_HEAD_MAX = 4096;
+/** Methods safe to send twice (RFC 9110 §9.2.2), and so the only ones resent after a stale socket. */
+const IDEMPOTENT = new Set(["GET", "HEAD", "OPTIONS"]);
 
 export type AbsoluteProxyRequest = { host: string; port: number; path: string; head: Buffer; tls: boolean };
 
@@ -960,7 +962,7 @@ export class Proxy {
       tag = `${route.provider.toUpperCase()} ${route.tag} effort=${routeEffort ?? "-"}`;
       }
     } else if (isApiHost) {
-      target = { protocol: "https:", host: cfg.upstream, port: 443, agent: this.upstreamAgent, extraHeaders: {} };
+      target = { protocol: "https:", host: cfg.upstream, port: this.deps.upstreamPort ?? 443, agent: this.deps.upstreamAgent ?? this.upstreamAgent, extraHeaders: {} };
       tag = `PASS ${typeof model === "string" ? model : "-"}`;
       // Passthrough stays byte-exact unless another model's thinking would get the turn refused.
       if (json && dropForeignThinking(json) > 0) body = Buffer.from(JSON.stringify(json));
@@ -1022,7 +1024,11 @@ export class Proxy {
     let upReq!: http.ClientRequest;
     /** Credentials already spent on this turn, so a retry cannot pick one of them again. */
     const tried = new Set<string>(penalised ? [penalised.id] : []);
+    /** The headers of the attempt in flight, so a stale-socket resend repeats exactly that attempt. */
+    let lastAttemptHeaders: string[] = headers;
+    let staleRetries = 0;
     const send = (attemptHeaders: string[]): void => {
+      lastAttemptHeaders = attemptHeaders;
       upReq = lib.request({
         protocol: target.protocol,
         host: target.host,
@@ -1088,6 +1094,18 @@ export class Proxy {
     });
 
     const onUpstreamError = (e: Error): void => {
+      // A kept-alive socket the upstream had already closed: the reset arrives before any response,
+      // so the request never reached it. claude.ai did this 259 times in four days of picker mode
+      // (2026-10-03..06), each one a 502 on an app request such as `current_user_access`. Send an
+      // idempotent request again on a fresh attempt instead of failing it; a POST is never resent,
+      // since a reset cannot prove the upstream did not act on it.
+      const code = (e as NodeJS.ErrnoException).code;
+      if (upReq.reusedSocket && (code === "ECONNRESET" || code === "EPIPE") && IDEMPOTENT.has(method) && !clientAborted && !res.headersSent && staleRetries < 2) {
+        staleRetries++;
+        log.info(`STALE ${reqHost}: kept-alive socket was closed (${code}); resending ${method} ${path.slice(0, 60)}`);
+        send(lastAttemptHeaders);
+        return;
+      }
       if (target.host === cfg.upstream) this.deps.health.failure(e);
       // Nothing reached the provider, so this says nothing about the credential — but it does say
       // the route is unusable for a moment, and a pool with somewhere else to go should use it.
