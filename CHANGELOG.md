@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.2 — 2026-10-06
+
+### Fixed
+
+- **Effort works on API-key providers.** A provider with no effort ladder of its own — DeepSeek,
+  Kimi, GLM, MiniMax, Qwen, Groq, Mistral, or any key and URL — stripped the effort you picked and
+  the Claude app showed no effort menu for its models. ClaudeRipple now asks each such model: it
+  sends a level no vendor defines, and if the endpoint refuses it, the levels it does accept become
+  that model's effort menu. An endpoint that accepts anything is left without effort, since it is
+  not reading the field. Providers you already set up are measured a minute after the router
+  starts; nothing needs re-saving.
+- **DeepSeek's API offers low / high / max**, the three levels its thinking mode maps every
+  request onto.
+
 ## 0.8.1 — 2026-10-06
 
 ### Fixed
