@@ -70,12 +70,19 @@ Node를 우리가 내려받은 경우에는 npm이 만든 `env node` 셔뱅 링�
      /tmp/cr-check/node_modules/.bin/clauderipple uninstall --purge
    ```
 
-5. 게시하고 태그를 답니다.
+5. 버전 올린 커밋을 main에 push하고 태그를 push합니다. **게시는 GitHub Actions가 합니다**
+   (`.github/workflows/publish.yml`). 태그와 네 곳의 버전이 같은지 확인하고, 타입체크·테스트를 돌린 뒤
+   npm trusted publishing(OIDC)으로 게시합니다. npm 토큰도, 브라우저 2단계 인증도 필요 없습니다.
 
    ```sh
-   npm publish
-   git tag v<버전> && git push --tags
+   git push origin main
+   git tag v<버전> && git push origin v<버전>
    ```
+
+   npmjs.com의 clauderipple → Settings → Trusted Publisher에 `PBJ-2` / `clauderipple` / `publish.yml`이
+   등록돼 있어야 합니다. npm은 저장할 때 검사하지 않고 게시할 때 거절하므로, 틀리면 Actions 로그에
+   `ENEEDAUTH`가 뜹니다. 게시 없이 검사만 하려면 Actions → Publish → Run workflow(`--dry-run`)를 씁니다.
+   급할 때는 예전처럼 로컬에서 `npm publish`도 됩니다(브라우저 인증 필요).
 
 ## 빌드가 하는 일
 

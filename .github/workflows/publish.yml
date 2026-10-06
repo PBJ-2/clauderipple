@@ -1,0 +1,62 @@
+# Publish to npm when a release tag is pushed.
+#
+# `git tag vX.Y.Z && git push origin vX.Y.Z` is the whole release once the version bump is on main
+# (docs/RELEASE.md). Authentication is npm trusted publishing: the job proves it is this workflow
+# in this repository with a GitHub OIDC token, so there is no npm token to store and no browser
+# 2FA step. npmjs.com → clauderipple → Settings → Trusted Publisher must name
+# PBJ-2 / clauderipple / publish.yml; npm checks that only at publish time.
+#
+# Run it by hand (Actions → Publish → Run workflow) to check a commit without publishing: a manual
+# run packs with --dry-run.
+
+name: Publish
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      # The tray's Electron is only a type dependency at build time; its ~270MB binary is not needed.
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      # Trusted publishing needs npm 11.5.1 or later.
+      - run: npm install -g npm@^11.5.1
+
+      - run: npm ci
+
+      - name: Tag matches every version
+        if: github.event_name == 'push'
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          for f in package.json packages/router/package.json packages/cli/package.json packages/app/package.json; do
+            v=$(node -p "require('./$f').version")
+            [ "$v" = "$tag" ] || { echo "::error::$f is $v, tag is v$tag"; exit 1; }
+          done
+          grep -q "VERSION = \"$tag\"" packages/router/src/version.ts || { echo "::error::packages/router/src/version.ts is not $tag"; exit 1; }
+
+      - run: npm run typecheck
+      - run: npm test
+
+      - name: Publish
+        if: github.event_name == 'push'
+        run: npm publish
+
+      - name: Pack (manual run, nothing published)
+        if: github.event_name != 'push'
+        run: npm publish --dry-run
