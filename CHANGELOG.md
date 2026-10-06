@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.3 — 2026-10-06
+
+### Fixed
+
+- **No PowerShell window at every Windows logon** (#49). With Windows Terminal as the default
+  terminal — the Windows 11 default — the router task's PowerShell window stayed on screen after
+  each logon, because Windows Terminal ignores `-WindowStyle Hidden`. The task now starts
+  PowerShell inside a headless console host. Updating re-registers the task; where Windows
+  refuses that, the old task is kept and the router runs as before.
+
 ## 0.8.2 — 2026-10-06
 
 ### Fixed
