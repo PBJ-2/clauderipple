@@ -4,7 +4,7 @@
 
 <h1 align="center">ClaudeRipple</h1>
 
-<p align="center"><a href="README.md">English</a> · <b>한국어</b></p>
+<p align="center"><a href="README.md">English</a> · <b>한국어</b> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.es.md">Español</a> · <a href="README.pt-BR.md">Português (BR)</a></p>
 
 <p align="center">
   <b>채팅은 Claude 그대로. Code만 GPT로.</b><br>
@@ -246,7 +246,7 @@ ClaudeRipple은 Claude Code 프로세스만 신뢰하는 작은 HTTPS 프록시�
 - **원하면 가벼운 워커.** 스위치 하나로, 생성된 서브에이전트에 세션의 MCP·플러그인 도구 전부 대신 워커가 쓰는 도구만
   줍니다. 워커 첫 요청이 3.3만에서 0.9만 토큰으로 줄었습니다.
 - **터미널이 싫은 사람을 위해.** 원클릭 연결 확인과 모델 자동 검색이 붙은 프로바이더 프리셋, 드롭다운 모델 매핑, 자동 저장,
-  한국어·영어 UI. 런타임을 품고 첫 실행에 스스로 설치하는 메뉴 막대 앱. 서명·공증 완료.
+  한국어·영어·중국어·일본어·스페인어·포르투갈어 UI. 런타임을 품고 첫 실행에 스스로 설치하는 메뉴 막대 앱. 서명·공증 완료.
 
 <p align="center">
   <img src="docs/media/mapping.png" width="880" alt="모델 매핑: Claude 이름마다 실제로 답할 모델과 추론 강도">
@@ -421,7 +421,7 @@ codex --profile clauderipple -m claude-sonnet-5
 
 Claude 모델이 Codex 모델 목록에 이름 그대로 뜹니다(ClaudeRipple이 Codex 자체 카탈로그 옆에 모델 카탈로그를 씁니다).
 Claude는 Claude Code 로그인(실행 중인 Desktop 세션, 터미널 로그인, 또는 ClaudeRipple 자체 로그인 — **프로바이더 →
-Claude → Claude 구독 연결…**을 누르면 브라우저가 열리고 터미널은 필요 없습니다. `clauderipple claude-login`과 같습니다)이나
+Claude (Anthropic) → + Claude 계정 추가**를 누르면 브라우저가 열리고 터미널은 필요 없습니다. `clauderipple claude-login`과 같습니다)이나
 Anthropic API 키로 갑니다. 구독 로그인 재사용은 Anthropic 약관의 적용을 받습니다. 설정한 Anthropic 호환 프로바이더도
 같은 방식으로 쓸 수 있습니다.
 

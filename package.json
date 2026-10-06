@@ -33,7 +33,11 @@
     "dist/",
     "docs/ARCHITECTURE.md",
     "CHANGELOG.md",
-    "README.ko.md"
+    "README.ko.md",
+    "README.zh-CN.md",
+    "README.ja.md",
+    "README.es.md",
+    "README.pt-BR.md"
   ],
   "publishConfig": {
     "access": "public"

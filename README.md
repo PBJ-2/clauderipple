@@ -4,7 +4,7 @@
 
 <h1 align="center">ClaudeRipple</h1>
 
-<p align="center"><b>English</b> · <a href="README.ko.md">한국어</a></p>
+<p align="center"><b>English</b> · <a href="README.ko.md">한국어</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.es.md">Español</a> · <a href="README.pt-BR.md">Português (BR)</a></p>
 
 <p align="center">
   <b>Chat stays Claude. Only Code becomes GPT.</b><br>
@@ -299,8 +299,8 @@ you map go to your provider, everything else goes to Anthropic byte for byte.
   tools a worker uses instead of every MCP server and plugin of the session: one
   worker's first request fell from 33k to 9k tokens.
 - **Made for people who don't want a terminal.** Provider presets with one-click
-  connection tests and model discovery, drop-down model mapping, auto-save, Korean
-  and English UI. A menu-bar app that carries its own runtime and sets itself up on
+  connection tests and model discovery, drop-down model mapping, auto-save, a UI in
+  English, Korean, Chinese, Japanese, Spanish and Portuguese. A menu-bar app that carries its own runtime and sets itself up on
   first launch. Signed and notarized.
 
 <p align="center">
@@ -496,8 +496,8 @@ login is used. An `openai_base_url` you set yourself is left alone. `clauderippl
 Claude models show up in Codex's model list under their names (ClaudeRipple writes
 a model catalog next to Codex's own). Claude is reached through your Claude Code
 login (detected from the running Desktop session, the terminal login, or a
-sign-in of ClaudeRipple's own: **Providers → Claude → Connect Claude
-subscription…** opens the browser, no terminal needed; the same as
+sign-in of ClaudeRipple's own: **Providers → Claude (Anthropic) → + Add
+Claude account** opens the browser, no terminal needed; the same as
 `clauderipple claude-login`) or an Anthropic API key. Reusing a
 subscription login is subject to Anthropic's terms. Any Anthropic-compatible
 provider you configured is available the same way.
@@ -511,7 +511,7 @@ provider you configured is available the same way.
 | Provider | Kind | Auth | Model list | Notes |
 |---|---|---|---|---|
 | ChatGPT subscription | Codex backend | several sign-ins, switching when one runs out (Codex login reused too) | read from your subscription (GPT-6 Sol, Luna, Astra, GPT-5.6 …) | effort low…max (Luna: ultra), prompt cache 94–99 % |
-| Google Gemini | Gemini API | AI Studio API key, or Google account sign-in (Antigravity, see below) | discovered | translated (Messages ⇄ generateContent), thought signatures kept across turns |
+| Google Gemini | Gemini API | AI Studio API key, or Google account sign-in (Antigravity, see the FAQ) | discovered | translated (Messages ⇄ generateContent), thought signatures kept across turns |
 | OpenRouter | Anthropic-compatible | API key | 400+, discovered | per-model effort support read from the API |
 | DeepSeek, Kimi, Z.ai GLM, MiniMax, Qwen (intl / cn) | Anthropic-compatible | API key | preset | verified against vendor docs |
 | xAI Grok, Mistral, Groq, Together, Fireworks | OpenAI-compatible | API key | discovered | translated (Chat Completions / Responses) |
