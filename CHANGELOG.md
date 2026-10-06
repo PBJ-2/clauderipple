@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.5 — 2026-10-07
+
+### Fixed
+
+- **The ChatGPT provider no longer says Plus/Pro only.** Any ChatGPT plan that includes Codex
+  (Plus, Pro, Business, and Enterprise/Edu with Codex on) signs in the same way; the dashboard
+  now says so in every language.
+
 ## 0.8.4 — 2026-10-06
 
 ### Added
