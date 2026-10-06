@@ -103,7 +103,7 @@ if [ -d "$OLD_ELECTRON" ] && [ ! -e "$NEW_ELECTRON" ]; then
   mv "$OLD_ELECTRON" "$NEW_ELECTRON" && say "Moved the tray's Electron to $NEW_ELECTRON"
 fi
 
-say "Installing $PACKAGE…"
+say "Installing ${PACKAGE}..."
 "$NODE" "$NPM_CLI" install --global --prefix "$PREFIX" --loglevel error "$PACKAGE"
 
 BIN="$PREFIX/bin"
