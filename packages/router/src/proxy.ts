@@ -55,13 +55,15 @@ const CLIENT_AUTH = new Set(["authorization", "x-api-key"]);
 /** How much of an upstream error body is kept for the log. */
 const ERROR_HEAD_MAX = 4096;
 
-export type AbsoluteProxyRequest = { host: string; port: number; path: string; head: Buffer };
+export type AbsoluteProxyRequest = { host: string; port: number; path: string; head: Buffer; tls: boolean };
 
 /**
  * Claude Code's Remote Control registration uses HTTPS absolute-form proxy requests instead of
  * CONNECT (`POST https://api.anthropic.com/v1/environments/bridge HTTP/1.1`). Convert that legal
  * forward-proxy form to the origin form expected inside a TLS connection. Credentials and the
  * request body remain byte-for-byte client data; proxy-only headers never reach the destination.
+ * Plain `http:` takes the same form and is relayed over TCP: Claude Code 2.1.288 sends its http
+ * requests through HTTPS_PROXY too, loopback included (a mod reading the admin API got our 405).
  */
 export function absoluteProxyRequest(header: Buffer): AbsoluteProxyRequest | null {
   const lines = header.toString("latin1").split("\r\n");
@@ -74,8 +76,9 @@ export function absoluteProxyRequest(header: Buffer): AbsoluteProxyRequest | nul
   } catch {
     return null;
   }
-  if (url.protocol !== "https:" || url.username || url.password || url.hash || !url.hostname) return null;
-  const port = url.port ? Number(url.port) : 443;
+  const secure = url.protocol === "https:";
+  if ((!secure && url.protocol !== "http:") || url.username || url.password || url.hash || !url.hostname) return null;
+  const port = url.port ? Number(url.port) : secure ? 443 : 80;
   if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
   // URL.hostname keeps brackets around IPv6 literals; net/tls expect the bare address while the
   // HTTP Host field requires brackets. Keep those two representations separate.
@@ -87,10 +90,10 @@ export function absoluteProxyRequest(header: Buffer): AbsoluteProxyRequest | nul
   );
   const authority = url.port ? `${url.hostname}:${url.port}` : url.hostname;
   const path = `${url.pathname || "/"}${url.search}`;
-  // One TLS connection serves one absolute-form request. Reusing it would send the next proxy-form
+  // One upstream connection serves one absolute-form request. Reusing it would send the next proxy-form
   // request target directly to the origin, so explicitly ask both peers to close after the response.
   const rewritten = [`${match[1]} ${path} ${match[3]}`, `Host: ${authority}`, "Connection: close", ...headers].join("\r\n") + "\r\n\r\n";
-  return { host, port, path, head: Buffer.from(rewritten, "latin1") };
+  return { host, port, path, head: Buffer.from(rewritten, "latin1"), tls: secure };
 }
 
 /**
@@ -469,7 +472,7 @@ export class Proxy {
       if (method !== "CONNECT" || !target) {
         const absolute = absoluteProxyRequest(head.subarray(0, end));
         if (absolute) {
-          log.info(`ABSOLUTE ${method ?? "?"} https://${absolute.host}:${absolute.port}${absolute.path}`);
+          log.info(`ABSOLUTE ${method ?? "?"} ${absolute.tls ? "https" : "http"}://${absolute.host}:${absolute.port}${absolute.path}`);
           this.forwardAbsolute(sock, absolute, rest);
           return;
         }
@@ -493,7 +496,9 @@ export class Proxy {
   /** Forward an HTTPS absolute-form request without terminating it through the routing layer. */
   private forwardAbsolute(sock: net.Socket, request: AbsoluteProxyRequest, rest: Buffer): void {
     const servername = net.isIP(request.host) ? undefined : request.host;
-    const up = (this.deps.tlsConnect ?? tls.connect)({ host: request.host, port: request.port, ...(servername ? { servername } : {}), ALPNProtocols: ["http/1.1"] });
+    const up = request.tls
+      ? (this.deps.tlsConnect ?? tls.connect)({ host: request.host, port: request.port, ...(servername ? { servername } : {}), ALPNProtocols: ["http/1.1"] })
+      : net.connect({ host: request.host, port: request.port });
     const kill = (): void => {
       sock.destroy();
       up.destroy();
@@ -504,7 +509,7 @@ export class Proxy {
       up.destroy();
     });
     sock.on("error", kill);
-    up.once("secureConnect", () => {
+    up.once(request.tls ? "secureConnect" : "connect", () => {
       up.write(request.head);
       if (rest.length) up.write(rest);
       sock.pipe(up);
