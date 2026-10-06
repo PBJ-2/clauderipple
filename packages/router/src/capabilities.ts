@@ -142,11 +142,58 @@ async function candidateLevels(id: string, candidate: WireCandidate, ladder: str
     const response = await deps.fetch(endpointFor(candidate.wire, candidate.url), { method: "POST", headers: requestHeaders(candidate, deps), body: requestBody(candidate.wire, id, NOT_A_LEVEL) });
     if (!response.ok) listed = parseLevels(await response.text());
   } catch { /* the endpoint said nothing; fall back to everything known */ }
-  const wanted = listed.length > 0 ? listed : [...ladder, ...KNOWN_EFFORTS];
-  const seen = new Set(wanted);
-  // Canonical order first so the GUI reads weakest to strongest, then anything newly named.
-  return [...KNOWN_EFFORTS.filter((level) => seen.has(level)), ...wanted.filter((level) => !KNOWN_EFFORTS.includes(level))]
+  return canonicalOrder(listed.length > 0 ? listed : [...ladder, ...KNOWN_EFFORTS]);
+}
+
+/** Canonical order first so the GUI reads weakest to strongest, then anything newly named. */
+function canonicalOrder(levels: string[]): string[] {
+  const seen = new Set(levels);
+  return [...KNOWN_EFFORTS.filter((level) => seen.has(level)), ...levels.filter((level) => !KNOWN_EFFORTS.includes(level))]
     .filter((level, index, all) => all.indexOf(level) === index);
+}
+
+/**
+ * Whether a model with no declared ladder takes reasoning effort at all, and which levels.
+ *
+ * A provider set up from a key and a URL declares no ladder, and without one every effort the user
+ * picked was stripped and the app showed no effort menu — for DeepSeek's API, which takes effort,
+ * among others. Whether a model takes effort is not knowable from its id, and "the endpoint
+ * accepted the field" is not proof either: an endpoint that ignores unknown fields accepts any
+ * value. So a value no vendor defines is sent first:
+ *
+ * - accepted → the field is not read; no effort (`[]`).
+ * - refused (400/422) → the field is validated. The levels the refusal names, else every known one,
+ *   are sent one at a time, and the accepted ones are the ladder. DeepSeek refuses with the list
+ *   `none … max` and accepts each (measured 2026-10-06).
+ * - anything else (429, 5xx, network) → nothing is concluded (`undefined`), so a later save measures
+ *   again. Likewise when a level could not be settled, or no level was accepted while one could not
+ *   be asked: a partial ladder from a hiccup would read as the model's own.
+ */
+async function discoverLadder(id: string, candidate: WireCandidate, deps: MeasureDeps): Promise<string[] | undefined> {
+  const url = endpointFor(candidate.wire, candidate.url);
+  let probe: Response;
+  try {
+    probe = await deps.fetch(url, { method: "POST", headers: requestHeaders(candidate, deps), body: requestBody(candidate.wire, id, NOT_A_LEVEL) });
+  } catch {
+    return undefined;
+  }
+  if (probe.ok) return [];
+  if (!refusedLevel(probe.status)) return undefined;
+  const listed = parseLevels(await probe.text().catch(() => ""));
+  const accepted: string[] = [];
+  let unsettled = false;
+  for (const level of canonicalOrder(listed.length > 0 ? listed : KNOWN_EFFORTS)) {
+    let response: Response;
+    try {
+      response = await deps.fetch(url, { method: "POST", headers: requestHeaders(candidate, deps), body: requestBody(candidate.wire, id, level) });
+    } catch {
+      unsettled = true;
+      continue;
+    }
+    if (response.ok) accepted.push(level);
+    else if (!refusedLevel(response.status)) unsettled = true;
+  }
+  return unsettled ? undefined : accepted;
 }
 
 /** The levels an endpoint listed in its complaint, or nothing when it did not list any. */
@@ -187,8 +234,11 @@ async function measureLadder(id: string, candidate: WireCandidate, ladder: strin
  * was refused before the path mattered, so reporting anything but "auth" would send the user to
  * check the wire when the problem is the credential. When no candidate answers, the result carries
  * the last status and body as `error` and no `wire`.
+ *
+ * `discover` is for a model with no ladder from anywhere: an empty `ladder` then means "find out"
+ * (`discoverLadder`) rather than "do not measure effort".
  */
-export async function measureModel(id: string, candidates: WireCandidate[], ladder: string[], deps: MeasureDeps): Promise<Measured> {
+export async function measureModel(id: string, candidates: WireCandidate[], ladder: string[], deps: MeasureDeps, options: { discover?: boolean } = {}): Promise<Measured> {
   if (candidates.length === 0) return { id, error: "no candidate wire to try" };
   let failure = "no candidate wire answered";
   for (const candidate of candidates) {
@@ -207,7 +257,11 @@ export async function measureModel(id: string, candidates: WireCandidate[], ladd
       return { id, error: refusedByPlan(detail) ? `not-entitled: ${detail}` : "auth" };
     }
     if (response.ok) {
-      if (ladder.length === 0) return { id, wire: candidate.wire };
+      if (ladder.length === 0) {
+        if (!options.discover) return { id, wire: candidate.wire };
+        const discovered = await discoverLadder(id, candidate, deps);
+        return { id, wire: candidate.wire, ...(discovered !== undefined ? { effortLevels: discovered } : {}) };
+      }
       return { id, wire: candidate.wire, effortLevels: await measureLadder(id, candidate, ladder, deps) };
     }
     failure = `${response.status} ${snippet(await response.text())}`.trim();

@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { DEFAULTS, type Config, type ProviderModel } from "../src/config.ts";
 import { Logger } from "../src/log.ts";
-import { effortLevelsForModel, googleHealth, parseUpdateCheck, startAdmin } from "../src/admin.ts";
+import { effortLevelsForModel, googleHealth, measureUnsettledModels, parseUpdateCheck, startAdmin, type AdminDeps } from "../src/admin.ts";
 import type { ImageRequest } from "../src/providers/chatgpt/index.ts";
 import type { GoogleAccountStatus } from "../src/providers/google/index.ts";
 import { RequestLog } from "../src/requestlog.ts";
@@ -1752,4 +1752,53 @@ test("an Antigravity provider reads as usable only when an account can answer", 
   assert.deepEqual(googleHealth([account("needs-verification")]), { needsLogin: false, needsVerification: true });
   assert.deepEqual(googleHealth([account("needs-verification"), account("ready")]), { needsLogin: false });
   assert.deepEqual(googleHealth([account("paused")]), { needsLogin: false });
+});
+
+// A provider set up before effort discovery stays without effort until someone saves it again, so
+// the router measures those models itself. Only models whose effort is stripped and unsettled.
+test("measureUnsettledModels: discovers effort for a ladderless provider's unsettled models, and nothing else", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-unsettled-"));
+  try {
+    const cfg = makeCfg({
+      providers: {
+        kimi: { type: "anthropic-compatible", url: "http://127.0.0.1:9", preset: "kimi", models: [{ id: "kimi-k3" }, { id: "kimi-settled", effortLevels: [] }] },
+        // DeepSeek's preset declares low/high/max, which requests already use: nothing to discover.
+        deepseek: { type: "anthropic-compatible", url: "http://127.0.0.1:9", preset: "deepseek", models: [{ id: "deepseek-v4-pro" }] },
+        // The provider form writes `reasoning: "none"` for any OpenAI-compatible provider without a
+        // preset ladder; that is a default, not a decision. This endpoint ignores the field.
+        groq: { type: "openai-compatible", url: "http://127.0.0.1:9/v1", wire: "chat", caps: { reasoning: "none", effortLevels: [] }, models: [{ id: "llama-4" }] },
+        // `reasoning: "effort"` with no levels passes effort through as asked: nothing to discover.
+        relay: { type: "openai-compatible", url: "http://127.0.0.1:9/v1", wire: "chat", caps: { reasoning: "effort", effortLevels: [] }, models: [{ id: "relayed" }] },
+      },
+    });
+    const configFile = path.join(home, "config.json");
+    fs.writeFileSync(configFile, JSON.stringify(cfg, null, 2));
+    const asked = new Set<string>();
+    const measureFetch = stubFetch((_url, body) => {
+      const effort = body.output_config?.effort ?? body.reasoning_effort;
+      if (body.reasoning_effort !== undefined) return 200;
+      return effort === undefined ? 200 : effort === "clauderipple-probe" ? 400 : ["low", "high"].includes(effort) ? 200 : 400;
+    });
+    const deps = {
+      config: () => cfg,
+      configFile,
+      log: new Logger(null, 1_000_000, 1, false),
+      measureFetch: async (url: string, init: RequestInit) => {
+        asked.add(String((JSON.parse(String(init.body)) as { model: string }).model));
+        return measureFetch(url, init);
+      },
+    } as unknown as AdminDeps;
+    assert.equal(measureUnsettledModels(deps), 2, "two jobs: Kimi and Groq");
+    let onDisk: Config | undefined;
+    for (let i = 0; i < 200 && !(onDisk?.providers.kimi?.models?.[0]?.effortLevels && onDisk?.providers.groq?.models?.[0]?.effortLevels); i++) {
+      await new Promise((resolveP) => setTimeout(resolveP, 5));
+      onDisk = JSON.parse(fs.readFileSync(configFile, "utf8")) as Config;
+    }
+    assert.deepEqual(onDisk?.providers.kimi?.models?.[0]?.effortLevels, ["low", "high"], "validated, and these two accepted");
+    assert.deepEqual(onDisk?.providers.kimi?.models?.[1]?.effortLevels, [], "a settled model is left as it was");
+    assert.deepEqual(onDisk?.providers.groq?.models?.[0]?.effortLevels, [], "a field the endpoint ignores is no effort");
+    assert.deepEqual([...asked].sort(), ["kimi-k3", "llama-4"], "not the settled model, DeepSeek or the pass-through relay");
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });

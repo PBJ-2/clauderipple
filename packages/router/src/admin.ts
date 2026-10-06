@@ -1068,6 +1068,25 @@ function providerLadder(p: Provider): string[] {
 }
 
 /**
+ * Whether nothing says what effort this provider's models take, so a request strips it: the case
+ * worth measuring a model for. Read the way the request path reads it. An anthropic-compatible
+ * provider falls back to its preset live (`compatCaps` in proxy.ts) and strips on an empty ladder; the
+ * OpenAI adapter reads only its own `caps`, and `reasoning: "effort"` with no levels passes effort
+ * through as asked. An anthropic-compatible ladder the config states is a decision, even an empty
+ * one. `reasoning: "none"` is not: the provider form writes it for every OpenAI-compatible provider
+ * whose preset has no ladder (Groq, Mistral, a key and a URL), with no control to say otherwise.
+ */
+function effortUndeclared(p: Provider): boolean {
+  if (p.type === "anthropic-compatible") {
+    if (p.caps?.effortLevels !== undefined) return false;
+    const preset = p.preset ? PRESETS.find((entry) => entry.id === p.preset) : undefined;
+    return (preset?.effortLevels ?? []).length === 0;
+  }
+  if (p.type === "openai-compatible") return p.caps?.reasoning !== "effort";
+  return false;
+}
+
+/**
  * Fold measurements into the config on disk.
  *
  * Read again here rather than reusing what the job started with: the user may have saved from the
@@ -1104,6 +1123,36 @@ function applyMeasurements(configFile: string, results: Measured[]): { applied: 
   return { applied };
 }
 
+/** Register a measurement job and run it detached; returns the id a caller polls. */
+function startMeasureJob(providerName: string, models: string[], deps: AdminDeps): string {
+  sweepMeasureJobs();
+  const jobId = crypto.randomBytes(12).toString("hex");
+  MEASURE_JOBS.set(jobId, { state: "running", done: 0, total: models.length, results: [] });
+  deps.log.info(`admin: measuring ${providerName} (${models.length} model(s)) -> ${jobId.slice(0, 8)}`);
+  void runMeasureJob(jobId, providerName, models, deps);
+  return jobId;
+}
+
+/**
+ * Measure the models whose effort is still stripped and that nobody has settled, without waiting
+ * for a save in the GUI. A model was measured only when its provider was saved, so a provider set up
+ * before effort discovery — every DeepSeek, Kimi or GLM key on 0.8.1 and earlier — would otherwise
+ * stay without effort until its owner happened to save it again. A model with a ladder (measured,
+ * or typed) is the config's and left alone; so is one whose provider declares a ladder.
+ */
+export function measureUnsettledModels(deps: AdminDeps): number {
+  let started = 0;
+  for (const [name, provider] of Object.entries(deps.config().providers)) {
+    if (provider.type !== "openai-compatible" && provider.type !== "anthropic-compatible") continue;
+    if (!effortUndeclared(provider)) continue;
+    const models = (provider.models ?? []).filter((model) => model.effortLevels === undefined).map((model) => model.id);
+    if (models.length === 0) continue;
+    startMeasureJob(name, models, deps);
+    started++;
+  }
+  return started;
+}
+
 /** Run one provider measurement job to completion. Detached: the request that started it has already answered. */
 async function runMeasureJob(jobId: string, providerName: string, models: string[], deps: AdminDeps): Promise<void> {
   const job = MEASURE_JOBS.get(jobId);
@@ -1114,6 +1163,9 @@ async function runMeasureJob(jobId: string, providerName: string, models: string
     return;
   }
   const ladder = providerLadder(provider);
+  // No ladder from the provider, its preset or the config: find out per model whether it takes
+  // effort at all (`discoverLadder`), rather than leave it stripped.
+  const discover = effortUndeclared(provider);
   const fetchImpl = deps.measureFetch ?? measureFetchWithTimeout;
   const headers = "headers" in provider ? provider.headers : undefined;
   const sessionHeader = "sessionHeader" in provider ? provider.sessionHeader : undefined;
@@ -1125,9 +1177,9 @@ async function runMeasureJob(jobId: string, providerName: string, models: string
     const candidates = measureCandidates(provider, id, listed?.wire);
     // A ladder the catalogue states is taken as stated; the wire is still asked, once, because that
     // one request is also what finds a model the plan refuses (403 FreeTierError, DataPolicyError).
-    const stated = ladder.length > 0 ? listed?.effortLevels : undefined;
+    const stated = ladder.length > 0 || discover ? listed?.effortLevels : undefined;
     const known = stated !== undefined;
-    const measured = await measureModel(id, candidates, known ? [] : ladder, { fetch: fetchImpl, ...(sessionHeader ? { sessionHeader } : {}), ...(headers ? { headers } : {}) });
+    const measured = await measureModel(id, candidates, known ? [] : ladder, { fetch: fetchImpl, ...(sessionHeader ? { sessionHeader } : {}), ...(headers ? { headers } : {}) }, { discover: discover && !known });
     if (stated && measured.wire) measured.effortLevels = stated;
     job.results.push(measured);
     job.done++;
@@ -1413,13 +1465,8 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           sendJson(res, 400, { error: `provider "${body.provider}" is not openai-compatible or anthropic-compatible` });
           return;
         }
-        sweepMeasureJobs();
-        const jobId = crypto.randomBytes(12).toString("hex");
-        const job: MeasureJob = { state: "running", done: 0, total: body.models.length, results: [] };
-        MEASURE_JOBS.set(jobId, job);
-        deps.log.info(`admin: measuring ${body.provider} (${body.models.length} model(s)) -> ${jobId.slice(0, 8)}`);
-        void runMeasureJob(jobId, body.provider, body.models as string[], deps);
-        sendJson(res, 202, { jobId, total: job.total });
+        const jobId = startMeasureJob(body.provider, body.models as string[], deps);
+        sendJson(res, 202, { jobId, total: body.models.length });
         return;
       }
       if (pathname.startsWith("/api/providers/measure/") && method === "GET") {

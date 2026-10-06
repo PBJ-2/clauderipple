@@ -15,7 +15,7 @@ import { CertStore } from "./certs.ts";
 import { Logger } from "./log.ts";
 import { UpstreamHealth, EXIT_UPSTREAM_UNREACHABLE } from "./health.ts";
 import { Proxy } from "./proxy.ts";
-import { startAdmin } from "./admin.ts";
+import { measureUnsettledModels, startAdmin, type AdminDeps } from "./admin.ts";
 import { loadModelCatalog } from "./catalog.ts";
 import { RequestLog } from "./requestlog.ts";
 import { OpenAiIngress } from "./ingress/server.ts";
@@ -146,7 +146,7 @@ proxy
     // Quota only arrives on GPT response headers, so a quiet day left the status 11 hours stale
     // (2026-09-20). Ask once now, after listen(), and never wait for the answer.
     proxy.chatgptRefreshAll();
-    const admin = await startAdmin({
+    const adminDeps: AdminDeps = {
       config: () => store.get(),
       configFile: configPath(),
       log: log!,
@@ -175,9 +175,13 @@ proxy
       image: (req, signal) => proxy.generateImage(req, signal),
       modelCatalog: () => loadModelCatalog(),
       shutdown: () => beginDrain("shutdown requested"),
-    });
+    };
+    const admin = await startAdmin(adminDeps);
     log!.info(`clauderipple admin GUI on http://127.0.0.1:${admin.port}/`);
     setImmediate(premintLeaves);
+    // A minute in, once start-up traffic has settled: a few one-token requests per model whose
+    // effort nobody has measured yet, so effort works without the owner re-saving the provider.
+    setTimeout(() => measureUnsettledModels(adminDeps), 60_000).unref();
   })
   .catch((e) => {
     log!.error(`listen failed: ${(e as Error).message}`);

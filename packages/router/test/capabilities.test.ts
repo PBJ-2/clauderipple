@@ -204,3 +204,49 @@ test("a bare 403 is still an auth failure", async () => {
   const result = await measureModel("m", wireCandidates, [], { fetch });
   assert.deepEqual(result, { id: "m", error: "auth" });
 });
+
+// Effort discovery: a model whose provider declares no ladder. Without it every effort was stripped
+// (DeepSeek's API, Kimi, GLM and any key + URL provider), and the app showed no effort menu.
+const ANTHROPIC: WireCandidate[] = [{ wire: "anthropic", url: "https://api.deepseek.com/anthropic" }];
+const effortOf = (body: Record<string, unknown>): string | undefined => (body.output_config as { effort?: string } | undefined)?.effort;
+
+test("discovery: an endpoint that validates effort and names its levels gets exactly the ones it accepts", async () => {
+  const listed = "unknown variant `clauderipple-probe`, expected one of `none`, `low`, `high`, `max` at line 1 column 170";
+  const calls: string[] = [];
+  const fetch: MeasureDeps["fetch"] = async (_url, init) => {
+    const effort = effortOf(JSON.parse(String(init.body)) as Record<string, unknown>);
+    calls.push(effort ?? "-");
+    if (effort === "clauderipple-probe") return new Response(JSON.stringify({ error: { message: listed } }), { status: 422 });
+    return jsonResponse(effort === "none" ? 400 : 200);
+  };
+  const result = await measureModel("deepseek-v4-pro", ANTHROPIC, [], { fetch }, { discover: true });
+  assert.deepEqual(result, { id: "deepseek-v4-pro", wire: "anthropic", effortLevels: ["low", "high", "max"] });
+  assert.deepEqual(calls, ["-", "clauderipple-probe", "none", "low", "high", "max"]);
+});
+
+test("discovery: an endpoint that accepts a level no vendor defines does not read the field — no effort", async () => {
+  const { calls, fetch } = recorder(() => 200);
+  const result = await measureModel("llama", ANTHROPIC, [], { fetch }, { discover: true });
+  assert.deepEqual(result, { id: "llama", wire: "anthropic", effortLevels: [] });
+  assert.equal(calls.length, 2, "the wire, then the one probe");
+});
+
+test("discovery: a refusal that names nothing tries every known level; all refused means no effort", async () => {
+  const { calls, fetch } = recorder((_url, body) => (effortOf(body) ? 400 : 200));
+  const result = await measureModel("m", ANTHROPIC, [], { fetch }, { discover: true });
+  assert.deepEqual(result.effortLevels, []);
+  assert.equal(calls.length, 2 + 8, "the wire, the probe, and each of the eight known levels");
+});
+
+test("discovery: a 429 on the probe, or a level that could not be asked, concludes nothing", async () => {
+  const limited = recorder((_url, body) => (effortOf(body) ? 429 : 200));
+  assert.deepEqual(await measureModel("m", ANTHROPIC, [], { fetch: limited.fetch }, { discover: true }), { id: "m", wire: "anthropic" });
+  const flaky = recorder((_url, body) => (effortOf(body) === "clauderipple-probe" ? 400 : effortOf(body) === "high" ? 503 : 200));
+  assert.deepEqual(await measureModel("m", ANTHROPIC, [], { fetch: flaky.fetch }, { discover: true }), { id: "m", wire: "anthropic" });
+});
+
+test("without discover, an empty ladder still means one request and no effortLevels", async () => {
+  const { calls, fetch } = recorder(() => 200);
+  assert.deepEqual(await measureModel("m", ANTHROPIC, [], { fetch }), { id: "m", wire: "anthropic" });
+  assert.equal(calls.length, 1);
+});
