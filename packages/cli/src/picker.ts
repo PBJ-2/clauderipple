@@ -159,8 +159,12 @@ export function caTrusted(caPem: string): boolean {
       const out = powershell(`@(Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object { $_.Subject -eq 'CN=${CA_NAME}' }).Count`);
       return Number(out.trim()) > 0;
     }
-    execFileSync("security", ["find-certificate", "-c", CA_NAME, loginKeychain()], { stdio: "ignore" });
-    return true;
+    // Ask for the trust setting, not the keychain item: the certificate can sit in the login keychain
+    // with no trust (new Mac, 2026-10-06), and a presence check then made `picker on` skip the trust
+    // step while Claude Desktop rejected every claude.ai certificate (ERR_CERT_AUTHORITY_INVALID).
+    // `add-trusted-cert` without -d writes the user trust domain, which this lists one "Cert N: <name>" per line.
+    const out = execFileSync("security", ["dump-trust-settings"], { stdio: ["ignore", "pipe", "ignore"] }).toString();
+    return out.split("\n").some((line) => /^Cert \d+: /.test(line) && line.slice(line.indexOf(": ") + 2).trim() === CA_NAME);
   } catch {
     return false;
   }
@@ -180,8 +184,9 @@ export function trustCa(caPem: string): void {
 
 export function untrustCa(caPem: string): boolean {
   if (isLinux) return nssUntrust();
-  if (!caTrusted(caPem)) return false;
+  const trusted = caTrusted(caPem);
   if (isWindows) {
+    if (!trusted) return false;
     try {
       powershell(
         `Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object { $_.Subject -eq 'CN=${CA_NAME}' } | ForEach-Object { Remove-Item -Path $_.PSPath -Force }`,
@@ -192,17 +197,20 @@ export function untrustCa(caPem: string): boolean {
     }
     return true;
   }
-  try {
-    execFileSync("security", ["remove-trusted-cert", caPem], { stdio: "inherit" });
-  } catch {
-    /* trust settings may already be gone */
+  // macOS: an untrusted copy can still be in the keychain, so the item is deleted either way.
+  if (trusted) {
+    try {
+      execFileSync("security", ["remove-trusted-cert", caPem], { stdio: "inherit" });
+    } catch {
+      /* trust settings may already be gone */
+    }
   }
   try {
     execFileSync("security", ["delete-certificate", "-c", CA_NAME, loginKeychain()], { stdio: "ignore" });
+    return true;
   } catch {
-    /* ignore */
+    return trusted;
   }
-  return true;
 }
 
 type Meta = { appliedId?: string; clauderipple?: { ourId?: string; previousAppliedId?: string | null } } & Record<string, unknown>;
