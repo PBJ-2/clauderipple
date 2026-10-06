@@ -112,11 +112,34 @@ export function rateLimitsFromHeaders(h: Headers): Record<string, unknown> | nul
   const primary = window("primary");
   if (!primary) return null;
   const secondary = window("secondary");
+  const flag = (k: string): boolean | undefined => {
+    const v = h.get(k)?.toLowerCase();
+    return v === "true" ? true : v === "false" ? false : undefined;
+  };
+  const credits = creditsSnapshot(flag("x-codex-credits-has-credits"), flag("x-codex-credits-unlimited"), h.get("x-codex-credits-balance"), undefined);
   return {
     type: "codex.rate_limits",
     plan_type: h.get("x-codex-plan-type") ?? undefined,
     rate_limits: { primary, secondary: secondary && secondary.window_minutes ? secondary : null },
+    ...(credits ? { credits } : {}),
     at: Date.now(),
+  };
+}
+
+/**
+ * The account's purchased credits, which the backend draws on once a plan window is used up — the
+ * account keeps answering at 100%. Measured 2026-10-06: response headers carry
+ * `x-codex-credits-has-credits: False` / `-unlimited: False` / `-balance: 0` (Python-style
+ * booleans), and `/wham/usage` carries `credits: {has_credits, unlimited, overage_limit_reached,
+ * balance}`. Null when the backend said nothing about credits.
+ */
+function creditsSnapshot(hasCredits: unknown, unlimited: unknown, balance: unknown, overageReached: unknown): Record<string, unknown> | null {
+  if (typeof hasCredits !== "boolean" && typeof unlimited !== "boolean") return null;
+  return {
+    has_credits: hasCredits === true,
+    unlimited: unlimited === true,
+    ...(typeof balance === "string" || typeof balance === "number" ? { balance: String(balance) } : {}),
+    ...(typeof overageReached === "boolean" ? { overage_limit_reached: overageReached } : {}),
   };
 }
 
@@ -135,6 +158,7 @@ export function rateLimitsFromUsage(body: unknown): Record<string, unknown> | nu
       primary_window?: { used_percent?: unknown; limit_window_seconds?: unknown; reset_after_seconds?: unknown; reset_at?: unknown } | null;
       secondary_window?: { used_percent?: unknown; limit_window_seconds?: unknown; reset_after_seconds?: unknown; reset_at?: unknown } | null;
     } | null;
+    credits?: { has_credits?: unknown; unlimited?: unknown; balance?: unknown; overage_limit_reached?: unknown } | null;
   } | null;
   const win = (w: { used_percent?: unknown; limit_window_seconds?: unknown; reset_after_seconds?: unknown; reset_at?: unknown } | null | undefined): Record<string, number> | null => {
     const used = typeof w?.used_percent === "number" ? w.used_percent : undefined;
@@ -148,10 +172,13 @@ export function rateLimitsFromUsage(body: unknown): Record<string, unknown> | nu
   const primary = win(b?.rate_limit?.primary_window);
   if (!primary) return null;
   const secondary = win(b?.rate_limit?.secondary_window);
+  const c = b?.credits;
+  const credits = c ? creditsSnapshot(c.has_credits, c.unlimited, c.balance, c.overage_limit_reached) : null;
   return {
     type: "codex.rate_limits",
     plan_type: typeof b?.plan_type === "string" ? b.plan_type : undefined,
     rate_limits: { primary, secondary: secondary && secondary.window_minutes ? secondary : null },
+    ...(credits ? { credits } : {}),
     at: Date.now(),
   };
 }
@@ -201,9 +228,13 @@ function windowResetMs(w: Window, now: number): number | undefined {
 /**
  * How long an account is out, from a rate-limit snapshot: the latest reset among the windows it
  * has used up, since it is usable only once every full window has reset. Undefined when no window
- * is full — the account is not out, whatever else the snapshot says.
+ * is full — the account is not out, whatever else the snapshot says — and undefined when the
+ * account has credits to spend past the window: the backend keeps serving it, and when the credits
+ * run out it says so with a 429, which rests the account the ordinary way.
  */
-export function exhaustedForMs(snapshot: Record<string, unknown> | null | undefined, now = Date.now()): number | undefined {
+export function exhaustedForMs(snapshot: Record<string, unknown> | null | undefined, now = Date.now(), creditsCount = true): number | undefined {
+  const credits = snapshot?.credits as { has_credits?: unknown; unlimited?: unknown; overage_limit_reached?: unknown } | undefined;
+  if (creditsCount && credits && (credits.has_credits === true || credits.unlimited === true) && credits.overage_limit_reached !== true) return undefined;
   const limits = (snapshot?.rate_limits ?? null) as { primary?: Window | null; secondary?: Window | null } | null;
   let out: number | undefined;
   for (const w of [limits?.primary, limits?.secondary]) {
@@ -793,7 +824,8 @@ export class ChatGptAdapter {
       const headerRecord = Object.fromEntries(upstream.headers.entries());
       const snapshot = rateLimitsFromHeaders(upstream.headers);
       const retryHeader = headerRecord["retry-after"] ? retryAfterMs({ "retry-after": headerRecord["retry-after"] }) : undefined;
-      const waitMs = retryHeader ?? exhaustedForMs(snapshot) ?? retryAfterMs(headerRecord);
+      // The account was refused, so whatever credits the headers report did not carry it past the window.
+      const waitMs = retryHeader ?? exhaustedForMs(snapshot, Date.now(), false) ?? retryAfterMs(headerRecord);
       // A refusal here is a rest, never a pool quarantine: "sign in again" is the store's to say
       // (needsReauth, above), and a quarantine would outlive the new token a sign-in brings.
       const verdict = this.pool.penalise(this.name, credential.id, credentialRefused ? 403 : status, waitMs, text);

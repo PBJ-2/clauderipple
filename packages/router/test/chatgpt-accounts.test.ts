@@ -102,6 +102,16 @@ test("exhaustedForMs: out until the latest full window resets; not out below 100
   assert.equal(exhaustedForMs(null, now), undefined);
 });
 
+test("exhaustedForMs: a full window with credits left is not out; refused anyway, it rests until the reset", () => {
+  const now = 1_000_000;
+  const full = { primary: { used_percent: 100, reset_after_seconds: 10 } };
+  assert.equal(exhaustedForMs({ rate_limits: full, credits: { has_credits: true, unlimited: false } }, now), undefined);
+  assert.equal(exhaustedForMs({ rate_limits: full, credits: { has_credits: false, unlimited: true } }, now), undefined);
+  assert.equal(exhaustedForMs({ rate_limits: full, credits: { has_credits: false, unlimited: false } }, now), 10_000);
+  assert.equal(exhaustedForMs({ rate_limits: full, credits: { has_credits: true, unlimited: false, overage_limit_reached: true } }, now), 10_000);
+  assert.equal(exhaustedForMs({ rate_limits: full, credits: { has_credits: true, unlimited: false } }, now, false), 10_000);
+});
+
 test("pool: a due account refreshes once however many turns ask; a terminal rejection needs sign-in", async () => {
   const home = tempHome();
   saveChatGptAccount(home, { ...grant("ws-1", "a@example.test"), expiresAt: Date.now() + 60_000 });

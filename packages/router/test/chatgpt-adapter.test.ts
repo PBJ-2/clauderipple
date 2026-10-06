@@ -310,6 +310,22 @@ test("rateLimitsFromHeaders: missing headers → null", () => {
   assert.equal(rateLimitsFromHeaders(new Headers({ "content-type": "text/event-stream" })), null);
 });
 
+test("credits are read from the headers (Python-style booleans) and from /wham/usage", () => {
+  const fromHeaders = rateLimitsFromHeaders(new Headers({
+    "x-codex-primary-used-percent": "100",
+    "x-codex-credits-has-credits": "True",
+    "x-codex-credits-unlimited": "False",
+    "x-codex-credits-balance": "1250",
+  }));
+  assert.deepEqual(fromHeaders?.credits, { has_credits: true, unlimited: false, balance: "1250" });
+  assert.equal(rateLimitsFromHeaders(new Headers({ "x-codex-primary-used-percent": "100" }))?.credits, undefined);
+  const fromUsage = rateLimitsFromUsage({
+    rate_limit: { primary_window: { used_percent: 100 } },
+    credits: { has_credits: false, unlimited: false, overage_limit_reached: false, balance: "0" },
+  });
+  assert.deepEqual(fromUsage?.credits, { has_credits: false, unlimited: false, balance: "0", overage_limit_reached: false });
+});
+
 // The backend closing without response.completed used to be finished as end_turn with what had
 // arrived, which the client took as the model's final answer (gpt-6-astra, 12 empty turns).
 test("a stream cut off before response.completed → retryable overloaded_error, not end_turn", async () => {
