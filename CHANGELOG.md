@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.8.1 — 2026-10-06
+
+### Fixed
+
+- **Codex credits are spent instead of refused.** Once a ChatGPT plan's window read 100%, the
+  router rested the account until the reset, even though OpenAI serves an account with bought
+  credits past its window. An account with credits (or an unlimited balance) now stays in
+  rotation; a real usage-limit refusal still rests it.
+- **Fewer failed Claude app requests in picker mode.** claude.ai closes idle kept-alive
+  connections, and a request written on one as it closed came back as a 502 (about 65 a day
+  here, mostly the app's start-up requests). A GET, HEAD or OPTIONS that meets such a socket is
+  now sent again; a POST is not.
+- **Picker mode on a new Mac.** The ClaudeRipple CA counted as trusted when it was merely in the
+  login keychain, so `picker on` could skip the trust step and leave Claude Desktop unable to
+  load claude.ai. Trust is now read from the user trust settings, and `picker off` removes the
+  certificate either way.
+- **The route band said "router not answering"** on Claude Code 2.1.288, which sends plain
+  `http://` requests through the proxy too and got 405. They are now relayed.
+
+### Docs
+
+- Any ChatGPT plan that includes Codex works (Plus, Pro, Business; Enterprise/Edu with Codex
+  turned on), not just Plus and Pro.
+- `ultra` effort is sent as `max`: the Codex backend refuses `ultra` (measured), and Codex's own
+  ultra is max reasoning plus its sub-agents, which in Claude Code are Claude Code's subagents.
+
 ## 0.8.0 — 2026-10-05
 
 ### Added
