@@ -63,9 +63,12 @@ export const PRESETS: ProviderPreset[] = [
       { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro" },
       { id: "deepseek-flash", name: "DeepSeek Flash" },
     ],
-    // https://api-docs.deepseek.com/guides/anthropic_api/ documents thinking and output_config.effort,
-    // but no accepted effort-level set for its Anthropic endpoint; strip effort rather than guess.
-    effortLevels: [],
+    // https://api-docs.deepseek.com/guides/thinking_mode/ maps every requested effort onto three:
+    // minimal/low → low, medium/high/xhigh → high, max/ultra → max (thinking on, high, by default).
+    // Measured 2026-10-06 on this endpoint: `output_config.effort` is validated (an unknown value is
+    // 422 "expected one of none … max") and low/high/max answer 200 on deepseek-v4-pro and
+    // deepseek-flash. Offering the three real levels keeps the menu from showing steps that collapse.
+    effortLevels: ["low", "high", "max"],
     thinking: "enabled",
     // Measured 2026-09-17, not documented: a `web_search_20250305` tool sent to this endpoint came
     // back with server_tool_use, a web_search_tool_result holding ten hits, and
