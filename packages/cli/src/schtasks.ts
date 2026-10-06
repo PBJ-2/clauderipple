@@ -82,12 +82,12 @@ function sameAccount(stored: string | undefined, expected: string): boolean {
   return [expected, bare].some((name) => name.toLowerCase() === stored.toLowerCase());
 }
 
-export function taskDefinitionMatches(value: unknown, expected: { arguments: string; userId: string }): boolean {
+export function taskDefinitionMatches(value: unknown, expected: { execute: string; arguments: string; userId: string }): boolean {
   if (!value || typeof value !== "object") return false;
   const task = value as TaskDefinition;
   return (
     task.actionCount === 1 &&
-    task.execute?.toLowerCase() === "powershell.exe" &&
+    task.execute?.toLowerCase() === expected.execute.toLowerCase() &&
     task.arguments === expected.arguments &&
     sameAccount(task.userId, expected.userId) &&
     task.runLevel === 0 &&
@@ -171,15 +171,23 @@ export function existingTaskDefinition(): unknown {
 export function installAgent(opts: { program: string; args?: string[]; home: string; env?: Record<string, string> }): string {
   const launcher = writeLauncher({ program: opts.program, args: opts.args ?? [], home: opts.home, ...(opts.env ? { env: opts.env } : {}) });
   const user = taskUser();
-  const actionArgs = `-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "${launcher}"`;
+  const powershellArgs = `-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "${launcher}"`;
+  // PowerShell is started inside a headless console host. Started directly, it gets a console from
+  // the user's default terminal, and when that is Windows Terminal (the Windows 11 default)
+  // `-WindowStyle Hidden` hides nothing: a PowerShell window sat on screen after every logon (#49;
+  // measured 2026-10-06 in a Windows 11 24H2 VM — a CASCADIA_HOSTING_WINDOW_CLASS window appeared
+  // for `powershell.exe`, none for `conhost.exe --headless powershell.exe`, and both ran the script).
+  const execute = "conhost.exe";
+  const actionArgs = `--headless powershell.exe ${powershellArgs}`;
+  const existing = existingTaskDefinition();
   // Updating the generated launcher does not require re-registering an otherwise correct task.
   // Some Windows installations protect an existing per-user task's security descriptor so that
   // even the same unelevated user gets E_ACCESSDENIED from Register-ScheduledTask -Force. Treat the
   // verified existing definition as success; never silently accept a same-named foreign task.
-  if (taskDefinitionMatches(existingTaskDefinition(), { arguments: actionArgs, userId: user })) return launcher;
+  if (taskDefinitionMatches(existing, { execute, arguments: actionArgs, userId: user })) return launcher;
   const script = [
     `$ErrorActionPreference = 'Stop'`,
-    `$a = New-ScheduledTaskAction -Execute ${ps("powershell.exe")} -Argument ${ps(actionArgs)}`,
+    `$a = New-ScheduledTaskAction -Execute ${ps(execute)} -Argument ${ps(actionArgs)}`,
     `$t = New-ScheduledTaskTrigger -AtLogOn -User ${ps(user)}`,
     // Limited: the router needs no elevation, and asking for it would put a UAC prompt at every logon.
     `$p = New-ScheduledTaskPrincipal -UserId ${ps(user)} -LogonType Interactive -RunLevel Limited`,
@@ -188,7 +196,12 @@ export function installAgent(opts: { program: string; args?: string[]; home: str
     `'ok'`,
   ].join("; ");
   const r = run(script);
-  if (!r.ok) throw new Error(`Register-ScheduledTask failed: ${r.out}`);
+  if (!r.ok) {
+    // The task from before #49 still starts and supervises the router, only with a window. On an
+    // install that cannot re-register it (E_ACCESSDENIED, above), keeping it beats failing the update.
+    if (taskDefinitionMatches(existing, { execute: "powershell.exe", arguments: powershellArgs, userId: user })) return launcher;
+    throw new Error(`Register-ScheduledTask failed: ${r.out}`);
+  }
   return launcher;
 }
 
