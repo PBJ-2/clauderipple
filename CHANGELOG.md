@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.4 — 2026-10-06
+
+### Added
+
+- **Four more languages.** The dashboard, the tray and the README now come in Simplified
+  Chinese, Japanese, Spanish and Brazilian Portuguese as well as English and Korean. The
+  dashboard follows your browser or OS language; pick another from the selector at the bottom
+  of the sidebar.
+
+### Changed
+
+- **Releases publish themselves.** A version tag now publishes to npm from GitHub Actions, with
+  a signed provenance statement, so fixes reach `clauderipple update` without waiting on anyone.
+
 ## 0.8.3 — 2026-10-06
 
 ### Fixed
