@@ -302,8 +302,22 @@ request went, and a `Pane` holds the request log.
     `/zen/v1/responses`, not the Codex backend): gpt-6-sol, gpt-6-luna,
     gpt-5.6-sol and gpt-5.6-luna all accept `none, low, medium, high, xhigh,
     max` and answer `400 param: reasoning.effort` to both `minimal` and
-    `ultra`. So `ultra` is not a level that API takes on any of them; whether
-    the Codex backend does is still open.
+    `ultra`. So `ultra` is not a level that API takes on any of them. **Settled
+    2026-10-06 on the Codex backend too:** gpt-6.1-sol with `reasoning.effort:
+    "ultra"` answered `400 Invalid value: 'ultra'. Supported values are: 'none',
+    'minimal', 'low', 'medium', 'high', 'xhigh', and 'max'`, while `max` answered
+    200. The catalogue's own description of `ultra` is "Maximum reasoning with
+    automatic task delegation": it is `max` on the wire plus the Codex CLI
+    spawning its own sub-agents, which in Claude Code are Claude Code's
+    subagents. Keep the clamp. (`reasoning.mode` takes `standard`/`pro`, and
+    gpt-6.1-sol refuses `pro`: "not supported with this model".)
+  - **Credits (2026-10-06).** Every Codex response carries
+    `x-codex-credits-has-credits` / `-unlimited` (`True`/`False`) and
+    `-balance`; `/wham/usage` has `credits: {has_credits, unlimited,
+    overage_limit_reached, balance}`. OpenAI's help centre: included usage is
+    spent first, then purchased credits. So a window at 100% with credits left
+    is not an exhausted account — `exhaustedForMs` no longer rests it, and a
+    real 429 still does.
   - **Model catalogue (2026-09-23).** `GET {base}/codex/models?client_version=<v>`
     with the same credentials answers `{ models: [{ slug, display_name,
     visibility: "list"|"hide", context_window, supported_reasoning_levels:
@@ -1123,6 +1137,8 @@ subscription exists in this environment. Files are under `src/`:
 | Re-running the installer — the documented update — replaced the files and left the router running the old code: `install` treats a running router as done, and on Windows and Linux an unchanged supervisor definition is not re-registered, so nothing restarted it until the next login (found 2026-09-28 while building `update`; the tray's own restart covered only the packaged app) | `install` asks a router that is already running for its version and restarts one that differs. Measured in the Windows 11 VM: 0.5.1 running, installer run with 0.6.0 → "restarting it on 0.6.0", status 0.6.0. |
 | The tray's Electron (~270MB) was fetched into the installed package's own `node_modules`, and `npm install -g` of any other version deleted it with the old files (measured 2026-09-28): every update silently took the tray away, and on Windows a running tray held `electron.exe` inside the folder npm had to replace | Electron lives in `<home>/tray-runtime`, outside anything an update replaces. Both install scripts move one found in the old place there before installing (Windows first stops a tray running from it, and starts it again after setup) — checked on macOS and in the VM with a locked `electron.exe`. |
 | Adding a provider in the settings window restored three OpenCode effort ladders realigned by hand five hours earlier, so the app's effort menus for DeepSeek and GLM never narrowed (2026-10-02 23:13, found 10-05). `PUT /api/config` takes the whole config, and the screen built it from the copy it loaded at open and never re-read; the router itself also writes `config.json` (a measurement's results), so any of those was undone by the next unrelated save | Every GUI save fetches the router's config first and applies its own change to that. A provider form, which holds per-model fields (wire, ladder, window) from when it opened and has no control for them, takes a saved model's values from the router's copy. The provider and client screens re-read the config whenever they load. |
+| In picker mode, claude.ai requests failed as `502 … ECONNRESET` in under a second — 259 times in four days (2026-10-03..06), mostly `current_user_access`, `desktop/features` and `event_logging`. The kept-alive upstream socket had been closed by claude.ai as the next request was written on it, and Node does not resend | A GET/HEAD/OPTIONS whose reused socket resets before any response is sent again (twice at most), logged `STALE`. A POST is never resent: a reset does not prove the upstream did not act on it. Not yet shown to be the cause of the Windows "chat history loads forever" report (DC, 2026-10-06). |
+| ChatGPT accounts that had bought Codex credits were rested by the router the moment a window read 100%, though OpenAI serves them from credits past the window | `exhaustedForMs` ignores a full window while `credits.has_credits` or `unlimited` holds (and `overage_limit_reached` does not); an actual 429 still rests the account until the window resets. |
 
 ## 6. Blocked paths (measured, do not retry)
 

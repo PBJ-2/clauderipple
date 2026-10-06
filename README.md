@@ -114,8 +114,10 @@ Claude. Most people map one or two names to GPT and leave the rest alone.
 
 ### Do I need an OpenAI API key?
 
-No. A ChatGPT Plus or Pro subscription works — you sign in from the app and no API key
-is involved. API keys are for the other providers (DeepSeek, Kimi, GLM, OpenRouter and
+No. Any ChatGPT plan that includes Codex works — Plus, Pro and Business, and Enterprise or
+Edu where the workspace admin has turned Codex on. You sign in from the app and no API key
+is involved. The plan's usage limits apply; once they are used up, Codex credits you have
+bought carry on. API keys are for the other providers (DeepSeek, Kimi, GLM, OpenRouter and
 anything else with an Anthropic- or OpenAI-compatible endpoint).
 
 ### Which models can I use?

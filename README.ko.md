@@ -101,7 +101,9 @@ Anthropic이 만든 커넥터가 전부 그대로 동작합니다. 1P에 남는 
 
 ### OpenAI API 키가 필요한가요?
 
-필요 없습니다. ChatGPT Plus나 Pro 구독이면 됩니다. 앱에서 로그인하면 되고 API 키는 쓰지 않습니다.
+필요 없습니다. Codex가 포함된 ChatGPT 요금제면 됩니다 — Plus·Pro·Business, 그리고 워크스페이스 관리자가
+Codex를 켜 둔 Enterprise·Edu. 앱에서 로그인하면 되고 API 키는 쓰지 않습니다. 사용량 한도는 요금제 것을 따르며,
+한도를 다 쓰면 구매해 둔 Codex 크레딧으로 이어서 씁니다.
 API 키는 DeepSeek·Kimi·GLM·OpenRouter처럼 다른 프로바이더를 붙일 때만 씁니다.
 
 ### 어떤 모델을 쓸 수 있나요?
