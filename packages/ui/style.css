@@ -73,11 +73,12 @@ nav button.active { background: var(--accent); color: var(--accent-text); font-w
 nav .nav-spacer { flex: 1 1 auto; }
 
 .lang-toggle {
-  all: unset;
   cursor: pointer;
   padding: 6px 8px;
   border-radius: 6px;
   color: var(--muted);
+  background: transparent;
+  font: inherit;
   font-size: 14px;
   border: 1px solid var(--border);
   text-align: center;

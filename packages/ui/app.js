@@ -170,11 +170,17 @@ window.addEventListener("hashchange", () => showView((location.hash || "#health"
 showView((location.hash || "#health").slice(1) || "health");
 
 (function setupLanguage() {
-  const button = $("#lang-toggle");
+  const select = $("#lang-toggle");
   const lang = (typeof CURRENT_LANG !== "undefined" && CURRENT_LANG) || "en";
-  button.textContent = lang === "ko" ? t("lang.toggleEn") : t("lang.toggleKo");
-  button.addEventListener("click", () => {
-    try { localStorage.setItem("clauderipple_lang", lang === "ko" ? "en" : "ko"); } catch { /* unavailable */ }
+  for (const [code, name] of LANGUAGES) {
+    const option = document.createElement("option");
+    option.value = code;
+    option.textContent = name;
+    option.selected = code === lang;
+    select.append(option);
+  }
+  select.addEventListener("change", () => {
+    try { localStorage.setItem("clauderipple_lang", select.value); } catch { /* unavailable */ }
     location.reload();
   });
 })();
