@@ -25,7 +25,7 @@ import http from "node:http";
 import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { Config, Provider, ProviderModel } from "./config.ts";
-import { homeDir, validate } from "./config.ts";
+import { homeDir, searchProviderFor, validate } from "./config.ts";
 import type { Logger } from "./log.ts";
 import type { Stats } from "./proxy.ts";
 import type { RequestLog } from "./requestlog.ts";
@@ -433,6 +433,11 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
         // events — a backend the router does not have, so a search still cannot go through it.
         // Naming the provider's own capability instead would be a promise the router cannot keep.
         ...(providerCanSearch(name, cfg) ? { webSearch: true } : {}),
+        // A provider whose plan searches on another endpoint does so for some models only.
+        ...(() => {
+          const models = (("models" in p && p.models) || []).map((m) => typeof m === "string" ? m : m.id).filter((id) => searchProviderFor(p, id));
+          return models.length ? { webSearchModels: models } : {};
+        })(),
         // Reaching the host says nothing about being able to use it: a chatgpt provider with no
         // credentials is not "connected", and calling it that sends the user off believing it works.
         ...(p.type === "chatgpt" ? { needsLogin: !chatgptSignedIn(p.auth) } : {}),

@@ -35,7 +35,7 @@ import { ChatGptAdapter, type ChatGptAccountStatus, type ImageRequest, type Imag
 import { OpenAiCompatibleAdapter } from "./providers/openai/index.ts";
 import { GoogleAdapter, type GoogleAccountStatus } from "./providers/google/index.ts";
 import { conversationKey, type AnthropicRequest } from "./providers/chatgpt/translate.ts";
-import { providerFor, terminateHosts } from "./config.ts";
+import { providerFor, searchProviderFor, terminateHosts } from "./config.ts";
 import type { CertStore } from "./certs.ts";
 import { injectPickerModels, isBootstrapPath } from "./picker.ts";
 import { effortLevelsForModel } from "./admin.ts";
@@ -757,7 +757,9 @@ export class Proxy {
       // search of a `smallFast` slot pointed at Luna while the Clients screen called that provider
       // searchable (2026-10-07: 41 searches failed with nothing on screen to say why). A configured
       // backend on this same provider has already had its try above.
-      const own = cfg.providers[route.provider]?.type === "chatgpt" && cfg.webSearch?.provider !== route.provider;
+      // The same holds for a plan that searches on another of its endpoints (`anthropicSearch`).
+      const own = (cfg.providers[route.provider]?.type === "chatgpt" || searchProviderFor(cfg.providers[route.provider], route.model) !== undefined) &&
+        cfg.webSearch?.provider !== route.provider;
       if (own && (await this.serveWebSearch(res, json, search, { provider: route.provider, model: route.model }, record, finish))) return;
       const blocks = webSearchErrorBlocks(search, "unavailable");
       const model = typeof json.model === "string" ? json.model : "unknown";
@@ -1356,8 +1358,9 @@ export class Proxy {
       return false;
     }
     // Which backend is chosen below depends on the wire the search model speaks, which may not be
-    // the provider's own.
-    const provider = providerFor(configured, settings.model);
+    // the provider's own — or on the endpoint its plan searches on, which may not be the model's.
+    const searchVia = searchProviderFor(configured, settings.model);
+    const provider = searchVia ?? providerFor(configured, settings.model);
     const url = "url" in provider && typeof provider.url === "string" ? provider.url : undefined;
     if (!url && provider.type !== "chatgpt") {
       this.deps.log.warn(`web search: provider ${settings.provider} has no url; leaving the request alone`);
@@ -1366,10 +1369,12 @@ export class Proxy {
     // Which backend depends on how the provider is spoken to, not on the vendor. An
     // anthropic-compatible one is asked in Anthropic's own shape and hands back the blocks the CLI
     // already parses; an openai-compatible one is asked through its chat web plugin.
+    // OpenCode Go refuses a request without its session header outright (400 MissingSessionID).
+    const sessionHeader = "sessionHeader" in provider ? provider.sessionHeader : undefined;
     const common = {
       name: settings.provider,
       url: url ?? "",
-      headers: ("headers" in provider && provider.headers) || {},
+      headers: { ...(("headers" in provider && provider.headers) || {}), ...(sessionHeader ? { [sessionHeader]: crypto.randomUUID() } : {}) },
       model: settings.model,
       ...(settings.maxResults ? { maxResults: settings.maxResults } : {}),
     };
@@ -1378,7 +1383,7 @@ export class Proxy {
       // Refuse before sending rather than after. A provider that cannot run the server tool is sent
       // "perform a web search" with no tool attached, and a model told to search with nothing to
       // search with narrates a tool call instead — an answer shaped like success, holding nothing.
-      if (!this.canRunServerTools(settings.provider, this.deps.config())) {
+      if (!searchVia && !this.canRunServerTools(settings.provider, this.deps.config())) {
         this.deps.log.warn(`web search: provider ${settings.provider} does not run server tools; leaving the request alone`);
         return false;
       }

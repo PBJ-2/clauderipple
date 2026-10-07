@@ -506,7 +506,16 @@ request went, and a `Pane` holds the request log.
         runs OpenAI's hosted `web_search` and cites real pages, but its wire is OpenAI-shaped while
         its hits arrive as Responses events (`web_search_call`, `url_citation`), a backend the router
         does not have. DeepSeek's own endpoint and the ChatGPT provider run Anthropic's server tool;
-        OpenCode Go's chat and Anthropic endpoints, and every `openai-compatible` provider, do not.
+        OpenCode Go's chat endpoint, and every `openai-compatible` provider, do not.
+      - **OpenCode Go's Anthropic endpoint does, for DeepSeek only** (corrected 2026-10-07). The
+        line above once said it did not. Re-measured with the key in `x-api-key` (a bearer there
+        answers "Missing API key"), Claude Code's own side request to `/zen/go/v1/messages` came back
+        with ten real hits and `web_search_requests: 1` for deepseek-v4.1-flash, deepseek-v4-flash
+        and deepseek-v4-pro; Kimi K3, MiniMax M3 and Qwen3.8 Flash took the tool and never searched;
+        GLM and MiMo are not served there. The preset lists those three as `anthropicSearch`, and a
+        search routed to one of them (a `smallFast` slot on OpenCode Go's DeepSeek) is relayed there
+        by `anthropicServerToolBackend`, though the model's turns stay on Chat Completions. The
+        Clients screen reads `webSearchModels` from `/api/status` to stop calling them unsearchable.
     - **A model that cannot search does not merely decline — it invents.** Measured 2026-09-21
       against OpenCode Go's chat endpoint: `plugins: [{id: "web"}]` is accepted and ignored (HTTP
       200, no `annotations`, cache reporting no lookup), and the model answers a search-shaped

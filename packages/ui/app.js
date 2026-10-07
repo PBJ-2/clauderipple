@@ -519,8 +519,12 @@ const MODEL_SLOTS = ["smallFast", "subagent", "main"];
 // A provider the router measured as unable to search. Only the router can know this — it comes from
 // the status snapshot, never from the model's name — and the `smallFast` slot is exactly where it
 // matters, because a search sent to such a model comes back as invented prose or a visible failure.
-function providerCannotSearch(name) {
-  return Boolean(status && status.providers && status.providers[name] && status.providers[name].webSearch !== true);
+// A plan that searches on another of its endpoints does so for the models it names only.
+function providerCannotSearch(name, model) {
+  const entry = status && status.providers && status.providers[name];
+  if (!entry || entry.webSearch === true) return false;
+  const id = String(model || "").replace(/@[^@]*$/, "");
+  return !(Array.isArray(entry.webSearchModels) && entry.webSearchModels.includes(id));
 }
 
 function renderModelSlots() {
@@ -535,7 +539,7 @@ function renderModelSlots() {
       if (chosen[slot] === model.id) option.selected = true;
       // `smallFast` is what a WebSearch runs on, so an inability to search is fatal there and
       // merely worth knowing everywhere else.
-      if (slot === "smallFast" && providerCannotSearch(group.name)) {
+      if (slot === "smallFast" && providerCannotSearch(group.name, model.id)) {
         option.textContent += ` — ${t("slots.noWebSearch")}`;
       }
       select.appendChild(option);
@@ -572,7 +576,7 @@ async function saveModelSlots() {
     // screen was already guilty of once. The label on the option warns before the fact; this catches
     // a session that already had it selected.
     const owners = models.smallFast ? providersOffering(next, models.smallFast) : [];
-    if (owners.length && providerCannotSearch(owners[0])) toast(t("slots.noWebSearchWarn"), true);
+    if (owners.length && providerCannotSearch(owners[0], models.smallFast)) toast(t("slots.noWebSearchWarn"), true);
     else toast(t("slots.slotSaved"));
   } catch (error) { toast(t("common.saveFailed"), true, error.message); }
 }

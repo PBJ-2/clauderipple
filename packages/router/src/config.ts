@@ -8,6 +8,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { CompatibleCaps } from "./compat.ts";
+import { PRESETS } from "./presets.ts";
 
 export type ProviderModel = {
   id: string;
@@ -232,6 +233,27 @@ export function providerFor(provider: Provider, model: string | undefined): Prov
     return { ...rest, type: "anthropic-compatible", url: url ?? "", caps: { effortLevels: entry.effortLevels ?? [] } } as AnthropicCompatibleProvider;
   }
   return { ...shared, type: "openai-compatible", url: url ?? "", ...(entry.wire ? { wire: entry.wire } : {}) } as OpenAiCompatibleProvider;
+}
+
+/**
+ * The Anthropic endpoint a web search for `model` runs on, when the provider's preset measured that
+ * its plan searches there although the model is spoken to on another wire (`anthropicSearch`).
+ * OpenCode Go's DeepSeek models answer on Chat Completions, which has no search, while the same key
+ * on the plan's Anthropic endpoint runs the server tool (2026-10-07).
+ */
+export function searchProviderFor(provider: Provider | undefined, model: string): AnthropicCompatibleProvider | undefined {
+  const presetId = provider && "preset" in provider ? provider.preset : undefined;
+  const search = presetId ? PRESETS.find((entry) => entry.id === presetId)?.anthropicSearch : undefined;
+  if (!provider || !search || !search.models.includes(model)) return undefined;
+  const headers = reauthorized("headers" in provider ? provider.headers : undefined, search.authHeader);
+  const sessionHeader = "sessionHeader" in provider ? provider.sessionHeader : undefined;
+  return {
+    type: "anthropic-compatible",
+    url: search.url,
+    ...(headers ? { headers } : {}),
+    ...(sessionHeader ? { sessionHeader } : {}),
+    ...(presetId ? { preset: presetId } : {}),
+  };
 }
 
 export type Route = {

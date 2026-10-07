@@ -45,6 +45,11 @@ export type ProviderPreset = {
    * measured reply, never from a docs page: DeepSeek's docs do not mention it and it works.
    */
   serverTools?: boolean;
+  /**
+   * Models the plan runs a web search for on its Anthropic endpoint, although they are spoken to
+   * on another wire. Only ever set from a measured reply, like `serverTools`.
+   */
+  anthropicSearch?: { url: string; authHeader: "x-api-key" | "authorization-bearer"; models: string[] };
   verified: boolean;
   notes?: string;
   docsUrl: string;
@@ -309,6 +314,13 @@ export const PRESETS: ProviderPreset[] = [
     // to the Responses models above; the Chat and Anthropic ones carry their own empty ladder.
     effortLevels: ["none", "minimal", "low", "medium", "high", "xhigh"],
     thinking: "none",
+    // The DeepSeek models are served on Chat Completions, which ignores every search option, but
+    // the same key on the Anthropic endpoint runs `web_search_20250305` for them: Claude Code's own
+    // side request came back with a `web_search_tool_result` of ten real pages and
+    // `web_search_requests: 1` (measured 2026-10-07; a bearer header there answers "Missing API
+    // key"). Kimi K3, MiniMax M3 and Qwen3.8 Flash take the tool on that endpoint and never search;
+    // GLM and MiMo are not served there at all.
+    anthropicSearch: { url: "https://opencode.ai/zen/go", authHeader: "x-api-key", models: ["deepseek-v4.1-flash", "deepseek-v4-flash", "deepseek-v4-pro"] },
     verified: true,
     notes: "One subscription and key, three endpoints by wire. Measured 2026-09-18. Responses: Muse Spark answers, effort ladder tops out at xhigh, prompt cache reached 96% on a repeated turn. Chat: glm-5.3, glm-5.3-flash, kimi-k3, kimi-k2.7-code, deepseek-v4.1-flash, deepseek-v4-pro, longcat-2.0 and mimo-v2.5-pro all answered. Anthropic: minimax-m3, qwen3.8-max and qwen3.8-flash answered with the prompt cache at 99% on a repeated turn, while union-alpha, the free row, answered \"Model is unavailable\". The Muse Spark Contributor tier is ~90% cheaper because Meta states those interactions improve its products, and OpenCode refuses the model until the workspace opts in (403 DataPolicyError); it is also limited to some regions.",
     docsUrl: "https://opencode.ai/docs/go/",

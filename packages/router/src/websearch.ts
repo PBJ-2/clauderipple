@@ -334,7 +334,8 @@ export function anthropicServerToolBackend(opts: {
       // No result blocks means the provider did not run the tool, whatever else it said. A model
       // told to search with no tool it can reach will narrate one instead — an OpenCode Go DeepSeek
       // answered this exact request with its own tool-call markup as plain text and zero searches
-      // (measured 2026-09-18). Treat that as the failure it is.
+      // (measured 2026-09-18; that same model on the plan's Anthropic endpoint, with its x-api-key
+      // header, does search — 2026-10-07). Treat that as the failure it is.
       const deduped = dedupeHits(hits).slice(0, opts.maxResults ?? 10);
       if (deduped.length === 0) throw new Error(`${opts.name} web search: no results returned`);
       const text = prose.join("").trim();
