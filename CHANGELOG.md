@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Grok through a Grok subscription.** A new "Grok subscription" provider uses Grok 4.7, 4.7
+  Fast, 4.6 and 4.5 with the Grok CLI's own sign-in (`grok login`), with no API key. It reads the
+  CLI's session and, when the session is about to expire, has the CLI refresh it. Tools,
+  thinking and effort (low…xhigh, per model) work as on the other translated providers. This
+  is the channel the Grok CLI itself talks to, not a published xAI API, so a CLI update can
+  change it. Pay-per-token access with an xAI API key stays under the xAI preset.
+
 ## 0.8.8 — 2026-10-07
 
 ### Fixed

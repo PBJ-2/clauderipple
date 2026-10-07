@@ -1099,6 +1099,84 @@ subscription exists in this environment. Files are under `src/`:
   `PATCH/DELETE /api/google-accounts/:id`, and `POST /api/providers/probe` with
   `{type:"google", auth:"antigravity"}`. CLI: `clauderipple google-login` / `google-logout`.
 
+### 4e. `grok` providers (implemented 2026-10-08)
+
+Grok on a Grok subscription, through the chat proxy the Grok CLI itself talks to, signed in
+with the CLI's own session. A translated provider like §4c: the adapter
+(`packages/router/src/providers/grok/`) reuses `OpenAiCompatibleAdapter` on the Chat wire
+and adds only what an API key would not need — a credential that rotates under the router,
+and the headers the proxy routes on. Measured 2026-10-08 against CLI 1.0.46 on a SuperGrok
+plan unless marked otherwise.
+
+- **Endpoint and headers.** `POST https://cli-chat-proxy.grok.com/v1/chat/completions`,
+  `GET …/v1/models`. The CLI's own README ("Using auth.json for API Access") documents calling
+  it directly with `Authorization: Bearer <auth.json key>`, `X-XAI-Token-Auth: xai-grok-cli`
+  and `x-grok-model-override: <model>` (the proxy routes on the header, not the body). It does
+  not mention that the proxy also refuses a request without `x-grok-client-version`:
+  `426 {"error":"Your Grok CLI version (none) is outdated. Please update to version 1.0.13 or
+  later …"}`. The router sends `clientVersion` from the config when set, else the installed
+  CLI's version (`grok --version`, read again when the binary changes), else 1.0.46. The header names were
+  read from the CLI binary's strings; nothing else from it is used. This channel is the CLI's,
+  not a published API, so the probe returns a facts-only `warning` (like Antigravity's) and the
+  form says so.
+- **Session.** `<grok home>/auth.json` (`$GROK_HOME`, else `~/.grok`), written by `grok login`:
+  one entry per issuer keyed `https://auth.x.ai::<id>`, each with `key`, `expires_at`,
+  `refresh_token`. The README's own `jq` example reads a different key
+  (`https://accounts.x.ai/sign-in`), so the entry that expires last is taken and no key name
+  is assumed. A session token lives **six hours** (`expires_at` − `create_time`; the README
+  says 7 days); a running CLI refreshes it about five minutes before expiry under its own lock
+  (`auth lock: attempting acquire (timeout=25000ms)`, `oidc try_refresh_pure`). Whether the
+  refresh token rotates was not measured. So, as with `borrow-codex`, the router never
+  refreshes the grant itself — if it does rotate, racing the CLI could sign the CLI out.
+- **Refresh by asking the CLI.** With no CLI running, the file just goes stale. When the token
+  has under 10 minutes left the router runs `grok models` with
+  `GROK_AUTH_EARLY_INVALIDATION_SECS=600`: the CLI then sees the token as expiring, refreshes
+  it under its lock and rewrites the file (measured: expiry moved six hours, file rewritten).
+  One run serves every turn waiting on it; 30s bound, since the CLI's lock wait is 25s. A token
+  still alive is used even when that run fails, and a run that left it short is not repeated
+  for a minute, so a broken IdP does not add 30s to every turn. Under launchd's environment
+  (`env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=…`) `grok models` exits 0 and leaves no
+  process behind. The router runs under launchd with
+  `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, so the binary is looked up in `<home>/bin/grok` first,
+  then PATH, then `~/.local/bin/grok`; `HOME` is set there, which the CLI needs to find its
+  session.
+- **A 401 is asked once more.** The token read a moment ago can be the one the CLI just
+  replaced. On a 401 before any byte is written the adapter re-reads the file; if it still
+  holds the refused token the CLI refresh is forced (`GROK_AUTH_EARLY_INVALIDATION_SECS=86400`,
+  the value measured to make the CLI refresh, at most once a minute — a proxy that refuses a fresh token is refusing the
+  account), and the turn is asked again only when a different token exists. Otherwise the
+  user reads `authentication_error "Grok: … — sign in with grok login, …"`. An unknown token is
+  `401 {"error":"Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli,
+  upstream=PermissionDenied, reason=no auth context)"}` — a bare string under `error`, which
+  `vendorMessage` now reads. `fetchWithRetry` still never retries a 401 on its own.
+- **Models and effort.** `/v1/models` lists grok-4.7, grok-4.7-build-fast, grok-4.6 and
+  grok-4.5, each with `context_window` 256000, `api_backend: "responses"` and
+  `reasoning_efforts` listed high to low: low..xhigh, except grok-4.5 low..high. The probe
+  saves that ladder per model. On Chat, every model accepted low/medium/high/xhigh (grok-4.5's
+  `xhigh` too — a 200 is only "not refused", so the listing wins) and refused the string
+  `"none"` and `max` with `400 {"code":"invalid-argument"}`; omitting the field is accepted and
+  the model's default (`high`) applies. A model the listing did not describe gets low..xhigh.
+- **Chat, not Responses.** Both wires answer. On Chat the reasoning arrives as text the mapper
+  turns into thinking blocks; the Responses mapper has no reasoning handling (§4c), so a Grok
+  turn there showed none. Tools stream as ordinary `tool_calls` deltas and `tool` messages are
+  accepted back; the usage chunk carries `prompt_tokens_details.cached_tokens`.
+- **Cache.** No conversation header: a repeated 25.5k-token prefix was read from cache on the
+  second call without one (1,152 cached on the first, 25,472 of 25,573 on the second), while
+  the same pair with `x-grok-conv-id` on Chat missed both times. One
+  Claude Code session through a dev router (CLI 2.1.291, grok-4.7, four turns with Read, Write
+  and Bash) read 21,888 / 21,995, 21,888 / 22,210 and 22,144 / 22,257 from cache after its
+  cold first turn; a second session's second turn 21,760 / 22,023. A session's first turn is
+  cold. Watch the daily figure in `requests.jsonl` as for the other translated providers.
+- **Probe.** `POST /api/providers/probe` with `{type:"grok", home?, cli?, url?,
+  clientVersion?}` checks the session through the same `GrokAuth` the adapter uses (so a near-
+  expired one is refreshed here too) and asks `/models` with the headers live traffic sends.
+  `auth: "missing"` is no session or an expired one the CLI could not refresh; `"bad-key"` is
+  the proxy refusing it. The measured list above is offered when the listing cannot be read.
+- Routing, agent files, picker entries and the refusal of `web_search` side requests are the
+  same as for any translated provider. A grok model may not carry `wire`, `url` or
+  `authHeader` (validation refuses it): `providerFor` would turn it into an openai-compatible
+  provider without the session headers. Not available through the OpenAI ingress.
+
 ## 5. Failure modes that must not exist in the product (all observed)
 
 | Observed | Product requirement |

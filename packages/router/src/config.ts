@@ -171,7 +171,31 @@ export type AnthropicProvider = {
   models?: ProviderModel[];
 };
 
-export type Provider = AnthropicCompatibleProvider | ChatGptProvider | OpenAiCompatibleProvider | GoogleProvider | AnthropicProvider;
+export type GrokProvider = {
+  /**
+   * Grok on a SuperGrok / X Premium subscription, through the chat proxy the Grok CLI itself uses
+   * (Anthropic Messages translated to Chat Completions). Signs in with the CLI's own session
+   * (`grok login`, `<home>/auth.json`), read-only; when it runs low the CLI is asked to refresh it.
+   * The channel and its headers are the CLI's, not a public API (ARCHITECTURE §4e).
+   */
+  type: "grok";
+  /** The Grok CLI home holding auth.json. Default $GROK_HOME, else ~/.grok. */
+  home?: string;
+  /** The `grok` binary that refreshes the session and reports its version. Default: <home>/bin/grok, then PATH, then ~/.local/bin/grok. */
+  cli?: string;
+  /** Override the proxy base (default https://cli-chat-proxy.grok.com/v1). */
+  url?: string;
+  /** Sent as `x-grok-client-version` instead of what `grok --version` prints. */
+  clientVersion?: string;
+  /** Models offered in the GUI (the probe fills this from the proxy's `/v1/models`). */
+  models?: ProviderModel[];
+  /** Prefix the system prompt with a one-line identity so the model knows what it is. Default true. */
+  identity?: boolean;
+  /** Fixed text appended to the system prompt. Must stay constant across turns or the prompt cache breaks. */
+  instructionsAppend?: string;
+};
+
+export type Provider = AnthropicCompatibleProvider | ChatGptProvider | OpenAiCompatibleProvider | GoogleProvider | AnthropicProvider | GrokProvider;
 
 /**
  * The provider's own key, re-sent under the header another wire on the same account expects.
@@ -652,6 +676,19 @@ export function validate(c: Config): string[] {
       if (p.accountPool && p.auth !== "claude-code") errors.push(`provider ${name}: accountPool requires auth "claude-code"`);
       if (p.models !== undefined && !validModels(p.models)) {
         errors.push(`provider ${name}: ${MODELS_SHAPE}`);
+      }
+    } else if (p.type === "grok") {
+      for (const field of ["home", "cli", "clientVersion"] as const) {
+        if (p[field] !== undefined && (typeof p[field] !== "string" || !p[field])) errors.push(`provider ${name}: ${field} must be a non-empty string`);
+      }
+      if (p.url !== undefined && !/^https?:\/\//.test(p.url)) errors.push(`provider ${name}: url must start with http:// or https://`);
+      if (p.models !== undefined) {
+        if (!validModels(p.models)) errors.push(`provider ${name}: ${MODELS_SHAPE}`);
+        // `providerFor` turns a model with its own wire, url or auth header into an openai-compatible
+        // provider, which would go out without the session headers this one exists to add.
+        else if (p.models.some((m) => m.wire !== undefined || m.url !== undefined || m.authHeader !== undefined)) {
+          errors.push(`provider ${name}: a grok model cannot set wire, url or authHeader`);
+        }
       }
     } else {
       errors.push(`provider ${name}: unknown type "${(p as { type?: string }).type}"`);

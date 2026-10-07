@@ -218,3 +218,16 @@ test("validate refuses a credential pool with duplicate ids or non-string header
   assert.ok(cfg([{ id: "a", headers: { key: 5 } }])[0]?.includes("string record"));
   assert.ok(cfg([{ id: "a", headers: {}, label: 7 }])[0]?.includes("label must be a string"));
 });
+
+test("validate accepts a grok provider and refuses a model that would leave its session headers behind", () => {
+  const ok = validate({ ...DEFAULTS, providers: { grok: { type: "grok", models: [{ id: "grok-4.7", name: "Grok 4.7", contextWindow: 256000, effortLevels: ["low", "high"] }] } } });
+  assert.deepEqual(ok, []);
+  assert.deepEqual(validate({ ...DEFAULTS, providers: { grok: { type: "grok", home: "/tmp/g", cli: "/tmp/g/bin/grok", clientVersion: "1.0.46", url: "https://cli-chat-proxy.grok.com/v1" } } }), []);
+  const rewired = validate({ ...DEFAULTS, providers: { grok: { type: "grok", models: [{ id: "grok-4.7", wire: "responses" }] } } });
+  assert.ok(rewired.some((e) => e.includes("cannot set wire, url or authHeader")));
+  assert.ok(validate({ ...DEFAULTS, providers: { grok: { type: "grok", url: "cli-chat-proxy.grok.com" } } }).some((e) => e.includes("url must start")));
+  assert.ok(validate({ ...DEFAULTS, providers: { grok: { type: "grok", home: "" } } }).some((e) => e.includes("home must be a non-empty string")));
+  // A grok model with no overrides is its own provider: providerFor hands it back unchanged.
+  const provider = { type: "grok" as const, models: [{ id: "grok-4.7" }] };
+  assert.equal(providerFor(provider, "grok-4.7"), provider);
+});

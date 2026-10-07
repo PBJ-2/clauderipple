@@ -31,6 +31,7 @@ import type { Stats } from "./proxy.ts";
 import type { RequestLog } from "./requestlog.ts";
 import { PRESETS, type ProviderPreset } from "./presets.ts";
 import { resolveCompatibleCaps } from "./compat.ts";
+import { redactErrorText } from "./redact.ts";
 import { CHATGPT_FALLBACK_MODELS } from "./providers/chatgpt/catalog.ts";
 import { measureModel, refusedByPlan, type Measured, type WireCandidate } from "./capabilities.ts";
 import { catalogEntry } from "./catalog.ts";
@@ -51,6 +52,9 @@ import type { GoogleAccountStatus } from "./providers/google/index.ts";
 import { ANTIGRAVITY_WARNING, staticAntigravityModels } from "./providers/google/antigravity.ts";
 import { readGoogleAccounts, removeGoogleAccount, summarize as summarizeGoogleAccount, updateGoogleAccount } from "./providers/google/accounts.ts";
 import { GoogleOAuthSession, type GoogleOAuthState } from "./providers/google/login.ts";
+import { GROK_AUTH_HINT, GrokAuth, grokAuthPath, grokHome, readGrokToken } from "./providers/grok/auth.ts";
+import { GROK_DEFAULT_URL, GROK_EFFORT_LEVELS, GROK_FALLBACK_MODELS, grokModelsFromListing } from "./providers/grok/catalog.ts";
+import { GROK_WARNING, grokHeaders } from "./providers/grok/index.ts";
 
 const MAX_BODY = 1024 * 1024;
 /** `/api/image` carries reference images inline, so it gets more room than a config save. */
@@ -267,6 +271,12 @@ export function effortLevels(cfg: Config): { providers: Record<string, { default
       providers[name] = { default: ANTHROPIC_EFFORT_LEVELS };
       continue;
     }
+    if (provider.type === "grok") {
+      // The proxy's listing gives each model its ladder (the probe saves it); a model it has not
+      // described gets the common one, which is also what the adapter sends it.
+      providers[name] = { default: [...GROK_EFFORT_LEVELS], ...(Object.keys(modelLevels).length ? { models: modelLevels } : {}) };
+      continue;
+    }
     const preset = provider.preset ? PRESETS.find((entry) => entry.id === provider.preset) : undefined;
     providers[name] = {
       default: resolveCompatibleCaps(preset ? { effortLevels: preset.effortLevels, thinking: preset.thinking, ...(preset.serverTools ? { serverTools: true } : {}) } : undefined, provider.caps).effortLevels,
@@ -393,6 +403,15 @@ export function chatgptSignedIn(mode: string | undefined): boolean {
 }
 
 /**
+ * Whether the Grok CLI's session is there and not yet expired. A session near its end still counts:
+ * the router asks the CLI to refresh it before the next turn.
+ */
+export function grokSignedIn(p: { home?: string }): boolean {
+  const token = readGrokToken(grokAuthPath(p.home ?? grokHome()));
+  return token !== null && (token.expiresAt === 0 || token.expiresAt > Date.now());
+}
+
+/**
  * An Antigravity provider is only as usable as its accounts: none signed in, or every one waiting on
  * Google's verification page, answers nothing however reachable the host is.
  */
@@ -409,7 +428,7 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
   // them by whichever TCP check answered first, so the Health list reshuffled on every poll.
   const checked = await Promise.all(
     Object.entries(cfg.providers).map(async ([name, p]) => {
-      const url = p.type === "anthropic" ? "https://api.anthropic.com" : p.type === "chatgpt" ? (p.url ?? "https://chatgpt.com/backend-api") : p.type === "google" ? (p.url ?? "https://generativelanguage.googleapis.com") : p.url;
+      const url = p.type === "anthropic" ? "https://api.anthropic.com" : p.type === "chatgpt" ? (p.url ?? "https://chatgpt.com/backend-api") : p.type === "google" ? (p.url ?? "https://generativelanguage.googleapis.com") : p.type === "grok" ? (p.url ?? GROK_DEFAULT_URL) : p.url;
       let reachable = false;
       try {
         const u = new URL(url);
@@ -441,6 +460,7 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
         // Reaching the host says nothing about being able to use it: a chatgpt provider with no
         // credentials is not "connected", and calling it that sends the user off believing it works.
         ...(p.type === "chatgpt" ? { needsLogin: !chatgptSignedIn(p.auth) } : {}),
+        ...(p.type === "grok" ? { needsLogin: !grokSignedIn(p) } : {}),
         ...(p.type === "google" && p.auth === "antigravity" ? googleHealth(deps.google?.().accounts?.()[name] ?? []) : {}),
         ...(p.type === "anthropic"
           ? {
@@ -833,6 +853,53 @@ async function probeGoogleAntigravity(deps: AdminDeps): Promise<{ ok: boolean; a
   const named = Object.keys(accounts)[0];
   const models = named ? await deps.google?.().models?.(named).catch(() => null) ?? null : null;
   return { ok: true, auth: "ok", models: models ?? staticAntigravityModels() };
+}
+
+type GrokProbeResult = { ok: boolean; auth: ProbeAuth; models: ModelEntry[]; modelsSource: "catalog" | "fallback"; warning: string; error?: string };
+
+/**
+ * `{type:"grok"}`: whether the Grok CLI's session is usable, and the models its chat proxy lists.
+ * The session goes through the same `GrokAuth` the adapter uses — one near its end is refreshed
+ * through the CLI here too — and the listing is asked with the headers live traffic sends, since a
+ * test that presents another auth set certifies a path nobody uses (§5).
+ */
+async function probeGrok(
+  body: { home?: unknown; cli?: unknown; url?: unknown; clientVersion?: unknown },
+  log: Logger,
+  probeFetch: (url: string, init: RequestInit) => Promise<Response> = fetchWithTimeout,
+): Promise<GrokProbeResult> {
+  const text = (value: unknown): string | undefined => typeof value === "string" && value ? value : undefined;
+  const home = text(body.home) ?? grokHome();
+  const cli = text(body.cli);
+  const clientVersion = text(body.clientVersion);
+  const auth = new GrokAuth({ home, ...(cli ? { cli } : {}), ...(clientVersion ? { clientVersion } : {}), log });
+  const fallback = (result: Omit<GrokProbeResult, "models" | "modelsSource" | "warning">): GrokProbeResult =>
+    ({ ...result, models: GROK_FALLBACK_MODELS, modelsSource: "fallback", warning: GROK_WARNING });
+  let token;
+  try {
+    token = await auth.token();
+  } catch (error) {
+    return fallback({ ok: false, auth: "missing", error: errorText(error) });
+  }
+  const base = (text(body.url) ?? GROK_DEFAULT_URL).replace(/\/+$/, "");
+  const { "x-grok-model-override": _route, ...headers } = grokHeaders(token.key, "", await auth.clientVersion());
+  let response: Response;
+  try {
+    response = await probeFetch(`${base}/models`, { headers });
+  } catch (error) {
+    return fallback({ ok: false, auth: "unreachable", error: errorText(error) });
+  }
+  if (response.status === 401 || response.status === 403) {
+    return fallback({ ok: false, auth: "bad-key", error: `the proxy refused the Grok session (HTTP ${response.status}): ${GROK_AUTH_HINT}` });
+  }
+  if (!response.ok) {
+    const detail = redactErrorText(await response.text().catch(() => ""), [token.key]);
+    return fallback({ ok: false, auth: "unknown", error: `HTTP ${response.status}${detail ? `: ${detail.slice(0, 300)}` : ""}` });
+  }
+  const models = grokModelsFromListing(await response.json().catch(() => null));
+  return models.length
+    ? { ok: true, auth: "ok", models, modelsSource: "catalog", warning: GROK_WARNING }
+    : fallback({ ok: true, auth: "ok" });
 }
 
 function chatCompletionsUrl(base: string): string {
@@ -1393,7 +1460,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           sendJson(res, 400, { error: "expected provider probe object" });
           return;
         }
-        const probe = parsed as { type?: unknown; name?: unknown; auth?: unknown; apiKey?: unknown; url?: unknown; headers?: unknown; modelsUrl?: unknown; modelsAuthHeader?: unknown; probeModel?: unknown; sessionHeader?: unknown; preset?: unknown; wire?: unknown };
+        const probe = parsed as { type?: unknown; name?: unknown; auth?: unknown; apiKey?: unknown; url?: unknown; headers?: unknown; modelsUrl?: unknown; modelsAuthHeader?: unknown; probeModel?: unknown; sessionHeader?: unknown; preset?: unknown; wire?: unknown; home?: unknown; cli?: unknown; clientVersion?: unknown };
         if (probe.type === "anthropic") {
           if (probe.auth === "claude-code") {
             sendJson(res, 200, probeClaudeCodeAuth(deps));
@@ -1427,6 +1494,10 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
             models,
             modelsSource: live?.length ? "catalog" : "fallback",
           });
+          return;
+        }
+        if (probe.type === "grok") {
+          sendJson(res, 200, await probeGrok(probe, deps.log, deps.probeFetch));
           return;
         }
         if (probe.type === "google") {

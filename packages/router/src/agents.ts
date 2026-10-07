@@ -15,6 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import { homeDir, type Config, type Provider } from "./config.ts";
 import { declaredBy } from "./routing.ts";
+import { GROK_EFFORT_LEVELS } from "./providers/grok/catalog.ts";
 import { adminPort } from "./admin.ts";
 import { shortName } from "../../cli/src/hooks/agent-title.ts";
 
@@ -154,6 +155,8 @@ export function agentNameFor(modelId: string): string {
 }
 
 function capsEffortLevels(provider: Provider): string[] | undefined {
+  // A grok provider has no caps: its adapter sends the common ladder to a model the listing left out.
+  if (provider.type === "grok") return [...GROK_EFFORT_LEVELS];
   return (provider as { caps?: { effortLevels?: string[] } }).caps?.effortLevels;
 }
 

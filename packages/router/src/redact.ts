@@ -14,7 +14,11 @@ function credentialHeaderName(name: string): boolean {
 export function credentialHeaderValues(headers: Iterable<[string, string]>): string[] {
   const secrets = new Set<string>();
   for (const [rawName, value] of headers) {
-    if (credentialHeaderName(rawName) && value) secrets.add(value);
+    if (!credentialHeaderName(rawName) || !value) continue;
+    secrets.add(value);
+    // A vendor that echoes the credential echoes the token, not the scheme in front of it.
+    const bare = /^(?:Bearer|Basic|Token)\s+(\S+)$/i.exec(value)?.[1];
+    if (bare) secrets.add(bare);
   }
   return [...secrets].sort((a, b) => b.length - a.length);
 }

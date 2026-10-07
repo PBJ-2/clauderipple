@@ -34,6 +34,7 @@ import { PRESETS } from "./presets.ts";
 import { ChatGptAdapter, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
 import { OpenAiCompatibleAdapter } from "./providers/openai/index.ts";
 import { GoogleAdapter, type GoogleAccountStatus } from "./providers/google/index.ts";
+import { GrokAdapter } from "./providers/grok/index.ts";
 import { conversationKey, type AnthropicRequest } from "./providers/chatgpt/translate.ts";
 import { providerFor, searchProviderFor, terminateHosts } from "./config.ts";
 import type { CertStore } from "./certs.ts";
@@ -226,6 +227,7 @@ export class Proxy {
   private readonly chatgptAdapters = new Map<string, { key: string; adapter: ChatGptAdapter }>();
   private readonly openaiAdapters = new Map<string, { key: string; adapter: OpenAiCompatibleAdapter }>();
   private readonly googleAdapters = new Map<string, { key: string; adapter: GoogleAdapter }>();
+  private readonly grokAdapters = new Map<string, { key: string; adapter: GrokAdapter }>();
   private readonly claudeAccounts: ClaudeAccountAuthPool;
   /** Each Claude subscription account's usage, for the admin status (never a token). */
   readonly claudeUsage: ClaudeUsage;
@@ -337,6 +339,15 @@ export class Proxy {
     if (cur && cur.key === key) return cur.adapter;
     const adapter = new OpenAiCompatibleAdapter(name, cfg, this.deps.log);
     this.openaiAdapters.set(name, { key, adapter });
+    return adapter;
+  }
+
+  private grok(name: string, cfg: Extract<Config["providers"][string], { type: "grok" }>): GrokAdapter {
+    const key = JSON.stringify(cfg);
+    const cur = this.grokAdapters.get(name);
+    if (cur && cur.key === key) return cur.adapter;
+    const adapter = new GrokAdapter(name, cfg, this.deps.log);
+    this.grokAdapters.set(name, { key, adapter });
     return adapter;
   }
 
@@ -863,6 +874,33 @@ export class Proxy {
         } catch (e) {
           this.recordOutcome(route.provider, 0);
           finish("-", 0, `google error ${(e as NodeJS.ErrnoException).code ?? ""} ${(e as Error).message}`);
+          if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" }).end(JSON.stringify({ type: "error", error: { type: "api_error", message: (e as Error).message } }));
+          else res.destroy();
+        }
+        return;
+      }
+      if (provider.type === "grok") {
+        // The chat proxy keeps no server-side thread, so a `continue` is refused like on the other
+        // translated providers and the CLI resends the turn with the full history.
+        const td = threadDecision(json);
+        if (td === "refuse") {
+          const out = JSON.stringify(THREAD_UNSUPPORTED);
+          res.writeHead(400, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
+          finish("400", out.length, "thread continue refused → CLI resends stateless", false, { resent: true });
+          return;
+        }
+        if (td === "strip") stripThreadFields(json);
+        record = { ...record, target: route.model, provider: route.provider };
+        const routeEffort = effortOf(json);
+        if (routeEffort) record.effort = routeEffort;
+        tag = `GROK ${route.tag} effort=${routeEffort ?? "-"}`;
+        try {
+          const o = await this.grok(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort);
+          this.recordOutcome(route.provider, o.status);
+          finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...(o.usage ? { usage: o.usage } : {}), ...(o.stopReason ? { stopReason: o.stopReason } : {}) });
+        } catch (e) {
+          this.recordOutcome(route.provider, 0);
+          finish("-", 0, `grok error ${(e as NodeJS.ErrnoException).code ?? ""} ${(e as Error).message}`);
           if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" }).end(JSON.stringify({ type: "error", error: { type: "api_error", message: (e as Error).message } }));
           else res.destroy();
         }

@@ -512,6 +512,7 @@ provider you configured is available the same way.
 |---|---|---|---|---|
 | ChatGPT subscription | Codex backend | several sign-ins, switching when one runs out (Codex login reused too) | read from your subscription (GPT-6 Sol, Luna, Astra, GPT-5.6 …) | effort low…max (Luna: ultra), prompt cache 94–99 % |
 | Google Gemini | Gemini API | AI Studio API key, or Google account sign-in (Antigravity, see the FAQ) | discovered | translated (Messages ⇄ generateContent), thought signatures kept across turns |
+| Grok subscription | Grok CLI chat proxy | the Grok CLI's sign-in (`grok login`), refreshed through the CLI | read from your subscription (Grok 4.7, 4.7 Fast, 4.6, 4.5) | translated (Chat Completions), effort low…xhigh; the CLI's own channel, not a published API ([§4e](docs/ARCHITECTURE.md#4e-grok-providers-implemented-2026-10-08)) |
 | OpenRouter | Anthropic-compatible | API key | 400+, discovered | per-model effort support read from the API |
 | DeepSeek, Kimi, Z.ai GLM, MiniMax, Qwen (intl / cn) | Anthropic-compatible | API key | preset | verified against vendor docs |
 | xAI Grok, Mistral, Groq, Together, Fireworks | OpenAI-compatible | API key | discovered | translated (Chat Completions / Responses) |
