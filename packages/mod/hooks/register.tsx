@@ -242,11 +242,11 @@ export const register: Register = on => {
           <Text dimColor>{notice}</Text>
         ) : (
           <Box flexDirection="row" gap={1}>
-            <Text color={record.ok ? OK : FAIL}>{record.ok ? '↳' : '✕'}</Text>
+            {record.resent ? <Text dimColor>↻</Text> : <Text color={record.ok ? OK : FAIL}>{record.ok ? '↳' : '✕'}</Text>}
             <Text bold>{modelOf(record)}</Text>
             <Text color={providerColor(record.provider)}>{record.provider}</Text>
             {record.effort ? <Text dimColor>{record.effort}</Text> : null}
-            {record.ok ? null : <Text color={FAIL}>{String(record.status)}</Text>}
+            {record.ok ? null : record.resent ? <Text dimColor>{String(record.status)} resent</Text> : <Text color={FAIL}>{String(record.status)}</Text>}
             {record.ok && cache !== undefined ? <Text color={cacheColor(cache)}>cache {cache}%</Text> : null}
             <Text dimColor>{(record.ms / 1000).toFixed(1)}s</Text>
           </Box>
@@ -286,7 +286,9 @@ export const register: Register = on => {
                 <Text dimColor>{timeOf(record.at)}</Text>
                 <Text bold wrap="truncate-end">{modelOf(record)}</Text>
                 <Text color={providerColor(record.provider)}>{record.provider}</Text>
-                <Text color={record.ok ? OK : FAIL} bold={!record.ok}>{record.ok ? '✓' : `✕ ${record.status}`}</Text>
+                {record.resent
+                  ? <Text dimColor>↻ {String(record.status)} resent</Text>
+                  : <Text color={record.ok ? OK : FAIL} bold={!record.ok}>{record.ok ? '✓' : `✕ ${record.status}`}</Text>}
               </Box>
               <Box flexDirection="row" gap={1}>
                 <Text dimColor>{record.effort ?? '-'}</Text>
@@ -296,7 +298,7 @@ export const register: Register = on => {
                 <Text dimColor>{(record.ms / 1000).toFixed(1)}s</Text>
               </Box>
               {!record.ok && record.note ? (
-                <Text color={FAIL} wrap="wrap">
+                <Text color={record.resent ? undefined : FAIL} dimColor={record.resent} wrap="wrap">
                   {record.note}
                 </Text>
               ) : null}

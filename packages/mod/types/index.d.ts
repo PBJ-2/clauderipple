@@ -11,6 +11,8 @@ export type StatusRequest = {
   effort?: string
   usage?: { input: number; cached: number; cacheWrite?: number; output: number }
   note?: string
+  /** Not ok, but the client sent it again on its own: not a failure. */
+  resent?: boolean
   session?: string
   /** Sent by the session this mod runs in. */
   mine?: boolean

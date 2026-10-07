@@ -148,6 +148,20 @@ test("a provider error body is recorded with credentials masked, and still reach
   assert.match(record.note ?? "", /^upstream 401: .*Authentication Fails/);
   assert.match(record.note ?? "", /\[REDACTED\] is invalid/);
   assert.doesNotMatch(record.note ?? "", /sk-abcdef/);
+  assert.equal(record.resent, undefined);
+});
+
+// Anthropic drops a thread after a few idle minutes; the CLI replays the conversation on the 404,
+// so the log must not show it as a failure (2026-10-07: about half the turns after five minutes).
+test("a thread the API forgot is recorded as resent, and the 404 still reaches the client", async () => {
+  const body = Buffer.from(JSON.stringify({ type: "error", error: { type: "not_found_error", message: "No thread state was found for the requested `previous_message_id`.", details: { error_code: "thread_not_found" } } }));
+  const { records, clientStatus } = await roundTrip({ "x-api-key": "PROVIDER-KEY" }, { status: 404, headers: { "content-type": "application/json" }, body });
+  assert.equal(clientStatus, 404);
+  const record = records.find((r) => r.kind === "messages");
+  assert.ok(record, "the request was logged");
+  assert.equal(record.ok, false);
+  assert.equal(record.resent, true);
+  assert.match(record.note ?? "", /^upstream 404: /);
 });
 
 test("errorSnippet decodes gzip, masks bearer tokens and explicit opaque credentials, and bounds its length", () => {
@@ -229,6 +243,7 @@ test("an anthropic-compatible provider never receives a thread continue: the CLI
   assert.equal(r.providerCalls, 0, "the delta never reached the provider");
   const record = r.records.find((x) => x.kind === "messages");
   assert.match(record?.note ?? "", /thread continue refused/);
+  assert.equal(record?.resent, true, "a resend asked for is not a failure");
 });
 
 test("a thread create still reaches an anthropic-compatible provider, without the thread fields", async () => {

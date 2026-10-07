@@ -61,6 +61,21 @@ test("RequestLog computes success, usage, cache and latency summaries", () => {
   }
 });
 
+test("a resent request is counted, but neither as a success nor as a failure", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cr-request-resent-"));
+  try {
+    const log = new RequestLog(path.join(dir, "requests.jsonl"));
+    log.add(record("a", { at: "2026-10-07T10:00:00.000Z", ms: 300, ok: false, status: 404, provider: "anthropic", resent: true }));
+    log.add(record("b", { at: "2026-10-07T10:00:01.000Z", ms: 100, provider: "anthropic" }));
+    const summary = log.summary(Date.parse("2026-10-07T09:59:00.000Z"));
+    assert.equal(summary.total.count, 2);
+    assert.equal(summary.total.ok, 1);
+    assert.equal(summary.total.failed, 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("RequestLog rotates once at its configured size and keeps one previous file", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cr-request-rotate-"));
   const file = path.join(dir, "requests.jsonl");

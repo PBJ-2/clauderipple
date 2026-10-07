@@ -34,6 +34,12 @@ export type RequestRecord = {
    * session ask what happened to its own requests.
    */
   session?: string;
+  /**
+   * Not ok, but the client sends the request again on its own and nothing is lost: a thread the
+   * API forgot, a stateless resend asked for, a refusal during a restart. Shown apart from failures
+   * so they do not read as errors.
+   */
+  resent?: true;
 };
 
 type RequestFilter = { provider?: string; kind?: RequestRecord["kind"]; session?: string };
@@ -118,7 +124,7 @@ export class RequestLog {
     const add = (bucket: SummaryBucket, record: RequestRecord): void => {
       bucket.count++;
       if (record.ok) bucket.ok++;
-      else bucket.failed++;
+      else if (!record.resent) bucket.failed++;
       bucket.avgMs += record.ms;
       if (record.usage) {
         bucket.input += record.usage.input;

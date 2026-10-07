@@ -627,7 +627,7 @@ export class Proxy {
     let observedStopReason: string | undefined;
     // `failed` counts requests that did not get a proper response (vanished, upstream error,
     // provider error). A note alone is not a failure: adapters attach usage notes on success.
-    const finish = (status: string, bytes: number, note?: string, failed: boolean = note !== undefined, extra?: { usage?: RequestUsage; stopReason?: string }): void => {
+    const finish = (status: string, bytes: number, note?: string, failed: boolean = note !== undefined, extra?: { usage?: RequestUsage; stopReason?: string; resent?: boolean }): void => {
       if (finished) return;
       finished = true;
       this.stats.inFlight--;
@@ -651,6 +651,7 @@ export class Proxy {
         if (usage) completed.usage = usage;
         if (stopReason) completed.stopReason = stopReason;
         if (note) completed.note = note;
+        if (extra?.resent && !completed.ok) completed.resent = true;
         this.deps.requests.add(completed);
       }
     };
@@ -662,7 +663,7 @@ export class Proxy {
       const msg = JSON.stringify({ type: "error", error: { type: "overloaded_error", message: "ClaudeRipple is restarting; retry" } });
       res.writeHead(503, { "content-type": "application/json", "retry-after": "3", connection: "close", "content-length": String(Buffer.byteLength(msg)) }).end(msg);
       req.resume();
-      finish("503", msg.length, "refused during drain (client retries)", false);
+      finish("503", msg.length, "refused during drain (client retries)", false, { resent: true });
       return;
     }
 
@@ -793,7 +794,7 @@ export class Proxy {
         if (td === "refuse") {
           const out = JSON.stringify(THREAD_UNSUPPORTED);
           res.writeHead(400, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
-          finish("400", out.length, "thread continue refused → CLI resends stateless", false);
+          finish("400", out.length, "thread continue refused → CLI resends stateless", false, { resent: true });
           return;
         }
         if (td === "strip") stripThreadFields(json);
@@ -818,7 +819,7 @@ export class Proxy {
         if (td === "refuse") {
           const out = JSON.stringify(THREAD_UNSUPPORTED);
           res.writeHead(400, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
-          finish("400", out.length, "thread continue refused → CLI resends stateless", false);
+          finish("400", out.length, "thread continue refused → CLI resends stateless", false, { resent: true });
           return;
         }
         if (td === "strip") stripThreadFields(json);
@@ -845,7 +846,7 @@ export class Proxy {
         if (td === "refuse") {
           const out = JSON.stringify(THREAD_UNSUPPORTED);
           res.writeHead(400, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
-          finish("400", out.length, "thread continue refused → CLI resends stateless", false);
+          finish("400", out.length, "thread continue refused → CLI resends stateless", false, { resent: true });
           return;
         }
         if (td === "strip") stripThreadFields(json);
@@ -909,7 +910,7 @@ export class Proxy {
       if (threadDecision(json) === "refuse") {
         const out = JSON.stringify(THREAD_UNSUPPORTED);
         res.writeHead(400, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
-        finish("400", out.length, "thread continue refused → CLI resends stateless", false);
+        finish("400", out.length, "thread continue refused → CLI resends stateless", false, { resent: true });
         return;
       }
       const preset = provider.preset ? PRESETS.find((entry) => entry.id === provider.preset) : undefined;
@@ -1316,7 +1317,16 @@ export class Proxy {
         observedUsage = observed.usage;
         observedStopReason = observed.stopReason;
         res.end();
-        finish(String(status), bytes, status >= 400 ? `upstream ${status}: ${errorSnippet(Buffer.concat(errorHead), upRes.headers["content-encoding"], [...errorSecrets], upRes.headers["content-type"])}` : undefined);
+        const note = status >= 400 ? `upstream ${status}: ${errorSnippet(Buffer.concat(errorHead), upRes.headers["content-encoding"], [...errorSecrets], upRes.headers["content-type"])}` : undefined;
+        // Anthropic forgets a conversation's server-side thread after a few idle minutes, and the CLI
+        // answers the 404 by replaying the whole conversation, which hits the prompt cache. From CLI
+        // 2.1.288 this is about half the turns after five idle minutes (2026-10-07: 105 of 217, none
+        // of 69 before), so it is recorded as resent rather than failed.
+        if (status === 404 && note && /thread_not_found|No thread state was found/.test(note)) {
+          finish(String(status), bytes, note, false, { resent: true });
+          return;
+        }
+        finish(String(status), bytes, note);
       });
       upRes.on("error", (e) => {
         finish(String(status), bytes, `upstream stream error ${(e as Error).message}`);

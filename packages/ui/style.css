@@ -468,7 +468,7 @@ input, select, textarea, button { font-size: 15px; }
 .token-cell { white-space: nowrap; }
 .cache-pill { display: inline-block; margin-left: 4px; padding: 1px 5px; border-radius: 99px; color: var(--muted); background: var(--bg); font-size: 14px; }
 .no-usage { color: var(--muted); }
-.status-text { font-weight: 600; white-space: nowrap; }.status-text.ok { color: var(--ok); }.status-text.bad { color: var(--bad); }
+.status-text { font-weight: 600; white-space: nowrap; }.status-text.ok { color: var(--ok); }.status-text.bad { color: var(--bad); }.status-text.resent { color: var(--muted); font-weight: 500; }
 .request-detail td { padding: 0; background: color-mix(in srgb, var(--accent) 4%, var(--panel)); }
 .request-detail-grid { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 10px; padding: 12px 14px; }
 .request-detail-grid .detail-label { display: block; color: var(--muted); font-size: 14px; margin-bottom: 3px; }
