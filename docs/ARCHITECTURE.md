@@ -541,9 +541,12 @@ request went, and a `Pane` holds the request log.
       `response.completed.response.tool_usage.web_search.num_requests`. The adapter requires both
       a real search count and at least one citation; it never turns uncited prose into a successful
       result. `allowed_domains` becomes `filters.allowed_domains`. Codex exposes no corresponding
-      exclusion filter, so `blocked_domains` is refused rather than ignored. This path is opt-in
-      through `webSearch: {provider, model}`; with no setting, Claude Code's existing Haiku search
-      path is unchanged.
+      exclusion filter, so `blocked_domains` is refused rather than ignored. `webSearch:
+      {provider, model}` sends every search here. With no setting, a search Claude Code sends to a
+      model the router places on a `chatgpt` provider (a `smallFast` slot on Luna) is served the
+      same way, by that model; one left on Haiku is unchanged. Before 2026-10-07 the routed case
+      fell to the guard below and was refused, while the Clients screen called ChatGPT searchable:
+      41 searches of a Luna `smallFast` slot failed in a day with no warning anywhere.
     - The reply is assembled as `server_tool_use` + `web_search_tool_result` + `text`, with
       `usage.server_tool_use.web_search_requests` — the field the CLI turns into "Did N searches".
     - A provider that runs the tool itself is asked in Anthropic's own shape instead

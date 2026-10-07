@@ -1,5 +1,6 @@
-// ChatGPT hosted search is selected only when cfg.webSearch explicitly names that provider. Drive
-// the real CONNECT/TLS proxy so interception-before-routing and the response shape stay covered.
+// ChatGPT hosted search answers a search when cfg.webSearch names that provider, or when the search
+// is routed to one. Drive the real CONNECT/TLS proxy so interception-before-routing, the routed
+// path and the response shape stay covered.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -51,7 +52,14 @@ function decodeHttpResponse(raw: Buffer): { status: number; body: string } {
   return { status, body: body.toString("utf8") };
 }
 
-test("the proxy serves a configured ChatGPT hosted search before model routing", async () => {
+type SearchReply = {
+  message: { content: { type?: string; content?: { url?: string }[] }[]; usage: { server_tool_use: { web_search_requests: number } } };
+  seenTool: unknown;
+  target: string | undefined;
+};
+
+/** One `WebSearch` side request for `model`, through a real proxy whose ChatGPT backend is local. */
+async function searchThrough(model: string, cfgFor: (backendUrl: string) => Partial<Config>): Promise<SearchReply> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-proxy-websearch-"));
   const ca = createCa({ cn: "clauderipple web-search test" });
   fs.writeFileSync(path.join(home, "ca.pem"), ca.certPem);
@@ -85,8 +93,7 @@ test("the proxy serves a configured ChatGPT hosted search before model routing",
   const cfg: Config = {
     ...DEFAULTS,
     listen: { host: "127.0.0.1", port: proxyPort },
-    providers: { chatgpt: { type: "chatgpt", auth: "own", url: `http://127.0.0.1:${backendPort}` } },
-    webSearch: { provider: "chatgpt", model: "gpt-5.6-terra", maxResults: 3 },
+    ...cfgFor(`http://127.0.0.1:${backendPort}`),
   };
   const requests = new RequestLog(path.join(home, "requests.jsonl"));
   const proxy = new Proxy({
@@ -117,7 +124,7 @@ test("the proxy serves a configured ChatGPT hosted search before model routing",
       secure.once("error", reject);
     });
     const body = JSON.stringify({
-      model: "claude-haiku-4-5",
+      model,
       max_tokens: 1024,
       messages: [{ role: "user", content: "Perform a web search for the query: latest Node.js 24 release" }],
       tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 8, allowed_domains: ["nodejs.org"] }],
@@ -143,24 +150,44 @@ test("the proxy serves a configured ChatGPT hosted search before model routing",
     secure.destroy();
     const decoded = decodeHttpResponse(response);
     assert.equal(decoded.status, 200);
-    const message = JSON.parse(decoded.body) as {
-      content: { type?: string; content?: { url?: string }[] }[];
-      usage: { server_tool_use: { web_search_requests: number } };
+    return {
+      message: JSON.parse(decoded.body) as SearchReply["message"],
+      seenTool,
+      target: requests.list(10).find((entry) => entry.kind === "messages")?.target,
     };
-    const result = message.content.find((block) => block.type === "web_search_tool_result");
-    assert.deepEqual(result?.content, [{ type: "web_search_result", title: "Node.js", url: "https://nodejs.org/en/download" }]);
-    assert.equal(message.usage.server_tool_use.web_search_requests, 1);
-    assert.deepEqual(seenTool, {
-      type: "web_search",
-      search_context_size: "low",
-      external_web_access: true,
-      filters: { allowed_domains: ["nodejs.org"] },
-    });
-    const record = requests.list(10).find((entry) => entry.kind === "messages");
-    assert.equal(record?.target, "chatgpt/gpt-5.6-terra");
   } finally {
     proxy.close();
     await new Promise<void>((resolve) => backend.close(() => resolve()));
     fs.rmSync(home, { recursive: true, force: true });
   }
+}
+
+function assertSearched(reply: SearchReply, target: string): void {
+  const result = reply.message.content.find((block) => block.type === "web_search_tool_result");
+  assert.deepEqual(result?.content, [{ type: "web_search_result", title: "Node.js", url: "https://nodejs.org/en/download" }]);
+  assert.equal(reply.message.usage.server_tool_use.web_search_requests, 1);
+  assert.deepEqual(reply.seenTool, {
+    type: "web_search",
+    search_context_size: "low",
+    external_web_access: true,
+    filters: { allowed_domains: ["nodejs.org"] },
+  });
+  assert.equal(reply.target, target);
+}
+
+test("the proxy serves a configured ChatGPT hosted search before model routing", async () => {
+  const reply = await searchThrough("claude-haiku-4-5", (url) => ({
+    providers: { chatgpt: { type: "chatgpt", auth: "own", url } },
+    webSearch: { provider: "chatgpt", model: "gpt-5.6-terra", maxResults: 3 },
+  }));
+  assertSearched(reply, "chatgpt/gpt-5.6-terra");
+});
+
+// A `smallFast` slot pointed at a ChatGPT model sends every search there. With no `webSearch` set,
+// the router refused them all as a provider without server tools (2026-10-07).
+test("a search routed to a ChatGPT provider is served by its own search without webSearch", async () => {
+  const reply = await searchThrough("gpt-6-luna@low", (url) => ({
+    providers: { chatgpt: { type: "chatgpt", auth: "own", url, models: [{ id: "gpt-6-luna" }] } },
+  }));
+  assertSearched(reply, "chatgpt/gpt-6-luna");
 });

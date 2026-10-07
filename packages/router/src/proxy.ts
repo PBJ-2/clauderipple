@@ -751,6 +751,13 @@ export class Proxy {
     // Say so in the shape the CLI prints. A search that fails visibly can be retried by a human;
     // one that returns prose shaped like an answer cannot.
     if (search && route && json && !this.canRunServerTools(route.provider, cfg)) {
+      // A ChatGPT provider has a search of its own — the backend `webSearch` names — so a search
+      // routed there is served by it, not refused. Requiring `webSearch` as well refused every
+      // search of a `smallFast` slot pointed at Luna while the Clients screen called that provider
+      // searchable (2026-10-07: 41 searches failed with nothing on screen to say why). A configured
+      // backend on this same provider has already had its try above.
+      const own = cfg.providers[route.provider]?.type === "chatgpt" && cfg.webSearch?.provider !== route.provider;
+      if (own && (await this.serveWebSearch(res, json, search, { provider: route.provider, model: route.model }, record, finish))) return;
       const blocks = webSearchErrorBlocks(search, "unavailable");
       const model = typeof json.model === "string" ? json.model : "unknown";
       const wantStream = json.stream === true;
