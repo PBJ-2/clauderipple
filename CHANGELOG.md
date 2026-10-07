@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.6 — 2026-10-07
+
+### Fixed
+
+- **Web search works with a ChatGPT model on the small/fast slot.** With that slot on a ChatGPT
+  model (Luna, say) and no web-search provider set, every `WebSearch` failed as "unavailable",
+  while the Clients screen called ChatGPT searchable. A search sent to a ChatGPT model is now
+  answered by your ChatGPT subscription's own search.
+
 ## 0.8.5 — 2026-10-07
 
 ### Fixed
