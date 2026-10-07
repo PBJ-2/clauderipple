@@ -672,6 +672,39 @@ test("POST /api/providers/probe discovers OpenAI-compatible models and probes Ch
   }
 });
 
+// A provider entered by hand on the Responses wire may serve nothing else, so its test goes there.
+test("POST /api/providers/probe tests a hand-entered Responses provider on /responses", async () => {
+  const seen: { path?: string | undefined; body?: Record<string, unknown> } = {};
+  const upstream = http.createServer((req, res) => {
+    seen.path = req.url;
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      seen.body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+      if (req.url === "/v1/responses") res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ output: [] }));
+      else res.writeHead(404).end();
+    });
+  });
+  await new Promise<void>((resolveP) => upstream.listen(0, "127.0.0.1", resolveP));
+  const address = upstream.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    await withAdmin(makeCfg(), async ({ port }) => {
+      const res = await fetch(`${base()}:${port}/api/providers/probe`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "openai-compatible", url: `http://127.0.0.1:${address.port}/v1/`, wire: "responses", headers: { authorization: "Bearer secret-key" }, probeModel: "resp-model" }),
+      });
+      assert.deepEqual(await res.json(), { ok: true, auth: "ok", models: [] });
+    });
+    assert.equal(seen.path, "/v1/responses");
+    assert.equal(seen.body?.model, "resp-model");
+    assert.equal(seen.body?.input, "hi");
+  } finally {
+    await new Promise<void>((resolveP, reject) => upstream.close((error) => error ? reject(error) : resolveP()));
+  }
+});
+
 // A provider built from a preset reaches several wires on one `/models` catalog, and the catalog
 // reports ids alone. The preset's fallback list is the only place each model's wire, endpoint and auth
 // convention is written, so discovery has to fold it in — a model left bare would be sent in the

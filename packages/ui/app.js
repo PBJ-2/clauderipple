@@ -904,6 +904,7 @@ async function probeProvider(name, provider, onComplete) {
         // Some vendors refuse a request without it rather than merely losing the cache, so a test
         // that leaves it out reports a broken provider that works perfectly.
         sessionHeader: provider.sessionHeader || (provider.preset && presetById(provider.preset) && presetById(provider.preset).sessionHeader),
+        wire: provider.wire,
       };
     const result = await api("/api/providers/probe", {
       method: "POST",
@@ -1957,6 +1958,12 @@ function openProviderForm(options) {
   const urlInput = el("input", { value: (existing && existing.url) || (preset && preset.anthropicBaseUrl) || "", placeholder: "https://" });
   const wireSelect = el("select", {}, [selectOption("chat", "Chat Completions"), selectOption("responses", "Responses")]);
   wireSelect.value = (existing && existing.wire) || (preset && preset.wire) || "chat";
+  // A provider entered by hand speaks whichever API its docs name, so the form asks instead of
+  // assuming Anthropic: an OpenAI-compatible address was saved as Anthropic and tested on
+  // /v1/messages, which answered 404 (2026-10-07, reported by a user).
+  const formatSelect = el("select", {}, [selectOption("anthropic", "Anthropic Messages"), selectOption("chat", "OpenAI Chat Completions"), selectOption("responses", "OpenAI Responses")]);
+  const openAiNow = () => isCustom ? formatSelect.value !== "anthropic" : isOpenAi;
+  const wireNow = () => isCustom ? formatSelect.value : wireSelect.value;
   const pickerInput = el("input", { type: "checkbox", checked: Boolean(existing && (existing.models || []).some((model) => {
     const id = typeof model === "string" ? model : model.id;
     return ((currentConfig.cli && currentConfig.cli.extraModels) || []).some((extra) => extra.model === id);
@@ -1985,13 +1992,23 @@ function openProviderForm(options) {
   const advancedContent = el("div", { class: "advanced-content" });
   let chatgptFields = [];
   if (!isChatgpt) {
-    advancedContent.appendChild(inputRow(t("providers.url"), urlInput, isOpenAi ? t("providers.openaiUrlHelp") : t("providers.urlHelp")));
+    // A hand-entered provider shows the address above, outside this section; one input cannot sit in
+    // both places, and this row was left with its label and help but no field.
+    if (!isCustom) advancedContent.appendChild(inputRow(t("providers.url"), urlInput, isOpenAi ? t("providers.openaiUrlHelp") : t("providers.urlHelp")));
     if (isOpenAi) advancedContent.appendChild(inputRow(t("providers.wire"), wireSelect, t("providers.wireHelp")));
     if (isCustom) {
       const authSelect = el("select", {}, [selectOption("x-api-key", "x-api-key"), selectOption("authorization-bearer", "Authorization: Bearer")]);
       authSelect.value = headerKind;
       advancedContent.appendChild(inputRow(t("providers.keyType"), authSelect, t("providers.keyTypeHelp")));
-      authSelect.addEventListener("change", () => { keyInput.dataset.headerKind = authSelect.value; });
+      let authPicked = false;
+      authSelect.addEventListener("change", () => { authPicked = true; keyInput.dataset.headerKind = authSelect.value; });
+      // OpenAI-compatible APIs take the key as a Bearer token, so follow the format until the
+      // header has been picked by hand.
+      formatSelect.addEventListener("change", () => {
+        if (authPicked) return;
+        authSelect.value = openAiNow() ? "authorization-bearer" : "x-api-key";
+        keyInput.dataset.headerKind = authSelect.value;
+      });
     }
     const extraHeaders = el("textarea", { rows: "2", placeholder: "header-name: value" });
     const additional = Object.entries(currentHeaders).filter(([key]) => key.toLowerCase() !== "x-api-key" && key.toLowerCase() !== "authorization");
@@ -2031,11 +2048,16 @@ function openProviderForm(options) {
     advancedContent._chatgpt = { auth, effort, identity, append };
   }
   advanced.appendChild(advancedContent);
+  const customUrlRow = isCustom ? inputRow(t("providers.url"), urlInput, t("providers.urlHelp")) : null;
+  if (isCustom) formatSelect.addEventListener("change", () => {
+    customUrlRow.querySelector("small").textContent = openAiNow() ? t("providers.openaiUrlHelp") : t("providers.urlHelp");
+  });
   const form = el("div", { class: "provider-form" }, [
     el("h1", { id: "modal-title", text: existing ? t("providers.edit") : t("providers.addTitle") }),
     inputRow(t("providers.name"), nameInput, t("providers.nameHelp")),
     !isChatgpt ? el("div", { class: "form-field key-field" }, [el("span", { text: t("providers.apiKey") }), el("div", { class: "key-control" }, [keyInput, showKey]), el("small", { text: t("providers.keyHelp") })]) : null,
-    isCustom ? inputRow(t("providers.url"), urlInput, t("providers.urlHelp")) : null,
+    isCustom ? inputRow(t("providers.wire"), formatSelect, t("providers.formatHelp")) : null,
+    customUrlRow,
     ...chatgptFields,
     !isChatgpt ? probeButton : null,
     result,
@@ -2069,7 +2091,7 @@ function openProviderForm(options) {
     }
     const prompt = advancedContent._prompt;
     return {
-      type: isOpenAi ? "openai-compatible" : "anthropic-compatible",
+      type: openAiNow() ? "openai-compatible" : "anthropic-compatible",
       url: urlInput.value.trim(),
       ...(prompt ? { identity: prompt.identity.checked } : {}),
       ...(prompt && prompt.append.value.trim() ? { instructionsAppend: prompt.append.value.trim() } : {}),
@@ -2077,7 +2099,7 @@ function openProviderForm(options) {
       // A vendor that asks for a session header keys its prompt cache on it, so carry it from the
       // preset rather than leaving the user to discover the bill.
       ...(preset && preset.sessionHeader ? { sessionHeader: preset.sessionHeader } : {}),
-      ...(isOpenAi ? { wire: wireSelect.value, caps: { effortLevels: (preset && preset.effortLevels) || [], reasoning: preset && preset.effortLevels && preset.effortLevels.length ? "effort" : "none" } } : {}),
+      ...(openAiNow() ? { wire: wireNow(), caps: { effortLevels: (preset && preset.effortLevels) || [], reasoning: preset && preset.effortLevels && preset.effortLevels.length ? "effort" : "none" } } : {}),
       ...(Object.keys(readHeaders()).length ? { headers: readHeaders() } : {}),
     };
   }
@@ -2089,6 +2111,9 @@ function openProviderForm(options) {
     else {
       const ticked = modelArea.querySelector(".model-picker").selected();
       if (ticked.length) d.probeModel = ticked[0].id;
+      // OpenAI-compatible APIs list their models beside the endpoints, so a hand-entered one need
+      // not have every id typed in.
+      if (d.type === "openai-compatible" && d.url) d.modelsUrl = `${d.url.replace(/\/+$/, "")}/models`;
     }
     return d;
   }

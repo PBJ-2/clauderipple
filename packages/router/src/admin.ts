@@ -196,6 +196,8 @@ type ProbeRequest = {
    * omits it reports a broken provider that is in fact fine.
    */
   sessionHeader?: string;
+  /** The OpenAI wire the provider is saved with. Only a hand-entered provider is tested on it; see `probeProvider`. */
+  wire?: "chat" | "responses";
 };
 
 const ANTHROPIC_EFFORT_LEVELS = ["low", "medium", "high", "max"];
@@ -832,6 +834,10 @@ function chatCompletionsUrl(base: string): string {
   return `${base.replace(/\/+$/, "")}/chat/completions`;
 }
 
+function responsesUrl(base: string): string {
+  return `${base.replace(/\/+$/, "")}/responses`;
+}
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -937,12 +943,17 @@ async function probeProvider(body: ProbeRequest, probeFetch: (url: string, init:
   }
 
   const openai = body.type === "openai-compatible";
-  const checkUrl = openai ? chatCompletionsUrl(body.url) : messagesUrl(body.url);
+  // A preset's test model is picked for Chat Completions (see `presetProbeModel`), so only a provider
+  // entered by hand is tested on Responses: one that serves nothing else answered the Chat test 404.
+  const responses = openai && body.wire === "responses" && !body.preset;
+  const checkUrl = responses ? responsesUrl(body.url) : openai ? chatCompletionsUrl(body.url) : messagesUrl(body.url);
   const checkModel = presetProbeModel(body.preset) ?? models[0]?.id ?? body.probeModel ?? "test";
-  const checkBody = openai
-    ? { model: checkModel, max_tokens: 1, stream: false, messages: [{ role: "user", content: "hi" }] }
-    : { model: checkModel, max_tokens: 1, messages: [{ role: "user", content: "hi" }] };
-  const label = openai ? "chat completions endpoint" : "messages endpoint";
+  const checkBody = responses
+    ? { model: checkModel, max_output_tokens: 16, stream: false, store: false, input: "hi" }
+    : openai
+      ? { model: checkModel, max_tokens: 1, stream: false, messages: [{ role: "user", content: "hi" }] }
+      : { model: checkModel, max_tokens: 1, messages: [{ role: "user", content: "hi" }] };
+  const label = responses ? "responses endpoint" : openai ? "chat completions endpoint" : "messages endpoint";
   try {
     const response = await probeFetch(checkUrl, {
       method: "POST",
@@ -1377,7 +1388,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           sendJson(res, 400, { error: "expected provider probe object" });
           return;
         }
-        const probe = parsed as { type?: unknown; name?: unknown; auth?: unknown; apiKey?: unknown; url?: unknown; headers?: unknown; modelsUrl?: unknown; modelsAuthHeader?: unknown; probeModel?: unknown; sessionHeader?: unknown; preset?: unknown };
+        const probe = parsed as { type?: unknown; name?: unknown; auth?: unknown; apiKey?: unknown; url?: unknown; headers?: unknown; modelsUrl?: unknown; modelsAuthHeader?: unknown; probeModel?: unknown; sessionHeader?: unknown; preset?: unknown; wire?: unknown };
         if (probe.type === "anthropic") {
           if (probe.auth === "claude-code") {
             sendJson(res, 200, probeClaudeCodeAuth(deps));
@@ -1441,6 +1452,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           ...(probe.modelsAuthHeader ? { modelsAuthHeader: probe.modelsAuthHeader } : {}),
           ...(typeof probe.preset === "string" && probe.preset ? { preset: probe.preset } : {}),
           ...(typeof probe.probeModel === "string" ? { probeModel: probe.probeModel } : {}),
+          ...(probe.wire === "chat" || probe.wire === "responses" ? { wire: probe.wire } : {}),
         }, deps.probeModelFetch ?? fetchWithTimeout);
         sendJson(res, 200, result);
         return;
