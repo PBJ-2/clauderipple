@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.7 — 2026-10-07
+
+### Fixed
+
+- **"Enter manually" takes OpenAI-compatible APIs.** The form now asks for the API format
+  (Anthropic Messages, OpenAI Chat Completions or OpenAI Responses). It used to save every hand-entered
+  provider as Anthropic-compatible, so an OpenAI-compatible address failed its connection check with
+  a 404. An OpenAI-compatible provider also fills its model list from `/models`.
+- **Opus 404s after a pause no longer show as errors.** Since Claude Code 2.1.288, a turn after a
+  few idle minutes often comes back 404 `thread_not_found`, and Claude Code resends the conversation
+  at once with the prompt cache intact. Nothing fails, so the log, the line above the prompt and the
+  summary now show such requests as resent, not failed.
+
 ## 0.8.6 — 2026-10-07
 
 ### Fixed
