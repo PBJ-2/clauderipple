@@ -105,6 +105,8 @@ function fallbackEffortLevels(provider, model) {
   const explicit = modelEffortLevels(provider, model);
   if (explicit !== undefined) return explicit;
   if (provider.type === "chatgpt") return CHATGPT_ULTRA_MODELS.has(model) ? [...CHATGPT_EFFORT_LEVELS, "ultra"] : [...CHATGPT_EFFORT_LEVELS];
+  // What the router's grok adapter sends a model the proxy's listing has not described.
+  if (provider.type === "grok") return ["low", "medium", "high", "xhigh"];
   const preset = provider.preset && presetById(provider.preset);
   if (provider.type === "openai-compatible") return provider.caps && provider.caps.reasoning === "effort" && Array.isArray(provider.caps.effortLevels) ? provider.caps.effortLevels : [];
   return provider.caps && Array.isArray(provider.caps.effortLevels) ? provider.caps.effortLevels : (preset && preset.effortLevels) || [];
@@ -894,6 +896,8 @@ async function probeProvider(name, provider, onComplete) {
       ? { type: "anthropic", auth: provider.auth, ...(provider.auth === "api-key" && provider.apiKey ? { apiKey: provider.apiKey } : {}) }
       : provider.type === "google"
       ? { type: "google", auth: provider.auth, ...(provider.apiKey ? { apiKey: provider.apiKey } : {}), ...(provider.url ? { url: provider.url } : {}) }
+      : provider.type === "grok"
+      ? { type: "grok", ...Object.fromEntries(["home", "cli", "url", "clientVersion"].filter((key) => provider[key]).map((key) => [key, provider[key]])) }
       : {
         type: provider.type,
         url: provider.url,
@@ -1005,6 +1009,7 @@ function providerKind(name, provider) {
   const preset = provider.preset && presetById(provider.preset);
   if (provider.type === "chatgpt") return t("providers.chatgpt");
   if (provider.type === "google") return `${t("providers.google")} · ${provider.auth === "antigravity" ? t("providers.googleAntigravity") : t("providers.apiKey")}`;
+  if (provider.type === "grok") return t("providers.grok");
   if (provider.type === "anthropic") return provider.auth === "claude-code"
     ? `${t("providers.anthropic")} · ${provider.accountPool ? t("providers.rotationOn") : t("providers.rotationOff")}`
     : `${t("providers.anthropic")} · ${t("providers.apiKey")}`;
@@ -1642,6 +1647,9 @@ function openProviderChooser() {
   const google = el("button", { class: "chooser-tile", type: "button" }, [el("strong", { text: t("providers.google") }), el("span", { text: t("providers.googleHelp") })]);
   google.addEventListener("click", () => openProviderForm({ kind: "google" }));
   grid.appendChild(google);
+  const grok = el("button", { class: "chooser-tile", type: "button" }, [el("strong", { text: t("providers.grok") }), el("span", { text: t("providers.grokHelp") })]);
+  grok.addEventListener("click", () => openProviderForm({ kind: "grok" }));
+  grid.appendChild(grok);
   const native = presets.filter((preset) => (preset.kind || "anthropic-compatible") === "anthropic-compatible");
   for (const preset of native) {
     const tile = el("button", { class: "chooser-tile", type: "button" }, [el("strong", { text: preset.name }), el("span", { text: t("providers.presetHelp") })]);
@@ -1832,6 +1840,95 @@ function openAnthropicProviderForm(options) {
   showModal(form, () => { formActive = false; });
   if (auth.value === "claude-code") void runProbe();
 }
+/**
+ * A Grok subscription: nothing to type. The router reads the Grok CLI's own session, so the form
+ * checks that it is there, lists what the proxy offers and saves the ticked models. The check runs
+ * as soon as the form opens, since there is no key to wait for.
+ */
+function openGrokProviderForm(options) {
+  let formActive = true;
+  const existing = options.provider;
+  const nameInput = el("input", { value: options.name || t("providers.grok"), maxlength: "60" });
+  const result = el("div", { class: "probe-result" });
+  const probeButton = el("button", { class: "btn secondary", type: "button", text: t("providers.check") });
+  let foundModels = modelsOf(existing);
+  const currentChecked = new Set(foundModels.map((model) => model.id));
+  const modelArea = el("div", { class: "form-field" });
+  function renderModels(checked, help) {
+    modelArea.replaceChildren(el("span", { text: t("providers.models") }), hint(help || t("providers.modelsHelp")), modelChecklist(foundModels, checked, { allowCustom: true }));
+  }
+  renderModels(currentChecked);
+  // Fields this form has no control for (a home, a binary, a pinned version) go to the probe as saved.
+  const probeBody = () => ({ type: "grok", ...Object.fromEntries(["home", "cli", "url", "clientVersion"].filter((key) => existing && existing[key]).map((key) => [key, existing[key]])) });
+  async function runProbe() {
+    probeButton.disabled = true;
+    result.textContent = t("providers.checking");
+    try {
+      const response = await api("/api/providers/probe", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(probeBody()) });
+      if (!formActive) return;
+      const failed = response.auth === "missing" || response.auth === "bad-key" ? t("providers.grokSignInFirst") : t("providers.probeFailed");
+      result.replaceChildren(...[
+        el("span", { class: response.ok ? "ok-text" : "bad-text", text: response.ok ? t("providers.probeOk") : failed }),
+        response.error ? el("div", { class: "small", text: response.error }) : null,
+      ].filter(Boolean));
+      if (Array.isArray(response.models) && response.models.length) {
+        const ticked = modelArea.querySelector(".model-picker").selected();
+        // A handful of models, so a new provider starts with all of them ticked; an existing one keeps
+        // its own picks.
+        const keep = existing ? new Set([...currentChecked, ...ticked.map((model) => model.id)]) : new Set(response.models.map((model) => model.id));
+        foundModels = [...ticked.filter((model) => !response.models.some((m) => m.id === model.id)), ...response.models];
+        renderModels(keep);
+      }
+    } catch (error) { if (formActive) result.replaceChildren(el("span", { class: "bad-text", text: t("providers.probeFailed") }), el("div", { class: "small", text: error.message })); }
+    finally { if (formActive) probeButton.disabled = false; }
+  }
+  probeButton.addEventListener("click", () => void runProbe());
+  const advanced = el("details", { class: "details" }, [el("summary", { text: t("common.advanced") })]);
+  const identity = el("input", { type: "checkbox", checked: !(existing && existing.identity === false) });
+  const append = el("textarea", { rows: "2", value: (existing && existing.instructionsAppend) || "" });
+  advanced.appendChild(el("div", { class: "advanced-content" }, [
+    el("div", { class: "form-field" }, [el("label", { class: "check" }, [identity, el("span", { text: t("providers.identity") })]), el("small", { text: t("providers.identityHelp") })]),
+    inputRow(t("providers.append"), append, t("providers.appendHelp")),
+  ]));
+  const pickerInput = el("input", { type: "checkbox", checked: existing ? modelsOf(existing).some((model) => ((currentConfig.cli && currentConfig.cli.extraModels) || []).some((extra) => extra.model === model.id)) : true });
+  const form = el("div", { class: "provider-form" }, [
+    el("h1", { id: "modal-title", text: existing ? t("providers.edit") : t("providers.addTitle") }),
+    inputRow(t("providers.name"), nameInput, t("providers.nameHelp")),
+    el("div", { class: "form-field" }, [el("span", { text: t("providers.credentials") }), hint(t("providers.grokFormHelp")), el("small", { class: "warn-text", text: t("providers.grokWarningShort") })]),
+    probeButton, result, modelArea,
+    el("label", { class: "check picker-check" }, [pickerInput, el("span", { text: t("providers.showInPicker") })]),
+    pickerModeOn() ? null : hint(t("providers.pickerOffHint")),
+    advanced,
+  ]);
+  const saveButton = el("button", { class: "btn", type: "button", "data-default-action": "", text: existing ? t("common.save") : t("providers.add") });
+  saveButton.addEventListener("click", async () => {
+    const typedName = nameInput.value.trim();
+    if (!typedName) { toast(t("providers.nameRequired"), true); return; }
+    const next = clone(await latestConfig());
+    const providerName = existing ? options.name : uniqueName(typedName, next.providers);
+    const saved = existing && (next.providers[options.name] || existing);
+    const checkedModels = withSavedModelFields(form.querySelector(".model-picker").selected(), saved);
+    const formKeys = new Set(["type", "identity", "instructionsAppend", "models"]);
+    const kept = saved ? Object.fromEntries(Object.entries(saved).filter(([key]) => !formKeys.has(key))) : {};
+    next.providers[providerName] = {
+      ...kept,
+      type: "grok",
+      identity: identity.checked,
+      ...(append.value.trim() ? { instructionsAppend: append.value.trim() } : {}),
+      models: checkedModels,
+    };
+    const existingSelections = pickerSelectionsExcept(next, providerName);
+    applyPickerSelections(next, pickerInput.checked ? [...existingSelections, ...checkedModels.map((model) => ({ ...model, provider: providerName }))] : existingSelections);
+    saveButton.disabled = true;
+    try { await configRequest(next); currentConfig = next; selectedProviderName = providerName; providerDetailTab = "overview"; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); toast(t("common.saved")); await offerPickerOn(pickerInput.checked && checkedModels.length > 0); }
+    catch (error) { toast(t("common.saveFailed"), true, error.message); }
+    finally { saveButton.disabled = false; }
+  });
+  form.appendChild(el("div", { class: "actions end" }, [el("button", { class: "btn secondary", type: "button", text: t("common.cancel"), onclick: closeModal }), saveButton]));
+  showModal(form, () => { formActive = false; });
+  void runProbe();
+}
+
 function openGoogleProviderForm(options) {
   let formActive = true;
   const existing = options.provider;
@@ -1951,6 +2048,7 @@ function openProviderForm(options) {
   const displayName = options.name || (preset && preset.name) || (isChatgpt ? t("providers.chatgpt") : isAnthropic ? t("providers.anthropic") : t("providers.customName"));
   if (isAnthropic) { openAnthropicProviderForm(options); return; }
   if (options.kind === "google" || (existing && existing.type === "google")) { openGoogleProviderForm(options); return; }
+  if (options.kind === "grok" || (existing && existing.type === "grok")) { openGrokProviderForm(options); return; }
   const nameInput = el("input", { value: displayName, maxlength: "60" });
   const keyInput = el("input", { type: "password", autocomplete: "off", placeholder: t("providers.keyPlaceholder") });
   const showKey = el("button", { class: "eye-button", type: "button", text: t("common.show") });

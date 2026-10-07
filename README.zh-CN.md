@@ -318,6 +318,7 @@ Claude 模型会以各自的名称出现在 Codex 的模型列表中（ClaudeRip
 |---|---|---|---|---|
 | ChatGPT 订阅 | Codex 后端 | 可登录多个账号，一个用尽自动切换（也会复用 Codex 登录） | 从你的订阅读取（GPT-6 Sol、Luna、Astra、GPT-5.6 …） | 推理强度 low…max（Luna：ultra），提示缓存 94–99 % |
 | Google Gemini | Gemini API | AI Studio API 密钥，或 Google 账号登录（Antigravity，见[常见问题](#通过-google-账号使用-gemini-呢)） | 自动发现 | 格式转换（Messages ⇄ generateContent），跨轮次保留思维签名（thought signatures） |
+| Grok 订阅 | Grok CLI 聊天代理 | Grok CLI 的登录（`grok login`），由 CLI 刷新 | 从你的订阅读取（Grok 4.7、4.7 Fast、4.6、4.5） | 格式转换（Chat Completions），推理强度 low…xhigh；CLI 自己的通道，不是公开 API（[§4e](docs/ARCHITECTURE.md#4e-grok-providers-implemented-2026-10-08)） |
 | OpenRouter | Anthropic 兼容 | API 密钥 | 400+，自动发现 | 从 API 读取各模型对推理强度的支持情况 |
 | DeepSeek、Kimi、Z.ai GLM、MiniMax、Qwen（国际版 / 国内版） | Anthropic 兼容 | API 密钥 | 预设 | 已对照厂商文档验证 |
 | xAI Grok、Mistral、Groq、Together、Fireworks | OpenAI 兼容 | API 密钥 | 自动发现 | 格式转换（Chat Completions / Responses） |

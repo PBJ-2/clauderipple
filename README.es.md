@@ -546,6 +546,7 @@ compatible con Anthropic que hayas configurado está disponible de la misma form
 |---|---|---|---|---|
 | Suscripción de ChatGPT | Backend de Codex | varios inicios de sesión, con cambio cuando uno se agota (también reutiliza el de Codex) | leída de tu suscripción (GPT-6 Sol, Luna, Astra, GPT-5.6 …) | esfuerzo low…max (Luna: ultra), caché de prompts 94–99 % |
 | Google Gemini | API de Gemini | clave de API de AI Studio o inicio de sesión con cuenta de Google (Antigravity, consulta las preguntas frecuentes) | descubierta | traducido (Messages ⇄ generateContent), las firmas de pensamiento se conservan entre turnos |
+| Suscripción de Grok | proxy de chat de la CLI de Grok | el inicio de sesión de la CLI de Grok (`grok login`), renovado por la CLI | leída de tu suscripción (Grok 4.7, 4.7 Fast, 4.6, 4.5) | traducido (Chat Completions), esfuerzo low…xhigh; canal propio de la CLI, no una API publicada ([§4e](docs/ARCHITECTURE.md#4e-grok-providers-implemented-2026-10-08)) |
 | OpenRouter | Compatible con Anthropic | clave de API | más de 400, descubierta | compatibilidad de esfuerzo por modelo leída de la API |
 | DeepSeek, Kimi, Z.ai GLM, MiniMax, Qwen (intl / cn) | Compatible con Anthropic | clave de API | predefinida | verificado con la documentación del proveedor |
 | xAI Grok, Mistral, Groq, Together, Fireworks | Compatible con OpenAI | clave de API | descubierta | traducido (Chat Completions / Responses) |

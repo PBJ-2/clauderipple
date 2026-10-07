@@ -317,6 +317,7 @@ ClaudeのモデルはCodexのモデル一覧にそれぞれの名前で表示さ
 |---|---|---|---|---|
 | ChatGPTサブスクリプション | Codexバックエンド | 複数ログイン、上限で自動切り替え（Codexのログインも再利用） | サブスクリプションから取得（GPT-6 Sol、Luna、Astra、GPT-5.6 …） | 推論強度 low…max（Lunaはultra）、プロンプトキャッシュ 94–99 % |
 | Google Gemini | Gemini API | AI StudioのAPIキー、またはGoogleアカウントでのログイン（Antigravity、FAQ参照） | 自動検出 | 変換（Messages ⇄ generateContent）、thought signatureをターン間で保持 |
+| Grokサブスクリプション | Grok CLIのチャットプロキシ | Grok CLIのログイン（`grok login`）、更新はCLIが行う | サブスクリプションから取得（Grok 4.7、4.7 Fast、4.6、4.5） | 変換（Chat Completions）、推論強度 low…xhigh。公開APIではなくCLI専用の経路（[§4e](docs/ARCHITECTURE.md#4e-grok-providers-implemented-2026-10-08)） |
 | OpenRouter | Anthropic互換 | APIキー | 400以上、自動検出 | モデルごとの推論強度への対応をAPIから取得 |
 | DeepSeek、Kimi、Z.ai GLM、MiniMax、Qwen（国際版 / 中国版） | Anthropic互換 | APIキー | プリセット | ベンダーのドキュメントで確認済み |
 | xAI Grok、Mistral、Groq、Together、Fireworks | OpenAI互換 | APIキー | 自動検出 | 変換（Chat Completions / Responses） |

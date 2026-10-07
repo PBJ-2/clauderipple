@@ -533,6 +533,7 @@ que você tenha configurado fica disponível da mesma forma.
 |---|---|---|---|---|
 | Assinatura do ChatGPT | backend do Codex | vários logins, trocando quando um se esgota (o login do Codex também é reaproveitado) | lida da sua assinatura (GPT-6 Sol, Luna, Astra, GPT-5.6 …) | esforço low…max (Luna: ultra), cache de prompt 94–99% |
 | Google Gemini | API Gemini | chave de API do AI Studio, ou login com conta do Google (Antigravity, veja as Perguntas frequentes) | descoberta automática | traduzido (Messages ⇄ generateContent), thought signatures mantidas entre turnos |
+| Assinatura do Grok | proxy de chat da CLI do Grok | o login da CLI do Grok (`grok login`), renovado pela CLI | lida da sua assinatura (Grok 4.7, 4.7 Fast, 4.6, 4.5) | traduzido (Chat Completions), esforço low…xhigh; canal próprio da CLI, não uma API publicada ([§4e](docs/ARCHITECTURE.md#4e-grok-providers-implemented-2026-10-08)) |
 | OpenRouter | compatível com Anthropic | chave de API | mais de 400, descoberta automática | suporte a esforço por modelo lido da API |
 | DeepSeek, Kimi, Z.ai GLM, MiniMax, Qwen (intl / cn) | compatível com Anthropic | chave de API | preset | conferido com a documentação do fornecedor |
 | xAI Grok, Mistral, Groq, Together, Fireworks | compatível com OpenAI | chave de API | descoberta automática | traduzido (Chat Completions / Responses) |

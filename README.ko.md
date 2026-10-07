@@ -435,6 +435,7 @@ Anthropic API 키로 갑니다. 구독 로그인 재사용은 Anthropic 약관�
 |---|---|---|---|---|
 | ChatGPT 구독 | Codex 백엔드 | 로그인 여러 개, 한도 차면 자동 전환(Codex 로그인도 재사용) | 구독에서 자동으로 읽음(GPT-6 Sol·Luna·Astra, GPT-5.6 …) | 추론 강도 low…max(Luna는 ultra), 프롬프트 캐시 94~99 % |
 | Google Gemini | Gemini API | AI Studio API 키, 또는 Google 계정 로그인(Antigravity, 위 FAQ 참고) | 자동 검색 | 번역(Messages ⇄ generateContent), 턴 사이 thought signature 유지 |
+| Grok 구독 | Grok CLI 채팅 프록시 | Grok CLI 로그인(`grok login`), 갱신은 CLI가 함 | 구독에서 자동으로 읽음(Grok 4.7, 4.7 Fast, 4.6, 4.5) | 번역(Chat Completions), 추론 강도 low…xhigh. 공개 API가 아닌 CLI 전용 채널([§4e](docs/ARCHITECTURE.md#4e-grok-providers-implemented-2026-10-08)) |
 | OpenRouter | Anthropic 호환 | API 키 | 400+, 자동 검색 | 모델별 추론 강도 지원을 API에서 읽음 |
 | DeepSeek, Kimi, Z.ai GLM, MiniMax, Qwen(국제/중국) | Anthropic 호환 | API 키 | 프리셋 | 벤더 공식 문서로 확인 |
 | xAI Grok, Mistral, Groq, Together, Fireworks | OpenAI 호환 | API 키 | 자동 검색 | 번역(Chat Completions / Responses) |
