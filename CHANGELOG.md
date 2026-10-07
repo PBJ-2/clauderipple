@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.8 — 2026-10-07
+
+### Fixed
+
+- **Web search works with OpenCode Go's DeepSeek on the small/fast slot.** With that slot on
+  DeepSeek V4.1 Flash, V4 Flash or V4 Pro through OpenCode Go, every `WebSearch` was refused
+  and the Clients screen marked those models "no web search here". The same plan runs the search on
+  its Anthropic endpoint, so the router now sends searches for these models there. Their other
+  requests are unchanged.
+
 ## 0.8.7 — 2026-10-07
 
 ### Fixed
