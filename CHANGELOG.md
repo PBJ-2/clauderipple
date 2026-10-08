@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.9 — 2026-10-08
+
+### Fixed
+
+- **New Claude models appear on their own.** The Claude model list was built into ClaudeRipple,
+  so Opus 5.5, Sonnet 5.5 and Haiku 5.5 never showed up. It now comes from Anthropic's model list
+  for your account, refreshed hourly. When a newer model ships in a family you already use (say
+  Opus 5.5 after Opus 5), it is added to your Claude provider on its own. Untick it and it stays
+  unticked.
+
 ## 0.8.8 — 2026-10-07
 
 ### Fixed
