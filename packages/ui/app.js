@@ -1795,7 +1795,10 @@ function openAnthropicProviderForm(options) {
         response.error ? el("div", { class: "small", text: response.error.replace(/^no-credits:\s*/, "") }) : null,
       ].filter(Boolean));
       if (Array.isArray(response.models) && response.models.length) {
-        foundModels = response.models;
+        // Anthropic's own list, so a release shows up here without a ClaudeRipple update. A saved
+        // model the list no longer carries stays visible and ticked rather than dropped on save.
+        const listed = new Set(response.models.map((model) => model.id));
+        foundModels = [...response.models, ...modelsOf(existing).filter((model) => !listed.has(model.id))];
         selected = new Set(existing ? modelsOf(existing).map((model) => model.id) : foundModels.map((model) => model.id));
         renderModels();
       }
@@ -1803,6 +1806,9 @@ function openAnthropicProviderForm(options) {
     finally { if (formActive) probeButton.disabled = false; }
   }
   probeButton.addEventListener("click", () => void runProbe());
+  // The Claude login needs nothing typed, so fetch the account's model list as soon as the form
+  // opens: a saved provider otherwise showed only what was ticked when it was first saved.
+  if (auth.value === "claude-code") setTimeout(() => void runProbe(), 0);
   const modeHint = hint("");
   function syncModeHint() { modeHint.textContent = auth.value === "claude-code" && accountPool ? t("providers.anthropicPoolRouting") : t("providers.anthropicIngressOnly"); }
   auth.addEventListener("change", syncModeHint);

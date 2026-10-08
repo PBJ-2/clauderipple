@@ -43,6 +43,7 @@ import { ResponseUsageTap, type RequestLog, type RequestRecord, type RequestUsag
 import { credentialHeaderValues, redactErrorText, redactHeaders } from "./redact.ts";
 import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
 import { ClaudeAccountAuthPool } from "./providers/anthropic-account-pool.ts";
+import { ClaudeModelCatalog } from "./providers/anthropic-models.ts";
 import { ClaudeUsage } from "./providers/anthropic-usage.ts";
 import { dropForeignThinking } from "./thinking.ts";
 
@@ -229,6 +230,8 @@ export class Proxy {
   private readonly claudeAccounts: ClaudeAccountAuthPool;
   /** Each Claude subscription account's usage, for the admin status (never a token). */
   readonly claudeUsage: ClaudeUsage;
+  /** The Claude models the signed-in account can use, from Anthropic's own list. */
+  readonly claudeModels: ClaudeModelCatalog;
   private readonly deps: ProxyDeps;
   /**
    * Cooldowns, quarantines and conversation stickiness for provider credentials. In memory: a
@@ -393,6 +396,10 @@ export class Proxy {
       ...(deps.observedClaudeCodeAuth ? { observed: deps.observedClaudeCodeAuth } : {}),
     });
     this.claudeUsage = new ClaudeUsage(this.claudeAccounts, {
+      upstream: () => this.deps.config().upstream,
+      warn: (message) => deps.log.warn(message),
+    });
+    this.claudeModels = new ClaudeModelCatalog(this.claudeAccounts, {
       upstream: () => this.deps.config().upstream,
       warn: (message) => deps.log.warn(message),
     });

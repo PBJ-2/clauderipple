@@ -301,7 +301,7 @@ test("GET /api/claude-models falls back when no picker bootstrap has arrived", a
     assert.equal(res.status, 200);
     const body = (await res.json()) as { source: string; models: { id: string; name: string }[] };
     assert.equal(body.source, "fallback");
-    assert.deepEqual(body.models[0], { id: "claude-fable-5-1", name: "Fable 5.1" });
+    assert.deepEqual(body.models[0], { id: "claude-haiku-5-5", name: "Haiku 5.5" });
   });
 });
 
@@ -474,7 +474,7 @@ test("POST /api/providers/probe accepts native Claude Code auth and reports only
   await withAdmin(makeCfg(), async ({ port, home }) => {
     const missing = await fetch(`${base()}:${port}/api/providers/probe`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "anthropic", auth: "claude-code" }) });
     assert.deepEqual(await missing.json(), { ok: false, auth: "missing", source: null, signedIn: null, accountCount: 0, models: [
-      { id: "claude-fable-5-1", name: "Fable 5.1" }, { id: "claude-opus-5-5", name: "Opus 5.5" }, { id: "claude-opus-5", name: "Opus 5" }, { id: "claude-sonnet-5", name: "Sonnet 5" }, { id: "claude-haiku-4-5", name: "Haiku 4.5" }, { id: "claude-fable-5", name: "Fable 5" }, { id: "claude-opus-4-8", name: "Opus 4.8" }, { id: "claude-opus-4-7", name: "Opus 4.7" }, { id: "claude-opus-4-6", name: "Opus 4.6" }, { id: "claude-sonnet-4-6", name: "Sonnet 4.6" },
+      { id: "claude-haiku-5-5", name: "Haiku 5.5" }, { id: "claude-sonnet-5-5", name: "Sonnet 5.5" }, { id: "claude-opus-5-5", name: "Opus 5.5" }, { id: "claude-fable-5-1", name: "Fable 5.1" }, { id: "claude-opus-5", name: "Opus 5" }, { id: "claude-sonnet-5", name: "Sonnet 5" }, { id: "claude-fable-5", name: "Fable 5" }, { id: "claude-opus-4-8", name: "Opus 4.8" }, { id: "claude-opus-4-7", name: "Opus 4.7" }, { id: "claude-sonnet-4-6", name: "Sonnet 4.6" }, { id: "claude-opus-4-6", name: "Opus 4.6" }, { id: "claude-haiku-4-5", name: "Haiku 4.5" },
     ] });
     saveClaudeAuthFile(home, "test-token", "2026-09-13T00:00:00.000Z");
     const available = await fetch(`${base()}:${port}/api/providers/probe`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "anthropic", auth: "claude-code" }) });
@@ -483,7 +483,7 @@ test("POST /api/providers/probe accepts native Claude Code auth and reports only
     assert.equal(body.auth, "ok");
     assert.equal(body.source, "token-file");
     assert.equal(body.signedIn, "setup-token");
-    assert.equal(body.models[0]?.id, "claude-fable-5-1");
+    assert.equal(body.models[0]?.id, "claude-haiku-5-5");
     assert.equal(JSON.stringify(body).includes("test-token"), false);
   });
 });
@@ -518,7 +518,7 @@ test("POST /api/providers/probe sends Anthropic API-key headers and treats a mod
   try {
     const res = await fetch(`${base()}:${admin.port}/api/providers/probe`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "anthropic", auth: "api-key", apiKey: "secret-key" }) });
     assert.deepEqual(await res.json(), { ok: true, auth: "ok", models: [
-      { id: "claude-fable-5-1", name: "Fable 5.1" }, { id: "claude-opus-5-5", name: "Opus 5.5" }, { id: "claude-opus-5", name: "Opus 5" }, { id: "claude-sonnet-5", name: "Sonnet 5" }, { id: "claude-haiku-4-5", name: "Haiku 4.5" }, { id: "claude-fable-5", name: "Fable 5" }, { id: "claude-opus-4-8", name: "Opus 4.8" }, { id: "claude-opus-4-7", name: "Opus 4.7" }, { id: "claude-opus-4-6", name: "Opus 4.6" }, { id: "claude-sonnet-4-6", name: "Sonnet 4.6" },
+      { id: "claude-haiku-5-5", name: "Haiku 5.5" }, { id: "claude-sonnet-5-5", name: "Sonnet 5.5" }, { id: "claude-opus-5-5", name: "Opus 5.5" }, { id: "claude-fable-5-1", name: "Fable 5.1" }, { id: "claude-opus-5", name: "Opus 5" }, { id: "claude-sonnet-5", name: "Sonnet 5" }, { id: "claude-fable-5", name: "Fable 5" }, { id: "claude-opus-4-8", name: "Opus 4.8" }, { id: "claude-opus-4-7", name: "Opus 4.7" }, { id: "claude-sonnet-4-6", name: "Sonnet 4.6" }, { id: "claude-opus-4-6", name: "Opus 4.6" }, { id: "claude-haiku-4-5", name: "Haiku 4.5" },
     ] });
     assert.equal(seen.url, "https://api.anthropic.com/v1/messages");
     assert.equal(seen.headers?.get("x-api-key"), "secret-key");

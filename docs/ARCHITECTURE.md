@@ -208,6 +208,18 @@ request went, and a `Pane` holds the request log.
 
 ## 4. Provider adapters
 
+- **The Claude model list is Anthropic's own (2026-10-08).** The native `anthropic`
+  provider's models came from a constant in admin.ts, so each release after it was cut
+  was missing from the provider form, the mapping table and the declared list until a
+  ClaudeRipple release caught up — Opus 5.5 (Sep 21), Sonnet 5.5 (Sep 28) and Haiku 5.5
+  (Oct 7) all were, while Claude Code itself had them. `GET /v1/models` answers the Claude
+  Code login (the observed headers) as well as an API key, newest first, with each model's
+  effort ladder, context window and lifecycle (measured: 14 active models). The router
+  caches it for an hour (`ClaudeModelCatalog`); the constant is only the fallback when no
+  sign-in answers. A release is also **declared** on its own, every six hours: added to a
+  native provider that already declares an older model of the same family, and remembered
+  in `claude-models-offered.json` so a model unticked afterwards is not added again.
+
 - **Declared models route themselves (2026-09-19).** A provider's `models` list —
   filled by the probe from the vendor's `/models`, ticked in the GUI — now decides
   routing when no rule matched: a model exactly one provider carries goes there,

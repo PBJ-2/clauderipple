@@ -36,6 +36,7 @@ import { measureModel, refusedByPlan, type Measured, type WireCandidate } from "
 import { catalogEntry } from "./catalog.ts";
 import { ClaudeCodeAuthStore, nativeAnthropicHeaders } from "./providers/anthropic.ts";
 import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
+import { fetchClaudeModels, newClaudeReleases, type ClaudeModel } from "./providers/anthropic-models.ts";
 import { codexEnabled, codexHome } from "../../cli/src/codex.ts";
 import { openBrowser } from "../../cli/src/browser.ts";
 import { caTrusted, currentAppProxy } from "../../cli/src/picker.ts";
@@ -145,6 +146,8 @@ export type AdminDeps = {
    * login, otherwise the account id `/api/claude-accounts` lists). Absent in tests.
    */
   claudeUsage?: () => Promise<Record<string, Record<string, unknown>>>;
+  /** The Claude models the signed-in account can use (`GET /v1/models`); null until one answer. Absent in tests. */
+  claudeModels?: () => Promise<ClaudeModel[] | null>;
 };
 
 /** Claude usage is looked up only where a Claude subscription provider is configured. */
@@ -289,18 +292,28 @@ export function effortLevelsForModel(cfg: Config, modelId: string): string[] | u
   return undefined;
 }
 
+// Only for when Anthropic's own list cannot be had (no sign-in yet, offline): the live list is
+// `deps.claudeModels`, and a release after this table is cut appears there by itself (2026-10-08).
 const CLAUDE_MODEL_FALLBACK: { id: string; name: string }[] = [
-  { id: "claude-fable-5-1", name: "Fable 5.1" },
+  { id: "claude-haiku-5-5", name: "Haiku 5.5" },
+  { id: "claude-sonnet-5-5", name: "Sonnet 5.5" },
   { id: "claude-opus-5-5", name: "Opus 5.5" },
+  { id: "claude-fable-5-1", name: "Fable 5.1" },
   { id: "claude-opus-5", name: "Opus 5" },
   { id: "claude-sonnet-5", name: "Sonnet 5" },
-  { id: "claude-haiku-4-5", name: "Haiku 4.5" },
   { id: "claude-fable-5", name: "Fable 5" },
   { id: "claude-opus-4-8", name: "Opus 4.8" },
   { id: "claude-opus-4-7", name: "Opus 4.7" },
-  { id: "claude-opus-4-6", name: "Opus 4.6" },
   { id: "claude-sonnet-4-6", name: "Sonnet 4.6" },
+  { id: "claude-opus-4-6", name: "Opus 4.6" },
+  { id: "claude-haiku-4-5", name: "Haiku 4.5" },
 ];
+
+/** The account's Claude models, or the table above when Anthropic's list cannot be had. */
+async function claudeModelList(deps: AdminDeps): Promise<(ModelEntry & { name: string })[]> {
+  const live = await deps.claudeModels?.().catch(() => null);
+  return live?.length ? live.map(({ line: _line, createdAt: _createdAt, ...model }) => ({ ...model, name: model.name ?? model.id })) : CLAUDE_MODEL_FALLBACK;
+}
 
 
 export function adminPort(cfg: Config): number {
@@ -732,7 +745,9 @@ function claudeAuthStore(deps: AdminDeps): ClaudeCodeAuthStore {
 }
 
 async function probeAnthropicApiKey(apiKey: string, probeFetch: (url: string, init: RequestInit) => Promise<Response> = fetchWithTimeout): Promise<{ ok: boolean; auth: ProbeAuth; models: ModelEntry[]; error?: string }> {
-  const models = CLAUDE_MODEL_FALLBACK;
+  // The key's own model list where it answers; a key that cannot list is still tested below.
+  const listed = await fetchClaudeModels("https://api.anthropic.com", { "x-api-key": apiKey }, probeFetch).catch(() => []);
+  const models: ModelEntry[] = listed.length ? listed.map(({ line: _line, createdAt: _createdAt, ...model }) => model) : CLAUDE_MODEL_FALLBACK;
   const label = "messages endpoint";
   try {
     const response = await probeFetch("https://api.anthropic.com/v1/messages", {
@@ -751,14 +766,14 @@ async function probeAnthropicApiKey(apiKey: string, probeFetch: (url: string, in
   }
 }
 
-function probeClaudeCodeAuth(deps: AdminDeps): { ok: boolean; auth: "ok" | "missing"; source: "observed" | "env" | "keychain" | "credentials-file" | "token-file" | null; signedIn: "oauth" | "setup-token" | null; accountCount: number; models: ModelEntry[] } {
+async function probeClaudeCodeAuth(deps: AdminDeps): Promise<{ ok: boolean; auth: "ok" | "missing"; source: "observed" | "env" | "keychain" | "credentials-file" | "token-file" | null; signedIn: "oauth" | "setup-token" | null; accountCount: number; models: ModelEntry[] }> {
   const source = claudeAuthStore(deps).describeSource();
   // Our own accounts are reported separately: a Claude Desktop session can outrank them, and without
   // this the screen would answer a finished sign-in with the source it was already showing.
   const accounts = listClaudeAccounts(homeDir());
   const hasUsableAccount = accounts.some((account) => !account.needsReauth && account.expiresAt > Date.now());
   const signedIn = accounts.length > 0 ? "oauth" : readClaudeAuthFile(homeDir())?.source ?? null;
-  return { ok: source !== null || hasUsableAccount, auth: source !== null || hasUsableAccount ? "ok" : "missing", source, signedIn, accountCount: accounts.length, models: CLAUDE_MODEL_FALLBACK };
+  return { ok: source !== null || hasUsableAccount, auth: source !== null || hasUsableAccount ? "ok" : "missing", source, signedIn, accountCount: accounts.length, models: await claudeModelList(deps) };
 }
 
 /** The reasoning levels a `GET /v1beta/models` entry says the model takes, or none to offer. */
@@ -1169,6 +1184,51 @@ export function measureUnsettledModels(deps: AdminDeps): number {
   return started;
 }
 
+/**
+ * Declare each Claude release the account has gained on every native Anthropic provider that
+ * declares an older model of the same family (`newClaudeReleases`). The declared list was whatever
+ * was ticked when the provider was saved, so Opus 5.5, Sonnet 5.5 and Haiku 5.5 stayed off it for
+ * weeks while Claude Code had them (2026-10-08). A model offered once is remembered in
+ * `claude-models-offered.json` and never offered again, so unticking a new model sticks.
+ * Returns the `provider/model` ids it declared.
+ */
+export async function adoptNewClaudeModels(deps: AdminDeps): Promise<string[]> {
+  const live = await deps.claudeModels?.().catch(() => null);
+  if (!live?.length) return [];
+  const stateFile = path.join(homeDir(), "claude-models-offered.json");
+  let offered = new Set<string>();
+  try {
+    const saved = JSON.parse(fs.readFileSync(stateFile, "utf8")) as { offered?: unknown };
+    if (Array.isArray(saved.offered)) offered = new Set(saved.offered.filter((id): id is string => typeof id === "string"));
+  } catch { /* first run: nothing offered yet */ }
+  let current: Config;
+  try {
+    current = JSON.parse(fs.readFileSync(deps.configFile, "utf8")) as Config;
+  } catch (e) {
+    deps.log.warn(`admin: claude models not adopted: could not read config: ${errorText(e)}`);
+    return [];
+  }
+  const added: string[] = [];
+  for (const [name, provider] of Object.entries(current.providers)) {
+    if (provider.type !== "anthropic" || !provider.models?.length) continue;
+    for (const model of newClaudeReleases(live, provider.models.map((entry) => entry.id), offered)) {
+      provider.models.push({ id: model.id, name: model.name ?? model.id });
+      added.push(`${name}/${model.id}`);
+    }
+  }
+  if (added.length) {
+    const errors = validate(current);
+    if (errors.length > 0) {
+      deps.log.warn(`admin: claude models not adopted: config did not validate: ${errors[0]}`);
+      return [];
+    }
+    writeConfigFile(deps.configFile, current);
+    deps.log.info(`admin: declared new Claude model(s): ${added.join(", ")}`);
+  }
+  fs.writeFileSync(stateFile, JSON.stringify({ offered: [...new Set([...offered, ...live.map((model) => model.id)])].sort() }, null, 2) + "\n");
+  return added;
+}
+
 /** Run one provider measurement job to completion. Detached: the request that started it has already answered. */
 async function runMeasureJob(jobId: string, providerName: string, models: string[], deps: AdminDeps): Promise<void> {
   const job = MEASURE_JOBS.get(jobId);
@@ -1222,7 +1282,7 @@ async function runMeasureJob(jobId: string, providerName: string, models: string
   }
 }
 
-function pickerModels(deps: AdminDeps): { models: { id: string; name: string }[]; source: "picker" | "fallback" } {  const last = deps.picker?.().last;
+async function pickerModels(deps: AdminDeps): Promise<{ models: { id: string; name: string }[]; source: "picker" | "fallback" }> {  const last = deps.picker?.().last;
   if (last && typeof last === "object" && Array.isArray((last as { surfaces?: unknown }).surfaces)) {
     const entries = (last as { surfaces: { id?: unknown; entries?: unknown }[] }).surfaces
       .filter((surface) => surface.id === "code" || surface.id === "ccd")
@@ -1244,7 +1304,7 @@ function pickerModels(deps: AdminDeps): { models: { id: string; name: string }[]
     });
     if (models.length > 0) return { models, source: "picker" };
   }
-  return { models: CLAUDE_MODEL_FALLBACK, source: "fallback" };
+  return { models: await claudeModelList(deps), source: "fallback" };
 }
 
 function tailLines(file: string, n: number): string {
@@ -1367,7 +1427,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         return;
       }
       if (pathname === "/api/claude-models" && method === "GET") {
-        sendJson(res, 200, pickerModels(deps));
+        sendJson(res, 200, await pickerModels(deps));
         return;
       }
       if (pathname === "/api/effort-levels" && method === "GET") {
@@ -1396,7 +1456,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         const probe = parsed as { type?: unknown; name?: unknown; auth?: unknown; apiKey?: unknown; url?: unknown; headers?: unknown; modelsUrl?: unknown; modelsAuthHeader?: unknown; probeModel?: unknown; sessionHeader?: unknown; preset?: unknown; wire?: unknown };
         if (probe.type === "anthropic") {
           if (probe.auth === "claude-code") {
-            sendJson(res, 200, probeClaudeCodeAuth(deps));
+            sendJson(res, 200, await probeClaudeCodeAuth(deps));
             return;
           }
           if (probe.auth === "api-key") {

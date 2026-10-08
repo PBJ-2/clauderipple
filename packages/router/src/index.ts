@@ -15,7 +15,7 @@ import { CertStore } from "./certs.ts";
 import { Logger } from "./log.ts";
 import { UpstreamHealth, EXIT_UPSTREAM_UNREACHABLE } from "./health.ts";
 import { Proxy } from "./proxy.ts";
-import { measureUnsettledModels, startAdmin, type AdminDeps } from "./admin.ts";
+import { adoptNewClaudeModels, measureUnsettledModels, startAdmin, type AdminDeps } from "./admin.ts";
 import { loadModelCatalog } from "./catalog.ts";
 import { RequestLog } from "./requestlog.ts";
 import { OpenAiIngress } from "./ingress/server.ts";
@@ -172,6 +172,7 @@ proxy
       picker: () => ({ enabled: !!store.get().picker?.enabled, hosts: terminateHosts(store.get()).slice(1), last: proxy.lastPickerInjection }),
       observedClaudeCodeAuth,
       claudeUsage: () => proxy.claudeUsage.snapshot(),
+      claudeModels: () => proxy.claudeModels.list(),
       image: (req, signal) => proxy.generateImage(req, signal),
       modelCatalog: () => loadModelCatalog(),
       shutdown: () => beginDrain("shutdown requested"),
@@ -182,6 +183,11 @@ proxy
     // A minute in, once start-up traffic has settled: a few one-token requests per model whose
     // effort nobody has measured yet, so effort works without the owner re-saving the provider.
     setTimeout(() => measureUnsettledModels(adminDeps), 60_000).unref();
+    // Claude releases reach the declared models without a ClaudeRipple release: checked a minute in,
+    // then every six hours (the catalogue itself is cached for an hour).
+    const adopt = () => void adoptNewClaudeModels(adminDeps).catch((e: Error) => log!.warn(`claude models: ${e.message}`));
+    setTimeout(adopt, 60_000).unref();
+    setInterval(adopt, 6 * 60 * 60_000).unref();
   })
   .catch((e) => {
     log!.error(`listen failed: ${(e as Error).message}`);
