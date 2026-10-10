@@ -45,7 +45,7 @@ import { desktopClaudeCodeDirs } from "../../cli/src/claude-auth.ts";
 import { statusModEnabled, syncModelSlots } from "../../cli/src/settings.ts";
 import { ClaudeOAuthSession, type ClaudeOAuthState } from "./providers/claude-oauth.ts";
 import { readClaudeAuthFile } from "./providers/anthropic-token-file.ts";
-import { listClaudeAccounts, removeClaudeAccount, renameClaudeAccount } from "./providers/anthropic-accounts.ts";
+import { listClaudeAccounts, removeClaudeAccount, renameClaudeAccount, setPreferredClaudeAccount } from "./providers/anthropic-accounts.ts";
 import { readChatGptAccounts, removeChatGptAccount, summarize as summarizeChatGptAccount, updateChatGptAccount } from "./providers/chatgpt/accounts.ts";
 import { IMAGE_ASPECTS, IMAGE_BACKGROUNDS, IMAGE_FORMATS, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
 import type { GoogleAccountStatus } from "./providers/google/index.ts";
@@ -1709,6 +1709,28 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           current: source ? { id: "current", label: "Current Claude login", source, external: true, ...(usage.current ? { quota: usage.current } : {}) } : null,
           accounts: listClaudeAccounts(homeDir()).map((account) => (usage[account.id] ? { ...account, quota: usage[account.id] } : account)),
         });
+        return;
+      }
+      // Which account a new conversation tries first: a stored account id, or null for the current login.
+      if (pathname === "/api/claude-accounts" && method === "PUT") {
+        let preferred: unknown;
+        try {
+          preferred = (JSON.parse((await readBody(req)).toString("utf8")) as { preferred?: unknown }).preferred;
+        } catch {
+          sendJson(res, 400, { error: "invalid JSON" });
+          return;
+        }
+        if (preferred === "current") preferred = null;
+        if (preferred !== null && (typeof preferred !== "string" || !preferred)) {
+          sendJson(res, 400, { error: "expected {preferred: account id or null}" });
+          return;
+        }
+        if (!setPreferredClaudeAccount(homeDir(), preferred)) {
+          sendJson(res, 404, { error: "Claude account not found" });
+          return;
+        }
+        deps.log.info(`admin: Claude accounts now try ${preferred === null ? "the current login" : `account ${preferred.slice(0, 8)}`} first`);
+        sendJson(res, 200, { ok: true });
         return;
       }
       if (pathname.startsWith("/api/claude-accounts/") && (method === "PATCH" || method === "DELETE")) {

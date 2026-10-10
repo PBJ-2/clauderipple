@@ -7,7 +7,13 @@ import os from "node:os";
 import path from "node:path";
 
 import { ClaudeAccountAuthPool } from "../src/providers/anthropic-account-pool.ts";
-import { readClaudeAccountsFile, saveClaudeOAuthAccount } from "../src/providers/anthropic-accounts.ts";
+import {
+  listClaudeAccounts,
+  readClaudeAccountsFile,
+  replaceClaudeOAuthAccount,
+  saveClaudeOAuthAccount,
+  setPreferredClaudeAccount,
+} from "../src/providers/anthropic-accounts.ts";
 import { ClaudeCodeAuthStore, ClaudeCodeCredentialStore } from "../src/providers/anthropic.ts";
 
 function home(): string {
@@ -43,6 +49,38 @@ test("the current Claude login is first and stored accounts follow without expos
     assert.equal(credentials[0]!.headers.authorization, "Bearer current-access");
     assert.equal(credentials[1]!.headers.authorization, "Bearer stored-access");
     assert.doesNotMatch(JSON.stringify(credentials), /stored-refresh/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a preferred stored account leads the current login, and clearing it hands first place back", () => {
+  const dir = home();
+  try {
+    const now = () => 1_000_000;
+    const first = saveClaudeOAuthAccount(dir, { accessToken: "a-access", refreshToken: "a-refresh", expiresAt: 9_000_000, accountId: "a" });
+    const second = saveClaudeOAuthAccount(dir, { accessToken: "b-access", refreshToken: "b-refresh", expiresAt: 9_000_000, accountId: "b" });
+    const current = new ClaudeCodeAuthStore(
+      new ClaudeCodeCredentialStore(() => JSON.stringify({ claudeAiOauth: { accessToken: "current-access", expiresAt: 9_000_000 } }), now),
+      { home: dir, env: {}, now },
+    );
+    const pool = new ClaudeAccountAuthPool({ home: dir, now, current, log: log().logger });
+    const order = () => pool.peekCredentials().map((c) => c.ownerId);
+    assert.deepEqual(order(), ["current", first.id, second.id]);
+
+    assert.equal(setPreferredClaudeAccount(dir, second.id), true);
+    assert.deepEqual(order(), [second.id, "current", first.id]);
+    assert.equal(setPreferredClaudeAccount(dir, first.id), true);
+    assert.deepEqual(order(), [first.id, "current", second.id], "only one account is preferred at a time");
+    assert.deepEqual(listClaudeAccounts(dir).map((a) => a.preferred), [true, false]);
+
+    // A refresh rewrites the account; the choice survives it.
+    replaceClaudeOAuthAccount(dir, first.id, "a-refresh", { accessToken: "a2", refreshToken: "a2-refresh", expiresAt: 9_000_000 });
+    assert.equal(order()[0], first.id);
+
+    assert.equal(setPreferredClaudeAccount(dir, "missing"), false);
+    assert.equal(setPreferredClaudeAccount(dir, null), true);
+    assert.deepEqual(order(), ["current", first.id, second.id]);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

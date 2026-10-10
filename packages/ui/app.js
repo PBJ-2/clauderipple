@@ -1141,14 +1141,35 @@ function claudeQuotaNode(account) {
   return text ? el("p", { class: "small account-quota", text }) : null;
 }
 
+/** "Use first" for an account the pool does not lead with; `null` hands first place back to the current login. */
+function claudePreferButton(name, id, disabled) {
+  const button = el("button", { class: "btn secondary compact", type: "button", text: t("providers.preferAction") });
+  button.disabled = disabled;
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try { await api("/api/claude-accounts", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ preferred: id }) }); await refreshClaudeAccountPanel(name); }
+    catch (error) { button.disabled = false; toast(t("common.actionFailed"), true, error.message); }
+  });
+  return button;
+}
+
 function renderClaudeAccountRows(target, data, name, generation) {
   if (generation !== providerDetailGeneration) return;
+  // Rows follow the order the router tries them in: the preferred account, else the current login, first.
+  const stored = Array.isArray(data.accounts) ? [...data.accounts] : [];
+  const preferredIndex = stored.findIndex((account) => account.preferred);
+  if (preferredIndex > 0) stored.unshift(...stored.splice(preferredIndex, 1));
+  const leader = preferredIndex >= 0 ? stored[0].id : data.current ? "current" : stored[0] && stored[0].id;
+  const choosable = (data.current ? 1 : 0) + stored.length > 1;
+  const firstBadge = (id) => (choosable && id === leader ? el("span", { class: "badge first", text: t("providers.preferBadge") }) : null);
   const rows = [];
-  if (data.current) rows.push(el("article", { class: "account-card current" }, [
+  const currentRow = data.current ? el("article", { class: "account-card current" }, [
     el("div", { class: "account-card-copy" }, [el("strong", { text: data.current.label }), el("span", { class: "small", text: anthropicSourceText(data.current.source) }), claudeQuotaNode(data.current), hint(t("providers.currentAccountHelp"))].filter(Boolean)),
-    el("span", { class: "badge ok", text: t("providers.anthropicCurrent") }),
-  ]));
-  for (const account of Array.isArray(data.accounts) ? data.accounts : []) {
+    el("div", { class: "account-card-badges" }, [firstBadge("current"), el("span", { class: "badge ok", text: t("providers.anthropicCurrent") })].filter(Boolean)),
+    choosable && leader !== "current" ? el("div", { class: "account-card-actions" }, [claudePreferButton(name, null, false)]) : null,
+  ].filter(Boolean)) : null;
+  if (currentRow && preferredIndex < 0) rows.push(currentRow);
+  for (const account of stored) {
     const unavailable = account.needsReauth || account.expiresAt <= Date.now();
     const rename = el("button", { class: "btn secondary compact", type: "button", text: t("common.edit") });
     rename.addEventListener("click", async () => {
@@ -1164,6 +1185,7 @@ function renderClaudeAccountRows(target, data, name, generation) {
       catch (error) { toast(t("common.actionFailed"), true, error.message); }
     });
     const actions = [rename, remove];
+    if (choosable && account.id !== leader) actions.unshift(claudePreferButton(name, account.id, unavailable));
     if (unavailable) {
       const reauth = el("button", { class: "btn secondary compact", type: "button", text: t("providers.reauthAction") });
       reauth.addEventListener("click", () => openClaudeAccountConsent(name));
@@ -1171,12 +1193,14 @@ function renderClaudeAccountRows(target, data, name, generation) {
     }
     rows.push(el("article", { class: "account-card" }, [
       el("div", { class: "account-card-copy" }, [el("strong", { text: account.label }), account.email && account.email !== account.label ? el("span", { class: "small", text: account.email }) : null, claudeQuotaNode(account), hint(t("providers.addedAccountHelp"))].filter(Boolean)),
-      el("span", { class: `badge ${unavailable ? "bad" : "ok"}`, text: unavailable ? t("providers.anthropicReauth") : t("pool.ready") }),
+      el("div", { class: "account-card-badges" }, [firstBadge(account.id), el("span", { class: `badge ${unavailable ? "bad" : "ok"}`, text: unavailable ? t("providers.anthropicReauth") : t("pool.ready") })].filter(Boolean)),
       el("div", { class: "account-card-actions" }, actions),
     ]));
+    if (currentRow && rows.length === 1 && preferredIndex >= 0) rows.push(currentRow);
   }
   target.replaceChildren(...(rows.length ? rows : [el("div", { class: "empty-card", text: t("providers.anthropicNoAccounts") })]));
-  const count = (data.current ? 1 : 0) + (Array.isArray(data.accounts) ? data.accounts.length : 0);
+  if (choosable) target.appendChild(hint(t("providers.preferHelp")));
+  const count = (data.current ? 1 : 0) + stored.length;
   const countNode = $("#claude-account-count");
   if (countNode) countNode.textContent = t("providers.accountCount", { count });
 }

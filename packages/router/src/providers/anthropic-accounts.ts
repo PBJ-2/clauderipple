@@ -33,6 +33,12 @@ export type ClaudeOAuthAccount = {
   subjectHash?: string;
   email?: string;
   needsReauth?: boolean;
+  /**
+   * Tried before the current Claude login and the other accounts. At most one account has it; with
+   * none, the current login goes first. A field on the account rather than on the file, so every
+   * write that spreads an account keeps it and removing the account clears it.
+   */
+  preferred?: boolean;
 };
 
 type ClaudeAccountsFile = { version: 1; accounts: ClaudeOAuthAccount[] };
@@ -47,6 +53,7 @@ export type ClaudeAccountSummary = {
   email?: string;
   expiresAt: number;
   needsReauth: boolean;
+  preferred: boolean;
 };
 
 export function claudeAccountsPath(home: string): string {
@@ -64,7 +71,8 @@ function validAccount(value: unknown): value is ClaudeOAuthAccount {
     && typeof a.label === "string" && a.label.length > 0
     && (a.subjectHash === undefined || (typeof a.subjectHash === "string" && /^[0-9a-f]{64}$/.test(a.subjectHash)))
     && (a.email === undefined || typeof a.email === "string")
-    && (a.needsReauth === undefined || typeof a.needsReauth === "boolean");
+    && (a.needsReauth === undefined || typeof a.needsReauth === "boolean")
+    && (a.preferred === undefined || typeof a.preferred === "boolean");
 }
 
 function parseClaudeAccountsFile(home: string): ClaudeOAuthAccount[] | null {
@@ -221,6 +229,27 @@ export function renameClaudeAccount(home: string, id: string, label: string): bo
   });
 }
 
+/**
+ * Make one stored account the first one tried, or with `null` hand first place back to the current
+ * Claude login. False when the id names no stored account.
+ */
+export function setPreferredClaudeAccount(home: string, id: string | null): boolean {
+  return withAccountLock(home, () => {
+    const accounts = readClaudeOAuthAccountsForMutation(home);
+    if (id !== null && !accounts.some((account) => account.id === id)) return false;
+    let changed = false;
+    const next = accounts.map((account) => {
+      const want = account.id === id;
+      if ((account.preferred === true) === want) return account;
+      changed = true;
+      const { preferred: _, ...rest } = account;
+      return want ? { ...rest, preferred: true } : rest;
+    });
+    if (changed) writeClaudeAccountsFile(home, next);
+    return true;
+  });
+}
+
 export function removeClaudeAccount(home: string, id: string): boolean {
   return withAccountLock(home, () => {
     const accounts = readClaudeOAuthAccountsForMutation(home);
@@ -251,6 +280,7 @@ export function summarize(account: ClaudeOAuthAccount): ClaudeAccountSummary {
     ...(account.email ? { email: account.email } : {}),
     expiresAt: account.expiresAt,
     needsReauth: account.needsReauth === true,
+    preferred: account.preferred === true,
   };
 }
 

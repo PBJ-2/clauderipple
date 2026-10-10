@@ -342,6 +342,8 @@ label.check input { width: auto; }
 .account-card-copy strong, .account-card-copy > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .account-card-copy .hint { margin: 1px 0 0; }
 .account-card-actions { display: flex; gap: 6px; }
+.account-card-badges { display: flex; gap: 6px; align-items: center; justify-content: flex-end; }
+.badge.first { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
 /* Cards with more actions than fit beside the text keep them on their own row at every width. */
 .account-card.stacked { grid-template-columns: minmax(0, 1fr) auto; }
 .account-card.stacked .account-card-actions { grid-column: 1 / -1; flex-wrap: wrap; }

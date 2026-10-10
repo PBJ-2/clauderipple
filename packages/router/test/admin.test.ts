@@ -180,7 +180,7 @@ test("Claude account admin endpoints expose no secrets and rename or remove only
     assert.equal(listed.status, 200);
     const body = await listed.json() as { current: unknown; accounts: { id: string; label: string }[] };
     assert.equal(body.current, null);
-    assert.deepEqual(body.accounts, [{ id: account.id, label: "person@example.test", email: "person@example.test", expiresAt: account.expiresAt, needsReauth: false }]);
+    assert.deepEqual(body.accounts, [{ id: account.id, label: "person@example.test", email: "person@example.test", expiresAt: account.expiresAt, needsReauth: false, preferred: false }]);
     assert.doesNotMatch(JSON.stringify(body), /admin-access-secret|admin-refresh-secret|upstream-account-secret/);
 
     const renamed = await fetch(`${base()}:${port}/api/claude-accounts/${encodeURIComponent(account.id)}`, {
@@ -190,6 +190,18 @@ test("Claude account admin endpoints expose no secrets and rename or remove only
     });
     assert.equal(renamed.status, 200);
     assert.equal(listClaudeAccounts(home)[0]!.label, "Personal");
+
+    const prefer = (preferred: unknown) => fetch(`${base()}:${port}/api/claude-accounts`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ preferred }),
+    });
+    assert.equal((await prefer(account.id)).status, 200);
+    assert.equal(listClaudeAccounts(home)[0]!.preferred, true);
+    assert.equal((await prefer("current")).status, 200, "the current login takes first place back by name");
+    assert.equal(listClaudeAccounts(home)[0]!.preferred, false);
+    assert.equal((await prefer("not-a-local-id")).status, 404);
+    assert.equal((await prefer(7)).status, 400);
 
     const current = await fetch(`${base()}:${port}/api/claude-accounts/current`, { method: "DELETE" });
     assert.equal(current.status, 409);
