@@ -14,8 +14,13 @@ import path from "node:path";
 import type { ProviderModel } from "../../config.ts";
 import { codexHome } from "../../../../cli/src/codex.ts";
 
-/** The client_version floor: below this the backend hides models ClaudeRipple already supports. */
-export const CODEX_CLIENT_VERSION_FLOOR = "0.155.0";
+/**
+ * The client_version floor: below this the backend hides models ClaudeRipple already supports.
+ * 0.158.0 omits gpt-6.1-sol and 0.159.0 lists it (measured 2026-10-10). A floor always trails the
+ * next release, so the newest published Codex version is asked for as well (`latestCodexVersion`):
+ * a Windows user with no Codex CLI was asking with this floor and never saw 6.1 Sol (issue #50).
+ */
+export const CODEX_CLIENT_VERSION_FLOOR = "0.159.0";
 
 /**
  * Copied from the Codex catalog 2026-09-23, used only when the live catalog cannot be read. The
@@ -82,18 +87,42 @@ function compareVersions(a: string, b: string): number {
 /**
  * The version to ask the catalogue with: the installed Codex CLI's, from the cache it writes
  * (`<codexHome>/models_cache.json`, honouring `CODEX_HOME`), but never below the floor — an older
- * CLI must not cost us the models the newer backend would list. Missing or unreadable file, or a
- * version that is not numeric, answers the floor.
+ * CLI must not cost us the models the newer backend would list. `latest` (the newest published
+ * Codex) wins when it is higher still. Missing or unreadable file, or a version that is not
+ * numeric, answers the floor.
  */
-export function codexClientVersion(home = codexHome()): string {
-  let cached: unknown;
+export function codexClientVersion(home = codexHome(), latest?: string | null): string {
+  let best = CODEX_CLIENT_VERSION_FLOOR;
+  const consider = (value: unknown) => {
+    if (typeof value !== "string" || !/^\d+(\.\d+)*/.test(value)) return;
+    // "0.155.1-nightly.3" is 0.155.1 as far as the backend's filter is concerned.
+    const core = value.split("-")[0]!;
+    if (compareVersions(core, best) > 0) best = core;
+  };
   try {
-    cached = (JSON.parse(fs.readFileSync(path.join(home, "models_cache.json"), "utf8")) as { client_version?: unknown }).client_version;
-  } catch {
-    return CODEX_CLIENT_VERSION_FLOOR;
-  }
-  if (typeof cached !== "string" || !/^\d+(\.\d+)*/.test(cached)) return CODEX_CLIENT_VERSION_FLOOR;
-  // "0.155.1-nightly.3" is 0.155.1 as far as the backend's filter is concerned.
-  const core = cached.split("-")[0]!;
-  return compareVersions(core, CODEX_CLIENT_VERSION_FLOOR) > 0 ? core : CODEX_CLIENT_VERSION_FLOOR;
+    consider((JSON.parse(fs.readFileSync(path.join(home, "models_cache.json"), "utf8")) as { client_version?: unknown }).client_version);
+  } catch { /* no Codex CLI here */ }
+  consider(latest);
+  return best;
+}
+
+const NPM_LATEST = "https://registry.npmjs.org/@openai/codex/latest";
+const LATEST_TTL_MS = 24 * 60 * 60_000;
+const LATEST_RETRY_MS = 60 * 60_000;
+let latestCache: { version: string | null; until: number } | null = null;
+
+/**
+ * The newest published Codex CLI version, from the npm registry, kept a day; null when the
+ * registry cannot be read, which is then not asked again for an hour. Never throws.
+ */
+export async function latestCodexVersion(fetchImpl: typeof fetch = fetch, now = Date.now()): Promise<string | null> {
+  if (latestCache && latestCache.until > now) return latestCache.version;
+  let version: string | null = null;
+  try {
+    const res = await fetchImpl(NPM_LATEST, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(3_000) });
+    const value = res.ok ? ((await res.json()) as { version?: unknown }).version : undefined;
+    if (typeof value === "string" && /^\d+\.\d+\.\d+/.test(value)) version = value;
+  } catch { /* offline or blocked: the floor and the local CLI still answer */ }
+  latestCache = { version, until: now + (version ? LATEST_TTL_MS : LATEST_RETRY_MS) };
+  return version;
 }

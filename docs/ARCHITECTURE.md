@@ -335,8 +335,12 @@ request went, and a `Pane` holds the request log.
     visibility: "list"|"hide", context_window, supported_reasoning_levels:
     [{effort}] }] }` — what the Codex CLI's picker shows. **The server filters by
     `client_version`:** `0.146.0` omitted gpt-6-astra/sol/luna, `0.155.0`
-    listed them. The adapter (`catalog.ts`) asks with the higher of a floor and
-    `~/.codex/models_cache.json`'s `client_version`, drops `hide` entries, keeps
+    listed them; `0.158.0` omitted gpt-6.1-sol and `0.159.0` listed it
+    (2026-10-10, also listed at `0.162.1`, `1.0.0`, `99.0.0`). A floor alone
+    trails every release — a Windows user with no Codex CLI never saw 6.1 Sol
+    (#50) — so the adapter (`catalog.ts`) asks with the highest of the floor,
+    `~/.codex/models_cache.json`'s `client_version` and the newest `@openai/codex`
+    on the npm registry (kept a day), drops `hide` entries, keeps
     the list an hour, and falls back to a measured list in the same file. The
     GUI's ChatGPT form fetches it on open; new models arrive unticked. Model ids
     unknown to the backend answer `400 "… model is not supported when using

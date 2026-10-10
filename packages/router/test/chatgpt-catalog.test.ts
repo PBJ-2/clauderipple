@@ -60,7 +60,7 @@ test("parseCodexCatalog tolerates garbage and missing fields", () => {
 test("codexClientVersion floors without a cache file and honours a newer one", () => {
   withCodexHome((home) => {
     assert.equal(codexClientVersion(home), CODEX_CLIENT_VERSION_FLOOR);
-    writeCache(home, "0.155.0");
+    writeCache(home, CODEX_CLIENT_VERSION_FLOOR);
     assert.equal(codexClientVersion(home), CODEX_CLIENT_VERSION_FLOOR, "equal to the floor is the floor");
     writeCache(home, "0.160.2");
     assert.equal(codexClientVersion(home), "0.160.2");
@@ -68,8 +68,12 @@ test("codexClientVersion floors without a cache file and honours a newer one", (
     writeCache(home, "0.146.0");
     assert.equal(codexClientVersion(home), CODEX_CLIENT_VERSION_FLOOR);
     // A prerelease suffix is not part of the version.
-    writeCache(home, "0.155.1-nightly.3");
-    assert.equal(codexClientVersion(home), "0.155.1");
+    writeCache(home, "0.160.1-nightly.3");
+    assert.equal(codexClientVersion(home), "0.160.1");
+    // The newest published Codex wins over an older installed one, and is ignored when lower.
+    assert.equal(codexClientVersion(home, "0.162.1"), "0.162.1");
+    assert.equal(codexClientVersion(home, "0.150.0"), "0.160.1");
+    assert.equal(codexClientVersion(home, null), "0.160.1");
     writeCache(home, "nonsense");
     assert.equal(codexClientVersion(home), CODEX_CLIENT_VERSION_FLOOR);
   });

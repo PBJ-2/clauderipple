@@ -14,7 +14,7 @@ import { StreamMapper, conversationKey, estimateTokens, formatSse, serverToolNam
 import type { RequestUsage } from "../../requestlog.ts";
 import type { SearchBackend, SearchHit, WebSearchQuery } from "../../websearch.ts";
 import { credentialHeaderValues, redactErrorText } from "../../redact.ts";
-import { codexClientVersion, parseCodexCatalog } from "./catalog.ts";
+import { codexClientVersion, latestCodexVersion, parseCodexCatalog } from "./catalog.ts";
 import fs from "node:fs";
 import path from "node:path";
 import { homeDir } from "../../config.ts";
@@ -657,11 +657,12 @@ export class ChatGptAdapter {
       this.log.warn(`chatgpt ${this.name}: model-catalog fetch skipped: ${tokens.message}`);
       return null;
     }
+    const version = codexClientVersion(undefined, await latestCodexVersion());
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), MODELS_TIMEOUT_MS);
     let res: Response;
     try {
-      res = await fetch(`${(this.cfg.url ?? DEFAULT_BASE).replace(/\/$/, "")}${MODELS_PATH}?client_version=${encodeURIComponent(codexClientVersion())}`, {
+      res = await fetch(`${(this.cfg.url ?? DEFAULT_BASE).replace(/\/$/, "")}${MODELS_PATH}?client_version=${encodeURIComponent(version)}`, {
         method: "GET",
         headers: {
           authorization: `Bearer ${tokens.accessToken}`,
