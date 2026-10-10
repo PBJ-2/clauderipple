@@ -1,1 +1,9 @@
-{ "name": "clauderipple-status", "version": "0.1.0", "description": "Shows where ClaudeRipple sent each request and its request log, and keeps ClaudeRipple workers on their own model and effort.", "types": "./types/index.d.ts" }
+{
+  "name": "ripple",
+  "displayName": "ClaudeRipple",
+  "version": "0.2.0",
+  "description": "Picks the reasoning effort for every prompt and the worker for every delegated task, can keep the prompt cache warm, and shows where ClaudeRipple sent each request.",
+  "author": { "name": "ClaudeRipple" },
+  "license": "GPL-3.0-only",
+  "types": "./types/index.d.ts"
+}

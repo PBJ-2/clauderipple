@@ -221,12 +221,15 @@ export function agentTitleHookEnabled(): boolean {
 // ---- Status mod (packages/mod) ------------------------------------------------------------
 
 /** The `name` in packages/mod/.claude-plugin/plugin.json: how our entry is told from anyone else's. */
-export const STATUS_MOD_NAME = "clauderipple-status";
+export const STATUS_MOD_NAME = "ripple";
+/** Its name until 0.8.10: an entry an older install added is still ours to replace or remove. */
+const OLD_STATUS_MOD_NAMES = ["clauderipple-status"];
 const PLUGIN_DIRS = "CLAUDE_CODE_PLUGIN_DIRS";
 
 function isStatusMod(dir: string): boolean {
   try {
-    return (JSON.parse(fs.readFileSync(path.join(dir, ".claude-plugin", "plugin.json"), "utf8")) as { name?: unknown }).name === STATUS_MOD_NAME;
+    const name = (JSON.parse(fs.readFileSync(path.join(dir, ".claude-plugin", "plugin.json"), "utf8")) as { name?: unknown }).name;
+    return name === STATUS_MOD_NAME || OLD_STATUS_MOD_NAMES.includes(name as string);
   } catch {
     return false;
   }

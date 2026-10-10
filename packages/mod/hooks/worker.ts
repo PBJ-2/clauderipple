@@ -11,7 +11,7 @@
 // `deepseek-v4.1-flash@low` runs the worker on that id, and the router records effort low.
 
 /** The router's marker, found anywhere in the prompt rather than only at its top. */
-const MARKER = /\[\[\s*(?:ripple|gpt)\s*:\s*([A-Za-z0-9.\-]+)\s*(?:@\s*([A-Za-z]+))?\s*\]\]/
+export const MARKER = /\[\[\s*(?:ripple|gpt)\s*:\s*([A-Za-z0-9.\-]+)\s*(?:@\s*([A-Za-z]+))?\s*\]\]/
 
 export type Spawn = { subagentType: string; prompt: string; model?: string }
 export type WorkerFix = { prompt: string; model: string; dropped?: string }

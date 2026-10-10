@@ -80,3 +80,14 @@ test("an install that moved replaces its old entry, and the variable goes with o
     assert.equal("CLAUDE_CODE_PLUGIN_DIRS" in envOf(file), false);
   });
 });
+
+test("an entry under the mod's old name is replaced by the renamed mod", () => {
+  withSettings({}, (file, root) => {
+    const old = pluginDir(root, "old-mod", "clauderipple-status");
+    const now = pluginDir(root, "mod", STATUS_MOD_NAME);
+    setStatusMod(true, old);
+    assert.equal(statusModEnabled(), true);
+    setStatusMod(true, now);
+    assert.equal(envOf(file).CLAUDE_CODE_PLUGIN_DIRS, now);
+  });
+});
