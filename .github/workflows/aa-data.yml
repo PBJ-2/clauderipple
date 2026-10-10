@@ -1,0 +1,69 @@
+# Public AA metadata only. One orphan commit replaces the data branch on publication.
+name: AA model data
+
+on:
+  schedule:
+    - cron: "37 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: aa-data
+  cancel-in-progress: false
+
+jobs:
+  dataset:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Read previous publication
+        run: |
+          if git ls-remote --exit-code --heads origin data > /dev/null; then
+            git fetch origin data
+            git show FETCH_HEAD:aa-models.json > "$RUNNER_TEMP/aa-previous.json"
+            git show -s --format=%ct FETCH_HEAD > "$RUNNER_TEMP/aa-published-at"
+          fi
+
+      - name: Build dataset
+        env:
+          AA_API_KEY: ${{ secrets.AA_API_KEY }}
+        run: |
+          args=()
+          if [ -f "$RUNNER_TEMP/aa-previous.json" ]; then args+=("$RUNNER_TEMP/aa-previous.json"); fi
+          node scripts/aa-dataset.mjs "${args[@]}" --output "$RUNNER_TEMP/aa-models.json"
+
+      - name: Compare content or weekly refresh
+        id: compare
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import { meaningfulContent, parseDataset } from './scripts/aa-dataset-lib.mjs';
+          const dir = process.env.RUNNER_TEMP;
+          const next = parseDataset(JSON.parse(fs.readFileSync(`${dir}/aa-models.json`, 'utf8')));
+          const prev = fs.existsSync(`${dir}/aa-previous.json`) ? parseDataset(JSON.parse(fs.readFileSync(`${dir}/aa-previous.json`, 'utf8'))) : null;
+          const published = fs.existsSync(`${dir}/aa-published-at`) ? Number(fs.readFileSync(`${dir}/aa-published-at`, 'utf8')) * 1000 : 0;
+          const changed = meaningfulContent(next) !== meaningfulContent(prev);
+          const weekly = Date.now() - published >= 7 * 86400000;
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `publish=${changed || weekly}\n`);
+          JS
+
+      - name: Replace data branch with one commit
+        if: steps.compare.outputs.publish == 'true'
+        run: |
+          git switch --orphan aa-data-publish
+          git rm -rf --ignore-unmatch .
+          git clean -fd
+          cp "$RUNNER_TEMP/aa-models.json" aa-models.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add aa-models.json
+          git commit -m "data: refresh Artificial Analysis model scores" -m "Keep measured intelligence and USD cost per task current without growing dataset history." -m "Co-Authored-By: Claude Code <noreply@anthropic.com>"
+          git push --force origin HEAD:refs/heads/data

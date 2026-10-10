@@ -15,6 +15,7 @@ import { PRESETS } from "../src/presets.ts";
 import { saveClaudeAuthFile, saveClaudeOAuthFile } from "../src/providers/anthropic-token-file.ts";
 import { listClaudeAccounts, readClaudeAccountsFile, saveClaudeOAuthAccount } from "../src/providers/anthropic-accounts.ts";
 import { ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
+import type { ModelScores } from "../src/model-scores.ts";
 
 function makeCfg(overrides: Partial<Config> = {}): Config {
   // port 0: let the OS pick a free ephemeral port so parallel tests never collide.
@@ -34,6 +35,7 @@ async function withAdmin(
     probeFetch?: (url: string, init: RequestInit) => Promise<Response>;
     measureFetch?: (url: string, init: RequestInit) => Promise<Response>;
     modelCatalog?: () => Promise<unknown>;
+    modelScoresFetch?: typeof fetch;
     chatgpt?: () => { quota: Record<string, Record<string, unknown> | null>; auth: Record<string, string>; refresh?: (name: string) => Promise<Record<string, unknown> | null>; models?: (name: string) => Promise<ProviderModel[] | null> };
     google?: () => { accounts: () => Record<string, GoogleAccountStatus[]>; models?: (name: string) => Promise<ProviderModel[] | null>; clearCooldown?: (id: string) => void };
     googleOAuthFetch?: (url: string, init?: RequestInit) => Promise<Response>;
@@ -77,6 +79,54 @@ async function withAdmin(
 }
 
 const base = () => `http://127.0.0.1`;
+
+// The admin endpoint exercises the external fetch boundary and real local HTTP listener.
+test("admin model-scores lists matched and unknown configured targets with attribution, cached across GET/HEAD", async () => {
+  const cfg = makeCfg({
+    providers: { codex: { type: "chatgpt", models: [{ id: "gpt-6.1-sol" }, { id: "unknown-model" }] } },
+    direct: [{ prefix: "gpt-", provider: "codex" }],
+    aliases: { sol: "gpt-6.1-sol", extra: "gpt-new" },
+    routes: { "claude-opus-5": { provider: "codex", model: "gpt-6.1-sol" } },
+  });
+  const dataset = {
+    source: "https://artificialanalysis.ai", attribution: "Data: Artificial Analysis (artificialanalysis.ai)", generatedAt: "2026-10-10T00:00:00Z",
+    models: [{ slug: "gpt-6-1-sol-high", base: "gpt-6-1-sol", effort: "high", intelligence: 50.24, costPerTask: 0.3191 }],
+  };
+  let calls = 0;
+  await withAdmin(cfg, async ({ port, setCfg, home }) => {
+    const res = await fetch(`${base()}:${port}/api/model-scores`);
+    assert.equal(res.status, 200);
+    const body = await res.json() as ModelScores;
+    assert.equal(body.attribution, dataset.attribution);
+    assert.equal(body.generatedAt, dataset.generatedAt);
+    assert.deepEqual(body.models.find((m: { model: string }) => m.model === "gpt-6.1-sol"), {
+      model: "gpt-6.1-sol", provider: "codex", aaBase: "gpt-6-1-sol", variants: [{ effort: "high", intelligence: 50.24, costPerTask: 0.3191 }], matched: true,
+    });
+    assert.equal(body.models.find(m => m.model === "unknown-model")?.matched, false);
+    assert.equal(body.models.filter((m: { model: string }) => m.model === "gpt-6.1-sol").length, 1);
+    assert.ok(body.models.some((m: { model: string }) => m.model === "gpt-new"));
+    assert.ok(fs.existsSync(path.join(home, "aa-models.json")));
+    const head = await fetch(`${base()}:${port}/api/model-scores`, { method: "HEAD" });
+    assert.equal(head.status, 200);
+    assert.equal(await head.text(), "");
+    setCfg(makeCfg({ providers: {}, aliases: {}, routes: {}, direct: [] }));
+    const updated = await (await fetch(`${base()}:${port}/api/model-scores`)).json() as ModelScores;
+    assert.deepEqual(updated.models, []);
+    assert.equal(calls, 1);
+  }, { modelScoresFetch: async () => { calls++; return Response.json(dataset); } });
+});
+
+test("admin model-scores offline with no dataset reports unmatched models rather than an error", async () => {
+  await withAdmin(makeCfg({ providers: { codex: { type: "chatgpt", models: [{ id: "gpt-6.1-sol" }] } }, routes: {}, direct: [] }), async ({ port }) => {
+    const res = await fetch(`${base()}:${port}/api/model-scores`);
+    assert.equal(res.status, 200);
+    const body = await res.json() as ModelScores;
+    assert.equal(body.generatedAt, null);
+    assert.equal(body.models[0]?.matched, false);
+    assert.deepEqual(body.models[0]?.variants, []);
+    assert.equal(body.attribution, "Data: Artificial Analysis (artificialanalysis.ai)");
+  }, { modelScoresFetch: async () => { throw new Error("offline"); } });
+});
 
 test("admin config saves isolate client settings and restore the caller environment on failure", async () => {
   const outer = fs.mkdtempSync(path.join(os.tmpdir(), "cr-admin-settings-"));

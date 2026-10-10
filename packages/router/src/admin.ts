@@ -34,6 +34,7 @@ import { resolveCompatibleCaps } from "./compat.ts";
 import { CHATGPT_FALLBACK_MODELS } from "./providers/chatgpt/catalog.ts";
 import { measureModel, refusedByPlan, type Measured, type WireCandidate } from "./capabilities.ts";
 import { catalogEntry } from "./catalog.ts";
+import { ModelScoreCatalog, buildModelScores } from "./model-scores.ts";
 import { ClaudeCodeAuthStore, nativeAnthropicHeaders } from "./providers/anthropic.ts";
 import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
 import { fetchClaudeModels, newClaudeReleases, type ClaudeModel } from "./providers/anthropic-models.ts";
@@ -134,6 +135,8 @@ export type AdminDeps = {
   /** The public model catalogue (models.dev) a measurement reads before asking. Supplied by the
    * router; absent in tests, which then measure everything by request as before. */
   modelCatalog?: () => Promise<unknown>;
+  /** External AA dataset fetch boundary; the same cache/TTL is used in tests and production. */
+  modelScoresFetch?: typeof fetch;
   /** Test seams for the Claude subscription sign-in: the token endpoint and the browser. */
   claudeOAuthFetch?: (url: string, init: RequestInit) => Promise<Response>;
   openBrowser?: (url: string) => boolean;
@@ -1363,6 +1366,7 @@ function serveStatic(urlPath: string, res: http.ServerResponse): void {
 }
 
 export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): void }> {
+  const scores = new ModelScoreCatalog({ home: homeDir(), warn: message => deps.log.warn(message), ...(deps.modelScoresFetch ? { fetch: deps.modelScoresFetch } : {}) });
   // Set again once the socket is bound (port 0 in tests); the Origin check below compares against it.
   let boundPort = adminPort(deps.config());
   const server = http.createServer((req, res) => {
@@ -1428,6 +1432,10 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
       }
       if (pathname === "/api/claude-models" && method === "GET") {
         sendJson(res, 200, await pickerModels(deps));
+        return;
+      }
+      if (pathname === "/api/model-scores" && method === "GET") {
+        sendJson(res, 200, buildModelScores(deps.config(), await scores.get()));
         return;
       }
       if (pathname === "/api/effort-levels" && method === "GET") {

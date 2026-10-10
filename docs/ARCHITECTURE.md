@@ -208,6 +208,46 @@ request went, and a `Pane` holds the request log.
 
 ## 4. Provider adapters
 
+### Artificial Analysis model scores (2026-10-10)
+
+`scripts/aa-dataset.mjs` builds `aa-models.json` on the orphan GitHub `data` branch;
+`.github/workflows/aa-data.yml` checks daily at 03:37 UTC, replacing its single commit
+only for substantive changes or after a week. Source: [AA API v2](https://artificialanalysis.ai/api/v2/data/llms/models)
+(`x-api-key`, free limit 1,000 requests/day; `AA_API_KEY` stays in the environment).
+The API supplies slug/name/creator/release date, `evaluations.artificial_analysis_intelligence_index`
+and input/output USD-per-million prices, **not** cost per task. The model page's Next.js
+flight record supplies `intelligenceIndex`, `intelligenceIndexIsEstimated` and
+`intelligenceIndexCostPerTask.cost.total` (USD, already including input/cache/output);
+`intelligenceIndexCost.total` is a different, whole-benchmark total and is never used.
+Measured [GPT-6.1 Sol High](https://artificialanalysis.ai/models/gpt-6-1-sol-high):
+index **50.2378** (≈50.24), **$0.319144 per task** (≈$0.3191), not estimated.
+
+Track families with at least one measured release in the last **365 days**, including
+all their older/unmeasured variants. Group by creator and model name with reasoning
+parentheses removed; retain unrelated Preview/Beta/date labels. Strip only recognized
+reasoning endings from slugs. Effort uses the page suffix/name parentheses, then slug:
+`max/xhigh/high/medium/low/minimal/non-reasoning`; Non-reasoning takes precedence over
+an accompanying High/Low label. Generic Reasoning or the unsuffixed default maps to
+max in a multi-variant family; a single-variant model has null effort. Successful
+`checkedAt` values under **7 days** are reused; failed pages retain prior values/time
+(or null cost/time), and embedded defaults are harvested opportunistically by exact
+slug. Page requests are sequential, ≥1.5 seconds apart with one backed-off 429/5xx
+retry. Fewer than half of attempted pages parsing their requested slug aborts publication.
+The extraction marker `canonicalIntelligenceIndexTokenCount` is a private page-format
+anchor, not an output metric: no token counts are stored. `--limit N` caps page fetches
+for a local smoke run; use `--output <path>` and never publish capped output.
+
+`model-scores.ts` serves configured targets via `GET /api/model-scores`, with normalized
+AA bases (decimal dots → hyphens, provider namespace/Claude snapshot date removed),
+variant intelligence/cost, attribution and generation time. The picker's five effort
+names are preserved; AA minimal/non-reasoning and single variants return null rather
+than being mislabeled low. Unknown models remain present with `matched:false`.
+Scores are metadata, never routing policy or the user's subscription bill. The public
+raw JSON is fetched with a 5-second timeout, kept 24 hours in memory and
+`<homeDir()>/aa-models.json` (mtime records retrieval), shared by concurrent lookups;
+on failure the last cache is kept and retried after one hour. Displays/republication
+must preserve **Data: Artificial Analysis (artificialanalysis.ai)** attribution.
+
 - **The Claude model list is Anthropic's own (2026-10-08).** The native `anthropic`
   provider's models came from a constant in admin.ts, so each release after it was cut
   was missing from the provider form, the mapping table and the declared list until a
