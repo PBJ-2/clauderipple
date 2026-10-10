@@ -20,6 +20,10 @@ test("a tray process that exits at once is reported with its output; one that st
     assert.match(failed.message, /exit code 3/);
     assert.match(failed.message, /Goodbye/);
 
+    // A second tray leaves at once with 0 when one is already up.
+    const duplicate = spawn(process.execPath, ["-e", "process.exit(0)"], { stdio: "ignore" });
+    assert.deepEqual(await earlyExit(duplicate, log, 5_000), { ok: true, message: "✓ tray is already running" });
+
     const alive = spawn(process.execPath, ["-e", "setTimeout(() => {}, 5_000)"], { stdio: "ignore" });
     try {
       assert.deepEqual(await earlyExit(alive, log, 300), { ok: true, message: "✓ tray started" });

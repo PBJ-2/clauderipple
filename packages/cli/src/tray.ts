@@ -115,7 +115,13 @@ export function earlyExit(child: ChildProcess, log: string, waitMs = 2_000): Pro
       resolve({ ok: false, message: `the tray exited at once (${detail}). Its output is in ${log}${tail ? `:\n${tail}` : ""}` });
     };
     child.once("error", (error) => failed(error.message));
-    child.once("exit", (code, signal) => failed(signal ? `signal ${signal}` : `exit code ${code}`));
+    child.once("exit", (code, signal) => {
+      // A clean exit at once is a tray that found another one running (main.ts's single-instance lock).
+      if (code === 0 && !signal) {
+        clearTimeout(timer);
+        resolve({ ok: true, message: "✓ tray is already running" });
+      } else failed(signal ? `signal ${signal}` : `exit code ${code}`);
+    });
   });
 }
 

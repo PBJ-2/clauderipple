@@ -862,7 +862,9 @@ async function offerUpdate(check: UpdateCheck): Promise<void> {
   }
   availableUpdate = null;
   if (Notification.isSupported()) new Notification({ title: "ClaudeRipple", body: L.updateDone(version) }).show();
-  // A new tray from the new files, then this one goes.
+  // A new tray from the new files, then this one goes. The lock is let go first, or the new tray
+  // would see this one and leave.
+  app.releaseSingleInstanceLock();
   await runCliResult(["tray"]);
   app.quit();
 }
@@ -979,6 +981,10 @@ function render(): void {
   tray.setContextMenu(Menu.buildFromTemplate(template));
   tray.setToolTip(s ? L.tooltip(state) : L.tooltipDown);
 }
+
+// One tray. `clauderipple tray` run while one is up started a second icon (Windows VM,
+// 2026-10-10); the newcomer now leaves at once with code 0, which the CLI reads as "already running".
+if (!app.requestSingleInstanceLock()) app.exit(0);
 
 app.whenReady().then(() => {
   L = STRINGS[uiLang()];
