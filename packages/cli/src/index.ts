@@ -636,7 +636,7 @@ try {
       await update();
       break;
     case "tray": {
-      const result = args.includes("--install") ? installTrayRuntime() : startTray();
+      const result = args.includes("--install") ? installTrayRuntime() : await startTray();
       console.log(result.message);
       if (!result.ok) process.exit(1);
       break;

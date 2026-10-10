@@ -558,9 +558,19 @@ function writeAppState(patch: Record<string, unknown>): void {
   }
 }
 
+/**
+ * How Windows starts this tray at login. A packaged app is its own binary. Installed from npm, the
+ * binary is a bare Electron that needs our script after it: registered without one, every logon
+ * opened Electron's default app and no tray (issue #50). macOS ignores `path`/`args`.
+ */
+function loginItemLaunch(): { path: string; args: string[] } | undefined {
+  if (app.isPackaged || process.platform !== "win32" || !process.argv[1]) return undefined;
+  return { path: process.execPath, args: [path.resolve(process.argv[1])] };
+}
+
 function loginItemOn(): boolean {
   try {
-    return app.getLoginItemSettings().openAtLogin;
+    return app.getLoginItemSettings(loginItemLaunch()).openAtLogin;
   } catch {
     return false;
   }
@@ -568,7 +578,7 @@ function loginItemOn(): boolean {
 
 function setLoginItem(on: boolean): void {
   try {
-    app.setLoginItemSettings({ openAtLogin: on });
+    app.setLoginItemSettings({ openAtLogin: on, ...loginItemLaunch() });
   } catch {
     /* macOS may refuse in an unsigned development build */
   }
@@ -979,6 +989,9 @@ app.whenReady().then(() => {
   if (isMac) app.dock?.hide();
   // Default to starting at login on first run; after that the user's choice stands.
   if (!appState().loginItemInitialized) setLoginItem(true);
+  // An entry an older version wrote names bare Electron (the query without args finds it); the
+  // user had start-at-login on, so it is rewritten with the script rather than left broken.
+  else if (loginItemLaunch() && app.getLoginItemSettings().openAtLogin && !loginItemOn()) setLoginItem(true);
   tray = new Tray(icon("down"));
   tray.on("click", () => tray?.popUpContextMenu());
   render();

@@ -7,7 +7,7 @@
 // so the same command simply relaunches it.
 
 import { createRequire } from "node:module";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -59,10 +59,11 @@ export function trayEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv
 }
 
 /**
- * Starts the tray and returns immediately. `detached` outlives this process, which is what a
- * command typed in a terminal wants; the supervisor uses the foreground form instead.
+ * Starts the tray and returns once it has stayed up for a moment. `detached` outlives this
+ * process, which is what a command typed in a terminal wants; the supervisor uses the foreground
+ * form instead.
  */
-export function startTray(options: { detached?: boolean } = {}): TrayStart {
+export async function startTray(options: { detached?: boolean } = {}): Promise<TrayStart> {
   const current = runtime();
   if (current.packaged) {
     // The packaged app IS the tray: relaunching its own binary with no script is what opens it.
@@ -82,14 +83,40 @@ export function startTray(options: { detached?: boolean } = {}): TrayStart {
   if (!fs.existsSync(main)) {
     return { ok: false, message: `the tray is not built: ${main} is missing (run: npm run build)` };
   }
+  // Electron's own output goes to a file. With it discarded, a tray that died at launch still
+  // printed "✓ tray started" and left nothing to go on (issue #50).
+  const log = trayLogPath();
+  fs.mkdirSync(path.dirname(log), { recursive: true });
+  const out = fs.openSync(log, "a");
   const child = spawn(electron, [main], {
     detached: options.detached ?? true,
-    stdio: "ignore",
+    stdio: ["ignore", out, out],
     // Electron would otherwise re-enter as a plain Node process, since that is how the CLI runs.
     env: trayEnv(),
   });
+  fs.closeSync(out);
   if (options.detached ?? true) child.unref();
-  return { ok: true, message: "✓ tray started" };
+  return earlyExit(child, log);
+}
+
+export function trayLogPath(): string {
+  return path.join(homeDir(), "logs", "tray.log");
+}
+
+/** A tray that is still running after a moment has started; one that exits before then has not. */
+export function earlyExit(child: ChildProcess, log: string, waitMs = 2_000): Promise<TrayStart> {
+  return new Promise((resolve) => {
+    // Not unref'd: the command has to stay up long enough to see the exit it is waiting for.
+    const timer = setTimeout(() => resolve({ ok: true, message: "✓ tray started" }), waitMs);
+    const failed = (detail: string) => {
+      clearTimeout(timer);
+      let tail = "";
+      try { tail = fs.readFileSync(log, "utf8").trim().split(/\r?\n/).slice(-8).join("\n"); } catch { /* nothing logged */ }
+      resolve({ ok: false, message: `the tray exited at once (${detail}). Its output is in ${log}${tail ? `:\n${tail}` : ""}` });
+    };
+    child.once("error", (error) => failed(error.message));
+    child.once("exit", (code, signal) => failed(signal ? `signal ${signal}` : `exit code ${code}`));
+  });
 }
 
 /** The npm that came with the Node running us, as a script we can hand to that same Node. */
