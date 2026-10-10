@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.8.10 — 2026-10-10
+
+### Added
+
+- **Choose which Claude account is used first.** With several Claude accounts, the current Claude
+  login was always tried first. Each account card now has a "Use first" button (Providers →
+  Claude → Accounts). New conversations start on that account, move to the next one when it hits
+  its limit, and return to it once the limit resets. A conversation already running stays on its
+  account to keep its cache.
+
+### Fixed
+
+- **DeepSeek subagents no longer fail with 400 on the Artifact tool.** DeepSeek's Anthropic
+  endpoint rejected Claude Desktop's Artifact tool over a regular expression it cannot compile
+  (`"^[^\0]*$" is not a "regex"`). That pattern is now removed on the way out, as it already was for
+  OpenAI-format providers (#51).
+- **The tray starts again after a Windows restart.** Installed with the install script, the tray
+  was set to open at logon without its own script, so Windows opened a bare Electron instead
+  (#50). Restarting the tray once after updating fixes the entry. `clauderipple tray` now also
+  reports a tray that quits right after starting, with its output in `logs/tray.log`. Running it
+  while a tray is already up no longer adds a second icon.
+- **New ChatGPT models show up without the Codex CLI installed.** OpenAI's model list hides
+  models from older Codex versions, and without a Codex CLI the router asked as 0.155.0, so GPT-6.1
+  Sol never appeared (#50). It now asks as the newest published Codex. New models appear unticked in
+  the ChatGPT provider form.
+
 ## 0.8.9 — 2026-10-08
 
 ### Fixed
