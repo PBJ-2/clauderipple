@@ -2,7 +2,7 @@
 // an Anthropic-shaped Messages endpoint without implementing Anthropic's full feature set.
 // Pure: callers receive a new object and an audit list; the input is never mutated.
 
-import { droppedServerToolNote } from "./providers/chatgpt/translate.ts";
+import { droppedServerToolNote, scrubSchema } from "./providers/chatgpt/translate.ts";
 
 export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max", "ultra"] as const;
 export type EffortLevel = (typeof EFFORT_LEVELS)[number];
@@ -210,6 +210,7 @@ export function sanitizeForCompatible(json: Record<string, unknown>, caps: Resol
     const droppedNames = new Set<string>();
     let deferred = 0;
     let dropped = 0;
+    const patterns = { count: 0 };
     for (const tool of out.tools) {
       const source = record(tool);
       if (!source) {
@@ -228,11 +229,16 @@ export function sanitizeForCompatible(json: Record<string, unknown>, caps: Resol
         delete next.defer_loading;
         deferred++;
       }
+      // A strict regex engine refuses the whole request over one pattern it cannot compile:
+      // DeepSeek's Anthropic endpoint answers 400 `"^[^\\0]*$" is not a "regex"` for the Artifact
+      // tool (issue #51). The client validates its own tool input, so the pattern adds nothing here.
+      if (next.input_schema !== undefined) next.input_schema = scrubSchema(next.input_schema, patterns);
       kept.push(next);
     }
     if (deferred > 0) changes.push(`defer_loading×${deferred}`);
     if (dropped > 0) changes.push(`server_tools×${dropped}`);
-    if (deferred > 0 || dropped > 0) out.tools = kept;
+    if (patterns.count > 0) changes.push(`pattern×${patterns.count}`);
+    if (deferred > 0 || dropped > 0 || patterns.count > 0) out.tools = kept;
     const toolChoice = record(out.tool_choice);
     if (toolChoice && typeof toolChoice.name === "string" && droppedNames.has(toolChoice.name)) {
       delete out.tool_choice;

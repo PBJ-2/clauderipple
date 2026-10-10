@@ -177,13 +177,17 @@ export function unsupportedPattern(p: string): boolean {
   return UNSUPPORTED_REGEX.test(p);
 }
 
-function scrubSchema(node: unknown): unknown {
-  if (Array.isArray(node)) return node.map(scrubSchema);
+/** Drops the patterns above anywhere in a schema; `removed.count` says how many went. */
+export function scrubSchema(node: unknown, removed?: { count: number }): unknown {
+  if (Array.isArray(node)) return node.map((item) => scrubSchema(item, removed));
   if (typeof node !== "object" || node === null) return node;
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
-    if (k === "pattern" && typeof v === "string" && unsupportedPattern(v)) continue;
-    out[k] = scrubSchema(v);
+    if (k === "pattern" && typeof v === "string" && unsupportedPattern(v)) {
+      if (removed) removed.count++;
+      continue;
+    }
+    out[k] = scrubSchema(v, removed);
   }
   return out;
 }

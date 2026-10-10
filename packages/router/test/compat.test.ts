@@ -115,6 +115,35 @@ test("a provider that runs server tools keeps them; one that does not still lose
   assert.ok(dropped.changes.includes("server_tools×1"));
 });
 
+// Issue #51: DeepSeek's Anthropic endpoint refuses the whole request over the Artifact tool's
+// `^[^\0]*$`. Only the escape class a strict engine will not compile goes; ordinary patterns stay.
+test("a tool schema loses the patterns a strict regex engine refuses, and only those", () => {
+  const input = {
+    model: "m",
+    messages: [],
+    tools: [{
+      name: "Artifact",
+      input_schema: {
+        type: "object",
+        properties: {
+          file_paths: { type: "array", items: { type: "string", pattern: "^[^\\0]*$" } },
+          slug: { type: "string", pattern: "^[a-z]+$" },
+        },
+      },
+    }],
+  };
+  const result = sanitizeForCompatible(input, STRICT_COMPAT_CAPS);
+  type Props = { file_paths: { items: { pattern?: string } }; slug: { pattern?: string } };
+  const [tool] = result.json.tools as { input_schema: { properties: Props } }[];
+  assert.equal(tool?.input_schema.properties.file_paths.items.pattern, undefined);
+  assert.equal(tool?.input_schema.properties.slug.pattern, "^[a-z]+$");
+  assert.ok(result.changes.includes("pattern×1"));
+  assert.equal(input.tools[0]?.input_schema.properties.file_paths.items.pattern, "^[^\\0]*$", "input remains pure");
+
+  const clean = sanitizeForCompatible({ model: "m", messages: [], tools: [{ name: "Read", input_schema: { type: "object" } }] }, STRICT_COMPAT_CAPS);
+  assert.equal(clean.changes.some((c) => c.startsWith("pattern")), false);
+});
+
 // Claude Code explains the advisor in text on every subagent (CLI 2.1.286). Where the declaration is
 // dropped, the text is withdrawn; where the provider keeps server tools, nothing is added.
 test("a dropped server tool's instructions are withdrawn, whatever shape the system prompt has", () => {
