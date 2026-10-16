@@ -17,6 +17,7 @@ import { Logger } from "../src/log.ts";
 import { Proxy } from "../src/proxy.ts";
 import { RequestLog, type RequestRecord } from "../src/requestlog.ts";
 import { createCa } from "../src/x509.ts";
+import { saveGoogleAccount } from "../src/providers/google/accounts.ts";
 
 function freePort(): Promise<number> {
   return new Promise((resolve) => {
@@ -30,13 +31,19 @@ function freePort(): Promise<number> {
 
 type Rig = { home: string; send: (body: unknown, path?: string) => Promise<{ status: number; body: string }>; records: () => RequestRecord[]; stop: () => Promise<void>; seen: { path: string; headers: http.IncomingHttpHeaders; body: Record<string, unknown> }[] };
 
-async function rig(): Promise<Rig> {
+async function rig(promptRefusal = false): Promise<Rig> {
   const seen: Rig["seen"] = [];
   const upstream = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => {
       seen.push({ path: req.url ?? "", headers: req.headers, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown> });
+      if (promptRefusal && JSON.stringify(seen.at(-1)!.body).includes("You are a Claude agent, built on Anthropic's Claude Agent SDK.")) {
+        res.writeHead(429, { "content-type": "application/json" }).end(JSON.stringify({ error: {
+          code: 429, status: "RESOURCE_EXHAUSTED", message: "Resource has been exhausted (e.g. check quota).",
+        } }));
+        return;
+      }
       res.writeHead(200, { "content-type": "text/event-stream" });
       res.end(
         [
@@ -52,6 +59,9 @@ async function rig(): Promise<Rig> {
   const upstreamPort = (upstream.address() as net.AddressInfo).port;
 
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-proxy-google-"));
+  if (promptRefusal) saveGoogleAccount(home, {
+    accessToken: "test-google-token", projectId: "test-project", email: "test@example.test", expiresAt: Date.now() + 3_600_000,
+  });
   const ca = createCa({ cn: "clauderipple google test" });
   fs.writeFileSync(path.join(home, "ca.pem"), ca.certPem);
   fs.writeFileSync(path.join(home, "ca.key"), ca.keyPem);
@@ -59,7 +69,7 @@ async function rig(): Promise<Rig> {
   const cfg: Config = {
     ...DEFAULTS,
     listen: { host: "127.0.0.1", port: proxyPort },
-    providers: { google: { type: "google", auth: "api-key", apiKey: "test-key", url: `http://127.0.0.1:${upstreamPort}`, models: [{ id: "gemini-3-pro-preview" }] } },
+    providers: { google: { type: "google", auth: promptRefusal ? "antigravity" : "api-key", apiKey: "test-key", url: `http://127.0.0.1:${upstreamPort}`, models: [{ id: "gemini-3-pro-preview" }] } },
     routes: {},
     direct: [],
     aliases: {},
@@ -134,6 +144,31 @@ async function rig(): Promise<Rig> {
     },
   };
 }
+
+test("an Antigravity SDK refusal is logged as an upstream request failure without disabling compatible requests", async () => {
+  const r = await rig(true);
+  try {
+    const body = { model: "gemini-3-pro-preview", max_tokens: 16, stream: true,
+      system: "You are a Claude agent, built on Anthropic's Claude Agent SDK.", messages: [{ role: "user", content: "hi" }] };
+    const refused = await r.send(body);
+    assert.equal(refused.status, 400);
+    assert.match(refused.body, /invalid_request_error/);
+    const record = r.records().find(row => row.status === 400)!;
+    assert.ok(record);
+    assert.equal(record.provider, "google");
+    assert.equal(record.refusal, "prompt-incompatible");
+    assert.equal(record.ok, false);
+    assert.equal(record.upstreamCalled, undefined);
+    assert.match(record.note!, /upstream 429/);
+    assert.equal(r.seen.length, 1);
+    const compatible = await r.send({ ...body, system: "Ordinary system instructions." });
+    assert.equal(compatible.status, 200);
+    assert.equal(r.seen.length, 2);
+    assert.equal(r.seen[1]!.headers.authorization, r.seen[0]!.headers.authorization);
+  } finally {
+    await r.stop();
+  }
+});
 
 test("a declared google model is routed to the provider over TLS and logged GOOGLE", async () => {
   const r = await rig();

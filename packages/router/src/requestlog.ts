@@ -27,7 +27,7 @@ export type RequestRecord = {
   upstreamRequestId?: string;
   messageId?: string;
   upstreamCalled?: false;
-  refusal?: "thread-continue" | "drain" | "unroutable" | "no-account" | "unknown-provider" | "web-search-unsupported";
+  refusal?: "thread-continue" | "drain" | "unroutable" | "no-account" | "unknown-provider" | "web-search-unsupported" | "prompt-incompatible";
   purpose?: "auto-mode-classifier" | "web-search";
   requestedTier?: string;
   servedTier?: string;
