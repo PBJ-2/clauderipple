@@ -29,11 +29,32 @@ export function desktopClaudeCodeDirs(): string[] {
   // Ubuntu 24.04: ~/.config/Claude/claude-code/2.1.280/claude, a plain executable).
   if (process.platform === "linux") return [path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "Claude", "claude-code")];
   if (!isWindows) return [path.join(os.homedir(), "Library", "Application Support", "Claude", "claude-code")];
+  const localAppData = process.env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local");
   const roots = [
-    process.env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local"),
+    localAppData,
     process.env.APPDATA ?? path.join(os.homedir(), "AppData", "Roaming"),
+    ...msixAppDataRoots(localAppData),
   ];
   return roots.map((root) => path.join(root, "Claude", "claude-code"));
+}
+
+/**
+ * AppData roots of the Microsoft Store (MSIX) build of Claude Desktop. Windows redirects that app's
+ * AppData writes into its package's LocalCache, so the app itself sees %APPDATA%\Claude\claude-code
+ * while every process outside the package (the router, this CLI) finds the real one missing:
+ * Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude-code\2.1.299 on Windows 11 (2026-10-17).
+ */
+function msixAppDataRoots(localAppData: string): string[] {
+  let packages: string[];
+  try {
+    packages = fs.readdirSync(path.join(localAppData, "Packages")).filter((entry) => /^Claude_[a-z0-9]+$/i.test(entry));
+  } catch {
+    return [];
+  }
+  return packages.flatMap((entry) => {
+    const cache = path.join(localAppData, "Packages", entry, "LocalCache");
+    return [path.join(cache, "Local"), path.join(cache, "Roaming")];
+  });
 }
 
 /** Launcher inside one cached version directory. The macOS build nests an .app bundle. */

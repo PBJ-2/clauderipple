@@ -58,6 +58,20 @@ test("prefers a flat Desktop-cached CLI over a hashed one in the same version", 
     assert.equal(latestDesktopClaude(), flat);
   }));
 
+test("finds the CLI the Microsoft Store build of Desktop caches inside its package", { skip: process.platform !== "win32" }, () =>
+  withDesktopCache((dir) => {
+    const local = path.dirname(path.dirname(dir));
+    const cache = path.join(local, "Packages", "Claude_pzs8sxrjxfjjc", "LocalCache", "Roaming", "Claude", "claude-code");
+    const binary = path.join(cache, "2.1.299", "0123456789ab", desktopBinary);
+    fs.mkdirSync(path.dirname(binary), { recursive: true });
+    fs.writeFileSync(binary, "");
+    // Claude-3p is the picker's own userData, not a Desktop package.
+    fs.mkdirSync(path.join(local, "Packages", "Claude-3p"), { recursive: true });
+    assert.ok(desktopClaudeCodeDirs().includes(cache));
+    assert.equal(desktopClaudeCodeDirs().filter((d) => d.includes("Claude-3p")).length, 0);
+    assert.equal(latestDesktopClaude(), binary);
+  }));
+
 test("claude-login invokes PATH claude setup-token and saves only a 0600 credential file", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cr-claude-login-"));
   const bin = path.join(root, "bin");
