@@ -1169,7 +1169,13 @@ what we do not have yet — so that adding a provider does not start with readin
   by identity.
   `authHeader` names a convention rather than restating the key: the provider's own
   credential is re-sent under the header that model's wire expects, so there is one copy
-  of the key to rotate. Each endpoint follows the API it imitates — an Anthropic-wire
+  of the key to rotate. That applies to **every credential in the pool**, not only to
+  `provider.headers`: once a key has been added the pool is where the key lives
+  (`credentials[0]`, see the key endpoint below), and re-spelling only the headers left the pool
+  speaking the provider's convention, so every key was refused and quarantined in one
+  turn (2026-10-21). On the `google` wire the key is read from `apiKey`, then from
+  `headers`, then from the first credential that is not paused, for the same reason.
+  Each endpoint follows the API it imitates — an Anthropic-wire
   model wants `x-api-key` where an OpenAI-wire one on the same key wants a bearer. A
   config still written as three providers is folded on the way in and its `direct` and
   `routes` references follow; nothing is rewritten on disk, so it stays readable by an
@@ -1253,6 +1259,104 @@ what we do not have yet — so that adding a provider does not start with readin
   insufficient-credit response means the key is accepted but the account has no
   credit. Preset endpoint and capability claims cite the vendor's official docs in
   `packages/router/src/presets.ts`.
+- **Credential pools per key (2026-10-21).** A provider may declare `credentials`
+  (`{id, headers, label?, paused?}`) beside its single `headers`, and requests fail
+  over between them in the same turn, before the first byte reaches the client —
+  after that a retry would duplicate output the client already has. A conversation
+  stays on its key while that key is healthy (`pool.ts` stickiness), because moving
+  it moves the vendor's prompt cache with it. A provider with no `credentials` keeps
+  exactly the one credential it always had, under a fixed id, so health survives a
+  config edit that does not touch it.
+  - Provider `headers` are merged **under** the key's own `headers`, minus the auth
+    ones (`authorization`, `x-api-key`): an org header set once on the provider is
+    sent with every key, and the auth header is only ever the key's. Sending the
+    provider's copy over it would put one key's credential on another key's request.
+  - A key is cooled by a 429 for the reset the vendor states — `retry-after`, else
+    the reset field in the body, else one usage read, else 60 s — and never further
+    than `MAX_COOLDOWN_MS` (6 h) when the wait came from a refusal: a refusal is
+    about this key now, and a "reset" days out that it claims is more likely a
+    misread field. A **usage window**'s own reset is a real date and is not clamped,
+    so a weekly window at 100 % parks its key until that window actually resets.
+  - OpenCode Go keys are also parked **pre-emptively** from the cached `/usage`
+    snapshot: a key whose window is already at 100 % is not tried at all. This is
+    what the user asked for — the plan's Extra-usage pay-as-you-go is never reached
+    while another key is free — and it means the vendor is not first asked to refuse.
+    The snapshot is only ever read from the cache on the request path (never awaited
+    on the request path — a background refresh may start); `/api/provider-keys`
+    is where a read is awaited, and it parks from the answer it just read rather
+    than starting a second lookup.
+  - The same pool, stickiness, same-turn failover and pause rule apply to **every**
+    key-based provider — an `openai-compatible` one and an `anthropic-compatible`
+    one alike. OpenCode usage parking is OpenCode Go's own; nothing else waits on
+    that reader.
+  - `POST /v1/messages/count_tokens` answers locally, so it neither charges the key
+    nor cools one: a local estimate must not take a key out of rotation.
+  - When **every** key of a provider is paused, the router answers 503 locally
+    ("every key of <provider> is paused", `overloaded_error`) instead of sending the
+    request on the first key: the operator said stop, so the vendor must not be
+    charged for a key that was deliberately taken out.
+  - `/api/provider-keys?provider=<name>` reports one state per key — `in-use` (what
+    a new conversation would get), `standby`, `cooling`, `paused`, `quarantined`, and
+    `unknown` for an OpenCode Go key whose usage has never been read. A failed read
+    keeps the last good snapshot, so a key is never presented as healthy because the
+    read failed. `/api/opencode-accounts` is kept as an alias for the same endpoint
+    (2026-10-21 rename), GET/PATCH/DELETE included. Ids and labels only: no header
+    value is ever serialised.
+  - `POST /api/provider-keys?provider=<name>` `{label?, key}` appends a key. A
+    provider whose only key lives in `headers` is migrated first: that key becomes
+    `credentials[0]` under the id the router already used for it (`"default"`), its
+    auth header leaves `headers` (other provider headers stay, sent with every key),
+    and only then is the new key added as `key-<n>` (first free n). The auth header
+    follows the provider's existing convention — a credential's or the provider's own
+    header, else the preset's `authHeader`, else `x-api-key` on
+    `anthropic-compatible` and `authorization: Bearer` on `openai-compatible` — so a
+    key is not sent under a header its endpoint ignores. A pasted `Bearer ` prefix is
+    dropped once; internal whitespace or a non-header byte is refused. The write is
+    atomic (temp file + rename, mode `0600` set explicitly rather than left to the
+    service's umask) and goes through the same `validate` the GUI's save
+    does. The key is never returned, logged, or quoted in an error. The router picks
+    the new key up from the file's mtime, so it is live on the next request with no
+    restart.
+  - `PATCH` renames (`label`), pauses/resumes (`paused`), or clears a cooldown
+    (`clearCooldown`); `DELETE` removes a key. A headers-only key has no credential
+    entry to carry a label or a pause (400), and cannot be deleted (400, remove the
+    provider instead), but its `"default"` id does answer `clearCooldown`. An id the
+    provider does not have is a 404 rather than a silent success.
+
+### 4c-i. Credit balances (2026-10-21)
+
+Some providers sell prepaid credit rather than counting windows, and state what is
+left. `/api/limits` reports those as `type: "credit"` with **one account row per
+key** — `{account, label?, windows: [], at, credit: {remaining_usd,
+days_remaining?, low}}` — because a balance belongs to the key that asked for it.
+`low` is the tile's warning colour, under $5 left or under three days of it. The
+reader (`providers/credit-balance.ts`) is cached five minutes **per key**, keeps the
+last good value when a read fails, logs only the status, and every read is made with
+that key's own headers. A key whose read fails is left out of the rows rather than
+shown as zero.
+
+- **A balance of zero parks its key.** `remaining_usd <= 0` holds that key out of
+  rotation for one read period (`pool.parkEmpty`, separate from cooldown/quarantine
+  health so a later read can release it without erasing a vendor's own cooldown). It
+  reports as `cooling` on `/api/provider-keys`, and a later read that finds money
+  releases it — a top-up comes back on the dashboard's next poll, and on the router's
+  own five-minute re-read (`refreshParkedBalances`, a timer in `index.ts`) even with
+  the GUI closed. That re-read is forced past the reader's cache and asks only for
+  keys already parked, so it costs nothing while every key is funded. The request
+  path only ever reads the cached balance: a turn never waits on a vendor lookup.
+
+- **sail** (`api.sailresearch.com`): `GET /v2/usage/summary?range=30d` with the
+  provider's own auth header. `balance` is in **fractional USD cents**, so 73795 is
+  $737.95; a body that says `balance_unavailable` is skipped rather than read as
+  zero. `days_remaining` is passed through as given.
+  (https://docs.sailresearch.com/usage-endpoints.md)
+- **OpenRouter** (`openrouter.ai`): `GET /api/v1/credits`, remaining =
+  `total_credits - total_usage`. Measured 2026-10-21: it answers 200 with an
+  inference key although the docs name a management key. When that read fails, it
+  falls back to `GET /api/v1/key`'s `limit_remaining`; `null` there means the key
+  has no limit, which says nothing about a balance.
+  (openrouter.ai/docs/api/api-reference/credits/get-remaining-credits.md,
+  openrouter.ai/docs/api/api-reference/limits.md)
 
 ### 4d. `google` providers (implemented 2026-10-01)
 

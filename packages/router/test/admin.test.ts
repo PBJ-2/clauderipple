@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import net from "node:net";
@@ -44,6 +45,9 @@ async function withAdmin(
     chatgpt?: NonNullable<AdminDeps["chatgpt"]>;
     google?: NonNullable<AdminDeps["google"]>;
     opencodeUsage?: NonNullable<AdminDeps["opencodeUsage"]>;
+    providerKeys?: NonNullable<AdminDeps["providerKeys"]>;
+    creditBalance?: NonNullable<AdminDeps["creditBalance"]>;
+    credentialClear?: NonNullable<AdminDeps["credentialClear"]>;
     claudeUsage?: NonNullable<AdminDeps["claudeUsage"]>;
     googleOAuthFetch?: (url: string, init?: RequestInit) => Promise<Response>;
     googleOAuthPort?: number;
@@ -1165,6 +1169,133 @@ test("POST /api/providers/probe reports 401 as a bad key without exposing it", a
   }
 });
 
+// Adding a key moves a provider's only key out of `headers` and into `credentials[0]` on the first
+// POST /api/provider-keys. The connection test read the form's headers alone, went out with no
+// credential, and reported a working provider as "API key needed" — OpenCode Go answered "HTTP 401 ·
+// Upstream request failed: Go requires a credential" while every routed turn succeeded (2026-10-21).
+test("the connection test uses a key that lives only in the credential pool", async () => {
+  const seen: { path?: string | undefined; auth?: string | undefined; apiKey?: string | undefined; models?: string | undefined } = {};
+  const upstream = http.createServer((req, res) => {
+    seen.path = req.url;
+    if (req.url === "/v1/models") { seen.models = req.headers.authorization as string | undefined; res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ data: [{ id: "pooled-model" }] })); return; }
+    req.resume();
+    req.on("end", () => {
+      seen.auth = req.headers.authorization as string | undefined;
+      seen.apiKey = req.headers["x-api-key"] as string | undefined;
+      // The key really travels: only a request carrying it is answered.
+      if (req.headers.authorization !== "Bearer test-key-pooled") { res.writeHead(401, { "content-type": "application/json" }).end(JSON.stringify({ error: "Go requires a credential" })); return; }
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ choices: [] }));
+    });
+  });
+  await new Promise<void>((resolveP) => upstream.listen(0, "127.0.0.1", resolveP));
+  const address = upstream.address();
+  assert.ok(address && typeof address === "object");
+  const cfg = makeCfg({
+    providers: {
+      "opencode-go": {
+        type: "openai-compatible",
+        url: `http://127.0.0.1:${address.port}/v1`,
+        // The key is in the pool, not here: this is what the migration leaves behind.
+        headers: { "x-extra": "kept" },
+        credentials: [
+          { id: "default", headers: { authorization: "Bearer test-key-paused" }, paused: true },
+          { id: "key-1", headers: { authorization: "Bearer test-key-pooled" } },
+        ],
+        models: [{ id: "pooled-model" }],
+      },
+    },
+  });
+  try {
+    await withAdmin(cfg, async ({ port }) => {
+      const res = await fetch(`${base()}:${port}/api/providers/probe`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        // The form's own headers carry no key: they are the provider's remaining extra headers.
+        body: JSON.stringify({ type: "openai-compatible", name: "opencode-go", url: `http://127.0.0.1:${address.port}/v1`, headers: { "x-extra": "kept" }, modelsUrl: `http://127.0.0.1:${address.port}/v1/models`, probeModel: "pooled-model" }),
+      });
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { ok: boolean; auth: string; models?: { id: string }[]; error?: string };
+      assert.equal(body.ok, true, `the pooled key was not used: ${body.error ?? ""}`);
+      assert.equal(body.auth, "ok");
+      assert.deepEqual(body.models, [{ id: "pooled-model" }], "the listing was read with the same key");
+      assert.equal(JSON.stringify(body).includes("test-key"), false, "no key value in the answer");
+    });
+    assert.equal(seen.auth, "Bearer test-key-pooled", "the first non-paused key answers the test");
+    assert.equal(seen.models, "Bearer test-key-pooled", "the listing call carries the same key");
+  } finally {
+    await new Promise<void>((resolveP, reject) => upstream.close((error) => (error ? reject(error) : resolveP())));
+  }
+});
+
+// The same test on a headers-only provider must behave exactly as it always did.
+test("the connection test on a headers-only provider is unchanged", async () => {
+  const seen: { models?: string | undefined; auth?: string | undefined } = {};
+  const upstream = http.createServer((req, res) => {
+    if (req.url === "/v1/models") { seen.models = req.headers.authorization as string | undefined; res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ data: [{ id: "m" }] })); return; }
+    req.resume();
+    req.on("end", () => { seen.auth = req.headers.authorization as string | undefined; res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ choices: [] })); });
+  });
+  await new Promise<void>((resolveP) => upstream.listen(0, "127.0.0.1", resolveP));
+  const address = upstream.address();
+  assert.ok(address && typeof address === "object");
+  const cfg = makeCfg({ providers: { plain: { type: "openai-compatible", url: `http://127.0.0.1:${address.port}/v1`, headers: { authorization: "Bearer test-key-headers" }, models: [{ id: "m" }] } } });
+  try {
+    await withAdmin(cfg, async ({ port }) => {
+      const res = await fetch(`${base()}:${port}/api/providers/probe`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        // Not even named: a form draft with its own headers has to keep working by itself.
+        body: JSON.stringify({ type: "openai-compatible", url: `http://127.0.0.1:${address.port}/v1`, headers: { authorization: "Bearer test-key-headers" }, modelsUrl: `http://127.0.0.1:${address.port}/v1/models`, probeModel: "m" }),
+      });
+      assert.deepEqual(await res.json(), { ok: true, auth: "ok", models: [{ id: "m" }] });
+    });
+    assert.equal(seen.auth, "Bearer test-key-headers");
+    assert.equal(seen.models, "Bearer test-key-headers");
+  } finally {
+    await new Promise<void>((resolveP, reject) => upstream.close((error) => (error ? reject(error) : resolveP())));
+  }
+});
+
+// A pool with nothing in rotation is reported plainly and nothing is sent: a request without a key
+// can only come back 401, which reads as "the key is bad" when the operator is the one who parked it.
+test("the connection test on an all-paused pool reports plainly and calls no upstream", async () => {
+  let calls = 0;
+  const upstream = http.createServer((_req, res) => { calls += 1; res.writeHead(500).end(); });
+  await new Promise<void>((resolveP) => upstream.listen(0, "127.0.0.1", resolveP));
+  const address = upstream.address();
+  assert.ok(address && typeof address === "object");
+  const cfg = makeCfg({
+    providers: {
+      parked: {
+        type: "openai-compatible",
+        url: `http://127.0.0.1:${address.port}/v1`,
+        credentials: [
+          { id: "key-1", headers: { authorization: "Bearer test-key-1" }, paused: true },
+          { id: "key-2", headers: { authorization: "Bearer test-key-2" }, paused: true },
+        ],
+        models: [{ id: "m" }],
+      },
+    },
+  });
+  try {
+    await withAdmin(cfg, async ({ port }) => {
+      const res = await fetch(`${base()}:${port}/api/providers/probe`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "openai-compatible", name: "parked", url: `http://127.0.0.1:${address.port}/v1`, headers: {}, modelsUrl: `http://127.0.0.1:${address.port}/v1/models`, probeModel: "m" }),
+      });
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { ok: boolean; auth: string; error?: string };
+      assert.equal(body.ok, false);
+      assert.equal(body.auth, "missing", "not bad-key: no key was tested, so none failed");
+      assert.match(body.error ?? "", /paused/i);
+      assert.equal(calls, 0, "nothing was sent, so no key could be charged");
+    });
+  } finally {
+    await new Promise<void>((resolveP, reject) => upstream.close((error) => (error ? reject(error) : resolveP())));
+  }
+});
+
 test("POST /api/providers/probe does not call an upstream 500 authenticated", async () => {
   const upstream = http.createServer((_req, res) => res.writeHead(500).end("failure"));
   await new Promise<void>((resolveP) => upstream.listen(0, "127.0.0.1", resolveP));
@@ -1370,6 +1501,45 @@ test("GET /app.js serves a static file with the right content-type", async () =>
     const res = await fetch(`${base()}:${port}/app.js`);
     assert.equal(res.status, 200);
     assert.match(res.headers.get("content-type") ?? "", /javascript/);
+  });
+});
+
+// The phone tunnel's edge cache keys .js/.css by URL and ignores an origin that says nothing, so a
+// deploy left index.html new and app.js/style.css old. Two answers: every static response says
+// no-cache, and index.html asks for each asset at a URL that changes with its content, which no
+// cache can have a copy of yet.
+test("static answers tell every cache to revalidate", async () => {
+  await withAdmin(makeCfg(), async ({ port }) => {
+    for (const route of ["/", "/index.html", "/app.js", "/style.css", "/i18n.js", "/presets-fallback.js"]) {
+      const res = await fetch(`${base()}:${port}${route}`);
+      assert.equal(res.status, 200, route);
+      assert.match(res.headers.get("cache-control") ?? "", /no-cache/, route);
+    }
+  });
+});
+
+test("index.html names each asset at a content-hashed URL, and a hashed URL still serves the file", async () => {
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const html = await (await fetch(`${base()}:${port}/`)).text();
+    const versions = new Map<string, string>();
+    for (const file of ["app.js", "style.css", "i18n.js", "presets-fallback.js"]) {
+      const match = html.match(new RegExp(`(?:src|href)="${file.replace(/\./g, "\\.")}\\?v=([0-9a-f]{6,})"`));
+      assert.ok(match, `${file} must be named with ?v=<hash> in:\n${html.slice(0, 400)}`);
+      versions.set(file, match![1]!);
+      // The plain spelling stays valid too: a bookmarked page, an open tab, a probe.
+      assert.ok(html.includes(`"${file}?v=`), file);
+      const res = await fetch(`${base()}:${port}/${file}?v=${match![1]}`);
+      assert.equal(res.status, 200, file);
+      assert.match(res.headers.get("cache-control") ?? "", /no-cache/, file);
+      const plain = await (await fetch(`${base()}:${port}/${file}`)).text();
+      assert.equal(await res.text(), plain, `${file}?v= serves the same bytes as ${file}`);
+    }
+    // The hash is the file's content, not a constant: the URL changes exactly when the file does.
+    const app = fs.readFileSync(new URL("../../ui/app.js", import.meta.url));
+    const digest = crypto.createHash("sha256").update(app).digest("hex").slice(0, 10);
+    assert.equal(versions.get("app.js"), digest);
+    // No bare asset URL is left behind for a cache to hold on to.
+    assert.doesNotMatch(html, /(?:src|href)="app\.js"/);
   });
 });
 
@@ -1903,6 +2073,44 @@ test("POST /api/providers/measure runs in the background and polling settles the
     // `medium` and `high` are in although the provider declared neither: a measurement corrects the
     // configuration in both directions, or a level the plan really offers stays out of reach.
     assert.deepEqual(onDisk.providers.oc?.models?.[0]?.effortLevels, ["none", "low", "medium", "high"]);
+  }, { measureFetch });
+});
+
+// A measurement makes its own requests, so a key that lives only in the pool had to be resolved the
+// same way a turn resolves it: measured with no credential at all, the vendor's 401 was recorded as
+// the model's capability (2026-10-21).
+test("a measurement authenticates with a key that lives only in the credential pool", async () => {
+  const cfg = makeCfg({
+    providers: {
+      pooled: {
+        type: "openai-compatible",
+        url: "http://127.0.0.1:9/v1",
+        wire: "chat",
+        headers: { "x-extra": "kept" },
+        credentials: [
+          { id: "default", headers: { authorization: "Bearer test-key-paused" }, paused: true },
+          { id: "key-1", headers: { authorization: "Bearer test-key-pooled" } },
+        ],
+        models: [{ id: "pooled-model" }],
+      },
+    },
+  });
+  const seen: string[] = [];
+  const measureFetch = (async (_url: string, init: RequestInit): Promise<Response> => {
+    const auth = new Headers(init.headers).get("authorization") ?? "";
+    seen.push(auth);
+    return new Response("{}", { status: auth === "Bearer test-key-pooled" ? 200 : 401 });
+  }) as unknown as typeof fetch;
+  await withAdmin(cfg, async ({ port }) => {
+    const started = await fetch(`${base()}:${port}/api/providers/measure`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "pooled", models: ["pooled-model"] }),
+    });
+    assert.equal(started.status, 202);
+    const job = await pollMeasure(port, ((await started.json()) as { jobId: string }).jobId);
+    assert.equal(job.state, "done");
+    const [result] = job.results as { id: string; wire?: string }[];
+    assert.deepEqual([result!.id, result!.wire], ["pooled-model", "chat"], "measured as working, because the pooled key answered");
+    assert.ok(seen.length > 0 && seen.every((auth) => auth === "Bearer test-key-pooled"), `every measurement carried the pooled key: ${JSON.stringify(seen)}`);
   }, { measureFetch });
 });
 
@@ -2495,13 +2703,15 @@ test("GET /api/limits assembles every readable provider and honours limits:false
   } });
   await withAdmin(cfg, async ({ port }) => {
     const res = await fetch(`${base()}:${port}/api/limits`);
-    const body = (await res.json()) as { providers: { provider: string; type: string; title: string; accounts: { account: number; windows: { kind: string; label?: string; used_percent: number }[] }[] }[] };
+    const body = (await res.json()) as { providers: { provider: string; type: string; title: string; accounts: { account: number; windows: { kind: string; label?: string; used_percent: number }[]; renews_at?: number }[] }[] };
     assert.deepEqual(body.providers.map((p) => p.provider), ["anthropic", "chatgpt", "gem", "go"]);
     assert.deepEqual(body.providers.map((p) => p.title), ["Claude", "GPT", "Gemini", "Go"]);
     assert.equal(body.providers[0]!.type, "anthropic");
     assert.deepEqual(body.providers[0]!.accounts[0]!.windows.map((w) => `${w.kind}${w.label ? ":" + w.label : ""}`), ["five_hour", "seven_day", "scoped:Fable"]);
     // The paused ChatGPT account takes no number; the ready one is account 0.
     assert.deepEqual(body.providers[1]!.accounts.map((a) => a.account), [0]);
+    // The subscription's renewal date is carried in epoch seconds, when the account states one.
+    assert.equal(body.providers[1]!.accounts[0]!.renews_at, Math.round((now + 7 * 86_400_000) / 1000));
     assert.equal(body.providers[2]!.type, "google");
     assert.equal(body.providers[3]!.type, "opencode-go");
   }, {
@@ -2513,7 +2723,7 @@ test("GET /api/limits assembles every readable provider and honours limits:false
       quota: {}, auth: {},
       accounts: () => ({
         chatgpt: [
-          { id: "a", label: "A", paused: false, state: "ready", quota: { at: now, rate_limits: { primary: { used_percent: 23, window_minutes: 10080, reset_at: future }, secondary: null } }, active: true },
+          { id: "a", label: "A", paused: false, state: "ready", quota: { at: now, rate_limits: { primary: { used_percent: 23, window_minutes: 10080, reset_at: future }, secondary: null } }, active: true, renewsAt: now + 7 * 86_400_000 },
           { id: "b", label: "B", paused: true, state: "paused", quota: null, active: false },
         ] as never,
         quiet: [{ id: "c", label: "C", paused: false, state: "ready", quota: { at: now, rate_limits: { primary: { used_percent: 5, window_minutes: 10080 } } }, active: false }] as never,
@@ -2526,10 +2736,307 @@ test("GET /api/limits assembles every readable provider and honours limits:false
         { bucketId: "gemini-5h", displayName: "5h", window: "5h", remainingFraction: 1 },
       ] }] }),
     }),
-    opencodeUsage: async (name: string) => name === "go" ? [
-      { kind: "five_hour", used_percent: 3, window_minutes: 300, reset_at: future },
-      { kind: "seven_day", used_percent: 52, window_minutes: 10080, reset_at: future },
-      { kind: "window", used_percent: 92, window_minutes: 43200, reset_at: future },
-    ] : [],
+    opencodeUsage: async (name: string) => name === "go" ? [{
+      id: "default",
+      windows: [
+        { kind: "five_hour", used_percent: 3, window_minutes: 300, reset_at: future },
+        { kind: "seven_day", used_percent: 52, window_minutes: 10080, reset_at: future },
+        { kind: "window", used_percent: 92, window_minutes: 43200, reset_at: future },
+      ],
+    }] : [],
+  });
+});
+
+test("GET /api/limits reports a credit-selling provider as a credit row, and honours limits:false", async () => {
+  const now = Date.now();
+  const cfg = makeCfg({ providers: {
+    sail: { type: "anthropic-compatible", url: "https://api.sailresearch.com/anthropic" },
+    or: { type: "anthropic-compatible", url: "https://openrouter.ai/api" },
+    quiet: { type: "anthropic-compatible", url: "https://api.sailresearch.com/anthropic", limits: false },
+    deepseek: { type: "anthropic-compatible", url: "https://api.deepseek.com/anthropic" },
+  } });
+  await withAdmin(cfg, async ({ port }) => {
+    const res = await fetch(`${base()}:${port}/api/limits`);
+    const body = (await res.json()) as { providers: { provider: string; type: string; title: string; accounts: { account: number; windows: unknown[]; at: number; credit?: { remaining_usd: number; days_remaining?: number; low: boolean } }[] }[] };
+    assert.deepEqual(body.providers.map((p) => [p.provider, p.type]), [["sail", "credit"], ["or", "credit"]]);
+    const sail = body.providers[0]!;
+    assert.equal(sail.title, "sail");
+    // The contract the UI tile reads: one account, no windows, the balance and when it was read.
+    assert.deepEqual(sail.accounts[0]!.windows, []);
+    assert.equal(sail.accounts[0]!.at, now);
+    assert.deepEqual(sail.accounts[0]!.credit, { remaining_usd: 737.95, days_remaining: 12.3, low: false });
+    assert.deepEqual(body.providers[1]!.accounts[0]!.credit, { remaining_usd: 2.5, low: true });
+  }, {
+    creditBalance: async (name: string) => name === "sail"
+      ? [{ id: "default", credit: { remaining_usd: 737.95, days_remaining: 12.3, low: false }, at: now }]
+      : name === "or" ? [{ id: "default", credit: { remaining_usd: 2.5, low: true }, at: now }] : [],
+  });
+});
+
+test("GET /api/limits lists one OpenCode Go account per key, labelled when the key has a label", async () => {
+  const now = Date.now();
+  const window = { kind: "five_hour" as const, used_percent: 30, window_minutes: 300, reset_at: Math.floor(now / 1000) + 600 };
+  const cfg = makeCfg({ providers: {
+    go: {
+      type: "openai-compatible", preset: "opencode-go", url: "https://opencode.ai/zen/go/v1",
+      credentials: [
+        { id: "k1", label: "Work", headers: { authorization: "Bearer test-key-1" } },
+        { id: "k2", headers: { authorization: "Bearer test-key-2" } },
+      ],
+    },
+  } });
+  await withAdmin(cfg, async ({ port }) => {
+    const res = await fetch(`${base()}:${port}/api/limits`);
+    const body = (await res.json()) as { providers: { accounts: { account: number; label?: string; windows: { used_percent: number }[]; at: number }[] }[] };
+    const accounts = body.providers[0]!.accounts;
+    assert.deepEqual(accounts.map((a) => [a.account, a.label]), [[0, "Work"], [1, undefined]]);
+    assert.deepEqual(accounts.map((a) => a.windows[0]!.used_percent), [30, 30]);
+  }, {
+    // A key with no readable windows is left out rather than shown empty.
+    opencodeUsage: async () => [
+      { id: "k1", label: "Work", windows: [window] },
+      { id: "k2", windows: [window] },
+      { id: "k3", windows: [] },
+    ],
+  });
+});
+
+test("GET /api/provider-keys lists each key's state and windows, and never a header", async () => {
+  const now = Date.now();
+  const cfg = makeCfg({ providers: {
+    go: {
+      type: "openai-compatible", preset: "opencode-go", url: "https://opencode.ai/zen/go/v1",
+      credentials: [
+        { id: "k1", label: "Work", headers: { authorization: "Bearer test-key-1" } },
+        { id: "k2", headers: { authorization: "Bearer test-key-2" }, paused: true },
+      ],
+    },
+  } });
+  await withAdmin(cfg, async ({ port }) => {
+    for (const endpoint of ["/api/provider-keys", "/api/opencode-accounts"]) {
+      const res = await fetch(`${base()}:${port}${endpoint}?provider=go`);
+      assert.equal(res.status, 200);
+      const text = await res.text();
+      assert.ok(!text.includes("test-key-1") && !text.includes("test-key-2"), "no header value is serialised");
+      assert.ok(!/authorization/i.test(text), "not even the header's name");
+      const body = JSON.parse(text) as { provider: string; type: string; accounts: { id: string; label?: string; state: string; at: number; windows: { kind: string; used_percent: number }[] }[] };
+      assert.equal(body.provider, "go");
+      // The wire type is in the answer so a UI does not have to guess what a missing window means.
+      assert.equal(body.type, "openai-compatible");
+      assert.deepEqual(body.accounts.map((a) => [a.id, a.label, a.state]), [["k1", "Work", "in-use"], ["k2", undefined, "paused"]]);
+      assert.equal(body.accounts[0]!.windows[0]!.kind, "five_hour");
+      assert.equal(body.accounts[0]!.at, now);
+      // An unknown provider is a 404 rather than an empty list.
+      assert.equal((await fetch(`${base()}:${port}${endpoint}?provider=nope`)).status, 404);
+    }
+  }, {
+    providerKeys: async () => [
+      { id: "k1", label: "Work", state: "in-use", at: now, windows: [{ kind: "five_hour", used_percent: 40, window_minutes: 300 }] },
+      { id: "k2", state: "paused", at: 0, windows: [] },
+    ],
+  });
+});
+
+test("PATCH and DELETE on an OpenCode Go key change `credentials` on disk, and validate", async () => {
+  let cleared: string[] = [];
+  const cfg = makeCfg({ providers: {
+    go: {
+      type: "openai-compatible", preset: "opencode-go", url: "https://opencode.ai/zen/go/v1",
+      credentials: [
+        { id: "k1", label: "Work", headers: { authorization: "Bearer test-key-1" } },
+        { id: "k2", headers: { authorization: "Bearer test-key-2" } },
+      ],
+    },
+  } });
+  await withAdmin(cfg, async ({ port, configFile }) => {
+    const origin = `http://127.0.0.1:${port}`;
+    const saved = (): { credentials?: { id: string; label?: string; paused?: boolean; headers: Record<string, string> }[] } =>
+      (JSON.parse(fs.readFileSync(configFile, "utf8")) as { providers: { go: { credentials?: { id: string; label?: string; paused?: boolean; headers: Record<string, string> }[] } } }).providers.go;
+
+    // Rename and pause in one save.
+    let res = await fetch(`${base()}:${port}/api/opencode-accounts/k2?provider=go`, {
+      method: "PATCH", headers: { "content-type": "application/json", origin }, body: JSON.stringify({ label: "Home", paused: true }),
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(saved().credentials!.map((c) => [c.id, c.label, c.paused]), [["k1", "Work", undefined], ["k2", "Home", true]]);
+    // The key itself is untouched by a rename or a pause.
+    assert.equal(saved().credentials![1]!.headers.authorization, "Bearer test-key-2");
+
+    // Resume writes no `paused: false`: the file reads the way a never-paused key does.
+    res = await fetch(`${base()}:${port}/api/opencode-accounts/k2?provider=go`, {
+      method: "PATCH", headers: { "content-type": "application/json", origin }, body: JSON.stringify({ paused: false }),
+    });
+    assert.equal(res.status, 200);
+    assert.equal("paused" in saved().credentials![1]!, false);
+
+    // A cooldown is cleared in the router's memory, not by writing the config.
+    res = await fetch(`${base()}:${port}/api/opencode-accounts/k2?provider=go`, {
+      method: "PATCH", headers: { "content-type": "application/json", origin }, body: JSON.stringify({ clearCooldown: true }),
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(cleared, ["go/k2"]);
+
+    // An unknown id is a 404, for a cooldown clear as much as for a pause: the mem clear used to
+    // answer 200 for any string, so the dashboard reported a key it does not have as fixed.
+    assert.equal((await fetch(`${base()}:${port}/api/opencode-accounts/nope?provider=go`, {
+      method: "PATCH", headers: { "content-type": "application/json", origin }, body: JSON.stringify({ clearCooldown: true }),
+    })).status, 404);
+    assert.deepEqual(cleared, ["go/k2"], "an unknown id is not cleared");
+    assert.equal((await fetch(`${base()}:${port}/api/opencode-accounts/nope?provider=go`, {
+      method: "PATCH", headers: { "content-type": "application/json", origin }, body: JSON.stringify({ paused: true }),
+    })).status, 404);
+    assert.equal((await fetch(`${base()}:${port}/api/opencode-accounts/k1?provider=go`, {
+      method: "PATCH", headers: { "content-type": "application/json", origin }, body: JSON.stringify({ label: "" }),
+    })).status, 400);
+    assert.equal(saved().credentials![0]!.label, "Work");
+
+    // Removing the last key leaves no empty list: the provider falls back to its single `headers` key.
+    for (const id of ["k1", "k2"]) {
+      res = await fetch(`${base()}:${port}/api/opencode-accounts/${id}?provider=go`, { method: "DELETE", headers: { origin } });
+      assert.equal(res.status, 200);
+    }
+    assert.equal(saved().credentials, undefined);
+  }, { credentialClear: (provider, id) => cleared.push(`${provider}/${id}`) });
+});
+
+test("GET /api/provider-keys answers for an anthropic-compatible provider too, and names its wire type", async () => {
+  const now = Date.now();
+  const cfg = makeCfg({ providers: {
+    ds: {
+      type: "anthropic-compatible", url: "https://api.deepseek.com/anthropic",
+      credentials: [
+        { id: "k1", label: "Main", headers: { "x-api-key": "test-key-1" } },
+        { id: "k2", headers: { "x-api-key": "test-key-2" }, paused: true },
+      ],
+    },
+  } });
+  await withAdmin(cfg, async ({ port }) => {
+    const res = await fetch(`${base()}:${port}/api/provider-keys?provider=ds`);
+    assert.equal(res.status, 200);
+    const text = await res.text();
+    assert.ok(!text.includes("test-key-1") && !text.includes("test-key-2"), "no key value is serialised");
+    const body = JSON.parse(text) as { provider: string; type: string; accounts: { id: string; label?: string; state: string; at: number; windows: unknown[] }[] };
+    assert.equal(body.type, "anthropic-compatible");
+    assert.deepEqual(body.accounts.map((a) => [a.id, a.label, a.state, a.windows.length]), [
+      ["k1", "Main", "in-use", 0], ["k2", undefined, "paused", 0],
+    ]);
+    assert.equal(body.accounts[0]!.at, now);
+    // A provider that is not key-based keeps its own endpoint: this is a 404, not somebody's accounts.
+    assert.equal((await fetch(`${base()}:${port}/api/provider-keys?provider=nope`)).status, 404);
+  }, {
+    providerKeys: async () => [
+      { id: "k1", label: "Main", state: "in-use", at: now, windows: [] },
+      { id: "k2", state: "paused", at: 0, windows: [] },
+    ],
+  });
+});
+
+test("POST /api/provider-keys appends a key under the provider's own auth header, and never echoes it", async () => {
+  const cfg = makeCfg({ providers: {
+    ds: { type: "anthropic-compatible", url: "https://api.deepseek.com/anthropic", headers: { "x-api-key": "test-key-1", "x-org": "acme" } },
+    or: { type: "openai-compatible", preset: "openrouter", url: "https://openrouter.ai/api/v1" },
+  } });
+  await withAdmin(cfg, async ({ port, configFile }) => {
+    const origin = `http://127.0.0.1:${port}`;
+    const saved = (name: string): { headers?: Record<string, string>; credentials?: { id: string; label?: string; headers: Record<string, string> }[] } =>
+      (JSON.parse(fs.readFileSync(configFile, "utf8")) as { providers: Record<string, { headers?: Record<string, string>; credentials?: { id: string; label?: string; headers: Record<string, string> }[] }> }).providers[name]!;
+
+    // A headers-only provider: its key moves into credentials[0] under the id the router already used.
+    let res = await fetch(`${base()}:${port}/api/provider-keys?provider=ds`, {
+      method: "POST", headers: { "content-type": "application/json", origin }, body: JSON.stringify({ label: "Second", key: "test-key-2" }),
+    });
+    const created = (await res.json()) as { ok: boolean; provider: string; id: string; migrated: boolean };
+    assert.equal(res.status, 201);
+    assert.equal(created.migrated, true);
+    assert.equal(created.id, "key-1");
+    assert.equal(JSON.stringify(created).includes("test-key-2"), false, "the key is not echoed back");
+    const ds = saved("ds");
+    assert.deepEqual(ds.credentials!.map((c) => [c.id, c.label]), [["default", undefined], ["key-1", "Second"]]);
+    assert.deepEqual(ds.credentials![0]!.headers, { "x-api-key": "test-key-1" }, "the old key kept its header and value");
+    // The auth header left `headers`; the provider's other headers stay, sent with every key.
+    assert.deepEqual(ds.headers, { "x-org": "acme" });
+    // The file holds every key, so its mode does not depend on the umask of whoever saved it.
+    assert.equal(fs.statSync(configFile).mode & 0o777, 0o600, "the config file is owner-only");
+
+    // The new key goes out under the convention this provider already uses (x-api-key), not a bearer.
+    assert.deepEqual(ds.credentials![1]!.headers, { "x-api-key": "test-key-2" });
+    // A provider with no key at all takes its preset's convention (openrouter: bearer).
+    res = await fetch(`${base()}:${port}/api/provider-keys?provider=or`, {
+      method: "POST", headers: { "content-type": "application/json", origin }, body: JSON.stringify({ key: "Bearer test-key-3" }),
+    });
+    assert.equal(res.status, 201);
+    assert.deepEqual((await res.json() as { migrated: boolean }).migrated, false);
+    assert.deepEqual(saved("or").credentials![0]!.headers, { authorization: "Bearer test-key-3" }, "a pasted Bearer prefix is not doubled");
+
+    // A key that cannot travel in a header is refused, and nothing is written.
+    res = await fetch(`${base()}:${port}/api/provider-keys?provider=ds`, {
+      method: "POST", headers: { "content-type": "application/json", origin }, body: JSON.stringify({ key: "test key 4" }),
+    });
+    assert.equal(res.status, 400);
+    const bad = await res.text();
+    assert.ok(!bad.includes("test key 4"), "the refused key is not repeated in the error");
+    assert.equal(saved("ds").credentials!.length, 2);
+    assert.equal((await fetch(`${base()}:${port}/api/provider-keys?provider=nope`, {
+      method: "POST", headers: { "content-type": "application/json", origin }, body: JSON.stringify({ key: "test-key-5" }),
+    })).status, 404);
+  });
+});
+
+test("a headers-only key answers clearCooldown but not a rename, and its id cannot be deleted", async () => {
+  const cleared: string[] = [];
+  const cfg = makeCfg({ providers: {
+    ds: { type: "anthropic-compatible", url: "https://api.deepseek.com/anthropic", headers: { "x-api-key": "test-key-1" } },
+  } });
+  await withAdmin(cfg, async ({ port, configFile }) => {
+    const origin = `http://127.0.0.1:${port}`;
+    const onDisk = (): { headers?: Record<string, string>; credentials?: unknown } => {
+      const saved = (JSON.parse(fs.readFileSync(configFile, "utf8")) as { providers: { ds: { headers?: Record<string, string>; credentials?: unknown } } }).providers.ds;
+      return { ...(saved.headers !== undefined ? { headers: saved.headers } : {}), ...(saved.credentials !== undefined ? { credentials: saved.credentials } : {}) };
+    };
+    // The router calls this provider's one key "default", so clearing its cooldown is honest.
+    let res = await fetch(`${base()}:${port}/api/provider-keys/default?provider=ds`, {
+      method: "PATCH", headers: { "content-type": "application/json", origin }, body: JSON.stringify({ clearCooldown: true }),
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(cleared, ["ds/default"]);
+    // A label has nowhere to be written; refusing beats inventing a `credentials` entry.
+    res = await fetch(`${base()}:${port}/api/provider-keys/default?provider=ds`, {
+      method: "PATCH", headers: { "content-type": "application/json", origin }, body: JSON.stringify({ label: "Main" }),
+    });
+    assert.equal(res.status, 400);
+    // And deleting it would leave the provider with no key at all: the config is untouched.
+    assert.equal((await fetch(`${base()}:${port}/api/provider-keys/default?provider=ds`, { method: "DELETE", headers: { origin } })).status, 400);
+    // An id that is not this provider's is still a 404.
+    assert.equal((await fetch(`${base()}:${port}/api/provider-keys/other?provider=ds`, {
+      method: "PATCH", headers: { "content-type": "application/json", origin }, body: JSON.stringify({ clearCooldown: true }),
+    })).status, 404);
+    assert.deepEqual(onDisk(), { headers: { "x-api-key": "test-key-1" } });
+    assert.deepEqual(cleared, ["ds/default"]);
+  }, { credentialClear: (provider, id) => cleared.push(`${provider}/${id}`) });
+});
+
+test("GET /api/provider-keys carries a credit provider's balance per key, with the label", async () => {
+  const now = Date.now();
+  const cfg = makeCfg({ providers: {
+    openrouter: {
+      type: "anthropic-compatible", url: "https://openrouter.ai/api",
+      credentials: [
+        { id: "k1", label: "Personal", headers: { authorization: "Bearer test-key-1" } },
+        { id: "k2", headers: { authorization: "Bearer test-key-2" } },
+      ],
+    },
+  } });
+  await withAdmin(cfg, async ({ port }) => {
+    const res = await fetch(`${base()}:${port}/api/provider-keys?provider=openrouter`);
+    assert.equal(res.status, 200);
+    const text = await res.text();
+    assert.ok(!text.includes("test-key-1") && !text.includes("test-key-2"), "no key value is serialised");
+    const body = JSON.parse(text) as { accounts: { id: string; label?: string; state: string; windows: unknown[]; credit?: { remaining_usd: number; low: boolean } }[] };
+    assert.deepEqual(body.accounts.map((a) => [a.id, a.label, a.credit?.remaining_usd]), [["k1", "Personal", 3.95], ["k2", undefined, 12]]);
+  }, {
+    providerKeys: async () => [
+      { id: "k1", label: "Personal", state: "cooling", cooldown_seconds: 300, at: now, windows: [], credit: { remaining_usd: 3.95, low: true } },
+      { id: "k2", state: "in-use", at: now, windows: [], credit: { remaining_usd: 12, low: false } },
+    ],
   });
 });

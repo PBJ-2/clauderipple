@@ -219,6 +219,34 @@ test("with every credential cooling, the request still carries one — not an em
   } finally { await r.stop(); await up.close(); }
 });
 
+test("the anthropic-compatible wire answers every-paused locally, and falls back only to a non-paused key", async () => {
+  // The same rule the openai-compatible branch follows: pausing is the operator's decision, so with
+  // every key paused there is nothing to send on — and when only one is paused the fallback must not
+  // be `credentials[0]`, which may be the paused key itself.
+  const up = await upstream(() => ({ status: 429, headers: { "retry-after": "300" }, body: "{}" }));
+  const provider = pooled(up.port);
+  (provider as { credentials: { paused?: boolean }[] }).credentials[0]!.paused = true;
+  const r = await rig({ p: provider }, { "claude-opus-4-8": { provider: "p", model: "m" } });
+  try {
+    // Turn 1 goes out on the unpaused key and cools it; turn 2 has nothing usable and must still
+    // carry that same key, never the paused one.
+    assert.equal(await r.send(), 429);
+    assert.equal(await r.send(), 429);
+    assert.deepEqual(up.seen.map((s) => s.key), ["two", "two"], "the paused key is never asked, even as the last resort");
+  } finally { await r.stop(); await up.close(); }
+});
+
+test("with every anthropic-compatible key paused the router refuses locally, without calling upstream", async () => {
+  const up = await upstream(() => ({ status: 200 }));
+  const provider = pooled(up.port);
+  for (const credential of (provider as { credentials: { paused?: boolean }[] }).credentials) credential.paused = true;
+  const r = await rig({ p: provider }, { "claude-opus-4-8": { provider: "p", model: "m" } });
+  try {
+    assert.equal(await r.sendDetailed().then((res) => res.status), 503);
+    assert.equal(up.seen.length, 0, "nothing went upstream");
+  } finally { await r.stop(); await up.close(); }
+});
+
 // A relay reporting a broken upstream answers 403, and that is not a statement about our key. It was
 // charged as an auth failure, so one bad minute parked a working credential for the next minute and
 // every turn in between reached the user as an authentication error (2026-09-21).

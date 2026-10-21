@@ -67,26 +67,39 @@ function expiryFromToken(token: string): number {
   return typeof exp === "number" ? exp * 1000 : 0;
 }
 
-export type TokenIdentity = { accountId?: string; email?: string; planType?: string; expiresAt?: number };
+export type TokenIdentity = {
+  accountId?: string;
+  email?: string;
+  planType?: string;
+  expiresAt?: number;
+  /** When the subscription was paid through, epoch ms: the id token's `chatgpt_subscription_active_until`. */
+  subscriptionActiveUntil?: number;
+};
 
 /**
  * Who a grant belongs to, from its JWT claims: the id token first (it carries the email), then the
  * access token. The workspace is `https://api.openai.com/auth`.chatgpt_account_id; the email is a
  * top-level claim of the id token or `https://api.openai.com/profile`.email of the access token.
+ *
+ * The same namespace's `chatgpt_subscription_active_until` is the subscription's renewal date (an
+ * ISO string), read here so the dashboard's limits row can show it without another upstream call.
+ * Only the claim is read; no token is stored or returned.
  */
 export function identityFromTokens(tokens: { accessToken: string; idToken?: string }): TokenIdentity {
   const out: TokenIdentity = {};
   for (const token of [tokens.idToken, tokens.accessToken]) {
     const claims = token ? decodeJwt(token) : null;
     if (!claims) continue;
-    const auth = claims["https://api.openai.com/auth"] as { chatgpt_account_id?: unknown; chatgpt_plan_type?: unknown } | undefined;
+    const auth = claims["https://api.openai.com/auth"] as { chatgpt_account_id?: unknown; chatgpt_plan_type?: unknown; chatgpt_subscription_active_until?: unknown } | undefined;
     const profile = claims["https://api.openai.com/profile"] as { email?: unknown } | undefined;
     const accountId = typeof auth?.chatgpt_account_id === "string" ? auth.chatgpt_account_id : typeof claims.chatgpt_account_id === "string" ? claims.chatgpt_account_id : undefined;
     const email = typeof claims.email === "string" ? claims.email : typeof profile?.email === "string" ? profile.email : undefined;
     const planType = typeof auth?.chatgpt_plan_type === "string" ? auth.chatgpt_plan_type : undefined;
+    const activeUntil = typeof auth?.chatgpt_subscription_active_until === "string" ? Date.parse(auth.chatgpt_subscription_active_until) : NaN;
     if (!out.accountId && accountId) out.accountId = accountId;
     if (!out.email && email) out.email = email.toLowerCase();
     if (!out.planType && planType) out.planType = planType;
+    if (!out.subscriptionActiveUntil && Number.isFinite(activeUntil)) out.subscriptionActiveUntil = activeUntil;
   }
   const exp = expiryFromToken(tokens.accessToken);
   if (exp) out.expiresAt = exp;

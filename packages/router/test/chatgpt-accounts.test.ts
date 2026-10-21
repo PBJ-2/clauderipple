@@ -241,6 +241,23 @@ const usageLimit = (resetAfter: number): Behaviour => ({
   body: JSON.stringify({ error: { type: "usage_limit_reached", message: "The usage limit has been reached" } }),
 });
 
+test("an account's renewal date is read from its id token's subscription claim, and only that", () => {
+  const home = tempHome();
+  const until = "2026-11-21T00:00:00Z";
+  const id = saveChatGptAccount(home, {
+    ...grant("ws-r", "r@example.test"),
+    idToken: jwt({ email: "r@example.test", "https://api.openai.com/auth": { chatgpt_account_id: "ws-r", chatgpt_plan_type: "plus", chatgpt_subscription_active_until: until } }),
+  }).id;
+  const adapter = new ChatGptAdapter("chatgpt", { type: "chatgpt", auth: "own" }, home, log, new CredentialPool());
+  const status = adapter.accountStatus().find((a) => a.id === id)!;
+  assert.equal(status.renewsAt, Date.parse(until));
+  // Nothing about a token reaches the dashboard shape.
+  assert.ok(!JSON.stringify(status).includes("eyJ"), "no bearer material is summarised");
+  // An account whose token does not state it simply has no renewal date.
+  const plain = saveChatGptAccount(home, grant("ws-n", "n@example.test")).id;
+  assert.equal(adapter.accountStatus().find((a) => a.id === plain)!.renewsAt, undefined);
+});
+
 test("rotation: an account at its limit hands the same turn to the next, and the conversation stays there", async () => {
   rig(3);
   behaviour.set("tok-0", usageLimit(3600));

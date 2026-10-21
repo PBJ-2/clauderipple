@@ -12,6 +12,10 @@
 //   POST /api/google-login/code  paste the code when no loopback callback could be used
 //   GET  /api/google-accounts?provider=   signed-in Google accounts, rotation state (no tokens)
 //   PATCH/DELETE /api/google-accounts/:id rename, pause/resume, clear a cooldown; remove
+//   GET  /api/provider-keys?provider=     any key-based provider's keys: state, cooldown, windows, credit
+//   POST /api/provider-keys?provider=     add a key ({label?, key}); migrates a headers-only key first
+//   PATCH/DELETE /api/provider-keys/:id?provider=  rename, pause/resume, clear a cooldown; remove
+//   (/api/opencode-accounts is the GET/PATCH/DELETE alias this endpoint had before 2026-10-21.)
 //   GET  /api/update    whether a newer version is published, and how this copy was installed
 //   POST /api/update    start `clauderipple update` in the background (it restarts this router)
 //   GET  /api/power     lid-closed awake + hotspot failover state (power.ts)
@@ -31,8 +35,8 @@ import { runCli, startCliDetached, parseUpdateCheck, type DetachedCli } from "./
 import { AutoUpdater } from "./autoupdate.ts";
 export { parseUpdateCheck, type UpdateCheck } from "./cli-control.ts";
 import { fileURLToPath } from "node:url";
-import type { Config, Provider, ProviderModel } from "./config.ts";
-import { adminPort, headerValueProblem, homeDir, searchProviderFor, ssidProblem, validate } from "./config.ts";
+import type { Config, Provider, ProviderCredential, ProviderModel } from "./config.ts";
+import { adminPort, authConventionOf, headerValueProblem, headersWithCredential, homeDir, isKeyProvider, searchProviderFor, ssidProblem, validate } from "./config.ts";
 export { adminPort } from "./config.ts";
 import { generatedAgents } from "./agents.ts";
 import { isJudgeOnlyModel } from "./model-policy.ts";
@@ -68,7 +72,9 @@ import { readChatGptAccounts, removeChatGptAccount, summarize as summarizeChatGp
 import { exhaustedForMs, IMAGE_ASPECTS, IMAGE_BACKGROUNDS, IMAGE_FORMATS, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
 import type { GoogleAccountStatus } from "./providers/google/index.ts";
 import { googleWindowsFromGroups, type QuotaGroup } from "./providers/google/usage.ts";
-import { isOpenCodeGo, type OpenCodeWindow } from "./providers/opencode-usage.ts";
+import { isOpenCodeGo, type OpenCodeLimit } from "./providers/opencode-usage.ts";
+import type { CreditBalance } from "./providers/credit-balance.ts";
+import type { CreditKeyLimit, ProviderKeyState } from "./proxy.ts";
 import type { GrokWindow } from "./providers/grok/usage.ts";
 import { ANTIGRAVITY_WARNING, staticAntigravityModels } from "./providers/google/antigravity.ts";
 import { readGoogleAccounts, removeGoogleAccount, summarize as summarizeGoogleAccount, updateGoogleAccount } from "./providers/google/accounts.ts";
@@ -184,8 +190,20 @@ export type AdminDeps = {
   claudeUsage?: () => Promise<Record<string, Record<string, unknown>>>;
   /** The Claude models the signed-in account can use (`GET /v1/models`); null until one answer. Absent in tests. */
   claudeModels?: () => Promise<ClaudeModel[] | null>;
-  /** An OpenCode Go provider's usage windows, for the status bar's limits row (`/api/limits`). Absent in tests. */
-  opencodeUsage?: (name: string) => Promise<OpenCodeWindow[]>;
+  /**
+   * A credit-selling provider's remaining balance per key, for the status bar's limits row
+   * (`/api/limits`). Empty when it sells no credit. Absent in tests.
+   */
+  creditBalance?: (name: string) => Promise<CreditKeyLimit[]>;
+  /** An OpenCode Go provider's usage per key, for the status bar's limits row (`/api/limits`). Absent in tests. */
+  opencodeUsage?: (name: string) => Promise<OpenCodeLimit[]>;
+  /**
+   * Each key of any key-based provider as an account card for `GET /api/provider-keys` (state,
+   * cooldown, windows, credit; ids and labels only). Absent in tests.
+   */
+  providerKeys?: (name: string) => Promise<ProviderKeyState[]>;
+  /** Put one provider credential back into rotation now (`PATCH /api/provider-keys/:id`). */
+  credentialClear?: (provider: string, id: string) => void;
   /** A Grok provider's usage pool, for the status bar's limits row (`/api/limits`). Absent in tests. */
   grokUsage?: (name: string) => Promise<GrokWindow[]>;
   /**
@@ -234,7 +252,22 @@ async function claudeAccountUsage(deps: AdminDeps): Promise<{ id: string; label:
 
 /** One window the limits row reads. `reset_at` is epoch seconds, as the other readers use. */
 export type LimitsWindow = { kind: "five_hour" | "seven_day" | "scoped" | "window"; label?: string; used_percent: number; window_minutes?: number; reset_at?: number };
-export type LimitsAccount = { account: number; windows: LimitsWindow[]; at: number };
+/**
+ * One account row. `label` is the provider's own name for the account, when it has one (OpenCode Go
+ * keys). `credit` is a prepaid balance instead of windows (providers that sell credit, not quota).
+ */
+export type LimitsAccount = {
+  account: number;
+  label?: string;
+  windows: LimitsWindow[];
+  at: number;
+  /**
+   * The subscription's renewal date, epoch seconds, when the provider states one (ChatGPT: the id
+   * token's `chatgpt_subscription_active_until`). Absent for providers that do not.
+   */
+  renews_at?: number;
+  credit?: CreditBalance;
+};
 export type LimitsProvider = { provider: string; type: string; title: string; accounts: LimitsAccount[] };
 
 /** A `{used_percent, window_minutes, reset_at}` snapshot window as `/api/limits` reads it, or null. */
@@ -303,7 +336,7 @@ function chatgptLimitAccounts(accounts: ChatGptAccountStatus[]): LimitsAccount[]
       const win = limitWindowFrom(w);
       if (win) windows.push({ kind: windowKind(win.window_minutes), used_percent: win.used_percent, ...(win.window_minutes !== undefined ? { window_minutes: win.window_minutes } : {}), ...(win.reset_at !== undefined ? { reset_at: win.reset_at } : {}) });
     }
-    if (windows.length) out.push({ account: index, windows, at: quota.at });
+    if (windows.length) out.push({ account: index, windows, at: quota.at, ...(account.renewsAt !== undefined ? { renews_at: Math.round(account.renewsAt / 1000) } : {}) });
   });
   return out;
 }
@@ -331,13 +364,191 @@ async function googleLimitAccounts(deps: AdminDeps, name: string): Promise<Limit
   return out;
 }
 
-/** Every provider whose quota can be read, in one shape, for `GET /api/limits`. */
+/**
+ * The key-based provider a provider-keys request names, or null when there is none. The query
+ * `provider` picks one (openai-compatible or anthropic-compatible); absent, the first key-based
+ * provider in config order is used, the same fallback `/api/chatgpt-accounts` uses.
+ */
+function keyProviderName(deps: AdminDeps, wanted: string | null): string | null {
+  const providers = deps.config().providers;
+  if (wanted) {
+    const p = providers[wanted];
+    return p && isKeyProvider(p) ? wanted : null;
+  }
+  for (const [name, p] of Object.entries(providers)) {
+    if (isKeyProvider(p)) return name;
+  }
+  return null;
+}
+
+/**
+ * The config file as it is on disk right now, or the reason it could not be read.
+ *
+ * Read again rather than reusing the in-memory copy, and written through the one atomic save path,
+ * because the router picks a config file up by mtime: writing back a stale copy would silently
+ * revert a save the user made from another screen while this request was running.
+ */
+function readConfigFile(deps: AdminDeps): Config | { error: string } {
+  try {
+    return JSON.parse(fs.readFileSync(deps.configFile, "utf8")) as Config;
+  } catch (e) {
+    return { error: `could not re-read config: ${errorText(e)}` };
+  }
+}
+
+function saveConfigFile(deps: AdminDeps, config: Config): { ok: true } | { error: string } {
+  const errors = validate(config);
+  if (errors.length > 0) return { error: errors[0]! };
+  writeConfigFile(deps.configFile, config);
+  return { ok: true };
+}
+
+/**
+ * Rename, pause/resume or remove one key in a key-based provider's `credentials`.
+ *
+ * The result is validated with the same `validate` the GUI's save uses, so a bad edit is refused
+ * rather than written. Removing the last key is allowed: the provider then has no `credentials` and
+ * falls back to its `headers` key, which is the state every provider starts in.
+ *
+ * Removing the migrated key of a provider that had only `headers` deliberately does **not** put that
+ * key back into `headers`: the operator asked for it to be gone, and restoring it would keep a
+ * deleted key in use. The provider is then unauthenticated, which is what its config says.
+ */
+function changeProviderKey(
+  deps: AdminDeps,
+  name: string,
+  id: string,
+  change: { label?: string; paused?: boolean; remove?: boolean },
+): { ok: true } | { error: string } {
+  const current = readConfigFile(deps);
+  if ("error" in current) return current;
+  const provider = current.providers[name];
+  if (!provider || !isKeyProvider(provider) || !provider.credentials) return { error: "not-found" };
+  const index = provider.credentials.findIndex((credential) => credential.id === id);
+  if (index < 0) return { error: "not-found" };
+  if (change.remove) {
+    provider.credentials.splice(index, 1);
+    if (provider.credentials.length === 0) delete provider.credentials;
+  } else {
+    const credential = provider.credentials[index]!;
+    if (change.label !== undefined) credential.label = change.label;
+    if (change.paused !== undefined) {
+      // Absent rather than `false` when resumed: the stored config then reads the way a never-paused
+      // key does, and a boolean is only ever present when it is meant.
+      if (change.paused) credential.paused = true;
+      else delete credential.paused;
+    }
+  }
+  return saveConfigFile(deps, current);
+}
+
+/**
+ * Whether a key id names a credential of this provider, read from the config file the same way
+ * `changeProviderKey` reads it. Clearing a cooldown touches no config, but it must still answer an
+ * unknown id the way a rename does instead of reporting a success for a key nobody has.
+ *
+ * A provider with no `credentials` has exactly one key, in `headers`, and the router calls it
+ * "default": that id exists for the pool even though the file does not spell it out, so a cooldown
+ * clear on it is honest. A rename or pause has nowhere to be written, and is refused by the caller.
+ */
+function providerKeyKnown(deps: AdminDeps, name: string, id: string): "ok" | "not-found" | { error: string } {
+  const current = readConfigFile(deps);
+  if ("error" in current) return current;
+  const provider = current.providers[name];
+  if (!provider || !isKeyProvider(provider)) return "not-found";
+  if (provider.credentials?.some((credential) => credential.id === id)) return "ok";
+  if (!provider.credentials?.length && id === HEADERS_KEY_ID) return "ok";
+  return "not-found";
+}
+
+/** The id the router gives a provider's one key when it lives in `headers` (proxy `credentialsOf`). */
+const HEADERS_KEY_ID = "default";
+
+/**
+ * Append one credential to a key-based provider from `{label, key}`.
+ *
+ * A provider that kept its only key in `headers` is migrated first: that key becomes
+ * `credentials[0]` under the id the router already used for it ("default"), so its health and
+ * cooldown history survive, and its auth header leaves `headers` (the other headers stay — they are
+ * sent with every key). A provider that already has credentials just gains one.
+ *
+ * The auth header is the convention the provider already uses (config.ts `authConventionOf`), so a
+ * new key does not go out under a header its endpoint ignores. The key itself is never returned,
+ * logged, or put in an error message.
+ */
+function addProviderKey(
+  deps: AdminDeps,
+  name: string,
+  input: { label?: string; key: string },
+): { ok: true; id: string; migrated: boolean } | { error: string } {
+  const current = readConfigFile(deps);
+  if ("error" in current) return current;
+  const provider = current.providers[name];
+  if (!provider || !isKeyProvider(provider)) return { error: "not-found" };
+
+  const key = input.key.trim().replace(/^Bearer\s+/i, "");
+  if (!key) return { error: "the key is empty" };
+  // A header value is bytes: a key pasted with its label fails deep inside fetch with a message
+  // that says nothing about what the user did. The message those checks produce can quote the
+  // offending character, which would put part of the key in an answer, so this says the same thing
+  // without it — the key is never echoed, not even one character of it.
+  if (headerValueProblem(key) || /\s/.test(key)) {
+    return { error: "the key contains a character that cannot travel in an HTTP header (a space, a line break or a non-ASCII character) — paste the key on its own, without any label or surrounding text" };
+  }
+  if (input.label !== undefined && !input.label.trim()) return { error: "the label is empty" };
+
+  let migrated = false;
+  if (!provider.credentials?.length) {
+    // Migrate the headers-only key first, keeping the id the router already knows it by.
+    const headers = "headers" in provider ? provider.headers ?? {} : {};
+    const auth = ["authorization", "x-api-key"].find((header) => Object.keys(headers).some((key) => key.toLowerCase() === header));
+    if (auth) {
+      const actual = Object.keys(headers).find((key) => key.toLowerCase() === auth)!;
+      const kept = Object.fromEntries(Object.entries(headers).filter(([header]) => header !== actual));
+      provider.credentials = [{ id: HEADERS_KEY_ID, headers: { [actual]: headers[actual]! } }];
+      if (kept && Object.keys(kept).length > 0) (provider as { headers?: Record<string, string> }).headers = kept;
+      else delete (provider as { headers?: Record<string, string> }).headers;
+      migrated = true;
+    }
+  }
+
+  const convention = authConventionOf(provider);
+  const headers = convention === "x-api-key" ? { "x-api-key": key } : { authorization: `Bearer ${key}` };
+  // Ids are `key-<n>` with the first free n; "default" is reserved for the migrated headers key, so a
+  // new key never takes that id over and the old key's health stays its own.
+  const used = new Set((provider.credentials ?? []).map((credential) => credential.id));
+  let number = 1;
+  while (used.has(`key-${number}`)) number += 1;
+  const id = `key-${number}`;
+  provider.credentials = [...(provider.credentials ?? []), { id, ...(input.label?.trim() ? { label: input.label.trim() } : {}), headers }];
+
+  const saved = saveConfigFile(deps, current);
+  if ("error" in saved) return saved;
+  return { ok: true, id, migrated };
+}
+
+/**
+ * Every provider whose quota can be read, in one shape, for `GET /api/limits`.
+ */
 async function buildLimits(deps: AdminDeps): Promise<{ providers: LimitsProvider[] }> {
   const providers: LimitsProvider[] = [];
   const chatgpt = deps.chatgpt?.();
   const accounts = chatgpt?.accounts?.() ?? {};
   for (const [name, p] of Object.entries(deps.config().providers)) {
     if (p.limits === false) continue;
+    // A provider that sells prepaid credit reports that instead of quota windows, whichever wire it
+    // speaks (sail on OpenRouter's anthropic-compatible one, an OpenRouter key on either) — one row
+    // per key, because each key is a separate balance.
+    const credits = deps.creditBalance ? await deps.creditBalance(name) : [];
+    if (credits.length > 0) {
+      providers.push({
+        provider: name, type: "credit", title: name,
+        accounts: credits.map((row, index) => ({
+          account: index, ...(row.label ? { label: row.label } : {}), windows: [], at: row.at, credit: row.credit,
+        })),
+      });
+      continue;
+    }
     if (p.type === "anthropic" && p.auth === "claude-code") {
       const rows = await anthropicLimitAccounts(deps);
       if (rows.length) providers.push({ provider: name, type: "anthropic", title: "Claude", accounts: rows });
@@ -348,8 +559,16 @@ async function buildLimits(deps: AdminDeps): Promise<{ providers: LimitsProvider
       const rows = await googleLimitAccounts(deps, name);
       if (rows.length) providers.push({ provider: name, type: "google", title: "Gemini", accounts: rows });
     } else if (p.type === "openai-compatible" && isOpenCodeGo(p)) {
-      const windows = (await deps.opencodeUsage?.(name)) ?? [];
-      if (windows.length) providers.push({ provider: name, type: "opencode-go", title: "Go", accounts: [{ account: 0, windows: windows.map((w) => ({ ...w })), at: Date.now() }] });
+      const keys = (await deps.opencodeUsage?.(name)) ?? [];
+      // One account per key, in configured order; a provider with no `credentials` reports the single
+      // entry it always had. A key with no readable windows is left out rather than shown empty.
+      const at = Date.now();
+      const rows: LimitsAccount[] = [];
+      keys.forEach((key, index) => {
+        if (!key.windows.length) return;
+        rows.push({ account: index, ...(key.label ? { label: key.label } : {}), windows: key.windows.map((w) => ({ ...w })), at });
+      });
+      if (rows.length) providers.push({ provider: name, type: "opencode-go", title: "Go", accounts: rows });
     } else if (p.type === "grok") {
       const windows = (await deps.grokUsage?.(name)) ?? [];
       if (windows.length) providers.push({ provider: name, type: "grok", title: "Grok", accounts: [{ account: 0, windows: windows.map((w) => ({ ...w })), at: Date.now() }] });
@@ -366,6 +585,13 @@ type ProbeRequest = {
   type: "anthropic-compatible" | "openai-compatible";
   url: string;
   headers?: Record<string, string>;
+  /**
+   * The saved provider this test is for. Adding a key moves a headers-only key into `credentials`,
+   * so a test that read the form's headers alone went out unauthenticated and reported a working
+   * provider as "API key needed" (2026-10-21). The key is resolved from the router's own copy of the
+   * provider rather than from this request, so a paused or quarantined key is never tested.
+   */
+  name?: string;
   modelsUrl?: string;
   modelsAuthHeader?: string;
   /** Model id to use for the auth check when the provider has no listing endpoint (e.g. the preset's first fallback). */
@@ -508,14 +734,55 @@ function readSettingsEnv(): { HTTPS_PROXY?: string; NODE_EXTRA_CA_CERTS?: string
   }
 }
 
+/** The GUI files the browser loads; index.html names the rest and is itself never cacheable. */
+const UI_ASSETS = ["index.html", "app.js", "style.css", "i18n.js", "presets-fallback.js"];
+
 /** Newest mtime of the served GUI files; the page reloads itself when this changes (an open window would otherwise run stale JS). */
 function uiRevision(): string {
   try {
-    const files = ["index.html", "app.js", "style.css", "i18n.js", "presets-fallback.js"];
-    return String(Math.max(...files.map((f) => { try { return fs.statSync(path.join(UI_ROOT, f)).mtimeMs; } catch { return 0; } })));
+    return String(Math.max(...UI_ASSETS.map((f) => { try { return fs.statSync(path.join(UI_ROOT, f)).mtimeMs; } catch { return 0; } })));
   } catch {
     return "0";
   }
+}
+
+/**
+ * A short content hash per asset, computed once for the life of this process. An edge cache in
+ * front of the GUI (the phone tunnel's Cloudflare, measured 2026-10-21) keys .js/.css by URL and
+ * ignores the origin's headers unless told otherwise, so after a deploy index.html was new while
+ * app.js and style.css still came from cache. index.html names each asset with `?v=<hash>`, which
+ * a deploy changes, so every release asks the cache for URLs it has never seen. A file that
+ * cannot be read keeps its plain URL rather than failing the page.
+ */
+const uiAssetHashes: Record<string, string> = (() => {
+  const out: Record<string, string> = {};
+  for (const file of UI_ASSETS) {
+    if (file === "index.html") continue;
+    try {
+      out[file] = crypto.createHash("sha256").update(fs.readFileSync(path.join(UI_ROOT, file))).digest("hex").slice(0, 10);
+    } catch {
+      /* absent in this layout: the page's own URL stays */
+    }
+  }
+  return out;
+})();
+
+/** index.html with each asset URL pinned to its deploy's hash. */
+function versionedIndex(data: Buffer): Buffer {
+  let text = data.toString("utf8");
+  for (const [file, hash] of Object.entries(uiAssetHashes)) {
+    text = text.replaceAll(`"${file}"`, `"${file}?v=${hash}"`);
+  }
+  return Buffer.from(text, "utf8");
+}
+
+/**
+ * Every static answer says `no-cache`: the browser and any tunnel cache may keep the bytes, but
+ * must revalidate before reusing them, and the `?v=` spelling already changes with every deploy.
+ */
+function sendStatic(res: http.ServerResponse, type: string, body: Buffer): void {
+  res.writeHead(200, { "content-type": type, "content-length": String(body.length), "cache-control": "no-cache" });
+  res.end(body);
 }
 
 /** Newest CLI the Desktop app has cached, from the same per-platform directories sign-in uses. */
@@ -939,7 +1206,10 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
 function writeConfigFile(configFile: string, config: Config): void {
   const tmp = `${configFile}.tmp-${process.pid}-${Date.now()}`;
   fs.mkdirSync(path.dirname(configFile), { recursive: true });
-  fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + "\n");
+  // The file holds every provider key. The service's UMask makes this 0600 too, but the mode is set
+  // here so a copy written by anything else (a test, a CLI run, a shell with another umask) does not
+  // land world-readable.
+  fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
   fs.renameSync(tmp, configFile);
 }
 
@@ -1233,8 +1503,64 @@ function presetProbeModel(presetId: string | undefined): string | undefined {
   return preset.fallbackModels.find((model) => (model.wire ?? preset.wire ?? "chat") === "chat")?.id;
 }
 
-async function probeProvider(body: ProbeRequest, probeFetch: (url: string, init: RequestInit) => Promise<Response> = fetchWithTimeout): Promise<{ ok: boolean; auth: ProbeAuth; models: ModelEntry[]; error?: string }> {
-  const source = headerValue(body.headers);
+/**
+ * The headers a request of the router's own (a connection test, a capability measurement)
+ * authenticates with, when the provider's key may live in its pool.
+ *
+ * Adding a key moves a headers-only key into `credentials` (`addProviderKey`), so from then on
+ * `headers` authenticates nothing. A test that read `headers` alone went out with no credential and
+ * reported a working provider as one whose key was refused — OpenCode Go answered "HTTP 401 ·
+ * Upstream request failed: Go requires a credential" while every routed turn succeeded
+ * (2026-10-21). The key is resolved the way a turn resolves it: the first credential in configured
+ * order that is not paused and not quarantined. A probe never moves on to a second one (that would
+ * be round-robin, not a test) and never charges any of them.
+ *
+ * A key the caller supplies itself — one typed into the form — is the thing under test and wins.
+ * A provider with no pool is answered exactly as before.
+ *
+ * `resting` is set when the provider has a pool and nothing in it may be sent. The caller then
+ * reports that plainly instead of making a request that would come back 401 and read as "your key is
+ * bad" when the truth is that the operator parked them.
+ */
+function selfRequestHeaders(
+  deps: AdminDeps,
+  name: string | undefined,
+  headers: Record<string, string> | undefined,
+): { headers?: Record<string, string>; resting?: string } {
+  const provider = name ? deps.config().providers[name] : undefined;
+  if (!provider || !isKeyProvider(provider)) return headers ? { headers } : {};
+  if (headers && headerValue(headers)) return { headers };
+  const credentials = provider.credentials ?? [];
+  if (credentials.length === 0) {
+    const saved = provider.headers;
+    const merged = headers ?? saved;
+    return merged ? { headers: merged } : {};
+  }
+  const states = new Map((name ? deps.credentials?.()?.[name] ?? [] : []).map((entry) => [entry.id, entry.state]));
+  // Cooling is a rate limit, not a statement about the key, so a test may still use one. Paused is
+  // the operator's decision and quarantined is a refusal already earned; neither is a candidate.
+  const usable = (credential: ProviderCredential): boolean => {
+    const state = states.get(credential.id);
+    return state === undefined || state === "ready" || state === "cooling";
+  };
+  const merged = headersWithCredential({ headers: { ...provider.headers, ...headers }, credentials }, usable);
+  if (merged && headerValue(merged)) return { headers: merged };
+  // Nothing usable: name the reason rather than send a request that can only answer 401.
+  const parked = credentials.filter((credential) => !credential.paused && states.get(credential.id) === "quarantined").length;
+  const resting = credentials.every((credential) => credential.paused)
+    ? `${name} has no key in rotation: every key is paused. Resume one in the dashboard, then check again.`
+    : parked > 0
+      ? `${name} has no key in rotation: every key is quarantined after a refusal. Clear one in the dashboard, then check again.`
+      : `${name} has no usable key: its keys carry no authentication header.`;
+  return { ...(merged ? { headers: merged } : {}), resting };
+}
+
+async function probeProvider(body: ProbeRequest, deps: AdminDeps, probeFetch: (url: string, init: RequestInit) => Promise<Response> = fetchWithTimeout): Promise<{ ok: boolean; auth: ProbeAuth; models: ModelEntry[]; error?: string }> {
+  const resolved = selfRequestHeaders(deps, body.name, body.headers);
+  // A pool with nothing in rotation is reported as its own answer: no request is made, so nothing is
+  // charged and the operator is told what to do rather than that a working key failed.
+  if (resolved.resting) return { ok: false, auth: "missing", models: [], error: resolved.resting };
+  const source = headerValue(resolved.headers);
   let models: ModelEntry[] = [];
   let modelsError: string | undefined;
   if (body.modelsUrl) {
@@ -1590,7 +1916,9 @@ async function runMeasureJob(jobId: string, providerName: string, models: string
   // effort at all (`discoverLadder`), rather than leave it stripped.
   const discover = effortUndeclared(provider);
   const fetchImpl = deps.measureFetch ?? measureFetchWithTimeout;
-  const headers = "headers" in provider ? provider.headers : undefined;
+  // The key may be in the pool rather than in `headers` (adding one migrates it there), and a
+  // measurement sent without it measured the vendor's 401 as the model's capability.
+  const headers = selfRequestHeaders(deps, providerName, undefined).headers;
   const sessionHeader = "sessionHeader" in provider ? provider.sessionHeader : undefined;
   const preset = "preset" in provider ? provider.preset : undefined;
   const catalog = deps.modelCatalog ? await deps.modelCatalog().catch(() => undefined) : undefined;
@@ -1712,8 +2040,7 @@ function serveStatic(urlPath: string, res: http.ServerResponse): void {
             sendJson(res, 404, { error: "not found" });
             return;
           }
-          res.writeHead(200, { "content-type": MIME[".html"]! });
-          res.end(data);
+          sendStatic(res, MIME[".html"]!, versionedIndex(data));
         });
         return;
       }
@@ -1722,13 +2049,13 @@ function serveStatic(urlPath: string, res: http.ServerResponse): void {
     }
     const ext = path.extname(full);
     const type = MIME[ext] ?? "application/octet-stream";
+    // `safeStaticPath` already drops the query, so an asset's `?v=<hash>` still resolves here.
     fs.readFile(full, (err2, data) => {
       if (err2) {
         sendJson(res, 500, { error: "read failed" });
         return;
       }
-      res.writeHead(200, { "content-type": type, "content-length": String(data.length) });
-      res.end(data);
+      sendStatic(res, type, ext === ".html" ? versionedIndex(data) : data);
     });
   });
 }
@@ -1897,6 +2224,137 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         sendJson(res, 200, await buildLimits(deps));
         return;
       }
+      // Every key-based provider's keys as account cards (state, cooldown, windows, balance). Ids and
+      // labels only: the headers that carry a key are never rendered or logged here. (They are still
+      // part of the provider config this router serves, as they always have been — `GET /api/config`.)
+      // `/api/opencode-accounts` is the same endpoint under the name it had before 2026-10-21.
+      if ((pathname === "/api/provider-keys" || pathname === "/api/opencode-accounts") && method === "GET") {
+        const wanted = new URL(url, "http://127.0.0.1").searchParams.get("provider");
+        const name = keyProviderName(deps, wanted);
+        if (!name) {
+          sendJson(res, 404, { error: "no key-based provider by that name" });
+          return;
+        }
+        const provider = deps.config().providers[name]!;
+        sendJson(res, 200, {
+          provider: name,
+          type: provider.type,
+          accounts: (await deps.providerKeys?.(name)) ?? [],
+        });
+        return;
+      }
+      if (pathname === "/api/provider-keys" && method === "POST") {
+        // A mutation names its provider: with the query omitted the GET falls back to the first
+        // key-based provider, but writing a key into whichever provider happens to be first in the
+        // config is not a convenience — it is a key in the wrong place.
+        const wanted = new URL(url, "http://127.0.0.1").searchParams.get("provider");
+        const name = wanted ? keyProviderName(deps, wanted) : null;
+        if (!name) {
+          sendJson(res, 404, { error: "no key-based provider by that name" });
+          return;
+        }
+        let body: { label?: unknown; key?: unknown };
+        try {
+          body = JSON.parse((await readBody(req)).toString("utf8")) as typeof body;
+        } catch {
+          sendJson(res, 400, { error: "invalid JSON" });
+          return;
+        }
+        if (typeof body.key !== "string" || (body.label !== undefined && typeof body.label !== "string")) {
+          sendJson(res, 400, { error: "expected {label?: string, key: string}" });
+          return;
+        }
+        const result = addProviderKey(deps, name, {
+          key: body.key,
+          ...(typeof body.label === "string" ? { label: body.label } : {}),
+        });
+        if ("error" in result) {
+          sendJson(res, result.error === "not-found" ? 404 : 400, { error: result.error === "not-found" ? "no key-based provider by that name" : result.error });
+          return;
+        }
+        // The id only: the key itself is never echoed back, logged, or named in an error.
+        deps.log.info(`admin: added key ${result.id} to ${name}`);
+        sendJson(res, 201, { ok: true, provider: name, id: result.id, migrated: result.migrated });
+        return;
+      }
+      if ((pathname.startsWith("/api/provider-keys/") || pathname.startsWith("/api/opencode-accounts/")) && (method === "PATCH" || method === "DELETE")) {
+        const prefix = pathname.startsWith("/api/provider-keys/") ? "/api/provider-keys/" : "/api/opencode-accounts/";
+        let id: string;
+        try {
+          id = decodeURIComponent(pathname.slice(prefix.length));
+        } catch {
+          sendJson(res, 400, { error: "invalid key id" });
+          return;
+        }
+        const wanted = new URL(url, "http://127.0.0.1").searchParams.get("provider");
+        const name = wanted ? keyProviderName(deps, wanted) : null;
+        if (!name) {
+          sendJson(res, 404, { error: "no key-based provider by that name" });
+          return;
+        }
+        // A key-based provider (the name check above guarantees it) has exactly one key, in
+        // `headers`, until something is in `credentials`. That key has no credential entry to carry a
+        // label or a pause — but it exists in the pool as id "default", so a cooldown clear is honest.
+        const provider = deps.config().providers[name]!;
+        const headersOnly = isKeyProvider(provider) && !provider.credentials?.length;
+        if (method === "DELETE") {
+          if (headersOnly && id === HEADERS_KEY_ID) {
+            sendJson(res, 400, { error: "this provider keeps its only key in its headers; remove the provider instead" });
+            return;
+          }
+          const result = changeProviderKey(deps, name, id, { remove: true });
+          if ("error" in result) {
+            sendJson(res, result.error === "not-found" ? 404 : 400, { error: result.error === "not-found" ? "key not found" : result.error });
+            return;
+          }
+          deps.log.info(`admin: removed key ${id} from ${name}`);
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+        let change: { label?: unknown; paused?: unknown; clearCooldown?: unknown };
+        try {
+          change = JSON.parse((await readBody(req)).toString("utf8")) as typeof change;
+        } catch {
+          sendJson(res, 400, { error: "invalid JSON" });
+          return;
+        }
+        if ((change.label !== undefined && (typeof change.label !== "string" || !change.label.trim())) || (change.paused !== undefined && typeof change.paused !== "boolean")) {
+          sendJson(res, 400, { error: "expected {label?: non-empty string, paused?: boolean, clearCooldown?: true}" });
+          return;
+        }
+        // A headers-only key has no credential to carry a label or a pause; the contract says so
+        // rather than writing a `credentials` entry the pool did not ask for. Checked before anything
+        // is done, so a refused rename does not leave a cooldown already cleared.
+        if (headersOnly && (change.label !== undefined || change.paused !== undefined)) {
+          sendJson(res, 400, { error: "this provider keeps its only key in its headers; add a key first, which moves it into credentials" });
+          return;
+        }
+        if (change.clearCooldown === true) {
+          // Clearing touches the router's memory, not the file, so the id has to be checked here:
+          // otherwise an unknown key answered 200 and the dashboard showed a cooldown cleared for a
+          // key that does not exist.
+          const known = providerKeyKnown(deps, name, id);
+          if (known !== "ok") {
+            if (known === "not-found") sendJson(res, 404, { error: "key not found" });
+            else sendJson(res, 400, { error: known.error });
+            return;
+          }
+          deps.credentialClear?.(name, id);
+        }
+        if (change.label !== undefined || change.paused !== undefined) {
+          const result = changeProviderKey(deps, name, id, {
+            ...(typeof change.label === "string" ? { label: change.label } : {}),
+            ...(typeof change.paused === "boolean" ? { paused: change.paused } : {}),
+          });
+          if ("error" in result) {
+            sendJson(res, result.error === "not-found" ? 404 : 400, { error: result.error === "not-found" ? "key not found" : result.error });
+            return;
+          }
+        }
+        deps.log.info(`admin: updated key ${id} on ${name}`);
+        sendJson(res, 200, { ok: true });
+        return;
+      }
       if (pathname === "/api/mod-settings" && method === "GET") {
         const snapshot = readModSettings();
         // Filled here as well as on save, so a ladder with empty rungs (Auto migrated, or never set) reads whole to every surface.
@@ -2020,6 +2478,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         const result = await probeProvider({
           type: probe.type,
           url: probe.url,
+          ...(typeof probe.name === "string" && probe.name ? { name: probe.name } : {}),
           ...(probe.headers ? { headers: probe.headers as Record<string, string> } : {}),
           ...(probe.modelsUrl ? { modelsUrl: probe.modelsUrl } : {}),
           ...(typeof probe.sessionHeader === "string" && probe.sessionHeader ? { sessionHeader: probe.sessionHeader } : {}),
@@ -2027,7 +2486,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           ...(typeof probe.preset === "string" && probe.preset ? { preset: probe.preset } : {}),
           ...(typeof probe.probeModel === "string" ? { probeModel: probe.probeModel } : {}),
           ...(probe.wire === "chat" || probe.wire === "responses" ? { wire: probe.wire } : {}),
-        }, deps.probeModelFetch ?? fetchWithTimeout);
+        }, deps, deps.probeModelFetch ?? fetchWithTimeout);
         sendJson(res, 200, result);
         return;
       }

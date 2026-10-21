@@ -116,7 +116,7 @@ const observedClaudeCodeAuth = new ObservedClaudeCodeAuth(path.join(home, "claud
 // Before any provider fetches: a reasoning model may stay silent past fetch's 300s default.
 allowLongSilences();
 const proxy = new Proxy({ config: () => store.get(), log, certs, health, home, requests, observedClaudeCodeAuth, hold });
-const ingress = new OpenAiIngress({ config: () => store.get(), log, requests, home, observedClaudeCodeAuth, chatgpt: (name) => proxy.chatgptForCodex(name), hold });
+const ingress = new OpenAiIngress({ config: () => store.get(), log, requests, home, observedClaudeCodeAuth, chatgpt: (name) => proxy.chatgptForCodex(name), hold, credentials: () => proxy.credentialHealth() });
 
 // Lid-closed awake and hotspot failover (macOS and Windows; no-ops elsewhere, off until configured).
 // They read Claude's activity from the two servers' counters. Started after listen(), below.
@@ -204,6 +204,14 @@ setInterval(() => {
   log!.info(`stats proxy=${s.started}/${s.completed}/${s.failed} inFlight=${s.inFlight} ingress=${oi.started}/${oi.completed}/${oi.failed} inFlight=${oi.inFlight} consecutiveUpstreamFailures=${health.consecutiveFailures}`);
 }, statsEvery).unref();
 
+// A key parked on an empty prepaid balance is released only by a later balance read, and the only
+// reads used to be `/api/limits` and the dashboard. Left to those, a topped-up key stayed out of
+// rotation for as long as nobody opened the GUI. This asks again every five minutes, and the method
+// itself does nothing when no key is parked; a turn never waits on it.
+setInterval(() => {
+  void proxy.refreshParkedBalances().catch((e: Error) => log!.warn(`credit balance refresh: ${e.message}`));
+}, 5 * 60_000).unref();
+
 // The config callback above rewrites the Codex catalog when *our* models change; this covers
 // Codex's side (a new OpenAI model arriving in its cache).
 followCodexCache(() => ingressModels(store.get()), undefined, undefined, (e) => log!.warn(`codex catalog: ${e.message}`));
@@ -268,7 +276,10 @@ proxy
       observedClaudeCodeAuth,
       claudeUsage: () => proxy.claudeUsage.snapshot(),
       claudeModels: () => proxy.claudeModels.list(),
+      creditBalance: (name: string) => proxy.creditLimits(name),
       opencodeUsage: (name: string) => proxy.opencodeLimits(name),
+      providerKeys: (name: string) => proxy.providerKeys(name),
+      credentialClear: (provider: string, id: string) => proxy.credentialClear(provider, id),
       grokUsage: (name: string) => proxy.grokLimits(name),
       image: (req, signal, meta) => proxy.generateImage(req, signal, meta),
       modelCatalog: () => loadModelCatalog(),

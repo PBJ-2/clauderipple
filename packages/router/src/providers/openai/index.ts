@@ -3,7 +3,7 @@
 // cache figures; the request log reflects cached tokens only when the vendor sends them.
 
 import http from "node:http";
-import type { OpenAiCompatibleProvider } from "../../config.ts";
+import type { OpenAiCompatibleProvider, ProviderCredential } from "../../config.ts";
 import type { Logger } from "../../log.ts";
 import type { RequestUsage } from "../../requestlog.ts";
 import { providerExhaustion, type ProviderExhaustion } from "../../health.ts";
@@ -19,7 +19,24 @@ import type { AnthropicRequest } from "../chatgpt/translate.ts";
 
 const PING_MS = 15_000;
 
-export type OpenAiOutcome = { status: number; bytes: number; note?: string; usage?: RequestUsage; stopReason?: string; messageId?: string; servedTier?: string; exhaustion?: ProviderExhaustion | undefined };
+export type OpenAiOutcome = { status: number; bytes: number; note?: string; usage?: RequestUsage; stopReason?: string; messageId?: string; servedTier?: string; exhaustion?: ProviderExhaustion | undefined; credentialId?: string; vendorRefusal?: OpenAiRefusal };
+/**
+ * The vendor's own account of a refusal, handed back with the outcome so the caller's terminal charge
+ * can reach the same verdict as its mid-turn one: a 429's stated reset, and the body a 403's meaning
+ * is read from. Both are the upstream's own text, already redacted by the time they are returned.
+ */
+export type OpenAiRefusal = { retryAfterMs?: number | undefined; body?: string };
+
+/**
+ * The credential this turn uses, when the caller holds a pool. `next` offers the credential to try
+ * after the upstream refused this one, before anything is written to the client; null ends the turn
+ * with the provider's own answer. It may answer later (a vendor's reset time sometimes takes one
+ * more request to learn), which is still before the first byte.
+ */
+export type OpenAiHandleOptions = {
+  credential?: ProviderCredential;
+  next?: (status: number, bodyText: string, headers: Record<string, string>) => ProviderCredential | null | Promise<ProviderCredential | null>;
+};
 
 function anthropicError(status: number, type: string, message: string): { status: number; body: string } {
   return { status, body: JSON.stringify({ type: "error", error: { type, message } }) };
@@ -71,6 +88,15 @@ export function mapHttpError(status: number, text: string, label = "OpenAI-compa
 
 function endpoint(base: string, wire: "chat" | "responses"): string {
   return `${base.replace(/\/+$/, "")}/${wire === "chat" ? "chat/completions" : "responses"}`;
+}
+
+/** The names a provider's headers may carry its key under; a credential supplies these instead. */
+const AUTH_HEADERS = new Set(["authorization", "x-api-key"]);
+
+/** A provider's headers without whatever authenticates it, so a key from the pool is the only one sent. */
+function withoutAuth(headers: Record<string, string> | undefined): Record<string, string> {
+  if (!headers) return {};
+  return Object.fromEntries(Object.entries(headers).filter(([name]) => !AUTH_HEADERS.has(name.toLowerCase())));
 }
 
 function write(res: http.ServerResponse, value: string): number {
@@ -130,12 +156,15 @@ export class OpenAiCompatibleAdapter {
   }
 
   /** Handle a fully-read Messages request. Model/effort have already been resolved by routing. */
-  async handle(req: http.IncomingMessage, res: http.ServerResponse, path: string, json: AnthropicRequest, model: string, effort: string | undefined): Promise<OpenAiOutcome> {
+  async handle(req: http.IncomingMessage, res: http.ServerResponse, path: string, json: AnthropicRequest, model: string, effort: string | undefined, opts: OpenAiHandleOptions = {}): Promise<OpenAiOutcome> {
     if (path.startsWith("/v1/messages/count_tokens")) {
       const body = JSON.stringify({ input_tokens: estimateTokens(json) });
       res.writeHead(200, { "content-type": "application/json", "content-length": String(Buffer.byteLength(body)) }).end(body);
       return { status: 200, bytes: Buffer.byteLength(body), note: "estimated" };
     }
+    // The credential this attempt authenticates as. A pool hands it in per call rather than per
+    // adapter, because one adapter serves every key of its provider and the pool owns which one is up.
+    let credential = opts.credential;
 
     const wire = this.cfg.wire ?? "chat";
     const modelEffortLevels = this.cfg.models?.find((entry) => entry.id === model)?.effortLevels;
@@ -181,7 +210,11 @@ export class OpenAiCompatibleAdapter {
       "content-type": "application/json",
       accept: "text/event-stream",
       ...sessionHeader,
-      ...(this.cfg.headers ?? {}),
+      // The provider's own headers travel with every key — an organization id, a beta flag — but its
+      // authentication does not: the credential's headers are the complete auth set (config.ts
+      // ProviderCredential), so a leftover `authorization` beside it would be a key that is not in
+      // rotation. With no credential configured, the provider's headers are the whole set, as before.
+      ...(credential ? { ...withoutAuth(this.cfg.headers), ...credential.headers } : (this.cfg.headers ?? {})),
       ...(this.hooks.headers ? await this.hooks.headers(model) : {}),
     });
     let upstreamHeaders: Record<string, string> = {};
@@ -246,17 +279,46 @@ export class OpenAiCompatibleAdapter {
       throw error;
     }
 
-    if (!upstream.ok || !upstream.body) {
+    // A credential the vendor refused is replaced inside the same turn, while nothing has been
+    // written to the client: after the first byte the turn is committed (ARCHITECTURE §4). The
+    // caller's `next` is the judge of whether another credential could answer — a 400 is the
+    // request's own fault and is not walked across the pool. A credential is tried once per turn.
+    let failureText: string | null = null;
+    const triedIds = new Set<string>(credential ? [credential.id] : []);
+    while ((!upstream.ok || !upstream.body) && opts.next) {
       const text = await upstream.text().catch(() => "");
+      const next = await opts.next(upstream.status, text, Object.fromEntries(upstream.headers));
+      if (!next || triedIds.has(next.id)) {
+        failureText = text;
+        break;
+      }
+      triedIds.add(next.id);
+      // Ids only, never a header value: this line goes to the log the user may share.
+      this.log.info(`RETRY ${this.name}: ${credential?.id ?? "default"} answered ${upstream.status}, trying ${next.id}`);
+      credential = next;
+      upstream = await ask();
+    }
+    if (!upstream.ok || !upstream.body) {
+      const text = failureText ?? await upstream.text().catch(() => "");
       // Re-serialised first, so an escaped credential in a JSON body is spelled out before it is matched.
       let plain = text;
       try { plain = JSON.stringify(JSON.parse(text)); } catch { /* not JSON: matched as it came */ }
       const safeText = redactErrorText(plain, [...upstreamSecrets]);
       const out = mapHttpError(upstream.status, text, label, this.hooks.authHint, redact);
       this.log.warn(`${this.tag} ${this.name}: upstream ${upstream.status} for ${model}: ${safeText.slice(0, 400)}`);
+      const retryAfter = retryAfterMs(Object.fromEntries(upstream.headers));
       res.off("close", onClose);
       res.writeHead(out.status, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out.body)) }).end(out.body);
-      return { status: out.status, bytes: Buffer.byteLength(out.body), note: `upstream ${upstream.status}`, exhaustion: providerExhaustion(upstream.status, text, retryAfterMs(Object.fromEntries(upstream.headers))) };
+      return {
+        status: out.status,
+        bytes: Buffer.byteLength(out.body),
+        note: `upstream ${upstream.status}`,
+        exhaustion: providerExhaustion(upstream.status, text, retryAfter),
+        ...(credential ? { credentialId: credential.id } : {}),
+        // The same facts the caller's own pool would have used: the refusal's cooldown and what it
+        // said. Redacted, because this travels to a place that may be logged.
+        vendorRefusal: { ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}), ...(safeText ? { body: safeText } : {}) },
+      };
     }
 
     const wantStream = json.stream === true;
@@ -333,6 +395,7 @@ export class OpenAiCompatibleAdapter {
       stopReason: mapper.stopReason,
       ...(wantStream || !failure ? { messageId: mapper.messageId } : {}),
       ...(mapper.servedTier !== undefined ? { servedTier: mapper.servedTier } : {}),
+      ...(credential ? { credentialId: credential.id } : {}),
     };
   }
 }

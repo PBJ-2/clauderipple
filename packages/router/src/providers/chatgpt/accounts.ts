@@ -51,6 +51,11 @@ export type ChatGptAccountSummary = {
   expiresAt: number;
   needsReauth: boolean;
   paused: boolean;
+  /**
+   * The subscription's renewal date, epoch ms, from the id token's
+   * `chatgpt_subscription_active_until`. Absent when the account's token does not state one.
+   */
+  renewsAt?: number;
   /** "codex" for the Codex CLI's own login, which we only read. */
   source: "own" | "codex";
 };
@@ -244,11 +249,15 @@ export function removeAllChatGptAccounts(home: string): number {
 }
 
 export function summarize(account: ChatGptAccount): ChatGptAccountSummary {
+  // Read on each summarize rather than stored: the claim is in a token that is refreshed, so a copy
+  // in the account file would go stale the first time the subscription was renewed.
+  const identity = identityFromTokens({ accessToken: account.accessToken, ...(account.idToken ? { idToken: account.idToken } : {}) });
   return {
     id: account.id,
     label: account.label,
     ...(account.email ? { email: account.email } : {}),
     ...(account.planType ? { planType: account.planType } : {}),
+    ...(identity.subscriptionActiveUntil !== undefined ? { renewsAt: identity.subscriptionActiveUntil } : {}),
     expiresAt: account.expiresAt,
     needsReauth: account.needsReauth === true,
     paused: account.paused === true,
@@ -474,6 +483,7 @@ export class ChatGptAccountPool {
         label: identity.email ?? "Codex CLI login",
         ...(identity.email ? { email: identity.email } : {}),
         ...(identity.planType ? { planType: identity.planType } : {}),
+        ...(identity.subscriptionActiveUntil !== undefined ? { renewsAt: identity.subscriptionActiveUntil } : {}),
         expiresAt: codex.expiresAt,
         needsReauth: this.now() >= codex.expiresAt,
         paused: false,

@@ -140,6 +140,83 @@ test("native ingress uses one added Claude account without enabling failover", a
   }
 });
 
+// Adding a key migrates a provider's only key out of `headers` and into `credentials`. The ingress
+// read `provider.headers` alone and forwarded every call unauthenticated, so an OpenAI-ingress client
+// got the vendor's 401 on a provider whose routed turns worked (2026-10-21).
+test("ingress authenticates with a key that lives only in the credential pool", async () => {
+  const pooledSeen: http.IncomingHttpHeaders[] = [];
+  const pooled = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      pooledSeen.push(req.headers);
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ id: "msg_1", type: "message", role: "assistant", content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } }));
+    });
+  });
+  const pooledPort = await listen(pooled);
+  const pooledConfig: Config = {
+    ...config,
+    providers: {
+      pooled: {
+        type: "anthropic-compatible",
+        url: `http://127.0.0.1:${pooledPort}`,
+        // The migrated shape: the key is a credential, `headers` keeps only the extra header.
+        headers: { "x-extra": "kept" },
+        credentials: [
+          { id: "default", headers: { "x-api-key": "test-key-paused" }, paused: true },
+          { id: "key-1", headers: { "x-api-key": "test-key-pooled" } },
+        ],
+      },
+    },
+    routes: { "claude-sonnet-5": { provider: "pooled", model: "claude-sonnet-5" } },
+  };
+  const pooledIngress = new OpenAiIngress({ config: () => pooledConfig, log, requests });
+  const pooledIngressPort = await pooledIngress.listen();
+  try {
+    const response = await call("/v1/responses", input, pooledIngressPort);
+    assert.equal(response.status, 200);
+    assert.equal(pooledSeen.length, 1);
+    assert.equal(pooledSeen[0]!["x-api-key"], "test-key-pooled", "the first non-paused key authenticates the call");
+    assert.equal(pooledSeen[0]!.authorization, undefined, "the client's own bearer token is still dropped");
+    assert.equal(pooledSeen[0]!["x-extra"], "kept", "the provider's other headers still travel");
+  } finally {
+    await pooledIngress.drain(1);
+    await new Promise<void>((resolve) => pooled.close(() => resolve()));
+  }
+});
+
+// Nothing in rotation is refused here, before a request without a key can come back 401 and read as
+// "the key is bad" while the operator is the one who parked it.
+test("ingress refuses locally when every key of the pool is paused", async () => {
+  let calls = 0;
+  const parked = http.createServer((_req, res) => { calls += 1; res.writeHead(200).end("{}"); });
+  const parkedPort = await listen(parked);
+  const parkedConfig: Config = {
+    ...config,
+    providers: {
+      parked: {
+        type: "anthropic-compatible",
+        url: `http://127.0.0.1:${parkedPort}`,
+        credentials: [
+          { id: "key-1", headers: { "x-api-key": "test-key-1" }, paused: true },
+          { id: "key-2", headers: { "x-api-key": "test-key-2" }, paused: true },
+        ],
+      },
+    },
+    routes: { "claude-sonnet-5": { provider: "parked", model: "claude-sonnet-5" } },
+  };
+  const parkedIngress = new OpenAiIngress({ config: () => parkedConfig, log, requests });
+  const parkedIngressPort = await parkedIngress.listen();
+  try {
+    const response = await call("/v1/responses", input, parkedIngressPort);
+    assert.equal(response.status, 503);
+    assert.match(response.text, /paused|out of rotation/);
+    assert.equal(calls, 0, "nothing left the process");
+  } finally {
+    await parkedIngress.drain(1);
+    await new Promise<void>((resolve) => parked.close(() => resolve()));
+  }
+});
+
 test("cleanup", async () => {
   await ingress.drain(1);
   await new Promise<void>((resolve) => upstream.close(() => resolve()));

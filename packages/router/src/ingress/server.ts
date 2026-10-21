@@ -9,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
 import type { Config, AnthropicCompatibleProvider, AnthropicProvider } from "../config.ts";
-import { providerFor } from "../config.ts";
+import { headersWithCredential, providerFor } from "../config.ts";
 import type { Logger } from "../log.ts";
 import type { HoldGate } from "../hold.ts";
 import { resolve } from "../routing.ts";
@@ -54,6 +54,12 @@ type IngressDeps = {
   chatgpt?: (name: string | null) => ChatGptAdapter;
   /** While engaged (a network switch, tether.ts), new model calls wait here instead of starting. */
   hold?: HoldGate;
+  /**
+   * Per-credential health of each provider's key pool (proxy `credentialHealth`). A key the router
+   * has already quarantined is not a candidate here either, so this endpoint does not keep sending a
+   * refused key while the routed turns have moved to another one. Absent, every non-paused key is.
+   */
+  credentials?: () => Record<string, { id: string; state: string }[]>;
 };
 
 /**
@@ -419,7 +425,7 @@ export class OpenAiIngress {
       wire.stream = stream;
       record = { kind: "messages", source: requested, target: route.model, provider: route.provider, ...(route.effort ? { effort: route.effort } : {}), stream };
       const kindNote = `openai-ingress ${path === "/v1/responses" ? "responses" : "chat"}`;
-      const outcome = await this.forward(res, provider, wire, route.model, path === "/v1/chat/completions", stream, (done) => { terminal = { ...done, note: kindNote }; });
+      const outcome = await this.forward(res, provider, wire, route.model, path === "/v1/chat/completions", stream, (done) => { terminal = { ...done, note: kindNote }; }, route.provider);
       finish(outcome.status, outcome.bytes, { ...(outcome.usage ? { usage: outcome.usage } : {}), ...(outcome.stopReason ? { stopReason: outcome.stopReason } : {}), note: `${kindNote}${outcome.note ? `; ${outcome.note}` : ""}` });
     } catch (error) {
       if (completed) return; // already recorded (e.g. client closed after the terminal event)
@@ -434,7 +440,7 @@ export class OpenAiIngress {
     }
   }
 
-  private async forward(res: http.ServerResponse, provider: AnthropicCompatibleProvider | AnthropicProvider, wire: Json, model: string, chat: boolean, stream: boolean, onTerminal?: (outcome: Outcome) => void): Promise<Outcome> {
+  private async forward(res: http.ServerResponse, provider: AnthropicCompatibleProvider | AnthropicProvider, wire: Json, model: string, chat: boolean, stream: boolean, onTerminal?: (outcome: Outcome) => void, providerName?: string): Promise<Outcome> {
     const native = provider.type === "anthropic";
     const upstream = new URL(native ? (this.deps.nativeUpstream ?? "https://api.anthropic.com") : provider.url);
     const protocol = upstream.protocol === "https:" ? "https:" : "http:";
@@ -453,7 +459,26 @@ export class OpenAiIngress {
       } catch (error) {
         return { status: 401, bytes: sendJson(res, 401, openAiError((error as Error).message, "authentication_error")), note: "Anthropic API key unavailable" };
       }
-    } else authentication = provider.headers ?? {};
+    } else {
+      // The key may live in the pool, not in `headers`: adding one migrates it there, and this
+      // endpoint read `headers` alone, so every OpenAI-ingress call after the first added key went
+      // out with no credential at all and the vendor answered 401 (2026-10-21). It is resolved the
+      // way a routed turn resolves it — the first key that is neither paused nor quarantined — so the
+      // ingress does not keep presenting a key the turns have already moved off.
+      const states = new Map((providerName ? this.deps.credentials?.()?.[providerName] ?? [] : []).map((entry) => [entry.id, entry.state]));
+      const capable = (credential: { id: string; paused?: boolean }): boolean => {
+        const state = states.get(credential.id);
+        return state === undefined || state === "ready" || state === "cooling";
+      };
+      const resolved = headersWithCredential(provider, capable);
+      // All of a pool resting is answered here, before anything leaves: a request without a key could
+      // only come back 401, which reads as "the key is bad" when the operator parked them.
+      if (resolved === undefined && "credentials" in provider && (provider.credentials?.length ?? 0) > 0) {
+        const bytes = sendJson(res, 503, openAiError(`every key of ${providerName ?? "this provider"} is out of rotation (paused or refused)`, "authentication_error"));
+        return { status: 503, bytes, note: "no key in rotation" };
+      }
+      authentication = resolved ?? {};
+    }
     const headers: Record<string, string> = { "content-type": "application/json", accept: stream ? "text/event-stream" : "application/json", "content-length": String(body.length), ...authentication };
     const lib = protocol === "https:" ? https : http;
     const response = await new Promise<http.IncomingMessage>((resolveP, reject) => {

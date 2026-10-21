@@ -52,6 +52,11 @@ export type ProviderCredential = {
   headers: Record<string, string>;
   /** Shown in the dashboard instead of the id. Not a secret, so keep the key out of it. */
   label?: string;
+  /**
+   * Set from the dashboard to take this key out of rotation without deleting it. A paused key is
+   * never picked, but stays in the list so its position (and so its priority) is kept.
+   */
+  paused?: boolean;
 };
 
 export type AnthropicCompatibleProvider = {
@@ -129,6 +134,13 @@ export type OpenAiCompatibleProvider = {
    * several times the tokens. Absent, nothing extra is sent.
    */
   sessionHeader?: string;
+  /**
+   * Further credentials for the same provider, tried when `headers` is rate limited or rejected.
+   * Each is a complete header set, and a conversation keeps whichever one it is on while that one is
+   * healthy — moving it moves the prompt cache with it. Absent, the provider has exactly the one
+   * credential it always had.
+   */
+  credentials?: ProviderCredential[];
   /** OpenAI Chat Completions (default) or stateless Responses endpoint. */
   wire?: "chat" | "responses";
   /** Catalog preset used to populate this provider, if any. */
@@ -241,6 +253,35 @@ export function fastSwitches(provider: { fast?: { main?: unknown; subagent?: unk
 }
 
 /**
+ * A provider that holds API keys of its own, as opposed to one with an account system (chatgpt,
+ * google, grok) or a Claude login. Only these take `credentials`.
+ */
+export function isKeyProvider(p: { type: string }): p is OpenAiCompatibleProvider | AnthropicCompatibleProvider {
+  return p.type === "openai-compatible" || p.type === "anthropic-compatible";
+}
+
+/**
+ * How a key is spelled in this provider's headers: what its own key already uses, else its preset's
+ * convention, else the default for its wire.
+ *
+ * This answers for the provider as a whole, which is all a saved key needs: the convention it is
+ * stored under is the one the provider's own wire uses. A model that speaks another convention on
+ * another wire is not a second provider, so it does not get a second key — `providerFor` re-sends
+ * the same key under the header that model's endpoint recognises when the turn is routed there.
+ */
+export function authConventionOf(p: OpenAiCompatibleProvider | AnthropicCompatibleProvider): "x-api-key" | "authorization-bearer" {
+  const sources: (Record<string, string> | undefined)[] = [...(p.credentials ?? []).map((credential) => credential.headers), p.headers];
+  for (const headers of sources) {
+    if (!headers) continue;
+    if (Object.keys(headers).some((name) => name.toLowerCase() === "x-api-key")) return "x-api-key";
+    if (Object.keys(headers).some((name) => name.toLowerCase() === "authorization")) return "authorization-bearer";
+  }
+  const preset = p.preset ? PRESETS.find((entry) => entry.id === p.preset) : undefined;
+  if (preset?.authHeader) return preset.authHeader;
+  return p.type === "anthropic-compatible" ? "x-api-key" : "authorization-bearer";
+}
+
+/**
  * The provider's own key wherever its headers carry it, and every header that is not that one.
  *
  * Both auth conventions in use are recognised (`x-api-key` and `Authorization: Bearer`), because
@@ -277,6 +318,74 @@ function reauthorized(headers: Record<string, string> | undefined, kind: "x-api-
 }
 
 /**
+ * Every credential of a key pool under the header a model's endpoint recognises, ids and labels
+ * untouched.
+ *
+ * The provider stores each key under the convention its own wire uses (see `authConventionOf`), and
+ * a model on another wire reads the same key under the other one. Re-spelling only `provider.headers`
+ * would leave the pool — which is where a migrated key lives — still speaking the provider's
+ * convention, so every key would be refused on that model and the whole pool would be quarantined
+ * in one turn (2026-10-21).
+ */
+function reauthorizedCredentials(credentials: ProviderCredential[] | undefined, kind: "x-api-key" | "authorization-bearer"): ProviderCredential[] | undefined {
+  if (!credentials) return credentials;
+  return credentials.map((credential) => ({ ...credential, headers: reauthorized(credential.headers, kind) ?? credential.headers }));
+}
+
+/**
+ * The key inside the first credential that is not paused (a paused key is the operator's decision,
+ * not a candidate), else undefined.
+ */
+function firstCredentialKey(credentials: ProviderCredential[] | undefined): string | undefined {
+  for (const credential of credentials ?? []) {
+    if (credential.paused) continue;
+    const { key } = credentialIn(credential.headers);
+    if (key !== undefined) return key;
+  }
+  return undefined;
+}
+
+/**
+ * Whether these headers authenticate anything at all — a key under either convention the codebase
+ * recognises. A header set with an org id and no key reads as "authenticated" to every check that
+ * only asks whether headers exist, which is how an unauthenticated request gets sent.
+ */
+export function carriesAuthentication(headers: Record<string, string> | undefined): boolean {
+  return !!headers && credentialIn(headers).key !== undefined;
+}
+
+/**
+ * The headers a request of our own for this provider goes out with, when its key may live in the
+ * pool rather than in `headers`.
+ *
+ * Adding a key moves a provider's one key out of `headers` and into `credentials` (admin.ts
+ * `addProviderKey`), so from then on `headers` authenticates nothing. Every path that made its own
+ * request — a connection test, the OpenAI ingress, a capability measurement, a search side request —
+ * read `headers` alone and went out unauthenticated: OpenCode Go answered 401 "Go requires a
+ * credential" while every routed turn worked (2026-10-21).
+ *
+ * A provider whose `headers` still carry a key comes back exactly as it was, so nothing on the
+ * unmigrated path changes. Otherwise the first credential that is neither paused nor excluded by
+ * `usable` supplies the authentication; a credential is a complete header set, so the provider's own
+ * non-auth headers travel with it. Nothing usable leaves the headers as they were rather than
+ * inventing an unauthenticated request.
+ */
+export function headersWithCredential(
+  provider: { headers?: Record<string, string>; credentials?: ProviderCredential[] },
+  usable?: (credential: ProviderCredential) => boolean,
+): Record<string, string> | undefined {
+  const headers = provider.headers;
+  if (carriesAuthentication(headers)) return headers;
+  for (const credential of provider.credentials ?? []) {
+    if (credential.paused) continue;
+    if (usable && !usable(credential)) continue;
+    if (!carriesAuthentication(credential.headers)) continue;
+    return { ...(headers ? credentialIn(headers).kept : {}), ...credential.headers };
+  }
+  return headers;
+}
+
+/**
  * The provider shape a request for `model` is actually talking to.
  *
  * A model may speak another wire than the rest of its provider, on another path, under another auth
@@ -300,7 +409,12 @@ export function providerFor(provider: Provider, model: string | undefined): Prov
   // `x-goog-api-key`, never a bearer), and every header that is not the auth one travels along.
   if (entry.wire === "google") {
     const { key, kept } = credentialIn("headers" in provider && provider.headers ? provider.headers : {});
-    const apiKey = "apiKey" in provider && typeof provider.apiKey === "string" ? provider.apiKey : key;
+    // After a key is added the pool holds it, not `headers` (admin.ts migrates it on the first
+    // POST /api/provider-keys), so the key is read from there too: dropping it here would reach the
+    // adapter with no apiKey and charge its local 401 to "default", quarantining the working key.
+    const apiKey = "apiKey" in provider && typeof provider.apiKey === "string"
+      ? provider.apiKey
+      : key ?? firstCredentialKey("credentials" in provider ? provider.credentials : undefined);
     const sessionHeader = "sessionHeader" in provider ? provider.sessionHeader : undefined;
     return {
       type: "google",
@@ -320,10 +434,17 @@ export function providerFor(provider: Provider, model: string | undefined): Prov
   const headers = entry.authHeader
     ? reauthorized("headers" in provider ? provider.headers : undefined, entry.authHeader)
     : ("headers" in provider ? provider.headers : undefined);
+  // The key a request actually goes out with is the one in the credential pool, so the model's
+  // convention has to reach the pool as well as `headers`; re-spelling only the latter leaves every
+  // key under the provider's own header and the endpoint refuses all of them.
+  const credentials = entry.authHeader && "credentials" in provider
+    ? reauthorizedCredentials(provider.credentials, entry.authHeader)
+    : ("credentials" in provider ? provider.credentials : undefined);
   const shared = {
     ...provider,
     ...(url !== undefined ? { url } : {}),
     ...(headers !== undefined ? { headers } : {}),
+    ...(credentials !== undefined ? { credentials } : {}),
   };
 
   // Anthropic Messages needs no translation, so this model is served by the anthropic-compatible
@@ -348,7 +469,16 @@ export function searchProviderFor(provider: Provider | undefined, model: string)
   const presetId = provider && "preset" in provider ? provider.preset : undefined;
   const search = presetId ? PRESETS.find((entry) => entry.id === presetId)?.anthropicSearch : undefined;
   if (!provider || !search || !search.models.includes(model)) return undefined;
-  const headers = reauthorized("headers" in provider ? provider.headers : undefined, search.authHeader);
+  // The pool is where a migrated key lives (`addProviderKey`), so this one has to read it too: a
+  // search side request that went out on `headers` alone carried no key at all once the operator
+  // had added one, and answered 401 on a provider whose models worked.
+  const headers = reauthorized(
+    headersWithCredential({
+      ...("headers" in provider && provider.headers ? { headers: provider.headers } : {}),
+      ...("credentials" in provider && provider.credentials ? { credentials: provider.credentials } : {}),
+    }),
+    search.authHeader,
+  );
   const sessionHeader = "sessionHeader" in provider ? provider.sessionHeader : undefined;
   return {
     type: "anthropic-compatible",
@@ -811,6 +941,7 @@ export function validate(c: Config): string[] {
             }
           }
           if (cred.label !== undefined && typeof cred.label !== "string") errors.push(`provider ${name}: credential ${i} label must be a string`);
+          if ((entry as { paused?: unknown }).paused !== undefined && typeof (entry as { paused?: unknown }).paused !== "boolean") errors.push(`provider ${name}: credential ${i} paused must be true or false`);
         });
       }
     }
