@@ -97,6 +97,33 @@ function uniqueName(name, providers, url) {
   while (providers[value]) value = `${base}-${number++}`;
   return value;
 }
+/**
+ * A base URL as providers are compared: scheme and host lowercased, no trailing slash on the path.
+ * Two entries that differ only in case or a trailing "/" are the same service, and the router's
+ * pool is per provider, so a second entry would split one account's keys into two rotations.
+ */
+function normalizedBaseUrl(url) {
+  const raw = String(url || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    const path = parsed.pathname.replace(/\/+$/, "");
+    const query = parsed.search || "";
+    return `${parsed.protocol.toLowerCase()}//${parsed.host.toLowerCase()}${path}${query}`;
+  } catch { return raw.replace(/\/+$/, "").toLowerCase(); }
+}
+/** The provider already serving this base URL, as `[name, provider]`, or null. */
+function providerByBaseUrl(providers, url) {
+  const wanted = normalizedBaseUrl(url);
+  if (!wanted) return null;
+  // Only key-based providers take keys from the merge: ChatGPT, Google and Grok sign in instead,
+  // and a Claude subscription provider has its own account list.
+  for (const [name, provider] of Object.entries(providers || {})) {
+    if (!isKeyBasedProvider(provider)) continue;
+    if (normalizedBaseUrl(provider.url) === wanted) return [name, provider];
+  }
+  return null;
+}
 function groupedModels(config) {
   const groups = [];
   for (const [name, provider] of Object.entries(config.providers || {})) {
@@ -233,6 +260,9 @@ function showView(name) {
   if (name === "logs") queueMicrotask(() => void refreshRequests());
   // Read again on every visit: the bar's ⚙ panel saves the same settings.
   if (name === "mod") queueMicrotask(() => void loadMod());
+  // Quotas move while a page is open, so arriving at a page is a good moment to look again.
+  // Deferred: the first showView runs before the usage panel's state is declared.
+  queueMicrotask(() => void refreshUsage());
 }
 for (const button of $all(".nav-btn")) button.addEventListener("click", () => showView(button.dataset.view));
 window.addEventListener("hashchange", () => showView((location.hash || "#health").slice(1)));
@@ -382,6 +412,384 @@ async function startUpdate() {
   }
   renderVersionRow();
 }
+
+// ---- Usage panel ---------------------------------------------------------------------
+//
+// What is left of each subscription plan, from `GET /api/limits`. It is the same body the status
+// bar's row reads: one entry per provider, and one account inside it per plan or per key. Only
+// subscription providers appear — an API-key provider has a balance, not a window.
+//
+// One small tile per account, two to a row: the provider's mark, its name, and each window as a
+// compact figure ("5H 12%"). The reset times are a tap away — a phone has no hover at all, so a
+// tap (or a click) is the only way they are allowed to exist.
+//
+// A desktop window keeps the panel at the bottom left of the sidebar, where it is visible from
+// every page. A phone has no sidebar left (it becomes a tab bar), so the same panel is moved to
+// the top of the Status page instead of being duplicated: one element, one place.
+
+const USAGE_REFRESH_MS = 60_000;
+const USAGE_OPEN_KEY = "clauderipple_usage_open";
+/** The width at which style.css turns the sidebar into a tab bar (see `@media (max-width: 720px)`). */
+const USAGE_NARROW = "(max-width: 720px)";
+
+let usageLimits = null;
+let usageGeneration = 0;
+let usageError = "";
+let usageOpen = true;
+(function restoreUsageOpen() {
+  try {
+    const saved = localStorage.getItem(USAGE_OPEN_KEY);
+    if (saved === "0") usageOpen = false;
+    if (saved === "1") usageOpen = true;
+  } catch { /* storage unavailable: stay open */ }
+})();
+
+/**
+ * Which window a `used_percent` belongs to: `five_hour`, `seven_day`, `month`, `label` (the
+ * vendor's own word), or `hours` with the length it is called by. A tile and a key card name the
+ * same window, so both read this one classification and only pick their own words for it below.
+ */
+function usageWindowKind(window) {
+  const minutes = typeof window.window_minutes === "number" ? window.window_minutes : 0;
+  if (window.kind === "five_hour" || minutes === 5 * 60) return { kind: "five_hour" };
+  if (window.kind === "seven_day" || minutes === 7 * 24 * 60) return { kind: "seven_day" };
+  // About a month: OpenCode Go's third window.
+  if (minutes >= 28 * 24 * 60) return { kind: "month" };
+  if (window.label) return { kind: "label", label: String(window.label) };
+  if (minutes > 0) return { kind: "hours", hours: Math.max(1, Math.round(minutes / 60)) };
+  return { kind: "other" };
+}
+
+/** The tile's short name for that window: 5H, 7D, M. */
+function usageWindowName(window) {
+  const kind = usageWindowKind(window);
+  if (kind.kind === "five_hour") return t("usage.window5h");
+  if (kind.kind === "seven_day") return t("usage.window7d");
+  if (kind.kind === "month") return t("usage.windowMonth");
+  if (kind.kind === "label") return kind.label;
+  if (kind.kind === "hours") return t("usage.windowHours", { hours: kind.hours });
+  return t("usage.windowOther");
+}
+
+/** The long name a key card uses for the same window: 5시간, 주간, 월간. */
+function usageWindowLongName(window) {
+  const kind = usageWindowKind(window);
+  if (kind.kind === "five_hour") return t("quota.window5h");
+  if (kind.kind === "seven_day") return t("quota.windowWeek");
+  if (kind.kind === "month") return t("keys.windowMonth");
+  if (kind.kind === "label") return kind.label;
+  if (kind.kind === "hours") return t("quota.windowHours", { hours: kind.hours });
+  return t("usage.windowOther");
+}
+
+/**
+ * How long until the window resets, in the shortest reading that stays honest: "59m", "3h 35m",
+ * "2d 7h". Two units at most, so the line beside the percent never grows.
+ */
+function usageResetText(window) {
+  if (typeof window.reset_at !== "number") return "";
+  const left = Math.round(window.reset_at * 1000 - Date.now());
+  if (left <= 0) return t("usage.resetting");
+  const minutes = Math.floor(left / 60_000);
+  if (minutes >= 24 * 60) return t("usage.daysHours", { d: Math.floor(minutes / (24 * 60)), h: Math.floor((minutes % (24 * 60)) / 60) });
+  if (minutes >= 60) return t("usage.hoursMinutes", { h: Math.floor(minutes / 60), m: minutes % 60 });
+  return t("usage.minutes", { m: Math.max(1, minutes) });
+}
+
+/** Whole days until an epoch-seconds moment: "12d". The M row reads only this much. */
+function usageDaysText(epoch) {
+  if (typeof epoch !== "number" || !Number.isFinite(epoch)) return "";
+  const left = Math.round(epoch * 1000 - Date.now());
+  if (left <= 0) return t("usage.daysShort", { days: 0 });
+  return t("usage.daysShort", { days: Math.max(1, Math.ceil(left / 86_400_000)) });
+}
+
+/** Percent as it is written on a tile; one decimal only where the whole number would hide a rise. */
+function usagePercentText(percent) {
+  const value = Math.max(0, Math.min(100, Number(percent) || 0));
+  return value >= 10 || Number.isInteger(value) ? `${Math.round(value)}%` : `${value.toFixed(1)}%`;
+}
+
+/** How a percent is coloured: quiet up to 80, a warning to 99, a full window red. */
+function usageSeverity(percent) {
+  const value = Number(percent) || 0;
+  return value >= 100 ? " full" : value >= 80 ? " high" : "";
+}
+
+/** "GPT 1" — the account's own name where the router gives one, else its provider and position. */
+function usageAccountName(provider, account, index, count) {
+  const own = account.label || (account.title && String(account.title));
+  // A named account is called by its name; the position is only how an unnamed one is told apart.
+  if (own) return own;
+  return count <= 1 ? usageBaseName(provider) : `${usageBaseName(provider)} ${index + 1}`;
+}
+
+// A prepaid-credit vendor writes its own name with capitals; the router only knows its config key.
+// Replace that lowercase default, never a name the user chose.
+const USAGE_CREDIT_NAMES = new Map([["openrouter", "OpenRouter"], ["sail", "sail"]]);
+
+/** The provider's short word: "Claude", "GPT", "Go", "Gemini", "Grok". */
+function usageBaseName(provider) {
+  if (provider.type === "opencode-go") return t("usage.goName");
+  const own = provider.title || provider.provider;
+  const lower = String(own).toLowerCase();
+  const proper = provider.type === "credit" && own === lower ? USAGE_CREDIT_NAMES.get(lower) : undefined;
+  return proper || own;
+}
+
+/** The tile's square mark: the short name's first letters, like an app icon ("Cl", "GP", "Go"). */
+function usageMarkText(provider) {
+  const letters = String(usageBaseName(provider) || "").replace(/[^A-Za-z0-9]/g, "");
+  return letters.slice(0, 2) || "•";
+}
+
+/**
+ * One line of the tile: "5H 42% 59m" — label, percent and time left, always shown. The three are
+ * columns (see style.css), so the numbers line up down a tile and between accounts.
+ */
+function usageRow(label, percent, percentClass, time, kind) {
+  return el("span", { class: "usage-tile-row" }, [
+    el("span", { class: "usage-tile-window", text: label }),
+    el("span", { class: `usage-tile-percent${percentClass || ""}`, text: percent }),
+    el("span", { class: "usage-tile-reset", ...(kind ? { "data-window": kind } : {}), text: time }),
+  ]);
+}
+
+/**
+ * A quota window as its line. The M row counts whole days — the renewal date when the account has
+ * one, else the window's own reset — and the shorter windows keep the h/m reading.
+ */
+function usageFigure(window, account) {
+  const kind = usageWindowKind(window).kind;
+  const percent = usagePercentText(window.used_percent);
+  const time = kind === "month"
+    ? usageDaysText(typeof account.renews_at === "number" ? account.renews_at : window.reset_at)
+    : usageResetText(window);
+  return usageRow(usageWindowName(window), percent, usageSeverity(window.used_percent), time, kind);
+}
+
+/** A credit balance as the tile writes it: "$738", "$73.9", "$3.95". Cents only where they matter. */
+function usageUsd(remaining) {
+  const value = Number(remaining) || 0;
+  if (value >= 100) return `$${Math.round(value)}`;
+  if (value >= 10) return `$${value.toFixed(1)}`;
+  return `$${value.toFixed(2)}`;
+}
+
+/** Whole days left as the credit tile says them: "12d", the same reading the M row uses. */
+function usageCreditDays(days) {
+  return t("usage.daysShort", { days: Math.max(0, Math.floor(Number(days))) });
+}
+
+/**
+ * The head of every tile: a small mark, then the name. A tile is narrow, so the name is allowed to
+ * shorten itself but never to wrap; the whole name stays reachable as the button's title.
+ */
+function usageTileHead(name, provider) {
+  return el("span", { class: "usage-tile-head" }, [
+    el("span", { class: "usage-tile-mark", "aria-hidden": "true", text: usageMarkText(provider) }),
+    el("span", { class: "usage-tile-name", text: name }),
+  ]);
+}
+
+/** The account's quota rows, and the M row when the vendor renews a subscription instead of metering it. */
+function usageAccountFigures(account, windows) {
+  const monthWindow = windows.find((window) => usageWindowKind(window).kind === "month");
+  const rows = windows.map((window) => usageFigure(window, account));
+  if (!monthWindow && typeof account.renews_at === "number") {
+    // GPT and Claude have no monthly quota: the M row is the renewal, with no percent to show.
+    rows.push(usageRow(t("usage.windowMonth"), "—", "", usageDaysText(account.renews_at), "month"));
+  }
+  return rows;
+}
+
+/** A credit balance as one line: "잔액 $738 12d", the days column left empty when they are unknown. */
+function usageCreditFigure(credit) {
+  const days = typeof credit.days_remaining === "number" && Number.isFinite(credit.days_remaining)
+    ? usageCreditDays(credit.days_remaining)
+    : "";
+  return usageRow(t("usage.creditBalance"), usageUsd(credit.remaining_usd), credit.low ? " high" : "", days, "credit");
+}
+
+function usageAccountRows(account) {
+  const windows = Array.isArray(account.windows) ? account.windows.filter((window) => window && typeof window.used_percent === "number") : [];
+  if (windows.length) return usageAccountFigures(account, windows);
+  if (account.credit && typeof account.credit.remaining_usd === "number") return [usageCreditFigure(account.credit)];
+  // An account with neither windows nor a balance still counts toward the (n/m) on the tile.
+  return [];
+}
+
+/** Which account a provider's tile is about when it has several: the one in use, else the first. */
+const usageInUse = new Map();
+const usageExpanded = new Set();
+
+/**
+ * Accounts whose rows are worth drawing: any provider with several accounts opens them, prepaid
+ * credit included — a credit vendor with two keys shows the key in use and the rest behind a tap.
+ */
+function usageExpandable(provider, accounts) {
+  return accounts.length > 1;
+}
+
+function usageTile(provider, accounts) {
+  const inUse = usageInUse.has(provider.provider) ? usageInUse.get(provider.provider) : 0;
+  const index = inUse >= 0 && inUse < accounts.length ? inUse : 0;
+  const account = accounts[index];
+  const base = usageBaseName(provider);
+  const name = usageExpandable(provider, accounts) ? `${base} (${index + 1}/${accounts.length})` : base;
+  const open = usageExpanded.has(provider.provider);
+  const rows = [];
+  for (const row of usageAccountRows(account)) rows.push(row);
+  if (open) {
+    // The accounts the tile does not speak for, each under its own name so the figure has an owner.
+    accounts.forEach((other, at) => {
+      if (at === index) return;
+      const otherRows = usageAccountRows(other);
+      if (!otherRows.length) return;
+      rows.push(el("span", { class: "usage-tile-account", text: usageAccountName(provider, other, at, accounts.length) }));
+      for (const row of otherRows) rows.push(row);
+    });
+  }
+  const body = el("span", { class: "usage-tile-figures" }, rows);
+  const kindClass = provider.type === "credit" ? " credit" : "";
+  if (!usageExpandable(provider, accounts)) {
+    return el("span", { class: `usage-tile${kindClass}`, title: name }, [usageTileHead(name, provider), body]);
+  }
+  const tile = el("button", { class: `usage-tile expandable${kindClass}${open ? " open" : ""}`, type: "button", title: name, "aria-expanded": String(open), "aria-label": name }, [
+    usageTileHead(name, provider),
+    body,
+  ]);
+  tile.addEventListener("click", () => {
+    if (usageExpanded.has(provider.provider)) usageExpanded.delete(provider.provider); else usageExpanded.add(provider.provider);
+    renderUsage();
+  });
+  return tile;
+}
+
+/**
+ * One tile per provider, two to a row; several accounts share the tile and open on a tap.
+ * Subscription plans (everything that is not prepaid credit) come first, then the credit
+ * balances, each group in config order — the plans are what the user watches, the balance is
+ * a footnote. Config order alone would put them wherever their provider entry happens to sit.
+ */
+function usageTiles(providers) {
+  const drawable = providers.filter((provider) => Array.isArray(provider.accounts) && provider.accounts.length);
+  const plans = drawable.filter((provider) => provider.type !== "credit");
+  const credits = drawable.filter((provider) => provider.type === "credit");
+  return [...plans, ...credits].map((provider) => usageTile(provider, provider.accounts));
+}
+
+/**
+ * Ask the router which account each multi-account provider is using. `/api/limits` numbers accounts
+ * in the same order as these lists, but only counts the ones it has quota for, so the answer is an
+ * index to look up, not a promise; a miss falls back to the first account.
+ */
+async function usageKeyAccounts(name, type) {
+  // Every key-based provider (subscription or prepaid credit) answers on the same endpoint; the old
+  // OpenCode Go one is still there for a router that predates it.
+  try { return await api(`/api/provider-keys?provider=${encodeURIComponent(name)}`); }
+  catch (error) {
+    // Only a router too old to know the new path (404) is worth asking the old one; any other
+    // failure is the answer, and asking twice would only hide it.
+    if (type === "opencode-go" && error.status === 404) return api(`/api/opencode-accounts?provider=${encodeURIComponent(name)}`);
+    throw error;
+  }
+}
+
+async function resolveUsageInUse(providers) {
+  let changed = false;
+  for (const provider of providers) {
+    const accounts = Array.isArray(provider.accounts) ? provider.accounts : [];
+    if (!usageExpandable(provider, accounts)) continue;
+    const name = provider.provider;
+    try {
+      let at = -1;
+      if (provider.type === "chatgpt") {
+        const body = await api(`/api/chatgpt-accounts?provider=${encodeURIComponent(name)}`);
+        const list = (Array.isArray(body.accounts) ? body.accounts : []).filter((a) => a.state !== "paused" && a.state !== "needs-login");
+        at = list.findIndex((a) => a.active === true);
+      } else if (provider.type !== "anthropic" && provider.type !== "google" && provider.type !== "grok") {
+        const body = await usageKeyAccounts(name, provider.type);
+        const list = Array.isArray(body.accounts) ? body.accounts : [];
+        at = list.findIndex((a) => a.state === "in-use");
+      }
+      // That list's position is the account number the router gives a limits row, and a row for a
+      // key with no readable windows is left out of `/api/limits`, so match by number.
+      const limitIndex = at >= 0 ? accounts.findIndex((a) => a.account === at) : -1;
+      const next = limitIndex >= 0 ? limitIndex : 0;
+      if (usageInUse.get(name) !== next) { usageInUse.set(name, next); changed = true; }
+    } catch { /* the tile stays on its fallback account */ }
+  }
+  if (changed) renderUsage();
+}
+
+function renderUsage() {
+  const box = $("#usage-cards");
+  const empty = $("#usage-empty");
+  if (!box || !empty) return;
+  const providers = (usageLimits && Array.isArray(usageLimits.providers)) ? usageLimits.providers : [];
+  const tiles = usageTiles(providers);
+  box.replaceChildren(...tiles);
+  box.hidden = tiles.length === 0;
+  empty.hidden = tiles.length !== 0;
+  // An unreachable router is a quiet note, not a tile: the panel keeps its last good numbers.
+  empty.textContent = tiles.length === 0 ? (usageError || t("usage.empty")) : "";
+}
+
+async function refreshUsage() {
+  const generation = ++usageGeneration;
+  try {
+    const body = await api("/api/limits");
+    if (generation !== usageGeneration) return;
+    usageLimits = body;
+    usageError = "";
+  } catch (error) {
+    if (generation !== usageGeneration) return;
+    // Keep the last good numbers; say why only when there are none to keep. An HTTP answer is its
+    // own reason (a 404 from an older router, a 500), so it is named rather than swallowed.
+    usageError = error.status ? t("usage.unreachableStatus", { status: error.status }) : t("usage.unreachable");
+  }
+  renderUsage();
+  if (generation === usageGeneration && usageLimits) void resolveUsageInUse(usageLimits.providers || []);
+}
+
+/** Open or closed, remembered: someone who folded the panel away does not want it back each visit. */
+function setUsageOpen(open) {
+  usageOpen = open;
+  const panel = $("#usage-panel");
+  const toggle = $("#usage-toggle");
+  if (panel) panel.classList.toggle("collapsed", !open);
+  if (toggle) toggle.setAttribute("aria-expanded", String(open));
+  try { localStorage.setItem(USAGE_OPEN_KEY, open ? "1" : "0"); } catch { /* unavailable */ }
+}
+
+/** A phone moves the one panel into the Status page; a wider window puts it back in the sidebar. */
+function placeUsagePanel() {
+  const panel = $("#usage-panel");
+  const slot = $("#usage-slot");
+  const phone = $("#usage-slot-phone");
+  if (!panel || !slot || !phone) return;
+  const narrow = window.matchMedia(USAGE_NARROW).matches;
+  const target = narrow ? phone : slot;
+  if (panel.parentElement !== target) target.appendChild(panel);
+  panel.classList.toggle("in-phone-slot", narrow);
+}
+
+$("#usage-toggle") && $("#usage-toggle").addEventListener("click", () => setUsageOpen(!usageOpen));
+(function setupUsagePanel() {
+  placeUsagePanel();
+  setUsageOpen(usageOpen);
+  window.matchMedia(USAGE_NARROW).addEventListener("change", () => { placeUsagePanel(); });
+  void refreshUsage();
+  setInterval(() => {
+    // Nothing on screen to update while a page is hidden; the next visit refreshes anyway.
+    if (document.visibilityState === "hidden") return;
+    void refreshUsage();
+  }, USAGE_REFRESH_MS);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") void refreshUsage();
+  });
+})();
 
 // ---- Inside the app: the connection card, and pages while the router is down -------------
 // The app can do what this page cannot once the router is down: ask the CLI what is wrong
@@ -716,6 +1124,7 @@ function credentialLine(name) {
   if (!pool.length) return null;
   const parts = pool.map((c) => {
     const who = c.label || c.id;
+    if (c.state === "paused") return `${who}: ${t("providers.chatgptPaused")}`;
     if (c.state === "quarantined") return `${who}: ${t("pool.quarantined")}`;
     if (c.state === "cooling") return `${who}: ${t("pool.cooling", { seconds: c.cooldownSeconds ?? 0 })}`;
     return `${who}: ${t("pool.ready")}`;
@@ -1839,11 +2248,19 @@ async function saveSlots() {
 
 // ---- Providers ----------------------------------------------------------------------
 
-async function probeProvider(name, provider, onComplete) {
+async function probeProvider(name, provider, onComplete, savedName) {
   probeStates.set(name, { pending: true });
   renderHealthProviders();
   try {
     const headers = provider.headers || {};
+    // The saved provider whose key pool the router should resolve the check's key from. `name` is a
+    // UI state key and can be temporary (a draft), so it is never sent.
+    const providerName = savedName || (name && !String(name).startsWith("__new_") ? name : undefined);
+    // A provider whose keys moved into `credentials[]` keeps no auth header in `headers`, so the
+    // probe borrows the first usable key's header; otherwise "연결 확인" tested an anonymous request.
+    // A named provider needs no borrow: the router resolves the key from its own copy, and the key
+    // stays out of the request the page builds.
+    const credentialHeader = providerName || authHeaderName(headers) ? null : credentialAuthHeader(provider);
     const body = provider.type === "anthropic"
       ? { type: "anthropic", auth: provider.auth, ...(provider.auth === "api-key" && provider.apiKey ? { apiKey: provider.apiKey } : {}) }
       : provider.type === "google"
@@ -1853,7 +2270,10 @@ async function probeProvider(name, provider, onComplete) {
       : {
         type: provider.type,
         url: provider.url,
-        headers,
+        // With several keys the key lives in `credentials`, not in `headers` (adding one migrates
+        // it), so the router resolves the check's key from its own copy of the provider.
+        ...(providerName ? { name: providerName } : {}),
+        headers: credentialHeader ? { ...headers, [credentialHeader.name]: credentialHeader.value } : headers,
         modelsUrl: provider.modelsUrl || (provider.preset && presetById(provider.preset) && presetById(provider.preset).modelsUrl),
         modelsAuthHeader: provider.modelsAuthHeader || (provider.preset && presetById(provider.preset) && presetById(provider.preset).modelsAuthHeader),
         // The router reads the preset's fallback list to tag each discovered model with the wire it
@@ -2036,7 +2456,7 @@ async function removeProvider(name, provider) {
 
 function providerTabs(name, provider) {
   const tabs = [{ id: "overview", label: t("providers.overview") }];
-  if ((provider.type === "anthropic" && provider.auth === "claude-code") || provider.type === "chatgpt" || (provider.type === "google" && provider.auth === "antigravity")) tabs.push({ id: "accounts", label: t("providers.accounts") });
+  if ((provider.type === "anthropic" && provider.auth === "claude-code") || provider.type === "chatgpt" || (provider.type === "google" && provider.auth === "antigravity") || isKeyBasedProvider(provider)) tabs.push({ id: "accounts", label: t("providers.accounts") });
   tabs.push({ id: "models", label: t("providers.modelsTab") });
   return el("div", { class: "provider-tabs", role: "tablist" }, tabs.map((tab) => {
     const button = el("button", { class: providerDetailTab === tab.id ? "active" : "", type: "button", role: "tab", "aria-selected": String(providerDetailTab === tab.id), text: tab.label });
@@ -2475,6 +2895,485 @@ function chatgptAccountsPanel(name) {
   return panel;
 }
 
+/**
+ * Whether this provider is one whose keys form a pool: every API-key provider (OpenAI-compatible and
+ * Anthropic-compatible, subscription or prepaid credit alike). ChatGPT, Google and Grok sign in
+ * instead of taking a key, and the Claude subscription keeps its own account list, so neither is
+ * here. The router's `/api/provider-keys` answers for exactly these.
+ */
+const KEY_BASED_TYPES = new Set(["openai-compatible", "anthropic-compatible"]);
+function isKeyBasedProvider(provider) {
+  return Boolean(provider) && KEY_BASED_TYPES.has(provider.type);
+}
+
+/**
+ * The id the router gives the one key a provider keeps in `headers` (proxy `credentialsOf`). The
+ * dashboard shows that key as key 1, but the live-state endpoints (`/api/provider-keys`,
+ * `/api/limits`) call it `default`, so the card has to look it up under that id or it shows no
+ * state and no usage at all.
+ */
+const HEADERS_KEY_ID = "default";
+
+/** A header that carries a key, in whatever case a config or a form spelled it. */
+const AUTH_HEADER = /^(authorization|x-api-key)$/i;
+
+/** The name a headers object actually stores its auth header under ("Authorization", "x-api-key"), or "". */
+function authHeaderName(headers) {
+  return Object.keys(headers || {}).find((header) => AUTH_HEADER.test(header) && typeof headers[header] === "string" && headers[header].trim()) || "";
+}
+
+/** A header's value whatever case it was saved in; a config can hold "Authorization" where a form asks for "authorization". */
+function headerValueOf(headers, name) {
+  const found = Object.keys(headers || {}).find((header) => header.toLowerCase() === name);
+  return found ? headers[found] : undefined;
+}
+
+/**
+ * The auth header a probe should send for a provider whose key lives in `credentials[]`: the first
+ * stored key that is not paused and carries one. A provider migrated to the key pool has no auth
+ * header left in `headers`, so a probe built from `headers` alone tested an unauthenticated request
+ * and called a working provider broken (opencode-go, 2026-10-21). Only the header is returned and it
+ * goes straight into the probe body: no value is ever drawn on the page.
+ */
+function credentialAuthHeader(provider) {
+  const stored = Array.isArray(provider && provider.credentials) ? provider.credentials : [];
+  for (const entry of stored) {
+    if (!entry || entry.paused || !entry.headers) continue;
+    const name = authHeaderName(entry.headers);
+    if (name) return { name, value: entry.headers[name] };
+  }
+  return null;
+}
+
+/**
+ * A provider's keys as the pool reads them. `credentials` is the saved shape; a provider that has
+ * only the old `headers.authorization` shows that one as key 1 and is migrated to `credentials` on
+ * the first save here. Only ids, labels and header *names* leave this function — never a value.
+ */
+function keyRowsOf(provider) {
+  const stored = Array.isArray(provider && provider.credentials) ? provider.credentials : [];
+  if (stored.length) {
+    return stored
+      .filter((entry) => entry && typeof entry.id === "string" && entry.id)
+      .map((entry, index) => ({ id: entry.id, label: entry.label || t("keys.defaultLabel", { number: index + 1 }), legacy: false }));
+  }
+  const headers = (provider && provider.headers) || {};
+  const hasKey = Object.entries(headers).some(([name, value]) => /^(authorization|x-api-key)$/i.test(name) && typeof value === "string" && value.trim());
+  // `legacy` still means "there is no credential to PATCH": the acts go through the config save.
+  return hasKey ? [{ id: HEADERS_KEY_ID, label: t("keys.legacyLabel"), legacy: true }] : [];
+}
+
+/** The bearer value a key field was given: whatever was pasted, with stray spaces or a prefix taken off. */
+function keyValueOf(text) {
+  return String(text || "").trim().replace(/^bearer\s+/i, "").replace(/\s+/g, "");
+}
+
+/** A pasted key's characters that cannot travel in a header: what the add-key dialog warns about. */
+function keyHasSpaces(text) {
+  return /\s/.test(String(text || "").trim().replace(/^bearer\s+/i, ""));
+}
+
+/** The router's key-character refusal in the words this screen already has for it. */
+function keyErrorMessage(error) {
+  const raw = String((error && error.message) || "");
+  if (/HTTP header|whitespace/i.test(raw)) return t("keys.spaces");
+  return raw;
+}
+
+/**
+ * Save a new list of keys onto the provider, without ever handling a stored key's value.
+ *
+ * The headers of the keys that already exist are taken from the config the router just sent, matched
+ * by id, so a rename or a reorder cannot blank them. Only a newly typed key carries a value. Every
+ * other field a key carries (`paused`, and whatever the router adds later) rides along untouched.
+ * The whole save starts from `latestConfig()` like every other screen, so a concurrent edit survives.
+ */
+async function saveProviderKeys(name, change) {
+  const next = clone(await latestConfig());
+  const saved = next.providers && next.providers[name];
+  if (!saved) throw new Error(t("providers.noSelection"));
+  const stored = Array.isArray(saved.credentials) ? saved.credentials.filter((entry) => entry && typeof entry.id === "string") : [];
+  if (!stored.length) {
+    // The provider still holds one key in `headers`; it becomes the credential the router already
+    // calls "default" on its first save here, so the pool's health for that key survives the move.
+    // The auth header is matched in any case: a hand-edited config can spell it "Authorization".
+    const headers = saved.headers || {};
+    const card = authHeaderName(headers);
+    if (card) {
+      stored.push({ id: HEADERS_KEY_ID, label: t("keys.legacyLabel"), headers: { ...headers } });
+      const kept = Object.fromEntries(Object.entries(headers).filter(([header]) => !AUTH_HEADER.test(header)));
+      if (Object.keys(kept).length) saved.headers = kept;
+      else delete saved.headers;
+    }
+  }
+  const byId = new Map(stored.map((entry) => [entry.id, entry]));
+  // A credential is a complete header set (the router sends it instead of the provider's headers),
+  // so a new key takes the provider's other headers with it.
+  const sharedHeaders = Object.fromEntries(Object.entries(saved.headers || {}).filter(([header]) => !AUTH_HEADER.test(header)));
+  const credentials = change(byId, stored, sharedHeaders).map((entry) => ({
+    ...entry,
+    id: entry.id,
+    ...(entry.label ? { label: entry.label } : {}),
+    headers: entry.headers,
+  }));
+  if (credentials.length) saved.credentials = credentials;
+  else delete saved.credentials;
+  await configRequest(next);
+  currentConfig = next;
+  providersLoaded = false;
+  renderProviderDetail();
+}
+
+/**
+ * Add a key to a provider: a label and the key itself, in the sheet every other add uses.
+ *
+ * The key is saved through `POST /api/provider-keys` and joins the pool at once — the router has no
+ * separate "enable" step, and the form says so. Afterwards the provider's 계정 tab is shown with the
+ * new card, because that is where its state and place in the order live.
+ */
+function openAddKeyDialog(name, options) {
+  const labelInput = el("input", { type: "text", maxlength: "60", autocomplete: "off", placeholder: t("keys.labelPlaceholder") });
+  const keyInput = el("input", { type: "password", autocomplete: "off", spellcheck: "false", placeholder: t("keys.keyPlaceholder") });
+  const showKey = el("button", { class: "eye-button", type: "button", text: t("common.show") });
+  showKey.addEventListener("click", () => {
+    const show = keyInput.type === "password";
+    keyInput.type = show ? "text" : "password";
+    showKey.textContent = show ? t("common.hide") : t("common.show");
+  });
+  const problem = el("small", { class: "bad-text", role: "alert", hidden: "" });
+  const save = el("button", { class: "btn", type: "button", "data-default-action": "", text: t("keys.add") });
+  const check = () => {
+    const key = keyValueOf(keyInput.value);
+    const issue = key && keyHasSpaces(keyInput.value) ? t("keys.spaces") : "";
+    problem.textContent = issue;
+    problem.hidden = !issue;
+    save.disabled = !key || Boolean(issue);
+  };
+  keyInput.addEventListener("input", check);
+  check();
+  save.addEventListener("click", async () => {
+    const key = keyValueOf(keyInput.value);
+    if (!key) return;
+    save.disabled = true;
+    const label = labelInput.value.trim();
+    try {
+      await api(`/api/provider-keys?provider=${encodeURIComponent(name)}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        // The router refuses an empty label, and a blank name is a normal thing to leave alone:
+        // the field is not sent at all, so the key is saved with the default name instead.
+        body: JSON.stringify({ key, ...(label ? { label } : {}) }),
+      });
+      closeModal();
+      await afterKeyAdded(name, options);
+    } catch (error) {
+      save.disabled = false;
+      toast(t("common.saveFailed"), true, keyErrorMessage(error));
+    }
+  });
+  showModal(el("div", {}, [
+    el("h1", { id: "modal-title", text: t("keys.addTitle") }),
+    hint(t("keys.addHelp")),
+    el("label", { class: "form-field" }, [el("span", { text: t("keys.label") }), labelInput, el("small", { text: t("keys.labelOptional") })]),
+    el("div", { class: "form-field key-field" }, [
+      el("span", { text: t("keys.key") }),
+      el("div", { class: "key-control" }, [keyInput, showKey]),
+      problem,
+      el("small", { text: t("keys.keyHelp") }),
+    ]),
+    el("p", { class: "small", text: t("keys.addRotationNote") }),
+    el("div", { class: "actions end" }, [el("button", { class: "btn secondary", type: "button", text: t("common.cancel"), onclick: closeModal }), save]),
+  ]));
+}
+
+/**
+ * After a key is saved: re-read the config, open the provider's 계정 tab and draw its cards. The
+ * add-provider path hands back the name it merged into, so the page follows to that provider.
+ */
+async function afterKeyAdded(name, options) {
+  try { currentConfig = await api("/api/config"); } catch { /* the panel reports an unreachable router */ }
+  // Without a config there is no rail to draw; the toast still says the key was saved.
+  if (!currentConfig) { toast((options && options.notice) || t("keys.added")); return; }
+  selectedProviderName = name;
+  providerDetailTab = "accounts";
+  if (!$("#view-providers").classList.contains("active")) showView("providers");
+  $("#view-providers").classList.add("show-detail");
+  renderProviderWorkspace();
+  const notice = options && options.notice;
+  toast(notice || t("keys.added"));
+}
+
+/**
+ * Rename one key. The label is the only editable thing: the router never hands a saved key back.
+ * `apply` lets a caller save through its own endpoint (`PATCH /api/provider-keys/:id`); without one
+ * the label goes through the config save, which is what a provider form's keys use.
+ */
+function openRenameKeyDialog(name, row, apply) {
+  const input = el("input", { type: "text", value: row.label, maxlength: "60", autocomplete: "off" });
+  const save = el("button", { class: "btn", type: "button", "data-default-action": "", text: t("common.save") });
+  const check = () => { save.disabled = !input.value.trim() || input.value.trim() === row.label; };
+  input.addEventListener("input", check);
+  check();
+  save.addEventListener("click", async () => {
+    const label = input.value.trim();
+    if (!label) return;
+    save.disabled = true;
+    try {
+      if (apply) await apply(label);
+      else await saveProviderKeys(name, (byId, stored) => stored.map((entry) => entry.id === row.id ? { ...entry, label } : entry));
+      closeModal();
+      toast(t("common.saved"));
+    } catch (error) {
+      save.disabled = false;
+      toast(t("common.saveFailed"), true, error.message);
+    }
+  });
+  input.addEventListener("keydown", (event) => { if (event.key === "Enter" && !save.disabled) save.click(); });
+  showModal(el("div", {}, [
+    el("h1", { id: "modal-title", text: t("keys.renameTitle") }),
+    el("label", { class: "form-field" }, [el("span", { text: t("keys.label") }), input, el("small", { text: t("keys.renameHelp") })]),
+    el("div", { class: "actions end" }, [el("button", { class: "btn secondary", type: "button", text: t("common.cancel"), onclick: closeModal }), save]),
+  ]));
+  setTimeout(() => input.focus(), 0);
+}
+
+function removeProviderKey(name, row, rows) {
+  if (!confirm(t("keys.removeConfirm", { name: row.label }))) return;
+  void saveProviderKeys(name, (byId, stored) => stored.filter((entry) => entry.id !== row.id))
+    .then(() => toast(t("keys.removed")))
+    .catch((error) => toast(t("common.saveFailed"), true, error.message));
+}
+
+/** Move a key one place up or down; the router tries the list in this order. */
+function moveProviderKey(name, row, rows, delta) {
+  const at = rows.findIndex((entry) => entry.id === row.id);
+  const to = at + delta;
+  if (at < 0 || to < 0 || to >= rows.length) return;
+  void saveProviderKeys(name, (byId, stored) => {
+    const ordered = [...stored];
+    const [moved] = ordered.splice(at, 1);
+    ordered.splice(to, 0, moved);
+    return ordered;
+  }).catch((error) => toast(t("common.saveFailed"), true, error.message));
+}
+
+/**
+ * A key-based provider's keys. The same card list as the ChatGPT accounts tab: one card per key, in
+ * the order the router tries them, with the key's state, its usage (or its balance for a prepaid
+ * credit vendor) and the same actions. A conversation keeps its own key while that key is healthy,
+ * so the order only matters when one is cooling.
+ *
+ * Every act on a saved key goes to `/api/provider-keys` so the router writes the key's own field and
+ * no other card's header is touched. A key that lives only in the provider's old `headers` shape is
+ * migrated by the router when it is added or paused through the same endpoint; the config save
+ * (`PUT /api/config`) still carries the order.
+ *
+ * A stored key is shown as "저장한 키를 쓰고 있습니다" and nothing more — the router keeps the value,
+ * and this screen never puts it back on the page.
+ */
+const KEY_STATES = new Set(["in-use", "standby", "cooling", "paused", "quarantined", "unknown"]);
+
+/** "5시간 33% · 주간 86% · 월간 55%" — the same line the ChatGPT cards use for a quota. */
+function keyQuotaText(windows) {
+  const list = Array.isArray(windows) ? windows : [];
+  return list.filter((window) => window && typeof window.used_percent === "number").map((window) =>
+    t("quota.line", { window: usageWindowLongName(window), percent: Math.round(window.used_percent) }).trim(),
+  ).join(" · ");
+}
+
+/** A key's prepaid balance as the card writes it: "잔액 $738", and the days left when known. */
+function keyCreditText(credit) {
+  if (!credit || typeof credit.remaining_usd !== "number") return "";
+  const days = typeof credit.days_remaining === "number" && Number.isFinite(credit.days_remaining) ? ` · ${usageCreditDays(credit.days_remaining)}` : "";
+  return `${t("usage.creditBalance")} ${usageUsd(credit.remaining_usd)}${days}`;
+}
+
+function keyStateBadge(account) {
+  const state = KEY_STATES.has(account.state) ? account.state : null;
+  const cooldown = typeof account.cooldown_seconds === "number" ? account.cooldown_seconds : 0;
+  if (state === "paused") return el("span", { class: "badge", text: t("providers.chatgptPaused") });
+  if (state === "quarantined") return el("span", { class: "badge bad", text: t("keys.stateQuarantined") });
+  if (state === "cooling") return el("span", { class: "badge warn", text: t("keys.stateCooling", { duration: durationText(cooldown) }) });
+  if (state === "in-use") return el("span", { class: "badge ok", text: t("providers.chatgptInUse") });
+  // The router says "unknown" for a key nothing has read yet. That is not standby: it has no
+  // reading at all, and saying "대기" would promise a slot the router never confirmed.
+  if (state === "unknown") return el("span", { class: "badge", text: t("keys.stateUnknown") });
+  return el("span", { class: "badge", text: t("providers.chatgptStandby") });
+}
+
+/** The provider's key endpoint; `id` names one saved key. */
+function keyUrl(name, id) {
+  const base = `/api/provider-keys${id ? `/${encodeURIComponent(id)}` : ""}?provider=${encodeURIComponent(name)}`;
+  return base;
+}
+
+/** The one PATCH shape the endpoint takes: a label, a pause flag, or a cooldown cleared now. */
+async function patchProviderKey(name, id, change) {
+  await api(keyUrl(name, id), {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(change),
+  });
+}
+
+/**
+ * The key stored only in the provider's `headers` has no credential id for the endpoint to address.
+ * Editing it goes through the config save, which turns it into key 1 as it writes; `apply` edits
+ * that one saved entry.
+ */
+function editLegacyKey(name, apply) {
+  return saveProviderKeys(name, (byId, stored) => stored.map((entry, index) => (index === 0 ? apply(entry) : entry)));
+}
+
+async function setProviderKeyPaused(name, row, paused) {
+  try {
+    if (row.legacy) await editLegacyKey(name, (entry) => ({ ...entry, paused: paused || undefined }));
+    else await patchProviderKey(name, row.id, { paused });
+    await reloadProviderKeys(name);
+  } catch (error) { toast(t("common.saveFailed"), true, error.message); }
+}
+
+/**
+ * "대기 해제": the key is usable again now instead of at its window's reset.
+ *
+ * A key that lives only in the provider's old `headers` shape still exists in the pool as id
+ * "default" (`HEADERS_KEY_ID`), and clearing a cooldown touches the pool's memory, not the config
+ * file — so the router's PATCH accepts it for that id even though there is no credential entry to
+ * carry a label or a pause (`admin.ts` `providerKeyKnown`). The legacy card therefore takes the
+ * same PATCH as every other key; re-saving the config instead (the old behaviour) left the key
+ * cooling, because that save never reaches the pool.
+ *
+ * The config save stays as the fallback for a router whose PATCH refuses the headers id (404/400):
+ * that save migrates the key to `credentials`, and the pool has no health recorded for the new id,
+ * so the key is picked again at once.
+ */
+async function clearProviderKeyCooldown(name, row) {
+  try {
+    try {
+      await patchProviderKey(name, row.legacy ? HEADERS_KEY_ID : row.id, { clearCooldown: true });
+    } catch (error) {
+      if (!row.legacy || (error.status !== 404 && error.status !== 400)) throw error;
+      await editLegacyKey(name, (entry) => entry);
+    }
+    await reloadProviderKeys(name);
+  } catch (error) { toast(t("common.actionFailed"), true, error.message); }
+}
+
+async function renameProviderKey(name, row, label) {
+  try {
+    if (row.legacy) await editLegacyKey(name, (entry) => ({ ...entry, label }));
+    else await patchProviderKey(name, row.id, { label });
+    await reloadProviderKeys(name);
+  } catch (error) { toast(t("common.saveFailed"), true, error.message); }
+}
+
+async function removeProviderKeyById(name, row) {
+  if (!confirm(t("keys.removeConfirm", { name: row.label }))) return;
+  try {
+    if (row.legacy) await saveProviderKeys(name, (byId, stored) => []);
+    else await api(keyUrl(name, row.id), { method: "DELETE" });
+    toast(t("keys.removed"));
+    await reloadProviderKeys(name);
+  } catch (error) { toast(t("common.saveFailed"), true, error.message); }
+}
+
+/** The config changed under us (a key added, paused, renamed or removed): re-read it, then draw. */
+async function reloadProviderKeys(name) {
+  try { currentConfig = await api("/api/config"); } catch { /* keep the copy on screen */ }
+  if (selectedProviderName === name && providerDetailTab === "accounts") renderProviderDetail();
+}
+
+/**
+ * Draw the key cards. `data` is `GET /api/provider-keys` — `{ accounts: [{ id, label?, state,
+ * cooldown_seconds?, at, windows, credit? }] }` — or null when this router does not have that
+ * endpoint yet (an older build), in which case the cards still list and edit the keys from the config.
+ */
+function renderProviderKeyRows(target, data, name) {
+  const provider = currentConfig && currentConfig.providers && currentConfig.providers[name];
+  if (!provider) return;
+  const rows = keyRowsOf(provider);
+  const live = new Map(((data && Array.isArray(data.accounts)) ? data.accounts : []).filter((account) => account && typeof account.id === "string").map((account) => [account.id, account]));
+  const cards = rows.map((row, index) => {
+    const account = live.get(row.id);
+    const known = Boolean(account);
+    // The state endpoint names "paused" itself; before it exists, the saved flag in the config does.
+    const paused = known ? account.state === "paused" : byIdPaused(name, row.id);
+    const cooling = known && account.state === "cooling";
+    const inUse = known && account.state === "in-use";
+    const actions = [];
+    if (cooling) {
+      const clear = el("button", { class: "btn secondary compact", type: "button", text: t("providers.chatgptClearCooldown") });
+      clear.addEventListener("click", () => void clearProviderKeyCooldown(name, row));
+      actions.push(clear);
+    }
+    const pause = el("button", { class: "btn secondary compact", type: "button", text: paused ? t("providers.chatgptResume") : t("providers.chatgptPause") });
+    pause.addEventListener("click", () => void setProviderKeyPaused(name, row, !paused));
+    const up = el("button", { class: "icon-btn", type: "button", "aria-label": t("keys.moveUp"), title: t("keys.moveUp") }, [svgIcon("0 0 10 6", ["M1 5l4-4 4 4"])]);
+    up.disabled = index === 0;
+    up.addEventListener("click", () => moveProviderKey(name, row, rows, -1));
+    const down = el("button", { class: "icon-btn", type: "button", "aria-label": t("keys.moveDown"), title: t("keys.moveDown") }, [svgIcon("0 0 10 6", ["M1 1l4 4 4-4"])]);
+    down.disabled = index === rows.length - 1;
+    down.addEventListener("click", () => moveProviderKey(name, row, rows, 1));
+    const rename = el("button", { class: "btn secondary compact", type: "button", text: t("common.edit") });
+    rename.addEventListener("click", () => openRenameKeyDialog(name, row, (label) => renameProviderKey(name, row, label)));
+    const remove = el("button", { class: "btn danger compact", type: "button", text: t("common.remove") });
+    remove.addEventListener("click", () => void removeProviderKeyById(name, row));
+    actions.push(pause, up, down, rename, remove);
+    const quota = known ? keyQuotaText(account.windows) : "";
+    const credit = known ? keyCreditText(account.credit) : "";
+    return el("article", { class: `cell account-card${inUse ? " current" : ""}` }, [
+      el("div", { class: "cell-text account-card-copy" }, [
+        el("strong", { text: (account && account.label) || row.label }),
+        el("span", { class: "small mono key-saved", text: t("providers.keySaved") }),
+        row.legacy ? hint(t("keys.legacyHelp")) : null,
+        quota ? el("p", { class: "small account-quota", text: quota }) : null,
+        credit ? el("p", { class: `small account-quota${account.credit.low ? " bad-text" : ""}`, text: credit }) : null,
+        el("div", { class: "account-card-actions" }, actions),
+      ]),
+      el("div", { class: "account-card-badges" }, [
+        known ? keyStateBadge(account) : null,
+      ].filter(Boolean)),
+    ]);
+  });
+  target.replaceChildren(...(cards.length ? cards : [el("div", { class: "account-empty", text: t("keys.empty") })]));
+  const countNode = $("#provider-key-count");
+  if (countNode) countNode.textContent = t("keys.count", { count: rows.length });
+}
+
+/** A key's saved `paused` flag, straight from the config the page already holds (no header value read). */
+function byIdPaused(name, id) {
+  const provider = currentConfig && currentConfig.providers && currentConfig.providers[name];
+  const entry = ((provider && provider.credentials) || []).find((item) => item && item.id === id);
+  return Boolean(entry && entry.paused);
+}
+
+async function refreshProviderKeyPanel(name) {
+  const target = $("#provider-key-rows");
+  if (!target || selectedProviderName !== name || providerDetailTab !== "accounts") return;
+  const generation = providerDetailGeneration;
+  let data = null;
+  try { data = await api(keyUrl(name)); }
+  catch { /* an older router has no state endpoint yet: the cards still list and edit the keys */ }
+  if (generation !== providerDetailGeneration) return;
+  renderProviderKeyRows(target, data, name);
+}
+
+function providerKeysPanel(name) {
+  const add = el("button", { class: "cell-button", type: "button", text: t("keys.addAction") });
+  add.addEventListener("click", () => openAddKeyDialog(name));
+  const rows = el("div", { id: "provider-key-rows", class: "group account-card-list" }, [el("div", { class: "small", text: t("providers.checking") })]);
+  const panel = el("div", { class: "provider-panel" }, [
+    el("section", { class: "section" }, [
+      el("div", { class: "section-head" }, [el("h3", { class: "section-title", text: t("keys.title") }), el("span", { id: "provider-key-count", class: "small", text: t("keys.count", { count: 0 }) })]),
+      rows,
+      el("div", { class: "group stacked-add" }, [add]),
+      el("p", { class: "group-footer", text: t("keys.subtitle") }),
+    ]),
+  ]);
+  queueMicrotask(() => void refreshProviderKeyPanel(name));
+  return panel;
+}
+
 function renderProviderDetail() {
   const detail = $("#provider-detail");
   providerDetailGeneration += 1;
@@ -2487,17 +3386,21 @@ function renderProviderDetail() {
   const check = el("button", { class: "btn secondary", type: "button", text: t("providers.check") });
   check.addEventListener("click", async () => { check.disabled = true; await probeProvider(name, provider); check.disabled = false; renderProviderWorkspace(); });
   const edit = el("button", { class: "btn secondary", type: "button", text: t("common.edit"), onclick: () => openProviderForm({ name, provider }) });
+  // A provider that takes API keys offers the key first: it is the thing people come here to do.
+  const addKey = isKeyBasedProvider(provider) ? el("button", { class: "btn", type: "button", text: t("providers.addApiKey") }) : null;
+  if (addKey) addKey.addEventListener("click", () => openAddKeyDialog(name));
   // Removing is the one destructive act on this page, so it sits apart at the bottom, not beside Edit.
   const remove = el("button", { class: "cell-button destructive", type: "button", text: t("providers.remove"), onclick: () => void removeProvider(name, provider) });
   const back = el("button", { class: "provider-back", type: "button", onclick: closeProviderDetail }, [svgIcon("0 0 9 15", ["M7.5 1.5l-6 6 6 6"]), el("span", { text: t("nav.providers") })]);
   const header = el("header", { class: "provider-detail-header" }, [
     el("div", {}, [el("div", { class: "provider-title-line" }, [el("h2", { text: name }), providerState(name, provider)]), el("p", { class: "small", text: providerKind(name, provider) })]),
-    el("div", { class: "provider-detail-actions" }, [check, edit]),
+    el("div", { class: "provider-detail-actions" }, [addKey, check, edit].filter(Boolean)),
   ]);
   let content;
   if (providerDetailTab === "accounts" && provider.type === "anthropic" && provider.auth === "claude-code") content = anthropicAccountsPanel(name, provider);
   else if (providerDetailTab === "accounts" && provider.type === "chatgpt") content = chatgptAccountsPanel(name);
   else if (providerDetailTab === "accounts" && provider.type === "google" && provider.auth === "antigravity") content = googleAccountsPanel(name);
+  else if (providerDetailTab === "accounts" && isKeyBasedProvider(provider)) content = providerKeysPanel(name);
   else if (providerDetailTab === "models") content = providerModelsPanel(name, provider);
   else { providerDetailTab = "overview"; content = providerOverview(name, provider); }
   detail.replaceChildren(back, header, providerTabs(name, provider), content, el("div", { class: "group provider-remove" }, [remove]));
@@ -3084,8 +3987,12 @@ function openProviderForm(options) {
   const showKey = el("button", { class: "eye-button", type: "button", text: t("common.show") });
   showKey.addEventListener("click", () => { const show = keyInput.type === "password"; keyInput.type = show ? "text" : "password"; showKey.textContent = show ? t("common.hide") : t("common.show"); });
   const currentHeaders = (existing && existing.headers) || {};
-  const headerKind = preset ? preset.authHeader : (isOpenAi || Object.keys(currentHeaders).some((key) => key.toLowerCase() === "authorization") ? "authorization-bearer" : "x-api-key");
-  const existingKey = headerKind === "authorization-bearer" ? String(currentHeaders.authorization || "").replace(/^Bearer\s+/i, "") : currentHeaders["x-api-key"] || "";
+  // The saved auth header is found in any case: a config may spell it "Authorization" while the
+  // form writes "authorization", and an exact-case read left `existingKey` empty — saving the form
+  // then wrote an empty `headers` over the only key this provider had.
+  const savedAuthHeader = authHeaderName(currentHeaders);
+  const headerKind = preset ? preset.authHeader : (isOpenAi || (savedAuthHeader && savedAuthHeader.toLowerCase() === "authorization") ? "authorization-bearer" : "x-api-key");
+  const existingKey = headerKind === "authorization-bearer" ? String(headerValueOf(currentHeaders, "authorization") || "").replace(/^Bearer\s+/i, "") : headerValueOf(currentHeaders, "x-api-key") || "";
   if (existingKey) keyInput.placeholder = t("providers.keySaved");
   const urlInput = el("input", { value: (existing && existing.url) || (preset && preset.anthropicBaseUrl) || "", placeholder: "https://" });
   const wireSelect = el("select", {}, [selectOption("chat", "Chat Completions"), selectOption("responses", "Responses")]);
@@ -3145,7 +4052,10 @@ function openProviderForm(options) {
     const extraHeaders = el("textarea", { rows: "2", placeholder: "header-name: value" });
     const additional = Object.entries(currentHeaders).filter(([key]) => key.toLowerCase() !== "x-api-key" && key.toLowerCase() !== "authorization");
     extraHeaders.value = additional.map(([key, value]) => `${key}: ${value}`).join("\n");
-    advancedContent.appendChild(inputRow(t("providers.extraHeaders"), extraHeaders, t("providers.extraHeadersHelp")));
+    // With several keys saved, these headers are part of every key's request (the router merges
+    // them with each key's own auth header), so the note says so instead of leaving it to be found.
+    const hasKeys = Array.isArray(existing && existing.credentials) && existing.credentials.length > 0;
+    advancedContent.appendChild(inputRow(t("providers.extraHeaders"), extraHeaders, hasKeys ? t("providers.extraHeadersKeysHelp") : t("providers.extraHeadersHelp")));
     advancedContent._extraHeaders = extraHeaders;
     // Without a line of its own the model reads Claude Code's system prompt and answers that it is
     // Claude, which is what DeepSeek did before this was offered here too.
@@ -3218,8 +4128,9 @@ function openProviderForm(options) {
       if (kind === "authorization-bearer") headers.authorization = `Bearer ${key}`;
       else headers["x-api-key"] = key;
     } else if (existingKey) {
-      if (kind === "authorization-bearer") headers.authorization = currentHeaders.authorization;
-      else headers["x-api-key"] = currentHeaders["x-api-key"];
+      // Put the saved key back under the header name it is stored with, whatever its case.
+      const savedName = Object.keys(currentHeaders).find((header) => header.toLowerCase() === (kind === "authorization-bearer" ? "authorization" : "x-api-key"));
+      if (savedName) headers[savedName] = currentHeaders[savedName];
     }
     const rawHeaders = advancedContent._extraHeaders && advancedContent._extraHeaders.value;
     for (const line of String(rawHeaders || "").split("\n")) {
@@ -3234,6 +4145,11 @@ function openProviderForm(options) {
       return { type: "chatgpt", auth: chat.auth.value, defaultEffort: chat.effort.value, identity: chat.identity.checked, limits: chat.limits.checked, fast: { main: chat.fastMain.checked, subagent: chat.fastSubagent.checked }, ...(chat.append.value.trim() ? { instructionsAppend: chat.append.value.trim() } : {}) };
     }
     const prompt = advancedContent._prompt;
+    const draftHeaders = readHeaders();
+    // Nothing in this form clears a key: with no credentials the provider's one key lives in
+    // `headers`, an empty auth header here means "unchanged", and a save must never blank it.
+    const savesHeaders = !(Array.isArray(existing && existing.credentials) && existing.credentials.length);
+    if (existing && savesHeaders && savedAuthHeader && !authHeaderName(draftHeaders)) draftHeaders[savedAuthHeader] = currentHeaders[savedAuthHeader];
     return {
       type: openAiNow() ? "openai-compatible" : "anthropic-compatible",
       url: urlInput.value.trim(),
@@ -3244,11 +4160,19 @@ function openProviderForm(options) {
       // preset rather than leaving the user to discover the bill.
       ...(preset && preset.sessionHeader ? { sessionHeader: preset.sessionHeader } : {}),
       ...(openAiNow() ? { wire: wireNow(), caps: { effortLevels: (preset && preset.effortLevels) || [], reasoning: preset && preset.effortLevels && preset.effortLevels.length ? "effort" : "none" } } : {}),
-      ...(Object.keys(readHeaders()).length ? { headers: readHeaders() } : {}),
+      ...(Object.keys(draftHeaders).length ? { headers: draftHeaders } : {}),
     };
   }
   function probeDraft() {
     const d = draftProvider();
+    // A saved provider keeps its keys in `credentials[]`, so the form has no auth header to send.
+    // The first usable key's header goes to the probe only; it is never placed in a field. A named
+    // saved provider needs no borrow — the router resolves the check's key itself, so the key stays
+    // out of the request on this side.
+    if (!isChatgpt && !options.name && !authHeaderName(d.headers) && existing) {
+      const borrowed = credentialAuthHeader(existing);
+      if (borrowed) d.headers = { ...(d.headers || {}), [borrowed.name]: borrowed.value };
+    }
     if (preset) { d.modelsUrl = preset.modelsUrl; d.modelsAuthHeader = preset.modelsAuthHeader; d.probeModel = (preset.fallbackModels || [])[0] && preset.fallbackModels[0].id; }
     // With nothing to list models from, test with a model the user ticked rather than a made-up id
     // the provider is bound to refuse.
@@ -3263,11 +4187,14 @@ function openProviderForm(options) {
   }
   async function runProbe() {
     const draft = probeDraft();
-    if (!draft.url || !/^https?:\/\//.test(draft.url)) { toast(t("providers.urlRequired"), true); return; }
+    if (!draft.url || !/^https?:\/\//i.test(draft.url)) { toast(t("providers.urlRequired"), true); return; }
     probeButton.disabled = true;
     result.textContent = t("providers.checking");
     const temporary = `__new_${Date.now()}`;
-    const response = await probeProvider(temporary, draft);
+    // A draft is still reported under a temporary state key, but it is the saved provider's settings
+    // being tested, so the router is told which one: with several keys the key lives in `credentials`
+    // and only the router's own copy of the provider has it.
+    const response = await probeProvider(temporary, draft, undefined, existing ? options.name : undefined);
     probeButton.disabled = false;
     const noCredits = response.ok && /^no-credits:/.test(response.error || "");
     const headline = noCredits ? t("providers.probeNoCredits") : response.ok ? t("providers.probeOk") : response.auth === "not-entitled" ? t("providers.probeNotEntitled") : response.auth === "bad-key" ? t("providers.probeBadKey") : response.unavailable ? t("providers.apiSoon") : t("providers.probeFailed");
@@ -3328,7 +4255,37 @@ function openProviderForm(options) {
     const typedName = nameInput.value.trim();
     if (!typedName) { toast(t("providers.nameRequired"), true); return; }
     const provider = draftProvider();
-    if (!isChatgpt && (!provider.url || !/^https?:\/\//.test(provider.url))) { toast(t("providers.urlRequired"), true); return; }
+    if (!isChatgpt && (!provider.url || !/^https?:\/\//i.test(provider.url))) { toast(t("providers.urlRequired"), true); return; }
+    // Same base URL = the same service. Adding a provider at an address one already answers on
+    // would split that service's keys into two pools and two rotations, so the key joins the
+    // provider that is already there instead of making a twin. Only a new provider can merge;
+    // editing one keeps its own identity.
+    if (!existing && isKeyBasedProvider(provider)) {
+      const typedKey = keyValueOf(keyInput.value);
+      const twin = providerByBaseUrl((currentConfig && currentConfig.providers) || {}, provider.url);
+      if (twin && !typedKey) { toast(t("providers.existingNeedsKey", { name: twin[0] }), true); return; }
+      if (twin && typedKey) {
+        // Only the key travels: the router drops the spaces itself, without saying so, which turned
+        // a key pasted with its label into a silent wrong one. Refuse it here like the add-key dialog.
+        if (keyHasSpaces(keyInput.value)) { toast(t("keys.spaces"), true); return; }
+        saveButton.disabled = true;
+        try {
+          await api(`/api/provider-keys?provider=${encodeURIComponent(twin[0])}`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ key: typedKey, ...(typedName ? { label: typedName } : {}) }),
+          });
+          closeModal();
+          slotsLoaded = false;
+          providersLoaded = false;
+          await afterKeyAdded(twin[0], { notice: t("providers.addedToExisting", { name: twin[0] }) });
+        } catch (error) {
+          saveButton.disabled = false;
+          toast(t("common.saveFailed"), true, keyErrorMessage(error));
+        }
+        return;
+      }
+    }
     const next = clone(await latestConfig());
     const providerName = existing ? options.name : uniqueName(typedName, next.providers, provider.url);
     const saved = existing && (next.providers[options.name] || existing);

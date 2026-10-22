@@ -20,12 +20,28 @@
     <button data-view="logs" class="nav-btn" type="button"><svg class="nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.5 5.5H17M7.5 10H17M7.5 14.5H17"/><path d="M3.5 5.5h.01M3.5 10h.01M3.5 14.5h.01" stroke-width="2.4"/></svg><span data-i18n="nav.logs">Logs</span></button>
     <button data-view="about" class="nav-btn" type="button"><svg class="nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10" cy="10" r="7.6"/><path d="M10 9.2v4.6"/><path d="M10 6.3h.01" stroke-width="2.2"/></svg><span data-i18n="nav.about">About</span></button>
   </div>
+  <!-- Usage panel: here at the bottom left on a desktop window; a phone moves it to the top of
+       the Status page, where the sidebar is only a tab bar. See placeUsagePanel(). -->
+  <div class="sidebar-slot" id="usage-slot">
+    <section class="usage-panel" id="usage-panel" aria-labelledby="usage-title">
+      <button class="usage-head" id="usage-toggle" type="button" aria-expanded="true" aria-controls="usage-body">
+        <span class="usage-title" id="usage-title" data-i18n="usage.title">Usage</span>
+        <svg class="usage-chevron" viewBox="0 0 10 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 1.2l4 4 4-4"/></svg>
+      </button>
+      <div class="usage-body" id="usage-body">
+        <div class="usage-cards" id="usage-cards"></div>
+        <p class="usage-empty" id="usage-empty" data-i18n="usage.empty" hidden>No usage to show yet.</p>
+      </div>
+    </section>
+  </div>
   <div class="sidebar-footer"><select class="lang-select" id="lang-toggle" data-i18n-title="lang.label"></select></div>
 </nav>
 
 <main>
   <section id="view-health" class="view">
     <header class="page-header"><div><h1 data-i18n="health.title">Status</h1><p class="page-subtitle" data-i18n="health.subtitle"></p></div></header>
+    <!-- A phone has no sidebar bottom to put the usage panel in; it is moved here (see placeUsagePanel). -->
+    <div class="usage-slot-phone" id="usage-slot-phone"></div>
     <!-- Drawn only inside the ClaudeRipple app, which can repair or switch the connection (window.rippleApp). -->
     <div class="conn" id="health-connection" hidden></div>
     <section class="section" id="health-desktop-section">
