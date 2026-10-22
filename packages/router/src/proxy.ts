@@ -1113,6 +1113,8 @@ export class Proxy {
       /** The credential this attempt is using, and so the one a failure is charged to. */
       let chosen: Credential | null = null;
       let penalised: { provider: string; id: string } | null = null;
+      /** Whether this turn already spent its one extra ask of the same credential on a transient failure. */
+      let sameKeyRetried = false;
       let target: { protocol: "http:" | "https:"; host: string; port: number; agent: http.Agent | https.Agent; extraHeaders: Record<string, string>; basePath?: string; dropClientAuth?: boolean; dropHeaders?: Set<string>; dropHeaderPrefixes?: string[] };
       // Re-enter only for the one unwritten Google turn (prompt refusal or no model capacity). Each target sees the original
       // request, not the primary's rewritten effort, stripped thread, or translated body.
@@ -1217,7 +1219,28 @@ export class Proxy {
                 if (res.headersSent) return null;
                 const verdict = classify(status, undefined, text);
                 if (!verdict.retryable) return null;
-                if (!aboutCredential(verdict)) return null;
+                // A failure that is not the credential's own — a relay's broken upstream, an edge 5xx,
+                // a connect failure — is one more ask of the same key before the conversation moves.
+                // The adapter's own ladder has already run out, so this is the second chance; the next
+                // turn takes the provider-level cooldown this records (`penaliseProvider`), which is
+                // what lets a slot with a fallback use it instead of rediscovering the outage.
+                if (!aboutCredential(verdict)) {
+                  if (!sameKeyRetried) {
+                    sameKeyRetried = true;
+                    return charging;
+                  }
+                  // Failed twice on this key: another key of the same provider may answer even though
+                  // this one will not. Nothing has been written to the client, so the turn is still
+                  // replaceable.
+                  const rest = credentials.filter((credential) => !triedKeys.has(credential.id));
+                  if (rest.length === 0) return null;
+                  const next = this.pool.pick(providerName, rest, conversation);
+                  if (next) {
+                    triedKeys.add(next.id);
+                    charging = next;
+                  }
+                  return next;
+                }
                 const rest = credentials.filter((credential) => !triedKeys.has(credential.id));
                 // A vendor that states when the key comes back is believed over the pool's default;
                 // that is a cooling time, not a failure, so it is set rather than added to.
@@ -1241,17 +1264,24 @@ export class Proxy {
             // Charged to the key that actually answered, not to the one the turn started on. The
             // vendor's own status, reset and body go with it, so this terminal charge reaches the
             // same verdict as the mid-turn one (a stated 429 reset, a 402 that the client saw as a
-            // 400, a relay 403 that is not about the key). A refusal that is not about the key is
-            // charged to nobody at all, the way the anthropic-compatible wire's `onUpstreamJudged`
+            // 400, a relay 403 that is not about the key). A refusal that is not about the key is not
+            // charged to it at all, the way the anthropic-compatible wire's `onUpstreamJudged`
             // already does for a 400: the credential answered, and a transient verdict would only
-            // reset (or stretch) a cooldown it did not earn. `count_tokens` is answered locally
-            // without naming a key, so it is charged to nobody: a local 200 must not `succeed`
-            // either, or it would lift a quarantine it never earned.
+            // reset (or stretch) a cooldown it did not earn. It is charged to the provider instead,
+            // so the next turn of a route with a fallback uses that fallback rather than asking this
+            // provider again. `count_tokens` is answered locally without naming a key, so it is
+            // charged to nobody: a local 200 must not `succeed` either, or it would lift a quarantine
+            // it never earned.
             if (!path.startsWith("/v1/messages/count_tokens")) {
               const outcome = o.vendorRefusal?.status ?? o.status;
               const verdict = classify(outcome, o.vendorRefusal?.retryAfterMs, o.vendorRefusal?.body);
-              if (outcome < 400 || outcome === 0 || aboutCredential(verdict)) {
+              if (outcome > 0 && outcome < 400) {
+                this.recordOutcome(providerName, outcome, o.credentialId ?? first.id);
+                this.pool.succeedProvider(providerName);
+              } else if (aboutCredential(verdict)) {
                 this.recordOutcome(providerName, outcome, o.credentialId ?? first.id, o.vendorRefusal?.retryAfterMs, o.vendorRefusal?.body);
+              } else if (verdict.retryable) {
+                this.pool.penaliseProvider(providerName, outcome, o.vendorRefusal?.retryAfterMs, o.vendorRefusal?.body);
               }
               this.providerHealth.observe(providerName, o.status, o.exhaustion);
             }
@@ -1551,17 +1581,18 @@ export class Proxy {
       /**
        * The next credential to try inside this turn, or null to answer with what the provider said.
        * Only for a routed request whose provider has one we have not already spent — a failure that
-       * is the request's own fault is not retried at all, and one that says nothing about the
-       * credential is retried on the *same* one (see `aboutCredential`).
+       * is the request's own fault is not retried at all. A failure that says nothing about the
+       * credential is asked again on the same one first, and only a second failure may move the
+       * attempt (`allowTransient`): twice on one key is evidence the key cannot answer now.
        */
-      const nextCredential = (status: number, body = ""): Credential | null => {
+      const nextCredential = (status: number, body = "", allowTransient = false): Credential | null => {
         if (!route || !penalised || res.headersSent) return null;
         const verdict = classify(status, undefined, body);
         if (!verdict.retryable) return null;
-        // A relay's broken upstream, an edge 5xx, a 408: the credential did nothing, so only the
-        // attempt moves. Answering the client with the refusal while the key stays where it is keeps
-        // the conversation (and its prompt cache) on the key that worked before this turn.
-        if (!aboutCredential(verdict)) return null;
+        // A relay's broken upstream, an edge 5xx, a 408: the credential itself did nothing. Until it
+        // has failed twice in this turn, answering the client with the refusal keeps the conversation
+        // (and its prompt cache) on the key that worked before this turn.
+        if (!aboutCredential(verdict) && !allowTransient) return null;
         const owner = cfg.providers[route.provider];
         if (!owner) return null;
         // The model's own shape again: its credential pool is the provider's, but an auth convention
@@ -1689,18 +1720,50 @@ export class Proxy {
       const onUpstreamJudged = (upRes: http.IncomingMessage, status: number, errBody: string): void => {
         // Charge the answer to the credential that produced it. A rate limit parks this one until its
         // stated reset so the next request takes another; an answer clears whatever it was carrying.
-        // A 400 is our own request and is charged to nobody (see `classify`).
+        // A 400 is our own request and is charged to nobody (see `classify`). A failure that is not
+        // the key's own — an edge 5xx, a relay's 403, a 408 — is charged to the provider instead, so
+        // a slot with a fallback takes it on the next turn rather than retrying a dead provider.
         if (penalised) {
           if (status >= 400) {
-            this.pool.penalise(penalised.provider, penalised.id, status, retryAfterMs(upRes.headers), errBody);
+            const verdict = classify(status, retryAfterMs(upRes.headers), errBody);
+            if (aboutCredential(verdict)) this.pool.penalise(penalised.provider, penalised.id, status, retryAfterMs(upRes.headers), errBody);
+            else if (verdict.retryable) this.pool.penaliseProvider(penalised.provider, status, retryAfterMs(upRes.headers), errBody);
             if (status === 401 && cfg.providers[penalised.provider]?.type === "anthropic") this.claudeAccounts.reject(penalised.id);
-          } else this.pool.succeed(penalised.provider, penalised.id);
+          } else {
+            this.pool.succeed(penalised.provider, penalised.id);
+            this.pool.succeedProvider(penalised.provider);
+          }
         }
 
         // Nothing has been written to the client yet, so a refused credential can still be replaced
         // and the client answered on its first ask. Only here: once the answer starts flowing the
         // turn is committed, because replacing a half-sent stream splices two answers together.
-        const retry = status >= 400 ? nextCredential(status, errBody) : null;
+        //
+        // A failure that is not the credential's own is answered the same way the openai-compatible
+        // adapter answers it: the identical attempt is sent once more on the same credential, and
+        // only a second failure ends the turn. The key did nothing, so it must not move (that would
+        // take the prompt cache with it), and the provider was not asked twice for the same
+        // one-off hiccup.
+        if (status >= 400 && !res.headersSent) {
+          const verdict = classify(status, retryAfterMs(upRes.headers), errBody);
+          if (verdict.retryable && !aboutCredential(verdict) && !sameKeyRetried) {
+            sameKeyRetried = true;
+            log.info(`RETRY ${route?.provider ?? target.host}: ${status} was not about the credential; asking again on the same one`);
+            headFilled = false;
+            errRaw = Buffer.alloc(0);
+            errTruncated = false;
+            upRes.resume();
+            upRes.destroy();
+            send(lastAttemptHeaders);
+            return;
+          }
+        }
+
+        // The second transient answer on one key: it has now failed twice, so another key of the
+        // same provider may answer even though this one will not. Nothing has been written yet, so
+        // the turn is still replaceable; `sameKeyRetried` is the evidence that the retry happened.
+        // With no other key the client gets the provider's own answer, as before.
+        const retry = status >= 400 ? nextCredential(status, errBody, sameKeyRetried) : null;
         if (retry) {
           const previousId = retry.ownerId ? penalised!.id.split(":", 1)[0]! : penalised!.id;
           log.info(`RETRY ${route!.provider}: ${previousId} answered ${status}, trying ${retry.ownerId ?? retry.id}`);
@@ -2004,6 +2067,9 @@ export class Proxy {
   private targetUsable(target: Pick<Resolved, "provider" | "model">, cfg: Config): boolean {
     const configured = cfg.providers[target.provider];
     if (!configured) return false;
+    // A provider that just failed for a reason that was not any key's has a cooldown of its own: a
+    // slot with a fallback should use it now rather than spend a turn rediscovering the outage.
+    if (!this.pool.providerUsable(target.provider)) return false;
     const provider = providerFor(configured, target.model);
     if (provider.type === "anthropic") {
       if (!provider.accountPool || provider.auth !== "claude-code") return false;
@@ -2110,6 +2176,15 @@ export class Proxy {
   /** Operator action: give one credential another chance now (the dashboard's "다시 사용"). */
   credentialClear(provider: string, id: string): void {
     this.pool.clear(provider, id);
+  }
+
+  /**
+   * A provider was deleted from the config: forget its keys, its provider-level health and every
+   * conversation pinned to it. Health is in memory and keyed by name, so leaving it behind would
+   * hand a new provider that reuses the name a quarantine it never earned.
+   */
+  providerRemoved(provider: string): void {
+    this.pool.clearProvider(provider);
   }
 
   /**

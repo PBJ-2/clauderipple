@@ -280,6 +280,7 @@ proxy
       opencodeUsage: (name: string) => proxy.opencodeLimits(name),
       providerKeys: (name: string) => proxy.providerKeys(name),
       credentialClear: (provider: string, id: string) => proxy.credentialClear(provider, id),
+      providerRemoved: (provider: string) => proxy.providerRemoved(provider),
       grokUsage: (name: string) => proxy.grokLimits(name),
       image: (req, signal, meta) => proxy.generateImage(req, signal, meta),
       modelCatalog: () => loadModelCatalog(),

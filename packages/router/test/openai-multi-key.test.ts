@@ -215,27 +215,47 @@ test("the conversation stays on the key that answered while the limited one cool
   } finally { await r.stop(); await up.close(); }
 });
 
-// A relay answers 403 "Upstream request failed" ten times on key 1 — the adapter's whole retry
-// ladder — and key 2 would answer. The failure says nothing about the credential, so the turn ends
-// on the refusal and the conversation stays on key 1: rotating it would move the vendor's prompt
-// cache with it (§4). Before the fix the turn-after-next ran on key 2 and every later turn paid for
-// a cold cache.
-test("a relay's broken upstream does not rotate the conversation's key", async () => {
+// A relay answers 403 "Upstream request failed" — its whole ladder, twice — and key 2 answers. The
+// failure says nothing about the credential, so the turn gets one more ask on the same key (a second
+// full ladder here) before it may move; only after that is the key given up and the next one used.
+// It is never charged: a relay's broken upstream is not a statement about the key.
+test("a relay's broken upstream gets one more ask on the same key, then the turn moves on", async () => {
   const relay = { status: 403, body: JSON.stringify({ error: { message: "Error from provider (Console Go): Upstream request failed" } }) };
-  // The adapter's own ladder retries the identical ask up to ten times before the turn is committed;
-  // key 1 is refused for all ten, then answers. Key 2 would have answered at once.
-  const up = await upstream((key, n) => (key === "Bearer test-key-1" && n <= 10 ? relay : answer("first key")));
+  // The adapter's own ladder is ten asks per attempt, so key 1 refuses twenty times — ten for the
+  // turn's first ask and ten for the one retry it is given before moving.
+  const up = await upstream((key, n) => (key === "Bearer test-key-1" && n <= 20 ? relay : answer("second key")));
   const r = await rig({ p: pooled(up.port) }, routes);
   try {
-    // Turn 1: key 1 is refused on every attempt (ten, the adapter's ceiling), and the adapter may not
-    // move it — so the client gets the relay's own 403 rather than key 2's answer.
-    assert.equal(await r.send("conv-1"), 403);
-    assert.deepEqual(new Set(up.keys), new Set(["Bearer test-key-1"]), "no other key was tried");
-    // The next turn of the same conversation stays on key 1, which the relay answers now.
+    // The client is answered on its first ask: the relay hiccup never reaches it.
     assert.equal(await r.send("conv-1"), 200);
-    assert.equal(up.keys.at(-1), "Bearer test-key-1", "the conversation kept its key (and its cache)");
+    assert.deepEqual(up.keys.slice(0, 20), Array(20).fill("Bearer test-key-1"), "the same key was asked again before the turn moved");
+    assert.equal(up.keys.at(20), "Bearer test-key-2", "and only then the next key");
+    // The turn that answered was key 2's, so the conversation stays there — moving it back would take
+    // the prompt cache with it (§4).
+    assert.equal(await r.send("conv-1"), 200);
+    assert.equal(up.keys.at(-1), "Bearer test-key-2", "the conversation stayed on the key that answered");
+    // Nothing was charged: a relay report is not about the key, and it is not charged to the
+    // provider either, because the provider answered.
     const report = r.proxy.credentialHealth().p ?? [];
     assert.deepEqual(report.map((entry) => [entry.id, entry.state]), [["key-1", "ready"], ["key-2", "ready"]], "nothing was charged");
+  } finally { await r.stop(); await up.close(); }
+});
+
+// The openai-compatible wire's half of the same rule: a 503 is not the key's own failure, so the
+// turn is asked again on the same key once after the adapter's ladder, and only the second refusal
+// moves it to the next key. A one-off edge hiccup then costs a retry rather than the prompt cache.
+test("a 503 gets one more ask on the same key before the turn moves to the next", async () => {
+  // Each of key 1's asks suffers a ladder of ten 503s (the adapter's ceiling). Twenty of them is the
+  // first ask plus its one retry; after that the turn moves and key 2 answers.
+  const busy = { status: 503, body: JSON.stringify({ error: { message: "service unavailable" } }) };
+  const up = await upstream((key, n) => (key === "Bearer test-key-1" && n <= 20 ? busy : answer("second key")));
+  const r = await rig({ p: pooled(up.port) }, routes);
+  try {
+    assert.equal(await r.send(), 200, "the client got an answer, not the hiccup");
+    assert.deepEqual(up.keys.slice(0, 20), Array(20).fill("Bearer test-key-1"), "the same key was asked again");
+    assert.equal(up.keys.at(20), "Bearer test-key-2", "and only then the next key");
+    const report = r.proxy.credentialHealth().p ?? [];
+    assert.deepEqual(report.map((entry) => [entry.id, entry.state]), [["key-1", "ready"], ["key-2", "ready"]], "a transient failure is charged to neither key");
   } finally { await r.stop(); await up.close(); }
 });
 
@@ -578,6 +598,7 @@ async function adminFor(r: Rig) {
     providerKeys: (name) => r.proxy.providerKeys(name),
     creditBalance: (name) => r.proxy.creditLimits(name),
     credentialClear: (provider, id) => r.proxy.credentialClear(provider, id),
+    providerRemoved: (provider) => r.proxy.providerRemoved(provider),
   });
 }
 
@@ -739,6 +760,35 @@ test("a key added through POST /api/provider-keys is used by the next request wi
     })).status, 200);
     assert.equal(await r.send("user-2"), 200);
     assert.deepEqual(up.keys, ["Bearer test-key-1", "Bearer test-key-2"], "the pasted key drove the next turn, no restart");
+  } finally { admin.close(); await r.stop(); await up.close(); }
+});
+
+// Health is keyed by provider and key name, in memory. Deleting a provider from the config and
+// adding one back under the same name used to inherit the old one's quarantines and cooldowns: the
+// new provider started out with a key it had never asked. The config save is where the removal is
+// seen, so the pool's record goes with it.
+test("deleting a provider forgets its key health, so a provider re-added under the name starts clean", async () => {
+  const up = await upstream((key) => (key === "Bearer test-key-1" ? { status: 401, body: JSON.stringify({ error: { message: "invalid key" } }) } : answer("second key")));
+  const r = await rig({ p: pooled(up.port) }, routes, { configStore: true });
+  const admin = await adminFor(r);
+  const api = `http://127.0.0.1:${admin.port}`;
+  try {
+    assert.equal(await r.send(), 200, "key-1 is quarantined and key-2 answers");
+    assert.equal(r.proxy.credentialHealth().p?.[0]?.state, "quarantined");
+
+    // The GUI's delete: the provider leaves the config.
+    const without = { ...r.store!.get(), providers: {}, routes: {} };
+    assert.equal((await fetch(`${api}/api/config`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(without) })).status, 200);
+    // And it comes back under the same name, with the same two keys.
+    const back = { ...r.store!.get(), providers: { p: pooled(up.port) }, routes };
+    assert.equal((await fetch(`${api}/api/config`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(back) })).status, 200);
+
+    assert.deepEqual(r.proxy.credentialHealth().p?.map((entry) => entry.state), ["ready", "ready"], "no quarantine survived the delete");
+    assert.equal(await r.send("fresh"), 200);
+    // The fake vendor still refuses key-1, so this turn ends on key-2; what matters is that the
+    // re-added provider asked key-1 first rather than trusting a quarantine from its old life.
+    assert.equal(up.keys.at(-2), "Bearer test-key-1", "the re-added provider is asked on its first key again");
+    assert.equal(up.keys.at(-1), "Bearer test-key-2", "and moves only because key-1 refuses it, as before");
   } finally { admin.close(); await r.stop(); await up.close(); }
 });
 

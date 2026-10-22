@@ -204,6 +204,8 @@ export type AdminDeps = {
   providerKeys?: (name: string) => Promise<ProviderKeyState[]>;
   /** Put one provider credential back into rotation now (`PATCH /api/provider-keys/:id`). */
   credentialClear?: (provider: string, id: string) => void;
+  /** A provider left the config: forget its pool state (keys, provider cooldown, pinned conversations). */
+  providerRemoved?: (provider: string) => void;
   /** A Grok provider's usage pool, for the status bar's limits row (`/api/limits`). Absent in tests. */
   grokUsage?: (name: string) => Promise<GrokWindow[]>;
   /**
@@ -2565,7 +2567,12 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           sendJson(res, 400, { errors });
           return;
         }
+        // A provider the save removed keeps its keys' health, its provider-level cooldown and its
+        // conversations' affinity in memory. Nothing can reach them again, and a later provider that
+        // reuses the name would inherit them — so they are dropped here, where the removal is seen.
+        const before = deps.config();
         writeConfigFile(deps.configFile, parsed);
+        for (const name of Object.keys(before.providers)) if (!parsed.providers[name]) deps.providerRemoved?.(name);
         deps.log.info(`admin: config saved via GUI (${Object.keys(parsed.routes).length} routes, ${Object.keys(parsed.providers).length} providers)`);
         // `cli.models` cannot take effect through the router at all: Claude Code reads the slots
         // before a request exists. So a GUI save has to write them to settings.json itself;

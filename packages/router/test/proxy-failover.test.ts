@@ -260,10 +260,12 @@ test("a 403 about a broken upstream is not charged to the credential", async () 
   try {
     assert.equal(await r.send(), 403);
     assert.equal(await r.send(), 403, "the second turn is answered, not refused for a parked key");
-    // A relay's broken upstream says nothing about the credential, so the turn is not walked across
-    // the pool at all: it ends on the key it started on, and the conversation stays there (moving it
-    // would take the prompt cache with it — ARCHITECTURE §4).
-    assert.deepEqual(up.seen.map((seen) => seen.key), ["one", "one"], "no failure unrelated to the key moves the conversation");
+    // A relay's broken upstream says nothing about the credential, so the turn is asked twice on the
+    // key it started on and only then may move. Here the other key is just as broken, so each turn
+    // still ends on the provider's own 403 — and neither key is charged for it.
+    assert.deepEqual(up.seen.map((seen) => seen.key), ["one", "one", "two", "two", "two", "one"], "one retry on the starting key, then the next key, per turn");
+    // Nothing was parked either: the second turn of the same conversation starts on its first key.
+    assert.equal(up.seen.at(-1)?.key, "one", "the conversation was not rotated by a refusal that was not the key's");
   } finally { await r.stop(); await up.close(); }
 });
 
@@ -332,8 +334,9 @@ test("a compressed relay 403 is still recognised, so the credential is not parke
     assert.equal(await r.send(), 403);
     assert.equal(await r.send(), 403, "the second turn is answered, not refused for a parked key");
     // Exactly as in the uncompressed case above: readable or not, a relay report is not about the
-    // key, so nothing is charged and nothing moves.
-    assert.deepEqual(up.seen.map((seen) => seen.key), ["one", "one"], "the compressed relay report was read, so nothing was charged");
+    // key, so nothing is charged and nothing rotates for the refusal. Each turn is asked twice on its
+    // starting key and then on the other, which is just as broken.
+    assert.deepEqual(up.seen.map((seen) => seen.key), ["one", "one", "two", "two", "two", "one"], "the compressed relay report was read, so nothing was charged");
   } finally { await r.stop(); await up.close(); }
 });
 
@@ -377,7 +380,7 @@ test("a relay 403 too long to read whole is still recognised from its head", asy
   try {
     assert.equal(await r.send(), 403);
     assert.equal(await r.send(), 403, "the second turn is answered, not refused for a parked key");
-    assert.deepEqual(up.seen.map((seen) => seen.key), ["one", "one"], "the truncated relay report was read, so nothing moved and nothing was parked");
+    assert.deepEqual(up.seen.map((seen) => seen.key), ["one", "one", "two", "two", "two", "one"], "the truncated relay report was read, so nothing was charged and nothing was parked");
   } finally { await r.stop(); await up.close(); }
 });
 
@@ -394,6 +397,54 @@ test("a cancelled turn is not charged to the credential, so the next turn keeps 
     assert.equal(up.seen.length, 2, "the cancelled turn did reach the provider");
     await r.send();
     assert.equal(up.seen[up.seen.length - 1]?.key, "one", "still on the credential it was on");
+  } finally { await r.stop(); await up.close(); }
+});
+
+// Born from a provider outage: the primary answers 503 on every attempt, so the turn it was asked
+// on cannot be saved. The provider-level cooldown recorded by that failure is what makes the NEXT
+// turn use the route's fallback instead of spending another turn discovering the same outage.
+test("a primary answering 5xx sends the next turn to its fallback", async () => {
+  const down = await upstream(() => ({ status: 503, body: JSON.stringify({ error: { message: "bad gateway" } }) }));
+  const back = await upstream(() => ({ status: 200 }));
+  const r = await rig(
+    {
+      prim: { type: "openai-compatible", url: `http://127.0.0.1:${down.port}/v1`, headers: { authorization: "Bearer k" } } as Provider,
+      back: { type: "anthropic-compatible", url: `http://127.0.0.1:${back.port}`, headers: { "x-api-key": "b" } } as Provider,
+    },
+    { "claude-opus-4-8": { provider: "prim", model: "m1", fallbacks: [{ provider: "back", model: "m2" }] } },
+  );
+  try {
+    assert.notEqual(await r.send(), 200, "the outage reaches the client on the turn that found it");
+    assert.equal(back.seen.length, 0, "the fallback was not invented inside that turn");
+    assert.equal(await r.send(), 200, "the next turn goes to the fallback");
+    assert.equal(back.seen.length, 1);
+    assert.equal(down.seen.length >= 2, true, `the primary was retried inside the first turn, got ${down.seen.length}`);
+  } finally { await r.stop(); await down.close(); await back.close(); }
+});
+
+// The same rule on the anthropic-compatible wire: a 503 says nothing about the key, so it is asked
+// again once on that key before the turn gives up. The key never moves — moving it takes the prompt
+// cache with it (§4) — and the client sees the provider's own answer if the second ask fails too.
+// The reason for that retry: a hiccup on the first ask is absorbed without the user or the pool ever
+// seeing it. Turn one is a single 503 then an answer, on the same key.
+test("a one-off 503 is absorbed by the same-key retry, and the other key is never asked", async () => {
+  const up = await upstream((n) => (n === 1 ? { status: 503, body: "{}" } : { status: 200 }));
+  const r = await rig({ p: pooled(up.port) }, { "claude-opus-4-8": { provider: "p", model: "m" } });
+  try {
+    assert.equal(await r.send(), 200, "the hiccup never reached the client");
+    assert.deepEqual(up.seen.map((seen) => seen.key), ["one", "one"], "the same key was asked again; the conversation never moved");
+  } finally { await r.stop(); await up.close(); }
+});
+
+// The same rule on the anthropic-compatible wire: a 503 says nothing about the key, so it is asked
+// again once on that key; only after that second refusal does the turn try the other key, and with
+// every key refusing the client gets the provider's own answer.
+test("a 503 on a key is asked once more on that key, then the turn moves to the next", async () => {
+  const up = await upstream(() => ({ status: 503, body: "{}" }));
+  const r = await rig({ p: pooled(up.port) }, { "claude-opus-4-8": { provider: "p", model: "m" } });
+  try {
+    assert.equal(await r.send(), 503, "every key is down, so the provider's own answer reaches the client");
+    assert.deepEqual(up.seen.map((seen) => seen.key), ["one", "one", "two"], "twice on the first key, then the second");
   } finally { await r.stop(); await up.close(); }
 });
 

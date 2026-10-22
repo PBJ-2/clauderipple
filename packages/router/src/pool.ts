@@ -127,6 +127,15 @@ export type Credential = { id: string; headers: Record<string, string>; label?: 
 
 type Health = { cooldownUntil: number; quarantined: boolean; failures: number };
 
+/**
+ * Health of a provider as a whole, beside the per-key health above. A failure that is not the key's
+ * own — a relay or an edge answering 5xx, a connect failure — says nothing about any credential, so
+ * charging it to one would move the conversation (and its prompt cache) for no reason. It does say
+ * the provider is not answering, which is what makes a slot with a fallback use that fallback on the
+ * next turn instead of failing once per request until the outage clears.
+ */
+type ProviderHealth = { cooldownUntil: number; failures: number; exhausted: boolean };
+
 export type CredentialReport = {
   id: string;
   label?: string;
@@ -149,6 +158,8 @@ export class CredentialPool {
    * itself set, and a zero balance is not a failure the vendor reported about a request.
    */
   private readonly empty = new Map<string, number>();
+  /** Provider-level health, keyed by provider name: what a failure not about any key says about it. */
+  private readonly providers = new Map<string, ProviderHealth>();
   /** conversation → durable owner id (or runtime id when there is no owner), preserving its cache across token refreshes. */
   private readonly sticky = new Map<string, { provider: string; ownerId: string; at: number }>();
   private readonly now: () => number;
@@ -264,6 +275,61 @@ export class CredentialPool {
     if (h.cooldownUntil <= this.now()) h.cooldownUntil = 0;
     h.quarantined = false;
     h.failures = 0;
+  }
+
+  private providerHealthOf(provider: string): ProviderHealth {
+    let h = this.providers.get(provider);
+    if (!h) { h = { cooldownUntil: 0, failures: 0, exhausted: false }; this.providers.set(provider, h); }
+    return h;
+  }
+
+  /**
+   * Record a failure against the provider rather than against a credential. The verdict is the same
+   * one `penalise` reaches — it is the same status from the same vendor — but it is stored once for
+   * the provider, because it was not any key that failed. Five 503s from a relay are five attempts
+   * that tell one fact: this provider is not answering.
+   */
+  penaliseProvider(provider: string, status: number, retryAfterMs?: number, body = ""): Verdict {
+    const verdict = classify(status, retryAfterMs, body);
+    if (!verdict.retryable) return verdict;
+    const h = this.providerHealthOf(provider);
+    h.failures++;
+    if (verdict.quarantine) h.exhausted = true;
+    else h.cooldownUntil = Math.max(h.cooldownUntil, this.now() + verdict.cooldownMs);
+    return verdict;
+  }
+
+  /**
+   * Whether anything this provider sends could answer right now. False while its provider-level
+   * cooldown runs, or once it was marked exhausted — a slot then fails over instead of spending a
+   * turn on an outage it already knows about.
+   *
+   * Deliberately separate from `hasUsable`: a cooling provider still has its keys, and the keys are
+   * still the right answer once the provider is back.
+   */
+  providerUsable(provider: string): boolean {
+    const h = this.providers.get(provider);
+    if (!h) return true;
+    return !h.exhausted && h.cooldownUntil <= this.now();
+  }
+
+  /** A provider that answered is not exhausted; an unexpired cooldown is left alone, as `succeed` does. */
+  succeedProvider(provider: string): void {
+    const h = this.providerHealthOf(provider);
+    if (h.cooldownUntil <= this.now()) h.cooldownUntil = 0;
+    h.exhausted = false;
+    h.failures = 0;
+  }
+
+  /**
+   * Forget everything about a provider — every key's health and the provider's own. The provider is
+   * gone from the config, so its records are only memory: a later provider that happens to reuse the
+   * name must not start out quarantined for failures that belonged to something else.
+   */
+  clearProvider(provider: string): void {
+    this.clear(provider);
+    this.providers.delete(provider);
+    for (const [conversation, held] of this.sticky) if (held.provider === provider) this.sticky.delete(conversation);
   }
 
   /** Operator action from the dashboard: give a parked credential another chance now. */

@@ -340,6 +340,59 @@ test("an answer lifts a quarantine but does not cancel a live cooldown", () => {
 
 // Only a refusal the credential earned may move a conversation. A relay's 403, an edge 5xx, a 408
 // all say "ask again" — moving the conversation takes the vendor's prompt cache with it (§4).
+// A failure that is not a statement about any key — an edge 5xx, a relay's broken upstream — still
+// says the provider is not answering. Recorded once for the provider, it lets a slot with a fallback
+// use it on the next turn instead of spending that turn on the same outage.
+test("provider health cools the provider, not its keys, and a success clears it", () => {
+  const c = clock();
+  const pool = new CredentialPool({ now: c.now });
+  const all = creds("a", "b");
+
+  assert.equal(pool.providerUsable("p"), true, "nothing known means usable");
+  const verdict = pool.penaliseProvider("p", 503);
+  assert.equal(verdict.retryable && verdict.kind, "transient");
+  assert.equal(pool.providerUsable("p"), false, "cooling: a fallback should answer this turn");
+  assert.equal(pool.pick("p", all, "conv")?.id, "a", "the keys themselves were not charged");
+  assert.deepEqual(pool.report("p", all).map((r) => r.state), ["ready", "ready"]);
+
+  // Another provider is untouched: the cooldown is the provider's own.
+  assert.equal(pool.providerUsable("q"), true);
+
+  c.advance(10_001);
+  assert.equal(pool.providerUsable("p"), true, "it lapses on its own");
+
+  // A success lifts an exhaustion (as `succeed` lifts a quarantine) but not a live cooldown.
+  pool.penaliseProvider("p", 401);
+  assert.equal(pool.providerUsable("p"), false);
+  pool.succeedProvider("p");
+  assert.equal(pool.providerUsable("p"), true);
+
+  // A 400 is the request's own fault: it cools nobody, the provider included.
+  assert.equal(pool.penaliseProvider("p", 400).retryable, false);
+  assert.equal(pool.providerUsable("p"), true);
+});
+
+test("deleting a provider forgets its keys, its provider cooldown and its conversations' affinity", () => {
+  const c = clock();
+  const pool = new CredentialPool({ now: c.now });
+  const all = creds("a", "b");
+
+  pool.penalise("p", "a", 401);
+  pool.penaliseProvider("p", 503);
+  assert.equal(pool.pick("p", all, "conv")?.id, "b", "the conversation landed on b");
+  assert.equal(pool.providerUsable("p"), false);
+
+  pool.clearProvider("p");
+  assert.equal(pool.providerUsable("p"), true, "the provider record is gone");
+  // A provider that reuses the name starts clean: no key is quarantined, no conversation is pinned.
+  assert.deepEqual(pool.report("p", all).map((r) => [r.id, r.state]), [["a", "ready"], ["b", "ready"]]);
+  assert.equal(pool.pick("p", all, "conv")?.id, "a", "affinity was dropped with the provider");
+  // Other providers are untouched.
+  pool.penaliseProvider("q", 503);
+  pool.clearProvider("p");
+  assert.equal(pool.providerUsable("q"), false);
+});
+
 test("only a verdict about the credential may rotate it", () => {
   assert.equal(aboutCredential(classify(401)), true, "a refused key is the credential's own failure");
   assert.equal(aboutCredential(classify(429)), true, "so is a key at its limit");

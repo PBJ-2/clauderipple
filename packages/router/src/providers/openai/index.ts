@@ -286,19 +286,26 @@ export class OpenAiCompatibleAdapter {
     // A credential the vendor refused is replaced inside the same turn, while nothing has been
     // written to the client: after the first byte the turn is committed (ARCHITECTURE §4). The
     // caller's `next` is the judge of whether another credential could answer — a 400 is the
-    // request's own fault and is not walked across the pool. A credential is tried once per turn.
+    // request's own fault and is not walked across the pool. A credential is tried once per turn,
+    // except that `next` may hand the same one back once for a failure that was not its own (a relay
+    // 5xx): that is the second attempt the caller wants, and a third would only repeat the ladder.
     let failureText: string | null = null;
     const triedIds = new Set<string>(credential ? [credential.id] : []);
+    let sameRetried = false;
     while ((!upstream.ok || !upstream.body) && opts.next) {
       const text = await upstream.text().catch(() => "");
       const next = await opts.next(upstream.status, text, Object.fromEntries(upstream.headers));
-      if (!next || triedIds.has(next.id)) {
+      const repeat = next !== null && next.id === credential?.id;
+      if (!next || (triedIds.has(next.id) && (!repeat || sameRetried))) {
         failureText = text;
         break;
       }
+      if (repeat) sameRetried = true;
       triedIds.add(next.id);
       // Ids only, never a header value: this line goes to the log the user may share.
-      this.log.info(`RETRY ${this.name}: ${credential?.id ?? "default"} answered ${upstream.status}, trying ${next.id}`);
+      this.log.info(repeat
+        ? `RETRY ${this.name}: ${credential?.id ?? "default"} answered ${upstream.status} (transient); asking again on it`
+        : `RETRY ${this.name}: ${credential?.id ?? "default"} answered ${upstream.status}, trying ${next.id}`);
       credential = next;
       upstream = await ask();
     }
