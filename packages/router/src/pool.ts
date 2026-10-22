@@ -83,6 +83,22 @@ export function classify(status: number, retryAfterMs?: number, body = ""): Verd
 }
 
 /**
+ * Whether a failure is a statement about the credential that produced it, rather than about the
+ * provider, the relay, or the request.
+ *
+ * Only a refusal the credential itself earned may move a conversation to another key: moving it
+ * also moves the vendor's prompt cache, which is the acceptance metric (§4). A relay answering 403
+ * "Upstream request failed", a 500 from the edge, or a 408 all say "ask again", not "this key is
+ * bad" — the same request on the same key succeeds a moment later. They are still retryable inside
+ * the turn (an unwritten turn is lost otherwise); what they must not do is rotate the key for the
+ * next one. `classify` already draws this line by kind: `auth` is the credential being refused, and
+ * `rate-limit` / `exhausted` are the credential's own account running out.
+ */
+export function aboutCredential(verdict: Verdict): boolean {
+  return verdict.retryable && verdict.kind !== "transient";
+}
+
+/**
  * A vendor's own account of when to come back, from `retry-after` (seconds, or an HTTP date) or a
  * vendor reset field. Preferred over a guess, and ignored when it is not a number we can use.
  */

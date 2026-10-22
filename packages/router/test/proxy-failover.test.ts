@@ -260,10 +260,10 @@ test("a 403 about a broken upstream is not charged to the credential", async () 
   try {
     assert.equal(await r.send(), 403);
     assert.equal(await r.send(), 403, "the second turn is answered, not refused for a parked key");
-    // Turn 1 spends both credentials and ends on the second, so the pool holds the conversation
-    // there. Turn 2 must start on that same one. If the 403 had parked it, `pick` would have had
-    // nothing usable and fallen back to the first credential — which is what this rules out.
-    assert.equal(up.seen[2]?.key, "two", "turn 2 starts on the credential the conversation held");
+    // A relay's broken upstream says nothing about the credential, so the turn is not walked across
+    // the pool at all: it ends on the key it started on, and the conversation stays there (moving it
+    // would take the prompt cache with it — ARCHITECTURE §4).
+    assert.deepEqual(up.seen.map((seen) => seen.key), ["one", "one"], "no failure unrelated to the key moves the conversation");
   } finally { await r.stop(); await up.close(); }
 });
 
@@ -331,10 +331,9 @@ test("a compressed relay 403 is still recognised, so the credential is not parke
   try {
     assert.equal(await r.send(), 403);
     assert.equal(await r.send(), 403, "the second turn is answered, not refused for a parked key");
-    // Exactly as in the uncompressed case above: turn 1 ends on the second credential and turn 2
-    // must start there. Unreadable mojibake is not a relay report, so before the fix the 403 was
-    // charged as an auth failure and turn 2 fell back to the first credential.
-    assert.equal(up.seen[2]?.key, "two", "the compressed relay report was read, so nothing was parked");
+    // Exactly as in the uncompressed case above: readable or not, a relay report is not about the
+    // key, so nothing is charged and nothing moves.
+    assert.deepEqual(up.seen.map((seen) => seen.key), ["one", "one"], "the compressed relay report was read, so nothing was charged");
   } finally { await r.stop(); await up.close(); }
 });
 
@@ -378,7 +377,7 @@ test("a relay 403 too long to read whole is still recognised from its head", asy
   try {
     assert.equal(await r.send(), 403);
     assert.equal(await r.send(), 403, "the second turn is answered, not refused for a parked key");
-    assert.equal(up.seen[2]?.key, "two", "the truncated relay report was read, so nothing was parked");
+    assert.deepEqual(up.seen.map((seen) => seen.key), ["one", "one"], "the truncated relay report was read, so nothing moved and nothing was parked");
   } finally { await r.stop(); await up.close(); }
 });
 

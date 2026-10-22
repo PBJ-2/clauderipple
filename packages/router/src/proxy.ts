@@ -30,7 +30,7 @@ import { defaultAgentDir, withAgentAliases } from "./agents.ts";
 import { forwardCompatibleHeader, resolveCompatibleCaps, sanitizeForCompatible } from "./compat.ts";
 import { applyIdentityToAnthropicBody } from "./identity.ts";
 import { anthropicServerToolBackend, webPluginBackend, webSearchBlocks, webSearchErrorBlocks, webSearchMessage, webSearchQuery, webSearchSse, type WebSearchQuery } from "./websearch.ts";
-import { classify, CredentialPool, retryAfterMs, type Credential } from "./pool.ts";
+import { aboutCredential, classify, CredentialPool, retryAfterMs, type Credential } from "./pool.ts";
 import { PRESETS } from "./presets.ts";
 import { ChatGptAdapter, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
 import { OpenAiCompatibleAdapter } from "./providers/openai/index.ts";
@@ -1209,11 +1209,15 @@ export class Proxy {
               credential: first,
               // Nothing has been written to the client when this is asked, so a refused key can be
               // replaced inside the same turn (the adapter re-asks before its first byte). A failure
-              // that is the request's own fault is not retried at all — `classify` decides, as it does
-              // for the anthropic-compatible wire.
+              // that is the request's own fault is not retried at all, and one that is not about the
+              // credential at all — a relay's 403 "Upstream request failed", an edge 5xx — must not
+              // move the conversation: `aboutCredential` decides, as `nextCredential` does for the
+              // anthropic-compatible wire.
               next: async (status, text, headers) => {
                 if (res.headersSent) return null;
-                if (!classify(status, undefined, text).retryable) return null;
+                const verdict = classify(status, undefined, text);
+                if (!verdict.retryable) return null;
+                if (!aboutCredential(verdict)) return null;
                 const rest = credentials.filter((credential) => !triedKeys.has(credential.id));
                 // A vendor that states when the key comes back is believed over the pool's default;
                 // that is a cooling time, not a failure, so it is set rather than added to.
@@ -1235,12 +1239,20 @@ export class Proxy {
               },
             });
             // Charged to the key that actually answered, not to the one the turn started on. The
-            // vendor's own reset and body go with it, so this terminal charge reaches the same
-            // verdict as the mid-turn one (a stated 429 reset, a relay 403 that is not about the key).
-            // `count_tokens` is answered locally without naming a key, so it is charged to nobody:
-            // a local 200 must not `succeed` either, or it would lift a quarantine it never earned.
+            // vendor's own status, reset and body go with it, so this terminal charge reaches the
+            // same verdict as the mid-turn one (a stated 429 reset, a 402 that the client saw as a
+            // 400, a relay 403 that is not about the key). A refusal that is not about the key is
+            // charged to nobody at all, the way the anthropic-compatible wire's `onUpstreamJudged`
+            // already does for a 400: the credential answered, and a transient verdict would only
+            // reset (or stretch) a cooldown it did not earn. `count_tokens` is answered locally
+            // without naming a key, so it is charged to nobody: a local 200 must not `succeed`
+            // either, or it would lift a quarantine it never earned.
             if (!path.startsWith("/v1/messages/count_tokens")) {
-              this.recordOutcome(providerName, o.status, o.credentialId ?? first.id, o.vendorRefusal?.retryAfterMs, o.vendorRefusal?.body);
+              const outcome = o.vendorRefusal?.status ?? o.status;
+              const verdict = classify(outcome, o.vendorRefusal?.retryAfterMs, o.vendorRefusal?.body);
+              if (outcome < 400 || outcome === 0 || aboutCredential(verdict)) {
+                this.recordOutcome(providerName, outcome, o.credentialId ?? first.id, o.vendorRefusal?.retryAfterMs, o.vendorRefusal?.body);
+              }
               this.providerHealth.observe(providerName, o.status, o.exhaustion);
             }
             finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...o, ...(searchAttempted ? { upstreamCalled: undefined } : {}) });
@@ -1539,11 +1551,17 @@ export class Proxy {
       /**
        * The next credential to try inside this turn, or null to answer with what the provider said.
        * Only for a routed request whose provider has one we have not already spent — a failure that
-       * is the request's own fault is not retried at all (see `classify`).
+       * is the request's own fault is not retried at all, and one that says nothing about the
+       * credential is retried on the *same* one (see `aboutCredential`).
        */
       const nextCredential = (status: number, body = ""): Credential | null => {
         if (!route || !penalised || res.headersSent) return null;
-        if (!classify(status, undefined, body).retryable) return null;
+        const verdict = classify(status, undefined, body);
+        if (!verdict.retryable) return null;
+        // A relay's broken upstream, an edge 5xx, a 408: the credential did nothing, so only the
+        // attempt moves. Answering the client with the refusal while the key stays where it is keeps
+        // the conversation (and its prompt cache) on the key that worked before this turn.
+        if (!aboutCredential(verdict)) return null;
         const owner = cfg.providers[route.provider];
         if (!owner) return null;
         // The model's own shape again: its credential pool is the provider's, but an auth convention
@@ -2008,7 +2026,9 @@ export class Proxy {
    *
    * `retryAfterMs` and `body` are the vendor's own account of a refusal, when there is one: without
    * them a 429 stating an hour, or a relay's 403 naming its own broken upstream, was judged as if it
-   * had said nothing at all.
+   * had said nothing at all. The status itself must be the vendor's too — a translated adapter
+   * reports the client its own error code (a 402 reaches Claude Code as a 400), and judging by that
+   * never parks the last out-of-credit key.
    */
   private recordOutcome(provider: string, status: number, id = "default", retryAfterMs?: number, body?: string): void {
     if (status >= 400 || status === 0) this.pool.penalise(provider, id, status, retryAfterMs, body);

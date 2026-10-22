@@ -215,6 +215,30 @@ test("the conversation stays on the key that answered while the limited one cool
   } finally { await r.stop(); await up.close(); }
 });
 
+// A relay answers 403 "Upstream request failed" ten times on key 1 — the adapter's whole retry
+// ladder — and key 2 would answer. The failure says nothing about the credential, so the turn ends
+// on the refusal and the conversation stays on key 1: rotating it would move the vendor's prompt
+// cache with it (§4). Before the fix the turn-after-next ran on key 2 and every later turn paid for
+// a cold cache.
+test("a relay's broken upstream does not rotate the conversation's key", async () => {
+  const relay = { status: 403, body: JSON.stringify({ error: { message: "Error from provider (Console Go): Upstream request failed" } }) };
+  // The adapter's own ladder retries the identical ask up to ten times before the turn is committed;
+  // key 1 is refused for all ten, then answers. Key 2 would have answered at once.
+  const up = await upstream((key, n) => (key === "Bearer test-key-1" && n <= 10 ? relay : answer("first key")));
+  const r = await rig({ p: pooled(up.port) }, routes);
+  try {
+    // Turn 1: key 1 is refused on every attempt (ten, the adapter's ceiling), and the adapter may not
+    // move it — so the client gets the relay's own 403 rather than key 2's answer.
+    assert.equal(await r.send("conv-1"), 403);
+    assert.deepEqual(new Set(up.keys), new Set(["Bearer test-key-1"]), "no other key was tried");
+    // The next turn of the same conversation stays on key 1, which the relay answers now.
+    assert.equal(await r.send("conv-1"), 200);
+    assert.equal(up.keys.at(-1), "Bearer test-key-1", "the conversation kept its key (and its cache)");
+    const report = r.proxy.credentialHealth().p ?? [];
+    assert.deepEqual(report.map((entry) => [entry.id, entry.state]), [["key-1", "ready"], ["key-2", "ready"]], "nothing was charged");
+  } finally { await r.stop(); await up.close(); }
+});
+
 test("a 400 is the request's own fault: it is not retried against the other key", async () => {
   const up = await upstream(() => ({ status: 400, body: JSON.stringify({ error: { message: "bad body" } }) }));
   const r = await rig({ p: pooled(up.port) }, routes);
@@ -426,6 +450,69 @@ test("a relay's 403 about its own broken upstream does not cool the key that car
     const report = r.proxy.credentialHealth().p ?? [];
     assert.deepEqual(report.map((entry) => [entry.id, entry.state]), [["key-1", "ready"], ["key-2", "ready"]]);
   } finally { await r.stop(); await up.close(); }
+});
+
+// A vendor says 402 when a key has run out of credit. This adapter translates that to 400 for Claude
+// Code (402 is not an Anthropic status), and the pool was charged with the translated code — so a 400
+// is "the request's own fault, charge nobody", and the last key of a pool stayed `in-use` instead of
+// cooling. Two keys both out of credit: the first cooled, the second did not.
+test("a 402 parks every out-of-credit key, including the last one in the pool", async () => {
+  const outOfCredit = { status: 402, body: JSON.stringify({ error: { message: "insufficient credit" } }) };
+  const up = await upstream(() => outOfCredit);
+  const r = await rig({ p: pooled(up.port) }, routes);
+  try {
+    // The client still gets the shape it can read (the 402 is a 400 there, as before).
+    assert.equal(await r.send(), 400);
+    const report = r.proxy.credentialHealth().p ?? [];
+    assert.deepEqual(report.map((entry) => [entry.id, entry.state]), [["key-1", "cooling"], ["key-2", "cooling"]], "both are out of credit, not just the first");
+    // And the cooldown is the out-of-credit one (half an hour), not the transient one a 5xx gets.
+    const cooldown = report[1]!.cooldownSeconds ?? 0;
+    assert.equal(cooldown > 1_700 && cooldown <= 1_800, true, `half an hour, got ${cooldown}s`);
+  } finally { await r.stop(); await up.close(); }
+});
+
+test("a key added after a deletion never reuses the deleted key's id, so it never inherits its quarantine", async () => {
+  // key-1 answers 401 and is quarantined. Removed through the admin API, then a new key is added.
+  // Ids were the first free `key-<n>`, so the new key became `key-1` again — and since health is
+  // keyed on the id, the brand-new key was quarantined before it ever asked anything (the
+  // "replaced credential keeps the old quarantine" failure, ARCHITECTURE §5).
+  const up = await upstream((key) => key === "Bearer test-key-revoked" ? { status: 401, body: JSON.stringify({ error: { message: "invalid key" } }) } : answer("ok"));
+  const provider: Provider = {
+    type: "openai-compatible",
+    url: `http://127.0.0.1:${up.port}/v1`,
+    credentials: [
+      { id: "key-1", label: "Revoked", headers: { authorization: "Bearer test-key-revoked" } },
+      { id: "key-2", headers: { authorization: "Bearer test-key-2" } },
+    ],
+  } as Provider;
+  const r = await rig({ p: provider }, routes, { configStore: true });
+  const admin = await adminFor(r);
+  const api = `http://127.0.0.1:${admin.port}`;
+  try {
+    // Turn 1: key-1's 401 quarantines it, key-2 answers.
+    assert.equal(await r.send("conv-1"), 200);
+    assert.equal((r.proxy.credentialHealth().p ?? []).find((entry) => entry.id === "key-1")?.state, "quarantined");
+
+    assert.equal((await fetch(`${api}/api/provider-keys/key-1?provider=p`, { method: "DELETE", headers: { origin: api } })).status, 200);
+    const post = await fetch(`${api}/api/provider-keys?provider=p`, {
+      method: "POST", headers: { "content-type": "application/json", origin: api }, body: JSON.stringify({ key: "test-key-new", label: "New" }),
+    });
+    assert.equal(post.status, 201);
+    const created = (await post.json()) as { id: string };
+    assert.equal(created.id, "key-3", "the released id is not handed to a different key");
+
+    // The new key is usable at once — it carries none of the revoked key's history.
+    const keys = (await (await fetch(`${api}/api/provider-keys?provider=p`)).json()) as { accounts: { id: string; state: string }[] };
+    assert.deepEqual(keys.accounts.map((a) => [a.id, a.state]), [["key-2", "in-use"], ["key-3", "standby"]], "no quarantine was inherited");
+    assert.equal(await r.send("conv-2"), 200);
+    assert.equal(up.keys.at(-1), "Bearer test-key-2", "the new key is standby behind key-2, not the first usable because of a stale park");
+    // And when key-2 is paused, the new key answers — the pool does not believe it is quarantined.
+    assert.equal((await fetch(`${api}/api/provider-keys/key-2?provider=p`, {
+      method: "PATCH", headers: { "content-type": "application/json", origin: api }, body: JSON.stringify({ paused: true }),
+    })).status, 200);
+    assert.equal(await r.send("conv-3"), 200);
+    assert.equal(up.keys.at(-1), "Bearer test-key-new", "the new key carries its own credential");
+  } finally { admin.close(); await r.stop(); await up.close(); }
 });
 
 test("a local count_tokens answer charges nobody, so it cannot lift a quarantine it did not earn", async () => {

@@ -79,6 +79,11 @@ export type AnthropicCompatibleProvider = {
    * cache with it. Absent, the provider has exactly the one credential it always had.
    */
   credentials?: ProviderCredential[];
+  /**
+   * The next number `key-<n>` should take (admin.ts `addProviderKey`). Kept on both key-based
+   * provider shapes so a removed id is not reissued — see the openai-compatible provider's own note.
+   */
+  nextKey?: number;
   /** Catalog preset used to populate this provider, if any. */
   preset?: string;
   /** Optional model entries offered by the GUI as suggestions. */
@@ -141,6 +146,13 @@ export type OpenAiCompatibleProvider = {
    * credential it always had.
    */
   credentials?: ProviderCredential[];
+  /**
+   * The next number `key-<n>` should take (admin.ts `addProviderKey`), so a removed key's id is
+   * never handed to a different key. Ids key the router's in-memory health, and reusing one gave a
+   * fresh key the deleted key's quarantine: a `key-1` quarantined by a 401 was removed, the next
+   * key added was `key-1` again and was parked before it ever asked (2026-10-22).
+   */
+  nextKey?: number;
   /** OpenAI Chat Completions (default) or stateless Responses endpoint. */
   wire?: "chat" | "responses";
   /** Catalog preset used to populate this provider, if any. */
@@ -944,6 +956,13 @@ export function validate(c: Config): string[] {
           if ((entry as { paused?: unknown }).paused !== undefined && typeof (entry as { paused?: unknown }).paused !== "boolean") errors.push(`provider ${name}: credential ${i} paused must be true or false`);
         });
       }
+    }
+    // The `key-<n>` counter `addProviderKey` allocates from. A hand-edited value has to be a whole
+    // number of at least 1; `addProviderKey` itself never trusts it below the highest id in use, so
+    // a stale counter cannot make two keys share one id (and so one health record).
+    const nextKey = (p as { nextKey?: unknown }).nextKey;
+    if (nextKey !== undefined && (typeof nextKey !== "number" || !Number.isInteger(nextKey) || nextKey < 1)) {
+      errors.push(`provider ${name}: nextKey must be a whole number of at least 1`);
     }
     if (p.type === "anthropic-compatible") {
       if (!/^https?:\/\//.test(p.url)) errors.push(`provider ${name}: url must start with http:// or https://`);

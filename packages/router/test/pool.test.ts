@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classify, CredentialPool, retryAfterMs, targets, type Credential } from "../src/pool.ts";
+import { aboutCredential, classify, CredentialPool, retryAfterMs, targets, type Credential } from "../src/pool.ts";
 
 import { ProviderHealth, providerExhaustion } from "../src/health.ts";
 
@@ -336,4 +336,16 @@ test("an answer lifts a quarantine but does not cancel a live cooldown", () => {
   pool.penalise("p", "a", 401);
   pool.succeed("p", "a");
   assert.equal(pool.report("p", all)[0]?.state, "ready", "a credential that answered is not rejected");
+});
+
+// Only a refusal the credential earned may move a conversation. A relay's 403, an edge 5xx, a 408
+// all say "ask again" — moving the conversation takes the vendor's prompt cache with it (§4).
+test("only a verdict about the credential may rotate it", () => {
+  assert.equal(aboutCredential(classify(401)), true, "a refused key is the credential's own failure");
+  assert.equal(aboutCredential(classify(429)), true, "so is a key at its limit");
+  assert.equal(aboutCredential(classify(402)), true, "and a key out of credit");
+  assert.equal(aboutCredential(classify(403, undefined, JSON.stringify({ error: { message: "Upstream request failed" } }))), false, "a relay's own broken upstream is not");
+  assert.equal(aboutCredential(classify(503)), false);
+  assert.equal(aboutCredential(classify(0)), false);
+  assert.equal(aboutCredential(classify(400)), false, "a bad request is retryable nowhere, so it rotates nothing");
 });

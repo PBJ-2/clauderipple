@@ -24,8 +24,12 @@ export type OpenAiOutcome = { status: number; bytes: number; note?: string; usag
  * The vendor's own account of a refusal, handed back with the outcome so the caller's terminal charge
  * can reach the same verdict as its mid-turn one: a 429's stated reset, and the body a 403's meaning
  * is read from. Both are the upstream's own text, already redacted by the time they are returned.
+ *
+ * `status` is the upstream's own status, which is not always the one the client was sent: this
+ * adapter translates 402 to 400 for the client (mapHttpError), and the pool has to hear 402 or it
+ * never classifies an out-of-credit key as `exhausted` (2026-10-22, the last key of a pool).
  */
-export type OpenAiRefusal = { retryAfterMs?: number | undefined; body?: string };
+export type OpenAiRefusal = { retryAfterMs?: number | undefined; body?: string; status?: number };
 
 /**
  * The credential this turn uses, when the caller holds a pool. `next` offers the credential to try
@@ -315,9 +319,11 @@ export class OpenAiCompatibleAdapter {
         note: `upstream ${upstream.status}`,
         exhaustion: providerExhaustion(upstream.status, text, retryAfter),
         ...(credential ? { credentialId: credential.id } : {}),
-        // The same facts the caller's own pool would have used: the refusal's cooldown and what it
-        // said. Redacted, because this travels to a place that may be logged.
-        vendorRefusal: { ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}), ...(safeText ? { body: safeText } : {}) },
+        // The same facts the caller's own pool would have used: the refusal's own status, its
+        // cooldown and what it said. `out.status` is the client's — a 402 reaches it as a 400 — so
+        // the upstream's is carried here rather than re-derived from the answer. Redacted, because
+        // this travels to a place that may be logged.
+        vendorRefusal: { status: upstream.status, ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}), ...(safeText ? { body: safeText } : {}) },
       };
     }
 

@@ -420,6 +420,22 @@ test("validate refuses a credential pool with duplicate ids or non-string header
   assert.ok(cfg([{ id: "a", headers: {}, paused: "yes" }])[0]?.includes("paused must be true or false"));
 });
 
+// The `key-<n>` counter `addProviderKey` allocates from. It is read from a file a person can edit,
+// so a value that is not a whole number is refused rather than read as something else.
+test("validate accepts and type-checks the nextKey counter that keeps ids from being reissued", () => {
+  const cfg = (nextKey: unknown) => validate({
+    ...DEFAULTS,
+    providers: { p: { type: "openai-compatible", url: "https://example.test/v1", credentials: [{ id: "key-1", headers: {} }], nextKey } as never },
+  });
+
+  assert.deepEqual(cfg(2), [], "above every id in use");
+  assert.deepEqual(cfg(undefined), [], "a config written before the counter existed");
+  assert.ok(cfg(0)[0]?.includes("whole number of at least 1"));
+  assert.ok(cfg(-3)[0]?.includes("whole number of at least 1"));
+  assert.ok(cfg(2.5)[0]?.includes("whole number of at least 1"));
+  assert.ok(cfg("2")[0]?.includes("whole number of at least 1"));
+});
+
 test("validate accepts a grok provider and refuses a model that would leave its session headers behind", () => {
   const ok = validate({ ...DEFAULTS, providers: { grok: { type: "grok", models: [{ id: "grok-4.7", name: "Grok 4.7", contextWindow: 256000, effortLevels: ["low", "high"] }] } } });
   assert.deepEqual(ok, []);

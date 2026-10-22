@@ -1291,6 +1291,20 @@ what we do not have yet — so that adding a provider does not start with readin
     that reader.
   - `POST /v1/messages/count_tokens` answers locally, so it neither charges the key
     nor cools one: a local estimate must not take a key out of rotation.
+  - **A failure that is not about the key does not move the conversation.** A relay's
+    `403 "Upstream request failed"`, an edge 5xx, a 408: `pool.aboutCredential` says
+    which verdicts are the credential's own (`auth`, `rate-limit`, `exhausted`), and
+    only those rotate a key — on both wires (`nextCredential` and the adapter's
+    `next`). The others end the turn with the provider's own answer and leave the
+    conversation where its prompt cache is; the adapter still retries the identical
+    ask on the same key inside the turn (`fetchWithRetry`). Charging them to nobody
+    also means a transient refusal can neither stretch nor reset a cooldown the key
+    did not earn.
+  - **The pool is charged with the upstream's status, not the client's.** A
+    translated adapter re-spells a vendor error into an Anthropic one (`402` becomes
+    `400`), so the vendor's own status travels on `OpenAiRefusal.status` and
+    `recordOutcome` uses it. Judged by the client's 400, the last key of a pool that
+    answered `402` stayed `in-use` instead of cooling as out of credit (2026-10-22).
   - When **every** key of a provider is paused, the router answers 503 locally
     ("every key of <provider> is paused", `overloaded_error`) instead of sending the
     request on the first key: the operator said stop, so the vendor must not be
@@ -1314,9 +1328,16 @@ what we do not have yet — so that adding a provider does not start with readin
     dropped once; internal whitespace or a non-header byte is refused. The write is
     atomic (temp file + rename, mode `0600` set explicitly rather than left to the
     service's umask) and goes through the same `validate` the GUI's save
-    does. The key is never returned, logged, or quoted in an error. The router picks
+    does. Nothing this endpoint answers carries the key: it is not echoed, logged, or
+    quoted in an error. (`GET /api/config` is a different, older contract — it returns
+    the stored config verbatim, keys included, as it always has.) The router picks
     the new key up from the file's mtime, so it is live on the next request with no
-    restart.
+    restart. **Ids are never reissued.** Health and affinity are keyed on the id, so
+    the provider carries a `nextKey` counter: `DELETE` raises it past the removed
+    `key-<n>`, `POST` allocates from it (and from the highest id still in use, so a
+    hand-edited counter cannot make two keys share one id). Allocating the first free
+    `key-<n>` instead meant a key added after a deletion took the deleted key's id and
+    was quarantined before it had asked anything (2026-10-22).
   - `PATCH` renames (`label`), pauses/resumes (`paused`), or clears a cooldown
     (`clearCooldown`); `DELETE` removes a key. A headers-only key has no credential
     entry to carry a label or a pause (400), and cannot be deleted (400, remove the
@@ -1736,6 +1757,9 @@ plan unless marked otherwise.
 | Re-running `clauderipple install` as a normal Windows user rewrote the launcher, then `Register-ScheduledTask -Force` could answer `0x80070005 Access is denied` even though the existing per-user task was already correct (issue #9) | Reuse an existing task only when its entire intended definition matches: one PowerShell action and exact arguments, current user, limited interactive logon, one matching logon trigger, restart count/interval, no execution limit, IgnoreNew, and battery policy. A missing, stale or foreign same-named task still takes the normal registration/error path. |
 | OpenCode Go's relay answered `403 {"message":"Error from provider (Console Go): Upstream request failed: …"}` during a few seconds of its own trouble. The 403 was classified as an auth failure, which both cooled the credential for 60s **and** removed it from the retry candidate list, so the router could not retry inside the turn and answered the user with what read as an authentication error. Five times in a day, each cleared by asking again (2026-09-21) | A 403 whose body reports an upstream failure is charged a **zero** cooldown. It is not a statement about the credential, and any wait at all moves the conversation off a key that did nothing and takes its prompt cache with it (§4). With no cooldown the credential stays retryable, so the turn is answered on the next attempt instead of becoming a user-visible failure. The body is the only way to tell this apart from a real 403 (policy, region, blocked model), so it is read for 403 and only 403. |
 | The same relay 403 kept reaching the user after that fix, because it was the wrong layer: DeepSeek runs on `openai-compatible`, whose adapter was **never** retried at all — the in-turn retry lives only in the anthropic-compatible wire path (`nextCredential`), and `credentialsOf` gives a translated provider exactly one credential and no fallback. So a relay hiccup had nowhere to go but the user (2026-09-21, root cause of the day's repeated "authentication failed") | Every translated adapter retries the `fetch` **before** any status or byte is written, so the turn is still replaceable (§4 "the first byte commits the turn"). `fetchWithRetry` retries only `transient` verdicts — connect failures, 5xx, and a 403 reporting a broken upstream — to the ceiling of 10 attempts the CLI itself uses, with a 250ms→2s backoff. A 401/429 is **not** retried: the adapter holds one credential, so asking the key that just refused the identical request again only delays the error. `classify` is reused for the judgement, with `kind === "transient"` narrowing a pool's answer to an adapter's. |
+| A new key inherited a deleted key's quarantine: ids were the first free `key-<n>`, health is keyed on the id, and `DELETE` cleared neither — so `key-1` quarantined by a 401, deleted, then a key added became `key-1` again and was refused before it ever asked (2026-10-22, found in review of the key pool) | A released id is never reissued: the provider records `nextKey`, `DELETE` raises it past the removed `key-<n>`, and `POST` allocates from it (never below the highest id in use). Health and affinity stay keyed on the id, which is what makes a never-reused id the whole fix. |
+| A `402` on the last key of a pool left it `in-use`: the failure was recorded with the status the client was sent, and the OpenAI adapter re-spells 402 as 400, which `classify` reads as "the request's own fault, charge nobody". With two keys out of credit the first cooled and the last did not (2026-10-22) | The vendor's own status is carried separately from the client's (`OpenAiRefusal.status`) and is what the pool is charged with, so `402` classifies as `exhausted` for every key, including the last one. |
+| A relay failure moved the conversation to another key: `403 "Upstream request failed"` is `transient` with a zero cooldown, yet the retry limit made the pool pick a different key and the conversation's affinity changed with it — the next turn ran on the new key and lost the prompt cache (2026-10-22) | `pool.aboutCredential` gates rotation: only `auth`, `rate-limit` and `exhausted` are statements about the credential, so only they may move a conversation. A `transient` refusal ends the turn with the provider's answer and is charged to nobody, on both wires. |
 | Workers on muse-spark-1.3 "stalled for minutes, then died": 84 of 1,815 turns (2026-09-18..22) waited a median 58s — five exactly 300s — and then the upstream closed the stream with **no** `response.completed`, no usage, no text. Both translated adapters finished such a stream as `end_turn` with whatever had arrived (the ChatGPT one by a comment saying so), so Claude Code received an empty, successful turn, did not retry, and the subagent ended with nothing. Same shape on `chatgpt` (gpt-6-astra, 12 turns, median 105s) and DeepSeek. A non-streaming failure was likewise answered 200 with the fragment | A turn is finished only when the vendor says so: `response.completed`/`response.incomplete` on Responses, a `finish_reason` or `[DONE]` on Chat. A stream that closes without one, or breaks mid-read, ends in an SSE `overloaded_error` — the one mid-stream error Claude Code retries on its own (CLI 2.1.278 matches `"type":"overloaded_error"` in the message; `api_error` is final). Non-streaming turns answer 529 with the same error, and the request record says the turn failed. The upstream stall itself is the vendor's; what must not happen here is turning it into an answer. |
 | A session switched from gpt-6-astra to claude-opus-5-5 failed every turn with `400 messages.2.content.0.thinking: each thinking block must contain thinking`: the translated adapters hand the CLI reasoning as `thinking` blocks with no signature (and no text when the reasoning item had no summary), the CLI keeps them, and passthrough replayed them to Anthropic (2026-09-28) | Before a request reaches Anthropic (`PASS` and the account-pool provider), assistant `thinking` blocks without a signature are dropped (`thinking.ts`) — Anthropic's own always carry one — and a turn left empty goes with them. Passthrough stays byte-exact when there is nothing to drop. |
 | Re-running the installer — the documented update — replaced the files and left the router running the old code: `install` treats a running router as done, and on Windows and Linux an unchanged supervisor definition is not re-registered, so nothing restarted it until the next login (found 2026-09-28 while building `update`; the tray's own restart covered only the packaged app) | `install` asks a router that is already running for its version and restarts one that differs. Measured in the Windows 11 VM: 0.5.1 running, installer run with 0.6.0 → "restarting it on 0.6.0", status 0.6.0. |

@@ -429,6 +429,12 @@ function changeProviderKey(
   if (change.remove) {
     provider.credentials.splice(index, 1);
     if (provider.credentials.length === 0) delete provider.credentials;
+    // A released `key-<n>` id is never handed to a later key. Health and affinity are keyed on the
+    // id, so a new key that took the removed one's id inherited its quarantine at once: key-1
+    // quarantined by a 401, deleted, a key added — it was `key-1` and `pick` refused it before it
+    // had asked anything (2026-10-22). The counter records what the list no longer can.
+    const released = /^key-(\d+)$/.exec(id);
+    if (released) provider.nextKey = Math.max(provider.nextKey ?? 1, Number(released[1]) + 1);
   } else {
     const credential = provider.credentials[index]!;
     if (change.label !== undefined) credential.label = change.label;
@@ -473,8 +479,9 @@ const HEADERS_KEY_ID = "default";
  * sent with every key). A provider that already has credentials just gains one.
  *
  * The auth header is the convention the provider already uses (config.ts `authConventionOf`), so a
- * new key does not go out under a header its endpoint ignores. The key itself is never returned,
- * logged, or put in an error message.
+ * new key does not go out under a header its endpoint ignores. The key is never echoed by this
+ * endpoint, logged, or put in an error message — `GET /api/config` already returns the stored config
+ * verbatim, keys included, and that is the older, separate contract this does not change.
  */
 function addProviderKey(
   deps: AdminDeps,
@@ -514,12 +521,20 @@ function addProviderKey(
 
   const convention = authConventionOf(provider);
   const headers = convention === "x-api-key" ? { "x-api-key": key } : { authorization: `Bearer ${key}` };
-  // Ids are `key-<n>` with the first free n; "default" is reserved for the migrated headers key, so a
-  // new key never takes that id over and the old key's health stays its own.
+  // Ids are `key-<n>` and are never reissued: `nextKey` is the counter `changeProviderKey` bumps
+  // when it removes a key, so a new key cannot inherit a released id's health (the quarantine a
+  // deleted `key-1` had been wearing). "default" is reserved for the migrated headers key, so a new
+  // key never takes that id over either. The counter is trusted only when it is above every id in
+  // use, so a hand-edited or missing value cannot make two keys share one id.
   const used = new Set((provider.credentials ?? []).map((credential) => credential.id));
-  let number = 1;
+  const highest = [...used].reduce((max, id) => {
+    const match = /^key-(\d+)$/.exec(id);
+    return match ? Math.max(max, Number(match[1])) : max;
+  }, 0);
+  let number = Math.max(1, highest + 1, Number.isInteger(provider.nextKey) ? provider.nextKey! : 1);
   while (used.has(`key-${number}`)) number += 1;
   const id = `key-${number}`;
+  provider.nextKey = number + 1;
   provider.credentials = [...(provider.credentials ?? []), { id, ...(input.label?.trim() ? { label: input.label.trim() } : {}), headers }];
 
   const saved = saveConfigFile(deps, current);
