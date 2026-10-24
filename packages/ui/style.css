@@ -436,6 +436,14 @@ label.check input { margin-top: 2px; }
 /* ---- Clients ------------------------------------------------------------------------- */
 
 .slot-row .cell-value select { width: 240px; }
+/* A classifier row has two menus and a two-line explanation, which do not share one line without the
+   menus running over the text. The menus take a line of their own: the target stretches, the effort
+   keeps the width of its longest word. */
+.classifier-row { flex-wrap: wrap; row-gap: 8px; }
+.classifier-row > .cell-text { flex-basis: 100%; }
+.classifier-row > .cell-value { flex: 1 1 100%; max-width: none; justify-content: flex-start; }
+.classifier-row .cell-value select { width: auto; max-width: none; flex: 1 1 0; min-width: 0; }
+.classifier-row .cell-value select.classifier-effort { flex: 0 0 160px; }
 /* The picker tile carries a name, a provider and a context window. On one flex line the name is
    what collapses — it was rendering as "GPT…" — so name owns the first row and the rest share the
    second. */
@@ -987,6 +995,9 @@ a.cell { color: inherit; text-decoration: none; }
   .cell-value { max-width: 55%; }
   .slot-row .cell-value select { width: 100%; max-width: none; }
   .slot-row .cell-value { flex: 1 1 100%; max-width: none; justify-content: stretch; }
+  /* A phone has no room for "provider default" beside a model name, so the two menus stack. */
+  .classifier-row .cell-value { flex-wrap: wrap; }
+  .classifier-row .cell-value select, .classifier-row .cell-value select.classifier-effort { flex: 1 1 100%; }
   .map-effort.muted-cell { display: none; }
   .map-row { grid-template-areas: "source remove" "target target" "effort effort"; }
   .provider-detail-header { flex-direction: column; align-items: stretch; gap: 12px; }

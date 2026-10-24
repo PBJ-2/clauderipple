@@ -42,6 +42,64 @@ test("Auto mode classifier overrides only its own system request and ignores con
   assert.equal(rewritten.max_tokens, original.max_tokens);
 });
 
+test("Auto mode classifier sends only the first stage to its stage-1 target", () => {
+  // Shapes as CLI 2.1.310 builds them: n is the same thinking allowance on every stage.
+  const n = 0;
+  const system = "You are a security monitor for autonomous AI coding agents.\n\nEvaluate the action.";
+  const classifier = (shape: Record<string, unknown>) => ({ system, ...body("<transcript>…</transcript> Err on the side of blocking."), ...shape });
+  const stage1 = classifier({ max_tokens: 64 + n, stop_sequences: ["</block>"] });
+  const stage2 = classifier({ max_tokens: 8192 + n });
+  const fast = classifier({ max_tokens: 256 + n });
+  const severity = classifier({ max_tokens: 64 + n, stop_sequences: ["</severity>"] });
+  const configured: Config = {
+    ...cfg,
+    providers: { ...cfg.providers, cls: { type: "anthropic", auth: "claude-code", accountPool: true } },
+    autoModeClassifier: { provider: "chatgpt", model: "gpt-6-luna", effort: "high", stage1: { provider: "cls", model: "claude-sonnet-5-5" } },
+  };
+
+  const first = resolve("claude-haiku-5-5", stage1, configured)!;
+  assert.deepEqual([first.provider, first.model, first.effort], ["cls", "claude-sonnet-5-5", undefined]);
+  assert.match(first.tag, /\(auto-mode classifier, stage 1\)$/);
+  for (const [name, request] of [["second stage", stage2], ["fast mode, where yes blocks", fast], ["severity score", severity]] as const) {
+    const r = resolve("claude-haiku-5-5", request, configured)!;
+    assert.deepEqual([r.provider, r.model, r.effort], ["chatgpt", "gpt-6-luna", "high"], name);
+    assert.match(r.tag, /\(auto-mode classifier\)$/, name);
+  }
+  assert.equal(resolve("claude-haiku-5-5", classifier({ max_tokens: 8192, stop_sequences: ["</block>"] }), configured)!.model, "gpt-6-luna", "a second-stage budget never counts as a first stage");
+  assert.equal(resolve("claude-haiku-5-5", classifier({ max_tokens: 64, stop_sequences: ["</block>", "</reason>"] }), configured)!.model, "gpt-6-luna", "only the exact stop list matches");
+  assert.equal(resolve("claude-haiku-5-5", { ...stage1, tools: [{ name: "Bash" }] }, configured), null, "a tool-using turn is never a classifier");
+
+  const single: Config = { ...configured, autoModeClassifier: { provider: "chatgpt", model: "gpt-6-luna", effort: "high" } };
+  assert.equal(resolve("claude-haiku-5-5", stage1, single)!.model, "gpt-6-luna", "without stage1 both stages keep the main target");
+});
+
+test("each side of the Auto mode classifier is the operator's choice, ordinary routing included", () => {
+  const system = "You are a security monitor for autonomous AI coding agents.";
+  const stage1 = { system, ...body("x"), max_tokens: 64, stop_sequences: ["</block>"] };
+  const stage2 = { system, ...body("x"), max_tokens: 8192 };
+  const providers = { ...cfg.providers, cls: { type: "anthropic" as const, auth: "claude-code" as const, accountPool: true } };
+  const target = (settings: NonNullable<Config["autoModeClassifier"]>, model: string, request: unknown) => {
+    const r = resolve(model, request, { ...cfg, providers, autoModeClassifier: settings });
+    return r ? `${r.provider}/${r.model}` : "ordinary";
+  };
+
+  // One model for both stages: no stage1 needed.
+  const haiku = { provider: "cls", model: "claude-haiku-5-5" };
+  assert.equal(target(haiku, "claude-sonnet-5", stage1), "cls/claude-haiku-5-5");
+  assert.equal(target(haiku, "claude-sonnet-5", stage2), "cls/claude-haiku-5-5");
+
+  // Only the first stage moves; the rest stays as the engine sent it, slot routes and all.
+  const firstOnly = { stage1: { provider: "chatgpt", model: "gpt-6-luna" } };
+  assert.equal(target(firstOnly, "claude-sonnet-5", stage1), "chatgpt/gpt-6-luna");
+  assert.equal(target(firstOnly, "claude-sonnet-5", stage2), "ordinary");
+  assert.equal(target(firstOnly, "claude-opus-4-8", stage2), "chatgpt/gpt-6-astra", "an ordinary slot route still applies");
+
+  // Only the rest moves; the first stage is left native.
+  const restOnly = { provider: "chatgpt", model: "gpt-6-luna", stage1: "native" as const };
+  assert.equal(target(restOnly, "claude-sonnet-5", stage1), "ordinary");
+  assert.equal(target(restOnly, "claude-sonnet-5", stage2), "chatgpt/gpt-6-luna");
+});
+
 test("unmapped claude model passes through", () => {
   assert.equal(resolve("claude-sonnet-4-6", body("hi"), cfg), null);
   assert.equal(resolve("claude-fable-5-1", body("hi"), cfg), null);

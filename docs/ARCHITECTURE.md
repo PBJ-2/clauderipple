@@ -96,8 +96,8 @@ this setting, native routing remains unchanged. For example:
 The named provider must exist and support outbound inference. Detection uses the
 security-monitor system prompt, never user messages or routing markers. The
 original security prompt, context, output format and native decision logic remain
-intact. Configure this field in the JSON config; the settings GUI has no control
-for it yet. Removing the field restores ordinary routing.
+intact. The dashboard's Clients page sets it (see the first-stage section below),
+or edit the JSON config. Removing the field restores ordinary routing.
 
 This request is Auto mode's safety check: it decides whether an action the agent
 wants to take runs without asking. A target that judges worse than the model
@@ -111,6 +111,97 @@ Verified with Desktop's Claude Code 2.1.284: both classification stages used the
 configured target; an authorized temporary-file write proceeded and an explicitly
 forbidden deletion was denied. The registered `CLAUDE_CODE_AUTO_MODE_MODEL`
 environment variable did not change the actual native classifier requests.
+
+#### A separate first-stage target (CLI 2.1.310, 2026-10-24)
+
+The two stages, as the 2.1.310 binary builds them (`classifierStage` `xml_s1` /
+`xml_s2`; `n` is one thinking allowance added to both):
+
+- Stage 1: `max_tokens: 64 + n`, `stop_sequences: ["</block>"]`, the last user
+  text ending in an instruction to err on the side of blocking. `<block>no` allows
+  the action at once; `<block>yes` sends it to stage 2.
+- Stage 2: `max_tokens: 8192 + n`, no stop sequence, `<thinking>` then `<block>`.
+  Its verdict is final.
+- The server can set `tengu_auto_mode_config.twoStageClassifier` to `"fast"`
+  (stage 1 alone, `256 + n`, no stop sequence, and its `yes` blocks) or
+  `"thinking"` (stage 2 alone). A severity-score site stops at `</severity>`.
+
+In 2.1.310 `CLAUDE_CODE_AUTO_MODE_MODEL` does steer the native classifier (unlike
+2.1.284 above), but a server-configured classifier model takes priority, and the
+variable is refused for `claude-sonnet-5-5`, `claude-opus-5-5` and `claude-opus-5`
+(list `nH`, check `c4o`) with the warning that "the API's safeguards refuse the
+classifier's escalated check on it". `ANTHROPIC_DEFAULT_SONNET_MODEL` naming a
+5.5 model is refused as the classifier the same way.
+
+Measured 2026-10-24 by sending both stages to `claude-sonnet-5-5` through an
+`accountPool` provider: six first stages answered in 0.8–2.2 s with 8–9 output
+tokens (`stop_sequence`); both second stages came back `stop_reason: "refusal"`
+with 0 output tokens in about 1 s. The engine turns a stage-2 refusal into a block
+that keeps the stage-1 verdict ("Blocked by fast classifier"), and its refusal
+fallback model is empty in the external build, so nothing retries it. GPT-6 Luna at
+`high` effort took 4–20 s per call on both stages.
+
+So the setting can be split by stage, and which model answers each side is the
+operator's choice. A first stage is the exact shape above: one stop sequence,
+`</block>`, and `max_tokens < 8192`. Every other classifier request (stage 2, fast
+mode, the severity score, any shape not recognised) is "the rest".
+
+| Setting | First stage | The rest |
+|---|---|---|
+| `{provider, model, effort}` | that target | that target |
+| `{provider, model, effort, stage1: {…}}` | `stage1` | the top-level target |
+| `{stage1: {…}}` | `stage1` | ordinary routing |
+| `{provider, model, effort, stage1: "native"}` | ordinary routing | the top-level target |
+
+Ordinary routing is what the request gets without the setting: passthrough, or a
+slot route for its model. A setting that leaves both sides to it is a config error,
+not a silent no-op. The router log tags the first stage `(auto-mode classifier,
+stage 1)`; `requests.jsonl` keeps `purpose: "auto-mode-classifier"` and names the
+target.
+
+Two settings this allows. One Claude model on both stages:
+
+```json
+"providers": {"claude-classifier": {"type": "anthropic", "auth": "claude-code", "accountPool": true, "limits": false}},
+"autoModeClassifier": {"provider": "claude-classifier", "model": "claude-haiku-5-5"}
+```
+
+Sonnet 5.5 on the first stage, which it answers, and a GPT model on the rest (this
+machine's setting since 2026-10-24):
+
+```json
+"autoModeClassifier": {"provider": "chatgpt", "model": "gpt-6-luna", "effort": "high",
+                       "stage1": {"provider": "claude-classifier", "model": "claude-sonnet-5-5"}}
+```
+
+An `accountPool` provider with no `models` list is a target only where a setting
+names it, so no other Claude request moves to it. It signs in as the observed
+Claude Code login, and every request it answers counts against that subscription.
+
+The dashboard's Clients page has an "Auto mode classifier" section with one row per
+side, each a provider and model or Claude Code's own choice, plus an effort. The
+rows and the config are translated only by `classifierRowsOf` and
+`classifierSettingOf` in `packages/ui/app.js`; one model on both rows is saved
+without `stage1`. A Claude `accountPool` provider without a model list is offered
+with the Claude catalogue, and the models the engine refuses for stage 2 are
+labelled in the second row.
+
+Why splitting the stages does not loosen the check by itself:
+
+- A first-stage `no` allows the action without stage 2, as it does natively; only
+  who answers changes. That makes the first-stage target the one that decides
+  which actions are never looked at twice, so the warning above applies to it
+  most: a target that says `no` where the native model says `yes` lets the action
+  through unseen.
+- A first-stage `yes` always reaches the full second stage on the other side.
+- A first stage that fails (a refusal, an HTTP error, no usable Claude account) is
+  a block in the engine, never an allow.
+- Fast mode belongs to the rest: its single stage is final, so it goes where final
+  verdicts go.
+
+Also considered: answering every first stage `<block>yes` in the router so that
+every action gets the full second stage. That is stricter than native, but every
+action, including a plain file write, then waits for a whole second stage.
 
 Verified in `app.asar` (`.vite/build/index.chunk-C0sgyfNn.js`, `-2CuMdv3h.js`):
 

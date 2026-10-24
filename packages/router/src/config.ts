@@ -395,6 +395,9 @@ export type Route = {
   fallbacks?: { provider: string; model: string; effort?: string }[];
 };
 
+/** Where an Auto mode classifier request goes: one provider and model, optionally an effort. */
+export type ClassifierTarget = Pick<Route, "provider" | "model" | "effort">;
+
 export type DirectRule = {
   /** A request whose model starts with this prefix is sent to `provider` with the model unchanged. */
   prefix: string;
@@ -422,8 +425,13 @@ export type Config = {
   providers: Record<string, Provider>;
   /** Picker-slot alias → route. Keys are the model ids the app sends (e.g. "claude-opus-4-8"). */
   routes: Record<string, Route>;
-  /** Opt-in target for Claude Code's Auto mode security-monitor requests only. */
-  autoModeClassifier?: Pick<Route, "provider" | "model" | "effort">;
+  /**
+   * Opt-in targets for Claude Code's Auto mode security-monitor requests only (ARCHITECTURE §2,
+   * "Optional Auto mode classifier target"). `provider`/`model`/`effort` take every classifier
+   * request; `stage1` takes the first stage's yes/no instead. Either may be left out, and `stage1`
+   * may be "native": a request neither claims goes through ordinary routing, as without the setting.
+   */
+  autoModeClassifier?: Partial<ClassifierTarget> & { stage1?: ClassifierTarget | "native" };
   direct: DirectRule[];
   /** Short names usable in "[[ripple: sol@xhigh]]" markers and "@effort" suffixes. */
   aliases: Record<string, string>;
@@ -759,14 +767,28 @@ export function validate(c: Config): string[] {
   const errors: string[] = [];
   if (c.autoUpdate !== undefined && typeof c.autoUpdate !== "boolean") errors.push("autoUpdate must be true or false");
   if (c.autoModeClassifier !== undefined) {
-    const target = c.autoModeClassifier;
-    if (!target || typeof target !== "object") errors.push("autoModeClassifier must be an object");
+    const settings = c.autoModeClassifier;
+    if (!settings || typeof settings !== "object") errors.push("autoModeClassifier must be an object");
     else {
-      const provider = c.providers[target.provider];
-      if (!provider) errors.push("autoModeClassifier: unknown provider");
-      else if (provider.type === "anthropic" && !provider.accountPool) errors.push("autoModeClassifier: provider is ingress-only");
-      if (typeof target.model !== "string" || !target.model.trim()) errors.push("autoModeClassifier: missing model");
-      if (target.effort !== undefined && typeof target.effort !== "string") errors.push("autoModeClassifier: effort must be a string");
+      // The first-stage target is checked the same way: a typo there would otherwise surface only as
+      // a classifier error, and so a blocked action, on every first stage.
+      const checkTarget = (target: Partial<ClassifierTarget>, label: string): void => {
+        const provider = c.providers[target.provider as string];
+        if (!provider) errors.push(`${label}: unknown provider`);
+        else if (provider.type === "anthropic" && !provider.accountPool) errors.push(`${label}: provider is ingress-only`);
+        if (typeof target.model !== "string" || !target.model.trim()) errors.push(`${label}: missing model`);
+        if (target.effort !== undefined && typeof target.effort !== "string") errors.push(`${label}: effort must be a string`);
+      };
+      const routesRest = settings.provider !== undefined || settings.model !== undefined || settings.effort !== undefined;
+      if (routesRest) checkTarget(settings, "autoModeClassifier");
+      const stage1 = settings.stage1;
+      const routesStage1 = stage1 !== undefined && stage1 !== "native";
+      if (routesStage1) {
+        if (!stage1 || typeof stage1 !== "object") errors.push(`autoModeClassifier.stage1 must be an object or "native"`);
+        else checkTarget(stage1, "autoModeClassifier.stage1");
+      }
+      // Both sides on ordinary routing is the same as no setting; saying so beats a silent no-op.
+      if (!routesRest && !routesStage1) errors.push("autoModeClassifier names no target");
     }
   }
   if (c.webSearch !== undefined) {

@@ -15,6 +15,30 @@ test("validate rejects an unusable Auto mode classifier target", () => {
   assert.ok(validate({ ...DEFAULTS, providers: { p: { type: "anthropic", auth: "claude-code" } }, autoModeClassifier: { provider: "p", model: "claude-sonnet-5" } }).some((e) => e.includes("ingress-only")));
 });
 
+test("validate checks the Auto mode classifier's first-stage target like the main one", () => {
+  const providers = { p: { type: "chatgpt" as const }, cls: { type: "anthropic" as const, auth: "claude-code" as const, accountPool: true } };
+  const main = { provider: "p", model: "gpt-6-luna", effort: "high" };
+  const errors = (stage1: unknown) => validate({ ...DEFAULTS, providers, autoModeClassifier: { ...main, stage1: stage1 as { provider: string; model: string } } });
+  assert.deepEqual(errors({ provider: "cls", model: "claude-sonnet-5-5" }), []);
+  assert.deepEqual(errors({ provider: "missing", model: "claude-sonnet-5-5" }), ["autoModeClassifier.stage1: unknown provider"]);
+  assert.deepEqual(errors({ provider: "cls", model: " " }), ["autoModeClassifier.stage1: missing model"]);
+  assert.deepEqual(errors({ provider: "cls", model: "claude-sonnet-5-5", effort: 3 }), ["autoModeClassifier.stage1: effort must be a string"]);
+  assert.deepEqual(errors("claude-sonnet-5-5"), [`autoModeClassifier.stage1 must be an object or "native"`]);
+  assert.deepEqual(errors("native"), []);
+  const ingressOnly = { ...providers, cls: { type: "anthropic" as const, auth: "claude-code" as const } };
+  assert.deepEqual(validate({ ...DEFAULTS, providers: ingressOnly, autoModeClassifier: { ...main, stage1: { provider: "cls", model: "claude-sonnet-5-5" } } }), ["autoModeClassifier.stage1: provider is ingress-only"]);
+});
+
+test("validate lets either side of the Auto mode classifier stay on ordinary routing, but not both", () => {
+  const providers = { p: { type: "chatgpt" as const } };
+  const check = (settings: unknown) => validate({ ...DEFAULTS, providers, autoModeClassifier: settings as NonNullable<Config["autoModeClassifier"]> });
+  assert.deepEqual(check({ stage1: { provider: "p", model: "gpt-6-luna" } }), [], "the first stage alone");
+  assert.deepEqual(check({ provider: "p", model: "gpt-6-luna", stage1: "native" }), [], "the rest alone");
+  assert.deepEqual(check({}), ["autoModeClassifier names no target"]);
+  assert.deepEqual(check({ stage1: "native" }), ["autoModeClassifier names no target"]);
+  assert.deepEqual(check({ effort: "high", stage1: "native" }), ["autoModeClassifier: unknown provider", "autoModeClassifier: missing model"], "a half-written main target is an error, not a skip");
+});
+
 test("validate accepts a web search backend and rejects an unusable one", () => {
   const providers = { p: { type: "chatgpt" as const } };
   assert.deepEqual(validate({ ...DEFAULTS, providers, webSearch: { provider: "p", model: "gpt-5.6-terra" } }), []);

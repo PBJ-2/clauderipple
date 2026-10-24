@@ -72,17 +72,23 @@ export function markerOverride(body: unknown, aliases: Record<string, string>): 
 
 export function resolve(model: unknown, body: unknown, cfg: Config): Resolved | null {
   if (typeof model !== "string") return null;
-  // Measured on Desktop's engine 2.1.284: the registered AUTO_MODE_MODEL env var is
-  // unused. Match the classifier's system prompt, never quoted conversation text.
-  // Its decision and wire format remain the engine's; only the inference target changes.
+  // The engine's own AUTO_MODE_MODEL env var refuses Sonnet 5.5, Opus 5.5 and Opus 5 (CLI 2.1.310),
+  // so the target is chosen here. Match the classifier's system prompt, never quoted conversation
+  // text. Its decision and wire format remain the engine's; only the inference target changes.
   if (cfg.autoModeClassifier && isAutoModeClassifier(body)) {
-    const target = cfg.autoModeClassifier;
-    return {
-      provider: target.provider,
-      model: target.model,
-      effort: target.effort,
-      tag: `${model}->${target.model} (auto-mode classifier)`,
-    };
+    const settings = cfg.autoModeClassifier;
+    const stage1 = settings.stage1 !== undefined && isClassifierStage1(body);
+    const target = stage1 ? settings.stage1 : settings;
+    // A side left out, or a first stage set to "native", falls through to the ordinary routing
+    // below, exactly as if the setting were absent.
+    if (target !== "native" && target?.provider !== undefined && target.model !== undefined) {
+      return {
+        provider: target.provider,
+        model: target.model,
+        effort: target.effort,
+        tag: `${model}->${target.model} (auto-mode classifier${stage1 ? ", stage 1" : ""})`,
+      };
+    }
   }
   let base = model;
   let effort: string | undefined;
@@ -180,6 +186,21 @@ export function isAutoModeClassifier(body: unknown): boolean {
     ? system.filter((block) => block?.type === "text" && typeof block.text === "string").map((block) => block.text as string)
     : [];
   return texts.some((text) => text.trimStart().startsWith("You are a security monitor for autonomous AI coding agents."));
+}
+
+/**
+ * The classifier's first stage: a short yes/no that stops at `</block>`, where "no" allows the action
+ * and "yes" sends it on to the second stage. CLI 2.1.310 builds it as `max_tokens: 64 + n` with
+ * `stop_sequences: ["</block>"]`. The second stage is `8192 + n` with no stop, the server's fast mode
+ * (whose "yes" blocks outright) `256 + n` with no stop, and the severity score stops at `</severity>`.
+ * `n` is the same on both stages, so the bound never takes in a second stage, and any other shape
+ * goes with the rest. Call only on a body `isAutoModeClassifier` accepted.
+ */
+export function isClassifierStage1(body: unknown): boolean {
+  const request = body as { stop_sequences?: unknown; max_tokens?: unknown } | null;
+  const stops = request?.stop_sequences;
+  const max = request?.max_tokens;
+  return Array.isArray(stops) && stops.length === 1 && stops[0] === "</block>" && typeof max === "number" && max < 8192;
 }
 
 /**
