@@ -453,7 +453,7 @@ test('duplicate Gemini workers keep their own provider and skip only the exhaust
 
 test('spawn suffix and takeover retain named-worker and fork boundaries', () => {
   assert.equal(spawnModel({ agent: 'sol' }, 'max', 'gpt-6.1-sol@medium'), 'gpt-6.1-sol@max')
-  assert.equal(spawnModel({ agent: 'general-purpose', model: 'sonnet' }, 'high'), 'sonnet')
+  assert.equal(spawnModel({ agent: 'general-purpose', model: 'sonnet' }, 'high'), 'claude-sonnet-5-5')
   assert.equal(takesOver({ subagentType: 'ripple:auto', fork: false }, DEFAULTS), true)
   assert.equal(takesOver({ subagentType: 'ripple:auto', fork: true }, DEFAULTS), false)
   // The tier agents are gone (2026-10-12): a stale session's ripple:low runs as Claude Code spawns it.
@@ -466,6 +466,20 @@ test('spawn suffix and takeover retain named-worker and fork boundaries', () => 
     assert.equal(takesOver({ subagentType, fork: true }, { ...DEFAULTS, agentAuto: 'all' }), false)
   }
   for (const subagentType of ['Explore', 'Plan', 'statusline-setup', 'claude-code-guide', 'plugin:worker']) assert.equal(takesOver({ subagentType, fork: false }, { ...DEFAULTS, agentAuto: 'all' }), false)
+})
+
+test('spawn models resolve every native family from the worker table without changing explicit selections', () => {
+  for (const candidate of claudeCandidates()) {
+    assert.equal(spawnModel(candidate.target, 'high'), candidate.model)
+    assert.equal(spawnModel({ agent: 'native' }, 'max', candidate.target.model), `${candidate.model}@max`)
+  }
+  for (const model of [undefined, 'inherit', 'claude-opus-4-6', 'claude-sonnet-5', 'claude-haiku-4-5-20251001', 'gpt-6.1-sol@high', 'custom', 'sonnet-custom']) {
+    assert.equal(spawnModel({ agent: 'general-purpose', ...(model ? { model } : {}) }, 'low'), model)
+  }
+  assert.equal(spawnModel({ agent: 'general-purpose', model: 'opus@high' }, 'low'), 'claude-opus-5-5@high')
+  for (const [model, expected] of [['opus[1m]', 'claude-opus-5-5[1m]'], ['sonnet[1m]@high', 'claude-sonnet-5-5[1m]@high'], ['claude-opus-4-6[1m]@high', 'claude-opus-4-6[1m]@high']]) {
+    assert.equal(spawnModel({ agent: 'general-purpose', model }, 'low'), expected)
+  }
 })
 
 test('allow-lists pick by worker agent, so one model from two providers is told apart; provider names still match', () => {

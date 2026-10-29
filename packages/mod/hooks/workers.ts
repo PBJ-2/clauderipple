@@ -291,8 +291,16 @@ export function ladderFallbackModels(rule: Rule, pick: Resolution, candidates: r
   })
 }
 
+/** Resolve only native family aliases; explicit versions, custom ids and inheritance stay intact. */
+export function resolveClaudeModel(model: string | undefined): string | undefined {
+  if (!model) return model
+  const alias = baseModel(model).replace(/\[1m\]$/, '')
+  const worker = CLAUDE_WORKERS.find(w => w.target.model === alias)
+  return worker ? worker.model + model.slice(alias.length) : model
+}
+
 export function spawnModel(target: TierTarget, effort: Effort, fileModel?: string): string | undefined {
-  return fileModel && target.agent !== 'general-purpose' ? `${baseModel(fileModel)}@${effort}` : target.model
+  return resolveClaudeModel(fileModel && target.agent !== 'general-purpose' ? `${baseModel(fileModel)}@${effort}` : target.model)
 }
 /** A prefix this mod (or the retired agent-title hook) put on a title: "Sol·high · ". */
 const TITLE_PREFIX = /^[^\s·]+(?:·[a-z]+)? · /
