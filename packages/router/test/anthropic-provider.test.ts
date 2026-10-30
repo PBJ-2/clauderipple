@@ -7,10 +7,8 @@ import {
   CLAUDE_CODE_IDENTITY,
   ClaudeCodeAuthStore,
   ClaudeCodeCredentialStore,
-  fromClaudeCodeToolName,
   nativeAnthropicHeaders,
   observedAnthropicHeaders,
-  toClaudeCodeToolName,
 } from "../src/providers/anthropic.ts";
 import { OBSERVED_CLAUDE_CODE_TTL_MS, ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
 import {
@@ -114,14 +112,11 @@ test("get reads the injected keychain before the credentials file", t => {
   assert.equal(credentialsFileReads, 0);
 });
 
-test("OAuth native headers and custom tool names follow Claude Code wire requirements", () => {
+test("OAuth native headers follow Claude Code wire requirements", () => {
   const headers = nativeAnthropicHeaders({ type: "anthropic", auth: "claude-code" }, { accessToken: "secret", expiresAt: Date.now() + 1_000 });
   assert.equal(headers.authorization, "Bearer secret");
   assert.equal(headers["anthropic-beta"], "claude-code-20250219,oauth-2025-04-20");
   assert.equal(headers["anthropic-version"], "2023-06-01");
-  assert.equal(toClaudeCodeToolName("Read"), "custom_Read");
-  assert.equal(toClaudeCodeToolName("web_search"), "web_search");
-  assert.equal(fromClaudeCodeToolName("custom_Read"), "Read");
   assert.equal(CLAUDE_CODE_IDENTITY, "You are Claude Code, Anthropic's official CLI for Claude.");
 });
 

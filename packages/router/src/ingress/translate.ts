@@ -5,6 +5,7 @@
 // ephemeral breakpoint requested by the ingress contract.
 
 import crypto from "node:crypto";
+import { ToolTranslation } from "./tools.ts";
 
 // Anthropic requires max_tokens; OpenAI clients (Codex included) usually omit it. 16k is safe for every current Claude model.
 export const DEFAULT_MAX_TOKENS = 16384;
@@ -93,6 +94,19 @@ function messageContent(value: unknown): AnthropicContent[] {
   return out;
 }
 
+function customInputFromArguments(value: string): string {
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(value) as unknown;
+  } catch {
+    // JSON.parse errors can quote the tool's private input. Keep it out of router diagnostics.
+    throw new Error("Custom tool response contains invalid JSON");
+  }
+  const input = object(decoded)?.input;
+  if (typeof input !== "string") throw new Error("Custom tool response must contain a string input");
+  return input;
+}
+
 function parseArguments(value: unknown): unknown {
   if (typeof value !== "string" || value === "") return {};
   try {
@@ -100,39 +114,6 @@ function parseArguments(value: unknown): unknown {
   } catch {
     return { _raw_arguments: value };
   }
-}
-
-function normalizeSchema(value: unknown): Record<string, unknown> {
-  const source = object(value);
-  const out = source ? structuredClone(source) : {};
-  if (out.type !== "object") out.type = "object";
-  if (!object(out.properties)) out.properties = {};
-  return out;
-}
-
-function mapTools(value: unknown): AnthropicTool[] {
-  if (!Array.isArray(value)) return [];
-  const tools: AnthropicTool[] = value.flatMap((raw): AnthropicTool[] => {
-    const tool = object(raw);
-    if (!tool || string(tool.type) !== "function") return [];
-    // Responses uses function fields directly; Chat Completions nests them under `function`.
-    const fn = object(tool.function) ?? tool;
-    const name = string(fn.name);
-    if (!name) return [];
-    const description = string(fn.description);
-    return [{ name, ...(description ? { description } : {}), input_schema: normalizeSchema(fn.parameters) }];
-  });
-  if (tools.length) tools[tools.length - 1]!.cache_control = EPHEMERAL;
-  return tools;
-}
-
-function mapToolChoice(value: unknown): AnthropicIngressRequest["tool_choice"] | undefined {
-  if (value === "auto") return { type: "auto" };
-  if (value === "required") return { type: "any" };
-  if (value === "none") return { type: "none" };
-  const choice = object(value);
-  if (choice?.type === "function" && typeof choice.name === "string") return { type: "tool", name: choice.name };
-  return undefined;
 }
 
 /**
@@ -190,7 +171,7 @@ function restoreCompaction(value: unknown, onIgnored: () => void): string | null
   return `Summary of the earlier conversation: ${payload.summary}`;
 }
 
-function responseItems(value: unknown, onIgnoredCompaction: () => void): AnthropicMessage[] {
+function responseItems(value: unknown, onIgnoredCompaction: () => void, translation: ToolTranslation): AnthropicMessage[] {
   if (typeof value === "string") return value ? [{ role: "user", content: [{ type: "text", text: value }] }] : [];
   if (!Array.isArray(value)) return [];
   const messages: AnthropicMessage[] = [];
@@ -199,12 +180,13 @@ function responseItems(value: unknown, onIgnoredCompaction: () => void): Anthrop
     if (!item) continue;
     const type = string(item.type);
     if (type === "reasoning") continue;
-    if (type === "function_call") {
+    if (type === "function_call" || type === "custom_tool_call") {
       const callId = string(item.call_id) ?? string(item.id) ?? `call_${crypto.randomUUID().replaceAll("-", "")}`;
-      messages.push({ role: "assistant", content: [{ type: "tool_use", id: callId, name: string(item.name) ?? "tool", input: parseArguments(item.arguments) }] });
+      const name = translation.toWire({ name: string(item.name) ?? "tool", kind: type === "custom_tool_call" ? "custom" : "function", ...(typeof item.namespace === "string" ? { namespace: item.namespace } : {}) });
+      messages.push({ role: "assistant", content: [{ type: "tool_use", id: callId, name, input: type === "custom_tool_call" ? { input: string(item.input) ?? "" } : parseArguments(item.arguments) }] });
       continue;
     }
-    if (type === "function_call_output") {
+    if (type === "function_call_output" || type === "custom_tool_call_output") {
       const callId = string(item.call_id) ?? "";
       if (callId) messages.push({ role: "user", content: [{ type: "tool_result", tool_use_id: callId, content: contentText(item.output) }] });
       continue;
@@ -263,17 +245,17 @@ function placeInstructions(prefix: string | undefined, instructions: string[], m
   return text ? [{ type: "text", text, cache_control: EPHEMERAL }] : undefined;
 }
 
-export function responsesToAnthropic(body: Json, targetModel: string, systemPrefix?: string, onIgnoredCompaction: () => void = () => {}): AnthropicIngressRequest {
+export function responsesToAnthropic(body: Json, targetModel: string, systemPrefix?: string, onIgnoredCompaction: () => void = () => {}, translation = new ToolTranslation(body, !!systemPrefix)): AnthropicIngressRequest {
   const instructions = string(body.instructions);
-  const messages = responseItems(body.input, onIgnoredCompaction);
+  const messages = responseItems(body.input, onIgnoredCompaction, translation);
   endWithUserTurn(messages);
   const system = placeInstructions(systemPrefix, instructions ? [instructions] : [], messages);
   applyMessageCache(messages);
-  const tools = mapTools(body.tools);
+  const tools = translation.tools;
   const maxTokens = typeof body.max_output_tokens === "number" && Number.isFinite(body.max_output_tokens) ? Math.max(1, Math.floor(body.max_output_tokens)) : undefined;
   const temperature = typeof body.temperature === "number" && Number.isFinite(body.temperature) ? body.temperature : undefined;
   const effort = effortFromRequest(body.reasoning);
-  const toolChoice = mapToolChoice(body.tool_choice);
+  const toolChoice = translation.choice;
   return {
     model: targetModel,
     ...(system ? { system } : {}),
@@ -287,7 +269,7 @@ export function responsesToAnthropic(body: Json, targetModel: string, systemPref
   };
 }
 
-function chatMessageToAnthropic(raw: unknown): AnthropicMessage[] {
+function chatMessageToAnthropic(raw: unknown, translation: ToolTranslation): AnthropicMessage[] {
   const message = object(raw);
   if (!message) return [];
   const role = string(message.role);
@@ -307,13 +289,13 @@ function chatMessageToAnthropic(raw: unknown): AnthropicMessage[] {
     const fn = call && object(call.function);
     const id = call && string(call.id);
     const name = fn && string(fn.name);
-    if (id && name) content.push({ type: "tool_use", id, name, input: parseArguments(fn.arguments) });
+    if (id && name) content.push({ type: "tool_use", id, name: translation.toWire({ name, kind: "function" }), input: parseArguments(fn.arguments) });
   }
   return content.length ? [{ role: mappedRole, content }] : [];
 }
 
 /** Convert OpenAI Chat Completions request to an Anthropic Messages request. */
-export function chatToAnthropic(body: Json, targetModel: string, systemPrefix?: string): AnthropicIngressRequest {
+export function chatToAnthropic(body: Json, targetModel: string, systemPrefix?: string, translation = new ToolTranslation(body, !!systemPrefix)): AnthropicIngressRequest {
   const rawMessages = Array.isArray(body.messages) ? body.messages : [];
   const systems: string[] = [];
   const messages: AnthropicMessage[] = [];
@@ -325,16 +307,16 @@ export function chatToAnthropic(body: Json, targetModel: string, systemPrefix?: 
       if (text) systems.push(text);
       continue;
     }
-    messages.push(...chatMessageToAnthropic(raw));
+    messages.push(...chatMessageToAnthropic(raw, translation));
   }
   endWithUserTurn(messages);
   const system = placeInstructions(systemPrefix, systems, messages);
   applyMessageCache(messages);
-  const tools = mapTools(body.tools);
+  const tools = translation.tools;
   const maxTokensValue = body.max_completion_tokens ?? body.max_tokens;
   const maxTokens = typeof maxTokensValue === "number" && Number.isFinite(maxTokensValue) ? Math.max(1, Math.floor(maxTokensValue)) : undefined;
   const temperature = typeof body.temperature === "number" && Number.isFinite(body.temperature) ? body.temperature : undefined;
-  const toolChoice = mapToolChoice(body.tool_choice);
+  const toolChoice = translation.choice;
   return {
     model: targetModel,
     ...(system ? { system } : {}),
@@ -370,14 +352,14 @@ export class ResponsesEventMapper {
   private emittedCreated = false;
   private completed = false;
   private outputIndex = 0;
-  private readonly toolNameFromWire: (name: string) => string;
+  private readonly translation: ToolTranslation | undefined;
 
   private summary = "";
   private readonly compaction: boolean;
 
-  constructor(model: string, toolNameFromWire: (name: string) => string = (name) => name, compaction = false) {
+  constructor(model: string, translation?: ToolTranslation, compaction = false) {
     this.model = model;
-    this.toolNameFromWire = toolNameFromWire;
+    this.translation = translation;
     this.compaction = compaction;
   }
 
@@ -385,13 +367,23 @@ export class ResponsesEventMapper {
     return { id: this.responseId, object: "response", created_at: this.created, status, model: this.model, output: this.output, usage: this.usage };
   }
 
+  private sequenceNumber = 0;
+
+  private number(events: Json[]): Json[] {
+    return events.map((event) => structuredClone(event.sequence_number === undefined ? { ...event, sequence_number: this.sequenceNumber++ } : event));
+  }
+
   start(): Json[] {
     if (this.emittedCreated) return [];
     this.emittedCreated = true;
-    return [{ type: "response.created", response: this.response() }];
+    return this.number([{ type: "response.created", response: this.response() }]);
   }
 
   feed(event: Json): Json[] {
+    return this.number(this.feedEvent(event));
+  }
+
+  private feedEvent(event: Json): Json[] {
     const out = this.start();
     const type = string(event.type) ?? "";
     if (this.compaction) {
@@ -428,7 +420,11 @@ export class ResponsesEventMapper {
         out.push({ type: "response.output_item.added", output_index: this.outputIndex++, item });
       } else if (blockType === "tool_use") {
         const callId = string(block.id) ?? id("call");
-        const item: OutputItem = { id: id("fc"), type: "function_call", call_id: callId, name: this.toolNameFromWire(string(block.name) ?? "tool"), arguments: "", status: "in_progress" };
+        const wireName = string(block.name) ?? "tool";
+        const identity = this.translation?.fromWire(wireName);
+        if (this.translation && !identity) throw new Error("Upstream returned an unknown tool name");
+        const custom = identity?.kind === "custom";
+        const item: OutputItem = { id: id(custom ? "ctc" : "fc"), type: custom ? "custom_tool_call" : "function_call", call_id: callId, name: identity?.name ?? wireName, ...(identity?.namespace !== undefined ? { namespace: identity.namespace } : {}), ...(custom ? { input: "" } : { arguments: "" }), status: "in_progress" };
         this.output.push(item);
         this.blocks.set(index, { kind: "tool", item, arguments: "" });
         out.push({ type: "response.output_item.added", output_index: this.outputIndex++, item });
@@ -451,8 +447,12 @@ export class ResponsesEventMapper {
       } else if (state.kind === "tool" && deltaType === "input_json_delta") {
         const text = string(delta.partial_json) ?? "";
         state.arguments += text;
-        state.item.arguments = state.arguments;
-        out.push({ type: "response.function_call_arguments.delta", item_id: state.item.id, output_index: this.output.indexOf(state.item), delta: text });
+        // Custom input is JSON-wrapped upstream. Buffer it until it can be decoded without
+        // leaking JSON escapes or the wrapper into the Responses string-input protocol.
+        if (state.item.type === "function_call") {
+          state.item.arguments = state.arguments;
+          out.push({ type: "response.function_call_arguments.delta", item_id: state.item.id, output_index: this.output.indexOf(state.item), delta: text });
+        }
       }
       return out;
     }
@@ -460,7 +460,12 @@ export class ResponsesEventMapper {
       const index = typeof event.index === "number" ? event.index : -1;
       const state = this.blocks.get(index);
       if (!state) return out;
-      if (state.kind === "tool") out.push({ type: "response.function_call_arguments.done", item_id: state.item.id, output_index: this.output.indexOf(state.item), arguments: state.arguments });
+      if (state.kind === "tool" && state.item.type === "custom_tool_call") {
+        const input = customInputFromArguments(state.arguments);
+        state.item.input = input;
+        out.push({ type: "response.custom_tool_call_input.delta", item_id: state.item.id, output_index: this.output.indexOf(state.item), delta: input });
+        out.push({ type: "response.custom_tool_call_input.done", item_id: state.item.id, output_index: this.output.indexOf(state.item), input });
+      } else if (state.kind === "tool") out.push({ type: "response.function_call_arguments.done", item_id: state.item.id, output_index: this.output.indexOf(state.item), arguments: state.arguments });
       state.item.status = "completed";
       out.push({ type: "response.output_item.done", output_index: this.output.indexOf(state.item), item: state.item });
       this.blocks.delete(index);
@@ -479,6 +484,10 @@ export class ResponsesEventMapper {
   }
 
   finish(upstreamCompleted = false): Json[] {
+    return this.number(this.finishEvents(upstreamCompleted));
+  }
+
+  private finishEvents(upstreamCompleted: boolean): Json[] {
     if (this.completed) return [];
     if (this.compaction) {
       if (!upstreamCompleted || !this.summary.trim()) throw new Error("Compaction ended without a complete summary");
@@ -494,6 +503,7 @@ export class ResponsesEventMapper {
         { type: "response.completed", response: this.response("completed") },
       ];
     }
+    if ([...this.blocks.values()].some((state) => state.item.type === "custom_tool_call")) throw new Error("Custom tool response ended before its input was complete");
     this.completed = true;
     for (const state of this.blocks.values()) {
       state.item.status = "completed";
