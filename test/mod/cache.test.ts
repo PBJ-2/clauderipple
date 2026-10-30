@@ -6,7 +6,7 @@ import type { CacheMemo, WarmState } from '../../packages/mod/types/index.d.ts'
 registerHooks({ resolve(specifier, context, next) {
   return next(context.parentURL?.includes('/packages/mod/hooks/') && /^\.\.?\//.test(specifier) && !/\.[a-z]+$/.test(specifier) ? `${specifier}.ts` : specifier, context)
 } })
-const { ttlFromUsage, nextMemo, secondsLeft, shouldPing, afterPing, restoreFromResume } = await import('../../packages/mod/hooks/cache.ts')
+const { ttlFromUsage, nextMemo, secondsLeft, shouldPing, afterPing, restoreFromResume, cacheMemoryKey, CACHE_MEMORY_PREFIX, savedMemory, staleMemory, liveContextTokens, laterMemo } = await import('../../packages/mod/hooks/cache.ts')
 const hour = 3600000, five = 300000
 const warm: WarmState = { pings: 0, cost: 0 }
 const memo: CacheMemo = { ttlMs: hour, lastReplyAt: 0, expiresAt: hour }
@@ -79,4 +79,48 @@ test('resume reconstructs elapsed response time and obeys host expiry even befor
   assert.deepEqual(restoreFromResume(10, true, hour, 20000), { ttlMs: hour, lastReplyAt: 10000, expiresAt: 19999 })
   assert.equal(restoreFromResume(300, false, five, 400000)?.expiresAt, 399999)
   for (const seconds of [undefined, -1, NaN, Infinity]) assert.equal(restoreFromResume(seconds, false, hour, 0), null)
+})
+
+const kept = { memo: { ttlMs: hour, lastReplyAt: 100, expiresAt: hour + 100 }, lastRealReplyAt: 100, contextTokens: 220000, model: 'claude-opus-5-5' }
+
+test('a kept chat comes back only while its cache holds and under the same model', () => {
+  assert.deepEqual(savedMemory(kept, 'claude-opus-5-5', hour + 99), kept)
+  assert.equal(savedMemory(kept, 'claude-opus-5-5', hour + 100), null)
+  assert.equal(savedMemory(kept, 'claude-sonnet-5-5', hour), null)
+  assert.equal(savedMemory(undefined, 'claude-opus-5-5', 0), null)
+  assert.equal(savedMemory({ ...kept, lastRealReplyAt: null }, 'claude-opus-5-5', 0), null)
+  assert.equal(savedMemory({ memo: { ttlMs: 'hour' } }, 'claude-opus-5-5', 0), null)
+  assert.equal(savedMemory({ ...kept, contextTokens: '220k' }, 'claude-opus-5-5', 0)?.contextTokens, 0)
+})
+
+test('an expired or unreadable entry is what the store drops, another chat\'s live one is kept', () => {
+  assert.equal(staleMemory(kept, 0), false)
+  assert.equal(staleMemory(kept, hour + 100), true)
+  assert.equal(staleMemory({ ...kept, memo: { ...kept.memo, expiresAt: Number.NaN } }, 0), true)
+  assert.equal(staleMemory(undefined, 0), true)
+})
+
+test('a key names its own session beside the others', () => {
+  assert.equal(cacheMemoryKey('abc'), CACHE_MEMORY_PREFIX + 'abc')
+  assert.notEqual(cacheMemoryKey('abc'), cacheMemoryKey('abd'))
+  assert.ok(cacheMemoryKey('abc').startsWith(CACHE_MEMORY_PREFIX))
+})
+
+test('the live context wins over the stored one, and the stored one stands while there is none', () => {
+  assert.equal(liveContextTokens(220000, 90000), 220000)
+  assert.equal(liveContextTokens(undefined, 220000), 220000)
+  assert.equal(liveContextTokens(0, 220000), 220000)
+  assert.equal(liveContextTokens(undefined, null), 0)
+  assert.equal(liveContextTokens(undefined, undefined), 0)
+})
+
+test('a resume figure never shortens a memo a ping refreshed, and a dead cache still dies', () => {
+  const pinged: CacheMemo = { ttlMs: hour, lastReplyAt: 3000000, expiresAt: 3000000 + hour }
+  const resumed: CacheMemo = { ttlMs: hour, lastReplyAt: 2000000, expiresAt: 2000000 + hour }
+  assert.deepEqual(laterMemo(pinged, resumed, 2500000), pinged)
+  assert.deepEqual(laterMemo(resumed, pinged, 2500000), pinged)
+  assert.equal(laterMemo(pinged, null, 2500000), null)
+  assert.deepEqual(laterMemo(null, resumed, 2500000), resumed)
+  const dead: CacheMemo = { ttlMs: hour, lastReplyAt: 100, expiresAt: 1999999 }
+  assert.deepEqual(laterMemo(pinged, dead, 2000000), dead)
 })

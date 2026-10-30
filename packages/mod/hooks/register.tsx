@@ -2,7 +2,7 @@
 // Timers own background work; hooks only admit/rewrite a request and record its result.
 import { atom, read, update } from 'claude-code'
 import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, Register, RenderElement, RenderInput, RenderNode, SessionCompactResult, SessionContextBreakdown, SessionContextUsage, SessionRateLimit, ToolCallInput, ToolCallResult, TurnStepInput, TurnUsage } from 'claude-code'
-import type { AgentRec, Effort, JudgeInput, JudgeKind, JudgeRun, LimitItem, ModSettingsSnapshot, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
+import type { AgentRec, CacheMemory, Effort, JudgeInput, JudgeKind, JudgeRun, LimitItem, ModSettingsSnapshot, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
 import { MOD_SETTINGS_SCHEMA_VERSION, RUNG_EFFORT, applySettingsChanges, normalizeSettings, settingsChanges } from './settings'
 import { rungOf, workerLadderLine } from './ladder'
 import { debugText, langFrom, t } from './i18n'
@@ -13,7 +13,7 @@ import { MARKER, agentModel, delegationPin as parseDelegationPin, fixSpawn, huma
 import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom, modeKey, modeOver, quotaWindows, resetProvider, routingSettings } from './modes'
 import type { QuotaWindow } from './modes'
 import type { Spawn, WorkerFix } from './worker'
-import { afterPing, nextMemo, restoreFromResume, shouldPing } from './cache'
+import { afterPing, cacheMemoryKey, CACHE_MEMORY_PREFIX, laterMemo, liveContextTokens, nextMemo, restoreFromResume, savedMemory, shouldPing, staleMemory } from './cache'
 import { HEAVY_PERCENT, bandPriority, claudeLimitsFrom, claudeScopedFrom, coldAlert, contextWindow, modelCompactWindow, hotAlert, hottest, hotWindowMoved, keptAlert, routerLimitItems, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
 import type { ScopedLimit } from './session'
 import { COMPACT_SYSTEM, compactResult, serializeTranscript } from './compact'
@@ -1108,6 +1108,8 @@ async function fork($: EngineInterface, prompt: string): Promise<ModelForkResult
       if ((usage.cache_read_input_tokens ?? 0) > 0) {
         const memo = nextMemo(await read($, cache), usage, await $.clock.now())
         await update($, cache, () => memo)
+        // A ping refreshes the cache for another ttl: the store's expiry follows it across a restart.
+        await saveWarm($, await $.session.model())
       }
     }
     return answer
@@ -1466,7 +1468,8 @@ async function tick($: EngineInterface): Promise<void> {
     const s = { ...await currentSettings($) }
     s.keepWarm = await keepWarmOn($, s)
     const decision = shouldPing({ settings: s, memo: await read($, cache), warm: await read($, warm), now: await $.clock.now(), idle: !await read($, busy) && !await read($, deciding) && !forking,
-      contextTokens: (await read($, context))?.tokens ?? 0, lastRealReplyAt: await read($, lastRealReplyAt) })
+      // A restarted process has no live count until its next reply: the store's figure stands in.
+      contextTokens: liveContextTokens((await read($, context))?.tokens, rememberedContext), lastRealReplyAt: await read($, lastRealReplyAt) })
     if (decision.ping) {
       let answer: ModelForkResult | null = null
       try { answer = await fork($, 'Reply with just: ok') }
@@ -1607,6 +1610,53 @@ async function pollSettingsJobs($: EngineInterface): Promise<void> {
     // Transport and tool errors can contain private data; log neither those nor the job.
     await report($, 'settings jobs', 'request failed')
   } finally { jobsPolling = false }
+}
+/*
+ * Keep-warm survives a restart of this session's process. The memo and the last real reply live in
+ * the atoms, which are this process's memory alone; the app restarted every session's CLI at 12:06
+ * on 2026-10-30, and the resumed process got no SessionStart hook before its first prompt, so
+ * nothing pinged and the cache died at 12:56 though it was warm. The store keeps the same figures
+ * per session id, and `session.start` takes them back.
+ */
+/** The context the store kept for this chat, until the live count is known again. */
+let rememberedContext: number | null = null
+
+/** Mirrors this chat's atoms into the store, dropping other chats' entries that can no longer be used. */
+async function saveWarm($: EngineInterface, model: string): Promise<void> {
+  const memo = await read($, cache)
+  const replyAt = await read($, lastRealReplyAt)
+  if (!memo || replyAt === null) return
+  try {
+    const now = await $.clock.now()
+    const key = cacheMemoryKey(await $.session.id())
+    const tokens = liveContextTokens((await read($, context))?.tokens, rememberedContext)
+    const value: CacheMemory = { memo, lastRealReplyAt: replyAt, contextTokens: tokens, model }
+    await $.store.set(key, value)
+    for (const other of await $.store.keys()) {
+      if (other === key || !other.startsWith(CACHE_MEMORY_PREFIX)) continue
+      if (staleMemory(await $.store.get(other), now)) await $.store.delete(other)
+    }
+  } catch (error) { await report($, 'keep warm store', error) }
+}
+/** This chat's entry goes with its atoms (a /clear, a model change): nothing of it can be pinged for again. */
+async function forgetWarm($: EngineInterface): Promise<void> {
+  rememberedContext = null
+  try { await $.store.delete(cacheMemoryKey(await $.session.id())) } catch (error) { await report($, 'keep warm store', error) }
+}
+/**
+ * Takes this chat's keep-warm back after a restart: only this model's memo, and only while its cache
+ * still holds (a restart, like a ping, never revives an expired cache). Anything else is dropped.
+ */
+async function restoreWarm($: EngineInterface): Promise<void> {
+  if (await read($, cache)) return
+  const key = cacheMemoryKey(await $.session.id())
+  const value = await $.store.get(key)
+  if (value === undefined) return
+  const kept = savedMemory(value, await $.session.model(), await $.clock.now())
+  if (!kept) { await $.store.delete(key); return }
+  rememberedContext = kept.contextTokens
+  await update($, cache, () => kept.memo)
+  await update($, lastRealReplyAt, () => kept.lastRealReplyAt)
 }
 function startTimers($: EngineInterface): void {
   if (timersStarted) return
@@ -1874,6 +1924,7 @@ async function prepareStep($: EngineInterface, e: TurnStepInput): Promise<TurnSt
     if (previousModel !== null) {
       await update($, cache, () => null)
       await update($, lastRealReplyAt, () => null)
+      await forgetWarm($)
       if (await read($, kept)) await update($, kept, () => null)
     }
   }
@@ -1963,6 +2014,9 @@ export const register: Register = on => {
       // loadSettings skips the install when an earlier poll already took this revision, and that
       // poll may have run before the session bound: register here, where it is bound.
       await registerAuto($, await currentSettings($))
+      // The session's own process may be a restart of a warm chat: take its keep-warm back first,
+      // so the first tick already has a memo to ping for.
+      try { await restoreWarm($) } catch (error) { await report($, 'session.start keep warm', error) }
       startTimers($)
       // Setup keeps its draft across a reload; quick settings never keep one.
       let open = await read($, panel)
@@ -2003,6 +2057,7 @@ export const register: Register = on => {
           await update($, cache, () => null)
           await update($, context, () => null)
           await update($, lastRealReplyAt, () => null)
+          await forgetWarm($)
           if (await read($, kept)) await update($, kept, () => null)
           await update($, compactions, () => 0)
         }
@@ -2010,9 +2065,17 @@ export const register: Register = on => {
         await update($, paused, () => e.model ? !isCacheSafeModel(e.model) : false)
       }
       if (['resume', 'fork'].includes(e.source)) {
-        const memo = restoreFromResume(e.seconds_since_last_response, e.prompt_cache_likely_expired, (await read($, cache))?.ttlMs ?? 3600000, await $.clock.now())
-        await update($, cache, () => memo)
-        await update($, lastRealReplyAt, () => memo?.lastReplyAt ?? null)
+        const now = await $.clock.now()
+        const current = await read($, cache)
+        const offered = restoreFromResume(e.seconds_since_last_response, e.prompt_cache_likely_expired, current?.ttlMs ?? 3600000, now)
+        // A memo a ping refreshed can outlive the figure a resume counts from (laterMemo).
+        const memo = laterMemo(current, offered, now)
+        if (memo !== current) {
+          await update($, cache, () => memo)
+          await update($, lastRealReplyAt, () => memo?.lastReplyAt ?? null)
+        }
+        if (memo && memo.expiresAt > now) await saveWarm($, e.model ?? await $.session.model())
+        else await forgetWarm($)
       }
       startTimers($)
     } catch (error) { await report($, 'classic.SessionStart', error) }
@@ -2137,6 +2200,7 @@ export const register: Register = on => {
           if (await read($, coldHidden)) await update($, coldHidden, () => false)
           if (await read($, kept)) await update($, kept, () => null)
           await update($, lastRealReplyAt, () => now)
+          await saveWarm($, answer.usage.model)
           if ((await read($, warm)).stopped !== undefined) await update($, warm, value => ({ ...value, stopped: undefined }))
         }
         const p = await read($, pick)

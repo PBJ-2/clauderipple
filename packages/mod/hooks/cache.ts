@@ -1,5 +1,5 @@
 import type { ModelForkResult } from 'claude-code'
-import type { CacheMemo, Settings, Usage, WarmState } from '../types'
+import type { CacheMemo, CacheMemory, Settings, Usage, WarmState } from '../types'
 import { weighted } from './stats'
 import { t } from './i18n.ts'
 import type { Lang } from './i18n.ts'
@@ -57,4 +57,55 @@ export function restoreFromResume(secondsSinceLastResponse: number | undefined, 
   const lastReplyAt = now - secondsSinceLastResponse * 1000
   const expiresAt = lastReplyAt + ttlMs
   return { ttlMs, lastReplyAt, expiresAt: likelyExpired || expiresAt <= now ? now - 1 : expiresAt }
+}
+
+/** Every chat's keep-warm in the store sits under this prefix, so the others can be pruned. */
+export const CACHE_MEMORY_PREFIX = 'keepWarm.'
+
+/** One chat's key: a restarted process reads back what this chat's own replies left. */
+export function cacheMemoryKey(sessionId: string): string {
+  return CACHE_MEMORY_PREFIX + sessionId
+}
+
+function finite(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value)
+}
+
+/** The memo a store value holds, or null when it holds none this mod can read (older mod, an edit). */
+function memoIn(value: unknown): CacheMemo | null {
+  const held = value && typeof value === 'object' ? (value as Record<string, unknown>).memo : undefined
+  const memo = held && typeof held === 'object' ? held as Record<string, unknown> : {}
+  if (!finite(memo.ttlMs) || !finite(memo.lastReplyAt) || !finite(memo.expiresAt)) return null
+  return { ttlMs: memo.ttlMs, lastReplyAt: memo.lastReplyAt, expiresAt: memo.expiresAt }
+}
+
+/** What a restarted process takes back: this model's memo, and only while its cache still holds. */
+export function savedMemory(value: unknown, model: string, now: number): CacheMemory | null {
+  const memo = memoIn(value)
+  const held = value && typeof value === 'object' ? value as Record<string, unknown> : {}
+  if (!memo || memo.expiresAt <= now) return null
+  if (held.model !== model || !finite(held.lastRealReplyAt)) return null
+  return { memo, lastRealReplyAt: held.lastRealReplyAt, contextTokens: finite(held.contextTokens) ? held.contextTokens : 0, model }
+}
+
+/** A value the store need not keep: another chat's past its expiry, or not readable as a memo. */
+export function staleMemory(value: unknown, now: number): boolean {
+  const memo = memoIn(value)
+  return !memo || memo.expiresAt <= now
+}
+
+/** The context a ping is judged by: the live count when the session has one, else the one the store kept. */
+export function liveContextTokens(live: number | undefined, saved: number | null | undefined): number {
+  return live !== undefined && live > 0 ? live : saved ?? 0
+}
+
+/**
+ * A resume figure never shortens a memo that still holds: a ping refreshes the cache for another
+ * ttl, so a figure counted from the last real reply can read lower than what the cache really has.
+ * No figure at all keeps the old answer (null): a fork's first turn must not inherit its parent's memo.
+ */
+export function laterMemo(current: CacheMemo | null, offered: CacheMemo | null, now: number): CacheMemo | null {
+  if (!offered) return null
+  if (!current || offered.expiresAt <= now) return offered
+  return offered.expiresAt > current.expiresAt ? offered : current
 }
