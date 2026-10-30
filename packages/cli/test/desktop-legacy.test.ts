@@ -13,14 +13,15 @@ import { applyProxyEnv, settingsEnv } from "../src/settings.ts";
 import { ownersPath } from "../src/owners.ts";
 import { removeClientIntegrations } from "../src/integrations.ts";
 import { plistPath, renderPlist } from "../src/launchd.ts";
+import { normalizeHome } from "../src/ownership.ts";
 
 function fixture(t: { after(fn: () => void): void }) {
-  // Real path: macOS's TMPDIR is under /var, a link to /private/var, and the recorded home is resolved.
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cr-desktop-legacy-")));
+  // Native real path resolves macOS's /var link and Windows' 8.3 TEMP alias.
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "cr-desktop-legacy-")));
   const before = { ...process.env };
   const home = path.join(root, ".clauderipple");
   const other = path.join(root, "other");
-  Object.assign(process.env, { HOME: root, CLAUDE_SETTINGS_PATH: path.join(root, "settings.json"), CLAUDE_APP_SUPPORT: path.join(root, "desktop"), CLAUDERIPPLE_LAUNCH_AGENTS_DIR: path.join(root, "LaunchAgents"), CODEX_HOME: path.join(root, "codex") });
+  Object.assign(process.env, { HOME: root, USERPROFILE: root, CLAUDE_SETTINGS_PATH: path.join(root, "settings.json"), CLAUDE_APP_SUPPORT: path.join(root, "desktop"), CLAUDERIPPLE_LAUNCH_AGENTS_DIR: path.join(root, "LaunchAgents"), CODEX_HOME: path.join(root, "codex") });
   t.after(() => {
     for (const key of Object.keys(process.env)) if (!(key in before)) delete process.env[key];
     Object.assign(process.env, before);
@@ -104,7 +105,7 @@ for (const reason of ["other-installation", "different-port"] as const) {
 test("legacy Desktop apply migrates only with the current home's definition and verified live PID", t => {
   const f = fixture(t);
   applyAppProxy(f.url, f.home, undefined, f.deps);
-  assert.equal(currentAppProxy().installationHome, f.home);
+  assert.equal(currentAppProxy().installationHome, normalizeHome(f.home));
 });
 
 test("legacy Desktop uninstall completes for the default installation with independent evidence", t => {
@@ -157,7 +158,7 @@ for (const scenario of ["owners-store", "default-home", "damaged-owners-store"] 
       fs.mkdirSync(home);
       fs.copyFileSync(path.join(f.home, "config.json"), path.join(home, "config.json"));
       f.service(home);
-      assert.equal(path.join(os.homedir(), ".clauderipple"), f.home);
+      assert.equal(normalizeHome(path.join(os.homedir(), ".clauderipple")), normalizeHome(f.home));
     } else {
       fs.writeFileSync(ownersPath(process.env.CLAUDE_SETTINGS_PATH!), scenario === "damaged-owners-store" ? "{" : JSON.stringify({ version: 1, homes: { [f.home]: {}, [f.other]: {} } }));
     }

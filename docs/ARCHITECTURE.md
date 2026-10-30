@@ -23,6 +23,22 @@ CLI: CONNECT api.anthropic.com  → ClaudeRipple terminates TLS (leaf cert signe
 CLI: CONNECT anything else      → blind tunnel
 ```
 
+Before those rules run, `requestKind` (routing.ts) decides once what the request is
+(a web search, a web fetch, an Auto mode classifier request, or an ordinary turn),
+and `decide` returns the route, carrying that `kind` and the model the client
+`asked` for, or the reason to refuse it, in one pass over the rules above. The
+adapters read `kind` through `promptAdditions` (identity.ts) to know what they may
+add to the system prompt.
+
+What a provider can do is answered in one module, `targets.ts`: whether it can take
+routed requests at all (`isTargetProvider`, `ingressOnly`), who declares a model id
+(`declaredBy`, `qualifiedModel`), which efforts it takes (`effortLevels`), and
+whether it runs web search (`runsServerTools`, `answersWebSearch`). The router's
+callers (routing, validation, the proxy, agent files, model scores, the admin
+status) ask it instead of spelling the rule themselves. The dashboard keeps one
+copy of `isTargetProvider` for providers not saved yet, and `ui-targets.test.ts`
+holds that copy to the router's.
+
 Why this path is stable:
 
 - Anthropic's [corporate proxy docs](https://code.claude.com/docs/en/corporate-proxy)
@@ -99,6 +115,15 @@ security-monitor system prompt, never user messages or routing markers. The
 original security prompt, context, output format and native decision logic remain
 intact. The dashboard's Clients page sets it (see the first-stage section below),
 or edit the JSON config. Removing the field restores ordinary routing.
+
+"Intact" covers the system prompt on every provider: `promptAdditions` gives a
+request of kind `auto-mode-classifier` no identity line, no `instructionsAppend`
+and no image hint. Until 2026-10-24 it did not hold. The request's kind never
+reached the adapters, so the ChatGPT path put `You are gpt-6-luna (reasoning
+effort: high), answering through Claude Code, a terminal-based coding agent.` in
+front of the security prompt and the image-generation hint after it, and the
+OpenAI-compatible, Google, Grok and Anthropic-compatible paths added the identity
+line and the addendum (docs/reviews/2026-10-24-architecture-review.md, candidate 1).
 
 This request is Auto mode's safety check: it decides whether an action the agent
 wants to take runs without asking. A target that judges worse than the model
@@ -1413,7 +1438,11 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
   same flow); they are not an Anthropic guarantee, and reuse of one or multiple
   subscriptions is subject to Anthropic's terms and possible account restrictions.
 - A native `anthropic` provider remains OpenAI-ingress-only unless it explicitly
-  sets `accountPool: true`. With that flag and `auth: "claude-code"`, Claude
+  sets `accountPool: true` with `auth: "claude-code"` (`isTargetProvider`). The
+  config refuses one as a fallback or a classifier target; as a primary route or a
+  direct rule it is accepted, ignored at routing time (the request passes through),
+  and reported: the config save answers with a warning per such rule, and the
+  router logs it when it reads the config (`targetWarnings`). With the pool, Claude
   Desktop/Code Messages requests stay unmodified except for the routed model and
   selected identity. The runtime pool is ordered current observed/env/Claude Code
   login first, then ClaudeRipple-owned accounts. When none of them is usable, a
@@ -2061,7 +2090,7 @@ plan unless marked otherwise.
 | The DeepSeek `401` stayed unexplained for a day: a provider error was logged as a status code only (2026-09-15) | Upstream 4xx/5xx bodies are logged (first 300 characters, key-shaped strings masked) and kept in the request record. This is the same rule already required of the translator above. |
 | "Connect Claude subscription" from the tray/GUI failed with "setup-token failed": `claude setup-token` is an interactive terminal flow and neither place has a terminal (2026-09-15, Windows) | Without a TTY the error says to run `clauderipple claude-login` in a terminal and that an existing Claude Code login is reused anyway; other failures carry what `claude` printed. A button that cannot work where it is must say where it works. |
 | Closing Claude Desktop's window does not quit it; reopening hits `Not main instance, returning early` and the app silently keeps the OLD proxy setting. The user sees "I configured it and nothing happened" with no error anywhere (2026-09-14) | Tell the user that closing the window is not enough, and detect it: with picker mode on, the router knows whether the app is actually routing through it. Surface "configured, but the app has not restarted yet" rather than letting it fail silently. |
-| A subagent prompt carried `[[ripple: deepseek@high]]` while `aliases` had no `deepseek`; the marker resolved to a model id nobody declared, `resolve()` returned null, and the request went to Anthropic as an ordinary `PASS` — 30 × `404 model: deepseek-v4.1-flash` over two days, read by the session as "the model stopped working" (2026-09-19/20) | A non-`claude-*` model this router cannot route is **refused here, by name**: `400 invalid_request_error "ClaudeRipple: <reason>"`, tag `REFUSE`, reason in the request record (`unroutableReason`: undeclared / declared by two providers / ingress-only owner / unknown marker alias / alias to an undeclared model). Native `claude-*` ids keep passing through untouched — Claude traffic is never hijacked to say no. And the marker alias table is derived from the agent files themselves (§4), so an agent that exists is an alias that resolves. |
+| A subagent prompt carried `[[ripple: deepseek@high]]` while `aliases` had no `deepseek`; the marker resolved to a model id nobody declared, `resolve()` returned null, and the request went to Anthropic as an ordinary `PASS` — 30 × `404 model: deepseek-v4.1-flash` over two days, read by the session as "the model stopped working" (2026-09-19/20) | A non-`claude-*` model this router cannot route is **refused here, by name**: `400 invalid_request_error "ClaudeRipple: <reason>"`, tag `REFUSE`, reason in the request record (`decide()`'s `refusal`: undeclared / declared by two providers / ingress-only owner / unknown marker alias / alias to an undeclared model). Native `claude-*` ids keep passing through untouched — Claude traffic is never hijacked to say no. And the marker alias table is derived from the agent files themselves (§4), so an agent that exists is an alias that resolves. |
 | A rejected Claude account remained quarantined after its access/refresh token was replaced, because runtime health used the durable account id; keying affinity on that same generation id would instead move a healthy conversation after every refresh (found during multi-account implementation, 2026-09-20) | Runtime health keys on `<local-owner>:<token-generation-digest>`, while conversation affinity and admin state key on the durable local owner. A refresh or re-login receives fresh health without losing its prompt-cache claim; compare-and-swap prevents an old rejection from marking the new generation. |
 | The worker registry was four places that did not know each other — `providers.*.models`, `aliases`, `~/.claude/agents/*.md`, and prose in CLAUDE.md — and every new provider needed all four edited by hand; the one left out was the one that failed (2026-09-19, DeepSeek) | One source: a ticked model *is* a worker. Agent files and marker aliases are generated from `config.json` (§4 "worker definitions"); nothing about a worker is written twice. |
 | ChatGPT prompt-cache hit fell from 93% (2026-09-13) to 9% (2026-09-20) with nothing in our request changing — the backend had started keying the cache on the conversation's identity (`session-id`/`thread-id`/`x-client-request-id`/`client_metadata`), which we never sent; `prompt_cache_key` alone no longer earned a write | The adapter states the conversation's identity the way the Codex CLI does (§4) and echoes `x-codex-turn-state`. The acceptance metric (≥90% on translated providers) is watched per day in `requests.jsonl`; a fall with an unchanged request means the wire changed under us, and the reference to diff against is the real CLI captured through a local proxy, not our own memory of the protocol. |

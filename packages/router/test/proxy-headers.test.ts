@@ -275,6 +275,15 @@ test("identity false leaves the system prompt alone, and the addendum still foll
   assert.equal(seenBody.system, "You are Claude Code.\n\nAnswer in Korean.");
 });
 
+test("an Auto mode classifier reaches an Anthropic-compatible provider unchanged", async () => {
+  const system = "You are a security monitor for autonomous AI coding agents.\n\nJudge this action.";
+  const { seenBody } = await roundTrip({ "x-api-key": "K" }, OK_REPLY, {
+    system,
+    provider: { instructionsAppend: "Answer in Korean." } as Partial<Provider>,
+  });
+  assert.equal(seenBody.system, system);
+});
+
 // A vendor that keys its prompt cache on a session header charges full price to anyone who omits
 // one. On this path the header has to be added where the provider's own headers are, and it must
 // never displace them.

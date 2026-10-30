@@ -1181,6 +1181,24 @@ test("PUT /api/config accepts a valid config and saves it atomically", async () 
   });
 });
 
+test("PUT /api/config warns when accepted rules name an ingress-only provider", async () => {
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const next = makeCfg({
+      providers: { native: { type: "anthropic", auth: "api-key" } },
+      routes: { slot: { provider: "native", model: "claude-sonnet-5" } },
+      direct: [{ prefix: "native-", provider: "native" }],
+    });
+    const res = await fetch(`${base()}:${port}/api/config`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(next) });
+    assert.equal(res.status, 200);
+    const body = await res.json() as { ok: boolean; warning?: string };
+    assert.equal(body.ok, true);
+    assert.equal(body.warning, [
+      'route "slot" names "native", which serves the OpenAI ingress only; requests for it pass through to Anthropic',
+      'direct rule "native-" names "native", which serves the OpenAI ingress only; requests it matches pass through to Anthropic',
+    ].join("\n"));
+  });
+});
+
 test("config revisions prevent concurrent lost updates and detect external edits while legacy saves still work", async () => {
   await withAdmin(makeCfg(), async ({ port, configFile, setCfg }) => {
     type Snapshot = Config & { configRevision: string };

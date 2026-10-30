@@ -19,10 +19,16 @@ import { FrameAssembler } from "../src/chunks.ts";
 import { HostServer } from "../src/server.ts";
 import type { Peer as ServerPeer, ServerOptions } from "../src/server.ts";
 import { VISIBLE_MS } from "../src/push.ts";
+import { windowsDrives } from "../src/folders.ts";
 import { Sessions } from "../src/sessions.ts";
 import type { QueryFn, SdkUserMessage } from "../src/sessions.ts";
 import { bridgeFixture, bridgeId, tick } from "./bridge-fixture.ts";
 import { claudeAppData } from "./app-data.ts";
+
+// Limits for a stalled test, not for a slow one: a passing test never waits them out. 4.5 s and 2 s
+// ran out on a loaded Windows CI runner while the host was still answering (2026-10-29, #98).
+const TEST_TIMEOUT = 15_000;
+const WAIT_LIMIT = 10_000;
 
 const webDir = fileURLToPath(new URL("../web", import.meta.url));
 const token = "remote-test-token-not-a-real-pairing-token";
@@ -61,7 +67,7 @@ function scriptedQuery(sdkId = "sdk-1") {
 }
 
 async function waitFor(predicate: () => boolean): Promise<void> {
-  const deadline = performance.now() + 2000;
+  const deadline = performance.now() + WAIT_LIMIT;
   while (!predicate()) {
     assert.ok(performance.now() < deadline, "Timed out waiting for host or socket");
     await delay(5);
@@ -915,7 +921,7 @@ function seedLargeLog(sessions: Sessions, id: string): SessionEvent[] {
   return readAll(sessions, id);
 }
 
-test("hello denies and closes a wrong token, and returns ready with sessions for the right token", { timeout: 4500 }, async t => {
+test("hello denies and closes a wrong token, and returns ready with sessions for the right token", { timeout: TEST_TIMEOUT }, async t => {
   const f = await fixture(t);
   const id = await f.create();
   const wrong = await f.connect();
@@ -932,7 +938,7 @@ test("hello denies and closes a wrong token, and returns ready with sessions for
   assert.equal(ready.sessions[0]?.id, id);
 });
 
-test("static serves HTML, strips app TypeScript, exposes only the shared protocol and rejects traversal", { timeout: 4500 }, async t => {
+test("static serves HTML, strips app TypeScript, exposes only the shared protocol and rejects traversal", { timeout: TEST_TIMEOUT }, async t => {
   const f = await fixture(t);
   const index = await get(f.port, "/");
   assert.equal(index.status, 200);
@@ -972,7 +978,7 @@ test("static serves HTML, strips app TypeScript, exposes only the shared protoco
   }
 });
 
-test("presence: a phone that reported visible within 30 s counts as looking; hidden, gone or silent does not", { timeout: 4500 }, async t => {
+test("presence: a phone that reported visible within 30 s counts as looking; hidden, gone or silent does not", { timeout: TEST_TIMEOUT }, async t => {
   let now = 1_000_000;
   const subscribed: { clientId: string; endpoint: string; lang: string }[] = [];
   const unsubscribed: string[] = [];
@@ -1085,7 +1091,7 @@ test("a session read on a visible phone loses the app's unread dot in the next l
   assert.equal(unread(), true, "a background seen cannot mark the app's dot read");
 });
 
-test("WebSocket upgrade refuses an evil Origin", { timeout: 4500 }, async t => {
+test("WebSocket upgrade refuses an evil Origin", { timeout: TEST_TIMEOUT }, async t => {
   const f = await fixture(t);
   await new Promise<void>((resolve, reject) => {
     const req = http.request({ hostname: "127.0.0.1", port: f.port, path: "/ws", agent: false,
@@ -1103,7 +1109,7 @@ test("WebSocket upgrade refuses an evil Origin", { timeout: 4500 }, async t => {
   });
 });
 
-test("attach tails without a cursor, replays exactly after epoch/seq, and tails for a wrong epoch", { timeout: 4500 }, async t => {
+test("attach tails without a cursor, replays exactly after epoch/seq, and tails for a wrong epoch", { timeout: TEST_TIMEOUT }, async t => {
   const f = await fixture(t);
   const id = await f.create();
   const first = await f.auth();
@@ -1597,7 +1603,7 @@ test("desktop snapshot updates wait for drain and send only the newest tail", as
   assert.equal(peer.frames.filter(frame => frame.t === "events").length, 0);
 });
 
-test("history pages a >=2 MiB log back to seq 1 with bounded frames and every visible seq exactly once", { timeout: 4500 }, async t => {
+test("history pages a >=2 MiB log back to seq 1 with bounded frames and every visible seq exactly once", { timeout: TEST_TIMEOUT }, async t => {
   const f = await fixture(t);
   const id = await f.create();
   const expected = seedLargeLog(f.sessions, id);
@@ -1632,7 +1638,7 @@ test("history pages a >=2 MiB log back to seq 1 with bounded frames and every vi
   assert.deepEqual(f.diagnostics, []);
 });
 
-test("large catch-up from afterSeq=1 sends a tail rather than replaying a >=2 MiB log", { timeout: 4500 }, async t => {
+test("large catch-up from afterSeq=1 sends a tail rather than replaying a >=2 MiB log", { timeout: TEST_TIMEOUT }, async t => {
   const f = await fixture(t);
   const id = await f.create();
   seedLargeLog(f.sessions, id);
@@ -1650,7 +1656,7 @@ test("large catch-up from afterSeq=1 sends a tail rather than replaying a >=2 Mi
   assert.ok(frame.msg.events[0]!.seq > 2);
 });
 
-test("sequential socket create retries ack the same session and start one query", { timeout: 4500 }, async t => {
+test("sequential socket create retries ack the same session and start one query", { timeout: TEST_TIMEOUT }, async t => {
   const f = await fixture(t);
   const peer = await f.auth();
   const request: ClientMsg = { t: "create", clientMsgId: "socket-create", cwd: f.cwd, model: "claude-test", effort: "high", text: "ping" };
@@ -1666,7 +1672,7 @@ test("sequential socket create retries ack the same session and start one query"
 });
 
 test("concurrent socket create retries ack the same session and start one query", {
-  timeout: 4500,
+  timeout: TEST_TIMEOUT,
 }, async t => {
   const f = await fixture(t);
   const peer = await f.auth();
@@ -1681,7 +1687,7 @@ test("concurrent socket create retries ack the same session and start one query"
   assert.equal(f.fake.options.length, 1);
 });
 
-test("a send resend of a completed id acks without re-running; an orphaned one answers outcome_unknown", { timeout: 4500 }, async t => {
+test("a send resend of a completed id acks without re-running; an orphaned one answers outcome_unknown", { timeout: TEST_TIMEOUT }, async t => {
   const f = await fixture(t);
   const id = await f.create();
   const peer = await f.auth();
@@ -1694,7 +1700,7 @@ test("a send resend of a completed id acks without re-running; an orphaned one a
   assert.equal(f.fake.users.length, 2, "completed resend acks without running again");
 });
 
-test("a send orphaned by a host restart answers outcome_unknown over the socket without running", { timeout: 4500 }, async t => {
+test("a send orphaned by a host restart answers outcome_unknown over the socket without running", { timeout: TEST_TIMEOUT }, async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-restart-wire-"));
   const cwd = path.join(dir, "project");
   fs.mkdirSync(cwd);
@@ -1737,7 +1743,7 @@ test("a send orphaned by a host restart answers outcome_unknown over the socket 
 // B16: a message the host will not take must name itself, or the phone cannot keep it for a retry.
 // `no_session` itself is only ever answered to `attach` (no message involved); a send to a session
 // that is gone comes back as `send`, which carries the clientMsgId.
-test("a send to a session that no longer exists names the message so the phone can keep it", { timeout: 4500 }, async t => {
+test("a send to a session that no longer exists names the message so the phone can keep it", { timeout: TEST_TIMEOUT }, async t => {
   const f = await fixture(t);
   const peer = await f.auth();
   peer.send({ t: "send", session: "gone-session", clientMsgId: "keep-me", text: "이 지시는 사라지면 안 됩니다" });
@@ -1746,7 +1752,7 @@ test("a send to a session that no longer exists names the message so the phone c
   assert.equal(f.fake.users.length, 0, "nothing ran, so only the person's retry (same id) should send it");
 });
 
-test("answering the same approval twice resolves once; the second answer gets 이미 처리됨", { timeout: 4500 }, async t => {
+test("answering the same approval twice resolves once; the second answer gets 이미 처리됨", { timeout: TEST_TIMEOUT }, async t => {
   const f = await fixture(t);
   await f.create();
   const peer = await f.auth();
@@ -1758,7 +1764,7 @@ test("answering the same approval twice resolves once; the second answer gets �
   assert.equal(error.msg.message, "이미 처리됨");
 });
 
-test("a looked-at session suppresses push for 180 s; other sessions are unaffected", { timeout: 4500 }, async t => {
+test("a looked-at session suppresses push for 180 s; other sessions are unaffected", { timeout: TEST_TIMEOUT }, async t => {
   let now = 1_000_000;
   const f = await fixture(t, { now: () => now });
   const id = await f.create();
@@ -1779,7 +1785,7 @@ test("a looked-at session suppresses push for 180 s; other sessions are unaffect
   assert.equal(f.server.sessionSeenRecently("other-session"), false);
 });
 
-test("a client silent after hello is terminated after STALE_MS using virtual Date and intervals", { timeout: 4500 }, async t => {  // Node's public timer mocks cover both Date.now() and the host's periodic reaper;
+test("a client silent after hello is terminated after STALE_MS using virtual Date and intervals", { timeout: TEST_TIMEOUT }, async t => {  // Node's public timer mocks cover both Date.now() and the host's periodic reaper;
   // network I/O and the test's promise-based deadlines still use real time.
   t.mock.timers.enable({ apis: ["Date", "setInterval"], now: 1_000_000 });
   const f = await fixture(t);
@@ -1793,7 +1799,7 @@ test("a client silent after hello is terminated after STALE_MS using virtual Dat
   assert.equal(peer.ws.readyState, WebSocket.CLOSED);
 });
 
-test("blob req chunks round-trip full Unicode output with next offsets until null", { timeout: 4500 }, async t => {
+test("blob req chunks round-trip full Unicode output with next offsets until null", { timeout: TEST_TIMEOUT }, async t => {
   const f = await fixture(t);
   const id = await f.create();
   const text = "界😀\n".repeat(45_000);
@@ -1846,7 +1852,7 @@ test("large image blobs round-trip in capped frames without inlining bytes in ev
   assert.deepEqual(Buffer.from(combined, "base64"), bytes);
 });
 
-test("browse req lists only visible subdirectories in sorted order", { timeout: 4500 }, async t => {
+test("browse req lists drives, then only visible subdirectories in sorted order", { timeout: TEST_TIMEOUT }, async t => {
   const f = await fixture(t);
   const dir = path.join(f.dir, "browse");
   fs.mkdirSync(dir);
@@ -1860,7 +1866,9 @@ test("browse req lists only visible subdirectories in sorted order", { timeout: 
   assert.equal(result.path, dir);
   assert.equal(result.parent, f.dir);
   assert.equal(result.truncated, false);
-  assert.deepEqual(result.entries, ["Alpha", "folder2", "folder10", "zeta"].map(name => ({ name, path: path.join(dir, name) })));
+  const drives = (await windowsDrives()).filter(root => root.toLowerCase() !== dir.toLowerCase()).map(root => ({ name: root, path: root }));
+  const folders = ["Alpha", "folder2", "folder10", "zeta"].map(name => ({ name, path: path.join(dir, name) }));
+  assert.deepEqual(result.entries, [...drives, ...folders]);
 });
 
 test("host info carries the mod's status, refreshes limits once a minute, and reaches connected phones when it changes", { timeout: 6000 }, async t => {
@@ -1906,7 +1914,7 @@ test("host info carries the mod's status, refreshes limits once a minute, and re
   assert.equal("ripple" in down.host, false, "with the router down there is no status to show");
 });
 
-test("the context window the SDK reports for a model is kept for Mac sessions on that model", { timeout: 4500 }, async t => {
+test("the context window the SDK reports for a model is kept for Mac sessions on that model", { timeout: TEST_TIMEOUT }, async t => {
   const f = await fixture(t);
   await f.create();
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.dir, "context-windows.json"), "utf8")), { x: 1000 });

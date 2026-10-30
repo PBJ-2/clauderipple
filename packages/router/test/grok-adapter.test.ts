@@ -10,6 +10,7 @@ import { grokModelsFromListing } from "../src/providers/grok/catalog.ts";
 import { Logger } from "../src/log.ts";
 import type { OpenAiOutcome } from "../src/providers/openai/index.ts";
 import type { AnthropicRequest } from "../src/providers/chatgpt/translate.ts";
+import { requestKind } from "../src/routing.ts";
 
 const HOUR = 3600_000;
 const sse = (records: Record<string, unknown>[]) => records.map((record) => `data: ${JSON.stringify(record)}\n\n`).join("");
@@ -76,7 +77,7 @@ const run: RunCli = async (_file, args) => {
 /** Moved forward by a test that needs the once-a-minute forced refresh to be available again. */
 let clockSkew = 0;
 const auth = new GrokAuth({ home: dir, log, run, env: { PATH: "", HOME: dir }, now: () => Date.now() + clockSkew });
-const adapter = new GrokAdapter("grok", {
+let adapter = new GrokAdapter("grok", {
   type: "grok",
   url: `http://127.0.0.1:${upstreamPort}/v1`,
   models: [{ id: "grok-4.5", effortLevels: ["low", "medium", "high"] }],
@@ -87,7 +88,8 @@ const front = http.createServer((req, res) => {
   req.on("data", (chunk: Buffer) => chunks.push(chunk));
   req.on("end", () => {
     const json = JSON.parse(Buffer.concat(chunks).toString("utf8")) as AnthropicRequest & { model: string };
-    void adapter.handle(req, res, req.url ?? "/v1/messages", json, json.model, req.headers["x-effort"] as string | undefined).then((outcome) => { lastOutcome = outcome; });
+    const requestPath = (req.url ?? "/v1/messages").split("?")[0] ?? "/v1/messages";
+    void adapter.handle(req, res, req.url ?? "/v1/messages", json, json.model, req.headers["x-effort"] as string | undefined, { kind: requestKind(json, requestPath) }).then((outcome) => { lastOutcome = outcome; });
   });
 });
 const frontPort = await listen(front);
@@ -258,6 +260,37 @@ test("a client that leaves while the session is being refreshed cancels the turn
   assert.equal((await outcome()).note, "client closed");
   assert.equal(seen.length, 0, "the cancelled turn spent no quota");
   onRefresh = () => {};
+});
+
+test("an Auto mode classifier's system text reaches the upstream exactly as sent", async () => {
+  writeAuth("tok-a");
+  seen.length = 0;
+  const restore = adapter;
+  const system = "You are a security monitor for autonomous AI coding agents.\n\nJudge this action.";
+  const addendum = "Be brief.";
+  const classifier: AnthropicRequest = { model: "claude-haiku-5-5", stream: true, system, messages: [{ role: "user", content: "check" }] };
+  const ordinarySystem = "Judge this action.";
+  adapter = new GrokAdapter("grok", {
+    type: "grok",
+    url: `http://127.0.0.1:${upstreamPort}/v1`,
+    instructionsAppend: addendum,
+    models: [{ id: "grok-4.5", effortLevels: ["low", "medium", "high"] }],
+  }, log, auth);
+
+  try {
+    const classifierResponse = await call(classifier);
+    assert.equal(classifierResponse.status, 200);
+    assert.equal((seen.at(-1)!.body.messages as { content: unknown }[])[0]!.content, system);
+
+    const turnResponse = await call({ ...classifier, system: ordinarySystem });
+    assert.equal(turnResponse.status, 200);
+    assert.equal(
+      (seen.at(-1)!.body.messages as { content: unknown }[])[0]!.content,
+      `You are claude-haiku-5-5, answering through Claude Code, a terminal-based coding agent.\n\n${ordinarySystem}\n\n${addendum}`,
+    );
+  } finally {
+    adapter = restore;
+  }
 });
 
 test("with no session nothing is sent, and counting tokens still works", async () => {

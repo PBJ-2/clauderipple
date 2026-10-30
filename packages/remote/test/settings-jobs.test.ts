@@ -74,9 +74,16 @@ test("desktop session records map current CLI ids, refresh, and refuse ambiguous
 // a null reader there switched model/effort sync off in production while every test passed a root.
 test("Sessions reads the app's records from its default folder when the sidebar names no root", t => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-settings-home-"));
-  const previous = process.env.HOME;
-  process.env.HOME = home;
-  t.after(() => { process.env.HOME = previous; fs.rmSync(home, { recursive: true, force: true }); });
+  // os.homedir() reads USERPROFILE on Windows, HOME elsewhere.
+  const previous = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  Object.assign(process.env, { HOME: home, USERPROFILE: home });
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    fs.rmSync(home, { recursive: true, force: true });
+  });
   const scope = path.join(home, "Library", "Application Support", "Claude", "claude-code-sessions", "account", "org"); fs.mkdirSync(scope, { recursive: true });
   fs.writeFileSync(path.join(scope, "local_target.json"), JSON.stringify({ cliSessionId: "cli-1", model: "old" }));
   const dir = path.join(home, "host"); fs.mkdirSync(dir);

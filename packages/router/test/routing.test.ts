@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DEFAULTS, type Config } from "../src/config.ts";
-import { continuesTranslatedTurn, markerOverride, resolve, rewriteBody, unroutableReason } from "../src/routing.ts";
+import { continuesTranslatedTurn, decide, markerOverride, requestKind, resolve, rewriteBody } from "../src/routing.ts";
 import { injectBootstrap } from "../src/bootstrap.ts";
 import { withAgentAliases } from "../src/agents.ts";
 
@@ -21,6 +21,31 @@ const cfg: Config = {
 };
 
 const body = (text: string) => ({ messages: [{ role: "user", content: text }] });
+const classifierSystem = "You are a security monitor for autonomous AI coding agents.\n\nEvaluate the action.";
+const fetchText = "\nWeb page content:\n---\nNode.js 24 is current.\n---\n\nWhat is current?\n\nProvide a concise response based on the content above. Include relevant details, code examples, and documentation excerpts as needed.\n";
+
+test("requestKind applies search, fetch, classifier, then turn precedence", () => {
+  const search = {
+    system: classifierSystem,
+    tools: [{ type: "web_search_20250305", name: "web_search" }],
+    messages: [{ role: "user", content: "Perform a web search for the query: Node.js 24" }],
+  };
+  const fetch = { system: classifierSystem, messages: [{ role: "user", content: fetchText }] };
+  assert.equal(requestKind(search, "/v1/messages"), "web-search");
+  assert.equal(requestKind(fetch, "/v1/messages"), "web-fetch", "fetch wins over the classifier prompt");
+  assert.equal(requestKind({ system: classifierSystem, ...body("check it") }, "/v1/messages"), "auto-mode-classifier");
+  assert.equal(requestKind(body("ordinary"), "/v1/messages"), "turn");
+  assert.equal(requestKind(null, "/v1/messages"), "turn");
+});
+
+test("count_tokens is never search or fetch but can be an Auto mode classifier", () => {
+  const search = {
+    tools: [{ type: "web_search_20250305", name: "web_search" }],
+    messages: [{ role: "user", content: "Perform a web search for the query: Node.js 24" }],
+  };
+  assert.equal(requestKind(search, "/v1/messages/count_tokens"), "turn");
+  assert.equal(requestKind({ system: classifierSystem, messages: [{ role: "user", content: fetchText }] }, "/v1/messages/count_tokens"), "auto-mode-classifier");
+});
 
 test("Auto mode classifier overrides only its own system request and ignores conversation markers", () => {
   const configured: Config = { ...cfg, autoModeClassifier: { provider: "chatgpt", model: "gpt-6-luna", effort: "low" } };
@@ -136,7 +161,7 @@ test("regression: a Claude marker reaches an undeclared target through its direc
   const configured: Config = { ...cfg, aliases: { sol: "gpt-6.1-sol" } };
   assert.deepEqual(resolve("claude-sonnet-5-5", body("[[ripple: sol@high]] do it"), configured), {
     provider: "chatgpt", model: "gpt-6.1-sol", effort: "high",
-    tag: "claude-sonnet-5-5->gpt-6.1-sol (marker)",
+    tag: "claude-sonnet-5-5->gpt-6.1-sol (marker)", kind: "turn", asked: "claude-sonnet-5-5",
   });
 });
 
@@ -167,6 +192,21 @@ const declared: Config = {
   direct: [{ prefix: "gpt-", provider: "chatgpt" }],
   aliases: { luna: "gpt-5.6-luna", k3: "kimi-k3" },
 };
+
+test("routes carry the request kind and the model id as asked", () => {
+  const direct = resolve("gpt-7-unreleased@medium", body("hi"), declared)!;
+  const slot = resolve("claude-opus-4-8", body("hi"), declared)!;
+  const marker = resolve("kimi-k3", body("[[ripple: luna@high]] do it"), declared)!;
+  const owner = resolve("kimi-k3@low", body("hi"), declared)!;
+  const configured: Config = { ...declared, autoModeClassifier: { provider: "chatgpt", model: "gpt-5.6-luna" } };
+  const classifier = resolve("claude-haiku-5-5", { system: classifierSystem, ...body("check it") }, configured)!;
+
+  assert.deepEqual([direct.kind, direct.asked], ["turn", "gpt-7-unreleased@medium"]);
+  assert.deepEqual([slot.kind, slot.asked], ["turn", "claude-opus-4-8"]);
+  assert.deepEqual([marker.kind, marker.asked], ["turn", "kimi-k3"]);
+  assert.deepEqual([owner.kind, owner.asked], ["turn", "kimi-k3@low"]);
+  assert.deepEqual([classifier.kind, classifier.asked], ["auto-mode-classifier", "claude-haiku-5-5"]);
+});
 
 test("a model only one provider carries routes there without a rule", () => {
   const r = resolve("kimi-k3", body("hi"), declared)!;
@@ -223,7 +263,7 @@ test("rewriteBody sets model, effort and clamps ultra", () => {
   const j = rewriteBody({ model: "claude-opus-4-8", output_config: { effort: "ultra" } }, resolve("claude-opus-4-8", body("hi"), cfg)!, cfg.effortClamp);
   assert.equal(j.model, "gpt-6-astra");
   assert.deepEqual(j.output_config, { effort: "max" });
-  const k = rewriteBody({ model: "x" }, { provider: "chatgpt", model: "m", effort: undefined, tag: "" }, cfg.effortClamp);
+  const k = rewriteBody({ model: "x" }, { provider: "chatgpt", model: "m", effort: undefined, tag: "", kind: "turn", asked: "x" }, cfg.effortClamp);
   assert.equal("output_config" in k, false);
 });
 
@@ -370,7 +410,7 @@ test("a marker naming an agent file resolves through the derived alias", () => {
 
   // The marker now resolves to a real id. `deepseek-v4-pro` is offered by two providers in
   // `declared`, so it is still ambiguous — the alias resolves, and the ambiguity is what stops it.
-  const reason = unroutableReason("vendor-model", body("[[ripple: deepseek@high]] do it"), cfg);
+  const reason = decide("vendor-model", body("[[ripple: deepseek@high]] do it"), cfg, "turn").refusal;
   assert.equal(reason, '"deepseek-v4-pro" is declared by two providers (opencode-go, deepseek); use "opencode-go:deepseek-v4-pro" or "deepseek:deepseek-v4-pro", or add a route or direct rule');
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -385,50 +425,50 @@ test("a marker naming an agent file routes when exactly one provider declares it
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test("unroutableReason: marker alias that resolves to an undeclared model", () => {
+test("decide: marker alias that resolves to an undeclared model", () => {
   const cfg: Config = { ...declared, aliases: { ...declared.aliases, deepseek: "deepseek-v4-pro" } };
   // Two providers declare it → the ambiguity message, not the "undeclared" one.
-  assert.equal(unroutableReason("whatever", body("[[ripple: deepseek@high]]"), cfg),
+  assert.equal(decide("whatever", body("[[ripple: deepseek@high]]"), cfg, "turn").refusal,
     '"deepseek-v4-pro" is declared by two providers (opencode-go, deepseek); use "opencode-go:deepseek-v4-pro" or "deepseek:deepseek-v4-pro", or add a route or direct rule');
   // An alias pointing at a model nobody has.
   const ghost: Config = { ...declared, aliases: { ...declared.aliases, ghost: "no-such-model" } };
-  assert.equal(unroutableReason("whatever", body("[[ripple: ghost]]"), ghost),
+  assert.equal(decide("whatever", body("[[ripple: ghost]]"), ghost, "turn").refusal,
     'marker alias "ghost" resolves to "no-such-model", which no provider declares');
 });
 
-test("unroutableReason: a marker name that is neither alias nor agent", () => {
-  assert.equal(unroutableReason("whatever", body("[[ripple: nobody@high]]"), declared),
+test("decide: a marker name that is neither alias nor agent", () => {
+  assert.equal(decide("whatever", body("[[ripple: nobody@high]]"), declared, "turn").refusal,
     'marker alias "nobody" is not an alias and not an agent name');
 });
 
-test("unroutableReason: two providers declare the named model", () => {
-  assert.equal(unroutableReason("deepseek-v4-pro", body("hi"), declared),
+test("decide: two providers declare the named model", () => {
+  assert.equal(decide("deepseek-v4-pro", body("hi"), declared, "turn").refusal,
     '"deepseek-v4-pro" is declared by two providers (opencode-go, deepseek); use "opencode-go:deepseek-v4-pro" or "deepseek:deepseek-v4-pro", or add a route or direct rule');
 });
 
-test("unroutableReason: no provider declares it, and an ingress-only provider is named", () => {
-  assert.equal(unroutableReason("some-model-nobody-has", body("hi"), declared), 'no provider declares "some-model-nobody-has"');
+test("decide: no provider declares it, and an ingress-only provider is named", () => {
+  assert.equal(decide("some-model-nobody-has", body("hi"), declared, "turn").refusal, 'no provider declares "some-model-nobody-has"');
   // A model only the native anthropic provider lists: the provider is named, not the model.
   const onlyNative: Config = {
     ...DEFAULTS,
     providers: { anthropic: { type: "anthropic", auth: "claude-code", models: [{ id: "claude-haiku-4-5" }] } },
     routes: {}, direct: [], aliases: {},
   };
-  assert.equal(unroutableReason("claude-haiku-4-5", body("hi"), onlyNative), null, "a claude-* id is never a refusal");
+  assert.equal(decide("claude-haiku-4-5", body("hi"), onlyNative, "turn").refusal, null, "a claude-* id is never a refusal");
   const nonClaudeNative: Config = {
     ...DEFAULTS,
     providers: { anthropic: { type: "anthropic", auth: "claude-code", models: [{ id: "vendor-model" }] } },
     routes: {}, direct: [], aliases: {},
   };
-  assert.equal(unroutableReason("vendor-model", body("hi"), nonClaudeNative), 'provider "anthropic" is ingress-only');
+  assert.equal(decide("vendor-model", body("hi"), nonClaudeNative, "turn").refusal, 'provider "anthropic" is ingress-only');
 });
 
-test("unroutableReason is null for a routable model, a rule, and every claude-* id", () => {
-  assert.equal(unroutableReason("kimi-k3", body("hi"), declared), null, "routable");
-  assert.equal(unroutableReason("gpt-7-unreleased", body("hi"), declared), null, "a direct rule decides");
-  assert.equal(unroutableReason("claude-opus-5", body("hi"), declared), null);
+test("decide refusal is null for a routable model, a rule, and every claude-* id", () => {
+  assert.equal(decide("kimi-k3", body("hi"), declared, "turn").refusal, null, "routable");
+  assert.equal(decide("gpt-7-unreleased", body("hi"), declared, "turn").refusal, null, "a direct rule decides");
+  assert.equal(decide("claude-opus-5", body("hi"), declared, "turn").refusal, null);
   assert.equal(resolve("claude-opus-5", body("hi"), declared), null, "and resolve agrees it is unrouted");
-  assert.equal(unroutableReason(undefined, body("hi"), declared), null);
+  assert.equal(decide(undefined, body("hi"), declared, "turn").refusal, null);
 });
 
 // 2026-09-20: a GPT-6 Astra session (prefix rule → chatgpt) delegated to `muse`; the marker changed
@@ -454,10 +494,25 @@ test("a marker's model takes its own provider, even under a prefix rule on the s
   assert.equal(resolve("gpt-6-astra", body("[[ripple: gpt-5.6-sol@low]] x"), cfg2)!.provider, "chatgpt");
   // A marker to a model nobody declares is a refusal, with the reason, not a 400 from ChatGPT.
   assert.equal(resolve("gpt-6-astra", body("[[ripple: ghost@high]] x"), cfg2), null);
-  assert.equal(unroutableReason("gpt-6-astra", body("[[ripple: ghost@high]] x"), cfg2),
+  assert.equal(decide("gpt-6-astra", body("[[ripple: ghost@high]] x"), cfg2, "turn").refusal,
     'marker alias "ghost" is not an alias and not an agent name');
   // …but without a marker a prefix rule is never second-guessed here.
-  assert.equal(unroutableReason("gpt-6-astra", body("x"), cfg2), null);
+  assert.equal(decide("gpt-6-astra", body("x"), cfg2, "turn").refusal, null);
+});
+
+test("an ignored prefix rule still explains a marker that nothing can take", () => {
+  // A prefix rule naming an ingress-only provider is ignored, and the request passes through. A marker
+  // naming another model, with no prefix rule of its own, is refused by name when no provider takes
+  // it, as it was before the rules and their reasons became one pass.
+  const native: Config = {
+    ...cfg,
+    providers: { anthropic: { type: "anthropic", auth: "claude-code" }, chatgpt: { type: "anthropic-compatible", url: "http://127.0.0.1:8787", models: [{ id: "kimi-k3" }] } },
+    direct: [{ prefix: "vendor-", provider: "anthropic" }],
+  };
+  assert.equal(decide("vendor-model", body("x"), native, "turn").refusal, null, "no marker: pass through");
+  assert.equal(decide("vendor-model", body("[[ripple: ghost]] x"), native, "turn").refusal, 'marker alias "ghost" is not an alias and not an agent name');
+  assert.equal(decide("vendor-model", body("[[ripple: kimi-k3]] x"), native, "turn").refusal, null, "a declared marker model is not refused");
+  assert.equal(decide("vendor-model", body("[[ripple: vendor-other]] x"), native, "turn").refusal, null, "a marker model under a prefix rule is not second-guessed");
 });
 
 test("a marker counts only at the top of a user message; a quoted one is prose", () => {

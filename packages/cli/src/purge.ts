@@ -34,19 +34,37 @@ async function deferPurge(home: string): Promise<PurgeResult> {
   const script = [
     "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'",
     `$result=${quote(resultFile)}; $target=${quote(home)}`,
-    `@{status='running'; parent=${process.pid}} | ConvertTo-Json -Compress | Set-Content -LiteralPath $result -Encoding ASCII`,
+    // The receipt is the file the person is told to open. Set-Content could not write it while a
+    // reader had it open, and a purge that had removed the folder recorded itself as failed (1 run in
+    // 20 of the self-purge test, 2026-10-29). WriteAllText shares the file with readers, and a write
+    // that is still refused is tried again.
+    "function Write-Receipt([string]$text) {",
+    "  for($n=0;;$n++) {",
+    "    try { [System.IO.File]::WriteAllText($result, $text, (New-Object System.Text.UTF8Encoding($false))); return }",
+    "    catch [System.IO.IOException] { if($n -ge 50) { throw }; Start-Sleep -Milliseconds 100 }",
+    "  }",
+    "}",
+    `Write-Receipt (@{status='running'; parent=${process.pid}} | ConvertTo-Json -Compress)`,
     "try {",
-    `  Wait-Process -Id ${process.pid} -Timeout 120 -ErrorAction SilentlyContinue`,
-    `  if(Get-Process -Id ${process.pid} -ErrorAction SilentlyContinue) { throw 'uninstall process has not exited' }`,
+    // The wait holds this process's own handle: after Wait-Process returned, Get-Process by id still
+    // listed the exited process, and the receipt said "uninstall process has not exited" (1 run in 20
+    // of the self-purge test, 2026-10-29). HasExited on the handle answers for that very process.
+    `  $parent=Get-Process -Id ${process.pid} -ErrorAction SilentlyContinue`,
+    "  if($parent) {",
+    "    $deadline=(Get-Date).AddSeconds(120)",
+    "    while(-not $parent.HasExited -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }",
+    "    if(-not $parent.HasExited) { throw 'uninstall process has not exited' }",
+    "    $parent.Dispose()",
+    "  }",
     "  $env:CR_PURGE_TARGET=$target; $errorText='directory is still present'",
     "  for($i=0;$i -lt 30;$i++) {",
     "    $ErrorActionPreference='Continue'; & $env:ComSpec /d /v:off /c 'rd /s /q \"%CR_PURGE_TARGET%\"' 2>&1 | Out-Null; $ErrorActionPreference='Stop'",
-    "    if(-not [System.IO.Directory]::Exists($target)) { '{\"exitCode\":0}' | Set-Content -LiteralPath $result -Encoding ASCII; exit 0 }",
+    "    if(-not [System.IO.Directory]::Exists($target)) { Write-Receipt '{\"exitCode\":0}'; exit 0 }",
     "    Start-Sleep -Milliseconds 200",
     "  }",
     "  throw $errorText",
     "} catch {",
-    "  [System.IO.File]::WriteAllText($result, (@{exitCode=1; error=$_.Exception.Message} | ConvertTo-Json -Compress), (New-Object System.Text.UTF8Encoding($false))); exit 1",
+    "  Write-Receipt (@{exitCode=1; error=$_.Exception.Message} | ConvertTo-Json -Compress); exit 1",
     "}",
   ].join("\r\n");
   const program = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
@@ -56,13 +74,32 @@ async function deferPurge(home: string): Promise<PurgeResult> {
     // Windows PowerShell exits without executing when launched as a console-less detached
     // process. Start-Process is the same independent Windows launch used by our supervisor.
     const launch = `$ErrorActionPreference='Stop'; Start-Process -FilePath ${quote(program)} -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',${quote(`"${scriptFile}"`)}) -WindowStyle Hidden -RedirectStandardOutput ${quote(path.join(dir, "cleanup.log"))} -RedirectStandardError ${quote(path.join(dir, "cleanup.err.log"))} | Out-Null`;
-    execFileSync(program, ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(launch, "utf16le").toString("base64")], { cwd: os.tmpdir(), env: windowsPowerShellEnv(), stdio: "ignore", windowsHide: true, timeout: 10_000 });
-    for (let i = 0; i < 50; i++) {
-      if (fs.readFileSync(resultFile, "utf8").includes('"running"')) return { status: "deferred", resultFile };
+    // A Windows CI runner's cleanup PowerShell did not write "running" within 5 s (2026-10-29, the
+    // run of #116), and on a desktop with a build holding the CPU a PowerShell start took over 5 s
+    // the same day. Both waits allow a slow start; a working one returns as soon as it answers.
+    execFileSync(program, ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(launch, "utf16le").toString("base64")], { cwd: os.tmpdir(), env: windowsPowerShellEnv(), stdio: "ignore", windowsHide: true, timeout: 20_000 });
+    for (let i = 0; i < 150; i++) {
+      if (cleanerStarted(resultFile)) return { status: "deferred", resultFile };
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     throw new Error("외부 정리 프로세스가 시작을 확인하지 않았습니다.");
   } catch (error) {
     throw new Error(`외부 정리를 시작하지 못했습니다. 기록: ${dir}`, { cause: error });
+  }
+}
+
+/**
+ * Whether the cleaner has written "running". While Set-Content wrote the receipt, a read here failed
+ * with EBUSY, which was reported as a cleaner that never started (1 run in 20 of the purge tests,
+ * 2026-10-29). The cleaner now writes with WriteAllText; a busy or still-empty file is read again on
+ * the next round all the same.
+ */
+function cleanerStarted(resultFile: string): boolean {
+  try {
+    return fs.readFileSync(resultFile, "utf8").includes('"running"');
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EBUSY" || code === "EPERM") return false;
+    throw error;
   }
 }

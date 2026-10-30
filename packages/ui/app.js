@@ -142,12 +142,18 @@ function applyProviderLabel(provider, key, typedName) {
   else delete provider.label;
   return provider;
 }
+// The router's `isTargetProvider` (packages/router/src/targets.ts), copied because the forms ask it of
+// providers not saved yet; `ui-targets.test.ts` keeps the two equal. A native Claude provider becomes
+// a mapping target only after the explicit account-pool opt-in; API-key and legacy login providers
+// remain OpenAI-ingress-only.
+function isTargetProvider(provider) {
+  if (!provider) return false;
+  return provider.type !== "anthropic" || (provider.accountPool === true && provider.auth === "claude-code");
+}
 function groupedModels(config) {
   const groups = [];
   for (const [name, provider] of Object.entries(config.providers || {})) {
-    // A native Claude provider becomes a mapping target only after the explicit account-pool opt-in.
-    // API-key and legacy login providers remain OpenAI-ingress-only.
-    if (provider.type === "anthropic" && !provider.accountPool) continue;
+    if (!isTargetProvider(provider)) continue;
     let models = modelsOf(provider);
     if (!models.length && provider.type === "chatgpt") models = CHATGPT_MODELS;
     if (models.length) groups.push({ name, provider, models });
@@ -1284,7 +1290,7 @@ const CLASSIFIER_REFUSES_STAGE2 = new Set(["claude-sonnet-5-5", "claude-opus-5-5
 function classifierGroups(config) {
   const groups = groupedModels(config);
   for (const [name, provider] of Object.entries(config.providers || {})) {
-    if (provider.type !== "anthropic" || !provider.accountPool || modelsOf(provider).length) continue;
+    if (provider.type !== "anthropic" || !isTargetProvider(provider) || modelsOf(provider).length) continue;
     groups.push({ name, provider, models: claudeModels.map((model) => ({ id: model.id, name: labelOf(model) })) });
   }
   return groups;
@@ -1337,7 +1343,7 @@ function renderAutoClassifier() {
   const groups = classifierGroups(currentConfig);
   box.replaceChildren(classifierRow("first", rows.first, groups), classifierRow("rest", rows.rest, groups));
   const note = $("#client-auto-classifier-note");
-  const pool = Object.values(currentConfig.providers || {}).some((provider) => provider.type === "anthropic" && provider.accountPool);
+  const pool = Object.values(currentConfig.providers || {}).some((provider) => provider.type === "anthropic" && isTargetProvider(provider));
   if (note) note.hidden = pool;
 }
 

@@ -10,6 +10,7 @@ import path from "node:path";
 import { codexEnabled, followCodexCache, writeCodexCatalog } from "../../cli/src/codex.ts";
 import { ingressModels } from "./ingress/models.ts";
 import { ConfigStore, awakeSettings, configPath, homeDir, terminateHosts, tetherSettings } from "./config.ts";
+import { targetWarnings } from "./targets.ts";
 import { ensureInstallationId } from "./installation-id.ts";
 import { AwakeController, execRunner, type Activity } from "./awake.ts";
 import { TetherController } from "./tether.ts";
@@ -54,6 +55,7 @@ const store = new ConfigStore(undefined, (c, errors) => {
   configErrors = [...errors];
   reconcileProxyConfig?.(c);
   for (const e of errors) (log ?? console).warn(`config: ${e}`);
+  for (const w of targetWarnings(c)) (log ?? console).warn(`config: ${w}`);
   log?.info(`config loaded: ${Object.keys(c.routes).length} routes, ${Object.keys(c.providers).length} providers, direct=${c.direct.map((d) => d.prefix).join(",") || "-"}`);
   // Keep the Codex app's model list in step with the models we serve (only while `codex on` is in effect).
   try {

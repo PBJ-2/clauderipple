@@ -13,7 +13,8 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 function tmp(t: TestContext, name: string): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-creation-"));
+  // Git reports the native long form on Windows even when TEMP uses an 8.3 alias.
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "ripple-creation-")));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const target = path.join(dir, name);
   fs.mkdirSync(target);
@@ -29,7 +30,7 @@ function repo(t: TestContext): { dir: string; root: string } {
   fs.writeFileSync(path.join(dir, "README.md"), "hello\n");
   git(dir, "add", "-A");
   git(dir, "commit", "-q", "-m", "init");
-  return { dir, root: fs.realpathSync(dir) };
+  return { dir, root: fs.realpathSync.native(dir) };
 }
 
 test("worktreeSlug makes a branch-safe name, empty for nothing usable", () => {
@@ -44,7 +45,7 @@ test("gitInfo reads the repo, its current branch and its local branches", async 
   git(dir, "branch", "dev");
   const info = await gitInfo(dir);
   assert.equal(info.isRepo, true);
-  assert.equal(fs.realpathSync(info.root!), root);
+  assert.equal(fs.realpathSync.native(info.root!), root);
   assert.equal(info.branch, "main");
   assert.deepEqual(info.branches, ["dev", "main"]);
   // A plain folder is not a repo, and asking never throws.

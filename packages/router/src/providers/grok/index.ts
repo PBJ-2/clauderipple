@@ -16,6 +16,7 @@ import { OpenAiCompatibleAdapter, type OpenAiOutcome } from "../openai/index.ts"
 import { GROK_AUTH_HINT, GrokAuth, GrokAuthError, grokHome, sharedGrokAuth } from "./auth.ts";
 import { GROK_DEFAULT_URL, GROK_EFFORT_LEVELS } from "./catalog.ts";
 import { GrokUsage, type GrokWindow } from "./usage.ts";
+import type { RequestKind } from "../../routing.ts";
 
 /**
  * Facts only, returned by the probe in a `warning` field like the Antigravity one. Nothing published
@@ -94,7 +95,7 @@ export class GrokAdapter {
     }).catch(() => []);
   }
 
-  async handle(req: http.IncomingMessage, res: http.ServerResponse, path: string, json: AnthropicRequest, model: string, effort: string | undefined): Promise<OpenAiOutcome> {
+  async handle(req: http.IncomingMessage, res: http.ServerResponse, path: string, json: AnthropicRequest, model: string, effort: string | undefined, options?: { kind?: RequestKind }): Promise<OpenAiOutcome> {
     // Counting tokens is answered locally and needs no session.
     if (!path.startsWith("/v1/messages/count_tokens")) {
       // The wait can be a 30s CLI refresh. A client that leaves meanwhile has cancelled the turn, and
@@ -115,6 +116,6 @@ export class GrokAdapter {
       }
       if (closed) return { status: 0, bytes: 0, note: "client closed" };
     }
-    return this.inner.handle(req, res, path, json, model, effort);
+    return this.inner.handle(req, res, path, json, model, effort, undefined, options);
   }
 }

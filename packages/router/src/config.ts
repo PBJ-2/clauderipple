@@ -10,6 +10,7 @@ import path from "node:path";
 import type { CompatibleCaps } from "./compat.ts";
 import { PRESETS } from "./presets.ts";
 import { hostProblem, portProblem } from "./remote-host.ts";
+import { ingressOnly } from "./targets.ts";
 
 export type ProviderModel = {
   id: string;
@@ -798,7 +799,7 @@ export function validate(c: Config): string[] {
       const checkTarget = (target: Partial<ClassifierTarget>, label: string): void => {
         const provider = c.providers[target.provider as string];
         if (!provider) errors.push(`${label}: unknown provider`);
-        else if (provider.type === "anthropic" && !provider.accountPool) errors.push(`${label}: provider is ingress-only`);
+        else if (ingressOnly(c, target.provider as string)) errors.push(`${label}: provider is ingress-only`);
         if (typeof target.model !== "string" || !target.model.trim()) errors.push(`${label}: missing model`);
         if (target.effort !== undefined && typeof target.effort !== "string") errors.push(`${label}: effort must be a string`);
       };
@@ -839,7 +840,7 @@ export function validate(c: Config): string[] {
         if (!c.providers[f.provider]) errors.push(`route ${alias}: fallback ${i} names unknown provider "${f.provider}"`);
         // A native `anthropic` provider is routable only when its Claude OAuth pool is explicitly
         // enabled. Existing native providers remain ingress-only to avoid hijacking Claude traffic.
-        else if (c.providers[f.provider]!.type === "anthropic" && !(c.providers[f.provider] as AnthropicProvider).accountPool) errors.push(`route ${alias}: fallback ${i} names "${f.provider}", which serves the OpenAI ingress only`);
+        else if (ingressOnly(c, f.provider)) errors.push(`route ${alias}: fallback ${i} names "${f.provider}", which serves the OpenAI ingress only`);
         if (!f.model || typeof f.model !== "string") errors.push(`route ${alias}: fallback ${i} missing model`);
         if (f.provider === r.provider && f.model === r.model) errors.push(`route ${alias}: fallback ${i} repeats the primary target`);
       });

@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 
 type Entry = { id: string; name?: string; provider: string; contextWindow?: number };
 type Config = {
-  providers: Record<string, { type?: string; accountPool?: boolean; models?: { id: string; name?: string }[] }>;
+  providers: Record<string, { type?: string; auth?: string; accountPool?: boolean; models?: { id: string; name?: string }[] }>;
   cli?: { extraModels?: { model: string; name?: string; contextWindow?: number }[] };
   direct?: { prefix: string; provider: string }[];
 };
@@ -225,8 +225,8 @@ function baseConfig(): Config {
 test("only an opted-in native Claude account pool appears in model mapping", () => {
   const config: Config = {
     providers: {
-      ingress: { type: "anthropic", models: [{ id: "claude-opus-5" }] },
-      pooled: { type: "anthropic", accountPool: true, models: [{ id: "claude-sonnet-5" }] },
+      ingress: { type: "anthropic", auth: "api-key", models: [{ id: "claude-opus-5" }] },
+      pooled: { type: "anthropic", auth: "claude-code", accountPool: true, models: [{ id: "claude-sonnet-5" }] },
       other: { type: "anthropic-compatible", models: [{ id: "deepseek-v4-pro" }] },
     },
   };

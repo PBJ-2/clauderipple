@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { applyIdentityToAnthropicBody, identityLine, identityPrefix, instructionsSuffix } from "../src/identity.ts";
+import { applyIdentityToAnthropicBody, identityLine, identityPrefix, instructionsSuffix, promptAdditions } from "../src/identity.ts";
 
 test("the line names the model, and the effort only when there is one", () => {
   assert.equal(identityLine("deepseek-flash", "high"), "You are deepseek-flash (reasoning effort: high), answering through Claude Code, a terminal-based coding agent.");
@@ -19,6 +19,18 @@ test("an addendum of blanks is no addendum", () => {
   assert.equal(instructionsSuffix({ model: "m" }), null);
   assert.equal(instructionsSuffix({ model: "m", instructionsAppend: "   " }), null);
   assert.equal(instructionsSuffix({ model: "m", instructionsAppend: " Answer in Korean. " }), "Answer in Korean.");
+});
+
+test("an Auto mode classifier gains no prompt additions", () => {
+  assert.deepEqual(promptAdditions("auto-mode-classifier", { identity: true, instructionsAppend: " Add this. " }, "IMAGE"), { identity: false });
+});
+
+test("a turn gets the provider's trimmed prompt additions", () => {
+  assert.deepEqual(promptAdditions("turn", { instructionsAppend: " Add this. " }, "IMAGE"), {
+    identity: true,
+    instructionsAppend: "Add this.",
+    imageHint: "IMAGE",
+  });
 });
 
 test("a body with no system prompt gets one", () => {

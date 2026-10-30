@@ -234,15 +234,20 @@ test("file MIME is sniffed, Korean names survive and source changes never change
   assert.deepEqual(sessionFiles(null, { cwd }, sink), []);
 });
 
-test("replacement between path validation and open is blocked", { skip: !fileSymlinks }, t => {
+// Windows swaps in a junction, which needs no symlink privilege.
+test("replacement between path validation and open is blocked", { skip: !fileSymlinks && process.platform !== "win32" }, t => {
   const { cwd, sink } = fixture(t), outside = directory(t);
   const folder = path.join(cwd, "out"); fs.mkdirSync(folder);
   fs.writeFileSync(path.join(folder, "file.txt"), "safe");
   fs.writeFileSync(path.join(outside, "file.txt"), "outside");
+  // The reader may open the file under another spelling of the same folder (Windows' long form
+  // of an 8.3 TEMP), so the swap triggers on either.
+  const key = (file: string) => process.platform === "win32" ? path.resolve(file).toLowerCase() : path.resolve(file);
+  const targets = new Set([path.join(folder, "file.txt"), fs.realpathSync.native(path.join(folder, "file.txt"))].map(key));
   const open = fs.openSync;
   const mock = t.mock.method(fs, "openSync", (...args: Parameters<typeof fs.openSync>) => {
-    if (String(args[0]) !== path.join(folder, "file.txt")) return open(...args);
-    fs.renameSync(folder, folder + "-saved"); fs.symlinkSync(outside, folder);
+    if (!targets.has(key(String(args[0])))) return open(...args);
+    fs.renameSync(folder, folder + "-saved"); fs.symlinkSync(outside, folder, process.platform === "win32" ? "junction" : undefined);
     try { return open(...args); }
     finally { fs.unlinkSync(folder); fs.renameSync(folder + "-saved", folder); }
   });
