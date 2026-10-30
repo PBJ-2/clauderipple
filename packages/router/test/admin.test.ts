@@ -38,6 +38,7 @@ async function withAdmin(
     claudeClearCooldown?: NonNullable<AdminDeps["claudeClearCooldown"]>;
     providerHealth?: NonNullable<AdminDeps["providerHealth"]>;
     modelHealth?: NonNullable<AdminDeps["modelHealth"]>;
+    processPriority?: NonNullable<AdminDeps["processPriority"]>;
     shutdown?: () => void;
     instance?: NonNullable<AdminDeps["instance"]>;
     runCli?: (args: string[], timeout?: number) => Promise<{ ok: boolean; output: string }>;
@@ -958,9 +959,10 @@ test("GET /api/status returns a snapshot", async () => {
     const providers = body.providers as Record<string, { reachable: boolean }>;
     assert.ok("p" in providers);
     assert.equal(providers.p?.reachable, false); // nothing listening on :1
+    assert.deepEqual(body.processPriority, { supported: false, setting: "normal", current: null });
     assert.equal(typeof body.settings, "object");
     assert.equal(typeof body.cliVersion, "string");
-  });
+  }, { processPriority: () => ({ supported: false, setting: "normal", current: null }) });
 });
 
 // The Clients screen labels a model the router cannot search through, and only the router knows

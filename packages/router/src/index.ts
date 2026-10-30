@@ -33,6 +33,7 @@ import { allowLongSilences } from "./providers/retry.ts";
 import { assetsFingerprint, readLocalAssets, spawnSsh, syncRemoteAssets } from "./remote-host.ts";
 import { RemoteTunnels, proxyConnectHost } from "./remote-tunnel.ts";
 import { syncContextWindows } from "./context-windows.ts";
+import { applyProcessPriority } from "./process-priority.ts";
 
 // Startup timing. Claude Desktop routes *all* its traffic through us in picker mode, so every
 // second before the socket is open is a second the app cannot reach anything (ERR_PROXY_-
@@ -53,6 +54,7 @@ let configErrors: string[] = [];
 let reconcileProxyConfig: ((config: ReturnType<ConfigStore["get"]>) => void) | undefined;
 const store = new ConfigStore(undefined, (c, errors) => {
   configErrors = [...errors];
+  applyProcessPriority(c.processPriority, { log: line => (log ?? console).info(line) });
   reconcileProxyConfig?.(c);
   for (const e of errors) (log ?? console).warn(`config: ${e}`);
   for (const w of targetWarnings(c)) (log ?? console).warn(`config: ${w}`);
@@ -79,6 +81,7 @@ const store = new ConfigStore(undefined, (c, errors) => {
 });
 const cfg0 = store.get();
 log = new Logger(logFile, cfg0.log.maxBytes, cfg0.log.keep, !!process.env.CLAUDERIPPLE_ECHO || !logFile);
+applyProcessPriority(cfg0.processPriority, { log: line => log!.info(line) });
 const T_CONFIG = Date.now();
 
 const certs = new CertStore(home);

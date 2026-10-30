@@ -248,6 +248,7 @@ function taskOf(home: string, extra: Record<string, unknown> = {}): Record<strin
     restartInterval: "PT1M",
     executionTimeLimit: "PT0S",
     multipleInstances: 2,
+    priority: 4,
     allowStartIfOnBatteries: true,
     dontStopIfGoingOnBatteries: true,
     ...extra,

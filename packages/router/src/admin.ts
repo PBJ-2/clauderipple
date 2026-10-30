@@ -85,6 +85,7 @@ import { GROK_DEFAULT_URL, GROK_FALLBACK_MODELS, grokModelsFromListing } from ".
 import { GROK_WARNING, grokHeaders } from "./providers/grok/index.ts";
 import type { TunnelStatus } from "./remote-tunnel.ts";
 import { parsePowerChange, persistPowerChange, type PowerApi } from "./power.ts";
+import { processPriorityState, type ProcessPriorityState } from "./process-priority.ts";
 
 const MAX_BODY = 1024 * 1024;
 /** `/api/image` carries reference images inline, so it gets more room than a config save. */
@@ -118,6 +119,7 @@ export type AdminDeps = {
   log: Logger;
   stats: () => Stats;
   health: () => number;
+  processPriority?: () => ProcessPriorityState;
   providerHealth?: () => Record<string, ProviderExhaustion>;
   modelHealth?: ModelHealth["snapshot"];
   version: string;
@@ -893,6 +895,7 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
   return {
     version: deps.version,
     autoUpdate: deps.autoUpdater?.status() ?? { enabled: cfg.autoUpdate !== false, running: false },
+    processPriority: deps.processPriority?.() ?? processPriorityState(cfg.processPriority),
     readiness: { ready: problems.length === 0, problems },
     // The errors themselves, so a reader can name the line to fix rather than only "config".
     config: { errors: configErrors },

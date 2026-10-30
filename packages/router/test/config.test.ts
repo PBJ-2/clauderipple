@@ -3,9 +3,21 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ConfigStore, DEFAULTS, fastSwitches, providerFor, validate } from "../src/config.ts";
-import type { AnthropicCompatibleProvider, Config, GoogleProvider, OpenAiCompatibleProvider, Provider } from "../src/config.ts";
+import { ConfigStore, DEFAULTS, PROCESS_PRIORITIES, fastSwitches, providerFor, validate } from "../src/config.ts";
+import type { AnthropicCompatibleProvider, Config, GoogleProvider, OpenAiCompatibleProvider, ProcessPriority, Provider } from "../src/config.ts";
 import { Logger } from "../src/log.ts";
+
+test("validate accepts only the four process priority settings", () => {
+  assert.deepEqual(PROCESS_PRIORITIES, ["below-normal", "normal", "above-normal", "high"]);
+  for (const processPriority of PROCESS_PRIORITIES) {
+    assert.deepEqual(validate({ ...DEFAULTS, processPriority }), [], processPriority);
+  }
+  const message = 'processPriority must be "below-normal", "normal", "above-normal" or "high"';
+  for (const processPriority of ["realtime", "High", 1]) {
+    const config = { ...DEFAULTS, processPriority: processPriority as unknown as ProcessPriority };
+    assert.deepEqual(validate(config), [message]);
+  }
+});
 
 test("validate rejects an unusable Auto mode classifier target", () => {
   const providers = { p: { type: "chatgpt" as const } };

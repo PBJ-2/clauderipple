@@ -87,6 +87,7 @@ type TaskDefinition = {
   restartInterval?: string;
   executionTimeLimit?: string;
   multipleInstances?: number;
+  priority?: number;
   allowStartIfOnBatteries?: boolean;
   dontStopIfGoingOnBatteries?: boolean;
 };
@@ -128,9 +129,15 @@ export function taskDefinitionMatches(value: unknown, expected: { execute: strin
     task.restartInterval === "PT1M" &&
     task.executionTimeLimit === "PT0S" &&
     task.multipleInstances === 2 &&
+    task.priority === 4 &&
     task.allowStartIfOnBatteries === true &&
     task.dontStopIfGoingOnBatteries === true
   );
+}
+
+function taskDefinitionMatchesExceptPriority(value: unknown, expected: { execute: string; arguments: string; userId: string }): boolean {
+  if (!value || typeof value !== "object") return false;
+  return taskDefinitionMatches({ ...value, priority: 4 }, expected);
 }
 
 /**
@@ -162,6 +169,14 @@ export function renderLauncher(opts: { program: string; args: string[]; home: st
     `$out = ${ps(path.join(logDir, "launcher.log"))}`,
     `$err = ${ps(path.join(logDir, "launcher.err.log"))}`,
     "$quickFailures = 0",
+    // A task registered before -Priority 4 starts this at BelowNormal, and Start-Process hands that
+    // to the router (process-priority.ts has the measurement).
+    "try {",
+    "  $self = [System.Diagnostics.Process]::GetCurrentProcess()",
+    "  if ($self.PriorityClass -eq [System.Diagnostics.ProcessPriorityClass]::BelowNormal -or $self.PriorityClass -eq [System.Diagnostics.ProcessPriorityClass]::Idle) {",
+    "    $self.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::Normal",
+    "  }",
+    "} catch {}",
     "while ($true) {",
     "  $startedAt = Get-Date",
     `  $p = Start-Process -FilePath ${ps(opts.program)} -ArgumentList $routerArgs -WindowStyle Hidden -PassThru -Wait -RedirectStandardOutput $out -RedirectStandardError $err`,
@@ -207,7 +222,7 @@ export function readTaskDefinition(name = taskName(), deps: TaskDeps = {}): Task
       `if ($tasks.Count -eq 0) { 'null'; exit 0 }`,
       `if ($tasks.Count -ne 1) { throw 'ambiguous scheduled task name' }; $t = $tasks[0]`,
       `$a = @($t.Actions); $p = $t.Principal; $tr = @($t.Triggers); $s = $t.Settings`,
-      `[pscustomobject]@{ actionCount = $a.Count; execute = $a[0].Execute; arguments = $a[0].Arguments; userId = $p.UserId; runLevel = [int]$p.RunLevel; logonType = [int]$p.LogonType; triggerCount = $tr.Count; triggerType = $tr[0].CimClass.CimClassName; triggerUserId = $tr[0].UserId; restartCount = $s.RestartCount; restartInterval = [string]$s.RestartInterval; executionTimeLimit = [string]$s.ExecutionTimeLimit; multipleInstances = [int]$s.MultipleInstances; allowStartIfOnBatteries = $s.DisallowStartIfOnBatteries -eq $false; dontStopIfGoingOnBatteries = $s.StopIfGoingOnBatteries -eq $false } | ConvertTo-Json -Compress`,
+      `[pscustomobject]@{ actionCount = $a.Count; execute = $a[0].Execute; arguments = $a[0].Arguments; userId = $p.UserId; runLevel = [int]$p.RunLevel; logonType = [int]$p.LogonType; triggerCount = $tr.Count; triggerType = $tr[0].CimClass.CimClassName; triggerUserId = $tr[0].UserId; restartCount = $s.RestartCount; restartInterval = [string]$s.RestartInterval; executionTimeLimit = [string]$s.ExecutionTimeLimit; multipleInstances = [int]$s.MultipleInstances; priority = [int]$s.Priority; allowStartIfOnBatteries = $s.DisallowStartIfOnBatteries -eq $false; dontStopIfGoingOnBatteries = $s.StopIfGoingOnBatteries -eq $false } | ConvertTo-Json -Compress`,
     ].join("; "),
     deps,
   );
@@ -309,8 +324,10 @@ function installAgentLocked(opts: { program: string; args?: string[]; home: stri
   const script = renderTaskRegistration(name, user, execute, actionArgs);
   const r = invoke(script, deps);
   if (!r.ok) {
-    // Retain the pre-headless task only when its entire definition matches.
-    if (taskDefinitionMatches(existing, { execute: "powershell.exe", arguments: powershellArgs, userId: user })) return launcher;
+    // BelowNormal starved the listener under full CPU load on 2026-10-29. The rewritten launcher
+    // corrects that stale setting when E_ACCESSDENIED prevents replacing an otherwise exact task.
+    if (taskDefinitionMatchesExceptPriority(existing, { execute, arguments: actionArgs, userId: user })) return launcher;
+    if (taskDefinitionMatchesExceptPriority(existing, { execute: "powershell.exe", arguments: powershellArgs, userId: user })) return launcher;
     throw new Error(`Register-ScheduledTask failed: ${r.out}`);
   }
   return launcher;
@@ -323,7 +340,7 @@ export function renderTaskRegistration(name: string, user: string, execute: stri
     `$t = New-ScheduledTaskTrigger -AtLogOn -User ${ps(user)}`,
     // Limited: the router needs no elevation, and asking for it would put a UAC prompt at every logon.
     `$p = New-ScheduledTaskPrincipal -UserId ${ps(user)} -LogonType Interactive -RunLevel Limited`,
-    `$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 99 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew`,
+    `$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 99 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -Priority 4`,
     `Register-ScheduledTask -TaskName ${ps(name)} -Action $a -Trigger $t -Principal $p -Settings $s -Force | Out-Null`,
     `'ok'`,
   ].join("; ");

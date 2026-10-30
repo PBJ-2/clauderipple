@@ -369,6 +369,7 @@ async function refreshHealth() {
   modRedraw(details, [
     versionRow(),
     autoUpdateRow(),
+    priorityRow(),
     // Which files answer, and since when: the only way to see that an update actually replaced the router.
     ...(status.runtime ? [cell(t("health.runtime"), null, [el("span", { class: "cell-sub mono", text: status.runtime.router || "?" }), new Date(status.runtime.startedAt).toLocaleString()])] : []),
     el("div", { class: "row" }, [el("span", { class: "k", text: t("health.routes") }), el("span", { class: "v", text: String(status.routes) })]),
@@ -479,6 +480,46 @@ async function toggleAutoUpdate(enabled) {
     await refreshHealth();
     const current = document.querySelector('[data-key="auto-update"]');
     if (current) { current.disabled = !status.autoUpdate; current.checked = status.autoUpdate?.enabled !== false; }
+  }
+}
+
+// How much CPU priority the router and the phone host ask Windows for (config processPriority,
+// Normal unless set). Task Scheduler had started them below Normal, and a build holding every core
+// starved the router until an update could not reach it (2026-10-29). High puts ClaudeRipple ahead
+// of other programs, so choosing it asks first and the row says so while it is on.
+const PRIORITY_LABEL = { "below-normal": "priority.belowNormal", normal: "priority.normal", "above-normal": "priority.aboveNormal", high: "priority.high", idle: "priority.idle", realtime: "priority.realtime" };
+let prioritySaving = false;
+function priorityRow() {
+  const state = status.processPriority;
+  // Older routers do not report it, and only Windows has these levels.
+  if (!state || !state.supported) return null;
+  const items = ["below-normal", "normal", "above-normal", "high"].map((value) => ({ value, label: t(PRIORITY_LABEL[value]) }));
+  const select = modSelect("process-priority", items, state.setting, t("priority.label"), (value) => void savePriority(value, select));
+  select.disabled = prioritySaving;
+  const notes = [t("priority.help")];
+  if (state.setting === "high") notes.push(el("span", { class: "cell-sub warn-text", text: t("priority.highWarning") }));
+  // Task Manager or another program can change it underneath; say what is in effect.
+  if (state.current && state.current !== state.setting) notes.push(el("span", { class: "cell-sub warn-text", text: t("priority.current", { level: t(PRIORITY_LABEL[state.current]) }) }));
+  return cell(t("priority.label"), select, notes);
+}
+async function savePriority(value, select) {
+  const state = status.processPriority;
+  if (prioritySaving || !state || value === state.setting) return;
+  if (value === "high" && !confirm(t("priority.highConfirm"))) { select.value = state.setting; return; }
+  prioritySaving = true;
+  select.disabled = true;
+  try {
+    const next = await api("/api/config");
+    next.processPriority = value;
+    const out = await configRequest(next);
+    currentConfig = next;
+    state.setting = value;
+    configSaved(out, t("common.saved"));
+  } catch (error) {
+    toast(t("common.saveFailed"), true, error.message);
+  } finally {
+    prioritySaving = false;
+    await refreshHealth();
   }
 }
 function versionRow() {

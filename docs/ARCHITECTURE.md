@@ -2123,6 +2123,7 @@ plan unless marked otherwise.
 | A closed lid fell asleep although we were holding it, because another app writes the same bit: AlDente Pro's "Disable Sleep until Charge Limit" (`completelyDisableSleep`) sets it while AlDente charges below its limit and clears it when charging stops, so on 2026-10-30 the bit read 0 at 09:31:18 as its helper let go at the charge limit with AC still attached (our 15 s tick re-set it at 09:31:28 and logged "sleep was re-enabled outside ClaudeRipple"), and at 09:25:43.99 when a dock — power and two displays — was unplugged with the lid already closed, where macOS clamshell-slept at 09:25:44.44 (owner-reported, `pmset -g log` + ioreg + `defaults` reads) | A second writer of the bit is detected and named, not out-raced: a known-writer table (`SLEEP_SETTING_WRITERS`; now only AlDente's `completelyDisableSleep`) is read with `defaults` (no privilege, at most once a 60 s full tick, and at once after an outside re-enable); a match, or an outside re-enable with no known writer behind it and no boot since the hold (unknown cause, kept 24 h), is reported once in the log, `clauderipple power` and the laptop page, with the fix where one is known ("Stop Charging when Sleeping"). Re-asserting faster cannot win against an immediate clamshell sleep. AlDente's Calibration Mode and clamshell discharge disable sleep without this key, so those stay invisible (known limit). Tests: `awake.test.ts`. |
 | A new worker could not be spawned in a session that was open when it was added: the router wrote `zai-org-glm-5-3-flash.md` at 10:51:45, the MAMBO session (idle since 10:47) got its next message 26 s later, and the Agent tool answered "not found" at 10:52 and 11:12; after a `/clear` the mod rewrote `ripple:auto` to the worker and the CLI refused that too (11:24). The ClaudeRipple session, in use at the time, listed it by 10:55 (2026-10-23). CLI 2.1.308 polls `~/.claude/agents` every 2 s in use and 30 s after a minute idle; going back to 2 s rebuilds the watcher from the directory as it then is, and the catch-up compares only skills and commands, so a write in the last 30 s of idling is never read, and `/clear` keeps the process's list | Every sync that writes or removes a generated agent touches the generated files again `RETOUCH_AFTER_MS` (45 s) later (`agents.ts` `retouchLater`): any agent file's change makes a session reread all of them, and 45 s is past the idle poll. A session that already missed one is fixed the same way, by touching any file in `~/.claude/agents`. Tests: `agents.test.ts`. |
 | A routed request's `messages` array carried Anthropic-only shapes — a mid-conversation `role: "system"` message and `tool_addition`/`tool_removal` content blocks — and the compat layer cleaned only the top-level fields, so the vendor's Anthropic skin answered 400 `Invalid Anthropic Messages API request` on every turn once a SessionStart hook or a deferred MCP tool was in play (issue #92, CLI 2.1.308+, 2026-10-26) | A compat layer validates the **whole body** it forwards, `messages` included, not just the fields the CLI adds at the top level: a role an Anthropic-shaped vendor does not accept in `messages` is folded to `user` with the text untouched, a content block type only Anthropic defines is either converted into something the wire already has (a deferred tool's definition joins `tools`) or dropped, and a message left with no content goes whole. The request log counts each fold (`system_role×N`, `tool_addition×N`, `tool_removal×N`) so a vendor's next refusal can be read against what was sent. Same rule as the tool-schema row: what is forwarded must be valid for the wire it is forwarded to, not merely for the client that produced it. |
+| The router starved behind a build on Windows (2026-10-29, measured): the scheduled task had Task Scheduler's default priority 7, so conhost, the launcher and the router ran BelowNormal. With cargo and rustc holding every core at Normal, `/api/status` took 1-3 s; an update's probe got `ECONNREFUSED` from a router that was listening (a full accept queue); `install` skipped the version restart because `/api/status` gave no answer within 10 s; and `restart` refused the router as "another ClaudeRipple installation" because the 5 s PowerShell listener lookup timed out | The task is registered with `-Priority 4` (Normal), the launcher raises itself from BelowNormal or Idle to Normal before it starts the router, and the router applies `Config.processPriority` (Normal unless set) at start and on every config change. The listener lookup waits 15 s. Below Normal is now only the person's own choice. Tests: `process-priority.test.ts`, `schtasks-definition.test.ts`, `ui-priority.test.ts`. |
 
 ### Router-owned automatic updates (2026-10-21)
 
@@ -2158,6 +2159,25 @@ No remotely pushed command or live installation test is part of this feature's v
 
 Sources: `packages/router/src/autoupdate.ts`, `cli-control.ts`, `index.ts`, `admin.ts`, `config.ts`;
 `packages/app/src/update-model.ts`, `main.ts`; scheduler and tray decision tests.
+
+### Windows process priority (2026-10-29)
+
+`Config.processPriority` is `below-normal`, `normal`, `above-normal` or `high`, the Task Manager
+levels of those names; absent means `normal`. It applies on Windows only, since raising a priority
+elsewhere needs privileges; GET `/api/status` then reports `supported: false`. The router applies it
+right after its logger starts and again on every config change (`process-priority.ts`; a level
+already in effect is left alone and logs nothing). The phone host applies it when it starts and
+picks up a change at its next start. GET `/api/status` exposes `processPriority: { supported,
+setting, current, error? }`; `current` is what Windows reports now, which can also be `idle` or
+`realtime` when another program changed it. The dashboard's About view draws a menu from it: High
+asks before it is saved and keeps a warning on the row while it is on.
+
+The Task Scheduler registration (`-Priority 4`) and the launcher's raise give every start a Normal
+baseline before the router reads its config, so a router started from an older registration is not
+left below Normal, and a level below Normal is the router lowering itself on request.
+
+Sources: `packages/router/src/process-priority.ts`, `config.ts`, `admin.ts`, `index.ts`;
+`packages/cli/src/schtasks.ts`, `router-state.ts`; `packages/remote/src/main.ts`; `packages/ui/app.js`.
 
 ## 6. Blocked paths (measured, do not retry)
 

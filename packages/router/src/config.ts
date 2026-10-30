@@ -12,6 +12,9 @@ import { PRESETS } from "./presets.ts";
 import { hostProblem, portProblem } from "./remote-host.ts";
 import { ingressOnly } from "./targets.ts";
 
+export type ProcessPriority = "below-normal" | "normal" | "above-normal" | "high";
+export const PROCESS_PRIORITIES: readonly ProcessPriority[] = ["below-normal", "normal", "above-normal", "high"];
+
 export type ProviderModel = {
   id: string;
   name?: string;
@@ -444,6 +447,11 @@ export type CliModel = {
 export type Config = {
   /** Install new versions while idle. Omitted means enabled; hot-reloaded. */
   autoUpdate?: boolean;
+  /**
+   * Windows only. Absent means "normal". "below-normal" is what Task Scheduler gave the router
+   * before 0.12.23; "high" lets the router take CPU ahead of other programs.
+   */
+  processPriority?: ProcessPriority;
   listen: { host: string; port: number; /** OpenAI-compatible ingress port. Defaults to port + 2. */ openaiPort?: number };
   upstream: string;
   providers: Record<string, Provider>;
@@ -790,6 +798,9 @@ function foldSplitProviders(c: Config): Config {
 export function validate(c: Config): string[] {
   const errors: string[] = [];
   if (c.autoUpdate !== undefined && typeof c.autoUpdate !== "boolean") errors.push("autoUpdate must be true or false");
+  if (c.processPriority !== undefined && !PROCESS_PRIORITIES.includes(c.processPriority as ProcessPriority)) {
+    errors.push('processPriority must be "below-normal", "normal", "above-normal" or "high"');
+  }
   if (c.autoModeClassifier !== undefined) {
     const settings = c.autoModeClassifier;
     if (!settings || typeof settings !== "object") errors.push("autoModeClassifier must be an object");
