@@ -7,6 +7,7 @@ import path from "node:path";
 import { EventLog } from "./eventlog.ts";
 import { creationDateToFileTime, parseFileTime, processCommands, processSnapshot, sameFileTime, type ProcessSnapshot } from "./processes.ts";
 import { fileImages, messageContent, sessionFileTool, type ImageSink } from "./images.ts";
+import { narrationBody } from "./narration.ts";
 import { PERMISSION_MODES, type BackgroundTask, type EventBody, type Figures, type PermissionMode, type PlanStep, type SessionSummary, type ToolCall } from "./protocol.ts";
 import { WRAP_TOOL, wrapUpFields, type WrapUpFields } from "./wrap-up.ts";
 import { TaskPlan } from "./task-plan.ts";
@@ -246,7 +247,7 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
     const msg = str(r.uuid) || str(message.id);
     message.content.forEach((value, index) => {
       const block = object(value);
-      if (block?.type === "thinking" && typeof block.thinking === "string") bodies.push({ kind: "thinking", msg, block: index, text: block.thinking });
+      if (block?.type === "thinking" && typeof block.thinking === "string") bodies.push(narrationBody(block, msg, index) ?? { kind: "thinking", msg, block: index, text: block.thinking });
     });
     for (const value of message.content) {
       const b = object(value);

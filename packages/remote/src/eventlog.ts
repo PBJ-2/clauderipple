@@ -165,7 +165,7 @@ export class EventLog {
         if (["Edit", "MultiEdit", "Write"].includes(tool.name) && !tool.changes) tool.changes = changeCount(tool.name, toolInput(tool.input));
         if (tool.input !== undefined) tool.input = externalize(tool.input);
       }
-    } else if (event.kind === "tool_result" || event.kind === "thinking") event.text = externalize(event.text);
+    } else if (event.kind === "tool_result" || event.kind === "thinking" || event.kind === "narration") event.text = externalize(event.text);
     else if (event.kind === "permission") event.input = externalize(event.input);
     const line = fitLine(event);
     for (const { id, text } of blobs) writeFileAtomic(join(this.dir, "blobs", `${id}.txt`), text);

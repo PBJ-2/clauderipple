@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { EventLog } from "./eventlog.ts";
+import { narrationBody } from "./narration.ts";
 import { TaskPlan } from "./task-plan.ts";
 import { BackgroundActivity } from "./background-activity.ts";
 import { toolInput } from "./tool-details.ts";
@@ -2887,7 +2888,7 @@ export class Sessions {
         return;
       }
       case "assistant": {
-        const message = msg.message as { id?: string; model?: string; content?: { type: string; text?: string; thinking?: string; id?: string; name?: string; input?: Record<string, unknown> }[] } | undefined;
+        const message = msg.message as { id?: string; model?: string; content?: { type: string; text?: string; thinking?: string; signature?: string; id?: string; name?: string; input?: Record<string, unknown> }[] } | undefined;
         if (!message) return;
         if (parent) { this.subAssistant(r, live, parent, message); return; }
         this.flush(r.id, live);
@@ -2899,7 +2900,7 @@ export class Sessions {
           // SDK assistant messages can contain just one completed block: local index 0
           // is not necessarily the block's index in the original stream.
           const streamedIndex = cur.thinkingBlocks[cur.nextThinkingBlock++] ?? index;
-          this.append(r.id, { kind: "thinking", msg: id, block: streamedIndex, text: block.thinking });
+          this.append(r.id, narrationBody(block, id, streamedIndex) ?? { kind: "thinking", msg: id, block: streamedIndex, text: block.thinking });
         });
         const converted = messageContent(message.content, data => this.log(r.id).image(data), { cwd: r.cwd, ...(r.sdkSessionId ? { sessionId: r.sdkSessionId } : {}) });
         if (converted.text) cur.text += (cur.text ? "\n\n" : "") + converted.text;
@@ -3134,11 +3135,11 @@ export class Sessions {
     }
   }
 
-  private subAssistant(r: SessionRecord, live: Live, parent: string, message: { id?: string; model?: string; content?: { type: string; text?: string; thinking?: string; id?: string; name?: string; input?: Record<string, unknown> }[] }): void {
+  private subAssistant(r: SessionRecord, live: Live, parent: string, message: { id?: string; model?: string; content?: { type: string; text?: string; thinking?: string; signature?: string; id?: string; name?: string; input?: Record<string, unknown> }[] }): void {
     const log = this.subLog(r.id, `sub-${parent}`);
     if (!log) return;
     (message.content ?? []).forEach((block, index) => {
-      if (block.type === "thinking" && typeof block.thinking === "string") log.append({ kind: "thinking", msg: message.id ?? parent, block: index, text: block.thinking });
+      if (block.type === "thinking" && typeof block.thinking === "string") log.append(narrationBody(block, message.id ?? parent, index) ?? { kind: "thinking", msg: message.id ?? parent, block: index, text: block.thinking });
     });
     const converted = messageContent(message.content, data => this.log(r.id).image(data), { cwd: r.cwd, ...(r.sdkSessionId ? { sessionId: r.sdkSessionId } : {}) });
     const tools = (message.content ?? []).filter((b) => b.type === "tool_use" && b.id && b.name).map((b): ToolCall => ({ id: b.id!, name: b.name!, summary: summarize(b.name!, b.input ?? {}, r.cwd), input: JSON.stringify(b.input ?? {}, null, 2), ...sessionFileTool(b.name!, b.input ?? {}, { cwd: r.cwd, ...(r.sdkSessionId ? { sessionId: r.sdkSessionId } : {}) }, data => log.image(data)) }));

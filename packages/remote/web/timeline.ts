@@ -124,6 +124,13 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
         put({ type: "thinking", key, ver: `h${e.seq}`, msg: e.msg, text, streaming: e.delta === true, at: e.at });
         break;
       }
+      case "narration": {
+        // A progress sentence between tool calls is the model's words, drawn where it wrote them: the
+        // tool runs on either side stay separate, and the thinking that streamed here stops being live.
+        finishStream();
+        put({ type: "assistant", key: `n${e.msg}:${e.block}`, ver: `n${e.seq}`, text: e.text, streaming: false, tools: [], model: model ?? "", at: e.at });
+        break;
+      }
       case "delta": {
         const key = `a${e.msg}`;
         const prev = byKey.has(key) ? items[byKey.get(key)!] : undefined;
@@ -317,7 +324,8 @@ export function timelineItems(view: Pick<SessionView, "items" | "state">): Timel
       continue;
     }
     // As in the Claude app's default view, thinking is not drawn and does not split a run (most of it
-    // has its text withheld anyway). Only thinking still streaming at the very end shows, as a live line.
+    // has its text withheld anyway). Narration is not thinking at this point: it became an assistant
+    // row above. Only thinking still streaming at the very end shows, as a live line.
     if (item.type === "thinking") continue;
     if (item.type === "user" || item.type === "result" || item.type === "control") flushWrap();
     group = null;

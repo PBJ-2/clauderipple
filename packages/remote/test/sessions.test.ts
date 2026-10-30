@@ -7,7 +7,7 @@ import path from "node:path";
 import { setTimeout as delay, setImmediate as nextTick } from "node:timers/promises";
 import { PermissionQueue } from "../src/permissions.ts";
 import { MessageReceipts } from "../src/receipts.ts";
-import { reduce } from "../web/timeline.ts";
+import { reduce, timelineItems } from "../web/timeline.ts";
 import { sessionGroup, sidebarState } from "../web/sidebar.ts";
 import { INLINE_CAP } from "../src/protocol.ts";
 import type { Effort, SessionEvent } from "../src/protocol.ts";
@@ -17,6 +17,7 @@ import { transcriptEvents, type DesktopProcess, type SubagentState } from "../sr
 import type { CanUseTool, PermissionAnswer, QueryFn, SdkUserMessage, SessionsOptions } from "../src/sessions.ts";
 import { posixPaths } from "../../../test/capabilities.ts";
 import { claudeAppData } from "./app-data.ts";
+import { signatureOf } from "./narration-signature.ts";
 
 // Limits for a stalled test, not for a slow one: a passing test never waits them out. 4.5 s and 2 s
 // ran out on a loaded Windows CI runner while the host was still answering (2026-10-29, #98).
@@ -29,7 +30,7 @@ const router = {
   models: async () => [],
 } satisfies SessionsOptions["router"] & { models: () => Promise<never[]> };
 
-function scriptedQuery(script: { permission?: boolean; toolOutput?: unknown; images?: boolean; thinking?: boolean; sendFile?: string; failure?: { text: string; as: "result" | "throw" } } = {}, sdkId = "sdk-1") {
+function scriptedQuery(script: { permission?: boolean; toolOutput?: unknown; images?: boolean; thinking?: boolean; narration?: boolean; sendFile?: string; failure?: { text: string; as: "result" | "throw" } } = {}, sdkId = "sdk-1") {
   const options: Record<string, unknown>[] = [];
   const users: SdkUserMessage[] = [];
   const answers: PermissionAnswer[] = [];
@@ -48,10 +49,11 @@ function scriptedQuery(script: { permission?: boolean; toolOutput?: unknown; ima
           if (script.thinking) {
             // Two streamed indices, each finalized by an SDK message with local index zero.
             for (const index of [2, 4]) {
+              const signature = script.narration && index === 4 ? signatureOf("narration") : "private signature";
               yield { type: "stream_event", event: { type: "content_block_start", index, content_block: { type: "thinking" } } };
               yield { type: "stream_event", event: { type: "content_block_delta", index, delta: { type: "thinking_delta", thinking: `thought ${index}` } } };
-              yield { type: "stream_event", event: { type: "content_block_delta", index, delta: { type: "signature_delta", signature: "private signature" } } };
-              yield { type: "assistant", message: { id, model: "x", content: [{ type: "thinking", thinking: `thought ${index} complete`, signature: "private signature" }] } };
+              yield { type: "stream_event", event: { type: "content_block_delta", index, delta: { type: "signature_delta", signature } } };
+              yield { type: "assistant", message: { id, model: "x", content: [{ type: "thinking", thinking: `thought ${index} complete`, signature }] } };
             }
           }
           yield { type: "stream_event", parent_tool_use_id: null, event: { type: "content_block_delta", delta: { type: "text_delta", text: "po" } } };
@@ -357,6 +359,21 @@ test("thinking streams finalize at original block indices without exposing signa
   assert.deepEqual(thoughts.map(e => [e.block, e.text, e.delta === true]), [[2, "thought 2", true], [2, "thought 2 complete", false], [4, "thought 4", true], [4, "thought 4 complete", false]]);
   assert.ok(!JSON.stringify(stored).includes("private signature"));
   assert.deepEqual(reduce(stored).items.filter(i => i.type === "thinking").map(i => i.text), ["thought 2 complete", "thought 4 complete"]);
+});
+
+test("a narration block is stored as its own event and its streamed thinking tail does not stay on screen", async t => {
+  const f = fixture(t, { thinking: true, narration: true });
+  const id = await f.create();
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  const stored = f.sessions.log(id).readAfter(0).events;
+  const narrations = stored.filter(e => e.kind === "narration");
+  assert.deepEqual(narrations.map(e => [e.block, e.text]), [[4, "thought 4 complete"]]);
+  assert.ok(!JSON.stringify(stored).includes(signatureOf("narration")), "a signature never reaches the log");
+  const view = reduce(stored);
+  assert.deepEqual(view.items.filter(i => i.type === "thinking").map(i => [i.key, i.streaming]), [["hm1:2", false], ["hm1:4", false]]);
+  const rows = timelineItems(view);
+  assert.ok(rows.every(row => row.type !== "thinking"), "the thinking that narrated is not a live line");
+  assert.ok(rows.some(row => row.type === "assistant" && row.text === "thought 4 complete"));
 });
 
 test("a model plus effort change waits for writer exit and carries inputs accepted during restart", async t => {
