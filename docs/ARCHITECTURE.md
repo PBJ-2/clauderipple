@@ -1168,8 +1168,13 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
   ("No tool call found"), so such results are sent as user text.
 - **Usage snapshots.** The CLI snapshots `message.usage` per streamed content block,
   before `message_delta`; `message_start` therefore announces an input estimate
-  (char/4, floored by the last measured total for the conversation) so the app's
-  token counter and the CLI's context accounting are not zero.
+  so the app's token counter and the CLI's context accounting are not zero. Once
+  the conversation has been measured, the estimate is that measurement plus the
+  char/4 growth since (`providers/start-input.ts`); char/4 of the whole request is
+  used only before the first measurement or after the request shrank. Char/4 alone
+  must not come back: /context reconciles its Messages row to this figure while a
+  response streams, and a GPT-6.1 Sol chat measured at 281k read 648k (136% of its
+  475k window) on every streaming response (2026-10-30).
 
 - **Retired models (2026-10-29, #94).** Explicit `ModelDeprecated`, `model_deprecated`,
   or "Model … has been deprecated" on HTTP 404/410 records

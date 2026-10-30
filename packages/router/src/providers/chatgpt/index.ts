@@ -9,6 +9,7 @@ import { CredentialPool, retryAfterMs } from "../../pool.ts";
 import { ChatGptAccountPool, type ChatGptAccountSummary, type ChatGptCredential, type FetchLike } from "./accounts.ts";
 import { SseParser } from "./sse.ts";
 import { fetchWithRetry } from "../retry.ts";
+import { StartInputs } from "../start-input.ts";
 import { looksLikeAuth } from "../openai/index.ts";
 import { StreamMapper, conversationKey, estimateTokens, formatSse, serverToolNames, toResponsesRequest, toolNameRestoreMap, type AnthropicRequest, type TranslateOptions } from "./translate.ts";
 import { refusesReplayedReasoning } from "../../reasoning.ts";
@@ -733,8 +734,8 @@ export class ChatGptAdapter {
     return models;
   }
 
-  /** Last measured total input (uncached + cached) per conversation, for the next message_start estimate. */
-  private readonly lastInputByKey = new Map<string, number>();
+  /** Last measured input per conversation, for the next message_start estimate (start-input.ts). */
+  private readonly startInputs = new StartInputs();
 
   /**
    * The backend's `x-codex-turn-state` per conversation. Every response carries this opaque
@@ -747,14 +748,6 @@ export class ChatGptAdapter {
    * conversation is to us.
    */
   private readonly turnStateByKey = new Map<string, string>();
-
-  private rememberInput(key: string, u: { input_tokens: number; cache_read_input_tokens: number }): void {
-    const total = u.input_tokens + u.cache_read_input_tokens;
-    if (total > 0) {
-      this.lastInputByKey.set(key, total);
-      if (this.lastInputByKey.size > 500) this.lastInputByKey.delete(this.lastInputByKey.keys().next().value!);
-    }
-  }
 
   /** Troubleshooting aid (provider.debugDump): the failing exchange, secrets excluded (the request carries none). */
   private dump(status: number, anthropic: AnthropicRequest, upstreamReq: unknown, upstreamText: string): void {
@@ -1067,8 +1060,7 @@ export class ChatGptAdapter {
     let upstreamReq = toResponsesRequest(json, this.responsesOptions(carried, model, effort, true, options));
     let body = JSON.stringify(upstreamReq);
     const cacheKey = upstreamReq.prompt_cache_key;
-    // Input estimate for message_start: a conversation only grows, so the last measured total is a floor.
-    const startInput = Math.max(estimateTokens(json), this.lastInputByKey.get(cacheKey) ?? 0);
+    const startInput = this.startInputs.start(cacheKey, estimateTokens(json));
     const ac = new AbortController();
     const onClose = (): void => ac.abort();
     res.on("close", onClose);
@@ -1210,7 +1202,7 @@ export class ChatGptAdapter {
         for (const ev of parser.feed(decoder.decode(value, { stream: true }))) {
           const outEvents = mapper.feed(ev);
           if (mapper.rateLimits && mapper.rateLimits !== this.rateLimitsByAccount.get(credential.ownerId)) this.noteRateLimits(credential, mapper.rateLimits);
-          this.rememberInput(cacheKey, mapper.usage);
+          this.startInputs.note(cacheKey, mapper.usage);
           sendEvents(outEvents);
           if (mapper.isFinished) break;
         }

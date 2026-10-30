@@ -11,6 +11,7 @@ import { retryAfterMs } from "../../pool.ts";
 import { credentialHeaderValues, redactErrorText } from "../../redact.ts";
 import { SseParser } from "../chatgpt/sse.ts";
 import { fetchWithRetry } from "../retry.ts";
+import { StartInputs } from "../start-input.ts";
 import { estimateTokens, formatSse, OpenAiStreamMapper, toOpenAiRequest, type ChatRequest, type ResponsesRequest } from "./translate.ts";
 import { refusesReplayedReasoning, requiresThinkingReplay } from "../../reasoning.ts";
 import { PRESETS } from "../../presets.ts";
@@ -134,7 +135,7 @@ export class OpenAiCompatibleAdapter {
   private readonly log: Logger;
   private readonly hooks: OpenAiAdapterHooks;
   private readonly tag: string;
-  private readonly lastInputByKey = new Map<string, number>();
+  private readonly startInputs = new StartInputs();
 
   constructor(name: string, cfg: OpenAiCompatibleProvider, log: Logger, hooks: OpenAiAdapterHooks = {}) {
     this.name = name;
@@ -142,13 +143,6 @@ export class OpenAiCompatibleAdapter {
     this.log = log;
     this.hooks = hooks;
     this.tag = hooks.logTag ?? "openai";
-  }
-
-  private rememberInput(key: string, usage: { input_tokens: number; cache_read_input_tokens: number }): void {
-    const total = usage.input_tokens + usage.cache_read_input_tokens;
-    if (total <= 0) return;
-    this.lastInputByKey.set(key, total);
-    if (this.lastInputByKey.size > 500) this.lastInputByKey.delete(this.lastInputByKey.keys().next().value!);
   }
 
   /** Handle a fully-read Messages request. Model/effort have already been resolved by routing. */
@@ -213,7 +207,7 @@ export class OpenAiCompatibleAdapter {
     const redact = (text: string): string => redactErrorText(text, [...upstreamSecrets], 2000);
     // Same input floor behavior as the ChatGPT adapter: the CLI snapshots message_start before usage arrives.
     const key = JSON.stringify({ model, wire, system: json.system ?? "", user: json.messages.find((message) => message.role === "user")?.content ?? "" });
-    const startInput = Math.max(estimateTokens(json), this.lastInputByKey.get(key) ?? 0);
+    const startInput = this.startInputs.start(key, estimateTokens(json));
     const controller = new AbortController();
     const onClose = (): void => controller.abort();
     res.on("close", onClose);
@@ -318,7 +312,7 @@ export class OpenAiCompatibleAdapter {
         if (done) break;
         for (const event of parser.feed(decoder.decode(value, { stream: true }))) {
           const output = mapper.feed(event, wire);
-          this.rememberInput(key, mapper.usage);
+          this.startInputs.note(key, mapper.usage);
           if (wantStream) for (const anthropic of output) bytes += write(res, formatSse(anthropic));
           if (mapper.isFinished) break;
         }

@@ -24,6 +24,7 @@ import { CredentialPool, retryAfterMs } from "../../pool.ts";
 import { credentialHeaderValues, redactErrorText } from "../../redact.ts";
 import { SseParser } from "../chatgpt/sse.ts";
 import { fetchWithRetry } from "../retry.ts";
+import { StartInputs } from "../start-input.ts";
 import { estimateTokens, formatSse, GoogleStreamMapper, toGeminiRequest, type GeminiRequest } from "./translate.ts";
 import { antigravityBaseUrl, createTransport, credentialParts, googleBaseUrl, resolveApiKey, type GoogleTransport } from "./transport.ts";
 import { ThoughtSignatureStore, type ThoughtSignatureSink } from "./thoughtSignatures.ts";
@@ -262,7 +263,7 @@ export class GoogleAdapter {
   private readonly usage: GoogleUsage;
   /** Cooldowns and conversation stickiness, shared with the proxy's other credential pools. */
   private readonly pool: CredentialPool;
-  private readonly lastInputByKey = new Map<string, number>();
+  private readonly startInputs = new StartInputs();
   /** Thought signatures keyed by the tool_use id we minted; survives across turns of one process. */
   private readonly thoughtSignatures = new ThoughtSignatureStore();
   /** The account that answered last, for the dashboard's "active" mark. */
@@ -495,13 +496,6 @@ export class GoogleAdapter {
     return (this.pool.pick(this.name, all) as GoogleCredential | null) ?? all[0]!;
   }
 
-  private rememberInput(key: string, usage: { input_tokens: number; cache_read_input_tokens: number }): void {
-    const total = usage.input_tokens + usage.cache_read_input_tokens;
-    if (total <= 0) return;
-    this.lastInputByKey.set(key, total);
-    if (this.lastInputByKey.size > 500) this.lastInputByKey.delete(this.lastInputByKey.keys().next().value!);
-  }
-
   /** Handle a fully-read Messages request. Model/effort have already been resolved by routing. */
   async handle(req: http.IncomingMessage, res: http.ServerResponse, path: string, json: AnthropicRequest, model: string, effort: string | undefined, credential?: GoogleCredentialHandoff, options?: { kind?: RequestKind }): Promise<GoogleOutcome> {
     if (path.startsWith("/v1/messages/count_tokens")) {
@@ -543,7 +537,7 @@ export class GoogleAdapter {
     // The same input floor behavior as the other translated adapters: the CLI snapshots message_start
     // before usage arrives, so announce an estimate and correct it in message_delta.
     const key = conversationKey(json);
-    const startInput = Math.max(estimateTokens(json), this.lastInputByKey.get(key) ?? 0);
+    const startInput = this.startInputs.start(key, estimateTokens(json));
 
     const transport = createTransport(this.cfg.auth, {
       ...(this.cfg.apiKey ? { apiKey: this.cfg.apiKey } : {}),
@@ -775,7 +769,7 @@ export class GoogleAdapter {
           if (done) break;
           for (const raw of parser.feed(decoder.decode(value, { stream: true }))) {
             const output = mapper.feed(transport.unwrap(raw) as never);
-            this.rememberInput(key, mapper.usage);
+            this.startInputs.note(key, mapper.usage);
             for (const anthropic of output) bytes += write(res, formatSse(anthropic));
             if (mapper.isFinished) break;
           }
@@ -793,7 +787,7 @@ export class GoogleAdapter {
         whole += decoder.decode();
         for (const raw of parseWholeBody(whole, transport)) {
           mapper.feed(raw as never);
-          this.rememberInput(key, mapper.usage);
+          this.startInputs.note(key, mapper.usage);
         }
       }
       if (!mapper.isFinished) {
