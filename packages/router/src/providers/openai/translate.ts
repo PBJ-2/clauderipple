@@ -34,6 +34,8 @@ export type OpenAiTranslateOptions = {
   env?: { p: string; m: string };
   /** The provider's preset measured that it seals reasoning on request (presets.ts `sealedReasoning`). */
   sealedReasoning?: boolean;
+  /** Sent as `prompt_cache_key` where the preset asks for one (presets.ts `promptCacheKey`). */
+  promptCacheKey?: string;
   /** Filled in as the input is built: how many reasonings were replayed, and how many were not. */
   carried?: { replayed: number; undecodable: number };
   /** Names the reason a carrier was dropped. Absent in tests, where the counts are enough. */
@@ -96,6 +98,8 @@ export type ChatRequest = {
   temperature?: number;
   stop?: string[];
   reasoning_effort?: string;
+  /** The conversation, for a vendor that keys its prompt cache on it (presets.ts `promptCacheKey`). */
+  prompt_cache_key?: string;
   stream: true;
   stream_options: { include_usage: true };
 };
@@ -116,6 +120,8 @@ export type ResponsesRequest = {
    * to anyone else only once the conversation already carries their reasoning.
    */
   include?: "reasoning.encrypted_content"[];
+  /** The conversation, for a vendor that keys its prompt cache on it (presets.ts `promptCacheKey`). */
+  prompt_cache_key?: string;
   stream: true;
 };
 
@@ -392,6 +398,7 @@ export function toOpenAiRequest(req: AnthropicRequest, opts: OpenAiTranslateOpti
     if (typeof req.temperature === "number") out.temperature = req.temperature;
     if (Array.isArray(req.stop_sequences) && req.stop_sequences.every((value) => typeof value === "string")) out.stop = req.stop_sequences as string[];
     if (effort) out.reasoning_effort = effort;
+    if (opts.promptCacheKey) out.prompt_cache_key = opts.promptCacheKey;
     return out;
   }
 
@@ -423,6 +430,7 @@ export function toOpenAiRequest(req: AnthropicRequest, opts: OpenAiTranslateOpti
   if (typeof req.max_tokens === "number") out.max_output_tokens = Math.max(16, req.max_tokens);
   if (typeof req.temperature === "number") out.temperature = req.temperature;
   if (effort) out.reasoning = opts.sealedReasoning && opts.replay !== false ? { effort, summary: "auto" } : { effort };
+  if (opts.promptCacheKey) out.prompt_cache_key = opts.promptCacheKey;
   return out;
 }
 

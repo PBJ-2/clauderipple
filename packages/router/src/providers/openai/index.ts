@@ -179,6 +179,7 @@ export class OpenAiCompatibleAdapter {
       replay,
       env: { p: this.name, m: model },
       ...(PRESETS.find((entry) => entry.id === this.cfg.preset)?.sealedReasoning ? { sealedReasoning: true } : {}),
+      ...(PRESETS.find((entry) => entry.id === this.cfg.preset)?.promptCacheKey ? { promptCacheKey: conversationKey(json) } : {}),
       carried,
       log: (line) => this.log.info(`${this.tag} ${this.name}: ${line} (${model})`),
       ...promptAdditions(options?.kind ?? "turn", this.cfg),

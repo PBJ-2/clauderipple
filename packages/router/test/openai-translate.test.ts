@@ -735,3 +735,11 @@ test("documents reach both OpenAI wires as text, native PDF files or an unsuppor
   ]);
   assert.match(content[3]!.text!, /문서.*전달하지 못했습니다/);
 });
+
+test("a preset that keys its prompt cache on the conversation gets it on both wires, and nobody else does", () => {
+  const request: AnthropicRequest = { model: "m", max_tokens: 64, messages: [{ role: "user", content: "hi" }] };
+  for (const wire of ["chat", "responses"] as const) {
+    assert.equal((toOpenAiRequest(request, { model: "m", wire, promptCacheKey: "abc" }) as ChatRequest | ResponsesRequest).prompt_cache_key, "abc", wire);
+    assert.equal("prompt_cache_key" in toOpenAiRequest(request, { model: "m", wire }), false, `${wire}: a vendor that does not know the field may refuse it`);
+  }
+});

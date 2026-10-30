@@ -56,6 +56,11 @@ export type ProviderPreset = {
    * from a measured reply: a vendor that does not know the field may refuse the turn outright.
    */
   sealedReasoning?: boolean;
+  /**
+   * Send the conversation as `prompt_cache_key`, which the vendor routes its prompt cache by. Only
+   * where the vendor documents the field: one that does not know it may refuse the turn.
+   */
+  promptCacheKey?: boolean;
   verified: boolean;
   notes?: string;
   docsUrl: string;
@@ -214,6 +219,30 @@ export const PRESETS: ProviderPreset[] = [
     verified: true,
     notes: "The Anthropic skin passes through thinking blocks and native tool use.",
     docsUrl: "https://openrouter.ai/docs/cookbook/coding-agents/claude-code-integration",
+  },
+  // Docs: https://platform.openai.com/docs/api-reference/responses
+  //
+  // An API key, billed per token, beside the ChatGPT plan (`chatgpt`) that serves the same models
+  // through a sign-in. It never takes a model the plan also declares on a bare id: its models are
+  // reached by name, as the `<model>-openai` workers do (targets.ts `bareOwners`). Model discovery
+  // fills the list; `/models` also lists embedding, audio and image models, which are not ticked.
+  {
+    id: "openai",
+    kind: "openai-compatible",
+    name: "OpenAI API",
+    vendorUrl: "https://platform.openai.com/",
+    anthropicBaseUrl: "https://api.openai.com/v1",
+    authHeader: "authorization-bearer",
+    modelsUrl: "https://api.openai.com/v1/models",
+    modelsAuthHeader: "authorization-bearer",
+    wire: "responses",
+    fallbackModels: [],
+    effortLevels: ["low", "medium", "high", "xhigh"],
+    thinking: "none",
+    promptCacheKey: true,
+    verified: false,
+    notes: "Not yet checked against a live key: sealed reasoning stays off until a reply shows it.",
+    docsUrl: "https://platform.openai.com/docs/api-reference/responses",
   },
   // Docs: https://docs.x.ai/docs/guides/reasoning
   {
