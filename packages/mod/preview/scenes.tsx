@@ -272,7 +272,7 @@ const CONTEXT: SessionContextBreakdown = (() => {
     autoCompactThreshold: 144_000, isAutoCompactEnabled: true, apiUsage: null,
   }
 })()
-const CONTEXT_VIEW: ContextView = { breakdown: CONTEXT, basis: 'summary', busy: false, open: [], place: { cwd: '/work', home: '/home/me' } }
+const CONTEXT_VIEW: ContextView = { breakdown: CONTEXT, basis: 'summary', busy: false, precise: true, open: [], place: { cwd: '/work', home: '/home/me' } }
 
 const SCENES: Scene[] = [
   // The Context pane the band's context chip opens (2026-10-24): an estimate, a precise count under
@@ -280,6 +280,8 @@ const SCENES: Scene[] = [
   { name: 'context', columns: PANE, draw: (el, f) => renderContext(el, f, CONTEXT_VIEW, noop) },
   { name: 'context-busy-open', columns: PANE, draw: (el, f) => renderContext(el, f, { ...CONTEXT_VIEW, busy: true, open: ['skills'] }, noop) },
   { name: 'context-narrow', columns: PANE_NARROW, draw: (el, f) => renderContext(el, f, CONTEXT_VIEW, noop) },
+  // A routed model (a GPT chat): no precise count to offer (2026-10-30).
+  { name: 'context-routed', columns: PANE, draw: (el, f) => renderContext(el, f, { ...CONTEXT_VIEW, precise: false }, noop) },
   { name: 'context-wide', columns: 100, draw: (el, f) => renderContext(el, f, { ...CONTEXT_VIEW, basis: 'full' }, noop) },
   { name: 'flat-context', columns: PANE, skin: 'flat', draw: (el, f) => renderContext(el, f, CONTEXT_VIEW, noop) },
   { name: 'context-none', columns: PANE, draw: (el, f) => renderContext(el, f, { ...CONTEXT_VIEW, breakdown: null, error: 'count_tokens 529 overloaded' }, noop) },

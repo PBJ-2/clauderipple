@@ -49,6 +49,8 @@ export type ContextView = {
   basis: 'summary' | 'full'
   /** A precise count is under way. */
   busy: boolean
+  /** The token-count API counts this model (session.ts `countsPrecisely`); else no precise count is offered. */
+  precise: boolean
   /** Why the last precise count failed. */
   error?: string
   /** Sections shown whole. */
@@ -356,13 +358,13 @@ function headDrawn(el: Els, frame: Frame, view: ContextView, b: SessionContextBr
   const k = lookOf(frame)
   const L = frame.lang
   const label = view.busy ? t(L, 'context.refreshing') : t(L, view.basis === 'full' ? 'context.refreshAgain' : 'context.refresh')
-  const refresh = pill(el, frame, 'context-refresh', label, 'ghost', () => { if (!view.busy) actions.refresh() }, 'violet')
+  const refresh = view.precise ? pill(el, frame, 'context-refresh', label, 'ghost', () => { if (!view.busy) actions.refresh() }, 'violet') : null
   const over = b.totalTokens > b.rawMaxTokens
   // The model and how the count was made share a line while it fits beside the dial and the
   // controls; else each takes its own, so the second never starts with a stray "·".
   const model = displayText(b.model, DISPLAY.name)
   const basis = t(L, view.basis === 'full' ? 'context.precise' : 'context.estimate')
-  const sayCells = innerCells(frame) - Math.ceil(DIAL_PX / CELL_PX) - 4 - lookOf(frame).art.pill(label, 'ghost', 'violet').cells - 1 - CLOSE_CELLS
+  const sayCells = innerCells(frame) - Math.ceil(DIAL_PX / CELL_PX) - 4 - (refresh ? lookOf(frame).art.pill(label, 'ghost', 'violet').cells + 1 : 0) - CLOSE_CELLS
   const about = model && chOf(model + ' · ' + basis) > sayCells ? [model, basis] : [[model, basis].filter(Boolean).join(' · ')]
   return (
     <Box key="context-head" flexDirection="row" alignItems="center" columnGap={2} width="100%" minWidth={0}>
@@ -568,7 +570,7 @@ function contextText(el: Els, frame: Frame, view: ContextView, actions: ContextA
   const tone = textTone(frame.appearance)
   const buttons = (
     <Box key="buttons" flexDirection="row" flexWrap="wrap" columnGap={2}>
-      {b ? textButton(el, 'context-refresh', view.busy ? t(L, 'context.refreshing') : t(L, view.basis === 'full' ? 'context.refreshAgain' : 'context.refresh'), () => { if (!view.busy) actions.refresh() }, 'r') : null}
+      {b && view.precise ? textButton(el, 'context-refresh', view.busy ? t(L, 'context.refreshing') : t(L, view.basis === 'full' ? 'context.refreshAgain' : 'context.refresh'), () => { if (!view.busy) actions.refresh() }, 'r') : null}
       {textButton(el, 'context-close', t(L, 'settings.close'), actions.close, 'x')}
     </Box>
   )

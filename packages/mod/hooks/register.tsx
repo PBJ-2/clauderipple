@@ -14,7 +14,7 @@ import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom,
 import type { QuotaWindow } from './modes'
 import type { Spawn, WorkerFix } from './worker'
 import { afterPing, cacheMemoryKey, CACHE_MEMORY_PREFIX, laterMemo, liveContextTokens, nextMemo, restoreFromResume, savedMemory, shouldPing, staleMemory } from './cache'
-import { HEAVY_PERCENT, bandPriority, claudeLimitsFrom, claudeScopedFrom, coldAlert, contextWindow, modelCompactWindow, hotAlert, hottest, hotWindowMoved, keptAlert, routerLimitItems, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
+import { HEAVY_PERCENT, bandPriority, claudeLimitsFrom, claudeScopedFrom, coldAlert, contextWindow, countsPrecisely, modelCompactWindow, hotAlert, hottest, hotWindowMoved, keptAlert, routerLimitItems, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
 import type { ScopedLimit } from './session'
 import { COMPACT_SYSTEM, compactResult, serializeTranscript } from './compact'
 import { QUICK_PROMPT, wrapForNewChat } from './handoff'
@@ -2600,7 +2600,7 @@ export const register: Register = on => {
       const cwd = await $.session.cwd().catch(() => undefined)
       const error = full && !full.busy && same ? full.error : undefined
       return renderContext($.ui.resolve(e), frame, {
-        breakdown, basis: fresh ? 'full' : 'summary', busy: !!full?.busy, ...(error ? { error } : {}),
+        breakdown, basis: fresh ? 'full' : 'summary', busy: !!full?.busy, precise: countsPrecisely(await $.session.model()), ...(error ? { error } : {}),
         open: await read($, contextShowAll), place: { ...(cwd ? { cwd } : {}), home: await userHome($) },
       }, contextActions($)) as RenderElement
     } catch (error) { return contextRenderFailure($, e, error, frame) }

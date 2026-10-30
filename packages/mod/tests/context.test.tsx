@@ -76,7 +76,7 @@ const BREAKDOWN: SessionContextBreakdown = {
   apiUsage: null,
 }
 
-const VIEW: ContextView = { breakdown: BREAKDOWN, basis: 'summary', busy: false, open: [], place: { cwd: '/work', home: '/home/test' } }
+const VIEW: ContextView = { breakdown: BREAKDOWN, basis: 'summary', busy: false, precise: true, open: [], place: { cwd: '/work', home: '/home/test' } }
 
 function frameOf(surface: Surface, lang: Frame['lang'] = 'en', skin: Skin = 'deep', columns = 68): Frame {
   return { surface, columns, maxRows: 30, now: NOW, appearance: 'auto', skin, lang }
@@ -168,6 +168,20 @@ test('a section opened shows all its rows and folds again; a count under way tak
     await ui.unmount()
   }
   expect(calls).toEqual(['toggle:skills', 'toggle:skills'])
+})
+
+// 2026-10-30: a GPT chat's "precise" count was the router's characters-over-four, item by item.
+test('a routed model is offered no precise count, and the estimate stays labelled as one', async ($, on) => {
+  const { calls, actions } = recorder()
+  on('ui.render', { component: 'Pane', requestId: 'ctx-routed' }, ($, e) => renderContext($.ui.resolve(e), frameOf(e.surface, 'ko'), { ...VIEW, precise: false }, actions) as RenderElement)
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ plugin: 'test', surface, component: 'Pane', requestId: 'ctx-routed', props: paneProps(68), viewport: { columns: 68, rows: 40 } })
+    expect(await ui.find({ key: 'context-refresh' }), surface).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /로컬 추정치/ }), surface).toBeDefined()
+    await ui.press({ key: 'context-close' })
+    await ui.unmount()
+  }
+  expect(calls).toEqual(['close', 'close'])
 })
 
 test('with no breakdown the pane says so and keeps its way out; a failed count is said in plain words', async ($, on) => {

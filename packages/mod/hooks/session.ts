@@ -160,6 +160,16 @@ export function contextWindow(window: number, compactAt: number | null | undefin
   return compactAt !== null && compactAt !== undefined && compactAt > 0 && compactAt < window ? compactAt : window
 }
 
+/**
+ * Whether the token-count API counts this model's context: only Anthropic's own models. A routed
+ * model's count is ClaudeRipple's characters-over-four estimate, item by item (router
+ * `count_tokens`), so a "precise" count there is no more precise than the local estimate, and less
+ * so once the estimate's total is reconciled to the measured input (2026-10-30).
+ */
+export function countsPrecisely(model: string): boolean {
+  return /^claude-|^(?:opus|sonnet|haiku|fable|mythos)(?:[@[]|$)/.test(model)
+}
+
 /** Per-model effective window from the router; null also supports routers predating this field. */
 export function modelCompactWindow(body: unknown, model: string): number | null {
   const object = (v: unknown): Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {}
