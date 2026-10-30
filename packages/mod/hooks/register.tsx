@@ -2322,10 +2322,10 @@ export const register: Register = on => {
         if (ours && model && model !== selectedModel) {
           input = { ...input, model }
           // Consume a matching native marker so the router cannot put its alias back on the wire.
-          // Effort goes on the concrete id; [1m] stays there too (the marker grammar has no brackets).
+          // No `@level` on the concrete id: the router passes a claude-* id through byte for byte, so
+          // a suffix would reach Anthropic as part of the model name (and hide a trailing [1m]).
           if (marker && marker.name === selectedModel?.replace(/@[^@]*$/, '').replace(/\[1m\]$/, '')) {
-            input = { ...input, model: marker.level ? `${model.replace(/@[^@]*$/, '')}@${marker.level}` : model,
-              prompt: input.prompt.replace(MARKER, '').replace(/^\s*\n/, '') }
+            input = { ...input, model: model.replace(/@[^@]*$/, ''), prompt: input.prompt.replace(MARKER, '').replace(/^\s*\n/, '') }
           }
         }
       }

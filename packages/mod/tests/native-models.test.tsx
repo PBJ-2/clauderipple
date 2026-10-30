@@ -75,10 +75,10 @@ test('native explicit markers on auto dispatch a concrete id and are consumed', 
 })
 
 for (const annotation of ['', '[1m]']) {
-  test(`a direct native alias marker keeps ${annotation || 'default context'} and effort without a stale alias`, async ($, on) => {
+  test(`a direct native alias marker keeps ${annotation || 'default context'} and puts no effort suffix on the claude id`, async ($, on) => {
     const { sent } = boundaries(on)
     await $.agent.spawn({ ...SPAWN, model: `sonnet${annotation}`, prompt: '[[ripple: sonnet@high]]\nInspect.' })
-    expect(sent[0]?.model).toBe(`claude-sonnet-5-5${annotation}@high`)
+    expect(sent[0]?.model).toBe(`claude-sonnet-5-5${annotation}`)
     expect(sent[0]?.prompt).toBe('Inspect.')
   })
 }
