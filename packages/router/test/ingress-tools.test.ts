@@ -194,10 +194,19 @@ for (const kind of ["function", "custom"]) {
 
   test(`${kind} image size accepts 5 MiB and omits 5 MiB plus one byte`, () => {
     for (const size of [5 * 1024 * 1024, 5 * 1024 * 1024 + 1]) {
-      const data = Buffer.alloc(size).toString("base64");
+      const bytes = Buffer.alloc(size);
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes);
+      const data = bytes.toString("base64");
       assert.deepEqual(resultContent([{ type: "input_image", image_url: `data:image/png;base64,${data}` }]), size === 5 * 1024 * 1024
         ? [{ type: "image", source: { type: "base64", media_type: "image/png", data } }]
         : [{ type: "text", text: "[image omitted: unsupported source]" }]);
+    }
+  });
+
+  test(`${kind} image data that is not the declared format is omitted`, () => {
+    for (const data of [Buffer.from("not an image").toString("base64"), "AAAA", Buffer.from("GIF89a-but-png").toString("base64")]) {
+      assert.deepEqual(resultContent([{ type: "input_image", image_url: `data:image/png;base64,${data}` }]),
+        [{ type: "text", text: "[image omitted: unsupported source]" }]);
     }
   });
 
