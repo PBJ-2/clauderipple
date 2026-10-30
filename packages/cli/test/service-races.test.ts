@@ -9,9 +9,12 @@ import * as schtasks from "../src/schtasks.ts";
 
 function fixture(t: { after(fn: () => void): void }) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cr-service-race-"));
-  const keys = ["HOME", "CLAUDERIPPLE_LAUNCH_AGENTS_DIR", "XDG_CONFIG_HOME"] as const;
+  // USERPROFILE too: on Windows os.homedir() reads it, and the task lock lives under it. On the real
+  // home this file and ownership.test.ts shared one lock in parallel (Windows CI, 2026-10-29).
+  const keys = ["HOME", "USERPROFILE", "CLAUDERIPPLE_LAUNCH_AGENTS_DIR", "XDG_CONFIG_HOME"] as const;
   const before = keys.map(key => [key, process.env[key]] as const);
   process.env.HOME = root;
+  process.env.USERPROFILE = root;
   process.env.CLAUDERIPPLE_LAUNCH_AGENTS_DIR = path.join(root, "LaunchAgents");
   process.env.XDG_CONFIG_HOME = path.join(root, "xdg");
   t.after(() => {

@@ -121,6 +121,7 @@ function loadSave(stored: Record<string, unknown> = { providers }) {
     const classifierRow = (stage, saved) => { h.rows[stage] = saved ? JSON.stringify([saved.provider, saved.model]) : ""; return null; };
     const latestConfig = () => new Promise((resolve) => h.gets.push(() => resolve(currentConfig = clone(h.stored))));
     const configRequest = (next) => new Promise((resolve) => h.puts.push(() => { h.stored = clone(next); h.writes.push(clone(next)); resolve({}); }));
+    ${block("function isTargetProvider(", "function groupedModels(")}
     ${block("/** The two rows a setting shows", "// Claude Code refuses these")}
     ${block("function renderAutoClassifier(", "function clientPickerSelections(")}
     return { save: saveAutoClassifier, redraw: renderAutoClassifier };

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { OpenAiStreamMapper, toOpenAiRequest, type ChatRequest, type ResponsesRequest } from "../src/providers/openai/translate.ts";
 import { toolNameForResponses, toolNameRestoreMap, type AnthropicRequest } from "../src/providers/chatgpt/translate.ts";
 import { decodeEnvelope, encodeEnvelope } from "../src/reasoning.ts";
+import { promptAdditions } from "../src/identity.ts";
 import { SseParser } from "../src/providers/chatgpt/sse.ts";
 
 test("the SSE terminal preserves preceding usage and ignores trailing frames across every chunk boundary", () => {
@@ -222,6 +223,16 @@ test("responses SSE mapper emits a max-token response", () => {
 test("identity false leaves the system prompt as the caller wrote it; the addendum still follows", () => {
   const out = toOpenAiRequest(request, { ...options, wire: "chat", identity: false, instructionsAppend: "Answer in Korean." }) as ChatRequest;
   assert.equal(out.messages[0]?.content, "You are a coding agent.\n\nAnswer in Korean.");
+});
+
+test("an Auto mode classifier's system text stays exactly as sent", () => {
+  const system = "You are a security monitor for autonomous AI coding agents.\n\nJudge this action.";
+  const classifier: AnthropicRequest = { model: "claude-haiku-5-5", system, messages: [{ role: "user", content: "check" }] };
+  const additions = promptAdditions("auto-mode-classifier", { instructionsAppend: "Answer in Korean." });
+  const chat = toOpenAiRequest(classifier, { model: "grok", wire: "chat", ...additions }) as ChatRequest;
+  const responses = toOpenAiRequest(classifier, { model: "grok", wire: "responses", ...additions }) as ResponsesRequest;
+  assert.equal(chat.messages[0]?.content, system);
+  assert.equal(responses.instructions, system);
 });
 
 test("a provider that takes no reasoning effort is not told one", () => {

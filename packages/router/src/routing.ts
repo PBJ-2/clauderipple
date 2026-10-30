@@ -11,6 +11,13 @@
 //   Quoted anywhere else, a marker is prose (issue #13).
 
 import type { Config } from "./config.ts";
+import { declaredBy, ingressOnly, qualifiedModel, rawDeclaredBy, soleOwner } from "./targets.ts";
+export { qualifiedModel, declaredBy } from "./targets.ts";
+import { isWebFetchRequest } from "./webfetch.ts";
+import { webSearchQuery } from "./websearch.ts";
+
+/** What a request is, decided once from its body and path. The order below is the precedence. */
+export type RequestKind = "web-search" | "web-fetch" | "auto-mode-classifier" | "turn";
 
 export type Resolved = {
   provider: string;
@@ -18,11 +25,26 @@ export type Resolved = {
   effort: string | undefined;
   /** Human tag for the log line, e.g. "claude-opus-4-8->gpt-6-astra". */
   tag: string;
+  /** What kind of request this route serves. Adapters read it through `promptAdditions`. */
+  kind: RequestKind;
+  /** The model id the client asked for, as sent (for example "claude-opus-4-8"). Logs and failover name it. */
+  asked: string;
   /** Where this turn goes when the provider above has nothing usable left. Carried from the route. */
   fallbacks?: { provider: string; model: string; effort?: string }[];
   /** Spawn snapshot identity, for worker-only preflight and diagnostics. */
   ladderPick?: string;
 };
+
+export function requestKind(json: unknown, pathname: string): RequestKind {
+  if (!json || typeof json !== "object") return "turn";
+  const request = json as Record<string, unknown>;
+  if (pathname === "/v1/messages" && webSearchQuery(request) !== null) return "web-search";
+  if (pathname === "/v1/messages" && isWebFetchRequest(request)) return "web-fetch";
+  if (isAutoModeClassifier(request)) return "auto-mode-classifier";
+  return "turn";
+}
+
+export type Decision = { route: Resolved; refusal: null } | { route: null; refusal: string | null };
 
 const REMINDER = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
 // Anchored: the marker is honoured only at the very top of a user message. A subagent prompt starts
@@ -74,26 +96,37 @@ export function markerOverride(body: unknown, aliases: Record<string, string>): 
   return effort ? { model: model!, effort } : { model: model! };
 }
 
-export function resolve(model: unknown, body: unknown, cfg: Config): Resolved | null {
-  if (typeof model !== "string") return null;
+/**
+ * One pass over the rules: where this request goes, or why it cannot go anywhere. `refusal` is
+ * non-null only for a request that must be refused instead of passed through to Anthropic: never for
+ * a non-string model, and never when `route` is non-null.
+ */
+export function decide(model: unknown, body: unknown, cfg: Config, kind: RequestKind): Decision {
+  if (typeof model !== "string") return { route: null, refusal: null };
+  const routed = (route: Omit<Resolved, "kind" | "asked">): Decision => ({
+    route: { ...route, kind, asked: model },
+    refusal: null,
+  });
+
   // The engine's own AUTO_MODE_MODEL env var refuses Sonnet 5.5, Opus 5.5 and Opus 5 (CLI 2.1.310),
-  // so the target is chosen here. Match the classifier's system prompt, never quoted conversation
-  // text. Its decision and wire format remain the engine's; only the inference target changes.
-  if (cfg.autoModeClassifier && isAutoModeClassifier(body)) {
+  // so the target is chosen here. The request kind was matched against the classifier's system
+  // prompt before routing; its decision and wire format remain the engine's.
+  if (cfg.autoModeClassifier && kind === "auto-mode-classifier") {
     const settings = cfg.autoModeClassifier;
     const stage1 = settings.stage1 !== undefined && isClassifierStage1(body);
     const target = stage1 ? settings.stage1 : settings;
     // A side left out, or a first stage set to "native", falls through to the ordinary routing
     // below, exactly as if the setting were absent.
     if (target !== "native" && target?.provider !== undefined && target.model !== undefined) {
-      return {
+      return routed({
         provider: target.provider,
         model: target.model,
         effort: target.effort,
         tag: `${model}->${target.model} (auto-mode classifier${stage1 ? ", stage 1" : ""})`,
-      };
+      });
     }
   }
+
   let base = model;
   let effort: string | undefined;
   const at = model.indexOf("@");
@@ -102,62 +135,91 @@ export function resolve(model: unknown, body: unknown, cfg: Config): Resolved | 
     effort = model.slice(at + 1) || undefined;
   }
 
-  // Native Anthropic stays ingress-only unless the operator explicitly enables its OAuth account
-  // pool. That opt-in is what makes routing useful: the same Messages body goes to Anthropic under a
-  // selected account, with affinity and failover. Existing configs keep byte-for-byte passthrough.
-  const ingressOnly = (name: string): boolean => {
-    const provider = cfg.providers[name];
-    return provider?.type === "anthropic" && !provider.accountPool;
+  const marker = scanMarker(body);
+  const aliased = marker ? cfg.aliases[marker.name] : undefined;
+  const ov = markerOverride(body, cfg.aliases);
+  // The model the request names in the end: the marker's (through its alias), else the requested one.
+  const effective = ov?.model ?? base;
+  const hasDirect = (id: string): boolean => cfg.direct.some((d) => id.startsWith(d.prefix));
+
+  // Every way below of finding no route ends here, so passing through and refusing are decided by
+  // one set of rules, in this order.
+  const noRoute = (): Decision => {
+    const pass: Decision = { route: null, refusal: null };
+    const refuse = (refusal: string): Decision => ({ route: null, refusal });
+    // A Claude request still passes through, marker or not: the delegation markers ([[ripple:
+    // standard]], [[ripple: opus@high]]) sit on Claude workers and are no model of ours. Only a marker
+    // naming a model two providers declare is refused, since passing it on would run it on Claude (#94).
+    if (base.startsWith("claude-") && !(marker && rawDeclaredBy(effective, cfg).length > 1)) return pass;
+    if (effective.startsWith("claude-") && !qualifiedModel(effective, cfg)) return pass;
+    const qualified = qualifiedModel(effective, cfg);
+    if (qualified) return ingressOnly(cfg, qualified.provider) ? refuse(`provider "${qualified.provider}" is ingress-only`) : pass;
+    // A rule on the requested model decided. A prefix rule honours the marker, so its model counts
+    // only when it has no rule of its own; a slot ignores the marker. Either way the only null left is
+    // the ingress-only drop, which passes through.
+    if (hasDirect(base)) {
+      if (effective === base || hasDirect(effective)) return pass;
+    } else if (cfg.routes[base] || cfg.routes[base.replace(/-\d{8}$/, "")]) {
+      return pass;
+    }
+    // Otherwise the request would reach Anthropic and come back 404, which is what happened to a whole
+    // session on 2026-09-20: an agent file named `deepseek` resolved (through a missing alias) to a
+    // model no provider declared, and `PASS` sent thirty of them to Anthropic. Say which name failed.
+    const owners = declaredBy(effective, cfg);
+    if (owners.length > 1) {
+      return refuse(`"${effective}" is declared by two providers (${owners.join(", ")}); use ${owners.map((owner) => `"${owner}:${effective}"`).join(" or ")}, or add a route or direct rule`);
+    }
+    if (owners.length === 1) return ingressOnly(cfg, owners[0]!) ? refuse(`provider "${owners[0]}" is ingress-only`) : pass;
+    if (marker && !aliased) return refuse(`marker alias "${marker.name}" is not an alias and not an agent name`);
+    if (aliased) return refuse(`marker alias "${marker!.name}" resolves to "${aliased}", which no provider declares`);
+    return refuse(`no provider declares "${effective}"`);
   };
 
   // Explicit provider spelling selects that declaration, never a competing prefix rule (#94).
   const qualified = qualifiedModel(base, cfg);
   if (qualified) {
-    const ov = markerOverride(body, cfg.aliases);
     if (ov) {
-      const target = resolve(`${ov.model}@${ov.effort ?? effort ?? ""}`, {}, cfg);
-      return target ? { ...target, tag: `${model}->${target.model} (marker)` } : null;
+      const target = decide(`${ov.model}@${ov.effort ?? effort ?? ""}`, {}, cfg, "turn").route;
+      return target ? routed({ ...target, tag: `${model}->${target.model} (marker)` }) : noRoute();
     }
-    if (ingressOnly(qualified.provider)) return null;
-    return { ...qualified, effort, tag: `${model}->${qualified.model}` };
+    if (ingressOnly(cfg, qualified.provider)) return noRoute();
+    return routed({ ...qualified, effort, tag: `${model}->${qualified.model}` });
   }
 
   const direct = cfg.direct.find((d) => base.startsWith(d.prefix));
-  if (direct && ingressOnly(direct.provider)) return null;
+  if (direct && ingressOnly(cfg, direct.provider)) return noRoute();
   if (direct) {
-    const ov = markerOverride(body, cfg.aliases);
-    const finalModel = ov?.model ?? base;
     const finalEffort = ov?.effort ?? effort;
     // The provider follows the model the marker names, not the model the session runs on. A
     // `gpt-6-astra` session delegating to `muse` used to keep `chatgpt` as the provider and send
     // it `muse-spark-1.3-contributor`, which ChatGPT refuses (2026-09-20). The marker's model is
     // placed the way any requested model is: its own prefix rule, else its one declaring provider.
-    if (finalModel !== base) {
-      const qualified = qualifiedModel(finalModel, cfg);
-      if (qualified) return ingressOnly(qualified.provider) ? null : { ...qualified, effort: finalEffort, tag: `${model}->${qualified.model} (marker)` };
-      const ownDirect = cfg.direct.find((d) => finalModel.startsWith(d.prefix));
-      const provider = ownDirect ? ownDirect.provider : soleOwner(finalModel, cfg);
-      if (!provider || ingressOnly(provider)) return null;
-      return { provider, model: finalModel, effort: finalEffort, tag: `${model}->${finalModel} (marker)` };
+    if (effective !== base) {
+      const qualified = qualifiedModel(effective, cfg);
+      if (qualified) return ingressOnly(cfg, qualified.provider) ? noRoute() : routed({ ...qualified, effort: finalEffort, tag: `${model}->${qualified.model} (marker)` });
+      const ownDirect = cfg.direct.find((d) => effective.startsWith(d.prefix));
+      const provider = ownDirect ? ownDirect.provider : soleOwner(effective, cfg);
+      if (!provider || ingressOnly(cfg, provider)) return noRoute();
+      return routed({ provider, model: effective, effort: finalEffort, tag: `${model}->${effective} (marker)` });
     }
     // The log says when a marker decided: `claude-sonnet-5->gpt-6-astra` with no hint of why cost a
     // reporter twenty minutes (issue #13).
-    return { provider: direct.provider, model: finalModel, effort: finalEffort, tag: `${model}->${finalModel}${ov ? " (marker)" : ""}` };
+    return routed({ provider: direct.provider, model: effective, effort: finalEffort, tag: `${model}->${effective}${ov ? " (marker)" : ""}` });
   }
 
   // The app sends some slots with a dated id (`claude-haiku-4-5-20251001`) and others without
   // (`claude-opus-5`), while the GUI only ever offers the undated form. Match either.
   const route = cfg.routes[base] ?? cfg.routes[base.replace(/-\d{8}$/, "")];
   if (route) {
-    if (ingressOnly(route.provider)) return null;
-    return {
+    if (ingressOnly(cfg, route.provider)) return noRoute();
+    return routed({
       provider: route.provider,
       model: route.model,
       effort: effort ?? route.effort,
       tag: `${model}->${route.model}`,
       // Only a slot has somewhere else to go. A direct rule names one provider on purpose.
       ...(route.fallbacks?.length ? { fallbacks: route.fallbacks } : {}),
-    };
+    });
   }
 
   // No rule names this model. A provider that carries it in its own `models` list names it just as
@@ -166,36 +228,39 @@ export function resolve(model: unknown, body: unknown, cfg: Config): Resolved | 
   // written by hand, and why one config had eighteen of them (2026-09-19: seventeen of those
   // eighteen are exactly this case). Rules keep their priority — this only fills the gap they
   // leave, so nothing that routes today routes differently.
-  const ov = markerOverride(body, cfg.aliases);
-  const finalModel = ov?.model ?? base;
-  const markerTarget = qualifiedModel(finalModel, cfg);
-  if (markerTarget) return ingressOnly(markerTarget.provider) ? null : { ...markerTarget, effort: ov?.effort ?? effort, tag: `${model}->${markerTarget.model} (marker)` };
+  const markerTarget = qualifiedModel(effective, cfg);
+  if (markerTarget) return ingressOnly(cfg, markerTarget.provider) ? noRoute() : routed({ ...markerTarget, effort: ov?.effort ?? effort, tag: `${model}->${markerTarget.model} (marker)` });
   // A marker's target takes its own prefix rule even when the incoming Claude model had no rule.
   // Prefixes deliberately cover models not declared yet, so ownership alone cannot place it.
-  const ownDirect = ov ? cfg.direct.find((d) => finalModel.startsWith(d.prefix)) : undefined;
+  const ownDirect = ov ? cfg.direct.find((d) => effective.startsWith(d.prefix)) : undefined;
   if (ownDirect) {
-    if (ingressOnly(ownDirect.provider)) return null;
-    return { provider: ownDirect.provider, model: finalModel, effort: ov?.effort ?? effort, tag: `${model}->${finalModel} (marker)` };
+    if (ingressOnly(cfg, ownDirect.provider)) return noRoute();
+    return routed({ provider: ownDirect.provider, model: effective, effort: ov?.effort ?? effort, tag: `${model}->${effective} (marker)` });
   }
-  const owners = declaredBy(finalModel, cfg);
+  const owners = declaredBy(effective, cfg);
 
   // Two providers offering the same id is a question only the operator can answer (one config has
   // `deepseek-v4-pro` on both a direct DeepSeek mapping and OpenCode Go, and they are not the same
   // deal). Guessing would route someone's traffic to a vendor they did not choose, so an ambiguous
   // id keeps requiring the explicit rule it requires today.
-  if (owners.length !== 1) return null;
+  if (owners.length !== 1) return noRoute();
   const owner = owners[0]!;
 
   // An ingress-only provider declaring a model does not make it a target: it serves the OpenAI
-  // ingress with its own credentials (see `ingressOnly` above). This matters more here than
+  // ingress with its own credentials (see `ingressOnly` in targets.ts). This matters more here than
   // anywhere else — a native `anthropic` provider lists the Claude models, and auto-routing those
   // would hijack every Claude request in the session into a provider that answers 400 (ARCHITECTURE
   // §5). Counting it as an owner rather than skipping it is deliberate: if some other provider also
   // offered `claude-opus-5`, that is an ambiguity to be asked about, not a silent redirection of
   // Claude traffic to a third party.
-  if (ingressOnly(owner)) return null;
+  if (ingressOnly(cfg, owner)) return noRoute();
 
-  return { provider: owner, model: finalModel, effort: ov?.effort ?? effort, tag: `${model}->${finalModel}${ov ? " (marker)" : ""}` };
+  return routed({ provider: owner, model: effective, effort: ov?.effort ?? effort, tag: `${model}->${effective}${ov ? " (marker)" : ""}` });
+}
+
+/** `decide` for callers that have no path: agents, model scores, the OpenAI ingress. */
+export function resolve(model: unknown, body: unknown, cfg: Config): Resolved | null {
+  return decide(model, body, cfg, requestKind(body, "/v1/messages")).route;
 }
 
 export function isAutoModeClassifier(body: unknown): boolean {
@@ -224,100 +289,6 @@ export function isClassifierStage1(body: unknown): boolean {
   const stops = request?.stop_sequences;
   const max = request?.max_tokens;
   return Array.isArray(stops) && stops.length === 1 && stops[0] === "</block>" && typeof max === "number" && max < 8192;
-}
-
-/** The one provider declaring this id, or null when none or several do. */
-function soleOwner(id: string, cfg: Config): string | null {
-  const owners = declaredBy(id, cfg);
-  return owners.length === 1 ? owners[0]! : null;
-}
-
-/** A colon is a qualifier only when its prefix is a configured owner of the remaining id.
- * Otherwise the whole id (including Ollama's qwen3:8b) keeps its existing meaning. */
-export function qualifiedModel(id: string, cfg: Config): { provider: string; model: string } | null {
-  const base = id.split("@")[0]!;
-  const colon = base.indexOf(":");
-  if (colon <= 0) return null;
-  const provider = base.slice(0, colon);
-  const model = base.slice(colon + 1);
-  return Object.hasOwn(cfg.providers, provider) && rawDeclaredBy(model, cfg).includes(provider) ? { provider, model } : null;
-}
-
-/** Declared owners, including ingress-only providers. Qualified ids select one declared owner;
- * dated and undated forms match just as they do for slots. Never guess an ambiguous bare id. */
-export function declaredBy(id: string, cfg: Config): string[] {
-  const qualified = qualifiedModel(id, cfg);
-  return qualified ? [qualified.provider] : rawDeclaredBy(id.split("@")[0]!, cfg);
-}
-
-function rawDeclaredBy(id: string, cfg: Config): string[] {
-  const undated = id.replace(/-\d{8}$/, "");
-  const owners: string[] = [];
-  for (const [name, provider] of Object.entries(cfg.providers)) {
-    const models = provider.models;
-    if (!models?.length) continue;
-    if (models.some((m) => m.id === id || m.id === undated || m.id.replace(/-\d{8}$/, "") === undated)) owners.push(name);
-  }
-  return owners;
-}
-
-/**
- * Why `resolve` returned null, named, or null when the request is not ours to refuse.
- *
- * A model that resolves needs no explanation. A native Claude id is deliberately unrouted — it
- * passes through to Anthropic — so it is never a refusal either. Everything else reaching here is a
- * request that would otherwise be forwarded to Anthropic and come back 404, which is what happened
- * to a whole session on 2026-09-20: an agent file named `deepseek` resolved (through a missing
- * alias) to a model no provider declared, and `PASS` sent thirty of them to Anthropic.
- *
- * Pure: it decides and explains, it does not send.
- */
-export function unroutableReason(model: unknown, body: unknown, cfg: Config): string | null {
-  if (typeof model !== "string") return null;
-
-  const at = model.indexOf("@");
-  const base = at > 0 ? model.slice(0, at) : model;
-  const marker = scanMarker(body);
-
-  const aliased = marker ? cfg.aliases[marker.name] : undefined;
-  const effective = (aliased ?? (marker ? marker.name : base)).split("@")[0]!;
-  // A Claude request still passes through, marker or not: the delegation markers ([[ripple:
-  // standard]], [[ripple: opus@high]]) sit on Claude workers and are no model of ours. Only a marker
-  // naming a model two providers declare is refused, since passing it on would run it on Claude (#94).
-  if (base.startsWith("claude-") && !(marker && rawDeclaredBy(effective, cfg).length > 1)) return null;
-  if (effective.startsWith("claude-") && !qualifiedModel(effective, cfg)) return null;
-  const qualified = qualifiedModel(effective, cfg);
-  if (qualified) {
-    const provider = cfg.providers[qualified.provider]!;
-    return provider.type === "anthropic" && !provider.accountPool ? `provider "${qualified.provider}" is ingress-only` : null;
-  }
-  const hasDirect = (id: string): boolean => cfg.direct.some((d) => id.startsWith(d.prefix));
-
-  // Mirror `resolve`. A prefix rule on the requested model honours the marker: the marker's model is
-  // then placed by its own prefix rule or its one declaring provider, and a null from `resolve` there
-  // is a real "nowhere to send this". Without a marker, a prefix rule or a slot on the requested model
-  // decided, and a null can only be the ingress-only drop — pass through, do not refuse. A slot ignores
-  // the marker entirely.
-  if (hasDirect(base)) {
-    if (effective === base || hasDirect(effective)) return null;
-  } else if (cfg.routes[base] || cfg.routes[base.replace(/-\d{8}$/, "")]) {
-    return null;
-  }
-
-  const owners = declaredBy(effective, cfg);
-  if (owners.length > 1) {
-    return `"${effective}" is declared by two providers (${owners.join(", ")}); use ${owners.map(owner => `"${owner}:${effective}"`).join(" or ")}, or add a route or direct rule`;
-  }
-  if (owners.length === 1) {
-    const owner = owners[0]!;
-    const provider = cfg.providers[owner];
-    if (provider?.type === "anthropic" && !provider.accountPool) return `provider "${owner}" is ingress-only`;
-    return null; // resolve() would have routed this; nothing to refuse.
-  }
-  // Nothing declares it. Say which name failed, and whether a marker introduced it.
-  if (marker && !aliased) return `marker alias "${marker.name}" is not an alias and not an agent name`;
-  if (aliased) return `marker alias "${marker!.name}" resolves to "${aliased}", which no provider declares`;
-  return `no provider declares "${effective}"`;
 }
 
 /** Apply a resolution to a parsed Messages request body (mutates and returns it). */

@@ -39,9 +39,10 @@ import { desktopHandoff } from "./handoff.ts";
 import { windowsSidebarRoot } from "./sidebar.ts";
 import type { QueryFn } from "./sessions.ts";
 import { claudeBinary, claudeCodeLogin } from "../../cli/src/claude-auth.ts";
-import { homeDir } from "../../router/src/config.ts";
+import { ConfigStore, configPath as routerConfigPath, homeDir } from "../../router/src/config.ts";
 import { VERSION } from "../../router/src/version.ts";
 import { requestHostUpdate, refreshHostUpdate } from "./host-update.ts";
+import { applyProcessPriority } from "../../router/src/process-priority.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const out = (s: string): void => { process.stdout.write(s); };
@@ -125,6 +126,8 @@ function stampLines(stream: NodeJS.WriteStream): void {
 async function runHost(): Promise<void> {
   if (!process.stdout.isTTY) stampLines(process.stdout);
   if (!process.stderr.isTTY) stampLines(process.stderr);
+  const log = (line: string): void => { process.stderr.write(`${line}\n`); };
+  applyProcessPriority(new ConfigStore(routerConfigPath()).get().processPriority, { log });
   const dir = remoteHome();
   const cfg = configFromArgs(dir);
   const where = resolveBind(cfg.bind);
@@ -133,7 +136,6 @@ async function runHost(): Promise<void> {
   let server: HostServer | null = null;
   const claudePath = findClaude(cfg.claudePath);
   const power = new PowerHold();
-  const log = (line: string): void => { process.stderr.write(`${line}\n`); };
   // A VAPID subject must be an https: or mailto: URL; the relay is this host's one real https origin.
   const vapid = loadVapid(dir, cfg.relay?.startsWith("https:") ? cfg.relay : "mailto:ripple-host@clauderipple.invalid");
   let sessions: Sessions | null = null;

@@ -69,14 +69,23 @@ export function claudeSessionTemp(scope: SessionFileScope): string[] {
     // Observed with CLI 2.1.304: C:\\Users\\pbj → C--Users-pbj, under %TEMP%\\claude.
     // Authorize only the exact host-owned scope. Reparse points in its ancestors and ACLs
     // writable by another ordinary user fail closed; uid/mode bits cannot prove this on NTFS.
-    const temp = path.resolve(os.tmpdir());
-    const base = path.join(temp, "claude"), project = path.join(base, slug), session = path.join(project, scope.sessionId);
+    // The owner may be this user, SYSTEM or Administrators, the same principals the rules below
+    // trust: an elevated administrator's new folders belong to Administrators, not the user
+    // (GitHub's Windows runners run that way).
     try {
-      const chain = [temp, base, project, session];
+      // GitHub runners expose TEMP through an 8.3 alias. Use the native long form for ACL and
+      // identity checks, while returning the spelling the CLI used in its image references.
+      const temp = path.resolve(os.tmpdir());
+      const base = path.join(temp, "claude"), project = path.join(base, slug), session = path.join(project, scope.sessionId);
+      // The long form resolves a junction too, so TEMP itself is checked as spelled before that.
+      if (fs.lstatSync(temp).isSymbolicLink()) return [];
+      const nativeTemp = fs.realpathSync.native(temp);
+      const nativeBase = path.join(nativeTemp, "claude"), nativeProject = path.join(nativeBase, slug), nativeSession = path.join(nativeProject, scope.sessionId);
+      const chain = [nativeTemp, nativeBase, nativeProject, nativeSession];
       if (chain.some(dir => !fs.lstatSync(dir).isDirectory() || fs.lstatSync(dir).isSymbolicLink())) return [];
       const before = chain.map(dir => fs.lstatSync(dir, { bigint: true }));
       const quoted = chain.map(dir => `'${dir.replace(/'/g, "''")}'`).join(",");
-      const script = `$ErrorActionPreference='Stop'; $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; foreach($dir in @(${quoted})) { $acl=Get-Acl -LiteralPath $dir; if($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $sid) { exit 1 }; foreach($rule in $acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])) { if($rule.AccessControlType -eq 'Allow' -and ([long]$rule.FileSystemRights -band 852310) -ne 0 -and $rule.IdentityReference.Value -notin @($sid,'S-1-5-18','S-1-5-32-544')) { exit 1 } } }`;
+      const script = `$ErrorActionPreference='Stop'; $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; foreach($dir in @(${quoted})) { $acl=Get-Acl -LiteralPath $dir; if($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -notin @($sid,'S-1-5-18','S-1-5-32-544')) { exit 1 }; foreach($rule in $acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])) { if($rule.AccessControlType -eq 'Allow' -and ([long]$rule.FileSystemRights -band 852310) -ne 0 -and $rule.IdentityReference.Value -notin @($sid,'S-1-5-18','S-1-5-32-544')) { exit 1 } } }`;
       const env = windowsPowerShellEnv();
       execFileSync(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { env, stdio: "ignore", timeout: 5000, windowsHide: true });
       if (chain.some((dir, i) => {
@@ -99,9 +108,24 @@ export function claudeSessionTemp(scope: SessionFileScope): string[] {
 function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
+function pathKey(file: string): string {
+  const resolved = path.resolve(file);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+function samePath(a: string, b: string): boolean {
+  return pathKey(a) === pathKey(b);
+}
 function inside(root: string, file: string): boolean {
-  const relative = path.relative(root, file);
+  const relative = path.relative(pathKey(root), pathKey(file));
   return !!relative && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+function insideAllowedRoot(root: string, file: string): boolean {
+  if (inside(path.resolve(root), file)) return true;
+  try { return inside(fs.realpathSync.native(root), fs.realpathSync.native(file)); }
+  catch (error) {
+    if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return false;
+    throw error;
+  }
 }
 function secretPath(file: string): boolean {
   return file.split(/[\\/]/).some(name => /^(?:\.env(?:\..*)?|\.ssh|\.aws|\.gnupg|\.git|\.npmrc|\.netrc|\.pypirc|credentials(?:\..*)?|google-services\.json|id_(?:rsa|dsa|ecdsa|ed25519)(?:\..*)?)$/i.test(name) ||
@@ -170,24 +194,25 @@ function checkedPath(file: string, scope: SessionFileScope): { real: string; roo
   if (!file || file.includes("\0") || file.split(/[\\/]/).includes("..") || !path.isAbsolute(scope.cwd)) throw new Error("blocked");
   const absolute = path.resolve(scope.cwd, file);
   const roots = [scope.cwd, ...(scope.additionalDirectories ?? []), ...(scope.scratchpad ? [scope.scratchpad] : []), ...claudeSessionTemp(scope)];
-  const forbidden = new Set([path.parse(absolute).root, os.homedir(), path.join(os.homedir(), ".claude"), "/tmp", "/private/tmp", os.tmpdir()].map(p => path.resolve(p)));
+  const forbidden = new Set([path.parse(absolute).root, os.homedir(), path.join(os.homedir(), ".claude"), "/tmp", "/private/tmp", os.tmpdir()].map(pathKey));
   for (const root of [...forbidden]) {
-    try { forbidden.add(fs.realpathSync(root)); }
+    try { forbidden.add(pathKey(fs.realpathSync.native(root))); }
     catch (error) { if (!["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error; }
   }
-  const originalRoot = roots.find(root => path.isAbsolute(root) && !forbidden.has(path.resolve(root)) && inside(path.resolve(root), absolute));
+  const originalRoot = roots.find(root => path.isAbsolute(root) && !forbidden.has(pathKey(root)) && insideAllowedRoot(root, absolute));
   if (!originalRoot || fs.lstatSync(originalRoot).isSymbolicLink()) throw new Error("blocked");
   // Names below the allowed root only: a project folder called auth-service is not a secret.
   if (secretPath(path.relative(path.resolve(originalRoot), absolute))) throw new Error("blocked");
-  const root = fs.realpathSync(originalRoot);
-  if (forbidden.has(root)) throw new Error("blocked");
+  const root = fs.realpathSync.native(originalRoot);
+  if (forbidden.has(pathKey(root))) throw new Error("blocked");
   const real = path.join(root, path.relative(path.resolve(originalRoot), absolute));
   const chain = pathChain(root, real);
-  if (!inside(root, fs.realpathSync(absolute)) || fs.realpathSync(absolute) !== real) throw new Error("blocked");
+  const actual = fs.realpathSync.native(absolute);
+  if (!inside(root, actual) || !samePath(actual, real)) throw new Error("blocked");
   return { real, root, originalRoot, chain };
 }
 function unchanged(checked: ReturnType<typeof checkedPath>): boolean {
-  return fs.realpathSync(checked.originalRoot) === checked.root && fs.realpathSync(checked.real) === checked.real &&
+  return samePath(fs.realpathSync.native(checked.originalRoot), checked.root) && samePath(fs.realpathSync.native(checked.real), checked.real) &&
     checked.chain.every(({ file, stat }) => { const current = fs.lstatSync(file, { bigint: true }); return !current.isSymbolicLink() && sameIdentity(stat, current); });
 }
 /** Bounded read from one verified handle. Growth cannot allocate past the per-file cap. */

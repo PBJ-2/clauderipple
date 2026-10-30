@@ -116,7 +116,7 @@ test("Windows release (stop, uninstall, awake off, setup --remove): the journale
 test("status text says PC on Windows", () => {
   const s: PowerStatus = {
     platform: "win32",
-    awake: { mode: "on", applied: true, reason: "on", setup: "ok", battery: { percent: 70, onBattery: true }, thermal: "unknown", lidClosed: false, until: null },
+    awake: { mode: "on", applied: true, reason: "on", setup: "ok", battery: { percent: 70, onBattery: true }, thermal: "unknown", lidClosed: false, until: null, conflict: null },
     tether: { enabled: false, network: "wifi", state: "off", pinned: false, hotspotSsid: "", lastSwitch: null, lastProbe: null, hint: null },
   };
   const text = formatPower(s).join("\n");

@@ -7,6 +7,7 @@ import path from "node:path";
 import { GoogleAdapter, googleLooksLikeAuth, googleRetryDelayMs } from "../src/providers/google/index.ts";
 import { Logger } from "../src/log.ts";
 import type { AnthropicRequest } from "../src/providers/chatgpt/translate.ts";
+import { requestKind } from "../src/routing.ts";
 
 const seen: { path: string; headers: http.IncomingHttpHeaders; body: Record<string, unknown> }[] = [];
 let mode: "text" | "tool" | "cut" | "badkey" = "text";
@@ -60,7 +61,8 @@ const front = http.createServer((req, res) => {
   req.on("data", (chunk: Buffer) => chunks.push(chunk));
   req.on("end", () => {
     const json = JSON.parse(Buffer.concat(chunks).toString("utf8")) as AnthropicRequest;
-    void adapter.handle(req, res, req.url ?? "/v1/messages", json, "gemini-3-pro-preview", "high");
+    const requestPath = (req.url ?? "/v1/messages").split("?")[0] ?? "/v1/messages";
+    void adapter.handle(req, res, req.url ?? "/v1/messages", json, "gemini-3-pro-preview", "high", undefined, { kind: requestKind(json, requestPath) });
   });
 });
 const frontPort = await listen(front);
@@ -98,6 +100,28 @@ test("adapter streams text, carries the API key, and maps usage", async () => {
   assert.match(response.text, /"text":"there"/);
   assert.match(response.text, /"cache_read_input_tokens":30/);
   assert.match(response.text, /"stop_reason":"end_turn"/);
+});
+
+test("an Auto mode classifier's system text reaches the upstream exactly as sent", async () => {
+  mode = "text";
+  const system = "You are a security monitor for autonomous AI coding agents.\n\nJudge this action.";
+  const addendum = "Be brief.";
+  const classifier: AnthropicRequest = { model: "claude-haiku-5-5", stream: true, system, messages: [{ role: "user", content: "check" }] };
+  const ordinarySystem = "Judge this action.";
+  adapter = new GoogleAdapter("fake", {
+    type: "google", auth: "api-key", apiKey: "test-key", url: `http://127.0.0.1:${upstreamPort}`, instructionsAppend: addendum,
+  }, home, log);
+
+  const classifierResponse = await call(classifier);
+  assert.equal(classifierResponse.status, 200);
+  assert.equal(((seen.at(-1)!.body.systemInstruction as { parts: { text: string }[] }).parts[0]?.text), system);
+
+  const turnResponse = await call({ ...classifier, system: ordinarySystem });
+  assert.equal(turnResponse.status, 200);
+  assert.equal(
+    ((seen.at(-1)!.body.systemInstruction as { parts: { text: string }[] }).parts[0]?.text),
+    `You are gemini-3-pro-preview (reasoning effort: high), answering through Claude Code, a terminal-based coding agent.\n\n${ordinarySystem}\n\n${addendum}`,
+  );
 });
 
 // OpenCode Go's Gemini endpoint refuses a request without `x-opencode-session` (400

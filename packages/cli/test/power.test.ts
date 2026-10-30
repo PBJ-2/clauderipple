@@ -10,7 +10,7 @@ import type { SetupDeps } from "../src/awake-setup.ts";
 
 const STATUS: PowerStatus = {
   platform: "darwin",
-  awake: { mode: "working", applied: true, reason: "working: 1 model call running", setup: "ok", battery: { percent: 55, onBattery: false }, thermal: "normal", lidClosed: true, until: null },
+  awake: { mode: "working", applied: true, reason: "working: 1 model call running", setup: "ok", battery: { percent: 55, onBattery: false }, thermal: "normal", lidClosed: true, until: null, conflict: null },
   tether: { enabled: true, network: "hotspot", state: "hotspot-not-visible", pinned: false, hotspotSsid: "PBJ", lastSwitch: null, lastProbe: { at: "2026-10-20T03:00:00.000Z", ok: false, network: "wifi" }, hint: "Open Personal Hotspot" },
 };
 
@@ -30,6 +30,20 @@ test("status text names the state, the facts and the hint", () => {
   assert.match(text, /last probe FAILED/);
   assert.match(text, /→ Open Personal Hotspot/);
   assert.match(formatPower({ ...STATUS, awake: { ...STATUS.awake, setup: "needs-setup" } }).join("\n"), /needs setup: clauderipple awake setup/);
+});
+
+test("a conflict is named under the awake line in one line: the known app, the unknown cause, and an old router's string", () => {
+  const known = formatPower({ ...STATUS, awake: { ...STATUS.awake, conflict: { app: "aldente", name: "AlDente", at: "2026-10-20T03:00:00.000Z" } } }).join("\n");
+  assert.match(known, /^ {8}conflict: AlDente also changes the sleep setting$/m);
+  const unknown = formatPower({ ...STATUS, awake: { ...STATUS.awake, conflict: { app: null, name: null, at: "2026-10-20T03:00:00.000Z" } } }).join("\n");
+  assert.match(unknown, /^ {8}conflict: sleep was re-enabled outside ClaudeRipple at .+ by another app or a settings change$/m);
+  // A router of 0.12.22 sent the old string, which names the one app there was.
+  const old = formatPower({ ...STATUS, awake: { ...STATUS.awake, conflict: "aldente-disable-sleep" } } as unknown as PowerStatus).join("\n");
+  assert.match(old, /^ {8}conflict: AlDente also changes the sleep setting$/m);
+  // An older router sends no conflict field at all.
+  assert.doesNotMatch(formatPower(STATUS).join("\n"), /conflict:/);
+  const older = { platform: STATUS.platform, awake: { mode: STATUS.awake.mode }, tether: STATUS.tether } as unknown as PowerStatus;
+  assert.doesNotMatch(formatPower(older).join("\n"), /conflict:/);
 });
 
 function rig(answer: "router" | "down") {

@@ -7,7 +7,7 @@ import { chatgptModelWindow } from "./providers/chatgpt/windows.ts";
 import { claudeSettingsPath } from "./mod-settings.ts";
 import { effectiveCompactWindow, readCompactSettings, syncCompactWindows } from "../../cli/src/compact-windows.ts";
 import { readOwners } from "../../cli/src/owners.ts";
-import { resolvedModelWindow } from "./picker.ts";
+import { pickerWindowOverride, resolvedModelWindow } from "./picker.ts";
 
 export type ResolvedWindow = { model: string; provider: string | null; contextWindow: number | null; compactWindow: number | null };
 
@@ -43,10 +43,14 @@ export function contextWindowSnapshot(cfg: Config, natives: { id: string; contex
     if (!resolved.provider && declaredBy(base, cfg).length > 1) return;
     const route = cfg.routes[base] ?? cfg.routes[base.replace(/-\d{8}$/, "")];
     const live = chatgptModelWindow(cfg, id);
-    const value = route?.contextWindow ?? live ?? fallback;
+    // The window the operator set on the picker entry wins over the catalogue; a route window wins
+    // over both (2026-10-30). The catalogue's own figure is still reported below so the editor can
+    // prefill it as the default, whether or not it is the value in use.
+    const saved = pickerWindowOverride(cfg, base) ?? pickerWindowOverride(cfg, resolved.model);
+    const value = route?.contextWindow ?? saved ?? live ?? fallback;
     if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return;
     windows[id] = Math.floor(value);
-    if (live !== undefined && route?.contextWindow === undefined) catalogWindows[id] = live;
+    if (live !== undefined && route?.contextWindow === undefined) catalogWindows[id] = Math.floor(live);
   };
   for (const model of natives) put(model.id, model.contextWindow, true);
   for (const model of cfg.cli.extraModels) put(model.model, model.contextWindow ?? cfg.cli.autoCompactWindow);

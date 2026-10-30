@@ -7,6 +7,8 @@
 // identity depends on the model and the effort only, both fixed for a route, and the addendum is
 // configuration. Changing either costs one cache miss.
 
+import type { RequestKind } from "./routing.ts";
+
 export type IdentityOptions = {
   model: string;
   effort?: string | undefined;
@@ -14,6 +16,22 @@ export type IdentityOptions = {
   identity?: boolean | undefined;
   instructionsAppend?: string | undefined;
 };
+
+export type PromptAdditions = { identity: boolean; instructionsAppend?: string; imageHint?: string };
+
+/**
+ * What a routed request's system prompt may gain on its way to a provider. An Auto mode classifier
+ * request gains nothing: its prompt is the security check itself (ARCHITECTURE §2).
+ */
+export function promptAdditions(kind: RequestKind, provider: { identity?: boolean; instructionsAppend?: string }, imageHint?: string): PromptAdditions {
+  if (kind === "auto-mode-classifier") return { identity: false };
+  const addendum = provider.instructionsAppend?.trim();
+  return {
+    identity: provider.identity ?? true,
+    ...(addendum ? { instructionsAppend: addendum } : {}),
+    ...(imageHint !== undefined ? { imageHint } : {}),
+  };
+}
 
 /** The sentence put in front of the system prompt. Effort is named because a model cannot see its own setting. */
 export function identityLine(model: string, effort?: string): string {

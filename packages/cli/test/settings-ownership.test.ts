@@ -25,6 +25,7 @@ const { ownersPath, readOwners } = await import("../src/owners.ts");
 const { removeClientIntegrations } = await import("../src/integrations.ts");
 const { codexEnabled, codexHome, codexOff, codexOn, codexOwner, codexRemove, ingressPort } = await import("../src/codex.ts");
 const { applyAppProxy, currentAppProxy, removeAppProxy } = await import("../src/picker.ts");
+const { normalizeHome } = await import("../src/ownership.ts");
 const { withFileLock } = await import("../../router/src/locked-file.ts");
 const { claudeSettingsPath } = await import("../../router/src/mod-settings.ts");
 
@@ -358,7 +359,7 @@ test("a Codex provider block records the installation that wrote it", () => {
   process.env.CODEX_HOME = path.join(ctx.A, "codex");
   codexOn(18892, undefined, [], ctx.A);
   const text = fs.readFileSync(path.join(codexHome(), "config.toml"), "utf8");
-  assert.ok(text.includes(`# clauderipple-home: ${homeKey(ctx.A)}`), text);
+  assert.ok(text.includes(`# clauderipple-home: ${normalizeHome(ctx.A)}`), text);
   assert.equal(codexOwner(undefined, ctx.A).state, "ours");
   assert.equal(codexOwner(undefined, ctx.B).state, "other");
 });

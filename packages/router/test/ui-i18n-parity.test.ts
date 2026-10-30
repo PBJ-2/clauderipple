@@ -32,7 +32,8 @@ test("every dashboard language has the same keys as English", () => {
 test("a placeholder in one language is in all of them", () => {
   const i18n = loadI18n();
   const english = i18n.en!;
-  const vars = (text: string): string[] => (text.match(/\{\w+\}/g) ?? []).sort();
+  // A placeholder used twice in one sentence (ja "{app} も… {app} が…") still has to be present everywhere.
+  const vars = (text: string): string[] => [...new Set(text.match(/\{\w+\}/g) ?? [])].sort();
   for (const lang of LANGUAGES) {
     for (const key of Object.keys(english)) assert.deepEqual(vars(i18n[lang]![key]!), vars(english[key]!), `${lang} ${key}`);
   }

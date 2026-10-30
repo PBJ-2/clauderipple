@@ -51,7 +51,8 @@ import type { ModelHealth, ProviderExhaustion } from "./health.ts";
 import type { Stats } from "./proxy.ts";
 import type { RequestLog } from "./requestlog.ts";
 import { PRESETS, type ProviderPreset } from "./presets.ts";
-import { resolveCompatibleCaps } from "./compat.ts";
+import { answersWebSearch, effortLevels, targetWarnings } from "./targets.ts";
+export { effortLevels } from "./targets.ts";
 import { redactErrorText } from "./redact.ts";
 import { CHATGPT_FALLBACK_MODELS } from "./providers/chatgpt/catalog.ts";
 import { contextWindowSnapshot, syncContextWindows } from "./context-windows.ts";
@@ -80,10 +81,11 @@ import { ANTIGRAVITY_WARNING, staticAntigravityModels } from "./providers/google
 import { readGoogleAccounts, removeGoogleAccount, summarize as summarizeGoogleAccount, updateGoogleAccount } from "./providers/google/accounts.ts";
 import { GoogleOAuthSession, type GoogleOAuthState } from "./providers/google/login.ts";
 import { GROK_AUTH_HINT, grokAuthPath, grokHome, readGrokToken, sharedGrokAuth } from "./providers/grok/auth.ts";
-import { GROK_DEFAULT_URL, GROK_EFFORT_LEVELS, GROK_FALLBACK_MODELS, grokModelsFromListing } from "./providers/grok/catalog.ts";
+import { GROK_DEFAULT_URL, GROK_FALLBACK_MODELS, grokModelsFromListing } from "./providers/grok/catalog.ts";
 import { GROK_WARNING, grokHeaders } from "./providers/grok/index.ts";
 import type { TunnelStatus } from "./remote-tunnel.ts";
 import { parsePowerChange, persistPowerChange, type PowerApi } from "./power.ts";
+import { processPriorityState, type ProcessPriorityState } from "./process-priority.ts";
 
 const MAX_BODY = 1024 * 1024;
 /** `/api/image` carries reference images inline, so it gets more room than a config save. */
@@ -117,6 +119,7 @@ export type AdminDeps = {
   log: Logger;
   stats: () => Stats;
   health: () => number;
+  processPriority?: () => ProcessPriorityState;
   providerHealth?: () => Record<string, ProviderExhaustion>;
   modelHealth?: ModelHealth["snapshot"];
   version: string;
@@ -431,72 +434,12 @@ type ProbeRequest = {
   wire?: "chat" | "responses";
 };
 
-// The CLI's `--effort` takes the same five; Opus, Sonnet and Haiku 5.5 answered `xhigh` (requests.jsonl, 2026-10-14, #56).
-const ANTHROPIC_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
-const CHATGPT_DEFAULT_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
-
 type ChatgptLogin = { running: boolean; startedAt?: string; finishedAt?: string; ok?: boolean; output?: string };
 let chatgptLogin: ChatgptLogin = { running: false };
 /** The Claude subscription sign-in in progress (or the last one), for GET /api/claude-oauth. */
 let claudeOAuth: ClaudeOAuthSession | null = null;
 /** The Google (Antigravity) sign-in in progress (or the last one), for GET /api/google-login. */
 let googleOAuth: GoogleOAuthSession | null = null;
-/** Shared catalog for the GUI: model-specific values override provider defaults. */
-export function effortLevels(cfg: Config): { providers: Record<string, { default: string[]; models?: Record<string, string[]> }> } {
-  const providers: Record<string, { default: string[]; models?: Record<string, string[]> }> = {
-    anthropic: { default: ANTHROPIC_EFFORT_LEVELS },
-  };
-  for (const [name, provider] of Object.entries(cfg.providers)) {
-    if (provider.type === "chatgpt") {
-      // The backend's catalogue is the truth about which models exist and what each supports, but
-      // it lives behind a login and a network call, so the measured fallback list carries the
-      // per-model ladders (ultra on astra/sol/5.6 terra+sol, not on either Luna) and any config
-      // entries the user has saved override them.
-      const models: Record<string, string[]> = Object.fromEntries(
-        CHATGPT_FALLBACK_MODELS.filter((model) => model.effortLevels !== undefined).map((model) => [model.id, [...model.effortLevels!]]),
-      );
-      for (const model of provider.models ?? []) if (model.effortLevels !== undefined) models[model.id] = [...model.effortLevels];
-      providers[name] = { default: CHATGPT_DEFAULT_EFFORT_LEVELS, ...(Object.keys(models).length ? { models } : {}) };
-      continue;
-    }
-    const modelLevels = Object.fromEntries(
-      (provider.models ?? [])
-        .filter((model) => model.effortLevels !== undefined)
-        .map((model) => [model.id, [...model.effortLevels!]]),
-    );
-    if (provider.type === "openai-compatible") {
-      providers[name] = {
-        default: provider.caps?.reasoning === "effort" ? (provider.caps.effortLevels ?? []) : [],
-        ...(Object.keys(modelLevels).length ? { models: modelLevels } : {}),
-      };
-      continue;
-    }
-    if (provider.type === "google") {
-      // Gemini exposes its ladder per model (the probe fills `effortLevels`); there is no
-      // provider-wide default, so the union of what the models declared is the fallback.
-      const levels = [...new Set((provider.models ?? []).flatMap((model) => model.effortLevels ?? []))];
-      providers[name] = { default: levels, ...(Object.keys(modelLevels).length ? { models: modelLevels } : {}) };
-      continue;
-    }
-    if (provider.type === "anthropic") {
-      providers[name] = { default: ANTHROPIC_EFFORT_LEVELS };
-      continue;
-    }
-    if (provider.type === "grok") {
-      // The proxy's listing gives each model its ladder (the probe saves it); a model it has not
-      // described gets the common one, which is also what the adapter sends it.
-      providers[name] = { default: [...GROK_EFFORT_LEVELS], ...(Object.keys(modelLevels).length ? { models: modelLevels } : {}) };
-      continue;
-    }
-    const preset = provider.preset ? PRESETS.find((entry) => entry.id === provider.preset) : undefined;
-    providers[name] = {
-      default: resolveCompatibleCaps(preset ? { effortLevels: preset.effortLevels, thinking: preset.thinking, ...(preset.serverTools ? { serverTools: true } : {}) } : undefined, provider.caps).effortLevels,
-      ...(Object.keys(modelLevels).length ? { models: modelLevels } : {}),
-    };
-  }
-  return { providers };
-}
-
 /** One routed model's ladder, from the provider that declares it — what the picker's effort menu
  * should offer for it. Undefined when no provider declares the id: the menu is then left alone. */
 export function effortLevelsForModel(cfg: Config, modelId: string): string[] | undefined {
@@ -907,7 +850,7 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
         // and cites real pages, but the wire is OpenAI-shaped while its hits come back as Responses
         // events — a backend the router does not have, so a search still cannot go through it.
         // Naming the provider's own capability instead would be a promise the router cannot keep.
-        ...(providerCanSearch(name, cfg) ? { webSearch: true } : {}),
+        ...(answersWebSearch(cfg, name) ? { webSearch: true } : {}),
         // A provider whose plan searches on another endpoint does so for some models only.
         ...(() => {
           const models = (("models" in p && p.models) || []).map((m) => typeof m === "string" ? m : m.id).filter((id) => searchProviderFor(p, id));
@@ -952,6 +895,7 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
   return {
     version: deps.version,
     autoUpdate: deps.autoUpdater?.status() ?? { enabled: cfg.autoUpdate !== false, running: false },
+    processPriority: deps.processPriority?.() ?? processPriorityState(cfg.processPriority),
     readiness: { ready: problems.length === 0, problems },
     // The errors themselves, so a reader can name the line to fix rather than only "config".
     config: { errors: configErrors },
@@ -1009,26 +953,6 @@ function pickerTrust(): { caTrusted: boolean; appProxy: boolean } {
   }
   pickerTrustMemo = { at: now, value };
   return value;
-}
-
-/**
- * Whether this provider can actually run a web search — measured capability, not an assumption from
- * the vendor name. The rule is the router's own (`Proxy.canRunServerTools`, mirrored here because
- * that one is private to a live request): Anthropic runs its own server tools; an
- * `anthropic-compatible` provider only when its preset says it was measured doing so; a `chatgpt`
- * provider through its hosted search; an `openai-compatible` provider never — its web plugin is a
- * vendor extension, and OpenCode Go's silently ignores it, leaving the model to answer with invented
- * results. A configured `webSearch` backend is deliberately not counted here: it serves the search
- * for the session, but a model still cannot search by itself, which is what a slot points at.
- */
-function providerCanSearch(name: string, cfg: Config): boolean {
-  const p = cfg.providers[name];
-  if (!p) return false;
-  if (p.type === "chatgpt") return true;
-  if (p.type === "anthropic") return p.accountPool === true && p.auth === "claude-code";
-  if (p.type !== "anthropic-compatible") return false;
-  const preset = p.preset ? PRESETS.find((entry) => entry.id === p.preset) : undefined;
-  return resolveCompatibleCaps(preset ? { ...(preset.serverTools ? { serverTools: true } : {}) } : undefined, p.caps).serverTools;
 }
 
 /**
@@ -1888,11 +1812,13 @@ async function pickerModels(deps: AdminDeps): Promise<{ models: { id: string; na
 
 /**
  * Each model's context window for the phone and dashboard. ChatGPT-served models use the same
- * effective catalogue window as bootstrap/picker; an explicit route window still wins. Without a
- * catalogue window, the stored values retain their old precedence. Unknown is absent.
- * `catalogWindows` identifies values the picker window editor must not offer to override.
- * `resolvedWindows` binds a capacity (null when unknown) to its target/provider for usage readers;
- * unlike the legacy editor maps it never substitutes a native alias or global compaction window.
+ * effective resolution as bootstrap/picker: a window the operator saved on a picker entry wins, then
+ * the catalogue figure, and an explicit route window wins over both. Without a catalogue window, the
+ * stored values retain their old precedence. Unknown is absent. `catalogWindows` carries each
+ * catalogue-backed id's own figure — also when an override is in effect — for the picker editor's
+ * default; `windows` is the value actually resolved. `resolvedWindows` binds a capacity (null when
+ * unknown) to its target/provider for usage readers; unlike the legacy editor maps it never
+ * substitutes a native alias or global compaction window.
  */
 async function contextWindows(deps: AdminDeps): Promise<ReturnType<typeof contextWindowSnapshot>> {
   return contextWindowSnapshot(deps.config(), await claudeModelList(deps), deps.agentDir ? [deps.agentDir] : undefined);
@@ -2426,7 +2352,8 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         // before a request exists. So a GUI save has to write them to settings.json itself;
         // otherwise the Clients screen shows a choice that only a later `install` would honour.
         const slotWarning = syncModelSlotsForGui(parsed, deps.agentDir);
-        sendJson(res, 200, { ok: true, configRevision: configSnapshot(deps).configRevision, ...(slotWarning ? { warning: slotWarning } : {}) });
+        const warnings = [...(slotWarning ? [slotWarning] : []), ...targetWarnings(parsed)];
+        sendJson(res, 200, { ok: true, configRevision: configSnapshot(deps).configRevision, ...(warnings.length ? { warning: warnings.join("\n") } : {}) });
         return;
       }
       if (pathname === "/api/codex" && method === "GET") {

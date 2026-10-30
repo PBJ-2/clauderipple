@@ -38,6 +38,15 @@ export function formatPower(s: PowerStatus): string[] {
   if (a.thermal) facts.push(`thermal ${a.thermal}`);
   if (a.lidClosed !== null) facts.push(`lid ${a.lidClosed ? "closed" : "open"}`);
   if (facts.length) lines.push(`        ${facts.join(" · ")}`);
+  // A newer router sends an object (app, name, at) or null; an older one the bare string below, or
+  // nothing at all. The old string is read as the one app it named.
+  const conflict: unknown = a.conflict;
+  if (conflict === "aldente-disable-sleep") lines.push(`        conflict: AlDente also changes the sleep setting`);
+  else if (conflict && typeof conflict === "object") {
+    const c = conflict as { name?: unknown; at?: unknown };
+    if (typeof c.name === "string" && c.name !== "") lines.push(`        conflict: ${c.name} also changes the sleep setting`);
+    else if (typeof c.at === "string" && !Number.isNaN(Date.parse(c.at))) lines.push(`        conflict: sleep was re-enabled outside ClaudeRipple at ${clock(c.at)} by another app or a settings change`);
+  }
   if (!t.enabled) lines.push(`tether  off${t.state === "unsupported" ? " (not supported here)" : ""}`);
   else {
     lines.push(`tether  on · ${t.network} · ${t.state}${t.pinned ? " (pinned)" : ""}${t.hotspotSsid ? ` · hotspot "${t.hotspotSsid}"` : ""}`);

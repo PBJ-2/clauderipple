@@ -19,7 +19,8 @@ import { SseParser } from "../providers/chatgpt/sse.ts";
 import { ingressModels } from "./models.ts";
 import { requestId, type RequestLog, type RequestRecord, type RequestUsage } from "../requestlog.ts";
 import { credentialHeaderValues, redactErrorText } from "../redact.ts";
-import { CLAUDE_CODE_IDENTITY, fromClaudeCodeToolName, nativeAnthropicHeaders, toClaudeCodeToolName, type ClaudeCodeCredentialReaders } from "../providers/anthropic.ts";
+import { CLAUDE_CODE_IDENTITY, nativeAnthropicHeaders, type ClaudeCodeCredentialReaders } from "../providers/anthropic.ts";
+import { ToolTranslation, ToolTranslationError } from "./tools.ts";
 import { ClaudeAccountAuthPool } from "../providers/anthropic-account-pool.ts";
 import { ObservedClaudeCodeAuth } from "../providers/anthropic-observed.ts";
 import type { ChatGptAdapter } from "../providers/chatgpt/index.ts";
@@ -382,7 +383,7 @@ export class OpenAiIngress {
       // Unmapped models default to the native `anthropic` provider when one is configured, so a
       // Codex user can name any Claude model directly (`-m claude-sonnet-5`) without a mapping.
       const fallback = Object.entries(cfg.providers).find(([, p]) => p.type === "anthropic");
-      const route = explicit ?? (fallback && requested ? { provider: fallback[0], model: requested, effort: undefined, tag: `${requested}->${requested}` } : null);
+      const route = explicit ?? (fallback && requested ? { provider: fallback[0], model: requested, effort: undefined, tag: `${requested}->${requested}`, kind: "turn" as const, asked: requested } : null);
       if (!route) {
         const bytes = sendJson(res, 400, openAiError(`No ClaudeRipple route for model ${requested || "(missing)"}`, "invalid_request_error", "model_not_found"));
         finish(400, bytes);
@@ -407,30 +408,30 @@ export class OpenAiIngress {
       const native = provider.type === "anthropic";
       const prefix = native && provider.auth === "claude-code" ? CLAUDE_CODE_IDENTITY : undefined;
       const compaction = path === "/v1/responses" && hasCompactionTrigger(body);
+      const translation = new ToolTranslation(body, !!prefix, (diagnostic) => {
+        this.deps.log.warn(`OPENAI ingress tool omitted: ${JSON.stringify(diagnostic)}`);
+      });
       const anthropic = path === "/v1/responses" ? responsesToAnthropic(body, route.model, prefix, () => {
         this.deps.log.warn("OPENAI ingress: ignored foreign compaction item; encrypted_content is not a ClaudeRipple summary");
-      }) : chatToAnthropic(body, route.model, prefix);
-      const wire = native ? anthropic as unknown as Json : sanitizeForCompatible(anthropic as unknown as Json, resolveCompatibleCaps(
+      }, translation, native) : chatToAnthropic(body, route.model, prefix, translation);
+      const wire: Json = native ? anthropic : sanitizeForCompatible(anthropic, resolveCompatibleCaps(
         provider.preset ? (() => { const preset = PRESETS.find((entry) => entry.id === provider.preset); return preset ? { effortLevels: preset.effortLevels, thinking: preset.thinking } : undefined; })() : undefined,
         provider.caps,
       )).json;
-      if (native && provider.auth === "claude-code" && Array.isArray(wire.tools)) {
-        wire.tools = wire.tools.map((raw) => {
-          const tool = raw as Json;
-          return typeof tool.name === "string" ? { ...tool, name: toClaudeCodeToolName(tool.name) } : tool;
-        });
-        const choice = wire.tool_choice as Json | undefined;
-        if (choice?.type === "tool" && typeof choice.name === "string") wire.tool_choice = { ...choice, name: toClaudeCodeToolName(choice.name) };
-      }
       const stream = body.stream === true;
       wire.stream = stream;
       record = { kind: "messages", source: requested, target: route.model, provider: route.provider, ...(route.effort ? { effort: route.effort } : {}), stream };
       const kindNote = `openai-ingress ${path === "/v1/responses" ? "responses" : "chat"}`;
-      const outcome = await this.forward(res, provider, wire, route.model, path === "/v1/chat/completions", stream, compaction, (done) => { terminal = { ...done, note: kindNote }; });
+      const outcome = await this.forward(res, provider, wire, route.model, path === "/v1/chat/completions", stream, compaction, translation, (done) => { terminal = { ...done, note: kindNote }; });
       finish(outcome.status, outcome.bytes, { ...(outcome.usage ? { usage: outcome.usage } : {}), ...(outcome.stopReason ? { stopReason: outcome.stopReason } : {}), note: `${kindNote}${outcome.note ? `; ${outcome.note}` : ""}` });
     } catch (error) {
       if (completed) return; // already recorded (e.g. client closed after the terminal event)
       this.deps.log.warn(`OPENAI ingress error: ${(error as Error).message}`);
+      if (error instanceof ToolTranslationError && !res.headersSent) {
+        const bytes = sendJson(res, 400, openAiError(error.message));
+        finish(400, bytes);
+        return;
+      }
       if (!res.headersSent) {
         const bytes = sendJson(res, 502, openAiError(`Anthropic-compatible upstream unreachable: ${(error as Error).message}`, "api_error"));
         finish(502, bytes);
@@ -441,7 +442,7 @@ export class OpenAiIngress {
     }
   }
 
-  private async forward(res: http.ServerResponse, provider: AnthropicCompatibleProvider | AnthropicProvider, wire: Json, model: string, chat: boolean, stream: boolean, compaction: boolean, onTerminal?: (outcome: Outcome) => void): Promise<Outcome> {
+  private async forward(res: http.ServerResponse, provider: AnthropicCompatibleProvider | AnthropicProvider, wire: Json, model: string, chat: boolean, stream: boolean, compaction: boolean, translation: ToolTranslation, onTerminal?: (outcome: Outcome) => void): Promise<Outcome> {
     const native = provider.type === "anthropic";
     const upstream = new URL(native ? (this.deps.nativeUpstream ?? "https://api.anthropic.com") : provider.url);
     const protocol = upstream.protocol === "https:" ? "https:" : "http:";
@@ -481,7 +482,7 @@ export class OpenAiIngress {
       const mapped = httpStatusError(response.statusCode ?? 502, safeText);
       return { status: mapped.status, bytes: sendJson(res, mapped.status, mapped.error), note: `upstream ${response.statusCode ?? 0}` };
     }
-    const mapper = new ResponsesEventMapper(model, native && provider.auth === "claude-code" ? fromClaudeCodeToolName : undefined, compaction);
+    const mapper = new ResponsesEventMapper(model, translation, compaction);
     let bytes = 0;
     const writeResponses = (events: Json[]): void => {
       for (const event of events) bytes += Buffer.byteLength(formatSse(event)), res.write(formatSse(event));
@@ -505,7 +506,7 @@ export class OpenAiIngress {
               if (stream) write(mapped);
               if (stream && mapped.some((e) => e.type === "response.completed")) {
                 if (chat) { bytes += Buffer.byteLength("data: [DONE]\n\n"); res.write("data: [DONE]\n\n"); }
-                onTerminal?.({ status: 200, bytes, usage: usage(mapper), stopReason: mapper.output.some((item) => item.type === "function_call") ? "tool_use" : "end_turn" });
+                onTerminal?.({ status: 200, bytes, usage: usage(mapper), stopReason: mapper.output.some((item) => item.type === "function_call" || item.type === "custom_tool_call") ? "tool_use" : "end_turn" });
               }
             }
           } catch (error) {
@@ -539,6 +540,6 @@ export class OpenAiIngress {
       const result = chat ? responsesToChatCompletion(mapper) : mapper.response("completed");
       bytes = sendJson(res, 200, result);
     }
-    return { status: 200, bytes, usage: usage(mapper), stopReason: mapper.output.some((item) => item.type === "function_call") ? "tool_use" : "end_turn" };
+    return { status: 200, bytes, usage: usage(mapper), stopReason: mapper.output.some((item) => item.type === "function_call" || item.type === "custom_tool_call") ? "tool_use" : "end_turn" };
   }
 }

@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DEFAULTS, providerFor, type Config } from "../src/config.ts";
-import { declaredBy, qualifiedModel, resolve, rewriteBody, unroutableReason } from "../src/routing.ts";
+import { decide, declaredBy, qualifiedModel, resolve, rewriteBody } from "../src/routing.ts";
 import { syncAgentFiles, withAgentAliases } from "../src/agents.ts";
 import { effortLevelsForModel, startAdmin, type ModOptions } from "../src/admin.ts";
 import { Logger } from "../src/log.ts";
@@ -35,7 +35,7 @@ test("qualified ids select their declaration, preserve date/effort, and send onl
       assert.deepEqual(declaredBy(`${provider}:${model}@high`, cfg), [provider]);
       assert.equal(rewriteBody({}, result, cfg.effortClamp).model, model);
       assert.equal(providerFor(cfg.providers[provider]!, result.model).type, "google", "dated ids retain the selected model's wire override");
-      assert.equal(unroutableReason(`${provider}:${model}@high`, {}, cfg), null);
+      assert.equal(decide(`${provider}:${model}@high`, {}, cfg, "turn").refusal, null);
     }
   }
   const result = resolve(`opencode-go:${id}`, {}, cfg)!;
@@ -46,7 +46,7 @@ test("qualified ids select their declaration, preserve date/effort, and send onl
 test("ambiguous bare ids refuse with usable qualified names, including markers on Claude", () => {
   assert.equal(resolve(id, {}, cfg), null);
   for (const [model, body] of [[id, {}], ["claude-opus-5-5", prompt(`[[ripple: ${id}]]`)]] as const) {
-    const reason = unroutableReason(model, body, cfg)!;
+    const reason = decide(model, body, cfg, "turn").refusal!;
     assert.match(reason, /google-gemini:gemini-4-argon/);
     assert.match(reason, /opencode-go:gemini-4-argon/);
   }
@@ -54,7 +54,7 @@ test("ambiguous bare ids refuse with usable qualified names, including markers o
 
 test("a Claude request whose marker is a delegation word or an unknown name still passes through", () => {
   for (const marker of ["[[ripple: standard]]", "[[ripple: light]]", "[[ripple: opus@high]]", "[[ripple: hard backend]]", "[[ripple: nowhere-model]]"]) {
-    assert.equal(unroutableReason("claude-opus-5-5", prompt(`${marker}\ntask`), cfg), null, marker);
+    assert.equal(decide("claude-opus-5-5", prompt(`${marker}\ntask`), cfg, "turn").refusal, null, marker);
   }
 });
 
@@ -69,8 +69,8 @@ test("a colon is literal unless the named configured provider declares the remai
 
 test("qualified ingress-only declarations are refused, not passed through as native Claude", () => {
   assert.equal(resolve("native:claude-opus-5-5@high", {}, cfg), null);
-  assert.equal(unroutableReason("native:claude-opus-5-5@high", {}, cfg), 'provider "native" is ingress-only');
-  assert.equal(unroutableReason("claude-opus-5-5", {}, cfg), null);
+  assert.equal(decide("native:claude-opus-5-5@high", {}, cfg, "turn").refusal, 'provider "native" is ingress-only');
+  assert.equal(decide("claude-opus-5-5", {}, cfg, "turn").refusal, null);
 });
 
 test("explicit and agent-file marker aliases support qualified ids and effort precedence", t => {

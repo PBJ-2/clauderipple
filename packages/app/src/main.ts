@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { claudeStartedAt, reopenClaude } from "./claude-desktop";
+import { failureAction, failureKinds, type FailureAction, type FailureKind } from "./failure-model";
 import { readUpdateSeen, readReplacementTries, rememberUpdate, replacementExhausted, nextReplacementTries, resolveTrayVersion, updateNotice, TrayReplacement, REPLACEMENT_LIMIT, type ReplacementTries, type RouterUpdate, type UpdateSeen } from "./update-model";
 import { handleScheme, ORIGIN, registerScheme } from "./protocol";
 import { parseJsonOutput, repairDetails, restartStillOwed, shouldNotifyDown, tailLines, trayState, type Action, type ActionResult, type AppState, type Busy, type DirectOutput, type Doctor, type RepairOutput } from "./status-model";
@@ -76,6 +77,11 @@ function trayVersion(): string {
 
 // ---- i18n: tray menu, dialogs, tooltips -------------------------------------------------
 
+/** A title and a sentence for every failure the failure dialog can name, in every language. */
+function failureText(text: Record<FailureKind, [title: string, body: string]>): Record<FailureKind, [title: string, body: string]> {
+  return text;
+}
+
 const STRINGS = {
   en: {
     healthy: "healthy",
@@ -89,11 +95,11 @@ const STRINGS = {
     restartRouter: "Restart Router",
     startRouter: "Start Router",
     pickerOn: "Show GPT models in the Code tab picker…",
-    pickerOff: "Stop showing GPT models in the picker…",
-    pickerState: (on: boolean): string => (on ? "Picker: GPT models shown by name ✓" : "Picker: GPT models via Claude names (alias mode)"),
-    pickerOnConfirm: "macOS will ask for your login password to trust the ClaudeRipple certificate (ClaudeRipple never sees it). Then quit and reopen Claude Desktop.",
-    pickerDone: "Done. Now quit Claude Desktop completely and open it again, then check the Code tab picker.",
-    pickerOffDone: "Done. Quit and reopen Claude Desktop to apply.",
+    pickerOff: "Hide GPT models in the model picker…",
+    pickerState: (on: boolean): string => (on ? "Model picker: GPT models shown by name ✓" : "Model picker: GPT models via Claude names (alias mode)"),
+    pickerOnConfirm: "macOS will ask for your login password to trust the ClaudeRipple certificate (ClaudeRipple never sees it). Then quit Claude Desktop completely and open it again.",
+    pickerDone: "Done. Quit Claude Desktop completely, open it again, and check the model picker in the Code tab.",
+    pickerOffDone: "Done. Quit Claude Desktop completely and open it again to apply the change.",
     cancel: "Cancel",
     agentTitleOn: "Show model names on subagents",
     agentTitleOff: "Stop showing model names on subagents",
@@ -108,10 +114,10 @@ const STRINGS = {
     setupLater: "Later",
     setupContinue: "Continue",
     setupDone: "ClaudeRipple setup finished.",
-    setupFailed: "Setup did not finish",
+    setupFailed: "ClaudeRipple setup did not finish.",
     updatedTitle: (v: string) => `ClaudeRipple ${v}`,
     updatedRestarting: (from: string) => `The running router is ${from}. Switching it to this version…`,
-    updatedFailed: "The router could not be switched to this version",
+    updatedFailed: "The router could not be switched to the new version.",
     problem: (code: string) =>
       code === "settings" ? "Claude Code is not pointed at ClaudeRipple"
       : code === "upstream" ? "Anthropic is unreachable"
@@ -122,7 +128,7 @@ const STRINGS = {
       : code,
     about: "About ClaudeRipple",
     aboutDetail:
-      "Run GPT and other models inside Claude Desktop, without turning Claude off.\n\nIndependent open-source project (GPL-3.0). Not affiliated with, endorsed by, or sponsored by Anthropic or OpenAI. Claude and Claude Code are trademarks of Anthropic, PBC.",
+      "Use GPT and many other models alongside Claude, without quitting Claude Desktop.\n\nIndependent open-source project (GPL-3.0). Not affiliated with, endorsed by, or sponsored by Anthropic or OpenAI. Claude and Claude Code are trademarks of Anthropic, PBC.",
     quit: "Quit",
     tooltip: (state: string) => `ClaudeRipple ${state}`,
     tooltipDown: "ClaudeRipple: router not running — Claude Desktop cannot connect",
@@ -151,23 +157,44 @@ const STRINGS = {
     updateAvailableItem: (v: string) => `Update to ClaudeRipple ${v}…`,
     upToDate: (v: string) => `ClaudeRipple ${v} is the latest version.`,
     updateAvailable: (latest: string, current: string) => `ClaudeRipple ${latest} is available (you have ${current}).`,
-    updateDetail: "The router restarts on the new version once requests in flight have finished. The tray reopens by itself.",
+    updateDetail: "The router restarts on the new version once all requests in flight have finished. The tray app relaunches by itself.",
     updateNow: "Update",
     later: "Later",
     updating: (v: string) => `Updating to ClaudeRipple ${v}…`,
-    autoUpdated: (v: string) => `Updated to ClaudeRipple ${v}`,
-    autoAvailable: (v: string) => `New version ${v} — click to update`,
-    updateDone: (v: string) => `Updated to ClaudeRipple ${v}`,
-    updateFailed: "The update did not finish",
-    trayReplaceGaveUp: (v: string) => `The tray could not switch to the new version. It keeps running as version ${v}. The tray log has the details.`,
-    updateCheckFailed: "Could not check for updates",
+    autoUpdated: (v: string) => `ClaudeRipple has been updated to ${v}.`,
+    autoAvailable: (v: string) => `Version ${v} is available. Click to update.`,
+    updateDone: (v: string) => `The update to ClaudeRipple ${v} is complete.`,
+    updateFailed: "The update did not finish.",
+    close: "Close",
+    failureDetails: "Details",
+    failureOutput: "Full output",
+    failureOutputCopied: "Full output (copied)",
+    copyOutput: "Copy",
+    setupAgain: "Run Setup Again",
+    tryAgain: "Try Again",
+    routerRestarted: "Router restarted",
+    failures: failureText({
+      "router-not-switched": ["Router still on the old version", "The new version is installed, but the router running now is the old one. Restarting the router switches it to the new version."],
+      "router-not-started": ["Router not started", "The router could not be started. Repair registers its startup entry again and starts it."],
+      "startup-entry": ["Startup entry problem", "The entry that starts the router at login could not be registered or run. Repair registers it again."],
+      "certificate": ["Certificate problem", "The router's local certificate could not be read or does not match. Run setup again."],
+      "router-unresponsive": ["Router not responding", "The router did not answer the final connection check. This often happens while other programs keep the CPU busy. Run setup again in a moment."],
+      "anthropic-unreachable": ["Anthropic unreachable", "The router answered, but could not reach Anthropic. Check your internet connection, then run setup again."],
+      "foreign-proxy": ["Another proxy in use", "Claude Code is set to use another proxy, so its settings were left as they were. Turn that proxy off, then run setup again."],
+      "disk-full": ["Disk full", "There is not enough disk space to install. Free up space, then try again."],
+      "files-unwritable": ["Files could not be replaced", "Files in the install folder are in use, or this account cannot write to them. Try again in a moment."],
+      "download": ["Download failed", "The new version could not be downloaded. Check your internet connection, then try again."],
+      "unknown": ["Unknown error", "No known cause was found in the output. The full output is under Details."],
+    }),
+    trayReplaceGaveUp: (v: string) => `The tray app could not switch to the new version. It keeps running as version ${v}. See the tray log for details.`,
+    updateCheckFailed: "Could not check for updates.",
     updatePackaged: "This is the standalone app. Download the new version from the releases page.",
     updateCheckout: "This is a source checkout. Update it with git pull.",
     awakeMenu: (mode: string) => `Keep laptop awake · ${mode}`,
     awakeOff: "Off",
-    awakeWorking: "While working",
+    awakeWorking: "Only while working",
     awakeOn: "Always",
-    tetherItem: "Phone hotspot when Wi-Fi drops",
+    tetherItem: "Phone hotspot if Wi-Fi drops (auto)",
     laptopOpen: "Open Laptop settings…",
     laptopSetup: "Set up laptop features…",
   },
@@ -182,12 +209,12 @@ const STRINGS = {
     cliVersion: (v: string) => `Claude Code CLI ${v}`,
     restartRouter: "리플 재시작",
     startRouter: "리플 시작",
-    pickerOn: "Code 탭 피커에 GPT 모델 표시…",
-    pickerOff: "피커에서 GPT 모델 숨기기…",
-    pickerState: (on: boolean): string => (on ? "피커: GPT 모델 이름 표시 중 ✓" : "피커: Claude 이름으로 GPT 사용 (별칭 모드)"),
-    pickerOnConfirm: "ClaudeRipple 인증서를 신뢰하려면 macOS 로그인 암호를 입력해야 합니다(ClaudeRipple은 암호를 보지 않습니다). 완료 후 Claude Desktop을 완전히 종료했다가 다시 열어 주십시오.",
-    pickerDone: "완료되었습니다. Claude Desktop을 완전히 종료했다가 다시 연 뒤 Code 탭 피커를 확인해 주십시오.",
-    pickerOffDone: "완료되었습니다. Claude Desktop을 완전히 종료했다가 다시 열면 적용됩니다.",
+    pickerOn: "Code 탭 모델 피커에 GPT 모델 표시…",
+    pickerOff: "모델 피커에서 GPT 모델 숨기기…",
+    pickerState: (on: boolean): string => (on ? "모델 피커: GPT 모델 이름 표시 중 ✓" : "모델 피커: Claude 이름으로 GPT 사용 (별칭 모드)"),
+    pickerOnConfirm: "ClaudeRipple 인증서를 신뢰하려면 macOS 로그인 암호를 입력해야 합니다(ClaudeRipple은 암호를 보지 않습니다). 완료 후 Claude Desktop을 완전히 종료한 뒤 다시 실행해 주세요.",
+    pickerDone: "설정이 완료되었습니다. Claude Desktop을 완전히 종료한 뒤 다시 실행하여 Code 탭의 모델 피커를 확인해 주세요.",
+    pickerOffDone: "설정이 완료되었습니다. Claude Desktop을 완전히 종료한 뒤 다시 실행하면 적용됩니다.",
     cancel: "취소",
     agentTitleOn: "서브에이전트에 모델 이름 표시",
     agentTitleOff: "서브에이전트 모델 이름 숨기기",
@@ -198,14 +225,14 @@ const STRINGS = {
     showLogs: "로그 보기",
     rerunSetup: "ClaudeRipple 설정 다시 실행…",
     setupTitle: "ClaudeRipple 설정",
-    setupPrompt: "로컬 인증서를 만들고, Claude Code 설정(~/.claude/settings.json)을 연결하고, 리플이 백그라운드에서 돌도록 등록합니다. 계속하시겠습니까?",
+    setupPrompt: "로컬 인증서를 생성하고, Claude Code 설정(~/.claude/settings.json)을 연결하며, 리플이 백그라운드에서 실행되도록 등록합니다. 계속하시겠습니까?",
     setupLater: "나중에",
     setupContinue: "계속",
     setupDone: "ClaudeRipple 설정이 완료되었습니다.",
-    setupFailed: "ClaudeRipple 설정을 완료하지 못했습니다",
+    setupFailed: "ClaudeRipple 설정을 완료하지 못했습니다.",
     updatedTitle: (v: string) => `ClaudeRipple ${v}`,
     updatedRestarting: (from: string) => `현재 실행 중인 리플은 ${from} 버전입니다. 새 버전으로 전환합니다…`,
-    updatedFailed: "리플을 새 버전으로 전환하지 못했습니다",
+    updatedFailed: "리플을 새 버전으로 전환하지 못했습니다.",
     problem: (code: string) =>
       code === "settings" ? "Claude Code가 ClaudeRipple에 연결되지 않음"
       : code === "upstream" ? "Anthropic 연결 안 됨"
@@ -216,7 +243,7 @@ const STRINGS = {
       : code,
     about: "ClaudeRipple 정보",
     aboutDetail:
-      "Claude Desktop을 끄지 않고 그 안에서 GPT 등 다양한 모델을 함께 씁니다.\n\n독립 오픈소스 프로젝트(GPL-3.0)이며 Anthropic·OpenAI와 제휴·보증·후원 관계가 없습니다. Claude와 Claude Code는 Anthropic, PBC의 상표입니다.",
+      "Claude Desktop을 종료하지 않고 GPT 등 다양한 모델을 함께 사용할 수 있습니다.\n\n독립 오픈소스 프로젝트(GPL-3.0)이며 Anthropic·OpenAI와 제휴·보증·후원 관계가 없습니다. Claude와 Claude Code는 Anthropic, PBC의 상표입니다.",
     quit: "종료",
     tooltip: (state: string) => `ClaudeRipple ${state}`,
     tooltipDown: "ClaudeRipple: 리플이 꺼져 있어 Claude Desktop이 연결되지 않습니다",
@@ -243,25 +270,46 @@ const STRINGS = {
     windowWeek: "주간",
     checkUpdates: "업데이트 확인…",
     updateAvailableItem: (v: string) => `ClaudeRipple ${v} 버전으로 업데이트…`,
-    upToDate: (v: string) => `최신 버전입니다 (ClaudeRipple ${v})`,
-    updateAvailable: (latest: string, current: string) => `새 버전이 나왔습니다: ClaudeRipple ${latest} (현재 ${current})`,
-    updateDetail: "진행 중인 요청이 끝나면 리플이 새 버전으로 다시 시작됩니다. 트레이 메뉴는 자동으로 다시 열립니다.",
+    upToDate: (v: string) => `현재 최신 버전을 사용하고 있습니다 (ClaudeRipple ${v}).`,
+    updateAvailable: (latest: string, current: string) => `새로운 버전을 사용할 수 있습니다: ClaudeRipple ${latest} (현재 버전: ${current}).`,
+    updateDetail: "진행 중인 요청이 모두 끝나면 리플이 새 버전으로 재시작됩니다. 트레이 앱은 자동으로 다시 실행됩니다.",
     updateNow: "업데이트",
     later: "나중에",
     updating: (v: string) => `ClaudeRipple ${v} 업데이트 중…`,
-    autoUpdated: (v: string) => `ClaudeRipple ${v}로 업데이트됨`,
-    autoAvailable: (v: string) => `새 버전 ${v} — 클릭해서 업데이트`,
-    updateDone: (v: string) => `ClaudeRipple ${v} 업데이트 완료`,
-    updateFailed: "업데이트를 완료하지 못했습니다",
-    trayReplaceGaveUp: (v: string) => `트레이를 새 버전으로 전환하지 못했습니다. 이 트레이는 ${v} 버전으로 계속 실행됩니다. 자세한 내용은 트레이 로그에서 확인할 수 있습니다.`,
-    updateCheckFailed: "업데이트 정보를 확인하지 못했습니다",
-    updatePackaged: "설치형 앱입니다. 릴리스 페이지에서 최신 버전을 다운로드해 주십시오.",
-    updateCheckout: "소스 코드로 실행 중입니다. git pull 명령으로 업데이트해 주십시오.",
-    awakeMenu: (mode: string) => `노트북 깨어 있기 · ${mode}`,
+    autoUpdated: (v: string) => `ClaudeRipple ${v} 버전으로 업데이트되었습니다.`,
+    autoAvailable: (v: string) => `새로운 ${v} 버전을 사용할 수 있습니다. 클릭하여 업데이트해 주세요.`,
+    updateDone: (v: string) => `ClaudeRipple ${v} 버전으로 업데이트를 완료했습니다.`,
+    updateFailed: "업데이트를 완료하지 못했습니다.",
+    close: "닫기",
+    failureDetails: "자세히",
+    failureOutput: "전체 출력",
+    failureOutputCopied: "전체 출력 (복사됨)",
+    copyOutput: "복사",
+    setupAgain: "설정 다시 실행",
+    tryAgain: "다시 시도",
+    routerRestarted: "리플 재시작 완료",
+    failures: failureText({
+      "router-not-switched": ["리플이 이전 버전으로 실행 중", "새 버전은 설치되었지만 지금 실행 중인 리플은 이전 버전입니다. 리플을 재시작하면 새 버전으로 바뀝니다."],
+      "router-not-started": ["리플 시작 안 됨", "리플을 시작하지 못했습니다. 복구하면 시작 항목을 다시 등록하고 리플을 시작합니다."],
+      "startup-entry": ["시작 항목 문제", "로그인할 때 리플을 시작하는 항목을 등록하거나 실행하지 못했습니다. 복구하면 이 항목을 다시 등록합니다."],
+      "certificate": ["인증서 문제", "리플의 로컬 인증서를 읽지 못했거나 인증서가 올바르지 않습니다. 설정을 다시 실행해 주세요."],
+      "router-unresponsive": ["리플 응답 없음", "리플이 마지막 연결 확인에 응답하지 않았습니다. 다른 프로그램이 CPU를 많이 사용할 때 자주 발생합니다. 잠시 후 설정을 다시 실행해 주세요."],
+      "anthropic-unreachable": ["Anthropic 연결 안 됨", "리플은 응답했지만 Anthropic에 연결하지 못했습니다. 인터넷 연결을 확인한 뒤 설정을 다시 실행해 주세요."],
+      "foreign-proxy": ["다른 프록시 사용 중", "Claude Code가 다른 프록시를 사용하도록 설정되어 있어 설정을 변경하지 않았습니다. 해당 프록시 설정을 해제한 뒤 설정을 다시 실행해 주세요."],
+      "disk-full": ["디스크 공간 부족", "설치에 필요한 디스크 공간이 부족합니다. 디스크 여유 공간을 확보한 뒤 다시 시도해 주세요."],
+      "files-unwritable": ["파일 교체 실패", "설치 폴더의 파일이 사용 중이거나 현재 계정에 쓰기 권한이 없습니다. 잠시 후 다시 시도해 주세요."],
+      "download": ["다운로드 실패", "새 버전을 다운로드하지 못했습니다. 인터넷 연결을 확인한 뒤 다시 시도해 주세요."],
+      "unknown": ["알 수 없는 오류", "알려진 오류 원인을 찾지 못했습니다. 전체 출력은 '자세히'에서 확인할 수 있습니다."],
+    }),
+    trayReplaceGaveUp: (v: string) => `트레이 앱을 새 버전으로 전환하지 못했습니다. 트레이 앱은 ${v} 버전으로 계속 실행됩니다. 자세한 내용은 트레이 로그에서 확인할 수 있습니다.`,
+    updateCheckFailed: "업데이트 정보를 확인하지 못했습니다.",
+    updatePackaged: "설치형 앱입니다. 릴리스 페이지에서 최신 버전을 다운로드해 주세요.",
+    updateCheckout: "소스 코드로 실행 중입니다. git pull 명령으로 업데이트해 주세요.",
+    awakeMenu: (mode: string) => `노트북 잠자기 방지 · ${mode}`,
     awakeOff: "끔",
-    awakeWorking: "일할 때만",
-    awakeOn: "계속 켜 두기",
-    tetherItem: "와이파이가 끊기면 휴대폰 핫스팟으로",
+    awakeWorking: "작업 중에만",
+    awakeOn: "항상 유지",
+    tetherItem: "와이파이가 끊기면 휴대폰 핫스팟으로 자동 전환",
     laptopOpen: "노트북 관리 열기…",
     laptopSetup: "노트북 기능 설정…",
   },
@@ -279,9 +327,9 @@ const STRINGS = {
     pickerOn: "在 Code 标签页的模型选择器中显示 GPT 模型…",
     pickerOff: "不再在模型选择器中显示 GPT 模型…",
     pickerState: (on: boolean): string => (on ? "模型选择器：以真实名称显示 GPT 模型 ✓" : "模型选择器：通过 Claude 模型名使用 GPT 模型（别名模式）"),
-    pickerOnConfirm: "macOS 会要求输入登录密码以信任 ClaudeRipple 证书（ClaudeRipple 永远不会看到密码）。之后请退出并重新打开 Claude Desktop。",
-    pickerDone: "完成。现在请完全退出 Claude Desktop 再重新打开，然后查看 Code 标签页的模型选择器。",
-    pickerOffDone: "完成。退出并重新打开 Claude Desktop 后生效。",
+    pickerOnConfirm: "macOS 会要求输入登录密码以信任 ClaudeRipple 证书（ClaudeRipple 永远不会看到密码）。之后请完全退出 Claude Desktop，再重新打开。",
+    pickerDone: "设置已完成。请完全退出 Claude Desktop 再重新打开，然后查看 Code 标签页的模型选择器。",
+    pickerOffDone: "设置已完成。完全退出 Claude Desktop 并重新打开后生效。",
     cancel: "取消",
     agentTitleOn: "在子代理上显示模型名称",
     agentTitleOff: "不再在子代理上显示模型名称",
@@ -296,10 +344,10 @@ const STRINGS = {
     setupLater: "稍后",
     setupContinue: "继续",
     setupDone: "ClaudeRipple 设置完成。",
-    setupFailed: "设置未完成",
+    setupFailed: "未能完成 ClaudeRipple 设置。",
     updatedTitle: (v: string) => `ClaudeRipple ${v}`,
     updatedRestarting: (from: string) => `正在运行的路由服务版本为 ${from}，正在切换到当前版本…`,
-    updatedFailed: "无法将路由服务切换到当前版本",
+    updatedFailed: "无法将路由服务切换到新版本。",
     problem: (code: string) =>
       code === "settings" ? "Claude Code 未指向 ClaudeRipple"
       : code === "upstream" ? "无法连接 Anthropic"
@@ -310,7 +358,7 @@ const STRINGS = {
       : code,
     about: "关于 ClaudeRipple",
     aboutDetail:
-      "在 Claude Desktop 中运行 GPT 和其他模型，无需关闭 Claude。\n\n独立开源项目（GPL-3.0）。与 Anthropic 和 OpenAI 均无关联，未获其认可或赞助。Claude 和 Claude Code 是 Anthropic, PBC 的商标。",
+      "无需退出 Claude Desktop，即可同时使用 GPT 等多种模型。\n\n独立开源项目（GPL-3.0）。与 Anthropic 和 OpenAI 均无关联，未获其认可或赞助。Claude 和 Claude Code 是 Anthropic, PBC 的商标。",
     quit: "退出",
     tooltip: (state: string) => `ClaudeRipple ${state}`,
     tooltipDown: "ClaudeRipple：路由服务未运行 — Claude Desktop 无法连接",
@@ -339,23 +387,44 @@ const STRINGS = {
     updateAvailableItem: (v: string) => `更新到 ClaudeRipple ${v}…`,
     upToDate: (v: string) => `ClaudeRipple ${v} 已是最新版本。`,
     updateAvailable: (latest: string, current: string) => `ClaudeRipple ${latest} 已发布（当前版本 ${current}）。`,
-    updateDetail: "进行中的请求处理完毕后，路由服务会以新版本重启。托盘应用会自动重新打开。",
+    updateDetail: "进行中的请求全部处理完毕后，路由服务会以新版本重启。托盘应用会自动重新启动。",
     updateNow: "更新",
     later: "稍后",
     updating: (v: string) => `正在更新到 ClaudeRipple ${v}…`,
-    autoUpdated: (v: string) => `已更新到 ClaudeRipple ${v}`,
-    autoAvailable: (v: string) => `新版本 ${v} — 点击更新`,
-    updateDone: (v: string) => `已更新到 ClaudeRipple ${v}`,
-    updateFailed: "更新未完成",
-    trayReplaceGaveUp: (v: string) => `托盘无法切换到新版本，将以 ${v} 版本继续运行。详细信息已写入托盘日志。`,
-    updateCheckFailed: "无法检查更新",
+    autoUpdated: (v: string) => `已更新到 ClaudeRipple ${v}。`,
+    autoAvailable: (v: string) => `新版本 ${v} 已发布，点击即可更新。`,
+    updateDone: (v: string) => `ClaudeRipple ${v} 更新完成。`,
+    updateFailed: "更新未完成。",
+    close: "关闭",
+    failureDetails: "详情",
+    failureOutput: "完整输出",
+    failureOutputCopied: "完整输出（已复制）",
+    copyOutput: "复制",
+    setupAgain: "重新运行设置",
+    tryAgain: "重试",
+    routerRestarted: "路由服务已重启",
+    failures: failureText({
+      "router-not-switched": ["路由服务仍在运行旧版本", "新版本已安装，但当前运行的路由服务仍是旧版本。重启路由服务即可切换到新版本。"],
+      "router-not-started": ["路由服务未启动", "无法启动路由服务。“修复”会重新注册启动项并启动路由服务。"],
+      "startup-entry": ["启动项问题", "无法注册或运行登录时启动路由服务的启动项。“修复”会重新注册该启动项。"],
+      "certificate": ["证书问题", "无法读取路由服务的本地证书，或证书不匹配。请重新运行设置。"],
+      "router-unresponsive": ["路由服务没有响应", "路由服务未响应最后一次连接检查。其他程序大量占用 CPU 时经常会出现这种情况。请稍后重新运行设置。"],
+      "anthropic-unreachable": ["无法连接 Anthropic", "路由服务已响应，但无法连接 Anthropic。请检查互联网连接，然后重新运行设置。"],
+      "foreign-proxy": ["正在使用其他代理", "Claude Code 已设置为使用其他代理，因此未更改其设置。请关闭该代理，然后重新运行设置。"],
+      "disk-full": ["磁盘空间不足", "磁盘空间不足，无法安装。请释放空间后重试。"],
+      "files-unwritable": ["无法替换文件", "安装文件夹中的文件正在使用中，或当前账户没有写入权限。请稍后重试。"],
+      "download": ["下载失败", "无法下载新版本。请检查互联网连接后重试。"],
+      "unknown": ["未知错误", "未在输出中找到已知原因。完整输出可在“详情”中查看。"],
+    }),
+    trayReplaceGaveUp: (v: string) => `托盘应用无法切换到新版本，将继续以 ${v} 版本运行。详细信息请查看托盘日志。`,
+    updateCheckFailed: "无法检查更新。",
     updatePackaged: "这是独立打包的应用。请从发布页面下载新版本。",
     updateCheckout: "这是从仓库检出的源码版本，请用 git pull 更新。",
     awakeMenu: (mode: string) => `笔记本保持唤醒 · ${mode}`,
     awakeOff: "关闭",
     awakeWorking: "仅在工作时",
-    awakeOn: "始终开启",
-    tetherItem: "Wi-Fi 断开时改用手机热点",
+    awakeOn: "始终保持唤醒",
+    tetherItem: "Wi-Fi 断开时自动切换到手机热点",
     laptopOpen: "打开笔记本管理…",
     laptopSetup: "设置笔记本功能…",
   },
@@ -370,12 +439,12 @@ const STRINGS = {
     cliVersion: (v: string) => `Claude Code CLI ${v}`,
     restartRouter: "ルーターを再起動",
     startRouter: "ルーターを起動",
-    pickerOn: "CodeタブのピッカーにGPTモデルを表示…",
-    pickerOff: "ピッカーのGPTモデルを非表示にする…",
-    pickerState: (on: boolean): string => (on ? "ピッカー：GPTモデルを実際の名前で表示 ✓" : "ピッカー：Claudeの名前経由でGPTモデルを使用（エイリアスモード）"),
-    pickerOnConfirm: "ClaudeRippleの証明書を信頼するため、macOSがログインパスワードを求めます（ClaudeRippleがパスワードを見ることはありません）。その後、Claude Desktopを終了して開き直してください。",
-    pickerDone: "完了しました。Claude Desktopを完全に終了してから開き直し、Codeタブのピッカーを確認してください。",
-    pickerOffDone: "完了しました。反映するには、Claude Desktopを終了して開き直してください。",
+    pickerOn: "CodeタブのモデルピッカーにGPTモデルを表示…",
+    pickerOff: "モデルピッカーのGPTモデルを非表示にする…",
+    pickerState: (on: boolean): string => (on ? "モデルピッカー：GPTモデルを実際の名前で表示 ✓" : "モデルピッカー：Claudeの名前でGPTモデルを使用（エイリアスモード）"),
+    pickerOnConfirm: "ClaudeRippleの証明書を信頼するため、macOSがログインパスワードを求めます（ClaudeRippleがパスワードを見ることはありません）。その後、Claude Desktopを完全に終了してから開き直してください。",
+    pickerDone: "設定が完了しました。Claude Desktopを完全に終了してから開き直し、Codeタブのモデルピッカーを確認してください。",
+    pickerOffDone: "設定が完了しました。Claude Desktopを完全に終了してから開き直すと反映されます。",
     cancel: "キャンセル",
     agentTitleOn: "サブエージェントにモデル名を表示",
     agentTitleOff: "サブエージェントのモデル名を非表示にする",
@@ -390,10 +459,10 @@ const STRINGS = {
     setupLater: "後で",
     setupContinue: "続ける",
     setupDone: "ClaudeRippleのセットアップが完了しました。",
-    setupFailed: "セットアップが完了しませんでした",
+    setupFailed: "ClaudeRippleのセットアップが完了しませんでした。",
     updatedTitle: (v: string) => `ClaudeRipple ${v}`,
     updatedRestarting: (from: string) => `実行中のルーターは ${from} です。このバージョンに切り替えています…`,
-    updatedFailed: "ルーターをこのバージョンに切り替えられませんでした",
+    updatedFailed: "ルーターを新しいバージョンに切り替えられませんでした。",
     problem: (code: string) =>
       code === "settings" ? "Claude Codeの接続先がClaudeRippleになっていません"
       : code === "upstream" ? "Anthropicに接続できません"
@@ -404,7 +473,7 @@ const STRINGS = {
       : code,
     about: "ClaudeRippleについて",
     aboutDetail:
-      "Claudeをオフにすることなく、Claude Desktopの中でGPTなどのモデルを動かします。\n\n独立したオープンソースプロジェクトです（GPL-3.0）。AnthropicおよびOpenAIとは提携関係になく、両社による承認や後援も受けていません。ClaudeおよびClaude Codeは、Anthropic, PBCの商標です。",
+      "Claude Desktopを終了することなく、GPTなどさまざまなモデルをあわせて使えます。\n\n独立したオープンソースプロジェクトです（GPL-3.0）。AnthropicおよびOpenAIとは提携関係になく、両社による承認や後援も受けていません。ClaudeおよびClaude Codeは、Anthropic, PBCの商標です。",
     quit: "終了",
     tooltip: (state: string) => `ClaudeRipple ${state}`,
     tooltipDown: "ClaudeRipple：ルーター停止中 — Claude Desktopは接続できません",
@@ -437,19 +506,40 @@ const STRINGS = {
     updateNow: "アップデート",
     later: "後で",
     updating: (v: string) => `ClaudeRipple ${v} にアップデート中…`,
-    autoUpdated: (v: string) => `ClaudeRipple ${v} にアップデートしました`,
-    autoAvailable: (v: string) => `新バージョン ${v} — クリックして更新`,
-    updateDone: (v: string) => `ClaudeRipple ${v} にアップデートしました`,
-    updateFailed: "アップデートが完了しませんでした",
-    trayReplaceGaveUp: (v: string) => `トレイを新しいバージョンに切り替えられませんでした。トレイは ${v} バージョンで動き続けます。詳しくはトレイのログに残っています。`,
-    updateCheckFailed: "アップデートを確認できませんでした",
+    autoUpdated: (v: string) => `ClaudeRipple ${v} にアップデートしました。`,
+    autoAvailable: (v: string) => `新しいバージョン ${v} が利用可能です。クリックしてアップデートしてください。`,
+    updateDone: (v: string) => `ClaudeRipple ${v} へのアップデートが完了しました。`,
+    updateFailed: "アップデートが完了しませんでした。",
+    close: "閉じる",
+    failureDetails: "詳細",
+    failureOutput: "出力全文",
+    failureOutputCopied: "出力全文（コピー済み）",
+    copyOutput: "コピー",
+    setupAgain: "セットアップを再実行",
+    tryAgain: "再試行",
+    routerRestarted: "ルーターを再起動しました",
+    failures: failureText({
+      "router-not-switched": ["ルーターが旧バージョンで実行中", "新しいバージョンはインストールされていますが、現在実行中のルーターは旧バージョンです。ルーターを再起動すると新しいバージョンに切り替わります。"],
+      "router-not-started": ["ルーターが未起動", "ルーターを起動できませんでした。「修復」で起動項目を再登録し、ルーターを起動します。"],
+      "startup-entry": ["起動項目の問題", "ログイン時にルーターを起動する項目を登録または実行できませんでした。「修復」でこの項目を再登録します。"],
+      "certificate": ["証明書の問題", "ルーターのローカル証明書を読み取れなかったか、証明書が一致していません。セットアップを再実行してください。"],
+      "router-unresponsive": ["ルーターが応答しません", "ルーターが最後の接続確認に応答しませんでした。他のプログラムがCPUを多く使用しているときによく起こります。少し待ってからセットアップを再実行してください。"],
+      "anthropic-unreachable": ["Anthropicに接続できません", "ルーターは応答しましたが、Anthropicに接続できませんでした。インターネット接続を確認してから、セットアップを再実行してください。"],
+      "foreign-proxy": ["別のプロキシを使用中", "Claude Codeが別のプロキシを使う設定になっているため、設定は変更していません。そのプロキシをオフにしてから、セットアップを再実行してください。"],
+      "disk-full": ["ディスクの空き容量不足", "インストールに必要なディスクの空き容量がありません。空き容量を確保してから、再試行してください。"],
+      "files-unwritable": ["ファイルを置き換えられませんでした", "インストール先フォルダーのファイルが使用中か、このアカウントに書き込み権限がありません。少し待ってから再試行してください。"],
+      "download": ["ダウンロード失敗", "新しいバージョンをダウンロードできませんでした。インターネット接続を確認してから、再試行してください。"],
+      "unknown": ["不明なエラー", "出力から既知の原因は見つかりませんでした。出力全文は「詳細」で確認できます。"],
+    }),
+    trayReplaceGaveUp: (v: string) => `トレイアプリを新しいバージョンに切り替えられませんでした。トレイアプリは ${v} バージョンのまま動作を続けます。詳しくはトレイのログで確認できます。`,
+    updateCheckFailed: "アップデートを確認できませんでした。",
     updatePackaged: "これはスタンドアロン版のアプリです。リリースページから新しいバージョンをダウンロードしてください。",
     updateCheckout: "これはソースから実行している環境です。git pullで更新してください。",
     awakeMenu: (mode: string) => `ノートPC のスリープ防止 · ${mode}`,
     awakeOff: "オフ",
     awakeWorking: "作業中のみ",
     awakeOn: "常にオン",
-    tetherItem: "Wi-Fi が切れたらスマートフォンのインターネット共有へ",
+    tetherItem: "Wi-Fi切断時にスマホのインターネット共有へ自動切替",
     laptopOpen: "ノートPC の管理を開く…",
     laptopSetup: "ノートPC の機能を設定…",
   },
@@ -464,11 +554,11 @@ const STRINGS = {
     cliVersion: (v: string) => `Claude Code CLI ${v}`,
     restartRouter: "Reiniciar router",
     startRouter: "Iniciar router",
-    pickerOn: "Mostrar modelos GPT en el selector de la pestaña Code…",
-    pickerOff: "Dejar de mostrar modelos GPT en el selector…",
-    pickerState: (on: boolean): string => (on ? "Selector: modelos GPT con su nombre ✓" : "Selector: modelos GPT bajo nombres de Claude (modo alias)"),
+    pickerOn: "Mostrar GPT en el selector de Code…",
+    pickerOff: "Ocultar GPT en el selector de modelos…",
+    pickerState: (on: boolean): string => (on ? "Selector de modelos: modelos GPT con su nombre ✓" : "Selector de modelos: modelos GPT bajo nombres de Claude (modo alias)"),
     pickerOnConfirm: "macOS te pedirá tu contraseña de inicio de sesión para confiar en el certificado de ClaudeRipple (ClaudeRipple nunca la ve). Después, cierra Claude Desktop por completo y vuelve a abrirlo.",
-    pickerDone: "Listo. Ahora cierra Claude Desktop por completo, vuelve a abrirlo y revisa el selector de la pestaña Code.",
+    pickerDone: "Listo. Cierra Claude Desktop por completo, vuelve a abrirlo y revisa el selector de modelos de la pestaña Code.",
     pickerOffDone: "Listo. Cierra Claude Desktop por completo y vuelve a abrirlo para aplicarlo.",
     cancel: "Cancelar",
     agentTitleOn: "Mostrar nombres de modelo en los subagentes",
@@ -484,10 +574,10 @@ const STRINGS = {
     setupLater: "Más tarde",
     setupContinue: "Continuar",
     setupDone: "Configuración de ClaudeRipple completada.",
-    setupFailed: "La configuración no se completó",
+    setupFailed: "La configuración de ClaudeRipple no se completó.",
     updatedTitle: (v: string) => `ClaudeRipple ${v}`,
     updatedRestarting: (from: string) => `El router en ejecución está en la versión ${from}. Cambiándolo a esta versión…`,
-    updatedFailed: "No se pudo cambiar el router a esta versión",
+    updatedFailed: "No se pudo cambiar el router a la nueva versión.",
     problem: (code: string) =>
       code === "settings" ? "Claude Code no apunta a ClaudeRipple"
       : code === "upstream" ? "No se puede acceder a Anthropic"
@@ -498,7 +588,7 @@ const STRINGS = {
       : code,
     about: "Acerca de ClaudeRipple",
     aboutDetail:
-      "Usa GPT y otros modelos dentro de Claude Desktop sin desactivar Claude.\n\nProyecto independiente de código abierto (GPL-3.0). No está afiliado a Anthropic ni a OpenAI, ni cuenta con su respaldo ni con su patrocinio. Claude y Claude Code son marcas comerciales de Anthropic, PBC.",
+      "Usa GPT y muchos otros modelos junto con Claude sin salir de Claude Desktop.\n\nProyecto independiente de código abierto (GPL-3.0). No está afiliado a Anthropic ni a OpenAI, ni cuenta con su respaldo ni con su patrocinio. Claude y Claude Code son marcas comerciales de Anthropic, PBC.",
     quit: "Salir",
     tooltip: (state: string) => `ClaudeRipple ${state}`,
     tooltipDown: "ClaudeRipple: router detenido — Claude Desktop no puede conectarse",
@@ -527,23 +617,44 @@ const STRINGS = {
     updateAvailableItem: (v: string) => `Actualizar a ClaudeRipple ${v}…`,
     upToDate: (v: string) => `ClaudeRipple ${v} es la última versión.`,
     updateAvailable: (latest: string, current: string) => `ClaudeRipple ${latest} está disponible (tienes la ${current}).`,
-    updateDetail: "El router se reinicia con la nueva versión cuando terminan las solicitudes en curso. La app de la bandeja se vuelve a abrir sola.",
+    updateDetail: "El router se reinicia con la nueva versión cuando terminan todas las solicitudes en curso. La app de la bandeja se vuelve a abrir sola.",
     updateNow: "Actualizar",
     later: "Más tarde",
     updating: (v: string) => `Actualizando a ClaudeRipple ${v}…`,
-    autoUpdated: (v: string) => `Actualizado a ClaudeRipple ${v}`,
-    autoAvailable: (v: string) => `Nueva versión ${v} — haz clic para actualizar`,
-    updateDone: (v: string) => `Actualizado a ClaudeRipple ${v}`,
-    updateFailed: "La actualización no se completó",
-    trayReplaceGaveUp: (v: string) => `La bandeja no pudo cambiar a la nueva versión y sigue en la versión ${v}. Los detalles están en el registro de la bandeja.`,
-    updateCheckFailed: "No se pudo comprobar si hay actualizaciones",
+    autoUpdated: (v: string) => `ClaudeRipple se actualizó a la versión ${v}.`,
+    autoAvailable: (v: string) => `La versión ${v} está disponible. Haz clic para actualizar.`,
+    updateDone: (v: string) => `Se completó la actualización a ClaudeRipple ${v}.`,
+    updateFailed: "La actualización no se completó.",
+    close: "Cerrar",
+    failureDetails: "Detalles",
+    failureOutput: "Salida completa",
+    failureOutputCopied: "Salida completa (copiada)",
+    copyOutput: "Copiar",
+    setupAgain: "Volver a ejecutar la configuración",
+    tryAgain: "Reintentar",
+    routerRestarted: "Router reiniciado",
+    failures: failureText({
+      "router-not-switched": ["El router sigue en la versión anterior", "La nueva versión está instalada, pero el router en ejecución sigue en la anterior. Reinicia el router para que use la nueva versión."],
+      "router-not-started": ["Router no iniciado", "No se pudo iniciar el router. «Reparar» vuelve a registrar su entrada de inicio y lo inicia."],
+      "startup-entry": ["Problema con la entrada de inicio", "No se pudo registrar o ejecutar la entrada que inicia el router al iniciar sesión. «Reparar» vuelve a registrarla."],
+      "certificate": ["Problema con el certificado", "No se pudo leer el certificado local del router o el certificado no coincide. Vuelve a ejecutar la configuración."],
+      "router-unresponsive": ["El router no responde", "El router no respondió a la comprobación final de conexión. Esto suele ocurrir cuando otros programas mantienen la CPU ocupada. Vuelve a ejecutar la configuración dentro de un momento."],
+      "anthropic-unreachable": ["No se puede acceder a Anthropic", "El router respondió, pero no pudo acceder a Anthropic. Comprueba tu conexión a internet y vuelve a ejecutar la configuración."],
+      "foreign-proxy": ["Otro proxy en uso", "Claude Code está configurado para usar otro proxy, por lo que no se modificaron sus ajustes. Desactiva ese proxy y vuelve a ejecutar la configuración."],
+      "disk-full": ["Disco lleno", "No hay suficiente espacio en disco para la instalación. Libera espacio y vuelve a intentarlo."],
+      "files-unwritable": ["No se pudieron reemplazar los archivos", "Los archivos de la carpeta de instalación están en uso o esta cuenta no tiene permiso para escribir en ellos. Vuelve a intentarlo dentro de un momento."],
+      "download": ["Error de descarga", "No se pudo descargar la nueva versión. Comprueba tu conexión a internet y vuelve a intentarlo."],
+      "unknown": ["Error desconocido", "No se encontró ninguna causa conocida en la salida. La salida completa está en «Detalles»."],
+    }),
+    trayReplaceGaveUp: (v: string) => `La app de la bandeja no pudo cambiar a la nueva versión y sigue en la versión ${v}. Puedes ver los detalles en el registro de la bandeja.`,
+    updateCheckFailed: "No se pudo comprobar si hay actualizaciones.",
     updatePackaged: "Esta es la app independiente. Descarga la nueva versión desde la página de versiones.",
     updateCheckout: "Esta es una copia del código fuente. Actualízala con git pull.",
     awakeMenu: (mode: string) => `Mantener el portátil despierto · ${mode}`,
     awakeOff: "No",
-    awakeWorking: "Mientras trabaja",
+    awakeWorking: "Solo mientras trabaja",
     awakeOn: "Siempre",
-    tetherItem: "Punto de acceso del teléfono si se cae el Wi-Fi",
+    tetherItem: "Punto de acceso móvil sin Wi-Fi (auto)",
     laptopOpen: "Abrir Portátil…",
     laptopSetup: "Configurar funciones del portátil…",
   },
@@ -558,12 +669,12 @@ const STRINGS = {
     cliVersion: (v: string) => `Claude Code CLI ${v}`,
     restartRouter: "Reiniciar roteador",
     startRouter: "Iniciar roteador",
-    pickerOn: "Mostrar modelos GPT no seletor da aba Code…",
-    pickerOff: "Parar de mostrar modelos GPT no seletor…",
-    pickerState: (on: boolean): string => (on ? "Seletor: modelos GPT exibidos pelo nome ✓" : "Seletor: modelos GPT via nomes do Claude (modo alias)"),
-    pickerOnConfirm: "O macOS vai pedir sua senha de login para confiar no certificado do ClaudeRipple (o ClaudeRipple nunca a vê). Depois, encerre o Claude Desktop e abra-o de novo.",
-    pickerDone: "Pronto. Agora encerre o Claude Desktop por completo, abra-o de novo e confira o seletor da aba Code.",
-    pickerOffDone: "Pronto. Encerre o Claude Desktop e abra-o de novo para aplicar.",
+    pickerOn: "Mostrar GPT no seletor da aba Code…",
+    pickerOff: "Ocultar GPT no seletor de modelos…",
+    pickerState: (on: boolean): string => (on ? "Seletor de modelos: modelos GPT exibidos pelo nome ✓" : "Seletor de modelos: modelos GPT via nomes do Claude (modo alias)"),
+    pickerOnConfirm: "O macOS vai pedir sua senha de login para confiar no certificado do ClaudeRipple (o ClaudeRipple nunca a vê). Depois, encerre o Claude Desktop por completo e abra-o de novo.",
+    pickerDone: "Pronto. Encerre o Claude Desktop por completo, abra-o de novo e confira o seletor de modelos da aba Code.",
+    pickerOffDone: "Pronto. Encerre o Claude Desktop por completo e abra-o de novo para aplicar.",
     cancel: "Cancelar",
     agentTitleOn: "Mostrar nomes de modelo nos subagentes",
     agentTitleOff: "Parar de mostrar nomes de modelo nos subagentes",
@@ -578,10 +689,10 @@ const STRINGS = {
     setupLater: "Depois",
     setupContinue: "Continuar",
     setupDone: "Configuração do ClaudeRipple concluída.",
-    setupFailed: "A configuração não foi concluída",
+    setupFailed: "A configuração do ClaudeRipple não foi concluída.",
     updatedTitle: (v: string) => `ClaudeRipple ${v}`,
     updatedRestarting: (from: string) => `O roteador em execução está na versão ${from}. Mudando para esta versão…`,
-    updatedFailed: "Não foi possível mudar o roteador para esta versão",
+    updatedFailed: "Não foi possível mudar o roteador para a nova versão.",
     problem: (code: string) =>
       code === "settings" ? "O Claude Code não está configurado para usar o ClaudeRipple"
       : code === "upstream" ? "A Anthropic está inacessível"
@@ -592,7 +703,7 @@ const STRINGS = {
       : code,
     about: "Sobre o ClaudeRipple",
     aboutDetail:
-      "Rode o GPT e outros modelos dentro do Claude Desktop, sem desligar o Claude.\n\nProjeto open source independente (GPL-3.0). Não tem afiliação com a Anthropic nem com a OpenAI, nem é endossado ou patrocinado por nenhuma delas. Claude e Claude Code são marcas comerciais da Anthropic, PBC.",
+      "Use o GPT e vários outros modelos junto com o Claude, sem sair do Claude Desktop.\n\nProjeto open source independente (GPL-3.0). Não tem afiliação com a Anthropic nem com a OpenAI, nem é endossado ou patrocinado por nenhuma delas. Claude e Claude Code são marcas comerciais da Anthropic, PBC.",
     quit: "Sair",
     tooltip: (state: string) => `ClaudeRipple ${state}`,
     tooltipDown: "ClaudeRipple: roteador parado — o Claude Desktop não consegue se conectar",
@@ -621,23 +732,44 @@ const STRINGS = {
     updateAvailableItem: (v: string) => `Atualizar para o ClaudeRipple ${v}…`,
     upToDate: (v: string) => `O ClaudeRipple ${v} é a versão mais recente.`,
     updateAvailable: (latest: string, current: string) => `O ClaudeRipple ${latest} está disponível (você tem a ${current}).`,
-    updateDetail: "O roteador reinicia na nova versão assim que as requisições em andamento terminarem. O app da bandeja reabre sozinho.",
+    updateDetail: "O roteador reinicia na nova versão assim que todas as requisições em andamento terminarem. O app da bandeja reabre sozinho.",
     updateNow: "Atualizar",
     later: "Depois",
     updating: (v: string) => `Atualizando para o ClaudeRipple ${v}…`,
-    autoUpdated: (v: string) => `Atualizado para o ClaudeRipple ${v}`,
-    autoAvailable: (v: string) => `Nova versão ${v} — clique para atualizar`,
-    updateDone: (v: string) => `Atualizado para o ClaudeRipple ${v}`,
-    updateFailed: "A atualização não foi concluída",
-    trayReplaceGaveUp: (v: string) => `A bandeja não pôde mudar para a nova versão e continua na versão ${v}. Os detalhes estão no log da bandeja.`,
-    updateCheckFailed: "Não foi possível verificar atualizações",
+    autoUpdated: (v: string) => `O ClaudeRipple foi atualizado para a versão ${v}.`,
+    autoAvailable: (v: string) => `A versão ${v} está disponível. Clique para atualizar.`,
+    updateDone: (v: string) => `A atualização para o ClaudeRipple ${v} foi concluída.`,
+    updateFailed: "A atualização não foi concluída.",
+    close: "Fechar",
+    failureDetails: "Detalhes",
+    failureOutput: "Saída completa",
+    failureOutputCopied: "Saída completa (copiada)",
+    copyOutput: "Copiar",
+    setupAgain: "Configurar novamente",
+    tryAgain: "Tentar novamente",
+    routerRestarted: "Roteador reiniciado",
+    failures: failureText({
+      "router-not-switched": ["Roteador ainda na versão anterior", "A nova versão está instalada, mas o roteador em execução ainda está na versão anterior. Reiniciar o roteador faz com que ele use a nova versão."],
+      "router-not-started": ["Roteador não iniciado", "Não foi possível iniciar o roteador. “Reparar” registra novamente a entrada de inicialização e inicia o roteador."],
+      "startup-entry": ["Problema na entrada de inicialização", "Não foi possível registrar ou executar a entrada que inicia o roteador ao fazer login. “Reparar” registra essa entrada novamente."],
+      "certificate": ["Problema no certificado", "Não foi possível ler o certificado local do roteador ou o certificado não corresponde. Execute a configuração novamente."],
+      "router-unresponsive": ["O roteador não está respondendo", "O roteador não respondeu à verificação final de conexão. Isso costuma acontecer quando outros programas mantêm a CPU ocupada. Execute a configuração novamente daqui a pouco."],
+      "anthropic-unreachable": ["A Anthropic está inacessível", "O roteador respondeu, mas não conseguiu acessar a Anthropic. Verifique sua conexão com a internet e execute a configuração novamente."],
+      "foreign-proxy": ["Outro proxy em uso", "O Claude Code está configurado para usar outro proxy, por isso suas configurações não foram alteradas. Desative esse proxy e execute a configuração novamente."],
+      "disk-full": ["Disco cheio", "Não há espaço suficiente em disco para instalar. Libere espaço e tente novamente."],
+      "files-unwritable": ["Não foi possível substituir os arquivos", "Os arquivos na pasta de instalação estão em uso ou esta conta não tem permissão para gravar neles. Tente novamente daqui a pouco."],
+      "download": ["Falha no download", "Não foi possível baixar a nova versão. Verifique sua conexão com a internet e tente novamente."],
+      "unknown": ["Erro desconhecido", "Nenhuma causa conhecida foi encontrada na saída. A saída completa está em “Detalhes”."],
+    }),
+    trayReplaceGaveUp: (v: string) => `O app da bandeja não pôde mudar para a nova versão e continua na versão ${v}. Veja os detalhes no log da bandeja.`,
+    updateCheckFailed: "Não foi possível verificar atualizações.",
     updatePackaged: "Este é o app independente. Baixe a nova versão na página de releases.",
     updateCheckout: "Isto é um checkout do código-fonte. Atualize com git pull.",
     awakeMenu: (mode: string) => `Manter o notebook acordado · ${mode}`,
     awakeOff: "Não",
-    awakeWorking: "Enquanto trabalha",
+    awakeWorking: "Só enquanto trabalha",
     awakeOn: "Sempre",
-    tetherItem: "Acesso Pessoal do celular quando o Wi-Fi cai",
+    tetherItem: "Acesso Pessoal sem Wi-Fi (automático)",
     laptopOpen: "Abrir Notebook…",
     laptopSetup: "Configurar recursos do notebook…",
   },
@@ -987,10 +1119,13 @@ async function reconcileRouter(s: Status): Promise<void> {
   if (installedElsewhere || runningElsewhere) outputs.push(await runCli(["install"]));
   outputs.push(await runCli(["restart"]));
   const out = outputs.join("\n\n");
-  if (/✗|error|failed|not restarted|start failed/i.test(out)) {
-    await dialog.showMessageBox({ type: "warning", message: L.updatedFailed, detail: out });
-  }
+  if (failedOutput(out)) await showFailure(L.updatedFailed, out);
   void poll();
+}
+
+/** Whether `install` or `restart` printed a failure; both mark a step that did not happen. */
+function failedOutput(out: string): boolean {
+  return /✗|error|failed|not restarted|start failed/i.test(out);
 }
 
 /**
@@ -1405,27 +1540,36 @@ async function offerUpdate(check: UpdateCheck): Promise<void> {
     return;
   }
   const choice = await dialog.showMessageBox({ message: L.updateAvailable(check.latest ?? "?", check.current), detail: L.updateDetail, buttons: [L.updateNow, L.later], defaultId: 0, cancelId: 1 });
-  if (choice.response !== 0 || updating) return;
+  if (choice.response !== 0) return;
+  await installUpdate(check.latest ?? "");
+}
+
+/** The update the person chose, or chose to try again from its failure dialog. */
+async function installUpdate(version: string): Promise<void> {
+  if (updating) return;
   updating = true;
   render();
-  const version = check.latest ?? "";
   if (Notification.isSupported()) new Notification({ title: "ClaudeRipple", body: L.updating(version), icon: notifyIcon() }).show();
+  const retry = () => installUpdate(version);
   if (last?.autoUpdate) {
     // Share the router's coordinator with its scheduler instead of racing a second installer.
+    let failure: string | null = null;
     try {
       const response = await fetch(`${adminUrl()}api/update`, { method: "POST", signal: AbortSignal.timeout(35_000) });
       if (!response.ok) throw new Error(await response.text());
       routerUpdateUntil = Date.now() + 10 * 60_000;
     } catch (error) {
-      await dialog.showMessageBox({ type: "warning", message: L.updateFailed, detail: String(error) });
+      failure = String(error);
     } finally { updating = false; render(); }
+    // After `updating` is cleared, so that trying again from the dialog can start.
+    if (failure !== null) await showFailure(L.updateFailed, failure, retry);
     return; // /api/status will confirm completion, notify and relaunch this tray.
   }
   const r = await runCliResult(["update"]);
   updating = false;
   if (!r.ok) {
     render();
-    await dialog.showMessageBox({ type: "warning", message: L.updateFailed, detail: r.output.slice(-4000) });
+    await showFailure(L.updateFailed, r.output, retry);
     return;
   }
   availableUpdate = null;
@@ -1453,12 +1597,74 @@ async function setup(): Promise<void> {
   // `install` marks each step with ✓ or ✗ and ends on a failed probe; saying "finished" over a
   // failure would send the user away believing it worked.
   const failed = out.includes("✗") || /error|failed/i.test(out);
-  await dialog.showMessageBox({
-    type: failed ? "warning" : "info",
-    message: failed ? L.setupFailed : L.setupDone,
-    detail: out,
-  });
+  if (failed) await showFailure(L.setupFailed, out);
+  else await dialog.showMessageBox({ type: "info", title: DIALOG_TITLE, message: L.setupDone });
   void poll();
+}
+
+// ---- failure dialogs --------------------------------------------------------------------
+// A failed update, setup or router switch used to put the CLI's whole output in the dialog: npm's
+// lines, every install step and the exit code, with the cause somewhere in the middle (2026-10-29).
+// The dialog now names each failure the output shows (failure-model.ts), offers the tray's own fix
+// for the first one that has one, and keeps the output behind Details, where it can be copied.
+
+/** Without a title Windows shows Electron's name: the tray runs as `electron path/to/main.js`. */
+const DIALOG_TITLE = "ClaudeRipple";
+
+/** `retry` runs the failed operation again; only an update passes one. */
+async function showFailure(message: string, output: string, retry?: () => Promise<void>): Promise<void> {
+  const kinds = failureKinds(output);
+  const runs: Partial<Record<FailureAction, () => Promise<void>>> = {
+    restart: restartAfterFailure,
+    repair: async () => {
+      showWindow("health");
+      await act("repair");
+    },
+    setup,
+    ...(retry ? { retry } : {}),
+  };
+  const action = failureAction(kinds, new Set(Object.keys(runs) as FailureAction[]));
+  const label: Record<FailureAction, string> = { restart: L.restartRouter, repair: L.actRepair, setup: L.setupAgain, retry: L.tryAgain };
+  const buttons = [...(action ? [label[action]] : []), L.failureDetails, L.close];
+  const details = buttons.length - 2;
+  const close = buttons.length - 1;
+  const detail = kinds.map((kind) => L.failures[kind].join("\n")).join("\n\n");
+  for (;;) {
+    const choice = await dialog.showMessageBox({ type: "warning", title: DIALOG_TITLE, message, detail, buttons, defaultId: action ? 0 : close, cancelId: close, noLink: true });
+    if (choice.response === details) {
+      await showOutput(output);
+      continue;
+    }
+    if (action && choice.response === 0) await runs[action]?.();
+    return;
+  }
+}
+
+/** The output itself, for a bug report: its end on screen, all of it on the clipboard. */
+async function showOutput(output: string): Promise<void> {
+  let copied = false;
+  for (;;) {
+    const choice = await dialog.showMessageBox({
+      type: "none",
+      title: DIALOG_TITLE,
+      message: copied ? L.failureOutputCopied : L.failureOutput,
+      detail: output.slice(-4000),
+      buttons: [L.copyOutput, L.close],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+    });
+    if (choice.response !== 0) return;
+    clipboard.writeText(output);
+    copied = true;
+  }
+}
+
+async function restartAfterFailure(): Promise<void> {
+  const out = await runCli(["restart"]);
+  void poll();
+  if (failedOutput(out)) await showFailure(L.updatedFailed, out);
+  else await dialog.showMessageBox({ type: "info", title: DIALOG_TITLE, message: L.routerRestarted });
 }
 
 async function promptForSetup(): Promise<void> {
@@ -1609,6 +1815,12 @@ if (!app.requestSingleInstanceLock()) app.exit(0);
 // Opening the app again (Finder, Start menu, `clauderipple tray`) while it already runs in the
 // tray is someone looking for it: bring the window forward rather than nothing.
 app.on("second-instance", () => {
+  if (app.isReady()) showWindow(last ? undefined : "health");
+});
+// macOS does not start a second instance for that: clicking the icon of a running app only sends
+// it a reopen, which Electron reports as `activate`. Without this the icon did nothing and the
+// window opened only from the tray menu (2026-10-30).
+app.on("activate", () => {
   if (app.isReady()) showWindow(last ? undefined : "health");
 });
 

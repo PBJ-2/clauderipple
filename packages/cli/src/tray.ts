@@ -345,8 +345,10 @@ export function swapTrayRuntime(target: string, staging: string, backup = `${tar
     try { fs.renameSync(staging, target); return { ok: true }; }
     catch (error) { return { ok: false, message: `could not move the new Electron into ${target} (${(error as Error).message})` }; }
   }
-  try { fs.renameSync(target, backup); }
-  catch (error) {
+  try {
+    if (fs.existsSync(backup)) throw new Error(`backup path already exists: ${backup}`);
+    fs.renameSync(target, backup);
+  } catch (error) {
     return { ok: false, message: `the running tray still holds ${target}; quit it and run the update again (${(error as Error).message})` };
   }
   try { fs.renameSync(staging, target); }

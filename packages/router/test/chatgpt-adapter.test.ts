@@ -10,6 +10,7 @@ import { ChatGptAdapter, rateLimitsFromHeaders, rateLimitsFromUsage, streamHold 
 import { Logger } from "../src/log.ts";
 import { decodeEnvelope, encodeEnvelope } from "../src/reasoning.ts";
 import type { AnthropicRequest } from "../src/providers/chatgpt/translate.ts";
+import { requestKind } from "../src/routing.ts";
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-gpt-"));
 fs.writeFileSync(path.join(home, "chatgpt-auth.json"), JSON.stringify({ accessToken: "tok_test", accountId: "acct_test", expiresAt: Date.now() + 3600_000, source: "own" }));
@@ -165,7 +166,8 @@ const front = http.createServer((req, res) => {
   req.on("data", (c: Buffer) => chunks.push(c));
   req.on("end", () => {
     const json = JSON.parse(Buffer.concat(chunks).toString()) as AnthropicRequest;
-    void adapter.handle(req, res, req.url ?? "/v1/messages", json, "gpt-5.6-terra", "high");
+    const requestPath = (req.url ?? "/v1/messages").split("?")[0] ?? "/v1/messages";
+    void adapter.handle(req, res, req.url ?? "/v1/messages", json, "gpt-5.6-terra", "high", { kind: requestKind(json, requestPath) });
   });
 });
 
@@ -223,6 +225,15 @@ test("streaming: headers, request body, and translated Anthropic SSE", async () 
   assert.ok(r.text.includes('"partial_json":"{\\"file_path\\":\\"a\\"}"'));
   assert.ok(r.text.includes('"cache_read_input_tokens":450'));
   assert.equal(adapter.lastRateLimits?.plan_type, "prolite");
+});
+
+test("an Auto mode classifier's Responses instructions stay exactly as sent", async () => {
+  mode = "stream";
+  const system = "You are a security monitor for autonomous AI coding agents.\n\nJudge this action.";
+  const classifier: AnthropicRequest = { model: "claude-haiku-5-5", stream: true, system, messages: [{ role: "user", content: "check" }] };
+  const response = await call(classifier);
+  assert.equal(response.status, 200);
+  assert.equal(seen.at(-1)?.body.instructions, system);
 });
 
 test("hosted web search sends the measured Responses tool and extracts cited results", async () => {

@@ -9,7 +9,7 @@ import path from "node:path";
 import type { Config } from "./config.ts";
 import { agentAliases } from "./agents.ts";
 import { isJudgeOnlyModel } from "./model-policy.ts";
-import { chatPickerModels, providerModelWindow, resolvedModelWindow } from "./picker.ts";
+import { chatPickerModels, pickerWindowOverride, providerModelWindow, resolvedModelWindow } from "./picker.ts";
 import { chatgptModelWindow } from "./providers/chatgpt/windows.ts";
 
 export const BOOTSTRAP_PATH = "/api/claude_cli/bootstrap";
@@ -72,8 +72,9 @@ export function bootstrapModels(cfg: Config, agentDirs?: string[]): ReturnType<t
       const [base, effort] = id.split("@");
       const named = cfg.cli.extraModels.find((m) => m.model === base);
       // An "<model>@<effort>" entry is the same model with a different effort, so it has the same window.
-      // The live catalogue wins over both a saved entry and the provider's stored value (§4, 2026-10-23).
-      const window = chatgptModelWindow({ ...cfg, aliases }, base ?? id) ?? named?.contextWindow ?? providerModelWindow({ ...cfg, aliases }, base ?? id);
+      // A window the operator set on the picker entry wins; otherwise the live catalogue wins over
+      // both the copied entry value and the provider's stored value (§4, 2026-10-30).
+      const window = pickerWindowOverride({ ...cfg, aliases }, base ?? id) ?? chatgptModelWindow({ ...cfg, aliases }, base ?? id) ?? named?.contextWindow ?? providerModelWindow({ ...cfg, aliases }, base ?? id);
       return { model: id, name: `${named?.name ?? base}${effort ? ` · ${effort}` : ""}`, ...(window ? { contextWindow: window } : {}) };
     });
   return chatPickerModels({ ...cfg, aliases, cli: { ...cfg.cli, extraModels: [...cfg.cli.extraModels, ...fromAgents] } });

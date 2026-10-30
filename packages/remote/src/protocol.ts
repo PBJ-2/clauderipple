@@ -118,6 +118,8 @@ export type EventBody = MessageImages & (
   | { kind: "delta"; msg: string; text: string }
   /** One thinking block; deltas append, a final block replaces them (never expose signatures). */
   | { kind: "thinking"; msg: string; block: number; text: Text; delta?: boolean }
+  /** A progress sentence the model wrote between tools: shown, unlike thinking. Its signature never travels. */
+  | { kind: "narration"; msg: string; block: number; text: Text }
   | { kind: "assistant"; msg: string; model: string; text: Text; tools: ToolCall[] }
   | { kind: "tool_result"; toolUseId: string; ok: boolean; text: Text }
   /** A subagent ran; its own log is `sub` and loads only when asked (Paseo #5820). */

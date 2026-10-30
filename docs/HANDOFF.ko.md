@@ -277,7 +277,7 @@ Claude가 Claude 앱 창을 computer-use로 잡는 건 불가(권한 거부) —
 에이전트 파일이 Agent 도구 목록에 바로 뜨므로 그게 곧 조회다.
 
 **3. 라우팅 불능은 이제 소리 내며 죽는다.** `claude-*`가 아닌 모델을 보낼 곳이 없으면 Anthropic에
-PASS하지 않고 `400 ClaudeRipple: <사유>`로 거부한다(`unroutableReason`: 미선언 / 두 프로바이더 /
+PASS하지 않고 `400 ClaudeRipple: <사유>`로 거부한다(`decide()`의 `refusal`: 미선언 / 두 프로바이더 /
 ingress 전용 / 모르는 마커 이름 / 미선언 모델로 풀리는 별칭). Claude 모델은 그대로 통과.
 
 **4. 마커 규칙이 바뀌었다 (`60028ba`).** ① 유저 메시지 **맨 앞**에 있을 때만 인정 — 압축 요약에

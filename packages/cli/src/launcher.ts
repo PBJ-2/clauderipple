@@ -305,8 +305,10 @@ function windowsOperation(opts: Opts, remove: boolean): LauncherResult {
     if (denied) return denied;
   }
   const out = run(windowsShortcutScript(launcher, icon, overrideDir(), remove, shortcuts));
-  if (remove) fs.rmSync(launcher, { force: true });
-  else {
+  if (remove) {
+    try { fs.unlinkSync(launcher); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  } else {
     fs.mkdirSync(opts.home, { recursive: true });
     fs.writeFileSync(launcher, windowsTrayLauncher(opts.rt, opts.home));
   }

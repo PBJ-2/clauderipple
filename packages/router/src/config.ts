@@ -10,6 +10,10 @@ import path from "node:path";
 import type { CompatibleCaps } from "./compat.ts";
 import { PRESETS } from "./presets.ts";
 import { hostProblem, portProblem } from "./remote-host.ts";
+import { ingressOnly } from "./targets.ts";
+
+export type ProcessPriority = "below-normal" | "normal" | "above-normal" | "high";
+export const PROCESS_PRIORITIES: readonly ProcessPriority[] = ["below-normal", "normal", "above-normal", "high"];
 
 export type ProviderModel = {
   id: string;
@@ -443,6 +447,11 @@ export type CliModel = {
 export type Config = {
   /** Install new versions while idle. Omitted means enabled; hot-reloaded. */
   autoUpdate?: boolean;
+  /**
+   * Windows only. Absent means "normal". "below-normal" is what Task Scheduler gave the router
+   * before 0.12.23; "high" lets the router take CPU ahead of other programs.
+   */
+  processPriority?: ProcessPriority;
   listen: { host: string; port: number; /** OpenAI-compatible ingress port. Defaults to port + 2. */ openaiPort?: number };
   upstream: string;
   providers: Record<string, Provider>;
@@ -789,6 +798,9 @@ function foldSplitProviders(c: Config): Config {
 export function validate(c: Config): string[] {
   const errors: string[] = [];
   if (c.autoUpdate !== undefined && typeof c.autoUpdate !== "boolean") errors.push("autoUpdate must be true or false");
+  if (c.processPriority !== undefined && !PROCESS_PRIORITIES.includes(c.processPriority as ProcessPriority)) {
+    errors.push('processPriority must be "below-normal", "normal", "above-normal" or "high"');
+  }
   if (c.autoModeClassifier !== undefined) {
     const settings = c.autoModeClassifier;
     if (!settings || typeof settings !== "object") errors.push("autoModeClassifier must be an object");
@@ -798,7 +810,7 @@ export function validate(c: Config): string[] {
       const checkTarget = (target: Partial<ClassifierTarget>, label: string): void => {
         const provider = c.providers[target.provider as string];
         if (!provider) errors.push(`${label}: unknown provider`);
-        else if (provider.type === "anthropic" && !provider.accountPool) errors.push(`${label}: provider is ingress-only`);
+        else if (ingressOnly(c, target.provider as string)) errors.push(`${label}: provider is ingress-only`);
         if (typeof target.model !== "string" || !target.model.trim()) errors.push(`${label}: missing model`);
         if (target.effort !== undefined && typeof target.effort !== "string") errors.push(`${label}: effort must be a string`);
       };
@@ -839,7 +851,7 @@ export function validate(c: Config): string[] {
         if (!c.providers[f.provider]) errors.push(`route ${alias}: fallback ${i} names unknown provider "${f.provider}"`);
         // A native `anthropic` provider is routable only when its Claude OAuth pool is explicitly
         // enabled. Existing native providers remain ingress-only to avoid hijacking Claude traffic.
-        else if (c.providers[f.provider]!.type === "anthropic" && !(c.providers[f.provider] as AnthropicProvider).accountPool) errors.push(`route ${alias}: fallback ${i} names "${f.provider}", which serves the OpenAI ingress only`);
+        else if (ingressOnly(c, f.provider)) errors.push(`route ${alias}: fallback ${i} names "${f.provider}", which serves the OpenAI ingress only`);
         if (!f.model || typeof f.model !== "string") errors.push(`route ${alias}: fallback ${i} missing model`);
         if (f.provider === r.provider && f.model === r.model) errors.push(`route ${alias}: fallback ${i} repeats the primary target`);
       });

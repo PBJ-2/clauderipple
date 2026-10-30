@@ -142,12 +142,18 @@ function applyProviderLabel(provider, key, typedName) {
   else delete provider.label;
   return provider;
 }
+// The router's `isTargetProvider` (packages/router/src/targets.ts), copied because the forms ask it of
+// providers not saved yet; `ui-targets.test.ts` keeps the two equal. A native Claude provider becomes
+// a mapping target only after the explicit account-pool opt-in; API-key and legacy login providers
+// remain OpenAI-ingress-only.
+function isTargetProvider(provider) {
+  if (!provider) return false;
+  return provider.type !== "anthropic" || (provider.accountPool === true && provider.auth === "claude-code");
+}
 function groupedModels(config) {
   const groups = [];
   for (const [name, provider] of Object.entries(config.providers || {})) {
-    // A native Claude provider becomes a mapping target only after the explicit account-pool opt-in.
-    // API-key and legacy login providers remain OpenAI-ingress-only.
-    if (provider.type === "anthropic" && !provider.accountPool) continue;
+    if (!isTargetProvider(provider)) continue;
     let models = modelsOf(provider);
     if (!models.length && provider.type === "chatgpt") models = CHATGPT_MODELS;
     if (models.length) groups.push({ name, provider, models });
@@ -190,8 +196,9 @@ function modelEffortTag(model) {
   if (!Array.isArray(model.effortLevels)) return null;
   return model.effortLevels.length ? t("providers.modelEffort") : t("providers.modelNoEffort");
 }
-// Routed models do not share a context window. ChatGPT's live effective window comes from the
-// router's shared resolver and is read-only; other providers keep the saved/discovered fallback.
+// Routed models do not share a context window. `windows` is the value the router resolved for each
+// model (a saved override included) and `catalogWindows` is the live Codex catalogue's own figure,
+// which the window editor prefills and annotates while no override is in effect.
 let pickerContextWindows = { windows: {}, catalogWindows: {} };
 function discoveredContextWindow(providerName, modelId) {
   const provider = currentConfig && currentConfig.providers && currentConfig.providers[providerName];
@@ -362,6 +369,7 @@ async function refreshHealth() {
   modRedraw(details, [
     versionRow(),
     autoUpdateRow(),
+    priorityRow(),
     // Which files answer, and since when: the only way to see that an update actually replaced the router.
     ...(status.runtime ? [cell(t("health.runtime"), null, [el("span", { class: "cell-sub mono", text: status.runtime.router || "?" }), new Date(status.runtime.startedAt).toLocaleString()])] : []),
     el("div", { class: "row" }, [el("span", { class: "k", text: t("health.routes") }), el("span", { class: "v", text: String(status.routes) })]),
@@ -472,6 +480,46 @@ async function toggleAutoUpdate(enabled) {
     await refreshHealth();
     const current = document.querySelector('[data-key="auto-update"]');
     if (current) { current.disabled = !status.autoUpdate; current.checked = status.autoUpdate?.enabled !== false; }
+  }
+}
+
+// How much CPU priority the router and the phone host ask Windows for (config processPriority,
+// Normal unless set). Task Scheduler had started them below Normal, and a build holding every core
+// starved the router until an update could not reach it (2026-10-29). High puts ClaudeRipple ahead
+// of other programs, so choosing it asks first and the row says so while it is on.
+const PRIORITY_LABEL = { "below-normal": "priority.belowNormal", normal: "priority.normal", "above-normal": "priority.aboveNormal", high: "priority.high", idle: "priority.idle", realtime: "priority.realtime" };
+let prioritySaving = false;
+function priorityRow() {
+  const state = status.processPriority;
+  // Older routers do not report it, and only Windows has these levels.
+  if (!state || !state.supported) return null;
+  const items = ["below-normal", "normal", "above-normal", "high"].map((value) => ({ value, label: t(PRIORITY_LABEL[value]) }));
+  const select = modSelect("process-priority", items, state.setting, t("priority.label"), (value) => void savePriority(value, select));
+  select.disabled = prioritySaving;
+  const notes = [t("priority.help")];
+  if (state.setting === "high") notes.push(el("span", { class: "cell-sub warn-text", text: t("priority.highWarning") }));
+  // Task Manager or another program can change it underneath; say what is in effect.
+  if (state.current && state.current !== state.setting) notes.push(el("span", { class: "cell-sub warn-text", text: t("priority.current", { level: t(PRIORITY_LABEL[state.current]) }) }));
+  return cell(t("priority.label"), select, notes);
+}
+async function savePriority(value, select) {
+  const state = status.processPriority;
+  if (prioritySaving || !state || value === state.setting) return;
+  if (value === "high" && !confirm(t("priority.highConfirm"))) { select.value = state.setting; return; }
+  prioritySaving = true;
+  select.disabled = true;
+  try {
+    const next = await api("/api/config");
+    next.processPriority = value;
+    const out = await configRequest(next);
+    currentConfig = next;
+    state.setting = value;
+    configSaved(out, t("common.saved"));
+  } catch (error) {
+    toast(t("common.saveFailed"), true, error.message);
+  } finally {
+    prioritySaving = false;
+    await refreshHealth();
   }
 }
 function versionRow() {
@@ -1021,6 +1069,7 @@ function renderClientPickerModels(enabled) {
     groups.map((group) => [group.name, providerLabel(group.name, group.provider), group.models.map((model) => [
       model.id, labelOf(model), discoveredContextWindow(group.name, model.id) ?? null,
       savedContextWindow(model.id) ?? null, pickerContextWindows.catalogWindows[model.id] ?? null,
+      pickerContextWindows.windows[model.id] ?? null,
     ])]),
   ]);
   // Typing in a window changes none of this, and the catalogue arrives once with the screen, so a
@@ -1040,16 +1089,19 @@ function renderClientPickerModels(enabled) {
     const discovered = discoveredContextWindow(group.name, model.id);
     const saved = savedContextWindow(model.id);
     const catalogWindow = pickerContextWindows.catalogWindows[model.id];
+    // The catalogue's figure is the one in use while the router resolves exactly it; a saved
+    // override (or a route window) makes the two differ, and the field then shows the resolved value.
+    const catalogApplied = catalogWindow !== undefined && pickerContextWindows.windows[model.id] === catalogWindow;
     const draft = pickerWindowDrafts.get(model.id);
-    // Blank means "use the fallback" except when the live catalogue owns the value.
+    // Always editable. It shows the number the router uses; emptying it, or typing the catalogue's
+    // own figure, saves no override and goes back to the official value (2026-10-30).
     const windowField = el("input", {
       type: "number", class: "model-window", min: "1", step: "1000",
-      value: draft !== undefined ? draft : catalogWindow !== undefined ? String(catalogWindow) : saved !== undefined ? String(saved) : "",
+      value: draft !== undefined ? draft : catalogApplied ? String(catalogWindow) : saved !== undefined ? String(saved) : "",
       placeholder: discovered !== undefined ? String(discovered) : t("slots.windowGlobal"),
-      title: t(catalogWindow !== undefined ? "slots.windowCodex" : "slots.windowHelp"),
-      readonly: catalogWindow !== undefined ? "" : undefined,
+      title: t(catalogApplied ? "slots.windowCodex" : "slots.windowHelp"),
     });
-    const windowNote = catalogWindow !== undefined ? el("small", { text: t("slots.windowCodex"), style: "grid-row: 3; grid-column: 1 / -1" }) : null;
+    const windowNote = catalogApplied ? el("small", { class: "pm-note", text: t("slots.windowCodex") }) : null;
     windowField.hidden = !input.checked;
     if (windowNote) windowNote.hidden = !input.checked;
     windowField.dataset.model = model.id;
@@ -1061,8 +1113,10 @@ function renderClientPickerModels(enabled) {
       void saveClientPickerModels();
     });
     // Two lines: the name owns the first — on one line it was the thing that collapsed, down to
-    // "GPT…" — and the provider and the window share the second. The field sits outside the
-    // <label>, because inside it every click toggles the checkbox instead of reaching the field.
+    // "GPT…" — and the provider and the window share the second; the catalogue note, when there is
+    // one, takes a third of its own (style.css places it: an inline style is dropped by the CSP).
+    // The field sits outside the <label>, because inside it every click toggles the checkbox instead
+    // of reaching the field.
     box.appendChild(el("div", { class: "picker-model", title: model.id }, [
       el("label", { class: "pm-main" }, [input, el("span", { text: labelOf(model) })]),
       el("small", { text: providerLabel(group.name, group.provider) }),
@@ -1277,7 +1331,7 @@ const CLASSIFIER_REFUSES_STAGE2 = new Set(["claude-sonnet-5-5", "claude-opus-5-5
 function classifierGroups(config) {
   const groups = groupedModels(config);
   for (const [name, provider] of Object.entries(config.providers || {})) {
-    if (provider.type !== "anthropic" || !provider.accountPool || modelsOf(provider).length) continue;
+    if (provider.type !== "anthropic" || !isTargetProvider(provider) || modelsOf(provider).length) continue;
     groups.push({ name, provider, models: claudeModels.map((model) => ({ id: model.id, name: labelOf(model) })) });
   }
   return groups;
@@ -1330,7 +1384,7 @@ function renderAutoClassifier() {
   const groups = classifierGroups(currentConfig);
   box.replaceChildren(classifierRow("first", rows.first, groups), classifierRow("rest", rows.rest, groups));
   const note = $("#client-auto-classifier-note");
-  const pool = Object.values(currentConfig.providers || {}).some((provider) => provider.type === "anthropic" && provider.accountPool);
+  const pool = Object.values(currentConfig.providers || {}).some((provider) => provider.type === "anthropic" && isTargetProvider(provider));
   if (note) note.hidden = pool;
 }
 
@@ -1383,10 +1437,15 @@ function saveAutoClassifier() {
 function clientPickerSelections() {
   return $all("#client-picker-models input[type=checkbox]:checked").map((input) => {
     const field = $(`#client-picker-models input.model-window[data-model="${CSS.escape(input.dataset.model)}"]`);
-    // A catalogue value is display-only, not a new override persisted by an unrelated checkbox.
-    const typed = field && !field.readOnly && field.value.trim() ? Number(field.value) : NaN;
-    const contextWindow = field && field.readOnly ? savedContextWindow(input.dataset.model)
-      : Number.isFinite(typed) && typed > 0 ? Math.floor(typed) : discoveredContextWindow(input.dataset.provider, input.dataset.model);
+    const catalogWindow = pickerContextWindows.catalogWindows[input.dataset.model];
+    const typed = field && field.value.trim() ? Number(field.value) : NaN;
+    const value = Number.isFinite(typed) && typed > 0 ? Math.floor(typed) : undefined;
+    // An empty field, or the catalogue's own figure, is no override for a catalogue-backed model:
+    // the entry stores no window and the router keeps following the catalogue. Another provider
+    // keeps its old fallback to the window its provider declares (2026-10-30).
+    const contextWindow = value !== undefined && value !== catalogWindow
+      ? value
+      : catalogWindow !== undefined ? undefined : discoveredContextWindow(input.dataset.provider, input.dataset.model);
     return { id: input.dataset.model, name: input.dataset.name, provider: input.dataset.provider, contextWindow };
   });
 }
@@ -1396,6 +1455,9 @@ async function saveClientPickerModels() {
   try {
     const out = await configRequest(next);
     currentConfig = next;
+    // The override changes which window the router resolves; the rows read that map to decide
+    // whether the catalogue is in effect, so read it again before the next redraw.
+    pickerContextWindows = await api("/api/context-windows").catch(() => pickerContextWindows);
     // Everything the fields held, drafts included, is now the saved copy: there is nothing left to
     // carry over the next rebuild.
     pickerWindowDrafts.clear();
@@ -1873,14 +1935,30 @@ function openMacRename(current) {
   ]));
 }
 
+/** The conflict row's body: the app and its own fix when we know it, else the unknown cause. */
+function macConflictBody(c) {
+  if (typeof c.name === "string" && c.name) {
+    const app = t("mac.conflict.app", { app: c.name });
+    const fixKey = `mac.conflict.fix.${c.app}`;
+    return typeof c.app === "string" && hasI18nKey(fixKey) ? `${app} ${t(fixKey)}` : app;
+  }
+  return t("mac.conflict.unknown");
+}
+
 function macAwakeCard(a) {
   const why = macAwakeWhy(a);
   const state = a.applied
     ? macStateRow("on", t("mac.awake.on"), why.text, macFacts(a))
     : macStateRow(why.warn ? "warn" : "off", t("mac.awake.off"), why.text, macFacts(a));
   const modes = [{ value: "off", label: t("mac.mode.off") }, { value: "working", label: t("mac.mode.working") }, { value: "on", label: t("mac.mode.on") }];
+  // Another app can write the same sleep setting (router awake.ts): it clears the bit when it stops,
+  // so a closed lid sleeps. Only worth saying while we hold it; an older router's string is ignored.
+  const conflict = a.conflict && typeof a.conflict === "object" && a.mode !== "off"
+    ? macStateRow("warn", t("mac.conflict.title"), macConflictBody(a.conflict))
+    : null;
   const rows = [
     state,
+    conflict,
     cell(el("span", { class: "cell-label", text: t("mac.mode.label") }),
       modSegmented("mac-mode", modes, a.mode, t("mac.mode.label"), (mode) => void macPut({ awake: { mode, until: null } })),
       t(`mac.mode.${a.mode}Help`), "wide"),

@@ -23,6 +23,22 @@ CLI: CONNECT api.anthropic.com  → ClaudeRipple terminates TLS (leaf cert signe
 CLI: CONNECT anything else      → blind tunnel
 ```
 
+Before those rules run, `requestKind` (routing.ts) decides once what the request is
+(a web search, a web fetch, an Auto mode classifier request, or an ordinary turn),
+and `decide` returns the route, carrying that `kind` and the model the client
+`asked` for, or the reason to refuse it, in one pass over the rules above. The
+adapters read `kind` through `promptAdditions` (identity.ts) to know what they may
+add to the system prompt.
+
+What a provider can do is answered in one module, `targets.ts`: whether it can take
+routed requests at all (`isTargetProvider`, `ingressOnly`), who declares a model id
+(`declaredBy`, `qualifiedModel`), which efforts it takes (`effortLevels`), and
+whether it runs web search (`runsServerTools`, `answersWebSearch`). The router's
+callers (routing, validation, the proxy, agent files, model scores, the admin
+status) ask it instead of spelling the rule themselves. The dashboard keeps one
+copy of `isTargetProvider` for providers not saved yet, and `ui-targets.test.ts`
+holds that copy to the router's.
+
 Why this path is stable:
 
 - Anthropic's [corporate proxy docs](https://code.claude.com/docs/en/corporate-proxy)
@@ -99,6 +115,15 @@ security-monitor system prompt, never user messages or routing markers. The
 original security prompt, context, output format and native decision logic remain
 intact. The dashboard's Clients page sets it (see the first-stage section below),
 or edit the JSON config. Removing the field restores ordinary routing.
+
+"Intact" covers the system prompt on every provider: `promptAdditions` gives a
+request of kind `auto-mode-classifier` no identity line, no `instructionsAppend`
+and no image hint. Until 2026-10-24 it did not hold. The request's kind never
+reached the adapters, so the ChatGPT path put `You are gpt-6-luna (reasoning
+effort: high), answering through Claude Code, a terminal-based coding agent.` in
+front of the security prompt and the image-generation hint after it, and the
+OpenAI-compatible, Google, Grok and Anthropic-compatible paths added the identity
+line and the addendum (docs/reviews/2026-10-24-architecture-review.md, candidate 1).
 
 This request is Auto mode's safety check: it decides whether an action the agent
 wants to take runs without asking. A target that judges worse than the model
@@ -692,12 +717,27 @@ must preserve **Data: Artificial Analysis (artificialanalysis.ai)** attribution.
     adapter publishes the last-read list process-wide (`providers/chatgpt/
     windows.ts`), and one resolver (`chatgptModelWindow`) hands it to bootstrap's
     `auto_compact_windows`, the picker's `context_window_by_model` and
-    `providerModelWindow` — ahead of any stored `contextWindow` and of
-    `cli.autoCompactWindow`, for models served by a `chatgpt` provider (by id,
-    alias, prefix rule or as a route's target). An explicit
+    `providerModelWindow` — ahead of any stored `contextWindow` (except a picker entry's own
+    override, below) and of `cli.autoCompactWindow`, for models served by a `chatgpt` provider (by
+    id, alias, prefix rule or as a route's target). An explicit
     `route.contextWindow` still wins; every non-chatgpt provider keeps the old
     fallback. The catalogue is now read at router start and every two hours, not
     only when the dashboard asks.
+  - **A picker entry's own window wins over the catalogue (2026-10-30).** The catalogue
+    figure stays the default for a model the dashboard has no override for, but the
+    window field is the operator's: `cli.extraModels[].contextWindow` now beats
+    `chatgptModelWindow` in `resolvedModelWindow`, `chatPickerModels`,
+    bootstrap's agent-file entries and the `GET /api/context-windows` snapshot;
+    an explicit `route.contextWindow` still beats both. Ticking a model copies the
+    provider's declared window onto the entry (`applyPickerSelections`), so an entry
+    equal to that declaration is not an override (`pickerWindowOverride`) — today's
+    configs carry 6.1 Sol's stale 272000 that way and must keep following the
+    catalogue. `catalogWindows` now carries every catalogue-backed id's own figure,
+    also while an override is in effect, so the editor prefills it as the default and
+    shows its note only while `windows` (the resolved value) equals it. The field is
+    editable for catalogue models too; an empty or catalogue-equal value saves no
+    override. Tests: `router/test/chatgpt-windows.test.ts`,
+    `chatgpt-windows-api.test.ts`, `ui-picker-selection.test.ts`.
   - **Effective compaction windows (2026-10-28, Claude Code 2.1.308).** The owner's
     measured `/context` reported `30.7k / 600k` on `claude-opus-4-7` routed to Sol
     (475000 capacity), despite bootstrap and `autoCompactWindowsCache` carrying 475000.
@@ -1404,7 +1444,11 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
   same flow); they are not an Anthropic guarantee, and reuse of one or multiple
   subscriptions is subject to Anthropic's terms and possible account restrictions.
 - A native `anthropic` provider remains OpenAI-ingress-only unless it explicitly
-  sets `accountPool: true`. With that flag and `auth: "claude-code"`, Claude
+  sets `accountPool: true` with `auth: "claude-code"` (`isTargetProvider`). The
+  config refuses one as a fallback or a classifier target; as a primary route or a
+  direct rule it is accepted, ignored at routing time (the request passes through),
+  and reported: the config save answers with a warning per such rule, and the
+  router logs it when it reads the config (`targetWarnings`). With the pool, Claude
   Desktop/Code Messages requests stay unmodified except for the routed model and
   selected identity. The runtime pool is ordered current observed/env/Claude Code
   login first, then ClaudeRipple-owned accounts. When none of them is usable, a
@@ -2052,7 +2096,7 @@ plan unless marked otherwise.
 | The DeepSeek `401` stayed unexplained for a day: a provider error was logged as a status code only (2026-09-15) | Upstream 4xx/5xx bodies are logged (first 300 characters, key-shaped strings masked) and kept in the request record. This is the same rule already required of the translator above. |
 | "Connect Claude subscription" from the tray/GUI failed with "setup-token failed": `claude setup-token` is an interactive terminal flow and neither place has a terminal (2026-09-15, Windows) | Without a TTY the error says to run `clauderipple claude-login` in a terminal and that an existing Claude Code login is reused anyway; other failures carry what `claude` printed. A button that cannot work where it is must say where it works. |
 | Closing Claude Desktop's window does not quit it; reopening hits `Not main instance, returning early` and the app silently keeps the OLD proxy setting. The user sees "I configured it and nothing happened" with no error anywhere (2026-09-14) | Tell the user that closing the window is not enough, and detect it: with picker mode on, the router knows whether the app is actually routing through it. Surface "configured, but the app has not restarted yet" rather than letting it fail silently. |
-| A subagent prompt carried `[[ripple: deepseek@high]]` while `aliases` had no `deepseek`; the marker resolved to a model id nobody declared, `resolve()` returned null, and the request went to Anthropic as an ordinary `PASS` — 30 × `404 model: deepseek-v4.1-flash` over two days, read by the session as "the model stopped working" (2026-09-19/20) | A non-`claude-*` model this router cannot route is **refused here, by name**: `400 invalid_request_error "ClaudeRipple: <reason>"`, tag `REFUSE`, reason in the request record (`unroutableReason`: undeclared / declared by two providers / ingress-only owner / unknown marker alias / alias to an undeclared model). Native `claude-*` ids keep passing through untouched — Claude traffic is never hijacked to say no. And the marker alias table is derived from the agent files themselves (§4), so an agent that exists is an alias that resolves. |
+| A subagent prompt carried `[[ripple: deepseek@high]]` while `aliases` had no `deepseek`; the marker resolved to a model id nobody declared, `resolve()` returned null, and the request went to Anthropic as an ordinary `PASS` — 30 × `404 model: deepseek-v4.1-flash` over two days, read by the session as "the model stopped working" (2026-09-19/20) | A non-`claude-*` model this router cannot route is **refused here, by name**: `400 invalid_request_error "ClaudeRipple: <reason>"`, tag `REFUSE`, reason in the request record (`decide()`'s `refusal`: undeclared / declared by two providers / ingress-only owner / unknown marker alias / alias to an undeclared model). Native `claude-*` ids keep passing through untouched — Claude traffic is never hijacked to say no. And the marker alias table is derived from the agent files themselves (§4), so an agent that exists is an alias that resolves. |
 | A rejected Claude account remained quarantined after its access/refresh token was replaced, because runtime health used the durable account id; keying affinity on that same generation id would instead move a healthy conversation after every refresh (found during multi-account implementation, 2026-09-20) | Runtime health keys on `<local-owner>:<token-generation-digest>`, while conversation affinity and admin state key on the durable local owner. A refresh or re-login receives fresh health without losing its prompt-cache claim; compare-and-swap prevents an old rejection from marking the new generation. |
 | The worker registry was four places that did not know each other — `providers.*.models`, `aliases`, `~/.claude/agents/*.md`, and prose in CLAUDE.md — and every new provider needed all four edited by hand; the one left out was the one that failed (2026-09-19, DeepSeek) | One source: a ticked model *is* a worker. Agent files and marker aliases are generated from `config.json` (§4 "worker definitions"); nothing about a worker is written twice. |
 | ChatGPT prompt-cache hit fell from 93% (2026-09-13) to 9% (2026-09-20) with nothing in our request changing — the backend had started keying the cache on the conversation's identity (`session-id`/`thread-id`/`x-client-request-id`/`client_metadata`), which we never sent; `prompt_cache_key` alone no longer earned a write | The adapter states the conversation's identity the way the Codex CLI does (§4) and echoes `x-codex-turn-state`. The acceptance metric (≥90% on translated providers) is watched per day in `requests.jsonl`; a fall with an unchanged request means the wire changed under us, and the reference to diff against is the real CLI captured through a local proxy, not our own memory of the protocol. |
@@ -2082,8 +2126,10 @@ plan unless marked otherwise.
 | A closed lid was held awake on battery overnight (2026-10-24, owner-reported, `pmset -g log` + router.log): the lid closed and the Mac slept at 00:59 ("Clamshell Sleep"), but in two maintenance dark wakes (01:09 and 09:51) model calls ran — the mod's cache keep-warm pings (4-token turns on idle sessions) and a Claude app scheduled task — and `working` mode counted them as work: "sleep disabled (working: 1 model call running)" turned a ~45 s dark wake into 72 min (01:09–02:21) and 35 min (09:51–10:26) awake, 6 of the night's 10 battery points | A hold is never **started** in a dark wake: ioreg's IOPMrootDomain `System Capabilities` (read with the clamshell flags, no extra process) without Graphics (2) means the Mac is asleep to its user, and `decideAwake` answers "asleep: …" (logged once). A hold already taken is kept whatever the reading, and mode `on` is unaffected. Measured: 15 in a full wake; a held lid-closed Mac (2026-10-23 18:22–19:32) logged no transition to DarkWake. Tests: `awake.test.ts`. |
 | Our sleepnow overrode other processes keeping the Mac awake (2026-10-26, owner-reported, `pmset -g log` + router.log + unified log): in `working` mode the hold was released 10 min after the last call and, with the lid closed and `AppleClamshellCausesSleep` reading Yes although an awake TV was attached over HDMI, `pmset sleepnow` ran — at 18:48 under an Amphetamine session (remote sessions dropped overnight), and at 17:17 while audio played at the desk (coreaudiod's assertions released at the sleep). The log line claimed "nothing else holds the Mac awake" without checking | Before sleepnow, a non-guard release leaves the Mac to macOS when an external display is attached (ioreg framebuffers, not the flag) or another process holds PreventSystemSleep, or either read fails; the log names the reason. Guard releases (battery, heat, failed guard read) still sleep. Tests: `awake.test.ts`. |
 | A closed lid ran on battery for 4 hours because idle assertions were taken for sleep holds (2026-10-28, owner-reported, `pmset -g log` + router.log): a call at 05:14 set the bit, the lid was closed while it was set, and the 05:33:52 release logged "other processes prevent sleep (Amphetamine, powerd)" and skipped sleepnow. Both were PreventUserIdleSystemSleep — Amphetamine's indefinite session and powerd's "display is on" — which do not stop lid-close sleep (the Mac had slept every lid close that night under the same session) and, never letting go, kept idle sleep away too. No sleep was logged until AC at 09:19: 55% → 11% | Only PreventSystemSleep counts as another process's hold, beside an attached external display (the row above). Tests: `awake.test.ts` "idle-sleep holders … do not keep a released closed lid awake". |
+| A closed lid fell asleep although we were holding it, because another app writes the same bit: AlDente Pro's "Disable Sleep until Charge Limit" (`completelyDisableSleep`) sets it while AlDente charges below its limit and clears it when charging stops, so on 2026-10-30 the bit read 0 at 09:31:18 as its helper let go at the charge limit with AC still attached (our 15 s tick re-set it at 09:31:28 and logged "sleep was re-enabled outside ClaudeRipple"), and at 09:25:43.99 when a dock — power and two displays — was unplugged with the lid already closed, where macOS clamshell-slept at 09:25:44.44 (owner-reported, `pmset -g log` + ioreg + `defaults` reads) | A second writer of the bit is detected and named, not out-raced: a known-writer table (`SLEEP_SETTING_WRITERS`; now only AlDente's `completelyDisableSleep`) is read with `defaults` (no privilege, at most once a 60 s full tick, and at once after an outside re-enable); a match, or an outside re-enable with no known writer behind it and no boot since the hold (unknown cause, kept 24 h), is reported once in the log, `clauderipple power` and the laptop page, with the fix where one is known ("Stop Charging when Sleeping"). Re-asserting faster cannot win against an immediate clamshell sleep. AlDente's Calibration Mode and clamshell discharge disable sleep without this key, so those stay invisible (known limit). Tests: `awake.test.ts`. |
 | A new worker could not be spawned in a session that was open when it was added: the router wrote `zai-org-glm-5-3-flash.md` at 10:51:45, the MAMBO session (idle since 10:47) got its next message 26 s later, and the Agent tool answered "not found" at 10:52 and 11:12; after a `/clear` the mod rewrote `ripple:auto` to the worker and the CLI refused that too (11:24). The ClaudeRipple session, in use at the time, listed it by 10:55 (2026-10-23). CLI 2.1.308 polls `~/.claude/agents` every 2 s in use and 30 s after a minute idle; going back to 2 s rebuilds the watcher from the directory as it then is, and the catch-up compares only skills and commands, so a write in the last 30 s of idling is never read, and `/clear` keeps the process's list | Every sync that writes or removes a generated agent touches the generated files again `RETOUCH_AFTER_MS` (45 s) later (`agents.ts` `retouchLater`): any agent file's change makes a session reread all of them, and 45 s is past the idle poll. A session that already missed one is fixed the same way, by touching any file in `~/.claude/agents`. Tests: `agents.test.ts`. |
 | A routed request's `messages` array carried Anthropic-only shapes — a mid-conversation `role: "system"` message and `tool_addition`/`tool_removal` content blocks — and the compat layer cleaned only the top-level fields, so the vendor's Anthropic skin answered 400 `Invalid Anthropic Messages API request` on every turn once a SessionStart hook or a deferred MCP tool was in play (issue #92, CLI 2.1.308+, 2026-10-26) | A compat layer validates the **whole body** it forwards, `messages` included, not just the fields the CLI adds at the top level: a role an Anthropic-shaped vendor does not accept in `messages` is folded to `user` with the text untouched, a content block type only Anthropic defines is either converted into something the wire already has (a deferred tool's definition joins `tools`) or dropped, and a message left with no content goes whole. The request log counts each fold (`system_role×N`, `tool_addition×N`, `tool_removal×N`) so a vendor's next refusal can be read against what was sent. Same rule as the tool-schema row: what is forwarded must be valid for the wire it is forwarded to, not merely for the client that produced it. |
+| The router starved behind a build on Windows (2026-10-29, measured): the scheduled task had Task Scheduler's default priority 7, so conhost, the launcher and the router ran BelowNormal. With cargo and rustc holding every core at Normal, `/api/status` took 1-3 s; an update's probe got `ECONNREFUSED` from a router that was listening (a full accept queue); `install` skipped the version restart because `/api/status` gave no answer within 10 s; and `restart` refused the router as "another ClaudeRipple installation" because the 5 s PowerShell listener lookup timed out | The task is registered with `-Priority 4` (Normal), the launcher raises itself from BelowNormal or Idle to Normal before it starts the router, and the router applies `Config.processPriority` (Normal unless set) at start and on every config change. The listener lookup waits 15 s. Below Normal is now only the person's own choice. Tests: `process-priority.test.ts`, `schtasks-definition.test.ts`, `ui-priority.test.ts`. |
 
 ### Router-owned automatic updates (2026-10-21)
 
@@ -2119,6 +2165,25 @@ No remotely pushed command or live installation test is part of this feature's v
 
 Sources: `packages/router/src/autoupdate.ts`, `cli-control.ts`, `index.ts`, `admin.ts`, `config.ts`;
 `packages/app/src/update-model.ts`, `main.ts`; scheduler and tray decision tests.
+
+### Windows process priority (2026-10-29)
+
+`Config.processPriority` is `below-normal`, `normal`, `above-normal` or `high`, the Task Manager
+levels of those names; absent means `normal`. It applies on Windows only, since raising a priority
+elsewhere needs privileges; GET `/api/status` then reports `supported: false`. The router applies it
+right after its logger starts and again on every config change (`process-priority.ts`; a level
+already in effect is left alone and logs nothing). The phone host applies it when it starts and
+picks up a change at its next start. GET `/api/status` exposes `processPriority: { supported,
+setting, current, error? }`; `current` is what Windows reports now, which can also be `idle` or
+`realtime` when another program changed it. The dashboard's About view draws a menu from it: High
+asks before it is saved and keeps a warning on the row while it is on.
+
+The Task Scheduler registration (`-Priority 4`) and the launcher's raise give every start a Normal
+baseline before the router reads its config, so a router started from an older registration is not
+left below Normal, and a level below Normal is the router lowering itself on request.
+
+Sources: `packages/router/src/process-priority.ts`, `config.ts`, `admin.ts`, `index.ts`;
+`packages/cli/src/schtasks.ts`, `router-state.ts`; `packages/remote/src/main.ts`; `packages/ui/app.js`.
 
 ## 6. Blocked paths (measured, do not retry)
 
@@ -2193,6 +2258,34 @@ regardless.
 `<home>/awake.json` journals `{applied, since, reason, lastActivityAt}`; the journal is written
 before setting the bit and after clearing it. A bit that reads cleared while the journal says set
 (reboot, another tool) is re-applied if still wanted.
+
+**Other apps that write the sleep setting (2026-10-30).** The bit is global, so other apps set and clear
+it too. Known writers are a table in `awake.ts` (`SLEEP_SETTING_WRITERS`), each entry one unprivileged
+`defaults read <domain> <key>` whose trimmed stdout must equal the value:
+
+| app | name | macOS domain | key | value |
+|---|---|---|---|---|
+| `aldente` | AlDente | `com.apphousekitchen.aldente-pro` | `completelyDisableSleep` | `1` |
+
+AlDente Pro's "Disable Sleep until Charge Limit" is the measured entry: it is set while AlDente charges
+below its limit (this Mac: `chargeVal = 55`) and cleared when charging stops — at the limit AlDente has
+already let go, which is why unplugging at the end of a workday with the lid closed and the battery at
+55% never slept (owner-reported, the battery held at 55% for days). The clear can land behind our back
+and a closed lid sleeps at once (§5), so the probe runs on full ticks — at most once a minute, and not
+at all while the mode is off with nothing held — and a conflict is logged once (and its end once),
+named in `clauderipple power` and warned about in the laptop page; the "re-enabled outside" line names a
+known app when the probe says it is the cause, and that path asks again at once instead of waiting for
+the minute. The fix for the measured app is the owner's: "Stop Charging when Sleeping", which leaves
+`sleepInhibitCharge = 1`, a key that does not touch the bit.
+
+A clear with no known writer behind it is an unknown cause: it stays reported for 24 h
+(`CONFLICT_KEEP_MS`) from the last outside re-enable, then goes. On macOS a reboot explains it away —
+the bit never survives one — so if the system booted after the hold was set (boot time = now −
+`os.uptime`, compared with when the hold was set) it is a reboot, not a conflict. On Windows a recovered
+`stillHeld()` false means the lid-close action was changed outside us, which is always an unknown cause
+(there is no OS-wide bit, and nothing else writes a plan's lid action). A known match takes precedence
+over an unknown one. Known limit: AlDente also disables sleep itself in Calibration Mode and clamshell
+discharge ("required" in its help text), which this key cannot show.
 
 **Exit ordering (decided).** The router's exit does **not** clear the bit, in any mode. A restart is
 the common exit; clearing then setting again ~1s later is exactly the off-then-on window in which a

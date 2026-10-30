@@ -44,7 +44,8 @@ export function adminUrl(home: string = homeDir()): string {
 
 function quiet(command: string, args: string[]): string | null {
   try {
-    return execFileSync(command, args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5_000, windowsHide: true });
+    // On 2026-10-29, PowerShell took over 5 s to start at full CPU, and null made restart reject its own router.
+    return execFileSync(command, args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 15_000, windowsHide: true });
   } catch {
     return null;
   }

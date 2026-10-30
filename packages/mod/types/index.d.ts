@@ -343,6 +343,20 @@ export type CacheMemo = {
   expiresAt: number
 }
 
+/**
+ * A chat's keep-warm as the plugin store keeps it, per session id: the atoms hold these in one
+ * process's memory only, and the app restarts a session's CLI on its own (2026-10-30).
+ */
+export type CacheMemory = {
+  memo: CacheMemo
+  /** When the person's own reply last arrived, not a ping's: the keep-warm time bound counts from it. */
+  lastRealReplyAt: number
+  /** The context that reply was counted over, for a restarted process that has no live count yet. */
+  contextTokens: number
+  /** The model the memo was made under: another model's cache cannot be pinged for. */
+  model: string
+}
+
 /** Keep-warm bookkeeping for this chat. */
 export type WarmState = {
   pings: number

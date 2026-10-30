@@ -7,7 +7,7 @@ import path from "node:path";
 import { setTimeout as delay, setImmediate as nextTick } from "node:timers/promises";
 import { PermissionQueue } from "../src/permissions.ts";
 import { MessageReceipts } from "../src/receipts.ts";
-import { reduce } from "../web/timeline.ts";
+import { reduce, timelineItems } from "../web/timeline.ts";
 import { sessionGroup, sidebarState } from "../web/sidebar.ts";
 import { INLINE_CAP } from "../src/protocol.ts";
 import type { Effort, SessionEvent } from "../src/protocol.ts";
@@ -17,6 +17,12 @@ import { transcriptEvents, type DesktopProcess, type SubagentState } from "../sr
 import type { CanUseTool, PermissionAnswer, QueryFn, SdkUserMessage, SessionsOptions } from "../src/sessions.ts";
 import { posixPaths } from "../../../test/capabilities.ts";
 import { claudeAppData } from "./app-data.ts";
+import { signatureOf } from "./narration-signature.ts";
+
+// Limits for a stalled test, not for a slow one: a passing test never waits them out. 4.5 s and 2 s
+// ran out on a loaded Windows CI runner while the host was still answering (2026-10-29, #98).
+const TEST_TIMEOUT = 15_000;
+const WAIT_LIMIT = 10_000;
 
 const router = {
   status: async () => ({ ok: true, proxyEnv: { HTTPS_PROXY: "http://127.0.0.1:1" } }),
@@ -24,7 +30,7 @@ const router = {
   models: async () => [],
 } satisfies SessionsOptions["router"] & { models: () => Promise<never[]> };
 
-function scriptedQuery(script: { permission?: boolean; toolOutput?: unknown; images?: boolean; thinking?: boolean; sendFile?: string; failure?: { text: string; as: "result" | "throw" } } = {}, sdkId = "sdk-1") {
+function scriptedQuery(script: { permission?: boolean; toolOutput?: unknown; images?: boolean; thinking?: boolean; narration?: boolean; sendFile?: string; failure?: { text: string; as: "result" | "throw" } } = {}, sdkId = "sdk-1") {
   const options: Record<string, unknown>[] = [];
   const users: SdkUserMessage[] = [];
   const answers: PermissionAnswer[] = [];
@@ -43,10 +49,11 @@ function scriptedQuery(script: { permission?: boolean; toolOutput?: unknown; ima
           if (script.thinking) {
             // Two streamed indices, each finalized by an SDK message with local index zero.
             for (const index of [2, 4]) {
+              const signature = script.narration && index === 4 ? signatureOf("narration") : "private signature";
               yield { type: "stream_event", event: { type: "content_block_start", index, content_block: { type: "thinking" } } };
               yield { type: "stream_event", event: { type: "content_block_delta", index, delta: { type: "thinking_delta", thinking: `thought ${index}` } } };
-              yield { type: "stream_event", event: { type: "content_block_delta", index, delta: { type: "signature_delta", signature: "private signature" } } };
-              yield { type: "assistant", message: { id, model: "x", content: [{ type: "thinking", thinking: `thought ${index} complete`, signature: "private signature" }] } };
+              yield { type: "stream_event", event: { type: "content_block_delta", index, delta: { type: "signature_delta", signature } } };
+              yield { type: "assistant", message: { id, model: "x", content: [{ type: "thinking", thinking: `thought ${index} complete`, signature }] } };
             }
           }
           yield { type: "stream_event", parent_tool_use_id: null, event: { type: "content_block_delta", delta: { type: "text_delta", text: "po" } } };
@@ -352,6 +359,21 @@ test("thinking streams finalize at original block indices without exposing signa
   assert.deepEqual(thoughts.map(e => [e.block, e.text, e.delta === true]), [[2, "thought 2", true], [2, "thought 2 complete", false], [4, "thought 4", true], [4, "thought 4 complete", false]]);
   assert.ok(!JSON.stringify(stored).includes("private signature"));
   assert.deepEqual(reduce(stored).items.filter(i => i.type === "thinking").map(i => i.text), ["thought 2 complete", "thought 4 complete"]);
+});
+
+test("a narration block is stored as its own event and its streamed thinking tail does not stay on screen", async t => {
+  const f = fixture(t, { thinking: true, narration: true });
+  const id = await f.create();
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  const stored = f.sessions.log(id).readAfter(0).events;
+  const narrations = stored.filter(e => e.kind === "narration");
+  assert.deepEqual(narrations.map(e => [e.block, e.text]), [[4, "thought 4 complete"]]);
+  assert.ok(!JSON.stringify(stored).includes(signatureOf("narration")), "a signature never reaches the log");
+  const view = reduce(stored);
+  assert.deepEqual(view.items.filter(i => i.type === "thinking").map(i => [i.key, i.streaming]), [["hm1:2", false], ["hm1:4", false]]);
+  const rows = timelineItems(view);
+  assert.ok(rows.every(row => row.type !== "thinking"), "the thinking that narrated is not a live line");
+  assert.ok(rows.some(row => row.type === "assistant" && row.text === "thought 4 complete"));
 });
 
 test("a model plus effort change waits for writer exit and carries inputs accepted during restart", async t => {
@@ -747,7 +769,7 @@ test("a new SDK message denies pending approvals before delivering the message",
 });
 
 async function waitFor(predicate: () => boolean): Promise<void> {
-  const deadline = performance.now() + 2000;
+  const deadline = performance.now() + WAIT_LIMIT;
   while (!predicate()) {
     assert.ok(performance.now() < deadline, "Timed out waiting for scripted query");
     await delay(5);
@@ -774,7 +796,7 @@ for (const { model, effort, expected } of [
   { model: "gpt-test", effort: "max" as const, expected: { model: "gpt-test@max" } },
   { model: "opus", effort: "high" as const, expected: { model: "opus", effort: "high" } },
 ]) {
-  test(`create uses cwd, proxy env and modelArg for ${model}, and emits an ordered turn`, { timeout: 4500 }, async t => {
+  test(`create uses cwd, proxy env and modelArg for ${model}, and emits an ordered turn`, { timeout: TEST_TIMEOUT }, async t => {
     const f = fixture(t);
     const id = await f.create("create-1", model, effort);
     await waitFor(() => f.sessions.list().find(session => session.id === id)?.state === "idle");
@@ -808,7 +830,7 @@ for (const { model, effort, expected } of [
   });
 }
 
-test("sequential create and send retries with the same clientMsgId are idempotent", { timeout: 4500 }, async t => {
+test("sequential create and send retries with the same clientMsgId are idempotent", { timeout: TEST_TIMEOUT }, async t => {
   const f = fixture(t);
   const id = await f.create();
   assert.equal(await f.create(), id);
@@ -824,7 +846,7 @@ test("sequential create and send retries with the same clientMsgId are idempoten
 });
 
 test("concurrent create retries with the same clientMsgId start only one query", {
-  timeout: 4500,
+  timeout: TEST_TIMEOUT,
 }, async t => {
   const f = fixture(t);
   const ids = await Promise.all([f.create(), f.create()]);
@@ -835,7 +857,7 @@ test("concurrent create retries with the same clientMsgId start only one query",
 });
 
 for (const decision of ["allow", "allow_always", "deny"] as const) {
-  test(`permission ${decision} waits, rejects another session and returns the SDK answer`, { timeout: 4500 }, async t => {
+  test(`permission ${decision} waits, rejects another session and returns the SDK answer`, { timeout: TEST_TIMEOUT }, async t => {
     const f = fixture(t, { permission: true });
     const id = await f.create();
     const otherId = await f.create("other-session");
@@ -911,7 +933,7 @@ for (const damage of ["duplicate-seq", "invalid-json", "unreadable"] as const) t
   else assert.ok(fs.statSync(segment).isDirectory());
 });
 
-test("recover expires persisted permissions, stops a mid-turn session and resumes sdk-1", { timeout: 4500 }, async t => {
+test("recover expires persisted permissions, stops a mid-turn session and resumes sdk-1", { timeout: TEST_TIMEOUT }, async t => {
   const f = fixture(t);
   const id = await f.create();
   await waitFor(() => f.sessions.list()[0]?.state === "idle");
@@ -949,7 +971,7 @@ test("recover expires persisted permissions, stops a mid-turn session and resume
   assert.equal(fake.users[0]?.session_id, "sdk-1");
 });
 
-test("large SDK tool output is stored as a BlobRef and round-trips in full", { timeout: 4500 }, async t => {
+test("large SDK tool output is stored as a BlobRef and round-trips in full", { timeout: TEST_TIMEOUT }, async t => {
   const text = "界😀\n".repeat(INLINE_CAP);
   const f = fixture(t, { toolOutput: text });
   const id = await f.create();
@@ -1461,7 +1483,7 @@ test("summarize uses Bash's first line, cwd-relative Read paths and Grep pattern
   assert.equal(summarize("Grep", { pattern: "needle" }, cwd), "needle");
 });
 
-test("receipts go pending to completed on disk, and a completed resend never re-runs", { timeout: 4500 }, async t => {
+test("receipts go pending to completed on disk, and a completed resend never re-runs", { timeout: TEST_TIMEOUT }, async t => {
   const f = fixture(t);
   const id = await f.create();
   await waitFor(() => f.sessions.list()[0]?.state === "idle");
@@ -1485,7 +1507,7 @@ function reopen(t: TestContext, f: ReturnType<typeof fixture>) {
   return { permissions, fake, recovered };
 }
 
-test("a send resend orphaned by a restart answers outcome_unknown without running", { timeout: 4500 }, async t => {
+test("a send resend orphaned by a restart answers outcome_unknown without running", { timeout: TEST_TIMEOUT }, async t => {
   const f = fixture(t);
   const id = await f.create();
   await waitFor(() => f.sessions.list()[0]?.state === "idle");
@@ -1499,7 +1521,7 @@ test("a send resend orphaned by a restart answers outcome_unknown without runnin
   assert.equal(recovered.log(id).readAfter(0).events.filter(e => e.kind === "user" && e.clientMsgId === "orphan-1").length, 0);
 });
 
-test("a create resend orphaned by a restart answers outcome_unknown", { timeout: 4500 }, async t => {
+test("a create resend orphaned by a restart answers outcome_unknown", { timeout: TEST_TIMEOUT }, async t => {
   const f = fixture(t);
   const id = await f.create();
   await waitFor(() => f.sessions.list()[0]?.state === "idle");
@@ -1514,7 +1536,7 @@ test("a create resend orphaned by a restart answers outcome_unknown", { timeout:
 
 // 2026-10-22: a message queued on the phone during a 25-minute turn was still on the phone three
 // minutes after the turn ended — the app was asleep in a pocket. The host holds the queue now.
-test("a queued message waits for the turn, then goes one at a time with no phone attached", { timeout: 4500 }, async t => {
+test("a queued message waits for the turn, then goes one at a time with no phone attached", { timeout: TEST_TIMEOUT }, async t => {
   const f = fixture(t, { permission: true });
   const id = await f.create();
   await waitFor(() => f.permissions.pending(id).length === 1);
@@ -1542,7 +1564,7 @@ test("a queued message waits for the turn, then goes one at a time with no phone
   f.sessions.decide(id, f.permissions.pending(id)[0]!.id, "deny");
 });
 
-test("an idle session takes a queued message at once; Stop holds the queue until a send or resume", { timeout: 4500 }, async t => {
+test("an idle session takes a queued message at once; Stop holds the queue until a send or resume", { timeout: TEST_TIMEOUT }, async t => {
   const f = fixture(t, { permission: true });
   const id = await f.create();
   await waitFor(() => f.permissions.pending(id).length === 1);
@@ -1635,7 +1657,7 @@ test("an edited photo retained across a new epoch is published under its new sna
   assert.equal(recovered.blob(id, blob), null, "the old draft id is released after the accepted send");
 });
 
-test("send-now puts a queued message into the running turn; the queue survives a host restart", { timeout: 4500 }, async t => {
+test("send-now puts a queued message into the running turn; the queue survives a host restart", { timeout: TEST_TIMEOUT }, async t => {
   const f = fixture(t, { permission: true });
   const id = await f.create();
   await waitFor(() => f.permissions.pending(id).length === 1);

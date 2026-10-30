@@ -453,10 +453,16 @@ label.check input { margin-top: 2px; }
 .model-check { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: var(--fs-sub); }
 .model-check:hover { background: var(--fill); }
 .model-check span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.picker-model { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 8px; row-gap: 2px; align-items: center; }
+/* Rows pack at the top, so a tile whose catalogue note is absent does not push its provider line
+   down to centre in the taller row beside it. */
+.picker-model { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 8px; row-gap: 2px; align-items: center; align-content: start; }
 .picker-model > .pm-main { grid-column: 1 / span 2; display: flex; align-items: center; gap: 8px; min-width: 0; cursor: pointer; font-size: var(--fs-sub); }
 .picker-model > .pm-main span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .picker-model > small { grid-column: 1; grid-row: 2; padding-left: 24px; font-size: var(--fs-cap); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The note saying the catalogue's figure is the one in effect takes a row of its own, full width and
+   wrapping rather than ellipsized. It used to carry an inline `style`, which the page's CSP
+   (style-src 'self') drops — so it fell onto the provider's line and the two texts overlapped. */
+.picker-model > small.pm-note { grid-column: 1 / -1; grid-row: 3; padding-left: 24px; white-space: normal; line-height: 1.35; }
 /* Most models never need their own window, so an empty box on every tile is noise. It stays quiet
    until it is touched or actually holds a value. */
 .picker-model > .model-window { grid-column: 2; grid-row: 2; width: 9ch; min-height: 22px; padding: 1px 6px; font-size: var(--fs-cap); text-align: right; color: var(--label-2); background: transparent; border-color: transparent; }

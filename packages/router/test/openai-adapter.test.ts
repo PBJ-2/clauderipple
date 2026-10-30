@@ -6,6 +6,7 @@ import { mapHttpError, OpenAiCompatibleAdapter, type OpenAiCredential } from "..
 import { Logger } from "../src/log.ts";
 import { decodeEnvelope, encodeEnvelope } from "../src/reasoning.ts";
 import type { AnthropicRequest } from "../src/providers/chatgpt/translate.ts";
+import { requestKind } from "../src/routing.ts";
 
 const seen: { path: string; headers: http.IncomingHttpHeaders; body: Record<string, unknown> }[] = [];
 let mode: "chat" | "responses" | "error" | "cut-responses" | "cut-chat" | "done-chat" | "refuse-reasoning" | "refuse-chat" | "sealed" | "sealed-chat" | "missing-thinking" = "chat";
@@ -109,7 +110,8 @@ const front = http.createServer((req, res) => {
   req.on("data", (chunk: Buffer) => chunks.push(chunk));
   req.on("end", () => {
     const json = JSON.parse(Buffer.concat(chunks).toString("utf8")) as AnthropicRequest;
-    void adapter.handle(req, res, req.url ?? "/v1/messages", json, "vendor-model", configuredEffort, credential);
+    const requestPath = (req.url ?? "/v1/messages").split("?")[0] ?? "/v1/messages";
+    void adapter.handle(req, res, req.url ?? "/v1/messages", json, "vendor-model", configuredEffort, credential, { kind: requestKind(json, requestPath) });
   });
 });
 const frontPort = await listen(front);
@@ -184,6 +186,33 @@ test("adapter translates stateless Responses wire and supports non-streaming out
   assert.equal(sent.path, "/v1/responses");
   assert.deepEqual(sent.body.input && (sent.body.input as { type: string }[]).map((item) => item.type), ["message"]);
   assert.equal(JSON.parse(response.text).content[0].text, "Hi");
+});
+
+test("an Auto mode classifier's system text reaches the upstream exactly as sent, on both wires", async () => {
+  const system = "You are a security monitor for autonomous AI coding agents.\n\nJudge this action.";
+  const addendum = "Be brief.";
+  const classifier: AnthropicRequest = { model: "claude-haiku-5-5", stream: true, system, messages: [{ role: "user", content: "check" }] };
+  const ordinarySystem = "Judge this action.";
+
+  for (const wire of ["chat", "responses"] as const) {
+    mode = wire;
+    adapter = new OpenAiCompatibleAdapter("fake", { type: "openai-compatible", url: `http://127.0.0.1:${upstreamPort}/v1`, wire, instructionsAppend: addendum }, log);
+    const classifierResponse = await call(classifier);
+    assert.equal(classifierResponse.status, 200);
+    const classifierBody = seen.at(-1)!.body;
+    const classifierSystem = wire === "chat"
+      ? (classifierBody.messages as { content: unknown }[])[0]!.content
+      : classifierBody.instructions;
+    assert.equal(classifierSystem, system);
+
+    const turnResponse = await call({ ...classifier, system: ordinarySystem });
+    assert.equal(turnResponse.status, 200);
+    const turnBody = seen.at(-1)!.body;
+    const turnSystem = wire === "chat"
+      ? (turnBody.messages as { content: unknown }[])[0]!.content
+      : turnBody.instructions;
+    assert.equal(turnSystem, `You are vendor-model, answering through Claude Code, a terminal-based coding agent.\n\n${ordinarySystem}\n\n${addendum}`);
+  }
 });
 
 test("adapter maps a vendor 401 to Anthropic authentication_error", async () => {

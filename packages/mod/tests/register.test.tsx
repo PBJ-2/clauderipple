@@ -72,6 +72,8 @@ function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: u
   let percent = 20
   on('store.get', ($, e) => { storeReads.push(e.key); return { value: saved.get(e.key) } })
   on('store.set', ($, e) => { storeWrites.push(e.key); saved.set(e.key, e.value); return { value: undefined } })
+  on('store.delete', ($, e) => { saved.delete(e.key); return { value: undefined } })
+  on('store.keys', () => ({ value: [...saved.keys()] }))
   mock.env(on, { HOME: '/home/test', LANG: 'en_US.UTF-8', ...(options.key ? { TYPESAFE_API_KEY: options.key } : {}), ...options.env })
   let hostLanguage = options.language
   const processes: { argv: readonly string[]; timeoutMs?: number }[] = []
@@ -1721,6 +1723,74 @@ test('a cache-reading ping keeps the card, a real reply and /clear drop it, and 
   await command($, 'kept')
   const demo = await band($)
   expect(await demo.find({ type: 'Text', text: /held 312k tokens in cache/ })).toBeDefined()
+})
+
+test('a restarted process takes its chat\'s keep-warm back from the store and pings on the stored context', async ($, on) => {
+  // The live count is 0 until a reply lands (the app restarts the CLI before its first prompt):
+  // only the store's 220k keeps the chat over the minimum, and only with a memo to ping for.
+  const b = boundaries(on, { keepWarm: true }, { tokens: 0 })
+  http(on)
+  judgeStub(on)
+  stepStub(on)
+  let forks = 0
+  on('model.fork', () => { forks += 1; return { value: { isAnswered: true, text: 'ok', usage: USAGE } } })
+  b.saved.set('keepWarm.session-test', { memo: { ttlMs: 3600000, lastReplyAt: NOW - 600000, expiresAt: NOW + 240000 }, lastRealReplyAt: NOW - 600000, contextTokens: 220000, model: 'claude-opus-5-5' })
+  await start($)
+  await b.clock.advance(1)
+  expect(forks).toBe(1)
+  // The ping refreshed the memo for another hour, and the store follows it across a restart.
+  const entry = b.saved.get('keepWarm.session-test') as { memo: { lastReplyAt: number; expiresAt: number }; lastRealReplyAt: number; contextTokens: number }
+  expect(entry.memo.lastReplyAt).toBe(NOW + 1)
+  expect(entry.lastRealReplyAt).toBe(NOW - 600000)
+  expect(entry.contextTokens).toBe(220000)
+  // A resume counted from the person's reply reads lower than the ping refreshed: nothing shortens it.
+  await $.classic.SessionStart({ source: 'resume', seconds_since_last_response: 601, prompt_cache_likely_expired: false, model: 'claude-opus-5-5' })
+  const out = await $.command.run({ command: 'ripple', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 140 }, args: 'debug' })
+  expect(out.text).toContain(`"lastReplyAt": ${NOW + 1}`)
+  expect(out.text).toContain(`"expiresAt": ${NOW + 1 + 3600000}`)
+})
+
+test('an expired entry and another model\'s are not brought back, and the store drops them', async ($, on) => {
+  const b = boundaries(on, { keepWarm: true })
+  http(on)
+  judgeStub(on)
+  stepStub(on)
+  let forks = 0
+  on('model.fork', () => { forks += 1; return { value: { isAnswered: true, text: 'ok', usage: USAGE } } })
+  b.saved.set('keepWarm.session-test', { memo: { ttlMs: 3600000, lastReplyAt: NOW - 3600000, expiresAt: NOW - 1 }, lastRealReplyAt: NOW - 3600000, contextTokens: 220000, model: 'claude-opus-5-5' })
+  await start($)
+  await b.clock.advance(1)
+  // An expired cache is never revived by a restart, as a ping never revives it.
+  expect(forks).toBe(0)
+  expect(b.saved.has('keepWarm.session-test')).toBe(false)
+  const out = await $.command.run({ command: 'ripple', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 140 }, args: 'debug' })
+  expect(out.text).toContain('"cache": null')
+  b.saved.set('keepWarm.session-test', { memo: { ttlMs: 3600000, lastReplyAt: NOW - 600000, expiresAt: NOW + 240000 }, lastRealReplyAt: NOW - 600000, contextTokens: 220000, model: 'claude-sonnet-5-5' })
+  await start($)
+  await b.clock.advance(1)
+  expect(forks).toBe(0)
+  expect(b.saved.has('keepWarm.session-test')).toBe(false)
+})
+
+test('a real reply records the chat in the store; clear and a model change take it back out', async ($, on) => {
+  const b = boundaries(on, { keepWarm: true })
+  http(on)
+  judgeStub(on)
+  stepStub(on)
+  b.saved.set('keepWarm.other', { memo: { ttlMs: 3600000, lastReplyAt: 0, expiresAt: 1 }, lastRealReplyAt: 0, contextTokens: 1, model: 'old-worker' })
+  await start($)
+  await b.clock.advance(1)
+  await step($)
+  const entry = b.saved.get('keepWarm.session-test') as { memo: { expiresAt: number }; lastRealReplyAt: number; contextTokens: number; model: string }
+  expect(entry).toMatchObject({ lastRealReplyAt: NOW + 1, contextTokens: 40000, model: 'claude-opus-5-5' })
+  expect(entry.memo.expiresAt).toBe(NOW + 1 + 3600000)
+  // Another chat's entry past its expiry goes with the write: the store does not grow by sessions.
+  expect(b.saved.has('keepWarm.other')).toBe(false)
+  await $.classic.SessionStart({ source: 'clear' })
+  expect(b.saved.has('keepWarm.session-test')).toBe(false)
+  b.setModel('claude-sonnet-5-5')
+  await step($, 'claude-sonnet-5-5')
+  expect(b.saved.get('keepWarm.session-test')).toMatchObject({ model: 'claude-sonnet-5-5' })
 })
 
 test('fork turn.step is not effort-steered, busy or main-request cost', async ($, on) => {

@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { GoogleStreamMapper, toGeminiRequest, SIGNATURE_SENTINEL, type GeminiRequest } from "../src/providers/google/translate.ts";
 import { toolNameForResponses, type AnthropicRequest } from "../src/providers/chatgpt/translate.ts";
+import { promptAdditions } from "../src/identity.ts";
 
 /** A tiny stand-in for the adapter's bounded signature store. */
 function store(entries: Record<string, string> = {}): { get(id: string): string | undefined } {
@@ -38,6 +39,14 @@ test("translation removes billing telemetry, adds identity, and maps tools/choic
   assert.deepEqual(out.tools?.[0]?.functionDeclarations[0]?.name, "Read");
   assert.deepEqual(out.toolConfig, { functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["Read"] } });
   assert.deepEqual(out.generationConfig, { maxOutputTokens: 77, temperature: 0.2, stopSequences: ["STOP"], thinkingConfig: { thinkingLevel: "high" } });
+});
+
+test("an Auto mode classifier's system text stays exactly as sent", () => {
+  const system = "You are a security monitor for autonomous AI coding agents.\n\nJudge this action.";
+  const classifier: AnthropicRequest = { model: "claude-haiku-5-5", system, messages: [{ role: "user", content: "check" }] };
+  const additions = promptAdditions("auto-mode-classifier", { instructionsAppend: "Answer in Korean." });
+  const out = toGeminiRequest(classifier, { model: "gemini-3-pro", ...additions });
+  assert.equal(out.systemInstruction?.parts[0]?.text, system);
 });
 
 test("tool_choice modes map to functionCallingConfig", () => {

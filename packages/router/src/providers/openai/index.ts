@@ -16,6 +16,8 @@ import { refusesReplayedReasoning, requiresThinkingReplay } from "../../reasonin
 import { PRESETS } from "../../presets.ts";
 import { conversationKey, serverToolNames, toolNameRestoreMap } from "../chatgpt/translate.ts";
 import type { AnthropicRequest } from "../chatgpt/translate.ts";
+import { promptAdditions } from "../../identity.ts";
+import type { RequestKind } from "../../routing.ts";
 
 const PING_MS = 15_000;
 
@@ -150,7 +152,7 @@ export class OpenAiCompatibleAdapter {
   }
 
   /** Handle a fully-read Messages request. Model/effort have already been resolved by routing. */
-  async handle(req: http.IncomingMessage, res: http.ServerResponse, path: string, json: AnthropicRequest, model: string, effort: string | undefined, credential?: OpenAiCredential): Promise<OpenAiOutcome> {
+  async handle(req: http.IncomingMessage, res: http.ServerResponse, path: string, json: AnthropicRequest, model: string, effort: string | undefined, credential?: OpenAiCredential, options?: { kind?: RequestKind }): Promise<OpenAiOutcome> {
     if (path.startsWith("/v1/messages/count_tokens")) {
       const body = JSON.stringify({ input_tokens: estimateTokens(json) });
       res.writeHead(200, { "content-type": "application/json", "content-length": String(Buffer.byteLength(body)) }).end(body);
@@ -185,8 +187,7 @@ export class OpenAiCompatibleAdapter {
       ...(PRESETS.find((entry) => entry.id === this.cfg.preset)?.sealedReasoning ? { sealedReasoning: true } : {}),
       carried,
       log: (line) => this.log.info(`${this.tag} ${this.name}: ${line} (${model})`),
-      ...(this.cfg.identity === undefined ? {} : { identity: this.cfg.identity }),
-      ...(this.cfg.instructionsAppend ? { instructionsAppend: this.cfg.instructionsAppend } : {}),
+      ...promptAdditions(options?.kind ?? "turn", this.cfg),
     });
     const upstreamRequest = translate();
     let requestBody = JSON.stringify(upstreamRequest);

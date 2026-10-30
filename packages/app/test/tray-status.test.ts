@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
+import * as failureModel from "../src/failure-model.ts";
 import * as statusModel from "../src/status-model.ts";
 import * as updateModel from "../src/update-model.ts";
 
@@ -13,7 +14,11 @@ const source = fs.readFileSync(new URL("../src/main.ts", import.meta.url), "utf8
 const compiled = ts.transpileModule(source + `
 exports.inspectTray = (status, language, fakeTray) => { last = status; L = STRINGS[language]; tray = fakeTray; render(); };
 exports.health = healthy;
+exports.showFailure = (language, message, output, retry) => { L = STRINGS[language]; return showFailure(message, output, retry); };
+exports.strings = STRINGS;
 `, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
+
+type MessageBox = { type?: string; title?: string; message: string; detail?: string; buttons?: string[]; defaultId?: number; cancelId?: number };
 
 type WindowQuota = { used_percent?: number; window_minutes?: number };
 type Fixture = {
@@ -27,6 +32,8 @@ function harness() {
   const labels: string[] = [];
   let image = "", tooltip = "";
   const forbidden = () => { throw new Error("Unexpected OS, filesystem, CLI or network access"); };
+  // Dialogs answer from `answers` in order (the cancel button when it runs out); `shown` keeps each.
+  const answers: number[] = [], shown: MessageBox[] = [], copied: string[] = [];
   const fakeTray = {
     setImage: (value: { file: string }) => { image = value.file; },
     setToolTip: (value: string) => { tooltip = value; },
@@ -37,17 +44,22 @@ function harness() {
       app: { requestSingleInstanceLock: () => true, on() {}, whenReady: () => ({ then() {} }), isPackaged: true, getLoginItemSettings: () => ({ openAtLogin: false }), getPreferredSystemLanguages: () => ["ko"], getSystemLocale: () => "ko", getLocale: () => "ko" },
       Menu: { buildFromTemplate: (items: object[]) => items },
       nativeImage: { createFromPath: (file: string) => ({ file, setTemplateImage() {} }) },
+      // Copied out of the module's realm, whose arrays deepEqual would not take for this realm's.
+      dialog: { showMessageBox: async (options: MessageBox) => { shown.push(JSON.parse(JSON.stringify(options))); return { response: answers.shift() ?? options.cancelId ?? 0 }; } },
+      clipboard: { writeText: (text: string) => { copied.push(text); } },
     },
     "node:child_process": { execFile: forbidden }, "node:fs": new Proxy({}, { get: () => forbidden }),
     "node:os": { homedir: forbidden }, "node:path": path,
     "./claude-desktop": { claudeStartedAt: forbidden, reopenClaude: forbidden },
-    "./update-model": updateModel, "./status-model": statusModel,
+    "./update-model": updateModel, "./status-model": statusModel, "./failure-model": failureModel,
     "./protocol": { registerScheme() {}, ORIGIN: "ripple://app" },
     "./window": { mainWindow: () => null },
   };
   const exports: {
     inspectTray?: (status: Fixture, lang: string, tray: typeof fakeTray) => void;
     health?: (status: Fixture | null) => string;
+    showFailure?: (lang: string, message: string, output: string, retry?: () => Promise<void>) => Promise<void>;
+    strings?: Record<string, { failures: Record<string, [string, string]> }>;
   } = {};
   runInNewContext(compiled, {
     exports, require: (id: string) => { assert.ok(id in modules, id); return modules[id]; },
@@ -56,9 +68,79 @@ function harness() {
   });
   assert.ok(exports.inspectTray);
   assert.ok(exports.health);
+  assert.ok(exports.showFailure);
+  assert.ok(exports.strings);
   const inspect = exports.inspectTray;
-  return { health: exports.health, render: (status: Fixture, lang = "ko") => { inspect(status, lang, fakeTray); return { labels, image, tooltip }; } };
+  return {
+    health: exports.health,
+    render: (status: Fixture, lang = "ko") => { inspect(status, lang, fakeTray); return { labels, image, tooltip }; },
+    showFailure: exports.showFailure,
+    strings: exports.strings,
+    answers, shown, copied,
+  };
 }
+
+// The update that failed on 2026-10-29 while cargo held the CPU, cut to the lines that matter here.
+const starvedUpdate = [
+  "Updating ClaudeRipple 0.12.14 → 0.12.22 (install script, C:\\Users\\me\\.clauderipple)…",
+  "added 7 packages, and changed 127 packages in 54s",
+  "✓ router already running",
+  "✗ probe failed: router unreachable: connect ECONNREFUSED 127.0.0.1:8790",
+  "the installer exited with 1",
+  "Command failed: C:\\Program Files\\nodejs\\node.exe C:\\Users\\me\\.clauderipple\\node_modules\\clauderipple\\dist\\cli\\src\\index.js update",
+].join("\n");
+
+test("a failed update names the failure, offers its fix, and keeps the output behind Details", async () => {
+  const app = harness();
+  // Details, Copy, Close the output, Close the failure.
+  app.answers.push(1, 0, 1, 2);
+  await app.showFailure("ko", "업데이트를 완료하지 못했습니다", starvedUpdate, async () => assert.fail("a router that did not answer is not fixed by downloading again"));
+  const [failure, output, copiedOutput, again] = app.shown;
+  assert.equal(app.shown.length, 4);
+  assert.equal(failure!.title, "ClaudeRipple");
+  assert.equal(failure!.message, "업데이트를 완료하지 못했습니다");
+  assert.deepEqual(failure!.buttons, ["설정 다시 실행", "자세히", "닫기"]);
+  assert.equal(failure!.defaultId, 0);
+  assert.equal(failure!.cancelId, 2);
+  assert.equal(failure!.detail, app.strings.ko!.failures["router-unresponsive"]!.join("\n"));
+  assert.doesNotMatch(failure!.detail!, /ECONNREFUSED|Command failed|installer exited/);
+  assert.equal(output!.message, "전체 출력");
+  assert.match(output!.detail!, /ECONNREFUSED 127\.0\.0\.1:8790/);
+  assert.deepEqual(app.copied, [starvedUpdate]);
+  assert.equal(copiedOutput!.message, "전체 출력 (복사됨)");
+  assert.deepEqual(again, failure, "closing the output returns to the failure");
+});
+
+test("a failure with no fix the tray can run offers only Details and Close", async () => {
+  const app = harness();
+  await app.showFailure("en", "Setup did not finish", 'error: settings.json env.HTTPS_PROXY is already "http://127.0.0.1:9000".');
+  assert.equal(app.shown.length, 1);
+  assert.deepEqual(app.shown[0]!.buttons, ["Details", "Close"]);
+  assert.equal(app.shown[0]!.defaultId, 1);
+  assert.equal(app.shown[0]!.cancelId, 1);
+  assert.match(app.shown[0]!.detail!, /^Another proxy in use\n/);
+});
+
+test("an update that could not download offers to try again, and the button runs it", async () => {
+  const app = harness();
+  let retried = 0;
+  app.answers.push(0);
+  await app.showFailure("en", "The update did not finish", "npm error code ENOTFOUND", async () => { retried++; });
+  assert.deepEqual(app.shown[0]!.buttons, ["Try Again", "Details", "Close"]);
+  assert.equal(retried, 1);
+});
+
+test("every tray language names every failure", () => {
+  const kinds = ["router-not-switched", "router-not-started", "startup-entry", "certificate", "router-unresponsive", "anthropic-unreachable", "foreign-proxy", "disk-full", "files-unwritable", "download", "unknown"];
+  const { strings } = harness();
+  for (const [lang, table] of Object.entries(strings)) {
+    assert.deepEqual(Object.keys(table.failures).sort(), [...kinds].sort(), lang);
+    for (const [kind, text] of Object.entries(table.failures)) {
+      assert.equal(text.length, 2, `${lang} ${kind}`);
+      assert.ok(text.every((part) => part.trim().length > 0), `${lang} ${kind}`);
+    }
+  }
+});
 
 for (const problem of ["picker-ca", "picker-proxy"]) {
   test(`readiness ${problem} failure changes the actual tray headline, icon and tooltip`, () => {

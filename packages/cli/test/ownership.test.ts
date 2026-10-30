@@ -19,6 +19,11 @@ Object.assign(process.env, {
   CLAUDERIPPLE_LAUNCH_AGENTS_DIR: path.join(root, "LaunchAgents"),
   CLAUDERIPPLE_LAUNCHCTL: tripwire,
   XDG_CONFIG_HOME: path.join(root, "xdg-config"),
+  // The Windows task lock sits under os.homedir(), which reads USERPROFILE there. Left on the real
+  // home, this file and service-races.test.ts took the same task's lock at once in parallel, and one
+  // found the other's lock before its owner file existed (Windows CI, 2026-10-29).
+  HOME: root,
+  USERPROFILE: root,
 });
 // The production labels on purpose: the defect is two installations sharing one definition. The
 // temp directories above are what keep this away from the user's real services.
@@ -243,6 +248,7 @@ function taskOf(home: string, extra: Record<string, unknown> = {}): Record<strin
     restartInterval: "PT1M",
     executionTimeLimit: "PT0S",
     multipleInstances: 2,
+    priority: 4,
     allowStartIfOnBatteries: true,
     dontStopIfGoingOnBatteries: true,
     ...extra,

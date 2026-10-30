@@ -32,6 +32,8 @@ import { GoogleAccountPool, type GoogleAccountSummary, type GoogleCredential, ty
 import { fetchAvailableModels, hostForModel, resolveAntigravityWireModel, staticAntigravityModels, GOOGLE_OAUTH, type HostMap, type MergedCatalogue } from "./antigravity.ts";
 import { antigravityQuotaScope, GoogleUsage, type QuotaGroup } from "./usage.ts";
 import { ANTIGRAVITY_PROMPT_REFUSAL_MESSAGE, isAntigravityPromptRefusal } from "./prompt-refusal.ts";
+import { promptAdditions } from "../../identity.ts";
+import type { RequestKind } from "../../routing.ts";
 
 const PING_MS = 15_000;
 /** How long the CCA model list is reused before asking again. */
@@ -501,7 +503,7 @@ export class GoogleAdapter {
   }
 
   /** Handle a fully-read Messages request. Model/effort have already been resolved by routing. */
-  async handle(req: http.IncomingMessage, res: http.ServerResponse, path: string, json: AnthropicRequest, model: string, effort: string | undefined, credential?: GoogleCredentialHandoff): Promise<GoogleOutcome> {
+  async handle(req: http.IncomingMessage, res: http.ServerResponse, path: string, json: AnthropicRequest, model: string, effort: string | undefined, credential?: GoogleCredentialHandoff, options?: { kind?: RequestKind }): Promise<GoogleOutcome> {
     if (path.startsWith("/v1/messages/count_tokens")) {
       const body = JSON.stringify({ input_tokens: estimateTokens(json) });
       res.writeHead(200, { "content-type": "application/json", "content-length": String(Buffer.byteLength(body)) }).end(body);
@@ -530,8 +532,7 @@ export class GoogleAdapter {
       model,
       ...(useEffort ? { effort: useEffort } : {}),
       caps,
-      ...(this.cfg.identity === undefined ? {} : { identity: this.cfg.identity }),
-      ...(this.cfg.instructionsAppend ? { instructionsAppend: this.cfg.instructionsAppend } : {}),
+      ...promptAdditions(options?.kind ?? "turn", this.cfg),
       thoughtSignatures: signatures,
       // The CCA path never adds the sentinel: the signature goes back on the exact functionCall the
       // model signed (or nothing at all), rather than a fabricated validator bypass.

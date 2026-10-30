@@ -17,6 +17,7 @@ import path from "node:path";
 import { adminPort, homeDir, type Config, type Provider } from "./config.ts";
 import { withFileLock } from "./locked-file.ts";
 import { declaredBy, qualifiedModel } from "./routing.ts";
+import { isTargetProvider } from "./targets.ts";
 import { isJudgeOnlyModel } from "./model-policy.ts";
 import { GROK_EFFORT_LEVELS } from "./providers/grok/catalog.ts";
 import { shortName } from "../../cli/src/hooks/agent-title.ts";
@@ -193,13 +194,13 @@ type AgentTarget = { modelId: string; title: string; provider: string; suffix: s
 function agentTargets(cfg: Config, log?: AgentLog): Map<string, AgentTarget> {
   const targets = new Map<string, AgentTarget>();
   for (const [providerName, provider] of Object.entries(cfg.providers)) {
-    if (provider.type === "anthropic" && !provider.accountPool) continue;
+    if (!isTargetProvider(provider)) continue;
     for (const model of provider.models ?? []) {
       if (isJudgeOnlyModel(model.id)) continue;
       const owners = declaredBy(model.id, cfg);
       const first = owners.find(name => {
         const owner = cfg.providers[name]!;
-        return owner.type !== "anthropic" || owner.accountPool;
+        return isTargetProvider(owner);
       });
       const duplicate = owners.length > 1;
       const { name, legacy } = workerNames(model.id, providerName, duplicate && first !== providerName);
@@ -404,7 +405,7 @@ export function generatedAgents(cfg: Config, dir = defaultAgentDir(), manifestPa
     const owners = declaredBy(model, cfg);
     const provider = owners.length === 1 ? owners[0] : undefined;
     const target = provider ? cfg.providers[provider] : undefined;
-    if (!provider || !target || (target.type === "anthropic" && !target.accountPool)) continue;
+    if (!provider || !isTargetProvider(target)) continue;
     result.push({ name: entry.name, model: qualifiedModel(model, cfg)?.model ?? model, provider });
   }
   return result.sort((a, b) => a.name.localeCompare(b.name));

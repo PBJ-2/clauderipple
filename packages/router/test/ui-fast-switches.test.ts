@@ -24,9 +24,9 @@ test("every language the dashboard speaks has the ChatGPT Fast switches", () => 
     assert.ok(dict["providers.fastSubagent"], `${lang}: providers.fastSubagent`);
     assert.ok(dict["providers.fastHelp"], `${lang}: providers.fastHelp`);
   }
-  assert.equal(i18n.ko!["providers.fastMain"], "메인 세션 Fast");
-  assert.equal(i18n.ko!["providers.fastSubagent"], "서브에이전트 Fast");
-  assert.equal(i18n.ko!["providers.fastHelp"], "켜면 GPT 요청을 Codex 빠른 등급으로 보냅니다. 응답이 빨라지는 대신 구독 사용량이 더 빨리 줄어듭니다.");
+  assert.equal(i18n.ko!["providers.fastMain"], "메인 세션에 Fast 적용");
+  assert.equal(i18n.ko!["providers.fastSubagent"], "서브에이전트에 Fast 적용");
+  assert.equal(i18n.ko!["providers.fastHelp"], "활성화하면 GPT 요청을 Codex의 Fast(고속) 등급으로 전송합니다. 응답 속도는 빨라지지만 구독 사용량이 더 빠르게 소진됩니다.");
 });
 
 test("the ChatGPT provider form shows both switches and saves them", () => {

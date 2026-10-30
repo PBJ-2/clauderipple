@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 
 type Entry = { id: string; name?: string; provider: string; contextWindow?: number };
 type Config = {
-  providers: Record<string, { type?: string; accountPool?: boolean; models?: { id: string; name?: string }[] }>;
+  providers: Record<string, { type?: string; auth?: string; accountPool?: boolean; models?: { id: string; name?: string }[] }>;
   cli?: { extraModels?: { model: string; name?: string; contextWindow?: number }[] };
   direct?: { prefix: string; provider: string }[];
 };
@@ -225,8 +225,8 @@ function baseConfig(): Config {
 test("only an opted-in native Claude account pool appears in model mapping", () => {
   const config: Config = {
     providers: {
-      ingress: { type: "anthropic", models: [{ id: "claude-opus-5" }] },
-      pooled: { type: "anthropic", accountPool: true, models: [{ id: "claude-sonnet-5" }] },
+      ingress: { type: "anthropic", auth: "api-key", models: [{ id: "claude-opus-5" }] },
+      pooled: { type: "anthropic", auth: "claude-code", accountPool: true, models: [{ id: "claude-sonnet-5" }] },
       other: { type: "anthropic-compatible", models: [{ id: "deepseek-v4-pro" }] },
     },
   };
@@ -655,12 +655,16 @@ test('what a removal would also clean up is counted before the confirm', () => {
   assert.deepEqual(ui.usages(fixture), { routes: [], fallbacks: [{ route: 'one', model: 'two' }], direct: 1, picker: 1, search: false, classifier: false });
 });
 
-async function pickerWindowHarness(catalogWindows: Record<string, number>) {
+async function pickerWindowHarness(
+  catalogWindows: Record<string, number>,
+  windows: Record<string, number> = catalogWindows,
+  savedWindows: Record<string, number> = { 'gpt-6.1-sol': 272000, other: 700000 },
+) {
   const config = saveFixture();
   config.providers.p = { type: 'chatgpt', models: [{ id: 'gpt-6.1-sol', contextWindow: 272000 }] };
   config.providers.q = { type: 'openai-compatible', models: [{ id: 'other', contextWindow: 800000 }] };
-  config.cli.extraModels = [{ model: 'gpt-6.1-sol', contextWindow: 272000 }, { model: 'other', contextWindow: 700000 }];
-  const h = { config, catalogWindows, requests: [] as string[], box: new SaveNode('div'), card: new SaveNode('div'), rows: new SaveNode('div') };
+  config.cli.extraModels = Object.entries(savedWindows).map(([model, contextWindow]) => ({ model, contextWindow }));
+  const h = { config, catalogWindows, windows, requests: [] as string[], box: new SaveNode('div'), card: new SaveNode('div'), rows: new SaveNode('div') };
   const ui = new Function('h', 'el', `
     let currentConfig, pickerContextWindows = {catalogWindows:{}}, clientsLoaded, status = {};
     let pickerModelsDrawnFor = { key: null }, modelSlotsDrawnFor = { key: null };
@@ -681,7 +685,7 @@ async function pickerWindowHarness(catalogWindows: Record<string, number>) {
     ${dashboardBlock('function renderClientPickerModels(', '// Claude Code picks these')}
     ${dashboardBlock('function clientPickerSelections(', 'async function saveClientPickerModels(')}
     const loadCatalogs = async () => {}, renderClients = () => renderClientPickerModels(true);
-    const api = async url => { h.requests.push(url); return url === '/api/config' ? h.config : {windows:h.catalogWindows,catalogWindows:h.catalogWindows}; };
+    const api = async url => { h.requests.push(url); return url === '/api/config' ? h.config : {windows:h.windows,catalogWindows:h.catalogWindows}; };
     const toast = message => { throw new Error(message); };
     ${dashboardBlock('async function loadClients(', 'async function loadProviders(')}
     return {load:loadClients, selections:clientPickerSelections, setStatus: value => { status = value; }, render: () => { renderClientPickerModels(true); renderModelSlots(); }};
@@ -690,23 +694,43 @@ async function pickerWindowHarness(catalogWindows: Record<string, number>) {
   const field = (model: string) => h.box.find(node => node.attrs.class === 'model-window' && node.dataset.model === model)!;
   return { h, field, selections: ui.selections, load: ui.load, render: ui.render, setStatus: ui.setStatus };}
 
-test('the picker loads the resolved Codex window, makes it read-only and never saves its display as an override', async () => {
+test('the catalogue window prefills an editable field; an empty or catalogue-equal value saves no override', async () => {
   const ui = await pickerWindowHarness({ 'gpt-6.1-sol': 475000 });
   assert.deepEqual(ui.h.requests, ['/api/config', '/api/context-windows']);
   const field = ui.field('gpt-6.1-sol');
-  assert.equal(field.value, '475000');
-  assert.equal(field.readOnly, true);
+  assert.equal(field.value, '475000', 'the official figure is the default');
+  assert.equal(field.readOnly, false, 'the field exists to be edited');
   assert.equal(field.attrs.title, 'slots.windowCodex');
-  assert.ok(ui.h.box.find(node => node.tag === 'small' && node.attrs.text === 'slots.windowCodex'), 'visible catalogue note');
-  field.value = '500000'; // Even a programmatic change is not an editable override.
-  assert.equal(ui.selections().find(entry => entry.id === 'gpt-6.1-sol')?.contextWindow, 272000, 'keep existing stored fallback unchanged');
-  ui.h.config.cli.extraModels[0] = { model: 'gpt-6.1-sol' };
-  assert.equal(ui.selections().find(entry => entry.id === 'gpt-6.1-sol')?.contextWindow, undefined, 'no new stored override');
+  const note = ui.h.box.find(node => node.tag === 'small' && node.attrs.class === 'pm-note');
+  assert.ok(note, 'visible catalogue note');
+  assert.equal(note!.attrs.text, 'slots.windowCodex');
+  assert.equal(note!.attrs.style, undefined, 'placed by style.css: the page CSP drops a style attribute');
+  field.value = '500000';
+  assert.equal(ui.selections().find(entry => entry.id === 'gpt-6.1-sol')?.contextWindow, 500000, 'a typed number is the override');
+  field.value = '475000';
+  assert.equal(ui.selections().find(entry => entry.id === 'gpt-6.1-sol')?.contextWindow, undefined, 'the catalogue value is no override');
+  field.value = '';
+  assert.equal(ui.selections().find(entry => entry.id === 'gpt-6.1-sol')?.contextWindow, undefined, 'an empty field goes back to the catalogue');
   const other = ui.field('other');
   assert.equal(other.value, '700000');
   assert.equal(other.readOnly, false, 'another provider stays editable');
   other.value = '900000';
   assert.equal(ui.selections().find(entry => entry.id === 'other')?.contextWindow, 900000);
+  other.value = '';
+  assert.equal(ui.selections().find(entry => entry.id === 'other')?.contextWindow, 800000, 'another provider falls back to the window it declares');
+});
+
+test('a saved override is what the field shows, and typing the catalogue figure walks back to it', async () => {
+  const ui = await pickerWindowHarness({ 'gpt-6.1-sol': 475000 }, { 'gpt-6.1-sol': 300000, other: 700000 }, { 'gpt-6.1-sol': 300000, other: 700000 });
+  const field = ui.field('gpt-6.1-sol');
+  assert.equal(field.value, '300000', 'the override, not the catalogue figure');
+  assert.equal(field.readOnly, false);
+  assert.equal(field.attrs.title, 'slots.windowHelp', 'the note\'s wording belongs to the catalogue value');
+  assert.equal(ui.h.box.find(node => node.attrs.class === 'pm-note'), undefined, 'no note while the catalogue is not in effect');
+  field.value = '475000';
+  assert.equal(ui.selections().find(entry => entry.id === 'gpt-6.1-sol')?.contextWindow, undefined, 'the catalogue figure is no override');
+  field.value = '320000';
+  assert.equal(ui.selections().find(entry => entry.id === 'gpt-6.1-sol')?.contextWindow, 320000);
 });
 
 test('before a Codex window has been read the picker retains its stored editable fallback', async () => {

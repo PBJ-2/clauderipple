@@ -200,15 +200,6 @@ export class ClaudeCodeAuthStore {
   }
 }
 
-/** Prefix custom tool names for subscription OAuth; builtin Anthropic tools stay unchanged. */
-export function toClaudeCodeToolName(name: string): string {
-  return /^(custom_|web_search$|code_execution$|text_editor$|computer$)/i.test(name) ? name : `custom_${name}`;
-}
-
-export function fromClaudeCodeToolName(name: string): string {
-  return name.startsWith("custom_") ? name.slice("custom_".length) : name;
-}
-
 /**
  * Construct native Anthropic auth headers. OAuth wire requirements are behaviorally measured,
  * while API-key mode follows the public Messages API header convention.

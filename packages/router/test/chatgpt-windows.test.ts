@@ -1,7 +1,8 @@
 // A ChatGPT-subscription model's window is the live catalogue's effective window, everywhere
-// ClaudeRipple reports one to Claude Code — ahead of any stored contextWindow and of
-// cli.autoCompactWindow — while every other provider keeps the fallback it had (ARCHITECTURE §4,
-// 2026-10-23). The map is process-wide and fed by the adapter, so this file reads it directly.
+// ClaudeRipple reports one to Claude Code — ahead of the stored provider/picker value and of
+// cli.autoCompactWindow — unless the operator saved a window of their own on the picker entry, which
+// wins over the catalogue (2026-10-30), while every other provider keeps the fallback it had
+// (ARCHITECTURE §4). The map is process-wide and fed by the adapter, so this file reads it directly.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -73,6 +74,33 @@ test("an explicit route window still wins over the catalogue", () => {
     routes: { ...cfg.routes, "claude-opus-4-7": { provider: "chatgpt", model: "gpt-6.1-sol", contextWindow: 1_000_000 } },
   };
   assert.equal(boot(explicit).auto_compact_windows["claude-opus-4-7"], 1_000_000);
+});
+
+test("a window the operator saved on the picker entry wins over the catalogue, and clearing it goes back", () => {
+  noteChatgptModelWindows(catalogue(500000, 95));
+  const chosen: Config = {
+    ...cfg,
+    cli: { ...cfg.cli, extraModels: [{ model: "gpt-6.1-sol", name: "GPT-6.1 Sol", contextWindow: 300000 }] },
+  };
+  assert.equal(chatPickerModels(chosen).find((e) => e.model === "gpt-6.1-sol")?.contextWindow, 300000, "the picker advertises it");
+  assert.equal(boot(chosen).auto_compact_windows["gpt-6.1-sol"], 300000);
+  assert.equal(boot(chosen).auto_compact_windows["claude-opus-4-7"], 300000, "a route's target follows the entry");
+  assert.equal(chatgptModelWindow(chosen, "gpt-6.1-sol"), 475000, "the catalogue figure itself is unchanged");
+
+  const cleared: Config = { ...cfg, cli: { ...cfg.cli, extraModels: [{ model: "gpt-6.1-sol", name: "GPT-6.1 Sol" }] } };
+  assert.equal(boot(cleared).auto_compact_windows["gpt-6.1-sol"], 475000, "no saved window follows the catalogue");
+  assert.deepEqual(chatPickerModels(cleared).find((e) => e.model === "gpt-6.1-sol"), { model: "gpt-6.1-sol", name: "GPT-6.1 Sol", contextWindow: 475000 }, "and the picker state follows it too");
+
+  // The entry may carry the figure it was ticked with; that copy is not a choice.
+  const copied: Config = { ...cfg, cli: { ...cfg.cli, extraModels: [{ model: "gpt-6.1-sol", name: "GPT-6.1 Sol", contextWindow: 272000 }] } };
+  assert.equal(boot(copied).auto_compact_windows["gpt-6.1-sol"], 475000, "the copied provider value loses as before");
+
+  const both: Config = {
+    ...chosen,
+    routes: { ...cfg.routes, "claude-opus-4-7": { provider: "chatgpt", model: "gpt-6.1-sol", contextWindow: 1_000_000 } },
+  };
+  assert.equal(boot(both).auto_compact_windows["claude-opus-4-7"], 1_000_000, "an explicit route window beats the saved override");
+  assert.equal(boot(both).auto_compact_windows["gpt-6.1-sol"], 300000);
 });
 
 // Claude Code drops a per-model window over its 1M ceiling whole, and the model then compacts at

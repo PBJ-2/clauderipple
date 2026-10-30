@@ -32,6 +32,7 @@ test("the real catalogue lookup and probe give bootstrap, picker and admin the e
     { id: "gpt-6-astra", contextWindow: 272000 },
     { id: "unknown-capacity" },
     { id: "provider-only", contextWindow: 123000 },
+    { id: "prefix-only", contextWindow: 272000 },
     { id: "unlisted", contextWindow: 234000 },
   ] };
   const cfg: Config = {
@@ -135,4 +136,24 @@ test("the real catalogue lookup and probe give bootstrap, picker and admin the e
   const rerouted = await readWindows();
   assert.equal(rerouted.windows["gpt-6.1-sol"], 272000, "window follows actual serving provider, not GPT name");
   assert.equal(rerouted.catalogWindows["gpt-6.1-sol"], undefined);
+
+  // A window the operator saved on the picker entry is the one the router resolves, everywhere, and
+  // the catalogue's own figure stays exposed for the editor's default (2026-10-30).
+  cfg.direct = [{ prefix: "gpt-", provider: "chatgpt" }, { prefix: "prefix-", provider: "chatgpt" }];
+  cfg.cli.extraModels.find(model => model.model === "gpt-6-astra")!.contextWindow = 300000;
+  const overridden = await readWindows();
+  assert.equal(overridden.windows["gpt-6-astra"], 300000, "a saved picker override beats the catalogue");
+  assert.equal(overridden.windows["astra"], 300000, "the alias too");
+  assert.equal(overridden.catalogWindows["gpt-6-astra"], 258400, "the catalogue's figure is still exposed");
+  assert.deepEqual(overridden.resolvedWindows["claude-opus-4-8"], { model: "gpt-6-astra", provider: "chatgpt", contextWindow: 300000, compactWindow: 300000 });
+  assert.equal(overridden.resolvedWindows["claude-sonnet-5"]?.contextWindow, 600000, "an explicit route window still wins");
+  const overflow = JSON.parse(injectBootstrap(Buffer.from("{}"), cfg, []).toString()) as { auto_compact_windows: Record<string, number> };
+  assert.equal(overflow.auto_compact_windows["gpt-6-astra"], 300000);
+  assert.equal(overflow.auto_compact_windows["claude-opus-4-8"], 300000, "a route's target follows the picker entry");
+  assert.equal(overflow.auto_compact_windows["claude-opus-5"], 475000, "untouched picker entries keep the catalogue");
+  assert.equal(chatPickerModels(cfg).find(model => model.model === "gpt-6-astra")?.contextWindow, 300000);
+
+  // An empty field stores no override: the entry carries no window and the catalogue is back.
+  delete cfg.cli.extraModels.find(model => model.model === "gpt-6-astra")!.contextWindow;
+  assert.equal((await readWindows()).windows["gpt-6-astra"], 258400, "no override follows the catalogue again");
 });

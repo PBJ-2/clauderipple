@@ -319,6 +319,9 @@ test("Windows: a lid action changed by the user while held becomes theirs; a swi
   await t.c.tick();
   assert.deepEqual(t.w.lid, { scheme: SCHEME, ac: 0, dc: 0 }, "still wanted: set again");
   assert.deepEqual(readJournal(t.journalFile)?.lid, { scheme: SCHEME, ac: 3, dc: 3 }, "their new choice is what gets restored");
+  // Nothing else writes the lid action, so a change outside us is an unknown cause (no reboot exception).
+  assert.deepEqual(t.c.status().conflict, { app: null, name: null, at: new Date(NOW).toISOString() });
+  assert.ok(t.lines.includes("awake: sleep was re-enabled outside ClaudeRipple (another app or a settings change)"));
   const other = "a1841308-3541-4fab-bc81-f71556f20b4a";
   t.w.lid = { scheme: other, ac: 1, dc: 1 };
   t.w.calls.length = 0;

@@ -2,6 +2,7 @@
 import type { PermissionContent, RuleStatus, Effort, Figures, ImagePart, SessionFile, SessionEvent, SessionState, Text, ToolCall } from "../src/protocol.ts";
 import { WRAP_TOOL, wrapUpFields, type WrapUpReply } from "../src/wrap-up.ts";
 import { stringField, toolInput } from "../src/tool-details.ts";
+import { settingsOutcome } from "../src/settings-notice.ts";
 
 export interface ToolView extends ToolCall { result?: { ok: boolean; text: Text; images?: ImagePart[]; files?: SessionFile[] } }
 
@@ -123,6 +124,13 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
         put({ type: "thinking", key, ver: `h${e.seq}`, msg: e.msg, text, streaming: e.delta === true, at: e.at });
         break;
       }
+      case "narration": {
+        // A progress sentence between tool calls is the model's words, drawn where it wrote them: the
+        // tool runs on either side stay separate, and the thinking that streamed here stops being live.
+        finishStream();
+        put({ type: "assistant", key: `n${e.msg}:${e.block}`, ver: `n${e.seq}`, text: e.text, streaming: false, tools: [], model: model ?? "", at: e.at });
+        break;
+      }
       case "delta": {
         const key = `a${e.msg}`;
         const prev = byKey.has(key) ? items[byKey.get(key)!] : undefined;
@@ -189,11 +197,15 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
       case "figures":
         figures = e.figures;
         break;
-      case "settings":
+      case "settings": {
         // One durable row per operation: a late answer replaces its earlier unknown result.
-        put({ type: "notice", key: `settings:${e.reqId}`, ver: `${e.seq}`, code: `settings_${e.status}`,
-          text: [e.model, e.effort, e.permissionMode, ...Object.values(e.errors ?? {})].filter(Boolean).join(" · ") });
+        // A pending answer names what will apply, not the values it leaves in force until then.
+        const outcome = settingsOutcome(e);
+        const values = outcome === "pending" && e.pending ? e.pending : e;
+        put({ type: "notice", key: `settings:${e.reqId}`, ver: `${e.seq}`, code: `settings_${outcome}`,
+          text: [values.model, values.effort, e.permissionMode, ...Object.values(e.errors ?? {})].filter(Boolean).join(" · ") });
         break;
+      }
       case "notice":
         if (e.code === "interrupted" || e.code === "host_restarted") finishStream();
         put({ type: "notice", key: `n${e.seq}`, ver: "1", code: e.code, ...(e.text ? { text: e.text } : {}) });
@@ -312,7 +324,8 @@ export function timelineItems(view: Pick<SessionView, "items" | "state">): Timel
       continue;
     }
     // As in the Claude app's default view, thinking is not drawn and does not split a run (most of it
-    // has its text withheld anyway). Only thinking still streaming at the very end shows, as a live line.
+    // has its text withheld anyway). Narration is not thinking at this point: it became an assistant
+    // row above. Only thinking still streaming at the very end shows, as a live line.
     if (item.type === "thinking") continue;
     if (item.type === "user" || item.type === "result" || item.type === "control") flushWrap();
     group = null;

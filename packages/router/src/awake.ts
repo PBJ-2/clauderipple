@@ -17,11 +17,16 @@
 //   - The router's exit does not touch the bit: a restart's successor reconciles within one tick,
 //     and clearing it here then setting it again a second later is exactly the off-then-on window in
 //     which a closed lid could sleep mid-work. `clauderipple stop`/`uninstall` clear it.
+//   - Another app can write and clear the same bit: AlDente Pro's "Disable Sleep until Charge Limit"
+//     is the known one (a table of preference reads, at most once a minute). A known writer, or a
+//     clear we cannot attribute (kept 24 h, unless the Mac booted since the hold), is reported once
+//     in the log, the CLI and the app — no re-assert wins against an immediate lid sleep.
 //
 // Every command goes through an injected `Runner`, never a shell, so tests run against fakes.
 
 import { execFile } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import type { AwakeSettings } from "./config.ts";
 import { WinAwakeBackend, type ExecStateHelper } from "./awake-win.ts";
@@ -44,7 +49,21 @@ export type Runner = (file: string, args: string[], opts?: RunOptions) => Promis
 export const PMSET = "/usr/bin/pmset";
 export const SUDO = "/usr/bin/sudo";
 export const IOREG = "/usr/sbin/ioreg";
+export const DEFAULTS = "/usr/bin/defaults";
 export const SUDOERS_FILE = "/etc/sudoers.d/clauderipple";
+
+/**
+ * An app that also writes the global sleep setting we hold, and what to ask it. `app` is a stable id
+ * (the laptop page looks up `mac.conflict.fix.<app>`), `name` what to show. Each entry is one
+ * unprivileged `defaults read <domain> <key>`; a match is exit 0 and its stdout equal to `value`.
+ * AlDente Pro's "Disable Sleep until Charge Limit" was measured on 2026-10-30: 1 while the option was
+ * on, 0 after switching it to "Stop Charging when Sleeping". It writes the same bit as our
+ * `pmset -a disablesleep` — set while charging, cleared when charging stops.
+ */
+export type SleepSettingWriter = { app: string; name: string; domain: string; key: string; value: string };
+export const SLEEP_SETTING_WRITERS: readonly SleepSettingWriter[] = [
+  { app: "aldente", name: "AlDente", domain: "com.apphousekitchen.aldente-pro", key: "completelyDisableSleep", value: "1" },
+];
 
 export function execRunner(): Runner {
   return (file, args, opts = {}) =>
@@ -262,6 +281,16 @@ export function sudoRefused(r: RunResult): boolean {
 
 // ---- Controller --------------------------------------------------------------------------------
 
+/** A known app that also writes the sleep setting we hold, as the probe names it (SLEEP_SETTING_WRITERS). */
+export type ConflictApp = { app: string; name: string };
+
+/**
+ * Why a held sleep setting is not ours alone: a known app that also writes it (`app`/`name`), or a
+ * clear we could not attribute (both null). `at` is when it was last seen — the last probe for a known
+ * app, the last outside re-enable for an unknown cause.
+ */
+export type AwakeConflict = { app: string | null; name: string | null; at: string };
+
 export type AwakeStatus = {
   mode: AwakeSettings["mode"];
   applied: boolean;
@@ -271,6 +300,7 @@ export type AwakeStatus = {
   thermal: Thermal | null;
   lidClosed: boolean | null;
   until: string | null;
+  conflict: AwakeConflict | null;
 };
 
 export type Guards = { battery: Battery | null; thermal: Thermal | null; lidClosed: boolean | null; darkWake?: boolean; error?: string };
@@ -282,6 +312,11 @@ export interface AwakeBackend {
   readGuards(needed: boolean): Promise<Guards>;
   /** While the journal says held: false when it was undone outside us (nothing of ours left to undo). */
   stillHeld(): Promise<boolean>;
+  /**
+   * Read-only: another app that also writes the sleep setting we use (macOS: the table
+   * SLEEP_SETTING_WRITERS). The controller spaces the calls; never privileged.
+   */
+  probeConflict(): Promise<ConflictApp | null>;
   hold(): Promise<HoldOutcome>;
   release(): Promise<HoldOutcome>;
   /**
@@ -309,11 +344,17 @@ export type AwakeDeps = {
   schedule?: (fn: () => void, everyMs: number) => () => void;
   /** Windows: the execution-state child (tests pass a fake). */
   winHelper?: () => ExecStateHelper;
+  /** Seconds since boot (macOS: a boot after the hold explains a cleared bit); tests pass a value. */
+  uptime?: () => number;
 };
 
 export const AWAKE_TICK_MS = 15_000;
 /** Pause between clearing the bit and reading whether a closed lid now causes sleep. */
 export const SLEEPNOW_SETTLE_MS = 3_000;
+/** How often the conflict probe may run: it is a `defaults` child process on every full tick otherwise. */
+export const CONFLICT_PROBE_MS = 60_000;
+/** How long a clear we could not attribute stays reported, counted from the last outside re-enable. */
+export const CONFLICT_KEEP_MS = 24 * 60 * 60_000;
 
 export class AwakeController {
   private applied = false;
@@ -321,6 +362,19 @@ export class AwakeController {
   private battery: Battery | null = null;
   private thermal: Thermal | null = null;
   private lidClosed: boolean | null = null;
+  /** The last probe's known writer and when it was seen; null when no table entry matched. */
+  private knownConflict: ConflictApp | null = null;
+  private knownAt: number | null = null;
+  /** When the sleep setting was last cleared outside us with no known writer behind it (unknown cause). */
+  private unknownAt: number | null = null;
+  /** When the conflict probe last ran; null until the first full evaluation. */
+  private conflictAt: number | null = null;
+  /** The conflict kind the log last reported (an `app` id, "unknown", or null), so a change is logged once. */
+  private conflictLoggedKind: string | null = null;
+  /** The name in the last logged conflict, for the "no longer changes" line. */
+  private conflictLoggedName: string | null = null;
+  /** When this hold was set (journal `since`, or now when a released state is set again): a boot after it is a reboot. */
+  private heldSince: number | null = null;
   private sudoFailed = false;
   private lastActivityAt: number | undefined;
   private journaledActivityAt: number | undefined;
@@ -343,6 +397,8 @@ export class AwakeController {
       this.applied = j.applied;
       this.lastActivityAt = j.lastActivityAt;
       this.journaledActivityAt = j.lastActivityAt;
+      const since = Date.parse(j.since);
+      this.heldSince = Number.isNaN(since) ? null : since;
     }
     const log = deps.log;
     if (deps.platform === "darwin") {
@@ -387,6 +443,7 @@ export class AwakeController {
       thermal: this.thermal,
       lidClosed: this.lidClosed,
       until: s.until ?? null,
+      conflict: this.currentConflict(),
     };
   }
 
@@ -461,6 +518,14 @@ export class AwakeController {
       this.battery = null;
       this.thermal = null;
       this.lidClosed = null;
+      // Nothing of ours is held, so a conflict would be about a bit we are not setting: forget it
+      // quietly, and let the first tick after the next turn-on report it again.
+      this.knownConflict = null;
+      this.knownAt = null;
+      this.unknownAt = null;
+      this.conflictAt = null;
+      this.conflictLoggedKind = null;
+      this.conflictLoggedName = null;
       backend.shutdown();
       this.persist();
       return;
@@ -488,9 +553,23 @@ export class AwakeController {
     // not applied, so a wanted state is set again below — re-asserting at most once per tick — and an
     // unwanted one is not "cleared" twice.
     if (this.applied && !(await backend.stillHeld())) {
-      this.logOnce("awake: sleep was re-enabled outside ClaudeRipple (reboot or another tool)");
+      // Asked fresh (past the cache) because the answer decides who is named in the line below.
+      const reboot = this.bootedAfterHold();
+      const known = await this.probeConflict(true);
+      this.logOnce(known
+        ? `awake: sleep was re-enabled outside ClaudeRipple (${known.name})`
+        : reboot
+          ? "awake: sleep was re-enabled outside ClaudeRipple (reboot)"
+          : "awake: sleep was re-enabled outside ClaudeRipple (another app or a settings change)");
+      // A known writer explains the clear, and a boot explains it away; only the rest is an unknown cause.
+      if (known || reboot) this.unknownAt = null;
+      else this.unknownAt = this.now();
       this.applied = false;
     }
+    // The bit matters from here on (something wants it, or a hold is being released): check whether
+    // another app writes it too.
+    await this.probeConflict();
+    this.logConflictChanges();
     const d = decide(guards);
     this.reason = d.reason;
     if (d.reason.startsWith("asleep:")) this.logOnce(`awake: ${d.reason}`);
@@ -499,6 +578,52 @@ export class AwakeController {
       if (await this.set(false, d.reason)) await backend.afterRelease(d.forced === true);
     }
     this.persist();
+  }
+
+  /**
+   * At most once a minute. `force`: after the wait for a re-enable outside us, where the answer
+   * decides who did it. Returns the known writer the table matched, or null.
+   */
+  private async probeConflict(force = false): Promise<ConflictApp | null> {
+    const now = this.now();
+    if (!force && this.conflictAt !== null && now - this.conflictAt < CONFLICT_PROBE_MS) return this.knownConflict;
+    this.knownConflict = await this.backend!.probeConflict();
+    this.knownAt = this.knownConflict ? now : null;
+    this.conflictAt = now;
+    return this.knownConflict;
+  }
+
+  /** The conflict to report now: a known writer first, then an unknown cause kept CONFLICT_KEEP_MS. */
+  private currentConflict(): AwakeConflict | null {
+    if (this.knownConflict) {
+      return { app: this.knownConflict.app, name: this.knownConflict.name, at: new Date(this.knownAt ?? this.now()).toISOString() };
+    }
+    if (this.unknownAt !== null && this.now() - this.unknownAt < CONFLICT_KEEP_MS) {
+      return { app: null, name: null, at: new Date(this.unknownAt).toISOString() };
+    }
+    return null;
+  }
+
+  /** The log says each change once: a known writer turning up, then going. An unknown cause rides with its line. */
+  private logConflictChanges(): void {
+    const known = this.knownConflict;
+    const kind = known ? known.app : this.currentConflict() ? "unknown" : null;
+    if (kind === this.conflictLoggedKind) return;
+    if (known) this.deps.log.info(`awake: ${known.name} also changes the sleep setting this feature holds; when it turns it back, a closed lid sleeps at once (see the laptop page for the fix)`);
+    else if (this.conflictLoggedName !== null) this.deps.log.info(`awake: ${this.conflictLoggedName} no longer changes the sleep setting`);
+    this.conflictLoggedKind = kind;
+    this.conflictLoggedName = known ? known.name : null;
+  }
+
+  /**
+   * macOS only: the sleep bit never survives a reboot, so a cleared bit is the boot's doing, not a
+   * conflict, when the system booted after the hold was set. On Windows a cleared lid action is
+   * always an outside change, with no such exception.
+   */
+  private bootedAfterHold(): boolean {
+    if (this.deps.platform !== "darwin" || this.heldSince === null) return false;
+    const uptime = this.deps.uptime ?? os.uptime;
+    return this.now() - uptime() * 1000 > this.heldSince;
   }
 
   /** Hold or release. The journal is written before holding and after releasing. */
@@ -521,6 +646,8 @@ export class AwakeController {
     }
     this.sudoFailed = false;
     this.applied = on;
+    // When the setting was (re)set, for telling a reboot from another app's clear on a later tick.
+    this.heldSince = on ? this.now() : null;
     this.persist(true);
     this.lastLogged = "";
     this.deps.log.info(`awake: sleep ${on ? "disabled" : "re-enabled"} (${reason})`);
@@ -566,6 +693,20 @@ class MacAwakeBackend implements AwakeBackend {
 
   async stillHeld(): Promise<boolean> {
     return this.clamshell?.sleepDisabled !== false;
+  }
+
+  /**
+   * The first table entry whose preference matches (no privilege): with AlDente's "Disable Sleep
+   * until Charge Limit" on, `completelyDisableSleep` is 1 and AlDente writes the same global bit we
+   * do. A missing domain or key exits non-zero, and 0 means the option is off (measured 2026-10-30
+   * after the owner switched to "Stop Charging when Sleeping"): both are no match.
+   */
+  async probeConflict(): Promise<ConflictApp | null> {
+    for (const w of SLEEP_SETTING_WRITERS) {
+      const r = await this.deps.run(DEFAULTS, ["read", w.domain, w.key]);
+      if (r.code === 0 && r.stdout.trim() === w.value) return { app: w.app, name: w.name };
+    }
+    return null;
   }
 
   private async readClamshell(): Promise<Clamshell | null> {

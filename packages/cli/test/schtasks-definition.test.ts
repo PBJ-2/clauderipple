@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { taskDefinitionMatches, taskRouterPid, taskUser, type TaskDeps } from "../src/schtasks.ts";
+import { installAgent, renderLauncher, renderTaskRegistration, taskDefinitionMatches, taskRouterPid, taskUser, type TaskDeps } from "../src/schtasks.ts";
 
 const expected = { execute: "conhost.exe", arguments: '--headless powershell.exe -NoProfile -File "C:\\Users\\me\\.clauderipple\\router.ps1"', userId: "me" };
 const valid = {
@@ -18,6 +20,7 @@ const valid = {
   restartInterval: "PT1M",
   executionTimeLimit: "PT0S",
   multipleInstances: 2,
+  priority: 4,
   allowStartIfOnBatteries: true,
   dontStopIfGoingOnBatteries: true,
 };
@@ -41,8 +44,66 @@ test("accepts only the expected limited per-user task", () => {
   assert.equal(taskDefinitionMatches({ ...valid, restartInterval: "PT5M" }, expected), false);
   assert.equal(taskDefinitionMatches({ ...valid, executionTimeLimit: "PT72H" }, expected), false);
   assert.equal(taskDefinitionMatches({ ...valid, multipleInstances: 0 }, expected), false);
+  assert.equal(taskDefinitionMatches({ ...valid, priority: 7 }, expected), false);
+  assert.equal(taskDefinitionMatches({ ...valid, priority: undefined }, expected), false);
+  assert.equal(taskDefinitionMatches({ ...valid, priority: 4 }, expected), true);
   assert.equal(taskDefinitionMatches({ ...valid, allowStartIfOnBatteries: false }, expected), false);
   assert.equal(taskDefinitionMatches({ ...valid, dontStopIfGoingOnBatteries: false }, expected), false);
+});
+
+test("registration and launcher keep router children at Normal priority", () => {
+  const registration = renderTaskRegistration("ClaudeRippleTest", "me", "conhost.exe", "--headless powershell.exe");
+  assert.match(registration, /New-ScheduledTaskSettingsSet[^;]* -Priority 4/);
+
+  const launcher = renderLauncher({ program: "C:\\node.exe", args: ["C:\\router.js"], home: "C:\\home" });
+  const raise = launcher.indexOf("[System.Diagnostics.Process]::GetCurrentProcess()");
+  const loop = launcher.indexOf("while ($true)");
+  assert.ok(raise >= 0 && raise < loop);
+  assert.match(launcher, /PriorityClass -eq \[System\.Diagnostics\.ProcessPriorityClass\]::BelowNormal/);
+  assert.match(launcher, /PriorityClass -eq \[System\.Diagnostics\.ProcessPriorityClass\]::Idle/);
+  assert.match(launcher, /PriorityClass = \[System\.Diagnostics\.ProcessPriorityClass\]::Normal/);
+  assert.doesNotMatch(launcher, /::(?:High|RealTime|AboveNormal)/);
+  assert.equal(launcher.charCodeAt(0), 0xFEFF);
+  assert.doesNotMatch(launcher.replace(/\r\n/g, ""), /[\r\n]/);
+});
+
+test("registration failure retains only a task whose sole mismatch is priority", t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cr-task-priority-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const user = taskUser();
+  const definition = (home: string, extra: Record<string, unknown> = {}) => ({
+    ...valid,
+    execute: "conhost.exe",
+    arguments: `--headless powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "${path.join(home, "clauderipple-router.ps1")}"`,
+    userId: user,
+    triggerUserId: user,
+    priority: 7,
+    ...extra,
+  });
+  const denied = (name: string, value: unknown): TaskDeps => ({
+    name,
+    definition: () => value,
+    run: script => {
+      assert.match(script, /Register-ScheduledTask/);
+      return { ok: false, out: "Access is denied" };
+    },
+  });
+
+  const acceptedHome = path.join(root, "accepted");
+  const accepted = installAgent(
+    { program: "C:\\node.exe", args: ["C:\\router.js"], home: acceptedHome },
+    denied("ClaudeRipplePriorityFallbackAccepted", definition(acceptedHome)),
+  );
+  assert.equal(accepted, path.join(acceptedHome, "clauderipple-router.ps1"));
+
+  const rejectedHome = path.join(root, "rejected");
+  assert.throws(
+    () => installAgent(
+      { program: "C:\\node.exe", args: ["C:\\router.js"], home: rejectedHome },
+      denied("ClaudeRipplePriorityFallbackRejected", definition(rejectedHome, { restartCount: 0 })),
+    ),
+    /Register-ScheduledTask failed: Access is denied/,
+  );
 });
 
 // #38: a local account named after its computer does not resolve by its bare name, so the task is
