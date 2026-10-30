@@ -8,10 +8,12 @@
 // response showed the context at 136% of a 475k window, and the real figure came back as each one
 // finished.
 //
-// So once a conversation has been measured, the figure is that measurement plus only the estimated
-// growth since. The estimate's error is then confined to the few messages added in between. A
-// request smaller than the measured one is a conversation rewritten (compacted, cleared, forked): the
-// measurement no longer describes it and the plain estimate stands.
+// So once a conversation has been measured, its estimate is scaled by what the last measurement
+// showed the estimate to be worth: tokens over estimate, the same conversation's own ratio. That
+// holds whether the request grew or shrank. Falling back to the plain estimate on a smaller request
+// (the first version of this) announced 1.22M for the same chat at 355k measured (2026-10-30): the
+// CLI empties old tool results as a conversation grows, so a request a little smaller than the last
+// one is an ordinary turn, not a new conversation.
 
 const KEEP = 500;
 
@@ -25,7 +27,7 @@ export class StartInputs {
   start(key: string, estimate: number): number {
     remember(this.asked, key, estimate);
     const last = this.measured.get(key);
-    return last && estimate >= last.estimate ? last.tokens + estimate - last.estimate : estimate;
+    return last && last.estimate > 0 ? Math.round(estimate * last.tokens / last.estimate) : estimate;
   }
 
   /**
