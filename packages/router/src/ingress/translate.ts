@@ -75,19 +75,36 @@ function imageFromPart(part: Json): AnthropicContent | null {
   return { type: "image", source: { type: "url", url: value } };
 }
 
-function toolResultContent(value: unknown): string | AnthropicContent[] {
-  if (!Array.isArray(value)) return contentText(value);
+function isTextPart(value: unknown): boolean {
+  const type = object(value)?.type;
+  return type === "input_text" || type === "output_text" || type === "text" || type === "refusal";
+}
+
+function validToolImage(image: AnthropicContent | null): boolean {
+  if (image?.type !== "image" || image.source.type !== "base64") return false;
+  const { media_type, data } = image.source;
+  if (!/^image\/(png|jpeg|gif|webp)$/.test(media_type)) return false;
+  // Buffer accepts malformed base64; check its alphabet, padding and canonical round trip.
+  if (!data.length || data.length % 4 !== 0 || data.length > Math.ceil(5 * 1024 * 1024 / 3) * 4) return false;
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(data)) return false;
+  const decoded = Buffer.from(data, "base64");
+  return decoded.length <= 5 * 1024 * 1024 && decoded.toString("base64") === data;
+}
+
+function toolResultContent(value: unknown, nativeImages: boolean): string | AnthropicContent[] {
+  // Keep the pre-image translator's exact string (including newlines and empty text) for cache reuse.
+  if (!Array.isArray(value) || value.every(isTextPart)) return contentText(value);
   return value.flatMap((raw): AnthropicContent[] => {
     const part = object(raw);
     if (!part) return [{ type: "text", text: "[content omitted: unsupported type]" }];
     if (part.type === "input_image" || part.type === "image_url") {
+      if (!nativeImages) return [{ type: "text", text: "[image omitted: this model does not take images]" }];
       const image = imageFromPart(part);
-      return image?.type === "image" && image.source.type === "base64" && /^image\/(png|jpeg|gif|webp)$/.test(image.source.media_type) && image.source.data.length > 0
+      return image && validToolImage(image)
         ? [image]
         : [{ type: "text", text: "[image omitted: unsupported source]" }];
     }
-    const text = contentText([part]);
-    return [{ type: "text", text: text || "[content omitted: unsupported type]" }];
+    return [{ type: "text", text: isTextPart(part) ? contentText([part]) : "[content omitted: unsupported type]" }];
   });
 }
 
@@ -187,7 +204,7 @@ function restoreCompaction(value: unknown, onIgnored: () => void): string | null
   return `Summary of the earlier conversation: ${payload.summary}`;
 }
 
-function responseItems(value: unknown, onIgnoredCompaction: () => void, translation: ToolTranslation): AnthropicMessage[] {
+function responseItems(value: unknown, onIgnoredCompaction: () => void, translation: ToolTranslation, nativeImages: boolean): AnthropicMessage[] {
   if (typeof value === "string") return value ? [{ role: "user", content: [{ type: "text", text: value }] }] : [];
   if (!Array.isArray(value)) return [];
   const messages: AnthropicMessage[] = [];
@@ -204,7 +221,7 @@ function responseItems(value: unknown, onIgnoredCompaction: () => void, translat
     }
     if (type === "function_call_output" || type === "custom_tool_call_output") {
       const callId = string(item.call_id) ?? "";
-      if (callId) messages.push({ role: "user", content: [{ type: "tool_result", tool_use_id: callId, content: toolResultContent(item.output) }] });
+      if (callId) messages.push({ role: "user", content: [{ type: "tool_result", tool_use_id: callId, content: toolResultContent(item.output, nativeImages) }] });
       continue;
     }
     if (type === "compaction") {
@@ -261,9 +278,9 @@ function placeInstructions(prefix: string | undefined, instructions: string[], m
   return text ? [{ type: "text", text, cache_control: EPHEMERAL }] : undefined;
 }
 
-export function responsesToAnthropic(body: Json, targetModel: string, systemPrefix?: string, onIgnoredCompaction: () => void = () => {}, translation = new ToolTranslation(body, !!systemPrefix)): AnthropicIngressRequest {
+export function responsesToAnthropic(body: Json, targetModel: string, systemPrefix?: string, onIgnoredCompaction: () => void = () => {}, translation = new ToolTranslation(body, !!systemPrefix), nativeImages = false): AnthropicIngressRequest {
   const instructions = string(body.instructions);
-  const messages = responseItems(body.input, onIgnoredCompaction, translation);
+  const messages = responseItems(body.input, onIgnoredCompaction, translation, nativeImages);
   endWithUserTurn(messages);
   const system = placeInstructions(systemPrefix, instructions ? [instructions] : [], messages);
   applyMessageCache(messages);

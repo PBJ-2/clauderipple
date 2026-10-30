@@ -413,7 +413,7 @@ export class OpenAiIngress {
       });
       const anthropic = path === "/v1/responses" ? responsesToAnthropic(body, route.model, prefix, () => {
         this.deps.log.warn("OPENAI ingress: ignored foreign compaction item; encrypted_content is not a ClaudeRipple summary");
-      }, translation) : chatToAnthropic(body, route.model, prefix, translation);
+      }, translation, native) : chatToAnthropic(body, route.model, prefix, translation);
       const wire: Json = native ? anthropic : sanitizeForCompatible(anthropic, resolveCompatibleCaps(
         provider.preset ? (() => { const preset = PRESETS.find((entry) => entry.id === provider.preset); return preset ? { effortLevels: preset.effortLevels, thinking: preset.thinking } : undefined; })() : undefined,
         provider.caps,

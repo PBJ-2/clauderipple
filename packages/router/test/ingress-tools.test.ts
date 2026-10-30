@@ -140,26 +140,86 @@ test("namespace descriptions prefix every flattened child deterministically", ()
   }
 });
 
+const smallPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=";
+
 for (const kind of ["function", "custom"]) {
-  test(`${kind} tool output preserves inline images and marks unsupported content through compatibility sanitization`, () => {
+  const outputType = kind === "custom" ? "custom_tool_call_output" : "function_call_output";
+  const resultContent = (output: unknown, nativeImages = true) => {
+    const result = responsesToAnthropic({ input: [{ type: outputType, call_id: "inspect_1", output }] }, "claude-sonnet-5", undefined, undefined, undefined, nativeImages);
+    const block = result.messages[0]!.content[0]!;
+    if (block.type !== "tool_result") throw new Error("expected tool result");
+    return block.content;
+  };
+
+  test(`${kind} text-only output arrays match f969644 bytes`, () => {
+    const output = [
+      { type: "input_text", text: "첫 줄\r\n둘째 줄" },
+      { type: "output_text", text: "" },
+      { type: "text", text: "  그대로  " },
+      { type: "refusal", refusal: "거절" },
+    ];
+    const baseline = "첫 줄\r\n둘째 줄\n\n  그대로  \n거절";
+    for (const native of [false, true]) {
+      const actual = resultContent(output, native);
+      assert.equal(actual, baseline);
+      assert.deepEqual(Buffer.from(actual as string), Buffer.from(baseline));
+    }
+  });
+
+  test(`${kind} empty text output stays an empty string`, () => {
+    for (const output of ["", [], [{ type: "input_text", text: "" }], [{ type: "refusal", refusal: "" }]]) {
+      for (const native of [false, true]) assert.equal(resultContent(output, native), "");
+    }
+  });
+
+  test(`${kind} compatible output omits images`, () => {
+    assert.deepEqual(resultContent([{ type: "input_image", image_url: `data:image/png;base64,${smallPng}` }], false), [
+      { type: "text", text: "[image omitted: this model does not take images]" },
+    ]);
+  });
+
+  test(`${kind} invalid base64 omits only the invalid image`, () => {
+    for (const data of ["", "!!!!", "YQ", "YQ=", "YQ===", "Y Q==", "YR==", "AA=A"]) {
+      assert.deepEqual(resultContent([
+        { type: "input_text", text: "" },
+        { type: "input_image", image_url: `data:image/png;base64,${data}` },
+        { type: "input_image", image_url: `data:image/png;base64,${smallPng}` },
+      ]), [
+        { type: "text", text: "" },
+        { type: "text", text: "[image omitted: unsupported source]" },
+        { type: "image", source: { type: "base64", media_type: "image/png", data: smallPng } },
+      ]);
+    }
+  });
+
+  test(`${kind} image size accepts 5 MiB and omits 5 MiB plus one byte`, () => {
+    for (const size of [5 * 1024 * 1024, 5 * 1024 * 1024 + 1]) {
+      const data = Buffer.alloc(size).toString("base64");
+      assert.deepEqual(resultContent([{ type: "input_image", image_url: `data:image/png;base64,${data}` }]), size === 5 * 1024 * 1024
+        ? [{ type: "image", source: { type: "base64", media_type: "image/png", data } }]
+        : [{ type: "text", text: "[image omitted: unsupported source]" }]);
+    }
+  });
+
+  test(`${kind} native output preserves a small PNG and marks unsupported content`, () => {
     const body = { tools: [{ type: kind, name: "inspect" }], input: [
       { type: kind === "custom" ? "custom_tool_call" : "function_call", call_id: "inspect_1", name: "inspect", input: "image", arguments: "{}" },
       { type: kind === "custom" ? "custom_tool_call_output" : "function_call_output", call_id: "inspect_1", output: [
         { type: "input_text", text: "Screenshot follows" },
-        { type: "input_image", image_url: "data:image/png;base64,aGVsbG8=" },
+        { type: "input_image", image_url: `data:image/png;base64,${smallPng}` },
         { type: "input_image", image_url: "https://example.com/private.png" },
         { type: "input_image", file_id: "file_123" },
         { type: "input_image", image_url: "data:image/svg+xml;base64,PHN2Zy8+" },
         { type: "input_file", file_id: "file_456" },
       ] },
     ] };
-    const result = responsesToAnthropic(body, "claude-sonnet-5");
+    const result = responsesToAnthropic(body, "claude-sonnet-5", undefined, undefined, undefined, true);
     const block = result.messages[1]!.content[0]!;
     assert.equal(block.type, "tool_result");
     if (block.type !== "tool_result") throw new Error("expected tool result");
     assert.deepEqual(block.content, [
       { type: "text", text: "Screenshot follows" },
-      { type: "image", source: { type: "base64", media_type: "image/png", data: "aGVsbG8=" } },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: smallPng } },
       ...Array.from({ length: 3 }, () => ({ type: "text", text: "[image omitted: unsupported source]" })),
       { type: "text", text: "[content omitted: unsupported type]" },
     ]);
@@ -217,6 +277,50 @@ test("malformed custom wrappers and unknown upstream names never become executab
 async function listen(server: http.Server): Promise<number> {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   return (server.address() as { port: number }).port;
+}
+
+for (const native of [false, true]) {
+  test(`server tool-result images follow provider type (${native ? "native" : "compatible"})`, async (t) => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-ingress-images-"));
+    t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+    const seen: Json[] = [];
+    const upstream = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", () => {
+        seen.push(JSON.parse(Buffer.concat(chunks).toString()) as Json);
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ content: [{ type: "text", text: "done" }], stop_reason: "end_turn" }));
+      });
+    });
+    const upstreamPort = await listen(upstream);
+    t.after(() => new Promise<void>((resolve) => upstream.close(() => resolve())));
+    const url = `http://127.0.0.1:${upstreamPort}`;
+    const config: Config = {
+      listen: { host: "127.0.0.1", port: 0, openaiPort: 0 }, upstream: "api.anthropic.com",
+      providers: { target: native ? { type: "anthropic", auth: "api-key", apiKey: "fake-test-key" } : { type: "anthropic-compatible", url, headers: {} } },
+      routes: {}, aliases: {}, direct: [{ prefix: "claude-", provider: "target" }], effortClamp: {}, cli: { extraModels: [] },
+      health: { maxConsecutiveUpstreamFailures: 20 }, log: { maxBytes: 1e6, keep: 1 },
+    };
+    const ingress = new OpenAiIngress({ config: () => config, log: new Logger(null, 1e9, 0, false), requests: new RequestLog(path.join(home, "requests.jsonl")), home, nativeUpstream: url });
+    const port = await ingress.listen();
+    t.after(() => ingress.drain(1));
+    for (const kind of ["function", "custom"]) {
+      const response = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "claude-sonnet-5", tools: [{ type: kind, name: "inspect" }], input: [
+          { type: kind === "custom" ? "custom_tool_call" : "function_call", call_id: "inspect_1", name: "inspect", input: "", arguments: "{}" },
+          { type: kind === "custom" ? "custom_tool_call_output" : "function_call_output", call_id: "inspect_1", output: [{ type: "input_image", image_url: `data:image/png;base64,${smallPng}` }] },
+        ] }),
+      });
+      assert.equal(response.status, 200);
+      await response.text();
+      const messages = seen.at(-1)!.messages as { content: Json[] }[];
+      assert.deepEqual(messages[1]!.content[0]!.content, native
+        ? [{ type: "image", source: { type: "base64", media_type: "image/png", data: smallPng } }]
+        : [{ type: "text", text: "[image omitted: this model does not take images]" }]);
+    }
+    assert.equal(seen.length, 2);
+  });
 }
 
 for (const oauth of [false, true]) for (const stream of [false, true]) for (const upstreamSse of [false, true]) {
