@@ -75,6 +75,22 @@ function imageFromPart(part: Json): AnthropicContent | null {
   return { type: "image", source: { type: "url", url: value } };
 }
 
+function toolResultContent(value: unknown): string | AnthropicContent[] {
+  if (!Array.isArray(value)) return contentText(value);
+  return value.flatMap((raw): AnthropicContent[] => {
+    const part = object(raw);
+    if (!part) return [{ type: "text", text: "[content omitted: unsupported type]" }];
+    if (part.type === "input_image" || part.type === "image_url") {
+      const image = imageFromPart(part);
+      return image?.type === "image" && image.source.type === "base64" && /^image\/(png|jpeg|gif|webp)$/.test(image.source.media_type) && image.source.data.length > 0
+        ? [image]
+        : [{ type: "text", text: "[image omitted: unsupported source]" }];
+    }
+    const text = contentText([part]);
+    return [{ type: "text", text: text || "[content omitted: unsupported type]" }];
+  });
+}
+
 function messageContent(value: unknown): AnthropicContent[] {
   if (typeof value === "string") return value ? [{ type: "text", text: value }] : [];
   if (!Array.isArray(value)) return [];
@@ -188,7 +204,7 @@ function responseItems(value: unknown, onIgnoredCompaction: () => void, translat
     }
     if (type === "function_call_output" || type === "custom_tool_call_output") {
       const callId = string(item.call_id) ?? "";
-      if (callId) messages.push({ role: "user", content: [{ type: "tool_result", tool_use_id: callId, content: contentText(item.output) }] });
+      if (callId) messages.push({ role: "user", content: [{ type: "tool_result", tool_use_id: callId, content: toolResultContent(item.output) }] });
       continue;
     }
     if (type === "compaction") {
@@ -421,7 +437,7 @@ export class ResponsesEventMapper {
       } else if (blockType === "tool_use") {
         const callId = string(block.id) ?? id("call");
         const wireName = string(block.name) ?? "tool";
-        const identity = this.translation?.fromWire(wireName);
+        const identity = this.translation?.callableFromWire(wireName);
         if (this.translation && !identity) throw new Error("Upstream returned an unknown tool name");
         const custom = identity?.kind === "custom";
         const item: OutputItem = { id: id(custom ? "ctc" : "fc"), type: custom ? "custom_tool_call" : "function_call", call_id: callId, name: identity?.name ?? wireName, ...(identity?.namespace !== undefined ? { namespace: identity.namespace } : {}), ...(custom ? { input: "" } : { arguments: "" }), status: "in_progress" };

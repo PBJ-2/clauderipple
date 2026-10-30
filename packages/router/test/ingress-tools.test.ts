@@ -12,6 +12,7 @@ import { RequestLog } from "../src/requestlog.ts";
 import { ClaudeCodeAuthStore, ClaudeCodeCredentialStore } from "../src/providers/anthropic.ts";
 import { ClaudeAccountAuthPool } from "../src/providers/anthropic-account-pool.ts";
 import type { Config } from "../src/config.ts";
+import { resolveCompatibleCaps, sanitizeForCompatible } from "../src/compat.ts";
 
 const format = { type: "grammar", syntax: "lark", definition: 'start: "print(" /[^)]+/ ")"' };
 const tools = [
@@ -81,6 +82,96 @@ test("hosted tool diagnostics contain metadata only and impossible requirements 
   assert.throws(() => new ToolTranslation({ tools, tool_choice: { type: "allowed_tools", mode: "required", tools: [{ type: "web_search" }] } }), ToolTranslationError);
   assert.equal(new ToolTranslation({ tool_choice: "auto" }).choice, undefined);
 });
+
+for (const mode of ["auto", "none", "required"]) {
+  test(`empty allowed_tools omits declarations unless a call is required (${mode})`, () => {
+    for (const declared of [[{ type: "web_search" }], tools]) {
+      const body = { tools: declared, tool_choice: { type: "allowed_tools", mode, tools: [{ type: "web_search" }] }, input: "Continue" };
+      if (mode === "required") {
+        assert.throws(() => responsesToAnthropic(body, "claude-sonnet-5"), ToolTranslationError);
+        continue;
+      }
+      const result = responsesToAnthropic(body, "claude-sonnet-5");
+      assert.equal(Object.hasOwn(result, "tools"), false);
+      assert.equal(Object.hasOwn(result, "tool_choice"), false);
+      assert.equal(result.messages[0]!.content[0]!.type, "text");
+    }
+  });
+}
+
+for (const oauth of [false, true]) for (const source of ["excluded", "history-only", "none"]) {
+  test(`upstream cannot call ${source} tools while history stays reversible (${oauth ? "OAuth" : "API key"})`, () => {
+    const history = { type: "custom_tool_call", call_id: "old", name: "exec", input: customInput };
+    const body = {
+      tools: source === "history-only" ? [tools[0]] : tools,
+      tool_choice: source === "none" ? "none" : { type: "allowed_tools", mode: "required", tools: [{ type: "function", name: "read" }] },
+      input: [history, { type: "custom_tool_call_output", call_id: "old", output: "done" }],
+    };
+    const table = new ToolTranslation(body, oauth);
+    const wire = table.toWire(identities[1]!);
+    assert.deepEqual(table.fromWire(wire), identities[1]);
+    const replay = responsesToAnthropic(body, "claude-sonnet-5", undefined, undefined, table);
+    const use = replay.messages[0]!.content[0]!;
+    assert.equal(use.type, "tool_use");
+    if (use.type === "tool_use") assert.equal(use.name, wire);
+    const mapper = new ResponsesEventMapper("claude-sonnet-5", table);
+    assert.throws(() => mapper.feed({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "new", name: wire } }), /unknown tool/);
+    assert.deepEqual(mapper.output, [], "no executable output item is emitted");
+    if (source !== "none") {
+      const allowed = new ResponsesEventMapper("claude-sonnet-5", table);
+      allowed.feed({ type: "content_block_start", index: 0, content_block: { type: "tool_use", name: table.toWire(identities[0]!) } });
+      assert.equal(allowed.output[0]!.type, "function_call");
+    }
+  });
+}
+
+test("namespace descriptions prefix every flattened child deterministically", () => {
+  const body = { tools: [{ type: "namespace", name: "files.api", description: "Operate only on project files.", tools: [
+    { type: "function", name: "read", description: "Read a file." },
+    { type: "custom", name: "exec", description: "Execute code.", format },
+  ] }] };
+  for (const oauth of [false, true]) {
+    const table = new ToolTranslation(body, oauth);
+    assert.deepEqual(table.tools.map((tool) => tool.description), [
+      "Namespace: files.api\nOperate only on project files.\n\nRead a file.",
+      `Namespace: files.api\nOperate only on project files.\n\nExecute code.\n\nOriginal input format: ${JSON.stringify(format)}`,
+    ]);
+    assert.deepEqual(table.tools, new ToolTranslation(body, oauth).tools);
+  }
+});
+
+for (const kind of ["function", "custom"]) {
+  test(`${kind} tool output preserves inline images and marks unsupported content through compatibility sanitization`, () => {
+    const body = { tools: [{ type: kind, name: "inspect" }], input: [
+      { type: kind === "custom" ? "custom_tool_call" : "function_call", call_id: "inspect_1", name: "inspect", input: "image", arguments: "{}" },
+      { type: kind === "custom" ? "custom_tool_call_output" : "function_call_output", call_id: "inspect_1", output: [
+        { type: "input_text", text: "Screenshot follows" },
+        { type: "input_image", image_url: "data:image/png;base64,aGVsbG8=" },
+        { type: "input_image", image_url: "https://example.com/private.png" },
+        { type: "input_image", file_id: "file_123" },
+        { type: "input_image", image_url: "data:image/svg+xml;base64,PHN2Zy8+" },
+        { type: "input_file", file_id: "file_456" },
+      ] },
+    ] };
+    const result = responsesToAnthropic(body, "claude-sonnet-5");
+    const block = result.messages[1]!.content[0]!;
+    assert.equal(block.type, "tool_result");
+    if (block.type !== "tool_result") throw new Error("expected tool result");
+    assert.deepEqual(block.content, [
+      { type: "text", text: "Screenshot follows" },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "aGVsbG8=" } },
+      ...Array.from({ length: 3 }, () => ({ type: "text", text: "[image omitted: unsupported source]" })),
+      { type: "text", text: "[content omitted: unsupported type]" },
+    ]);
+    const before = structuredClone(result);
+    for (const cacheControl of [false, true]) {
+      const sanitized = sanitizeForCompatible(result, resolveCompatibleCaps(undefined, { cacheControl }));
+      const messages = sanitized.json.messages as { content: Json[] }[];
+      assert.deepEqual(messages[1]!.content[0]!.content, block.content);
+    }
+    assert.deepEqual(result, before, "compatibility sanitization never mutates the original images");
+  });
+}
 
 test("chat history and choices use the same OAuth identity as declarations", () => {
   const result = chatToAnthropic({ tools: [{ type: "function", function: { name: "a.b" } }], tool_choice: { type: "function", function: { name: "a.b" } }, messages: [

@@ -22,6 +22,7 @@ export class ToolTranslation {
   private readonly byWire = new Map<string, ToolIdentity>();
   private readonly byOriginal = new Map<string, string>();
   private readonly definitions: AnthropicTool[] = [];
+  private readonly callable = new Set<string>();
   readonly tools: AnthropicTool[];
   readonly choice: AnthropicIngressRequest["tool_choice"];
 
@@ -29,11 +30,12 @@ export class ToolTranslation {
 
   constructor(body: Json, oauth = false, diagnose: (diagnostic: ToolDiagnostic) => void = () => {}) {
     this.oauth = oauth;
-    const visit = (raw: unknown, namespace?: string): void => {
+    const visit = (raw: unknown, namespace?: string, namespaceDescription?: string): void => {
       const tool = object(raw);
       if (!tool) return;
       if (tool.type === "namespace" && typeof tool.name === "string" && Array.isArray(tool.tools)) {
-        for (const child of tool.tools) visit(child, tool.name);
+        const description = `Namespace: ${tool.name}${typeof tool.description === "string" ? `\n${tool.description}` : ""}`;
+        for (const child of tool.tools) visit(child, tool.name, description);
         return;
       }
       const identity = identityOf({ ...tool, ...(namespace !== undefined ? { namespace } : {}) });
@@ -43,7 +45,7 @@ export class ToolTranslation {
       }
       const fields = object(tool.function) ?? object(tool.custom) ?? tool;
       const name = this.register(identity);
-      const description = typeof fields.description === "string" ? fields.description : "";
+      const description = [namespaceDescription, typeof fields.description === "string" ? fields.description : ""].filter(Boolean).join("\n\n");
       const schema = object(fields.parameters) ? structuredClone(object(fields.parameters)!) : {};
       schema.type = "object";
       if (!object(schema.properties)) schema.properties = {};
@@ -70,6 +72,7 @@ export class ToolTranslation {
     this.tools = selected.tools.map((tool) => ({ ...tool }));
     if (this.tools.length) this.tools[this.tools.length - 1]!.cache_control = { type: "ephemeral" };
     this.choice = selected.choice;
+    if (this.choice?.type !== "none") for (const tool of this.tools) this.callable.add(tool.name);
   }
 
   private register(identity: ToolIdentity): string {
@@ -96,6 +99,9 @@ export class ToolTranslation {
     return name;
   }
   fromWire(name: string): ToolIdentity | undefined { return this.byWire.get(name); }
+  callableFromWire(name: string): ToolIdentity | undefined {
+    return this.callable.has(name) ? this.byWire.get(name) : undefined;
+  }
 
   private select(value: unknown): { tools: AnthropicTool[]; choice: AnthropicIngressRequest["tool_choice"] } {
     const choice = object(value);
@@ -109,7 +115,6 @@ export class ToolTranslation {
           return wanted !== null && key(wanted) === key(identity);
         })());
       });
-      if (!tools.length) throw new ToolTranslationError("No supported tools remain in allowed_tools");
     }
     const mode = choice?.type === "allowed_tools" ? choice.mode : value;
     if (mode === "required") {
