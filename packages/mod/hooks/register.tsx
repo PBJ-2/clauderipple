@@ -8,7 +8,7 @@ import { rungOf, workerLadderLine } from './ladder'
 import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, jevEffortRequest, jevFailure, jevUsage, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, shouldJudge } from './judge'
-import { AUTO_DESCRIPTION, NATIVE_AGENTS, TIER_MARKERS, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderFallbackModels, ladderPick, liveProviders, markerDomain, modelReason, readMarker, routerModelOptions, ruleReason, spawnModel, spawnTitle, titleName, takesOver, tierOf, userSaid, withoutReason, withoutRouting, workerRule, zenJev } from './workers'
+import { AUTO_DESCRIPTION, NATIVE_AGENTS, TIER_MARKERS, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderFallbackModels, ladderPick, liveProviders, markerDomain, modelReason, readMarker, routerModelOptions, resolveClaudeModel, ruleReason, spawnModel, spawnTitle, titleName, takesOver, tierOf, userSaid, withoutReason, withoutRouting, workerRule, zenJev } from './workers'
 import { MARKER, agentModel, delegationPin as parseDelegationPin, fixSpawn, humanText, pinInstruction, pinSaid } from './worker'
 import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom, modeKey, modeOver, quotaWindows, resetProvider, routingSettings } from './modes'
 import type { QuotaWindow } from './modes'
@@ -2253,6 +2253,8 @@ export const register: Register = on => {
     return next(e)
   })
   on('agent.spawn', async ($, e, next) => {
+    // A resumed run's content is pinned by the engine, including its model and title.
+    if (e.resume) return next(e)
     let input = e
     let chosen: WorkerPick | undefined
     // Forks, workflows, teammates, Claude Code's own agents and other plugins' agents are the
@@ -2313,6 +2315,18 @@ export const register: Register = on => {
         if (fix) {
           if (fix.dropped) await $.ui.toast(t(language, 'toasts.ownModel', { name: e.subagentType, model: fix.dropped }))
           input = { ...input, prompt: fix.prompt, model: fix.model }
+        }
+        // Keep generated workers' own model precedence; only then pin native aliases to our table.
+        const selectedModel = input.model ?? (file ? agentModel(file) : undefined)
+        const model = resolveClaudeModel(selectedModel)
+        if (ours && model && model !== selectedModel) {
+          input = { ...input, model }
+          // Consume a matching native marker so the router cannot put its alias back on the wire.
+          // No `@level` on the concrete id: the router passes a claude-* id through byte for byte, so
+          // a suffix would reach Anthropic as part of the model name (and hide a trailing [1m]).
+          if (marker && marker.name === selectedModel?.replace(/@[^@]*$/, '').replace(/\[1m\]$/, '')) {
+            input = { ...input, model: model.replace(/@[^@]*$/, ''), prompt: input.prompt.replace(MARKER, '').replace(/^\s*\n/, '') }
+          }
         }
       }
       // The model-reason line is the mod's alone, on every path a worker starts from.

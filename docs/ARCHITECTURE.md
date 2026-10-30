@@ -353,6 +353,12 @@ request went, and a `Pane` holds the request log.
   `model: "sonnet"` plus the marker on the second line reached the router as
   `deepseek-v4.1-flash@low`, effort low. Without the mod, the first-line rule
   and the no-`model` rule stand as before.
+- **Native Claude worker versions** come from `CLAUDE_WORKERS` in
+  `hooks/settings.ts`. The mod resolves family aliases (`haiku`, `sonnet`, `opus`,
+  `fable`) to that table's concrete IDs before dispatch, so the advertised worker
+  and the requested model agree even when the CLI's alias defaults differ.
+  Explicit versioned IDs and inherited models stay unchanged. This does not
+  change Claude Code's separate Auto mode security classifier.
 - **Where it can draw.** The desktop app's header icons (terminal, diff,
   browser) are the app's own; the mod API (CLI 2.1.286 types) has no place for
   a plugin's button there. Its sites are the band, the status line, panes,

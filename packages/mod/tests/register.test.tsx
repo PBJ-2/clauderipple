@@ -693,7 +693,7 @@ for (const prefix of ['ripple:', '']) for (const [tier, level, kind, rung, agent
   ['light', 'light', 'do', 'light', 'deepseek-v4-1-flash', 'deepseek-v4.1-flash@max', 'max'],
   ['standard', 'standard', 'do', 'standard', 'gpt-6-1-sol', 'gpt-6.1-sol@medium', 'medium'],
   ['hard', 'deep', 'do', 'hard', 'gpt-6-astra', 'gpt-6-astra@high', 'high'],
-  ['max', 'deep', 'plan', 'plan', 'general-purpose', 'opus', 'high'],
+  ['max', 'deep', 'plan', 'plan', 'general-purpose', 'claude-opus-5-5', 'high'],
 ] as const) test(`${prefix}auto: a [[ripple: ${tier}]] marker runs the ${rung} rung by the session's word`, async ($, on) => {
   const b = boundaries(on)
   http(on)
@@ -1260,9 +1260,9 @@ test('the worker reads neither the routing marker nor the Model reason line, whe
 // A model marker names a worker file, a model id, or one of Claude's own aliases.
 for (const [model, target] of [
   ['gpt-6-1-sol', { subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@xhigh' }],
-  ['opus', { subagentType: 'ripple:auto', model: 'opus' }],
-  ['sonnet', { subagentType: 'ripple:auto', model: 'sonnet' }],
-  ['haiku', { subagentType: 'ripple:auto', model: 'haiku' }],
+  ['opus', { subagentType: 'ripple:auto', model: 'claude-opus-5-5' }],
+  ['sonnet', { subagentType: 'ripple:auto', model: 'claude-sonnet-5-5' }],
+  ['haiku', { subagentType: 'ripple:auto', model: 'claude-haiku-5-5' }],
   ['claude-opus-5-5', { subagentType: 'ripple:auto', model: 'claude-opus-5-5' }],
   ['claude-sonnet-5-5', { subagentType: 'ripple:auto', model: 'claude-sonnet-5-5@xhigh' }],
 ] as const) test(`a user-reasoned [[ripple: ${model}@xhigh]] runs that model at xhigh, by user`, async ($, on) => {
@@ -1321,7 +1321,7 @@ test('a user reason is checked against the last ten human messages and the last 
 
 for (const [label, spawn, expected] of [
   ['a worker agent called directly', { subagentType: 'gpt-6-1-sol', prompt: '[[ripple: hard]]\nFix the race.' }, { subagentType: 'gpt-6-1-sol' }],
-  ['general-purpose given a model', { subagentType: 'general-purpose', model: 'sonnet', prompt: '[[ripple: hard]]\nFix the race.' }, { subagentType: 'general-purpose', model: 'sonnet' }],
+  ['general-purpose given a model', { subagentType: 'general-purpose', model: 'sonnet', prompt: '[[ripple: hard]]\nFix the race.' }, { subagentType: 'general-purpose', model: 'claude-sonnet-5-5' }],
 ] as const) test(`${label} runs as the main chat picked it`, async ($, on) => {
   boundaries(on, { agentAuto: 'auto' })
   http(on)
@@ -1383,7 +1383,7 @@ test('the default tier uses the standard rung, and a missing worker moves one ru
   const sent = spawnStub(on)
   await start($)
   await $.agent.spawn(SPAWN)
-  expect(sent[0]).toMatchObject({ subagentType: 'ripple:auto', model: 'sonnet' })
+  expect(sent[0]).toMatchObject({ subagentType: 'ripple:auto', model: 'claude-sonnet-5-5' })
   expect(judges.length).toBe(0)
   const debug = await $.command.run({ command: 'ripple', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 140 }, args: 'debug' })
   expect(debug.text).toContain('"effort": "high"')
@@ -1554,7 +1554,7 @@ test('general-purpose on a model in all mode names that model: refused unreasone
   const unreasoned = await $.agent.spawn({ ...SPAWN, subagentType: 'general-purpose', model: 'opus@xhigh', prompt: '[[ripple: hard]]\nInvestigate.' })
   expect(unreasoned.deny).toContain('No reason was given for the model opus')
   await $.agent.spawn({ ...SPAWN, subagentType: 'general-purpose', model: 'opus@xhigh', prompt: '[[ripple: hard]]\nModel reason: user "Use Opus for this"\nInvestigate.' })
-  expect(sent[0]).toMatchObject({ subagentType: 'general-purpose', model: 'opus', prompt: 'Investigate.' })
+  expect(sent[0]).toMatchObject({ subagentType: 'general-purpose', model: 'claude-opus-5-5', prompt: 'Investigate.' })
   const row = JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!)
   expect(row).toMatchObject({ by: 'user', namedModel: 'opus', source: 'user', effort: 'xhigh' })
   // A Claude id is a model this machine runs, so a reasoned one passes the name check too; a model
