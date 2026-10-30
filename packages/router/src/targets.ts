@@ -12,12 +12,42 @@ import { PRESETS } from "./presets.ts";
 import { CHATGPT_FALLBACK_MODELS } from "./providers/chatgpt/catalog.ts";
 import { GROK_EFFORT_LEVELS } from "./providers/grok/catalog.ts";
 
-/** A provider can take routed requests unless it is an `anthropic` provider without its OAuth account
- * pool. The pool is `accountPool: true` with `auth: "claude-code"`; anything else serves the OpenAI
- * ingress only. */
+/** A provider can take routed requests unless it is an `anthropic` provider on a login without its
+ * OAuth account pool (`accountPool: true` with `auth: "claude-code"`), which serves the OpenAI
+ * ingress only. An `anthropic` API key is a target, but only by name (`namedOnly`). */
 export function isTargetProvider(provider: Config["providers"][string] | undefined): boolean {
   if (!provider) return false;
-  return provider.type !== "anthropic" || (provider.accountPool === true && provider.auth === "claude-code");
+  if (provider.type !== "anthropic") return true;
+  return provider.auth === "api-key" ? provider.accountPool !== true : provider.accountPool === true && provider.auth === "claude-code";
+}
+
+/**
+ * A provider that bills per token for models the person also reaches on a plan: Claude's API key
+ * beside the app's own sign-in, the OpenAI API beside a ChatGPT plan. Taking a bare id would move
+ * that traffic onto the bill unasked, so these serve what names them (`provider:model`, a rule, a
+ * slot, the worker generated for them) and stand back from a bare id (`bareOwners`).
+ */
+function metered(provider: Config["providers"][string] | undefined): boolean {
+  return provider?.type === "anthropic" ? provider.auth === "api-key" : provider?.type === "openai-compatible" && provider.preset === "openai";
+}
+
+/**
+ * The providers a bare id may be routed to: its declared owners less the metered ones, which own it
+ * only where nothing else does. A Claude API key never does, since a bare Claude id always has the
+ * app's own sign-in to pass to; the OpenAI API does where no plan declares the model. A qualified id
+ * keeps the one owner it names.
+ */
+export function bareOwners(id: string, cfg: Config): string[] {
+  const owners = declaredBy(id, cfg);
+  if (qualifiedModel(id, cfg)) return owners;
+  const plan = owners.filter((name) => !metered(cfg.providers[name]));
+  if (plan.length) return plan;
+  return owners.filter((name) => cfg.providers[name]?.type !== "anthropic");
+}
+
+/** Whether a provider's models are only ever generated as `<model>-<provider>` workers on qualified ids. */
+export function namedOnly(provider: Config["providers"][string] | undefined): boolean {
+  return provider?.type === "anthropic" && provider.auth === "api-key";
 }
 
 /** Whether this configured provider serves the OpenAI ingress but cannot take routed requests. */
@@ -57,7 +87,7 @@ export function rawDeclaredBy(id: string, cfg: Config): string[] {
 
 /** The one provider declaring this id, or null when none or several do. */
 export function soleOwner(id: string, cfg: Config): string | null {
-  const owners = declaredBy(id, cfg);
+  const owners = bareOwners(id, cfg);
   return owners.length === 1 ? owners[0]! : null;
 }
 

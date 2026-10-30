@@ -143,17 +143,20 @@ function applyProviderLabel(provider, key, typedName) {
   return provider;
 }
 // The router's `isTargetProvider` (packages/router/src/targets.ts), copied because the forms ask it of
-// providers not saved yet; `ui-targets.test.ts` keeps the two equal. A native Claude provider becomes
-// a mapping target only after the explicit account-pool opt-in; API-key and legacy login providers
-// remain OpenAI-ingress-only.
+// providers not saved yet; `ui-targets.test.ts` keeps the two equal. A native Claude login becomes a
+// mapping target only after the explicit account-pool opt-in, and stays OpenAI-ingress-only without
+// it. An API key is a target, reached only by name: its `<model>-<provider>` workers, a slot or a rule.
 function isTargetProvider(provider) {
   if (!provider) return false;
-  return provider.type !== "anthropic" || (provider.accountPool === true && provider.auth === "claude-code");
+  if (provider.type !== "anthropic") return true;
+  return provider.auth === "api-key" ? provider.accountPool !== true : provider.accountPool === true && provider.auth === "claude-code";
 }
 function groupedModels(config) {
   const groups = [];
   for (const [name, provider] of Object.entries(config.providers || {})) {
-    if (!isTargetProvider(provider)) continue;
+    // A Claude API key serves its `<model>-<provider>` workers only: a bare Claude id picked here
+    // would run on the app's own sign-in instead (targets.ts `bareOwners`).
+    if (!isTargetProvider(provider) || (provider.type === "anthropic" && provider.auth === "api-key")) continue;
     let models = modelsOf(provider);
     if (!models.length && provider.type === "chatgpt") models = CHATGPT_MODELS;
     if (models.length) groups.push({ name, provider, models });
@@ -3655,7 +3658,8 @@ function openProviderChooser() {
     tile(t("providers.grok"), t("providers.grokHelp"), { kind: "grok" }),
   ], null, true);
   const native = presets.filter((preset) => (preset.kind || "anthropic-compatible") === "anthropic-compatible");
-  group(t("providers.anthropicGroup"), native.map((preset) => tile(preset.name, null, { preset })), t("providers.presetHelp"));
+  // Claude's own API key is the native provider's API-key mode, offered here beside the other keys.
+  group(t("providers.anthropicGroup"), [tile("Claude API", null, { kind: "anthropic", auth: "api-key" }), ...native.map((preset) => tile(preset.name, null, { preset }))], t("providers.presetHelp"));
   const openai = presets.filter((preset) => preset.kind === "openai-compatible");
   group(t("providers.openaiGroup"), openai.map((preset) => tile(preset.name, null, { preset })), `${t("providers.presetHelp")} ${t("providers.openaiGroupHelp")}`);
   group(null, [tile(t("providers.custom"), t("providers.customHelp"), { kind: "custom" })], null, true);
@@ -3752,10 +3756,10 @@ function anthropicSourceText(source) {
 function openAnthropicProviderForm(options) {
   let formActive = true;
   const existing = options.provider;
-  const displayName = options.name ? providerLabel(options.name, existing) : t("providers.anthropic");
+  const displayName = options.name ? providerLabel(options.name, existing) : options.auth === "api-key" ? "Claude API" : t("providers.anthropic");
   const nameInput = el("input", { value: displayName, maxlength: "60" });
   const auth = el("select", {}, [selectOption("claude-code", t("providers.anthropicAuthClaudeCode")), selectOption("api-key", t("providers.anthropicAuthApiKey"))]);
-  auth.value = (existing && existing.auth) || "claude-code";
+  auth.value = (existing && existing.auth) || options.auth || "claude-code";
   const keyInput = el("input", { type: "password", autocomplete: "off", placeholder: existing && existing.apiKey ? t("providers.keySaved") : t("providers.keyPlaceholder") });
   const showKey = el("button", { class: "eye-button", type: "button", text: t("common.show") });
   showKey.addEventListener("click", () => { const show = keyInput.type === "password"; keyInput.type = show ? "text" : "password"; showKey.textContent = show ? t("common.hide") : t("common.show"); });
@@ -3771,7 +3775,8 @@ function openAnthropicProviderForm(options) {
   const modelArea = el("div", { class: "form-field" });
   function renderModels() {
     const modelsBox = modelChecklist(foundModels, selected);
-    modelArea.replaceChildren(el("span", { text: t("providers.models") }), hint(t("providers.modelsHelp")), el("small", { text: t("providers.effortLevels", { levels: "low · medium · high · max" }) }), modelsBox);
+    // An API key's models are workers, not mapping choices: the mode hint below says so instead.
+    modelArea.replaceChildren(...[el("span", { text: t("providers.models") }), auth.value === "api-key" ? null : hint(t("providers.modelsHelp")), el("small", { text: t("providers.effortLevels", { levels: "low · medium · high · max" }) }), modelsBox].filter(Boolean));
   }
   renderModels();
   const authField = inputRow(t("providers.credentials"), auth, t("providers.anthropicCredentialsHelp"));
@@ -3783,6 +3788,7 @@ function openAnthropicProviderForm(options) {
     sourceLine.hidden = !reused;
   }
   auth.addEventListener("change", syncAuthFields);
+  auth.addEventListener("change", renderModels);
   syncAuthFields();
   async function runProbe() {
     probeButton.disabled = true;
@@ -3820,7 +3826,7 @@ function openAnthropicProviderForm(options) {
   // opens: a saved provider otherwise showed only what was ticked when it was first saved.
   if (auth.value === "claude-code") setTimeout(() => void runProbe(), 0);
   const modeHint = hint("");
-  function syncModeHint() { modeHint.textContent = auth.value === "claude-code" && accountPool ? t("providers.anthropicPoolRouting") : t("providers.anthropicIngressOnly"); }
+  function syncModeHint() { modeHint.textContent = auth.value === "api-key" ? t("providers.anthropicApiKeyWorkers") : accountPool ? t("providers.anthropicPoolRouting") : t("providers.anthropicIngressOnly"); }
   auth.addEventListener("change", syncModeHint);
   syncModeHint();
   const limitsInput = el("input", { type: "checkbox", checked: !(existing && existing.limits === false) });

@@ -205,6 +205,27 @@ test("(d) duplicate declarations keep the first worker and add a qualified worke
   assert.deepEqual(agentAliases(dir), { "shared-model": "a:shared-model", "shared-model-b": "b:shared-model", "single-model": "single-model" });
 });
 
+test("a metered key's workers are its own, by name: a Claude API key always, the OpenAI API beside a plan", t => {
+  const dir = tmp(); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const manifest = path.join(dir, "generated-agents.json");
+  // The key listed first: the bare name still goes to the plan, which a bare id routes to.
+  const cfg = cfgWith({
+    openai: { type: "openai-compatible", url: "https://api.openai.com/v1", preset: "openai", wire: "responses", models: [{ id: "gpt-6.1-sol" }] },
+    chatgpt: { type: "chatgpt", models: [{ id: "gpt-6.1-sol" }] },
+    claude: { type: "anthropic", auth: "api-key", apiKey: "k", models: [{ id: "claude-opus-5-5" }] },
+  });
+  syncAgentFiles(cfg, dir, undefined, { manifestPath: manifest });
+
+  assert.match(fs.readFileSync(path.join(dir, "gpt-6-1-sol.md"), "utf8"), /\nmodel: chatgpt:gpt-6\.1-sol/);
+  assert.match(fs.readFileSync(path.join(dir, "gpt-6-1-sol-openai.md"), "utf8"), /\nmodel: openai:gpt-6\.1-sol/);
+  assert.match(fs.readFileSync(path.join(dir, "claude-opus-5-5-claude.md"), "utf8"), /\nmodel: claude:claude-opus-5-5/, "a bare Claude worker would run on the app's sign-in");
+  assert.equal(fs.existsSync(path.join(dir, "claude-opus-5-5.md")), false);
+  for (const worker of ["gpt-6-1-sol", "gpt-6-1-sol-openai", "claude-opus-5-5-claude"]) {
+    const model = agentAliases(dir)[worker]!;
+    assert.equal(resolve(model, { messages: [{ role: "user", content: "hi" }] }, cfg)?.provider, model.split(":")[0], worker);
+  }
+});
+
 test("duplicate workers keep manual-file and sanitised-name collision priority", t => {
   const dir = tmp(); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const manifest = path.join(dir, "manifest.json");

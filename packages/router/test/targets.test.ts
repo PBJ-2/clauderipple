@@ -13,6 +13,8 @@ test("isTargetProvider identifies every provider kind and ingressOnly ignores un
   assert.equal(isTargetProvider({ type: "anthropic", auth: "claude-code" }), false);
   assert.equal(isTargetProvider({ type: "anthropic", auth: "claude-code", accountPool: true }), true);
   assert.equal(isTargetProvider({ type: "anthropic", auth: "api-key", accountPool: true }), false);
+  // An API key is a target, reached by name only (bareOwners).
+  assert.equal(isTargetProvider({ type: "anthropic", auth: "api-key", apiKey: "k" }), true);
 
   const others: Provider[] = [
     { type: "anthropic-compatible", url: "https://example.test" },
@@ -65,7 +67,7 @@ test("runsServerTools and answersWebSearch preserve provider search capabilities
 test("targetWarnings reports accepted primary and direct ingress-only rules only", () => {
   const cfg: Config = {
     ...config({
-      ingress: { type: "anthropic", auth: "api-key" },
+      ingress: { type: "anthropic", auth: "claude-code" },
       pool: { type: "anthropic", auth: "claude-code", accountPool: true },
     }),
     routes: {

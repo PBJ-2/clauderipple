@@ -235,6 +235,32 @@ test("the native anthropic provider's models are not a routing target until its 
   assert.equal(resolve("claude-haiku-4-5-20251001", body("hi"), pooled)?.provider, "anthropic");
 });
 
+test("a Claude API key serves only what names it, never a bare Claude id", () => {
+  const keyed: Config = {
+    ...declared,
+    providers: {
+      ...declared.providers,
+      api: { type: "anthropic", auth: "api-key", apiKey: "k", models: [{ id: "claude-opus-5" }] },
+    },
+  };
+  assert.equal(resolve("claude-opus-5", body("hi"), keyed), null, "the bare id stays on the app's own sign-in");
+  const named = resolve("api:claude-opus-5", body("hi"), keyed)!;
+  assert.equal(named.provider, "api");
+  assert.equal(named.model, "claude-opus-5");
+  const both: Config = { ...keyed, providers: { ...keyed.providers, anthropic: { type: "anthropic", auth: "claude-code", accountPool: true, models: [{ id: "claude-opus-5" }] } } };
+  assert.equal(resolve("claude-opus-5", body("hi"), both)?.provider, "anthropic", "beside the account pool, the pool keeps the bare id");
+});
+
+test("the OpenAI API stands back from a model the ChatGPT plan also declares", () => {
+  const openai: Config["providers"][string] = { type: "openai-compatible", url: "https://api.openai.com/v1", preset: "openai", wire: "responses", models: [{ id: "gpt-6.1-sol" }] };
+  const plan: Config["providers"][string] = { type: "chatgpt", models: [{ id: "gpt-6.1-sol" }] };
+  const base: Config = { ...DEFAULTS, routes: {}, direct: [], aliases: {}, providers: { chatgpt: plan, openai } };
+  assert.equal(resolve("gpt-6.1-sol", body("hi"), base)?.provider, "chatgpt", "the plan keeps the bare id: the key would bill it");
+  assert.equal(resolve("openai:gpt-6.1-sol", body("hi"), base)?.provider, "openai");
+  const alone: Config = { ...base, providers: { openai } };
+  assert.equal(resolve("gpt-6.1-sol", body("hi"), alone)?.provider, "openai", "with no plan declaring it, the key owns the bare id");
+});
+
 test("rules still win over what a provider declares", () => {
   // chatgpt carries gpt-5.6-terra AND a direct prefix rule covers it; the rule decides.
   assert.equal(resolve("gpt-5.6-terra", body("hi"), declared)!.provider, "chatgpt");

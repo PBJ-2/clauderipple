@@ -30,10 +30,12 @@ function freePort(): Promise<number> {
   });
 }
 
-type Seen = { authorization?: string; currentOnly?: string; beta?: string; body: Record<string, unknown> };
+type Seen = { authorization?: string; apiKey?: string; currentOnly?: string; beta?: string; body: Record<string, unknown> };
 type Reply = { status: number; headers?: Record<string, string>; body?: string };
 
-async function nativeRig(reply: (seen: Seen, attempt: number) => Reply) {
+const POOL: Config["providers"][string] = { type: "anthropic", auth: "claude-code", accountPool: true, models: [{ id: "claude-opus-5" }] };
+
+async function nativeRig(reply: (seen: Seen, attempt: number) => Reply, claude: Config["providers"][string] = POOL, clientBeta = "claude-code-20250219,prompt-caching-scope-2026-01-05") {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-native-account-proxy-"));
   const ca = createCa({ cn: "clauderipple native account test" });
   const leaf = createLeaf({ host: "localhost", caCertPem: ca.certPem, caKeyPem: ca.keyPem });
@@ -48,6 +50,7 @@ async function nativeRig(reply: (seen: Seen, attempt: number) => Reply) {
       const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
       const item = {
         ...(typeof req.headers.authorization === "string" ? { authorization: req.headers.authorization } : {}),
+        ...(typeof req.headers["x-api-key"] === "string" ? { apiKey: req.headers["x-api-key"] } : {}),
         ...(typeof req.headers["anthropic-client-current-only"] === "string" ? { currentOnly: req.headers["anthropic-client-current-only"] } : {}),
         ...(typeof req.headers["anthropic-beta"] === "string" ? { beta: req.headers["anthropic-beta"] } : {}),
         body,
@@ -87,14 +90,7 @@ async function nativeRig(reply: (seen: Seen, attempt: number) => Reply) {
     ...DEFAULTS,
     upstream: "localhost",
     listen: { host: "127.0.0.1", port: proxyPort },
-    providers: {
-      claude: {
-        type: "anthropic",
-        auth: "claude-code",
-        accountPool: true,
-        models: [{ id: "claude-opus-5" }],
-      },
-    },
+    providers: { claude },
     routes: { "claude-opus-4-8": { provider: "claude", model: "claude-opus-5" } },
     direct: [],
   };
@@ -133,7 +129,7 @@ async function nativeRig(reply: (seen: Seen, attempt: number) => Reply) {
       "content-type: application/json\r\n" +
       "authorization: Bearer caller-token\r\n" +
       "anthropic-client-current-only: caller-fingerprint\r\n" +
-      "anthropic-beta: claude-code-20250219,prompt-caching-scope-2026-01-05\r\n" +
+      `anthropic-beta: ${clientBeta}\r\n` +
       `content-length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
     );
     const first = await new Promise<Buffer>((resolve) => secure.once("data", (chunk: Buffer) => setTimeout(() => resolve(chunk), 30)));
@@ -203,6 +199,22 @@ test("every account keeps the client's beta flags alongside its own OAuth flags 
       assert.equal(item.authorization, "Bearer stored-token");
       assert.equal(item.beta, "claude-code-20250219,prompt-caching-scope-2026-01-05,oauth-2025-04-20", "stored account: client flags plus OAuth, no duplicates");
     }
+  } finally {
+    await rig.stop();
+  }
+});
+
+test("a slot on a Claude API key sends the key alone: no sign-in, no OAuth beta", async () => {
+  const key: Config["providers"][string] = { type: "anthropic", auth: "api-key", apiKey: "sk-ant-test", models: [{ id: "claude-opus-5" }] };
+  const rig = await nativeRig(() => ({ status: 200 }), key, "claude-code-20250219,oauth-2025-04-20");
+  try {
+    assert.equal(await rig.send(), 200);
+    assert.equal(rig.seen.length, 1);
+    assert.equal(rig.seen[0]!.apiKey, "sk-ant-test");
+    assert.equal(rig.seen[0]!.authorization, undefined, "the caller's sign-in never reaches the key's bill");
+    assert.equal(rig.seen[0]!.beta, "claude-code-20250219", "the OAuth beta belongs to a sign-in");
+    assert.equal(rig.seen[0]!.body.model, "claude-opus-5");
+    assert.doesNotMatch(JSON.stringify(rig.requests.list(20)), /sk-ant-test/);
   } finally {
     await rig.stop();
   }

@@ -1186,7 +1186,7 @@ test("PUT /api/config accepts a valid config and saves it atomically", async () 
 test("PUT /api/config warns when accepted rules name an ingress-only provider", async () => {
   await withAdmin(makeCfg(), async ({ port }) => {
     const next = makeCfg({
-      providers: { native: { type: "anthropic", auth: "api-key" } },
+      providers: { native: { type: "anthropic", auth: "claude-code" } },
       routes: { slot: { provider: "native", model: "claude-sonnet-5" } },
       direct: [{ prefix: "native-", provider: "native" }],
     });

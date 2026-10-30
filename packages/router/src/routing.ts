@@ -11,7 +11,7 @@
 //   Quoted anywhere else, a marker is prose (issue #13).
 
 import type { Config } from "./config.ts";
-import { declaredBy, ingressOnly, qualifiedModel, rawDeclaredBy, soleOwner } from "./targets.ts";
+import { bareOwners, ingressOnly, qualifiedModel, rawDeclaredBy, soleOwner } from "./targets.ts";
 export { qualifiedModel, declaredBy } from "./targets.ts";
 import { isWebFetchRequest } from "./webfetch.ts";
 import { webSearchQuery } from "./websearch.ts";
@@ -165,7 +165,7 @@ export function decide(model: unknown, body: unknown, cfg: Config, kind: Request
     // Otherwise the request would reach Anthropic and come back 404, which is what happened to a whole
     // session on 2026-09-20: an agent file named `deepseek` resolved (through a missing alias) to a
     // model no provider declared, and `PASS` sent thirty of them to Anthropic. Say which name failed.
-    const owners = declaredBy(effective, cfg);
+    const owners = bareOwners(effective, cfg);
     if (owners.length > 1) {
       return refuse(`"${effective}" is declared by two providers (${owners.join(", ")}); use ${owners.map((owner) => `"${owner}:${effective}"`).join(" or ")}, or add a route or direct rule`);
     }
@@ -237,7 +237,8 @@ export function decide(model: unknown, body: unknown, cfg: Config, kind: Request
     if (ingressOnly(cfg, ownDirect.provider)) return noRoute();
     return routed({ provider: ownDirect.provider, model: effective, effort: ov?.effort ?? effort, tag: `${model}->${effective} (marker)` });
   }
-  const owners = declaredBy(effective, cfg);
+  // A metered provider stands back from a bare id another owner declares (targets.ts `bareOwners`).
+  const owners = bareOwners(effective, cfg);
 
   // Two providers offering the same id is a question only the operator can answer (one config has
   // `deepseek-v4-pro` on both a direct DeepSeek mapping and OpenCode Go, and they are not the same

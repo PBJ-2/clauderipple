@@ -17,7 +17,7 @@ import path from "node:path";
 import { adminPort, homeDir, type Config, type Provider } from "./config.ts";
 import { withFileLock } from "./locked-file.ts";
 import { declaredBy, qualifiedModel } from "./routing.ts";
-import { isTargetProvider } from "./targets.ts";
+import { bareOwners, isTargetProvider, namedOnly } from "./targets.ts";
 import { isJudgeOnlyModel } from "./model-policy.ts";
 import { GROK_EFFORT_LEVELS } from "./providers/grok/catalog.ts";
 import { shortName } from "../../cli/src/hooks/agent-title.ts";
@@ -198,11 +198,10 @@ function agentTargets(cfg: Config, log?: AgentLog): Map<string, AgentTarget> {
     for (const model of provider.models ?? []) {
       if (isJudgeOnlyModel(model.id)) continue;
       const owners = declaredBy(model.id, cfg);
-      const first = owners.find(name => {
-        const owner = cfg.providers[name]!;
-        return isTargetProvider(owner);
-      });
-      const duplicate = owners.length > 1;
+      // The bare name goes to the owner a bare id routes to: a plan before a metered key, and never
+      // a Claude API key, whose workers are always `<model>-<provider>` (targets.ts `bareOwners`).
+      const first = bareOwners(model.id, cfg).find(name => isTargetProvider(cfg.providers[name]));
+      const duplicate = owners.length > 1 || namedOnly(provider);
       const { name, legacy } = workerNames(model.id, providerName, duplicate && first !== providerName);
       const clash = targets.get(name);
       if (clash) {

@@ -52,7 +52,7 @@ import { effortLevels, isTargetProvider, runsServerTools } from "./targets.ts";
 import { requestConversationKey, ResponseUsageTap, requestId, type RequestLog, type RequestRecord, type RequestUsage } from "./requestlog.ts";
 import { credentialHeaderValues, redactErrorText, redactHeaders } from "./redact.ts";
 import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
-import type { ClaudeCodeCredentialReaders } from "./providers/anthropic.ts";
+import { nativeAnthropicHeaders, type ClaudeCodeCredentialReaders } from "./providers/anthropic.ts";
 import { ClaudeAccountAuthPool } from "./providers/anthropic-account-pool.ts";
 import { ClaudeModelCatalog } from "./providers/anthropic-models.ts";
 import { ClaudeUsage } from "./providers/anthropic-usage.ts";
@@ -145,6 +145,13 @@ export function withClientBetas(credential: Record<string, string>, clientBeta: 
   const flags = (raw: string) => raw.split(",").map((flag) => flag.trim()).filter(Boolean);
   const merged = [...new Set([...flags(([] as string[]).concat(clientBeta).join(",")), ...flags(credential[name] ?? "")])];
   return { ...credential, [name]: merged.join(",") };
+}
+
+/** The client's betas less the OAuth one, which belongs to a sign-in and not to an API key; none left is none sent. */
+export function apiKeyBetas(clientBeta: string | string[] | undefined): string | undefined {
+  if (clientBeta === undefined) return undefined;
+  const kept = ([] as string[]).concat(clientBeta).join(",").split(",").map((flag) => flag.trim()).filter((flag) => flag && !/^oauth-/.test(flag));
+  return kept.length ? kept.join(",") : undefined;
 }
 
 /**
@@ -1356,6 +1363,33 @@ export class Proxy {
             }
             // Native Messages need no translation. Only authentication changes, so server-side threads,
             // prompt caching, beta features and the client's exact tool contract remain first-party.
+            if (provider.auth === "api-key") {
+              // Only ever reached by name (targets.ts `bareOwners`): a worker, slot or rule chose the key.
+              let headers: Record<string, string>;
+              try { headers = nativeAnthropicHeaders(provider); }
+              catch (e) {
+                const out = JSON.stringify({ type: "error", error: { type: "authentication_error", message: `ClaudeRipple: ${(e as Error).message}` } });
+                res.writeHead(401, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
+                finish("401", out.length, "no Anthropic API key", true, { ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "no-account" });
+                return;
+              }
+              dropForeignThinking(json);
+              body = Buffer.from(JSON.stringify(json));
+              target = {
+                protocol: "https:",
+                host: cfg.upstream,
+                port: this.deps.upstreamPort ?? 443,
+                agent: this.deps.upstreamAgent ?? this.agentFor(route.provider, "https:"),
+                // The app's sign-in asks for the OAuth beta, which an API key is not.
+                extraHeaders: withClientBetas(headers, apiKeyBetas(req.headers["anthropic-beta"])),
+                dropClientAuth: true,
+                dropHeaders: new Set(["anthropic-beta"]),
+              };
+              const routeEffort = effortOf(json);
+              if (routeEffort) record.effort = routeEffort;
+              tag = `CLAUDE ${route.tag} account=api-key`;
+              break;
+            }
             const credentials = await this.claudeAccounts.credentials();
             // With no account of the pool usable, the app's own sign-in still is: the turn goes out on
             // it, as it did before the provider was added. A pool whose only stored account lost its

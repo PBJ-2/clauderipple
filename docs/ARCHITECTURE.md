@@ -1448,7 +1448,18 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
   Wire facts are behaviorally measured (the reference implementations do the
   same flow); they are not an Anthropic guarantee, and reuse of one or multiple
   subscriptions is subject to Anthropic's terms and possible account restrictions.
-- A native `anthropic` provider remains OpenAI-ingress-only unless it explicitly
+- **Metered keys serve what names them (2026-10-30).** A native `anthropic`
+  provider on an API key (`auth: "api-key"`, no `accountPool`) and the `openai`
+  preset (the OpenAI API) bill per token for models the person also reaches on a
+  plan. They are targets, but `bareOwners` (targets.ts) drops them from a bare
+  id's owners: a Claude API key never owns a bare id, since the app's own sign-in
+  always answers one; the OpenAI API owns one only where no plan declares it. Their
+  workers are always `<model>-<provider>` on a qualified id (`claude-api:claude-opus-5-5`),
+  and the dashboard keeps a Claude API key out of the mapping and picker lists, where
+  a bare id would run on the sign-in. The key goes as `x-api-key`; the caller's
+  `authorization` and the `oauth-*` beta are dropped. Asked for 2026-10-30: only
+  whoever turns a key on uses it, and through API workers.
+- A native `anthropic` login remains OpenAI-ingress-only unless it explicitly
   sets `accountPool: true` with `auth: "claude-code"` (`isTargetProvider`). The
   config refuses one as a fallback or a classifier target; as a primary route or a
   direct rule it is accepted, ignored at routing time (the request passes through),
