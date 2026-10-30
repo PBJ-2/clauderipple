@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { claudeStartedAt, reopenClaude } from "./claude-desktop";
+import { failureAction, failureKinds, type FailureAction, type FailureKind } from "./failure-model";
 import { readUpdateSeen, readReplacementTries, rememberUpdate, replacementExhausted, nextReplacementTries, resolveTrayVersion, updateNotice, TrayReplacement, REPLACEMENT_LIMIT, type ReplacementTries, type RouterUpdate, type UpdateSeen } from "./update-model";
 import { handleScheme, ORIGIN, registerScheme } from "./protocol";
 import { parseJsonOutput, repairDetails, restartStillOwed, shouldNotifyDown, tailLines, trayState, type Action, type ActionResult, type AppState, type Busy, type DirectOutput, type Doctor, type RepairOutput } from "./status-model";
@@ -75,6 +76,11 @@ function trayVersion(): string {
 }
 
 // ---- i18n: tray menu, dialogs, tooltips -------------------------------------------------
+
+/** A title and a sentence for every failure the failure dialog can name, in every language. */
+function failureText(text: Record<FailureKind, [title: string, body: string]>): Record<FailureKind, [title: string, body: string]> {
+  return text;
+}
 
 const STRINGS = {
   en: {
@@ -159,6 +165,27 @@ const STRINGS = {
     autoAvailable: (v: string) => `Version ${v} is available. Click to update.`,
     updateDone: (v: string) => `The update to ClaudeRipple ${v} is complete.`,
     updateFailed: "The update did not finish.",
+    close: "Close",
+    failureDetails: "Details",
+    failureOutput: "Full output",
+    failureOutputCopied: "Full output (copied)",
+    copyOutput: "Copy",
+    setupAgain: "Run Setup Again",
+    tryAgain: "Try Again",
+    routerRestarted: "Router restarted",
+    failures: failureText({
+      "router-not-switched": ["Router still on the old version", "The new version is installed, but the router running now is the old one. Restarting the router switches it to the new version."],
+      "router-not-started": ["Router not started", "The router could not be started. Repair registers its startup entry again and starts it."],
+      "startup-entry": ["Startup entry problem", "The entry that starts the router at login could not be registered or run. Repair registers it again."],
+      "certificate": ["Certificate problem", "The router's local certificate could not be read or does not match. Run setup again."],
+      "router-unresponsive": ["Router not responding", "The router did not answer the final connection check. This often happens while other programs keep the CPU busy. Run setup again in a moment."],
+      "anthropic-unreachable": ["Anthropic unreachable", "The router answered, but could not reach Anthropic. Check your internet connection, then run setup again."],
+      "foreign-proxy": ["Another proxy in use", "Claude Code is set to use another proxy, so its settings were left as they were. Turn that proxy off, then run setup again."],
+      "disk-full": ["Disk full", "There is not enough disk space to install. Free up space, then try again."],
+      "files-unwritable": ["Files could not be replaced", "Files in the install folder are in use, or this account cannot write to them. Try again in a moment."],
+      "download": ["Download failed", "The new version could not be downloaded. Check your internet connection, then try again."],
+      "unknown": ["Unknown error", "No known cause was found in the output. The full output is under Details."],
+    }),
     trayReplaceGaveUp: (v: string) => `The tray app could not switch to the new version. It keeps running as version ${v}. See the tray log for details.`,
     updateCheckFailed: "Could not check for updates.",
     updatePackaged: "This is the standalone app. Download the new version from the releases page.",
@@ -253,6 +280,27 @@ const STRINGS = {
     autoAvailable: (v: string) => `새로운 ${v} 버전을 사용할 수 있습니다. 클릭하여 업데이트해 주세요.`,
     updateDone: (v: string) => `ClaudeRipple ${v} 버전으로 업데이트를 완료했습니다.`,
     updateFailed: "업데이트를 완료하지 못했습니다.",
+    close: "닫기",
+    failureDetails: "자세히",
+    failureOutput: "전체 출력",
+    failureOutputCopied: "전체 출력 (복사됨)",
+    copyOutput: "복사",
+    setupAgain: "설정 다시 실행",
+    tryAgain: "다시 시도",
+    routerRestarted: "리플 재시작 완료",
+    failures: failureText({
+      "router-not-switched": ["리플이 이전 버전으로 실행 중", "새 버전은 설치되었지만 지금 실행 중인 리플은 이전 버전입니다. 리플을 재시작하면 새 버전으로 바뀝니다."],
+      "router-not-started": ["리플 시작 안 됨", "리플을 시작하지 못했습니다. 복구하면 시작 항목을 다시 등록하고 리플을 시작합니다."],
+      "startup-entry": ["시작 항목 문제", "로그인할 때 리플을 시작하는 항목을 등록하거나 실행하지 못했습니다. 복구하면 이 항목을 다시 등록합니다."],
+      "certificate": ["인증서 문제", "리플의 로컬 인증서를 읽지 못했거나 인증서가 맞지 않습니다. 설정을 다시 실행하세요."],
+      "router-unresponsive": ["리플 응답 없음", "리플이 마지막 연결 확인에 응답하지 않았습니다. 다른 프로그램이 CPU를 많이 쓰는 동안 자주 생깁니다. 잠시 뒤 설정을 다시 실행하세요."],
+      "anthropic-unreachable": ["Anthropic 연결 안 됨", "리플은 응답했지만 Anthropic에 연결하지 못했습니다. 인터넷 연결을 확인한 뒤 설정을 다시 실행하세요."],
+      "foreign-proxy": ["다른 프록시 사용 중", "Claude Code가 다른 프록시를 쓰도록 설정되어 있어 설정을 바꾸지 않았습니다. 그 프록시를 끈 뒤 설정을 다시 실행하세요."],
+      "disk-full": ["디스크 공간 부족", "설치할 디스크 공간이 부족합니다. 공간을 확보한 뒤 다시 시도하세요."],
+      "files-unwritable": ["파일 교체 실패", "설치 폴더의 파일이 사용 중이거나 이 계정에 쓰기 권한이 없습니다. 잠시 뒤 다시 시도하세요."],
+      "download": ["다운로드 실패", "새 버전을 내려받지 못했습니다. 인터넷 연결을 확인한 뒤 다시 시도하세요."],
+      "unknown": ["알 수 없는 오류", "출력에서 알려진 원인을 찾지 못했습니다. 전체 출력은 '자세히'에서 볼 수 있습니다."],
+    }),
     trayReplaceGaveUp: (v: string) => `트레이 앱을 새 버전으로 전환하지 못했습니다. 트레이 앱은 ${v} 버전으로 계속 실행됩니다. 자세한 내용은 트레이 로그에서 확인할 수 있습니다.`,
     updateCheckFailed: "업데이트 정보를 확인하지 못했습니다.",
     updatePackaged: "설치형 앱입니다. 릴리스 페이지에서 최신 버전을 다운로드해 주세요.",
@@ -347,6 +395,27 @@ const STRINGS = {
     autoAvailable: (v: string) => `新版本 ${v} 已发布，点击即可更新。`,
     updateDone: (v: string) => `ClaudeRipple ${v} 更新完成。`,
     updateFailed: "更新未完成。",
+    close: "关闭",
+    failureDetails: "详情",
+    failureOutput: "完整输出",
+    failureOutputCopied: "完整输出（已复制）",
+    copyOutput: "复制",
+    setupAgain: "重新运行设置",
+    tryAgain: "重试",
+    routerRestarted: "路由服务已重启",
+    failures: failureText({
+      "router-not-switched": ["路由服务仍在运行旧版本", "新版本已安装，但当前运行的路由服务仍是旧版本。重启路由服务即可切换到新版本。"],
+      "router-not-started": ["路由服务未启动", "无法启动路由服务。“修复”会重新注册启动项并启动路由服务。"],
+      "startup-entry": ["启动项问题", "无法注册或运行登录时启动路由服务的启动项。“修复”会重新注册该启动项。"],
+      "certificate": ["证书问题", "无法读取路由服务的本地证书，或证书不匹配。请重新运行设置。"],
+      "router-unresponsive": ["路由服务没有响应", "路由服务未响应最后一次连接检查。其他程序大量占用 CPU 时经常会出现这种情况。请稍后重新运行设置。"],
+      "anthropic-unreachable": ["无法连接 Anthropic", "路由服务已响应，但无法连接 Anthropic。请检查互联网连接，然后重新运行设置。"],
+      "foreign-proxy": ["正在使用其他代理", "Claude Code 已设置为使用其他代理，因此未更改其设置。请关闭该代理，然后重新运行设置。"],
+      "disk-full": ["磁盘空间不足", "磁盘空间不足，无法安装。请释放空间后重试。"],
+      "files-unwritable": ["无法替换文件", "安装文件夹中的文件正在使用中，或当前账户没有写入权限。请稍后重试。"],
+      "download": ["下载失败", "无法下载新版本。请检查互联网连接后重试。"],
+      "unknown": ["未知错误", "未在输出中找到已知原因。完整输出可在“详情”中查看。"],
+    }),
     trayReplaceGaveUp: (v: string) => `托盘应用无法切换到新版本，将继续以 ${v} 版本运行。详细信息请查看托盘日志。`,
     updateCheckFailed: "无法检查更新。",
     updatePackaged: "这是独立打包的应用。请从发布页面下载新版本。",
@@ -441,6 +510,27 @@ const STRINGS = {
     autoAvailable: (v: string) => `新しいバージョン ${v} が利用可能です。クリックしてアップデートしてください。`,
     updateDone: (v: string) => `ClaudeRipple ${v} へのアップデートが完了しました。`,
     updateFailed: "アップデートが完了しませんでした。",
+    close: "閉じる",
+    failureDetails: "詳細",
+    failureOutput: "出力全文",
+    failureOutputCopied: "出力全文（コピー済み）",
+    copyOutput: "コピー",
+    setupAgain: "セットアップを再実行",
+    tryAgain: "再試行",
+    routerRestarted: "ルーターを再起動しました",
+    failures: failureText({
+      "router-not-switched": ["ルーターが旧バージョンで実行中", "新しいバージョンはインストールされていますが、現在実行中のルーターは旧バージョンです。ルーターを再起動すると新しいバージョンに切り替わります。"],
+      "router-not-started": ["ルーターが未起動", "ルーターを起動できませんでした。「修復」で起動項目を再登録し、ルーターを起動します。"],
+      "startup-entry": ["起動項目の問題", "ログイン時にルーターを起動する項目を登録または実行できませんでした。「修復」でこの項目を再登録します。"],
+      "certificate": ["証明書の問題", "ルーターのローカル証明書を読み取れなかったか、証明書が一致していません。セットアップを再実行してください。"],
+      "router-unresponsive": ["ルーターが応答しません", "ルーターが最後の接続確認に応答しませんでした。他のプログラムがCPUを多く使用しているときによく起こります。少し待ってからセットアップを再実行してください。"],
+      "anthropic-unreachable": ["Anthropicに接続できません", "ルーターは応答しましたが、Anthropicに接続できませんでした。インターネット接続を確認してから、セットアップを再実行してください。"],
+      "foreign-proxy": ["別のプロキシを使用中", "Claude Codeが別のプロキシを使う設定になっているため、設定は変更していません。そのプロキシをオフにしてから、セットアップを再実行してください。"],
+      "disk-full": ["ディスクの空き容量不足", "インストールに必要なディスクの空き容量がありません。空き容量を確保してから、再試行してください。"],
+      "files-unwritable": ["ファイルを置き換えられませんでした", "インストール先フォルダーのファイルが使用中か、このアカウントに書き込み権限がありません。少し待ってから再試行してください。"],
+      "download": ["ダウンロード失敗", "新しいバージョンをダウンロードできませんでした。インターネット接続を確認してから、再試行してください。"],
+      "unknown": ["不明なエラー", "出力から既知の原因は見つかりませんでした。出力全文は「詳細」で確認できます。"],
+    }),
     trayReplaceGaveUp: (v: string) => `トレイアプリを新しいバージョンに切り替えられませんでした。トレイアプリは ${v} バージョンのまま動作を続けます。詳しくはトレイのログで確認できます。`,
     updateCheckFailed: "アップデートを確認できませんでした。",
     updatePackaged: "これはスタンドアロン版のアプリです。リリースページから新しいバージョンをダウンロードしてください。",
@@ -535,6 +625,27 @@ const STRINGS = {
     autoAvailable: (v: string) => `La versión ${v} está disponible. Haz clic para actualizar.`,
     updateDone: (v: string) => `Se completó la actualización a ClaudeRipple ${v}.`,
     updateFailed: "La actualización no se completó.",
+    close: "Cerrar",
+    failureDetails: "Detalles",
+    failureOutput: "Salida completa",
+    failureOutputCopied: "Salida completa (copiada)",
+    copyOutput: "Copiar",
+    setupAgain: "Volver a ejecutar la configuración",
+    tryAgain: "Reintentar",
+    routerRestarted: "Router reiniciado",
+    failures: failureText({
+      "router-not-switched": ["El router sigue en la versión anterior", "La nueva versión está instalada, pero el router en ejecución sigue en la anterior. Reinicia el router para que use la nueva versión."],
+      "router-not-started": ["Router no iniciado", "No se pudo iniciar el router. «Reparar» vuelve a registrar su entrada de inicio y lo inicia."],
+      "startup-entry": ["Problema con la entrada de inicio", "No se pudo registrar o ejecutar la entrada que inicia el router al iniciar sesión. «Reparar» vuelve a registrarla."],
+      "certificate": ["Problema con el certificado", "No se pudo leer el certificado local del router o el certificado no coincide. Vuelve a ejecutar la configuración."],
+      "router-unresponsive": ["El router no responde", "El router no respondió a la comprobación final de conexión. Esto suele ocurrir cuando otros programas mantienen la CPU ocupada. Vuelve a ejecutar la configuración dentro de un momento."],
+      "anthropic-unreachable": ["No se puede acceder a Anthropic", "El router respondió, pero no pudo acceder a Anthropic. Comprueba tu conexión a internet y vuelve a ejecutar la configuración."],
+      "foreign-proxy": ["Otro proxy en uso", "Claude Code está configurado para usar otro proxy, por lo que no se modificaron sus ajustes. Desactiva ese proxy y vuelve a ejecutar la configuración."],
+      "disk-full": ["Disco lleno", "No hay suficiente espacio en disco para la instalación. Libera espacio y vuelve a intentarlo."],
+      "files-unwritable": ["No se pudieron reemplazar los archivos", "Los archivos de la carpeta de instalación están en uso o esta cuenta no tiene permiso para escribir en ellos. Vuelve a intentarlo dentro de un momento."],
+      "download": ["Error de descarga", "No se pudo descargar la nueva versión. Comprueba tu conexión a internet y vuelve a intentarlo."],
+      "unknown": ["Error desconocido", "No se encontró ninguna causa conocida en la salida. La salida completa está en «Detalles»."],
+    }),
     trayReplaceGaveUp: (v: string) => `La app de la bandeja no pudo cambiar a la nueva versión y sigue en la versión ${v}. Puedes ver los detalles en el registro de la bandeja.`,
     updateCheckFailed: "No se pudo comprobar si hay actualizaciones.",
     updatePackaged: "Esta es la app independiente. Descarga la nueva versión desde la página de versiones.",
@@ -629,6 +740,27 @@ const STRINGS = {
     autoAvailable: (v: string) => `A versão ${v} está disponível. Clique para atualizar.`,
     updateDone: (v: string) => `A atualização para o ClaudeRipple ${v} foi concluída.`,
     updateFailed: "A atualização não foi concluída.",
+    close: "Fechar",
+    failureDetails: "Detalhes",
+    failureOutput: "Saída completa",
+    failureOutputCopied: "Saída completa (copiada)",
+    copyOutput: "Copiar",
+    setupAgain: "Configurar novamente",
+    tryAgain: "Tentar novamente",
+    routerRestarted: "Roteador reiniciado",
+    failures: failureText({
+      "router-not-switched": ["Roteador ainda na versão anterior", "A nova versão está instalada, mas o roteador em execução ainda está na versão anterior. Reiniciar o roteador faz com que ele use a nova versão."],
+      "router-not-started": ["Roteador não iniciado", "Não foi possível iniciar o roteador. “Reparar” registra novamente a entrada de inicialização e inicia o roteador."],
+      "startup-entry": ["Problema na entrada de inicialização", "Não foi possível registrar ou executar a entrada que inicia o roteador ao fazer login. “Reparar” registra essa entrada novamente."],
+      "certificate": ["Problema no certificado", "Não foi possível ler o certificado local do roteador ou o certificado não corresponde. Execute a configuração novamente."],
+      "router-unresponsive": ["O roteador não está respondendo", "O roteador não respondeu à verificação final de conexão. Isso costuma acontecer quando outros programas mantêm a CPU ocupada. Execute a configuração novamente daqui a pouco."],
+      "anthropic-unreachable": ["A Anthropic está inacessível", "O roteador respondeu, mas não conseguiu acessar a Anthropic. Verifique sua conexão com a internet e execute a configuração novamente."],
+      "foreign-proxy": ["Outro proxy em uso", "O Claude Code está configurado para usar outro proxy, por isso suas configurações não foram alteradas. Desative esse proxy e execute a configuração novamente."],
+      "disk-full": ["Disco cheio", "Não há espaço suficiente em disco para instalar. Libere espaço e tente novamente."],
+      "files-unwritable": ["Não foi possível substituir os arquivos", "Os arquivos na pasta de instalação estão em uso ou esta conta não tem permissão para gravar neles. Tente novamente daqui a pouco."],
+      "download": ["Falha no download", "Não foi possível baixar a nova versão. Verifique sua conexão com a internet e tente novamente."],
+      "unknown": ["Erro desconhecido", "Nenhuma causa conhecida foi encontrada na saída. A saída completa está em “Detalhes”."],
+    }),
     trayReplaceGaveUp: (v: string) => `O app da bandeja não pôde mudar para a nova versão e continua na versão ${v}. Veja os detalhes no log da bandeja.`,
     updateCheckFailed: "Não foi possível verificar atualizações.",
     updatePackaged: "Este é o app independente. Baixe a nova versão na página de releases.",
@@ -987,10 +1119,13 @@ async function reconcileRouter(s: Status): Promise<void> {
   if (installedElsewhere || runningElsewhere) outputs.push(await runCli(["install"]));
   outputs.push(await runCli(["restart"]));
   const out = outputs.join("\n\n");
-  if (/✗|error|failed|not restarted|start failed/i.test(out)) {
-    await dialog.showMessageBox({ type: "warning", message: L.updatedFailed, detail: out });
-  }
+  if (failedOutput(out)) await showFailure(L.updatedFailed, out);
   void poll();
+}
+
+/** Whether `install` or `restart` printed a failure; both mark a step that did not happen. */
+function failedOutput(out: string): boolean {
+  return /✗|error|failed|not restarted|start failed/i.test(out);
 }
 
 /**
@@ -1405,27 +1540,36 @@ async function offerUpdate(check: UpdateCheck): Promise<void> {
     return;
   }
   const choice = await dialog.showMessageBox({ message: L.updateAvailable(check.latest ?? "?", check.current), detail: L.updateDetail, buttons: [L.updateNow, L.later], defaultId: 0, cancelId: 1 });
-  if (choice.response !== 0 || updating) return;
+  if (choice.response !== 0) return;
+  await installUpdate(check.latest ?? "");
+}
+
+/** The update the person chose, or chose to try again from its failure dialog. */
+async function installUpdate(version: string): Promise<void> {
+  if (updating) return;
   updating = true;
   render();
-  const version = check.latest ?? "";
   if (Notification.isSupported()) new Notification({ title: "ClaudeRipple", body: L.updating(version), icon: notifyIcon() }).show();
+  const retry = () => installUpdate(version);
   if (last?.autoUpdate) {
     // Share the router's coordinator with its scheduler instead of racing a second installer.
+    let failure: string | null = null;
     try {
       const response = await fetch(`${adminUrl()}api/update`, { method: "POST", signal: AbortSignal.timeout(35_000) });
       if (!response.ok) throw new Error(await response.text());
       routerUpdateUntil = Date.now() + 10 * 60_000;
     } catch (error) {
-      await dialog.showMessageBox({ type: "warning", message: L.updateFailed, detail: String(error) });
+      failure = String(error);
     } finally { updating = false; render(); }
+    // After `updating` is cleared, so that trying again from the dialog can start.
+    if (failure !== null) await showFailure(L.updateFailed, failure, retry);
     return; // /api/status will confirm completion, notify and relaunch this tray.
   }
   const r = await runCliResult(["update"]);
   updating = false;
   if (!r.ok) {
     render();
-    await dialog.showMessageBox({ type: "warning", message: L.updateFailed, detail: r.output.slice(-4000) });
+    await showFailure(L.updateFailed, r.output, retry);
     return;
   }
   availableUpdate = null;
@@ -1453,12 +1597,74 @@ async function setup(): Promise<void> {
   // `install` marks each step with ✓ or ✗ and ends on a failed probe; saying "finished" over a
   // failure would send the user away believing it worked.
   const failed = out.includes("✗") || /error|failed/i.test(out);
-  await dialog.showMessageBox({
-    type: failed ? "warning" : "info",
-    message: failed ? L.setupFailed : L.setupDone,
-    detail: out,
-  });
+  if (failed) await showFailure(L.setupFailed, out);
+  else await dialog.showMessageBox({ type: "info", title: DIALOG_TITLE, message: L.setupDone });
   void poll();
+}
+
+// ---- failure dialogs --------------------------------------------------------------------
+// A failed update, setup or router switch used to put the CLI's whole output in the dialog: npm's
+// lines, every install step and the exit code, with the cause somewhere in the middle (2026-10-29).
+// The dialog now names each failure the output shows (failure-model.ts), offers the tray's own fix
+// for the first one that has one, and keeps the output behind Details, where it can be copied.
+
+/** Without a title Windows shows Electron's name: the tray runs as `electron path/to/main.js`. */
+const DIALOG_TITLE = "ClaudeRipple";
+
+/** `retry` runs the failed operation again; only an update passes one. */
+async function showFailure(message: string, output: string, retry?: () => Promise<void>): Promise<void> {
+  const kinds = failureKinds(output);
+  const runs: Partial<Record<FailureAction, () => Promise<void>>> = {
+    restart: restartAfterFailure,
+    repair: async () => {
+      showWindow("health");
+      await act("repair");
+    },
+    setup,
+    ...(retry ? { retry } : {}),
+  };
+  const action = failureAction(kinds, new Set(Object.keys(runs) as FailureAction[]));
+  const label: Record<FailureAction, string> = { restart: L.restartRouter, repair: L.actRepair, setup: L.setupAgain, retry: L.tryAgain };
+  const buttons = [...(action ? [label[action]] : []), L.failureDetails, L.close];
+  const details = buttons.length - 2;
+  const close = buttons.length - 1;
+  const detail = kinds.map((kind) => L.failures[kind].join("\n")).join("\n\n");
+  for (;;) {
+    const choice = await dialog.showMessageBox({ type: "warning", title: DIALOG_TITLE, message, detail, buttons, defaultId: action ? 0 : close, cancelId: close, noLink: true });
+    if (choice.response === details) {
+      await showOutput(output);
+      continue;
+    }
+    if (action && choice.response === 0) await runs[action]?.();
+    return;
+  }
+}
+
+/** The output itself, for a bug report: its end on screen, all of it on the clipboard. */
+async function showOutput(output: string): Promise<void> {
+  let copied = false;
+  for (;;) {
+    const choice = await dialog.showMessageBox({
+      type: "none",
+      title: DIALOG_TITLE,
+      message: copied ? L.failureOutputCopied : L.failureOutput,
+      detail: output.slice(-4000),
+      buttons: [L.copyOutput, L.close],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+    });
+    if (choice.response !== 0) return;
+    clipboard.writeText(output);
+    copied = true;
+  }
+}
+
+async function restartAfterFailure(): Promise<void> {
+  const out = await runCli(["restart"]);
+  void poll();
+  if (failedOutput(out)) await showFailure(L.updatedFailed, out);
+  else await dialog.showMessageBox({ type: "info", title: DIALOG_TITLE, message: L.routerRestarted });
 }
 
 async function promptForSetup(): Promise<void> {

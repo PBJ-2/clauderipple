@@ -24,6 +24,11 @@ import { signatureOf } from "./narration-signature.ts";
 const TEST_TIMEOUT = 15_000;
 const WAIT_LIMIT = 10_000;
 
+// Limits for a stalled test, not for a slow one: a passing test never waits them out. 4.5 s and 2 s
+// ran out on a loaded Windows CI runner while the host was still answering (2026-10-29, #98).
+const TEST_TIMEOUT = 15_000;
+const WAIT_LIMIT = 10_000;
+
 const router = {
   status: async () => ({ ok: true, proxyEnv: { HTTPS_PROXY: "http://127.0.0.1:1" } }),
   figures: async () => ({ effort: null, cachePct: null, contextPct: null, fiveHourPct: null, fiveHourResetAt: null, workers: [], at: Date.now() }),
