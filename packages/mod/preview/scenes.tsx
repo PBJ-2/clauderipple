@@ -337,7 +337,7 @@ const SCENES: Scene[] = [
   { name: 'alert-swamp', draw: alert({ kind: 'swamp', percent: 63, tokens: 126_000 }) },
   { name: 'alert-hot', draw: alert({ kind: 'hot', limitKind: 'five_hour', percent: 86, resetsAt: '2026-10-12T15:40:00', save: false }) },
   { name: 'alert-judge', draw: alert({ kind: 'judgeDown', judge: 'jev', reason: 'key rejected (401)' }) },
-  { name: 'alert-compact', draw: alert({ kind: 'compactNote', draft: '', tidy: true, pick: 'claude-haiku-5-5', models: [{ value: 'claude-haiku-5-5', label: 'Claude Haiku' }, { value: 'session', label: '현재 대화 기본' }], cold: false }) },
+  { name: 'alert-compact', draw: alert({ kind: 'compactNote', draft: '', tidy: true, pick: 'claude-haiku-5-5', models: [{ value: 'claude-haiku-5-5', label: 'Claude Haiku' }, { value: 'session', label: '앱 기본' }], cold: false }) },
   { name: 'alert-tidying', draw: alert({ kind: 'result', stage: 'tidying' }) },
   { name: 'alert-handing', draw: alert({ kind: 'result', stage: 'handingOff' }) },
   { name: 'alert-handed', draw: alert({ kind: 'result', stage: 'handoffDone', detail: '새 대화를 열고 입력창에 인수인계 내용을 넣었습니다. 새 대화에서 Enter를 누르면 이어갑니다.' }) },
