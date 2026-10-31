@@ -288,12 +288,12 @@ const ALERTS: AlertView[] = [
   { kind: 'result', stage: 'compacting' },
   { kind: 'result', stage: 'compacted' },
   { kind: 'result', stage: 'failed', detail: 'Haiku timed out' },
-  { kind: 'compactNote', draft: '', tidy: true },
+  { kind: 'compactNote', draft: '', tidy: true, pick: 'claude-haiku-5-5', models: [{ value: 'claude-haiku-5-5', label: 'Claude Haiku' }], cold: false },
 ]
 
 test('every alert draws on both surfaces', async ($, on) => {
   const noop = () => undefined
-  const actions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, toggleTidy: noop, copy: noop }
+  const actions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, toggleTidy: noop, pickCompactModel: noop, copy: noop }
   ALERTS.forEach((alert, i) => drawPane(on, 'alert-' + i, (el, surface) => renderAlert(el, frameOf(surface), alert, actions)))
   for (const surface of SURFACES) {
     for (let i = 0; i < ALERTS.length; i++) {
@@ -307,12 +307,12 @@ test('every alert draws on both surfaces', async ($, on) => {
 test('alert choices reach their callbacks', async ($, on) => {
   const { calls, fn } = recorder()
   const actions = {
-    compact: fn("compact"), clear: fn("clear"), dismiss: fn("dismiss"), toggleSave: fn('save'), openSettings: fn('settings'), noteInput: fn('note'), toggleTidy: fn('tidy'), copy: fn('copy'),
+    compact: fn("compact"), clear: fn("clear"), dismiss: fn("dismiss"), toggleSave: fn('save'), openSettings: fn('settings'), noteInput: fn('note'), toggleTidy: fn('tidy'), pickCompactModel: fn('model'), copy: fn('copy'),
   }
   drawPane(on, 'cold', (el, surface) => renderAlert(el, frameOf(surface), ALERTS[0]!, actions))
   drawPane(on, 'kept', (el, surface) => renderAlert(el, frameOf(surface), ALERTS[1]!, actions))
   drawPane(on, 'hot', (el, surface) => renderAlert(el, frameOf(surface), ALERTS[3]!, actions))
-  drawPane(on, 'note', (el, surface) => renderAlert(el, frameOf(surface), { kind: 'compactNote', draft: '', tidy: true }, actions))
+  drawPane(on, 'note', (el, surface) => renderAlert(el, frameOf(surface), { kind: 'compactNote', draft: '', tidy: true, pick: 'claude-haiku-5-5', models: [{ value: 'claude-haiku-5-5', label: 'Claude Haiku' }], cold: false }, actions))
   drawPane(on, 'handed', (el, surface) => renderAlert(el, frameOf(surface), { kind: 'result', stage: 'handoffDone' }, actions))
   for (const surface of SURFACES) {
     const cold = await mount($, 'cold', surface)
@@ -351,7 +351,7 @@ function mascots(tree: unknown): Drawn[] {
 
 test('each alert shows 리플이 with the face of its state, its gauge in 5% steps; the terminal keeps a text mark', async ($, on) => {
   const noop = () => undefined
-  const actions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, toggleTidy: noop, copy: noop }
+  const actions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, toggleTidy: noop, pickCompactModel: noop, copy: noop }
   const variants: [string, AlertView][] = [
     ['swamp-59', { kind: 'swamp', percent: 59, tokens: 118_000 }],
     ['swamp-61', { kind: 'swamp', percent: 61, tokens: 122_000 }],
@@ -496,12 +496,12 @@ const DEEP_INKS = ['#f2f0eb', '#cbc8bf', '#9c988e']
 test('every skin draws the band, the quick settings and a card on the desktop; flat paints the app\'s surface and its quiet words', async ($, on) => {
   const noop = () => undefined
   const bandActions = { toggleAuto: noop, toggleWarm: noop, compact: noop, clear: noop, handoff: noop, toggleLog: noop, toggleAgents: noop, openSettings: noop, toggleEffortMenu: noop, pickEffort: noop, hide: noop }
-  const alertActions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, toggleTidy: noop, copy: noop }
+  const alertActions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, toggleTidy: noop, pickCompactModel: noop, copy: noop }
   const full: DashboardView = { ...DASH, extras: ['context', 'limits'], limit: { kind: 'five_hour', percent: 42, save: true }, effortMenu: true, warm: { on: true, pings: 2, cost: 9000 }, agents: { live: 2, total: 3 }, mode: 'Burn GPT' }
   for (const skin of SKINS) {
     drawPane(on, skin + '-band', el => renderBand(el, frameOf('desktop', 100, 12, skin), full, bandActions))
     drawPane(on, skin + '-quick', el => renderSettings(el, frameOf('desktop', 140, 12, skin), { settings: { ...SETTINGS, skin, jevSource: 'typesafe' }, jev: { source: null, test: { state: 'fail', message: 'no' } } }, QUICK_ACTIONS))
-    drawPane(on, skin + '-card', el => renderAlert(el, frameOf('desktop', 100, 12, skin), { kind: 'compactNote', draft: '', tidy: true }, alertActions))
+    drawPane(on, skin + '-card', el => renderAlert(el, frameOf('desktop', 100, 12, skin), { kind: 'compactNote', draft: '', tidy: true, pick: 'claude-haiku-5-5', models: [{ value: 'claude-haiku-5-5', label: 'Claude Haiku' }], cold: false }, alertActions))
     drawPane(on, skin + '-setup', el => renderSetup(el, frameOf('desktop', 100, 12, skin), { step: 1, draft: SETTINGS, jev: { source: null, test: { state: 'idle' } } }, { patch: noop, jevKey: noop, testJev: noop, openAllSettings: noop, back: noop, next: noop, finish: noop, skip: noop }))
   }
   for (const skin of SKINS) {
@@ -817,7 +817,7 @@ test('every picture fills the cells laid out for it, so it keeps its place whate
     ['band', el => renderBand(el, frameOf('desktop', 100), DASH, BAND_ACTIONS)],
     ['settings', el => renderSettings(el, frameOf('desktop', 100), { settings: SETTINGS, jev: { source: null, test: { state: 'idle' } } }, QUICK_ACTIONS)],
     ['agents', el => renderAgents(el, frameOf('desktop', 64), { agents: AGENTS, now: NOW, showDone: true }, AGENT_NOOP)],
-    ['alert', el => renderAlert(el, frameOf('desktop', 100), ALERTS[0]!, { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, toggleTidy: noop, copy: noop })],
+    ['alert', el => renderAlert(el, frameOf('desktop', 100), ALERTS[0]!, { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, toggleTidy: noop, pickCompactModel: noop, copy: noop })],
   ]
   for (const [id, draw] of draws) drawPane(on, 'cells-' + id, draw)
   for (const [id] of draws) {
@@ -1121,7 +1121,7 @@ test('every picture is a plain image, 리플이 the one face, and every blank pr
   // over it (kit.tsx), never from a blank button over nothing.
   const noop = () => undefined
   const setupActions = { patch: noop, jevKey: noop, testJev: noop, openAllSettings: noop, back: noop, next: noop, finish: noop, skip: noop }
-  const alertActions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, toggleTidy: noop, copy: noop }
+  const alertActions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, toggleTidy: noop, pickCompactModel: noop, copy: noop }
   const cases: [string, Draw][] = [
     ['one-quick', (el, surface) => renderSettings(el, frameOf(surface, 64, 30), { settings: { ...SETTINGS, jevSource: 'typesafe' }, jev: { source: null, test: { state: 'idle' } } }, QUICK_ACTIONS)],
     ...([1, 2, 3, 4] as const).map((step): [string, Draw] => ['one-setup-' + step, (el, surface) => renderSetup(el, frameOf(surface, 64, 30), { step, draft: SETTINGS, jev: { source: null, test: { state: 'idle' } } }, setupActions)]),
@@ -1141,7 +1141,7 @@ test('every picture is a plain image, 리플이 the one face, and every blank pr
 
 test('a card says one thing: at most one main action, the others quiet, one way to let it go', async ($, on) => {
   const noop = () => undefined
-  const alertActions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, toggleTidy: noop, copy: noop }
+  const alertActions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, toggleTidy: noop, pickCompactModel: noop, copy: noop }
   const all: AlertView[] = [...ALERTS, { kind: 'hot', limitKind: 'five_hour', percent: 97, save: true }]
   all.forEach((alert, i) => drawPane(on, 'say-' + i, (el, surface) => renderAlert(el, frameOf(surface), alert, alertActions)))
   for (let i = 0; i < all.length; i++) {
@@ -1178,7 +1178,7 @@ test('no drawing cuts its text, but for the agent card\'s title and model name, 
   const cases: [string, Draw][] = [
     ['cut-quick', (el, surface) => renderSettings(el, frameOf(surface, 60, 30), { settings: SETTINGS, jev: { source: null, test: { state: 'fail', message: 'key rejected (401) '.repeat(4) } } }, settingsActions)],
     ['cut-log', (el, surface) => renderLog(el, frameOf(surface, 40), { rows: [{ at: '2026-10-10T13:19:10', source: 'a-very-long-requested-model-name@high', target: 'another-very-long-routed-model-name', provider: 'opencode-go', status: 200, ok: true, ms: 2140 }], mineOnly: false }, { toggleScope: noop })],
-    ...ALERTS.map((alert, i): [string, Draw] => ['cut-alert-' + i, (el, surface) => renderAlert(el, frameOf(surface, 40), alert, { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, toggleTidy: noop, copy: noop })]),
+    ...ALERTS.map((alert, i): [string, Draw] => ['cut-alert-' + i, (el, surface) => renderAlert(el, frameOf(surface, 40), alert, { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, toggleTidy: noop, pickCompactModel: noop, copy: noop })]),
   ]
   for (const [id, draw] of cases) drawPane(on, id, draw)
   for (const surface of SURFACES) {

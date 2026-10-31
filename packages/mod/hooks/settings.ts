@@ -30,7 +30,7 @@ export const DEFAULTS: Settings = {
   providers: {},
   fallback: { agent: 'general-purpose', model: 'sonnet' },
   keepWarm: false, keepWarmHours: 2, keepWarmMinTokens: 30000,
-  compactModel: 'claude-haiku-5-5',
+  compactModel: 'claude-haiku-5-5', compactModels: [],
   swampAlert: false, layout: 'dashboard', appearance: 'auto', skin: 'deep', language: 'auto', hide: ['reason'], extras: [], setupDone: false,
 }
 
@@ -317,6 +317,7 @@ export function normalizeSettings(raw: unknown, workers?: readonly Worker[]): Se
   // old choice (or anything unknown) reads as Haiku, the default it always meant.
   if (typeof value.compactModel === 'string' && value.compactModel.trim()) result.compactModel = value.compactModel.trim()
   else if (value.compactWith === 'session') result.compactModel = 'session'
+  result.compactModels = names(value.compactModels).slice(0, 4)
   if (Array.isArray(value.hide)) result.hide = [...new Set(value.hide.filter((part): part is string => typeof part === 'string' && ['timer', 'reason', 'route', 'limits'].includes(part)))]
   result.fallback = target(value.fallback, DEFAULTS.fallback)!
   const domains = domainRules(value.domainRules)

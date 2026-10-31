@@ -16,7 +16,7 @@ import type { Spawn, WorkerFix } from './worker'
 import { afterPing, cacheMemoryKey, CACHE_MEMORY_PREFIX, laterMemo, liveContextTokens, nextMemo, restoreFromResume, savedMemory, shouldPing, staleMemory } from './cache'
 import { HEAVY_PERCENT, bandPriority, claudeLimitsFrom, claudeScopedFrom, coldAlert, contextWindow, countsPrecisely, modelCompactWindow, hotAlert, hottest, hotWindowMoved, keptAlert, routerLimitItems, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
 import type { ScopedLimit } from './session'
-import { COMPACT_SYSTEM, compactResult, serializeTranscript } from './compact'
+import { COMPACT_SYSTEM, compactPaths, compactResult, serializeTranscript } from './compact'
 import { QUICK_PROMPT, wrapForNewChat } from './handoff'
 import { addTask, endTasks, endWithAgent, settleTasks, stopTask, taskEnds, taskStarted } from './tasks'
 import { addAgentStep, addJudge, addPrompt, addRequest, addWarm, addWorker, emptyStats, formatStats, sentEffort } from './stats'
@@ -91,6 +91,7 @@ const stats = atom({ plugin: 'ripple', key: 'stats' } as const, emptyStats())
 const settingsDraft = atom({ plugin: 'ripple', key: 'settingsDraft' } as const, null)
 const setupStep = atom({ plugin: 'ripple', key: 'setupStep' } as const, 1)
 const compactNote = atom({ plugin: 'ripple', key: 'compactNote' } as const, '')
+const compactPick = atom({ plugin: 'ripple', key: 'compactPick' } as const, '')
 /** The compact card's tidy-up switch: on unless the person turned it off, and their last choice is kept. */
 const compactTidy = atom({ plugin: 'ripple', key: 'compactTidy' } as const, true)
 const effortMenuOpen = atom({ plugin: 'ripple', key: 'effortMenuOpen' } as const, false)
@@ -1207,19 +1208,21 @@ async function driveHandoff($: EngineInterface): Promise<void> {
   }
 }
 /** The tidy prompt the last Compact press sent and the main-loop turn it became; null once it settles. */
-type Tidy = { text: string; note: string; turnId: string | null }
+type Tidy = { text: string; note: string; model: string; turnId: string | null }
 let tidy: Tidy | null = null
-async function compactNow($: EngineInterface, note: string): Promise<void> {
+let compactOnce: string | null = null
+async function compactNow($: EngineInterface, note: string, model: string): Promise<void> {
   const language = await read($, lang)
   await update($, resultCard, () => ({ stage: 'compacting' }))
   try {
+    compactOnce = model
     await $.command.run({ command: 'compact', args: note })
     await update($, resultCard, () => ({ stage: 'compacted' }))
   } catch (error) {
     await update($, resultCard, () => ({ stage: 'failed' as const, detail: t(language, 'alerts.compactFailed') }))
     await $.ui.toast(t(language, 'toasts.compactFailed'))
     await report($, 'compact command', error)
-  }
+  } finally { compactOnce = null }
 }
 /** The tidy-up did not finish: nothing is compacted, and the card says the chat was left as it was. */
 async function tidyStopped($: EngineInterface): Promise<void> {
@@ -1238,7 +1241,7 @@ async function tidyStopped($: EngineInterface): Promise<void> {
  * left dead; one already bound to a turn blocks the second press. With the switch off, the
  * compaction goes at once.
  */
-async function runCompact($: EngineInterface, note = ''): Promise<void> {
+async function runCompact($: EngineInterface, note = '', model?: string): Promise<void> {
   await update($, panel, () => null)
   // A press while the tidy-up is bound to its turn sends nothing a second time; the card it shows
   // says so. One still waiting for that turn is given up instead, and the prompt goes again below.
@@ -1247,10 +1250,11 @@ async function runCompact($: EngineInterface, note = ''): Promise<void> {
     tidy = null
   }
   const language = await read($, lang)
-  if (!await read($, compactTidy)) { await compactNow($, note); return }
+  const choice = model ?? (await currentSettings($)).compactModel
+  if (!await read($, compactTidy)) { await compactNow($, note, choice); return }
   await update($, resultCard, () => ({ stage: 'tidying' }))
   const text = t(language, 'alerts.tidyPrompt')
-  const wait: Tidy = { text, note, turnId: null }
+  const wait: Tidy = { text, note, model: choice, turnId: null }
   tidy = wait
   try {
     // In the person's words, not under "the ripple plugin sent a message": it is their Compact press.
@@ -1267,6 +1271,9 @@ async function runCompact($: EngineInterface, note = ''): Promise<void> {
 async function openCompact($: EngineInterface, surface: Frame['surface']): Promise<void> {
   if (surface === 'terminal') { await runCompact($); return }
   await update($, compactNote, () => '')
+  try { await refreshModels($) } catch (error) { await report($, 'compact catalogue', error) }
+  const model = (await currentSettings($)).compactModel
+  await update($, compactPick, () => model)
   await update($, panel, () => 'compact')
 }
 async function openClear($: EngineInterface): Promise<void> {
@@ -1783,7 +1790,13 @@ async function alertView($: EngineInterface, now: number): Promise<AlertView | n
     cold: d === 'cold' || coldAlert(m, c?.tokens ?? 0, now, await read($, coldHidden)),
     kept: d === 'kept' || keptAlert(await read($, kept), m, now),
     swamp: d === 'swamp' || (s.swampAlert && !await read($, busy) && swampAlert(swamped(c), await read($, swampHidden))) })
-  if (which === 'compact') return { kind: 'compactNote', draft: await read($, compactNote), tidy: await read($, compactTidy) }
+  if (which === 'compact') {
+    const selected = await read($, compactPick) || s.compactModel
+    const catalogue = await read($, routerModels)
+    const labels: Record<string, string> = { session: t(language, 'settings.sessionCompactor'), 'claude-haiku-5-5': 'Claude Haiku', 'claude-sonnet-5-5': 'Claude Sonnet', 'claude-opus-5-5': 'Claude Opus' }
+    const models = [...new Set([s.compactModel, ...s.compactModels, selected])].map(value => ({ value, label: labels[value] ?? catalogue.find(item => item.value === value)?.label ?? value }))
+    return { kind: 'compactNote', draft: await read($, compactNote), tidy: await read($, compactTidy), pick: selected, models, cold: !!m && m.expiresAt <= now }
+  }
   if (which === 'clear') return { kind: 'clear' }
   if (which === 'judgeDown') return { kind: 'judgeDown', judge: s.judge, reason: d === 'down' ? t(language, 'alerts.demoDown') : downReason!, network: d !== 'down' && await read($, judgeDownNetwork) }
   if (which === 'hot') return { kind: 'hot', limitKind: h?.kind ?? 'five_hour', percent: d === 'hot' ? 86 : h!.percent, resetsAt: h?.resetsAt, save: (await read($, saveUntil) ?? 0) > now }
@@ -1844,8 +1857,8 @@ function setupActions($: EngineInterface): SetupActions {
     back: () => update($, setupStep, step => Math.max(1, step - 1) as 1 | 2 | 3 | 4), next: () => update($, setupStep, step => Math.min(4, step + 1) as 1 | 2 | 3 | 4), finish: () => finishSetup($), skip: () => finishSetup($, true) }
 }
 function alertActions($: EngineInterface, view: AlertView): AlertActions {
-  return { compact: note => runCompact($, note), clear: async () => { await update($, panel, () => null); await $.command.run({ command: 'clear', args: '' }) }, dismiss: () => dismiss($, view), toggleSave: () => toggleSave($), openSettings: () => startPanel($, 'settings'),
-    noteInput: text => update($, compactNote, () => text), toggleTidy: () => update($, compactTidy, value => !value), copy: () => copyHandoff($) }
+  return { compact: note => runCompact($, note, view.kind === 'compactNote' ? view.pick : undefined), clear: async () => { await update($, panel, () => null); await $.command.run({ command: 'clear', args: '' }) }, dismiss: () => dismiss($, view), toggleSave: () => toggleSave($), openSettings: () => startPanel($, 'settings'),
+    noteInput: text => update($, compactNote, () => text), toggleTidy: () => update($, compactTidy, value => !value), pickCompactModel: value => update($, compactPick, () => value), copy: () => copyHandoff($) }
 }
 function agentsActions($: EngineInterface): AgentsActions {
   return {
@@ -2230,10 +2243,10 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     try {
       if (!e.agentId && tidy?.turnId === e.turnId) {
-        const note = tidy.note
+        const { note, model } = tidy
         tidy = null
         // The compaction runs from a tick of its own, not inside this turn's hooks.
-        if (e.reason === 'answer') void $.clock.after(1, async () => { await compactNow($, note) })
+        if (e.reason === 'answer') void $.clock.after(1, async () => { await compactNow($, note, model) })
         else await tidyStopped($)
       }
       if (e.agentId) {
@@ -2417,22 +2430,29 @@ export const register: Register = on => {
       // The summary drops what was noted; the note itself goes with every prompt while eager
       // (modes.ts eagerNote), so this is bookkeeping only.
       if (!e.agentId && e.trigger !== 'precompute' && await read($, modeNoted) !== null) await update($, modeNoted, () => null)
-      if (e.agentId || (await currentSettings($)).compactModel === 'session') return next(e).then(counted)
+      const setting = (await currentSettings($)).compactModel
+      const choice = !e.agentId && e.trigger === 'manual' ? compactOnce ?? setting : setting
+      if (!e.agentId && e.trigger === 'manual') compactOnce = null
+      if (e.agentId || choice === 'session') return next(e).then(counted)
       if (e.trigger === 'precompute') return { skip: t(language, 'commands.compactSkip') }
-      const transcript = serializeTranscript(e.messages.length ? e.messages : await $.session.messages())
+      const messages = e.messages.length ? e.messages : await $.session.messages()
+      const transcript = serializeTranscript(messages)
       if (!transcript) throw new Error(t(language, 'toasts.transcriptEmpty'))
       // A chosen model may carry its effort (`id@effort`), as a worker's does: the router takes the
       // effort on its own field, so the two are split here.
-      const choice = (await currentSettings($)).compactModel
       const at = choice.lastIndexOf('@')
       const effort = at > 0 && EFFORTS.includes(choice.slice(at + 1) as Effort) ? choice.slice(at + 1) as Effort : 'medium'
-      const answer = await $.model.complete({ model: at > 0 ? choice.slice(0, at) : choice, system: COMPACT_SYSTEM, prompt: transcript + (e.instructions ? `\n\nKeep especially:\n${e.instructions}` : ''), maxTokens: 16000, timeoutMs: 240000, effort })
+      const answer = await $.model.complete({ model: at > 0 ? choice.slice(0, at) : choice, system: COMPACT_SYSTEM, prompt: transcript + (e.instructions ? `\n\nKeep especially:\n${e.instructions}` : ''), maxTokens: 20000, timeoutMs: 240000, effort })
       if (!answer.isAnswered || answer.text.trim().length <= 200) throw new Error(t(language, 'toasts.summaryEmpty'))
+      const files: { path: string; text: string }[] = []
+      for (const path of compactPaths(messages)) {
+        try { files.push({ path, text: await $.fs.read(path) }) } catch { /* Missing or too large: leave it out. */ }
+      }
       await update($, cache, () => null)
       await update($, context, () => null)
       if (await read($, kept)) await update($, kept, () => null)
       await update($, resultCard, () => ({ stage: 'compacted' }))
-      return counted(compactResult(answer.text))
+      return counted(compactResult(answer.text, files))
     } catch (error) {
       await $.ui.toast(t(await read($, lang), 'toasts.compactFallback'))
       await report($, 'session.compact', error)

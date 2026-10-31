@@ -15,7 +15,7 @@ import { CELL_PX, ROW_PX } from './art'
 import { DISPLAY, displayText } from './display'
 import { lookOf } from './look'
 import type { Sea } from './art'
-import { capsule, closeButton, pill, ripple, well } from './kit'
+import { capsule, closeButton, pill, ripple, segmented, well } from './kit'
 import { action, actions, canDraw, dismiss, speak } from './parts'
 import type { Els } from './parts'
 import { FACE_TONE } from './ripple'
@@ -109,7 +109,7 @@ export function cardOf(frame: Frame, alert: AlertView, a: AlertActions): Card {
         key: 'note',
         face: 'asking',
         title: t(L, 'alerts.compactTitle'),
-        body: t(L, 'alerts.compactBody'),
+        body: t(L, 'alerts.compactBody') + (alert.pick === 'session' && alert.cold ? '\n' + t(L, 'alerts.compactCold') : ''),
         quiet: [tidy],
         main: { ...compact, onPress: () => a.compact(alert.draft) },
         close: cancel,
@@ -152,6 +152,7 @@ function extras(el: Els, frame: Frame, alert: AlertView, a: AlertActions): Rende
   if (alert.kind === 'compactNote' && 'Input' in el) {
     const Field = el.Input
     return [
+      ...('Select' in el && alert.models.length > 1 ? [<Box key="compact-model-row" flexDirection="row" alignItems="center" columnGap={2}><el.Text dimColor>{t(frame.lang, 'alerts.compactModel')}</el.Text><el.Select key="compact-model" options={alert.models} value={alert.pick} onSelect={(value: string) => a.pickCompactModel(value)} /></Box>] : []),
       <Field
         key="note"
         label={t(frame.lang, 'alerts.keep')}
@@ -213,6 +214,9 @@ function drawnExtras(el: Els, frame: Frame, alert: AlertView, a: AlertActions): 
     // The field's own label would take the host's ink; its name is ours, beside its well.
     const cells = Math.max(20, frame.columns - Math.ceil(CARD_FACE / CELL_PX) - Math.ceil(chOf(name)) - 10)
     return [
+      // Drawn, as the settings' own pickers are: the host's Select takes the host's ink, which a light
+      // theme leaves dark on this dark card (2026-10-31). The dashboard keeps the choices to five.
+      ...(alert.models.length > 1 ? [<Box key="compact-model-row" flexDirection="row" alignItems="center" columnGap={2} flexWrap="wrap"><Text {...k.sub}>{t(frame.lang, 'alerts.compactModel')}</Text>{segmented(el, frame, 'compact-model', alert.models, alert.pick, value => a.pickCompactModel(value))}</Box>] : []),
       <Box key="note-row" flexDirection="row" alignItems="center" columnGap={2} width="100%" minWidth={0}>
         <Text {...k.sub}>{name}</Text>
         {well(el, frame, 'note', cells, (
@@ -285,7 +289,7 @@ function drawnAlert(el: Els, frame: Frame, alert: AlertView, a: AlertActions): R
       {actionsBelow ? null : buttons}
     </Box>
   )
-  const rows = oneRow ? 2 : 4 + (more.length ? 3.2 : 0) + (actionsBelow ? 2 : 0) + (frame.columns < 60 ? 3 : 0)
+  const rows = oneRow ? 2 : 4 + (more.length ? 3.2 + (more.length - 1) * 2 : 0) + (actionsBelow ? 2 : 0) + (frame.columns < 60 ? 3 : 0)
   return capsule(el, frame, {
     key: 'alert-' + card.key,
     // The light comes from 리플이: on the title's line in one row, at the card's middle beside more.

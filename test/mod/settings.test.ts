@@ -111,6 +111,14 @@ test('the compaction model migrates from compactWith and an unknown old choice k
   assert.equal(Object.hasOwn(normalizeSettings({ compactWith: 'session' }), 'compactWith'), false)
 })
 
+test('compact card models are trimmed, distinct, bounded and independent', () => {
+  assert.deepEqual(normalizeSettings({}).compactModels, [])
+  const settings = normalizeSettings({ compactModels: [' a ', '', 'a', 7, 'b', 'c', 'd', 'e', 'f', 'g'] })
+  assert.deepEqual(settings.compactModels, ['a', 'b', 'c', 'd'])
+  settings.compactModels.push('changed')
+  assert.deepEqual(normalizeSettings({}).compactModels, [])
+})
+
 test('a stored settings file that still names handoff settings loads without them', () => {
   const s = normalizeSettings({ effortAuto: true, handoffSkill: ' /handoff ', handoffAfter: 'copy', handoffButton: 'always' })
   for (const key of ['handoffSkill', 'handoffAfter', 'handoffButton']) assert.equal(Object.hasOwn(s, key), false, key)

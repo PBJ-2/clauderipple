@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { SessionMessage } from 'claude-code'
-import { COMPACT_SYSTEM, serializeTranscript, compactResult } from '../../packages/mod/hooks/compact.ts'
+import { COMPACT_SYSTEM, serializeTranscript, compactResult, compactPaths, capCompactFiles } from '../../packages/mod/hooks/compact.ts'
 
 const message = (text: string, bulk = 0): SessionMessage => ({ role: 'assistant', text, toolUses: bulk ? [
   { tool_use_id: 'read-1', tool: 'Read', input: { file: 'input-' + 'i'.repeat(bulk) }, text: 'result-' + 'r'.repeat(bulk), isError: true },
@@ -14,7 +14,7 @@ test('transcript keeps roles, text, tools, errors and standalone results', () =>
   assert.ok(text.includes('assistant:\nthinking') && text.includes('user:\ncontinue'))
   assert.ok(text.includes('tool Read (read-1)') && text.includes('input-'))
   assert.ok(text.includes('result ERROR') && text.includes('result read-2:\nstandalone'))
-  assert.ok(COMPACT_SYSTEM.includes('changes of mind') && COMPACT_SYSTEM.includes('pending'))
+  assert.ok(COMPACT_SYSTEM.includes('changes of mind') && COMPACT_SYSTEM.includes('Pending tasks'))
 })
 
 test('last six tool inputs/results get 20k, older input 400 and result 2k', () => {
@@ -54,6 +54,21 @@ test('tight pass reduces old results to 300 and represents result records withou
 
 test('default 2.4M budget falls back rather than truncating essential user text', () => {
   assert.equal(serializeTranscript([message('x'.repeat(2400001))]), null)
+})
+
+test('recent file paths are distinct, newest first, limited to five', () => {
+  const uses = ['a', 'b', 'c', 'd', 'e', 'f', 'b'].map((path, i) => ({ tool_use_id: String(i), tool: i === 5 ? 'NotebookEdit' : 'Read', input: i === 5 ? { notebook_path: path } : { file_path: path } }))
+  assert.deepEqual(compactPaths([{ role: 'assistant', text: '', toolUses: uses }]), ['b', 'f', 'e', 'd', 'c'])
+})
+
+test('file contents obey per-file and aggregate limits and render safely', () => {
+  const capped = capCompactFiles([{ path: '/a', text: 'x'.repeat(25000) }, { path: '/b', text: 'y'.repeat(25000) }], 30000)
+  assert.equal(capped[0]!.text.length, 20000)
+  assert.equal(capped[1]!.text.length, 10000)
+  assert.ok(capped.every(file => file.text.endsWith('[truncated — re-read before editing]')))
+  const text = compactResult('summary', [{ path: '/a', text: 'before\n```\nafter' }]).messages[0]!.text
+  assert.ok(text.includes('/a\n````\nbefore\n```\nafter\n````'))
+  assert.ok(text.indexOf('Files read before') < text.indexOf('Resume the pending work'))
 })
 
 test('compact replacement is a built user message, not engine handles or an unsupported summary field', () => {

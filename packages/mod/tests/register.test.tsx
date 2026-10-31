@@ -1847,10 +1847,22 @@ test('Haiku compaction returns replacement messages and forwards the keep note',
   on('session.compact', () => { engine++; return { messages: MESSAGES } })
   await start($)
   const out = await $.session.compact({ trigger: 'manual', messages: MESSAGES, instructions: 'Keep file paths.' })
-  expect(calls[0]).toMatchObject({ model: 'claude-haiku-5-5', maxTokens: 16000, timeoutMs: 240000, effort: 'medium' })
+  expect(calls[0]).toMatchObject({ model: 'claude-haiku-5-5', maxTokens: 20000, timeoutMs: 240000, effort: 'medium' })
   expect(calls[0]?.prompt).toContain('Keep file paths.')
   expect(out.messages?.[0]?.text.includes('Continuation record')).toBe(true)
   expect(engine).toBe(0)
+})
+
+test('compaction reattaches the current file, not the transcript result', async ($, on) => {
+  const b = boundaries(on)
+  b.files.set('/work/a.ts', 'current file content')
+  http(on)
+  judgeStub(on, 'Verified continuation summary. '.repeat(20))
+  await start($)
+  const messages: SessionMessage[] = [{ role: 'assistant', text: '', toolUses: [{ tool_use_id: 'r', tool: 'Read', input: { file_path: '/work/a.ts' }, text: 'old content' }] }]
+  const out = await $.session.compact({ trigger: 'manual', messages })
+  expect(out.messages?.[0]?.text).toContain('/work/a.ts\n```\ncurrent file content\n```')
+  expect(out.messages?.[0]?.text).not.toContain('old content')
 })
 
 test('the compaction model is the chosen one, with an @effort split off for the router', async ($, on) => {
@@ -1862,6 +1874,61 @@ test('the compaction model is the chosen one, with an @effort split off for the 
   const out = await $.session.compact({ trigger: 'manual', messages: MESSAGES })
   expect(calls[0]).toMatchObject({ model: 'gpt-6.1-sol', effort: 'high' })
   expect(out.messages?.[0]?.text.includes('Continuation record')).toBe(true)
+})
+
+test('compact card warns only for an expired known cache and session compactor', async ($, on) => {
+  const b = boundaries(on, { compactModel: 'session', compactModels: ['claude-haiku-5-5'] })
+  let memo: { ttlMs: number; lastReplyAt: number; expiresAt: number } | null = null
+  on('state.get', { plugin: 'ripple', key: 'cache' }, () => ({ value: { value: memo, version: 0 } }))
+  http(on)
+  await start($)
+  const ui = await band($, 'desktop')
+  await ui.press({ key: 'compact' })
+  expect(JSON.stringify(await ui.drawn())).not.toContain('The cache has expired')
+  memo = { ttlMs: 1000, lastReplyAt: NOW - 1000, expiresAt: NOW }
+  await ui.press({ key: 'compact-model-claude-haiku-5-5' })
+  expect(JSON.stringify(await ui.drawn())).not.toContain('The cache has expired')
+  await ui.press({ key: 'compact-model-session' })
+  expect(JSON.stringify(await ui.drawn())).toContain('The cache has expired')
+  memo = { ...memo, expiresAt: NOW + 1000 }
+  await ui.press({ key: 'compact-model-claude-haiku-5-5' })
+  await ui.press({ key: 'compact-model-session' })
+  expect(JSON.stringify(await ui.drawn())).not.toContain('The cache has expired')
+  await ui.unmount()
+  await b.clock.settle()
+})
+
+// 2026-10-31: the card's model applies once, including after its tidy turn.
+for (const tidyFirst of [false, true]) test(`compact card model is one-shot, tidy ${tidyFirst}`, async ($, on) => {
+  const b = boundaries(on, { compactModel: 'claude-haiku-5-5', compactModels: ['claude-opus-5-5', 'session'] })
+  http(on)
+  const calls = judgeStub(on, 'Verified continuation summary. '.repeat(20))
+  let native = 0
+  on('session.compact', () => { native++; return { messages: MESSAGES } })
+  on('command.run', { command: 'compact' }, async () => { await $.session.compact({ trigger: 'manual', messages: MESSAGES }); return { text: 'done' } })
+  await start($)
+  const ui = await band($, 'desktop')
+  await ui.press({ key: 'compact' })
+  await ui.press({ key: 'compact-model-claude-opus-5-5' })
+  if (!tidyFirst) await ui.press({ key: 'tidy' })
+  await ui.input({ key: 'note', text: 'keep' })
+  if (tidyFirst) {
+    await $.turn.start({ text: TIDY, turnId: 'tidy-choice' })
+    await $.turn.complete({ turnId: 'tidy-choice', answer: 'done', reason: 'answer', durationMs: 10, isAborted: false })
+    await b.clock.advance(10)
+  }
+  expect(calls[0]?.model).toBe('claude-opus-5-5')
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES })
+  expect(calls[1]?.model).toBe('claude-haiku-5-5')
+  expect(native).toBe(0)
+  await ui.press({ key: 'dismiss' })
+  await ui.press({ key: 'compact' })
+  expect(JSON.stringify(await ui.drawn())).toContain('[Claude Haiku]')
+  await ui.press({ key: 'compact-model-session' })
+  if (tidyFirst) await ui.press({ key: 'tidy' })
+  await ui.input({ key: 'note', text: 'keep' })
+  expect(native).toBe(1)
+  await ui.unmount()
 })
 
 // 2026-10-25: the band's Compact asks the chat to tidy up first, as a prompt of its own, and only

@@ -655,6 +655,8 @@ a.cell { color: inherit; text-decoration: none; }
 /* The four workers: a name and its meaning on the left; one menu for the model and effort on the right. */
 .rung-row { align-items: flex-start; }
 .rung-row > .cell-text { padding-top: 5px; }
+/* A long hint wraps beside the list rather than pushing a rung's buttons under its select. */
+.rung-row > .cell-value { flex-shrink: 0; max-width: 100%; }
 .mod-card .cell-value select.rung-model { width: 300px; }
 /* Saved worker sets: tabs browse, the separate control activates. Numbering is dispatch order. */
 .mode-on { display: inline-block; margin-left: 8px; padding: 1px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: var(--fs-cap); font-weight: 600; vertical-align: 1px; }

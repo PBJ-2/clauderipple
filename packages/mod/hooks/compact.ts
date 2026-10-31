@@ -1,6 +1,16 @@
 import type { SessionCompacted, SessionMessage } from 'claude-code'
 
-export const COMPACT_SYSTEM = `Create a faithful continuation record of this coding conversation. Keep the user's intent and changes of mind, decisions and constraints, relevant concepts, files and code touched, errors and their fixes, and user feedback. List user requests in order, distinguish solved from pending work, and state exactly what is happening now. Include a next step only when the conversation justifies it. Preserve useful exact paths and commands, but omit secrets, redundant logs, and obsolete detail. Do not invent verification or claim unfinished work is complete. Write in the user's language.`
+export const COMPACT_SYSTEM = `Write a faithful, detailed continuation record in the user's language. Use these sections in order:
+1. Primary requests and intent: every explicit request, in detail, including changes of mind.
+2. Key technical concepts: technologies, frameworks and conventions in play.
+3. Files and code: each file read, changed or created, its exact path, importance and changes; reproduce important snippets verbatim, including full snippets for the most recent edits.
+4. Errors and fixes: each error, its fix and any user feedback.
+5. Problem solving and decisions: what was solved, decided or ruled out, and ongoing troubleshooting.
+6. All user messages: every message the user wrote, not tool results, in order and near-verbatim.
+7. Pending tasks: what was requested and remains unfinished.
+8. Current work: precisely what was underway immediately before compaction, with file names and code snippets.
+9. Next step: only if it follows directly from the most recent explicit user request; quote that request verbatim. Otherwise omit this section.
+Preserve exact paths and commands; omit secrets and redundant logs. Never invent verification or claim unfinished work is complete.`
 
 function clipped(text: string, limit: number): string {
   return text.length > limit ? `${text.slice(0, limit)}\n[truncated]` : text
@@ -33,8 +43,48 @@ export function serializeTranscript(messages: readonly SessionMessage[], budget 
   return tight.length <= budget ? tight : null
 }
 
+export type CompactFile = { path: string; text: string }
+
+/** Most recently used file paths first, including notebook edits. */
+export function compactPaths(messages: readonly SessionMessage[]): string[] {
+  const paths = new Set<string>()
+  for (const message of [...messages].reverse()) {
+    for (const use of [...message.toolUses].reverse()) {
+      if (!['Read', 'Edit', 'MultiEdit', 'Write', 'NotebookEdit'].includes(use.tool)) continue
+      const input = use.input
+      if (!input || typeof input !== 'object') continue
+      const value = input as Record<string, unknown>
+      const path = value.file_path ?? value.notebook_path
+      if (typeof path === 'string' && path) paths.add(path)
+      if (paths.size === 5) return [...paths]
+    }
+  }
+  return [...paths]
+}
+
+/** Bound the content, including the truncation marker, before rendering. */
+export function capCompactFiles(files: readonly CompactFile[], total = 200000, perFile = 20000): CompactFile[] {
+  const marker = '\n[truncated — re-read before editing]'
+  const out: CompactFile[] = []
+  let left = total
+  for (const file of files) {
+    if (left <= 0) break
+    const limit = Math.min(perFile, left)
+    const text = file.text.length <= limit ? file.text : limit >= marker.length ? file.text.slice(0, limit - marker.length) + marker : ''
+    if (!text && file.text) break
+    out.push({ path: file.path, text })
+    left -= text.length
+  }
+  return out
+}
+
 /** No handle: the engine builds this replacement from role, text and tool blocks. */
-export function compactResult(summary: string): SessionCompacted {
+export function compactResult(summary: string, files: readonly CompactFile[] = []): SessionCompacted {
+  const rendered = capCompactFiles(files).map(file => {
+    const fence = '`'.repeat(Math.max(3, ...[...file.text.matchAll(/`+/g)].map(match => match[0].length + 1)))
+    return `${file.path}\n${fence}\n${file.text}\n${fence}`
+  }).join('\n\n')
+  const attached = rendered ? `\n\nFiles read before the compaction, as they are now on disk:\n\n${rendered}` : ''
   return { messages: [{ role: 'user', toolUses: [], text:
-    `Continuation record from the previous conversation:\n\n${summary.trim()}\n\nResume the pending work from this record. Do not repeat completed work or ask for information already recorded.` }] }
+    `Continuation record from the previous conversation:\n\n${summary.trim()}${attached}\n\nResume the pending work from this record. Do not repeat completed work or ask for information already recorded.` }] }
 }

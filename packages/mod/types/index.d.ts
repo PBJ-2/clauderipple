@@ -200,6 +200,8 @@ export type Settings = {
    * model id (a Claude id or a router id) with an optional `@effort`. Defaults to Haiku.
    */
   compactModel: string
+  /** Additional models offered on the compact card, up to four: the card draws five choices at most. */
+  compactModels: string[]
   /** The heavy-context band; off unless switched on. */
   swampAlert: boolean
   layout: 'dashboard' | 'minimal'
@@ -479,6 +481,7 @@ declare module 'claude-code' {
       settingsDraft: Settings | null
       setupStep: SetupStep
       compactNote: string
+      compactPick: string
       /** The compact card's "tidy up first" switch, on unless the person turned it off (register.tsx). */
       compactTidy: boolean
       effortMenuOpen: boolean

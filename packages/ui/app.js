@@ -4439,7 +4439,7 @@ const MOD_DEFAULTS = {
   allow: [], allowKnown: [], modes: [], delegation: "normal", providers: {},
   fallback: { agent: "general-purpose", model: "sonnet" },
   keepWarm: false, keepWarmHours: 2, keepWarmMinTokens: 30000,
-  compactModel: "claude-haiku-5-5",
+  compactModel: "claude-haiku-5-5", compactModels: [],
   swampAlert: false, layout: "dashboard", appearance: "auto", skin: "deep", language: "auto", hide: ["reason"], extras: [], setupDone: false,
 };
 
@@ -5194,6 +5194,21 @@ function modCompactModelItems() {
   ];
 }
 
+function modCompactChoices(s) {
+  const choices = s.compactModels || [];
+  const items = modCompactModelItems();
+  const rows = choices.map((value, index) => el("li", { class: "rung-item" }, [
+    modSelect(`compact-choice:${index}`, items, value, t("mod.compactChoices"), (next) => {
+      if (!choices.includes(next)) modPatch({ compactModels: choices.map((item, at) => at === index ? next : item) });
+      else modRefresh();
+    }, "rung-model"),
+    el("div", { class: "rung-actions" }, [el("button", { type: "button", class: "btn secondary compact", "data-key": `compact-remove:${index}`, text: "✕", "aria-label": t("common.remove"), onclick: () => modPatch({ compactModels: choices.filter((_, at) => at !== index) }) })]),
+  ]));
+  const available = items.flatMap(item => item.group ? item.items : [item]).find(item => item.value !== s.compactModel && !choices.includes(item.value));
+  const add = el("button", { type: "button", class: "btn secondary compact", "data-key": "compact-add", text: t("mod.modeAddModel"), ...(!available || choices.length >= 4 ? { disabled: "" } : {}), onclick: () => { if (available) modPatch({ compactModels: [...choices, available.value] }); } });
+  return cell(t("mod.compactChoices"), el("div", { class: "rung-list" }, [el("ol", {}, rows), add]), t("mod.compactChoicesHint"), "wide rung-row");
+}
+
 function modCompactCard() {
   const s = modState.settings;
   const at = modState.compactAt;
@@ -5221,6 +5236,7 @@ function modCompactCard() {
   const hint = outOfRange ? t("mod.compactAtRange") : modCap(t("mod.compactAtHint"));
   return modCard("compact", t("mod.compaction"), t("mod.compactionBlurb"), [modSection(null, [
     cell(t("mod.compactModel"), modSelect("compact-model", modCompactModelItems(), s.compactModel, t("mod.compactModel"), (compactModel) => modPatch({ compactModel })), null, "wide"),
+    modCompactChoices(s),
     cell(t("mod.compactAt"), el("div", { class: "mode-until compact-at" }, [preset, custom]), el("span", { class: outOfRange ? "cell-sub warn-text" : undefined, text: hint }), "wide"),
   ])]);
 }

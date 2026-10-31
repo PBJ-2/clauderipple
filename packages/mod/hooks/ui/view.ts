@@ -141,7 +141,7 @@ export type AlertView =
   | { kind: 'judgeDown'; judge: JudgeKind; reason: string; network?: boolean }
   | { kind: 'result'; stage: ResultStage; detail?: string }
   /** Compact with an optional note of what to keep, and whether the chat tidies up first. */
-  | { kind: 'compactNote'; draft: string; tidy: boolean }
+  | { kind: 'compactNote'; draft: string; tidy: boolean; pick: string; models: { value: string; label: string }[]; cold: boolean }
   /** The band's Clear asks before the conversation is started over. */
   | { kind: 'clear' }
 
@@ -156,6 +156,7 @@ export type AlertActions = {
   noteInput: (text: string) => void
   /** The compact card's "tidy up first" switch; the last choice is kept. */
   toggleTidy: () => void
+  pickCompactModel: (value: string) => void
   /** Copies a written handoff again (its done card). */
   copy: () => void
 }
