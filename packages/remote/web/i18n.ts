@@ -230,7 +230,7 @@ const ko = {
   "model.done": "이 모델 선택",
   "model.noEffort": "이 모델은 추론 강도를 지원하지 않습니다",
   "model.auto": "자동",
-  "model.autoHint": "자동으로 설정하면 ClaudeRipple이 요청마다 추론 강도를 정합니다. 이 Mac의 모든 세션에 적용됩니다.",
+  "model.autoHint": "자동으로 설정하면 ClaudeRipple이 요청마다 추론 강도를 결정합니다. 이 Mac의 모든 세션에 적용됩니다.",
   "model.autoFailed": "자동 설정을 변경하지 못했습니다. 다시 시도해 주세요.",
   "history.loading": "이전 대화 불러오는 중…",
   "history.failed": "이전 대화를 불러오지 못했습니다.",
