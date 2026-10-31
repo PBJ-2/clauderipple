@@ -1097,9 +1097,27 @@ export class App {
     const v = forSession ? this.view(forSession) : null;
     const model = (v?.model ?? s?.model) ?? this.ui.draft.model;
     const effort = (v?.effort ?? s?.effort) ?? this.ui.draft.effort;
-    this.ui.sheet = { kind: "model", groups: this.ui.models, recent: this.recentModels, model, effort, forSession };
+    // Auto is host-wide: the sheet opens on it when the Mac has it on. A host that cannot write
+    // mod settings has no Auto option at all, so the choice stays with the model's levels.
+    const auto = this.autoWritable() && this.ui.host?.ripple?.effortAuto === true;
+    this.ui.sheet = { kind: "model", groups: this.ui.models, recent: this.recentModels, model, effort, forSession, auto };
     this.renderSheet();
     if (!this.ui.models.length) void this.loadModels().then(() => { if (this.ui.sheet?.kind === "model") { this.ui.sheet.groups = this.ui.models; this.renderSheet(); } });
+  }
+
+  /** Whether this host can turn the mod's host-wide automatic effort on or off. */
+  private autoWritable(): boolean {
+    return this.ui.host?.capabilities?.effortAuto === true && !!this.ui.host.ripple;
+  }
+
+  private effortsFor(model: string | null): Effort[] {
+    return model ? this.ui.models.flatMap((g) => g.models).find((m) => m.model === model)?.efforts ?? [] : [];
+  }
+
+  /** A failed Auto write is said plainly; the sheet's other choices still went through. */
+  private async setEffortAuto(on: boolean): Promise<void> {
+    try { await this.req<{ effortAuto: boolean }>({ op: "effort_auto", on }); }
+    catch { this.toast(t("model.autoFailed")); }
   }
 
   // ---- input -----------------------------------------------------------------------------------
@@ -1477,13 +1495,28 @@ export class App {
         if (m && !m.efforts.length) this.ui.sheet.effort = null;
         this.renderSheet();
       } break;
-      case "choose-effort": if (this.ui.sheet?.kind === "model") { this.ui.sheet.effort = (el.dataset.effort as Effort) ?? null; this.renderSheet(); } break;
+      case "choose-effort": if (this.ui.sheet?.kind === "model") { this.ui.sheet.effort = (el.dataset.effort as Effort) ?? null; this.ui.sheet.auto = false; this.renderSheet(); } break;
+      case "choose-auto": if (this.ui.sheet?.kind === "model") { this.ui.sheet.auto = true; this.renderSheet(); } break;
       case "model-done": if (this.ui.sheet?.kind === "model" && this.ui.sheet.model) {
-        const { model, effort, forSession } = this.ui.sheet;
-        if (forSession) this.link?.send({ t: "set_model", session: forSession, model, effort });
-        else { this.ui.draft.model = model; this.ui.draft.effort = effort; store.set("rr.draft", this.ui.draft); }
-        this.rememberModel(model);
-        store.set(`rr.effort.${model}`, effort);
+        const { model, effort, forSession, auto } = this.ui.sheet;
+        const autoShown = this.autoWritable() && this.effortsFor(model).length > 0;
+        const autoSelected = autoShown && auto === true;
+        const currentModel = forSession ? (this.view(forSession)?.model ?? this.summary(forSession)?.model ?? null) : null;
+        if (autoSelected) {
+          // A new model under Auto starts on the level the sheet gave it (its remembered or default
+          // one), which the new model surely has; the mod takes over from the next prompt.
+          if (forSession && currentModel !== model) this.link?.send({ t: "set_model", session: forSession, model, effort });
+          if (autoShown && this.ui.host?.ripple?.effortAuto !== true) void this.setEffortAuto(true);
+          if (!forSession) { this.ui.draft.model = model; store.set("rr.draft", this.ui.draft); }
+          this.rememberModel(model);
+        } else {
+          if (forSession) this.link?.send({ t: "set_model", session: forSession, model, effort });
+          else { this.ui.draft.model = model; this.ui.draft.effort = effort; store.set("rr.draft", this.ui.draft); }
+          // A level means manual from now on, host-wide, not only in this session.
+          if (autoShown && this.ui.host?.ripple?.effortAuto === true) void this.setEffortAuto(false);
+          this.rememberModel(model);
+          store.set(`rr.effort.${model}`, effort);
+        }
         this.ui.sheet = null;
         this.render();
       } break;

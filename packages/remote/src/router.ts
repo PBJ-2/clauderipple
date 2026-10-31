@@ -1,6 +1,6 @@
 // The host reads the router's admin API like any client: models and effort ladders for the
 // picker, the proxy settings a spawned CLI needs, and per-session request records for the
-// mod's figures. Read-only; the host never writes router state.
+// mod's figures. It writes one thing, and only when the phone asks: the mod's host-wide effortAuto.
 import type { Effort, Figures, ProviderGroup, RippleLimit, RippleStatus } from "./protocol.ts";
 
 const EFFORTS: readonly Effort[] = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
@@ -24,8 +24,10 @@ interface RequestRecord { source?: string; target?: string; provider?: string; e
 interface Window { used_percent?: number; window_minutes?: number; reset_at?: number }
 
 export interface RouterStatus { ok: boolean; problem?: string; proxyEnv: Record<string, string> }
+/** The router's `GET`/409 body for mod settings: the settings and the revision they were read at. */
+interface ModSettingsBody { settings?: unknown; revision?: number }
 
-export type Fetch = (url: string, init?: { signal?: AbortSignal }) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
+export type Fetch = (url: string, init?: { signal?: AbortSignal; method?: string; headers?: Record<string, string>; body?: string }) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
 
 const toEffort = (s: string | undefined): Effort | null => (s && (EFFORTS as readonly string[]).includes(s) ? (s as Effort) : null);
 const base = (id: string): string => id.split("@")[0]!.replace(/-\d{8}$/, "");
@@ -45,6 +47,16 @@ export class RouterClient {
     return (await res.json()) as T;
   }
 
+  private async put<T>(path: string, body: unknown): Promise<{ ok: boolean; status: number; data: T }> {
+    const res = await this.fetch(this.adminUrl + path, {
+      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(4000),
+    });
+    let data: T;
+    // A 409 carries the snapshot to retry with; anything else may carry a plain-text body.
+    try { data = (await res.json()) as T; } catch { data = undefined as T; }
+    return { ok: res.ok, status: res.status, data };
+  }
+
   /** Every chat model the router routes, grouped by provider, judge-only models left out (ARCHITECTURE §3b). */
   async models(): Promise<ProviderGroup[]> {
     const [opts, levels] = await Promise.all([this.get<ModOptions>("/api/mod-options"), this.get<EffortLevels>("/api/effort-levels")]);
@@ -56,6 +68,34 @@ export class RouterClient {
 
   /** The router's own `GET /api/mod-settings` body, unvalidated: `rippleStatus` reads it at the boundary. */
   async modSettings(): Promise<unknown> { return this.get<unknown>("/api/mod-settings"); }
+
+  /**
+   * Turn the mod's host-wide automatic effort on or off. The dashboard's own save is the model:
+   * read the settings and their revision, then write the whole setting set back with only
+   * `effortAuto` replaced. A save that raced another writer gets the current snapshot with a 409,
+   * and that body is the next attempt's base — never a blind overwrite. Three attempts, then fail.
+   * Answers the value the router now stores.
+   */
+  async setEffortAuto(on: boolean): Promise<boolean> {
+    let snapshot: ModSettingsBody | undefined = await this.get<ModSettingsBody>("/api/mod-settings");
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const settings = obj(snapshot?.settings);
+      if (!Object.keys(settings).length) throw new Error("router has no mod settings");
+      const revision: number | undefined = snapshot?.revision;
+      const written: { ok: boolean; status: number; data: ModSettingsBody } = await this.put<ModSettingsBody>("/api/mod-settings", {
+        schemaVersion: 1,
+        settings: { ...settings, effortAuto: on },
+        ...(typeof revision === "number" ? { revision } : {}),
+      });
+      if (written.ok) {
+        const stored = obj(obj(written.data).settings).effortAuto;
+        return typeof stored === "boolean" ? stored : on;
+      }
+      if (written.status !== 409) throw new Error(`router /api/mod-settings: HTTP ${written.status}`);
+      snapshot = written.data && typeof written.data === "object" ? written.data : undefined;
+    }
+    throw new Error("router /api/mod-settings: revision changed too often");
+  }
 
   /** What a spawned CLI needs to go through the router: the same two keys `~/.claude/settings.json` carries (ARCHITECTURE §1). */
   async status(): Promise<RouterStatus> {

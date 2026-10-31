@@ -47,7 +47,9 @@ export type Sheet =
   /** The session folder's changes: either the file list, or one file's whole patch over it
    * (`open`), with `scroll` where the list was left. */
   | { kind: "diff"; view: DiffView | null; scope: DiffScope; loading: boolean; error: string; open: string | null; scroll: number }
-  | { kind: "model"; groups: ProviderGroup[]; recent: string[]; model: string | null; effort: Effort | null; forSession: string | null }
+  /** `auto` is the sheet's own choice of the host-wide automatic effort; it describes the intent,
+   * not what a level field says. Absent on a host that cannot write mod settings. */
+  | { kind: "model"; groups: ProviderGroup[]; recent: string[]; model: string | null; effort: Effort | null; forSession: string | null; auto?: boolean }
   /** Unsent messages kept from earlier connections: what is preserved, what this computer already
    * holds after an import, and any stored text that could not be read (never parsed, never sent). */
   | {
@@ -633,8 +635,12 @@ export function sheet(ui: UI): string {
     : "";
   const groups = s.groups.map((g) => `<div class="sec">${esc(g.label)}${g.usable ? "" : ` · ${esc(t("model.unusable"))}`}</div><div class="list">${g.models.map((m) => opt(m, m.model)).join("")}</div>`).join("");
   const efforts = chosen?.efforts ?? [];
+  // Auto is the mod's host-wide setting, so it only exists where the host can write it and the
+  // chosen model has levels for it to choose between. It comes first, like the dashboard's toggle.
+  const autoShown = efforts.length > 0 && ui.host?.capabilities?.effortAuto === true && !!ui.host.ripple;
+  const autoOn = autoShown && s.auto === true;
   const seg = efforts.length
-    ? `<div class="seg-label"><span>${esc(t("model.effort"))}</span></div><div class="seg">${efforts.map((e) => `<button class="${s.effort === e ? "on" : ""}" data-act="choose-effort" data-effort="${e}">${esc(effortLabel(e))}</button>`).join("")}</div>`
+    ? `<div class="seg-label"><span>${esc(t("model.effort"))}</span></div><div class="seg">${autoShown ? `<button class="${autoOn ? "on" : ""}" data-act="choose-auto">${esc(t("model.auto"))}</button>` : ""}${efforts.map((e) => `<button class="${!autoOn && s.effort === e ? "on" : ""}" data-act="choose-effort" data-effort="${e}">${esc(effortLabel(e))}</button>`).join("")}</div>${autoShown ? `<div class="note">${esc(t("model.autoHint"))}</div>` : ""}`
     : `<div class="seg-label"><span>${esc(t("model.noEffort"))}</span></div>`;
   return `<div class="scrim" data-act="close-sheet"></div><div class="sheet" role="dialog">${head(t("model.title"))}<div class="sbody">${recentHtml}${groups}</div><div class="sfoot">${seg}<div style="height:10px"></div><button class="btn primary" data-act="model-done" ${s.model ? "" : "disabled"}>${esc(t("model.done"))}</button></div></div>`;
 }

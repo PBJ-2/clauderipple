@@ -56,8 +56,9 @@ export interface ServerOptions {
   token: string;
   webDir: string;
   sessions: Sessions;
-  /** `limits` and `modSettings` feed `HostInfo.ripple`; a router without them just leaves it out. */
-  router: Pick<RouterClient, "models" | "status"> & Partial<Pick<RouterClient, "limits" | "modSettings">>;
+  /** `limits` and `modSettings` feed `HostInfo.ripple`; a router without them just leaves it out.
+   * `setEffortAuto` is the one write a phone may ask for (`op: "effort_auto"`). */
+  router: Pick<RouterClient, "models" | "status"> & Partial<Pick<RouterClient, "limits" | "modSettings" | "setEffortAuto">>;
   hostName: string;
   version: string;
   recentCli: () => Promise<RecentSource[]>;
@@ -161,7 +162,10 @@ export class HostServer {
   constructor(opts: ServerOptions) {
     this.opts = opts;
     const desktopProblem = opts.sessions.desktopProblem?.();
-    this.hostInfo = { name: opts.hostName, version: opts.version, routerOk: true, queue: true, capabilities: { sessionFiles: true, folderFiles: true, diffScope: true }, ...(desktopProblem ? { desktopProblem } : {}) };
+    const canWriteAuto = typeof opts.router.setEffortAuto === "function";
+    this.hostInfo = { name: opts.hostName, version: opts.version, routerOk: true, queue: true,
+      capabilities: { sessionFiles: true, folderFiles: true, diffScope: true, ...(canWriteAuto ? { effortAuto: true } : {}) },
+      ...(desktopProblem ? { desktopProblem } : {}) };
     this.http = http.createServer((req, res) => this.serve(req, res));
     this.wss = new WebSocketServer({ noServer: true, maxPayload: FRAME_CAP });
     this.http.on("upgrade", (req, socket, head) => {
@@ -618,6 +622,16 @@ export class HostServer {
       case "models": {
         if (!this.models || Date.now() - this.models.at > 30_000) this.models = { at: Date.now(), data: await this.opts.router.models() };
         return this.models.data;
+      }
+      /** The Mac mod's host-wide setting, not a session's effort: it reaches the mod by its own
+       * poll, and the phones hear the stored value at once through a fresh `ripple` read. */
+      case "effort_auto": {
+        const write = this.opts.router.setEffortAuto;
+        if (typeof write !== "function") throw new Error("this host cannot change the Auto setting");
+        if (typeof op.on !== "boolean") throw new Error("Invalid Auto setting.");
+        const effortAuto = await write.call(this.opts.router, op.on);
+        await this.checkRouter();
+        return { effortAuto };
       }
       case "folders": {
         const cli = await this.opts.recentCli().catch(() => []);

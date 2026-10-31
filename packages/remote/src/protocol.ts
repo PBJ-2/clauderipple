@@ -291,7 +291,10 @@ export interface HostInfo { name: string; version: string; routerOk: boolean; ro
     /** read-only session folder listing and small-file reads */ folderFiles?: boolean;
     /** `op: "diff"` takes a `scope`, so the diff pane can switch between uncommitted work and the
      * branch. Absent on an older host, which always answers with its own order. */
-    diffScope?: boolean };
+    diffScope?: boolean;
+    /** `op: "effort_auto"` can write the mod's host-wide automatic effort. Absent on an older
+     * host: phones must leave the Auto option out then. */
+    effortAuto?: boolean };
   /** the mod's mode, effort range and provider limits; absent on older hosts or when the router is down */
   ripple?: RippleStatus }
 
@@ -328,6 +331,9 @@ export type ClientMsg =
 
 export type ReqOp =
   | { op: "models" }
+  /** The mod's host-wide automatic effort on this Mac. Answers `{ effortAuto: boolean }` with the
+   * value now stored; every phone hears the new state at once through the usual `host` frame. */
+  | { op: "effort_auto"; on: boolean }
   | { op: "upload"; session: string; uploadId: string; offset: number; data: string; done: boolean }
   | { op: "folders" }
   | { op: "browse"; path?: string; hidden?: boolean }
