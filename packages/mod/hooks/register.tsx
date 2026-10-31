@@ -2118,6 +2118,18 @@ export const register: Register = on => {
     void work.catch(error => report($, 'agent instruction', error).catch(() => undefined))
     return next(e)
   })
+  on('session.append', async ($, e, next) => {
+    // A command a worker left running reports its end to that worker's conversation, never to main's
+    // prompt.submit: the panel kept one it had killed as running until main's turn ended (2026-10-31).
+    // A row the model wrote or a tool returned may quote a notice, so neither ends anything.
+    if (e.agentId && (e.message.type === 'user' || e.message.type === 'attachment') && e.door !== 'tool-result' && e.door !== 'tool-message') {
+      const text = e.message.content.map(block => block.type === 'text' ? block.text : '').join('\n')
+      if (text.includes('<task-notification>')) {
+        try { await endBackground($, text) } catch (error) { await report($, 'session.append tasks', error) }
+      }
+    }
+    return next(e)
+  })
   on('prompt.submit', async ($, e, next) => {
     // A background task's notification says it ended, and how (tasks.ts taskEnds).
     if (e.origin.kind === 'task-notification') {

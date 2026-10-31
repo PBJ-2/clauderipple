@@ -855,7 +855,7 @@ test('a background command and a watch are listed from their calls and ended by 
   })
   // The tools' own results as core answers them (claude-code-tools BuiltinToolResults).
   on('tool.call', ($, e) => {
-    if (e.tool === 'Bash') return { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: e.command.includes('dev') ? 'b-dev' : 'b-test' } }
+    if (e.tool === 'Bash') return { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: e.command.includes('dev') ? 'b-dev' : e.command.includes('scrape') ? 'b-scrape' : 'b-test' } }
     if (e.tool === 'Monitor') return { result: { taskId: 'm-log', timeoutMs: 300000 } }
     if (e.tool === 'TaskStop') return { result: { message: 'stopped', task_id: e.task_id!, task_type: 'local_bash' } }
     return { result: {} }
@@ -875,6 +875,12 @@ test('a background command and a watch are listed from their calls and ended by 
   expect(written.find(task => task.id === 'b-test')).toMatchObject({ state: 'failed', endedAt: NOW, summary: 'Background command "npm test" failed with exit code 1' })
   await $.tool.call({ tool: 'TaskStop', task_id: 'b-dev' })
   expect(written.find(task => task.id === 'b-dev')?.state).toBe('stopped')
+  // A worker's command reports its end to that worker's conversation, not to main's prompt.
+  await $.tool.call({ tool: 'Bash', command: 'node scrape.mjs', description: 'Search the web', run_in_background: true, agentId: 'w1' })
+  expect(written.find(task => task.id === 'b-scrape')).toMatchObject({ agentId: 'w1', state: 'running' })
+  const notice = '<task-notification>\n<task-id>b-scrape</task-id>\n<status>failed</status>\n</task-notification>'
+  await $.session.append({ message: { type: 'user', role: 'user', isMeta: true, content: [{ type: 'text', text: notice }] }, door: 'delivery', origin: { kind: 'task-notification' }, uuid: 'u-notice', agentId: 'w1' })
+  expect(written.find(task => task.id === 'b-scrape')).toMatchObject({ state: 'failed', endedAt: NOW })
   // The watch ended unannounced: a Stop that no longer holds it in flight settles it.
   await $.classic.Stop({ stop_hook_active: false, background_tasks: [] })
   expect(written.find(task => task.id === 'm-log')).toMatchObject({ state: 'done', settled: true })
