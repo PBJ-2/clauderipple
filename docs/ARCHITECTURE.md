@@ -473,6 +473,67 @@ Codex catalogs exclude them; the next enabled agent sync removes previously
 owned Jev files, never hand-written ones. Provider configuration and mod options keep
 them available as judge candidates. Tests: `test/admin.test.ts`, `test/model-policy.test.ts`.
 
+### 3c. Native compaction, with only its answering model selected (2026-10-31)
+
+The mod always calls `next(e)` for `session.compact`, including workers and
+`precompute`. Claude Code alone builds the summary prompt, chooses the recent
+messages to keep, and reattaches files. There is no mod-side summarizer or
+transcript serialization. The optional card tidy-up is unchanged; it happens
+before invoking core's compactor, not instead of it.
+
+Measured in CLI **2.1.309**: a compaction appends a final user instruction containing
+`Your task is to create a detailed summary of the conversation so far,` or
+`Your task is to create a detailed summary of this conversation.`. The same CLI
+names each request's class in `x-claude-code-request-class` (`main`, `subagent`,
+`workflow`, `compaction`, `auxiliary`, `side_reply`; `compaction` when the query
+source is `compact`). It sends that header with its gateway hint headers, which
+`CLAUDE_CODE_GATEWAY_HINT_HEADERS` forces and a first-party login turns on by
+default. When the header is present it alone decides, so a person who quotes the
+compaction prompt in a main turn keeps their model. Only a request with no class
+header falls back to the prompt text: `routing.ts` then recognizes the common
+prefix only in the last user message's direct text. Either way only a POST on
+`/v1/messages` can select another compaction model. Unrecognized requests retain
+ordinary routing. A measured core compaction on 2026-10-30 at
+02:49:39 (session `55197cef…`, Opus 5.5) was one Messages call: input 2,057,
+cache read 565,652, cache write 458, output 8,694, `end_turn`. It reused the
+conversation prefix. Haiku 5.5's reported window is 1M, whereas GPT's effective
+475k may be too small for that conversation; a refused target falls back below.
+
+`POST /api/compact-pick {session, model}` registers a RAM-only pick for ten minutes,
+consumed by the first matching main-conversation compaction. The store is bounded
+to 10,000 sessions. The existing admin Host/Origin checks apply. A card press
+registers its exact model, including `session` (which overrides the default with
+no swap). Typed and automatic compactions register nothing. Without a pick the
+router reads the saved mod `compactModel`; absent or `session` means no swap.
+The normalized UI default is not treated as an explicitly stored choice. Failed
+registration is reported by the mod but never prevents core compaction.
+
+Workers are excluded by `x-claude-code-agent-id`, the existing CLI subagent signal
+(§4a); they neither consume main's pick nor inherit its compaction default.
+Session identity is the same on both sides: the 2.1.309 binary's `session.id`
+handler calls `Rpe(...).id`, whose definition returns `String(V())`; the request
+header builder also sets `X-Claude-Code-Session-Id` from `V()`. The generated API
+types call this the transcript file's name (§3a's captured header measurement).
+Precompute is allowed through unchanged and, when it issues the recognized API
+request, follows the same router selection. A core-reused precomputed summary has
+no new API request to intercept, so the mod clears its pick (`model: null`) once
+core's compaction settles, used or not; otherwise it would wait up to ten minutes
+for the next compaction. The router does not invalidate core's precompute or
+change its behavior.
+
+Selected ids go through ordinary route resolution, without scanning historical
+routing markers to override the selection. Native Claude ids keep caller auth;
+declared/routed ids use their ordinary adapters, effort and compatibility rules.
+Compaction gains no identity, appended instructions or image hints. On non-2xx or
+connect/dispatch failure **before response commitment**, the existing deferred
+error-response boundary restores the original body and re-resolves its original
+model, exactly once. A started response is never replaced. The original destination
+still returns its own failure if it also fails. Both compaction attempts are kept
+in `requests.jsonl` (`purpose: compaction`, `compact→<model>` and fallback/error
+notes); router.log names the failed override and final completion. The failed
+attempt's upstream error excerpt is redacted by the existing logging rules (§5).
+Tests: `packages/router/test/compaction.test.ts` and the mod's engine tests.
+
 ## 4. Provider adapters
 
 ### Artificial Analysis model scores (2026-10-10)

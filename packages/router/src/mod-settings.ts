@@ -143,7 +143,13 @@ export function writeAutoCompactWindow(tokens: number | null): void {
 }
 
 type StoredModSettings = Omit<ModSettingsSnapshot, "compactAt">;
-const modSettingsCache = new Map<string, { version: string; snapshot: StoredModSettings }>();
+const modSettingsCache = new Map<string, { version: string; snapshot: StoredModSettings; compactModel: string | undefined }>();
+
+/** Absence is not the UI's normalized Haiku default: an unset compaction target changes nothing. */
+export function readCompactModel(home = homeDir()): string | undefined {
+  readModRoutingSettings(home);
+  return modSettingsCache.get(path.join(home, "mod-settings.json"))?.compactModel;
+}
 
 /** Worker authorization needs only this store, never Claude Code's compaction/ownership files. */
 export function readModRoutingSettings(home = homeDir()): StoredModSettings {
@@ -168,7 +174,8 @@ export function readModRoutingSettings(home = homeDir()): StoredModSettings {
     settings: normalizeSettings(stored.settings), revision: stored.revision, stored: true,
     ...(hadRetiredRouting(stored.settings) ? { legacy: true } : {}),
   };
-  modSettingsCache.set(file, { version, snapshot });
+  const compactModel = typeof stored.settings.compactModel === "string" && stored.settings.compactModel.trim() ? stored.settings.compactModel.trim() : undefined;
+  modSettingsCache.set(file, { version, snapshot, compactModel });
   if (modSettingsCache.size > 32) modSettingsCache.delete(modSettingsCache.keys().next().value!);
   return structuredClone(snapshot);
 }

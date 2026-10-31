@@ -293,6 +293,7 @@ proxy
       modelHealth: () => proxy.modelHealth.snapshot(),
       version: VERSION,
       requests,
+      compactPick: (session, model) => model === null ? proxy.compactPicks.clear(session) : proxy.compactPicks.set(session, model),
       chatgpt: () => ({
         quota: proxy.chatgptRateLimits,
         auth: proxy.chatgptAuthStatus(),

@@ -16,7 +16,6 @@ import type { Spawn, WorkerFix } from './worker'
 import { afterPing, cacheMemoryKey, CACHE_MEMORY_PREFIX, laterMemo, liveContextTokens, nextMemo, restoreFromResume, savedMemory, shouldPing, staleMemory } from './cache'
 import { HEAVY_PERCENT, bandPriority, claudeLimitsFrom, claudeScopedFrom, coldAlert, contextWindow, countsPrecisely, modelCompactWindow, hotAlert, hottest, hotWindowMoved, keptAlert, routerLimitItems, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
 import type { ScopedLimit } from './session'
-import { COMPACT_SYSTEM, compactPaths, compactResult, serializeTranscript } from './compact'
 import { QUICK_PROMPT, wrapForNewChat } from './handoff'
 import { addTask, endTasks, endWithAgent, settleTasks, stopTask, taskEnds, taskStarted } from './tasks'
 import { addAgentStep, addJudge, addPrompt, addRequest, addWarm, addWorker, emptyStats, formatStats, sentEffort } from './stats'
@@ -2415,6 +2414,8 @@ export const register: Register = on => {
       try {
         if (!e.agentId && e.trigger !== 'precompute' && 'messages' in result) {
           await update($, compactions, n => n + 1)
+          // Only a successful replacement forgets the mode's old-context bookkeeping.
+          if (await read($, modeNoted) !== null) await update($, modeNoted, () => null)
           // The count was of the context this compaction replaced: make it stale for a count already
           // running too, which the epoch and run catch (2026-10-25).
           contextEpoch += 1
@@ -2425,39 +2426,25 @@ export const register: Register = on => {
       } catch (error) { await report($, 'session.compact count', error) }
       return result
     }
-    try {
-      const language = await read($, lang)
-      // The summary drops what was noted; the note itself goes with every prompt while eager
-      // (modes.ts eagerNote), so this is bookkeeping only.
-      if (!e.agentId && e.trigger !== 'precompute' && await read($, modeNoted) !== null) await update($, modeNoted, () => null)
-      const setting = (await currentSettings($)).compactModel
-      const choice = !e.agentId && e.trigger === 'manual' ? compactOnce ?? setting : setting
-      if (!e.agentId && e.trigger === 'manual') compactOnce = null
-      if (e.agentId || choice === 'session') return next(e).then(counted)
-      if (e.trigger === 'precompute') return { skip: t(language, 'commands.compactSkip') }
-      const messages = e.messages.length ? e.messages : await $.session.messages()
-      const transcript = serializeTranscript(messages)
-      if (!transcript) throw new Error(t(language, 'toasts.transcriptEmpty'))
-      // A chosen model may carry its effort (`id@effort`), as a worker's does: the router takes the
-      // effort on its own field, so the two are split here.
-      const at = choice.lastIndexOf('@')
-      const effort = at > 0 && EFFORTS.includes(choice.slice(at + 1) as Effort) ? choice.slice(at + 1) as Effort : 'medium'
-      const answer = await $.model.complete({ model: at > 0 ? choice.slice(0, at) : choice, system: COMPACT_SYSTEM, prompt: transcript + (e.instructions ? `\n\nKeep especially:\n${e.instructions}` : ''), maxTokens: 20000, timeoutMs: 240000, effort })
-      if (!answer.isAnswered || answer.text.trim().length <= 200) throw new Error(t(language, 'toasts.summaryEmpty'))
-      const files: { path: string; text: string }[] = []
-      for (const path of compactPaths(messages)) {
-        try { files.push({ path, text: await $.fs.read(path) }) } catch { /* Missing or too large: leave it out. */ }
-      }
-      await update($, cache, () => null)
-      await update($, context, () => null)
-      if (await read($, kept)) await update($, kept, () => null)
-      await update($, resultCard, () => ({ stage: 'compacted' }))
-      return counted(compactResult(answer.text, files))
-    } catch (error) {
-      await $.ui.toast(t(await read($, lang), 'toasts.compactFallback'))
-      await report($, 'session.compact', error)
+    // The card's one-shot choice is registered for the same session id that /api/requests uses.
+    // Typed/automatic compactions read the shared default in the router, not here.
+    const choice = !e.agentId && e.trigger === 'manual' ? compactOnce : null
+    const pick = async (model: string | null): Promise<void> => {
+      try {
+        const response = await $.http.fetch(`${await adminUrl($)}/api/compact-pick`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ session: await $.session.id(), model }) })
+        if (!response.ok) throw new Error(`compact pick HTTP ${response.status}`)
+      } catch (error) { await report($, 'session.compact pick', error).catch(() => undefined) }
     }
-    return counted(await next(e))
+    if (choice !== null) {
+      compactOnce = null
+      await pick(choice)
+    }
+    // Core owns the prompt, recent-message preservation and file reattachment, including precompute.
+    // Its ahead-of-time summary uses the same router default; it must never be skipped by this mod.
+    // A pick core never asked for (it reused that precompute) is forgotten, not left to the next
+    // compaction (2026-10-31).
+    try { return await next(e).then(counted) }
+    finally { if (choice !== null) await pick(null) }
   })
   on('command.run', { command: 'ripple' }, async ($, e, next) => {
     try {

@@ -34,7 +34,7 @@ export type RequestRecord = {
   messageId?: string;
   upstreamCalled?: false;
   refusal?: "thread-continue" | "drain" | "unroutable" | "no-account" | "unknown-provider" | "web-search-unsupported" | "prompt-incompatible";
-  purpose?: "auto-mode-classifier" | "web-search" | "web-fetch";
+  purpose?: "auto-mode-classifier" | "web-search" | "web-fetch" | "compaction";
   requestedTier?: string;
   servedTier?: string;
   stopReason?: string;

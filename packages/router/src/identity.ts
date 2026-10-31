@@ -20,11 +20,11 @@ export type IdentityOptions = {
 export type PromptAdditions = { identity: boolean; instructionsAppend?: string; imageHint?: string };
 
 /**
- * What a routed request's system prompt may gain on its way to a provider. An Auto mode classifier
- * request gains nothing: its prompt is the security check itself (ARCHITECTURE §2).
+ * What a routed request's system prompt may gain on its way to a provider. Auto mode classifiers
+ * and core compaction gain nothing: their prompts belong entirely to Claude Code.
  */
 export function promptAdditions(kind: RequestKind, provider: { identity?: boolean; instructionsAppend?: string }, imageHint?: string): PromptAdditions {
-  if (kind === "auto-mode-classifier") return { identity: false };
+  if (kind === "auto-mode-classifier" || kind === "compaction") return { identity: false };
   const addendum = provider.instructionsAppend?.trim();
   return {
     identity: provider.identity ?? true,

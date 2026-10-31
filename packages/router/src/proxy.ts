@@ -28,8 +28,8 @@ import { BOOTSTRAP_PATH, injectBootstrap } from "./bootstrap.ts";
 import { readWorkerLadder, type WorkerLadderRoute } from "../../mod/hooks/ladder.ts";
 import { routingSettings } from "../../mod/hooks/modes.ts";
 import { candidateKey, isAllowed } from "../../mod/hooks/settings.ts";
-import { readModRoutingSettings } from "./mod-settings.ts";
-import { THREAD_UNSUPPORTED, continuesTranslatedTurn, decide, effortOf, requestKind, resolve, rewriteBody, stripThreadFields, threadDecision, type RequestKind, type Resolved } from "./routing.ts";
+import { readCompactModel, readModRoutingSettings } from "./mod-settings.ts";
+import { CompactPicks, THREAD_UNSUPPORTED, continuesTranslatedTurn, decide, effortOf, requestKind, resolve, rewriteBody, stripThreadFields, threadDecision, type RequestKind, type Resolved } from "./routing.ts";
 import { defaultAgentDir, imageLine, withAgentAliases } from "./agents.ts";
 import { forwardCompatibleHeader, resolveCompatibleCaps, sanitizeForCompatible } from "./compat.ts";
 import { applyIdentityToAnthropicBody, promptAdditions } from "./identity.ts";
@@ -279,6 +279,7 @@ export class Proxy {
   private readonly thinkingOrigins = new ThinkingOrigins();
   readonly providerHealth = new ProviderHealth();
   readonly modelHealth = new ModelHealth();
+  readonly compactPicks = new CompactPicks();
   private readonly healthConfig = new Map<string, { config: string; credentials: string; keys: Record<string, string> }>();
   /** Agent/session-scoped spawn snapshots survive compaction, never shared by model id. */
   private readonly workerLadders = new Map<string, WorkerLadderRoute>();
@@ -832,6 +833,10 @@ export class Proxy {
     const agentId = req.headers["x-claude-code-agent-id"];
     const subagent = typeof agentId === "string" && agentId.length > 0;
     if (subagent) record.subagent = true;
+    // The CLI's own name for the request (`main`, `subagent`, `compaction`, …), sent with its gateway
+    // hint headers (CLI 2.1.309); requestKind trusts it over the prompt text.
+    const classHeader = req.headers["x-claude-code-request-class"];
+    const requestClass = typeof classHeader === "string" && classHeader ? classHeader : undefined;
     let observedUsage: RequestUsage | undefined;
     let observedStopReason: string | undefined;
     // Set once a Google turn came back unwritten (a prompt refusal or no model capacity), which allows
@@ -860,7 +865,7 @@ export class Proxy {
       if (failed) this.stats.failed++;
       else this.stats.completed++;
       const ms = Date.now() - t0;
-      log.info(`${tag} ${method} ${path} -> ${status} ${bytes}B ${(ms / 1000).toFixed(1)}s${record.credential ? ` credential=${record.credential}` : ""}${note ? " " + note : ""}`);
+      log.info(`${record.purpose === "compaction" ? "COMPACTION " : ""}${tag} ${method} ${path} -> ${status} ${bytes}B ${(ms / 1000).toFixed(1)}s${record.credential ? ` credential=${record.credential}` : ""}${note ? " " + note : ""}`);
       if (isLoggedRequest) {
         const numericStatus = Number(status);
         const usage = extra?.usage ?? observedUsage;
@@ -935,7 +940,7 @@ export class Proxy {
         json = null;
       }
     }
-    const kind: RequestKind = json && isApiHost && path.startsWith("/v1/messages") ? requestKind(json, pathname) : "turn";
+    const kind: RequestKind = json && isApiHost && path.startsWith("/v1/messages") ? requestKind(json, pathname, method, requestClass) : "turn";
     // A WebSearch arrives as its own request aimed at ANTHROPIC_SMALL_FAST_MODEL, recognised by the
     // forced `web_search` server tool rather than by its model id. Recognise it whether or not a
     // backend is configured: `cfg.webSearch` decides who answers it, but knowing that this is a
@@ -996,45 +1001,77 @@ export class Proxy {
         log.warn(`web fetch via ${settings.provider}: provider unusable; leaving the request alone`);
       }
     }
+    let compactModel: string | undefined;
+    if (kind === "compaction" && method === "POST") {
+      record.purpose = "compaction";
+      try {
+        compactModel = this.compactPicks.take(record.session, subagent, () => readCompactModel(this.deps.home));
+      } catch (error) {
+        log.warn(`compaction: saved settings unavailable; keeping session model (${(error as Error).message})`);
+      }
+    }
+    type Override = { route: Resolved | null; model: string; label: string; purpose: "web-fetch" | "compaction"; refusal?: string | null };
+    const compactDecision = compactModel ? decide(compactModel, {}, cfg, "compaction") : null;
+    const override: Override | null = compactModel && compactDecision
+      ? { ...compactDecision, model: compactModel, label: `compact→${compactModel}`, purpose: "compaction" }
+      : fetchRoute ? { route: fetchRoute, model: fetchRoute.model, label: `web fetch via ${fetchRoute.provider}`, purpose: "web-fetch" } : null;
     const originalBody = body;
-    const originalJson = fetchRoute ? structuredClone(json) : null;
+    const originalJson = override ? structuredClone(json) : null;
     const originalRecord = { ...record };
     const response = res;
     const complete = finish;
-    // Every provider still uses the ordinary path below. Only this opt-in side request may
-    // withhold an error response and retry the original destination, before the first byte.
-    const run = async (fetchTarget: Resolved | null): Promise<void> => {
+    // Both overrides use ordinary adapters and may retry only before a response is committed.
+    const run = async (override: Override | null): Promise<void> => {
+      const fetchTarget = override?.route ?? null;
       let attemptDone = false;
-      const res = fetchTarget ? deferErrorResponse(response, () => attemptDone) : response;
+      const res = override ? deferErrorResponse(response, () => attemptDone) : response;
       const finish: typeof complete = (status, bytes, note, failed, extra) => {
         if (attemptDone) return;
-        if (fetchTarget && !response.headersSent && !response.destroyed && !req.aborted && (Number(status) >= 400 || !Number.isFinite(Number(status)) || Number(status) <= 0)) {
+        if (override && !response.headersSent && !response.destroyed && !req.aborted && (Number(status) < 200 || Number(status) >= 300 || !Number.isFinite(Number(status)))) {
           attemptDone = true;
           // A later local refusal must not claim that no upstream was called on this request.
           searchAttempted ||= extra?.upstreamCalled !== false;
-          log.warn(`web fetch via ${fetchTarget.provider}: ${note ?? status}; falling back to original destination`);
+          const failure = `${override.label}: ${note ?? status}`;
+          log.warn(`${failure}; falling back to original destination`);
+          if (override.purpose === "compaction") {
+            this.deps.requests.add({ ...record, id: crypto.randomUUID(), at: new Date(t0).toISOString(), ms: Date.now() - t0,
+              status: Number.isFinite(Number(status)) ? Number(status) : status, ok: false, note: `${failure}; fallback` });
+          }
           body = originalBody;
           json = structuredClone(originalJson);
-          record = { ...originalRecord, purpose: "web-fetch" };
-          unwrittenFallbackNote = `web fetch via ${fetchTarget.provider} failed; original destination fallback`;
+          record = { ...originalRecord, purpose: override.purpose };
+          observedUsage = undefined;
+          observedStopReason = undefined;
+          unwrittenFallbackNote = `${failure}; original destination fallback`;
           void run(null).catch((error: Error) => {
-            complete("502", 0, `web fetch fallback error: ${error.message}`);
+            complete("502", 0, `${override.label} fallback error: ${error.message}`);
             if (!response.headersSent) response.writeHead(502).end();
             else response.destroy();
           });
           return;
         }
-        if (!fetchTarget) { complete(status, bytes, note, failed, extra); return; }
-        complete(status, bytes, [`web fetch via ${fetchTarget.provider}`, note].filter(Boolean).join("; "), failed ?? (!!note || Number(status) >= 400), extra);
+        if (!override) { complete(status, bytes, note, failed, extra); return; }
+        complete(status, bytes, [override.label, note].filter(Boolean).join("; "), failed ?? (!!note || Number(status) >= 400), extra);
       };
-      if (fetchTarget && json) {
-        record.purpose = "web-fetch";
+      try {
+      if (override?.purpose === "compaction" && json && !fetchTarget && !override.refusal) {
+        // A native Claude id has no outbound provider: retain the caller's authentication and prompt.
+        const [targetModel, effort] = override.model.split("@");
+        json.model = targetModel;
+        if (effort) json.output_config = { ...(json.output_config as Record<string, unknown> | undefined), effort };
+        body = Buffer.from(JSON.stringify(json));
+        record.target = targetModel!;
+      }
+      if (override && json) {
+        record.purpose = override.purpose;
+      }
+      if (override?.purpose === "web-fetch" && json) {
         const output = { ...(json.output_config as Record<string, unknown> | undefined) };
         delete output.effort;
         json.output_config = output;
       }
-      const decision = fetchTarget
-        ? { route: fetchTarget, refusal: null }
+      const decision = override
+        ? { route: fetchTarget, refusal: override.refusal ?? null }
         : json ? decide(model, json, cfg, kind) : { route: null, refusal: null };
       let resolved = decision.route;
       if (!fetchTarget && subagent && resolved && json) {
@@ -1079,7 +1116,7 @@ export class Proxy {
       record = {
         ...record,
         source,
-        target: source,
+        target: override?.purpose === "compaction" && !fetchTarget ? String(json?.model ?? source) : source,
         stream: json?.stream === true,
       };
       const requestedEffort = effortOf(json ?? {});
@@ -1686,7 +1723,7 @@ export class Proxy {
         // with `x-should-retry: false` before the headers go out, and only its body says whether a
         // 429 is exhausted or an ordinary rate limit (#89). A bootstrap response is never a model
         // turn and is forwarded as it arrives.
-        if (status === 403 || (!isBootstrap && (status === 400 || status === 402 || status === 429))) {
+        if (override?.purpose === "compaction" && (status < 200 || status >= 300) || status === 403 || (!isBootstrap && (status === 400 || status === 402 || status === 429))) {
           bufferBody(upRes, ERROR_HEAD_MAX).then((whole) => onUpstreamJudged(upRes, status, whole)).catch((e: Error) => {
             log.warn(`upstream ${status}: could not read the body: ${e.message}`);
             finish(String(status), 0, `upstream ${status}: body read failed`);
@@ -1750,6 +1787,10 @@ export class Proxy {
         // Nothing has been written to the client yet, so a refused credential can still be replaced
         // and the client answered on its first ask. Only here: once the answer starts flowing the
         // turn is committed, because replacing a half-sent stream splices two answers together.
+        if (override?.purpose === "compaction" && (status < 200 || status >= 300)) {
+          finish(String(status), 0, `upstream ${status}: ${redactErrorText(errBody, [...errorSecrets], 300)}`, true);
+          return;
+        }
         const retry = status >= 400 ? nextCredential(status, errBody) : null;
         if (retry) {
           const credentials = credentialCandidates;
@@ -1917,8 +1958,13 @@ export class Proxy {
       };
 
       send(headers);
+      } catch (error) {
+        finish("502", 0, `request dispatch error: ${(error as Error).message}`);
+        if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" }).end(JSON.stringify({ type: "error", error: { type: "api_error", message: "request dispatch failed" } }));
+        else res.destroy();
+      }
     };
-    await run(fetchRoute);
+    await run(override);
   }
 
   /**
@@ -2228,7 +2274,7 @@ function deferErrorResponse(response: http.ServerResponse, discarded: () => bool
     get(target, key) {
       if (key === "writeHead") return (...args: unknown[]) => {
         if (discarded()) return guarded;
-        error = typeof args[0] === "number" && args[0] >= 400 && !target.headersSent;
+        error = typeof args[0] === "number" && (args[0] < 200 || args[0] >= 300) && !target.headersSent;
         return error ? guarded : Reflect.apply(target.writeHead, target, args);
       };
       if (key === "write" || key === "end" || key === "flushHeaders" || key === "destroy") return (...args: unknown[]) => {

@@ -130,6 +130,8 @@ export type AdminDeps = {
    */
   instance?: { installId: string | null; pid: number };
   requests: RequestLog;
+  /** Registers a main conversation's RAM-only, one-shot compaction model; null forgets it. */
+  compactPick?: (session: string, model: string | null) => void;
   /** Optional: chatgpt providers' latest rate-limit snapshot and credential status. */
   chatgpt?: () => {
     quota: Record<string, Record<string, unknown> | null>;
@@ -2104,6 +2106,21 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
       // One shape for every provider whose quota can be read, for the status bar's limits row.
       if (pathname === "/api/limits" && method === "GET") {
         sendJson(res, 200, await buildLimits(deps));
+        return;
+      }
+      if (pathname === "/api/compact-pick" && method === "POST") {
+        let input: unknown;
+        try { input = JSON.parse((await readBody(req, 4096, new Error("compact pick too large"))).toString("utf8")); }
+        catch { sendJson(res, 400, { error: "invalid compact pick" }); return; }
+        const value = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+        if (Object.keys(value).some(key => key !== "session" && key !== "model") ||
+            typeof value.session !== "string" || !/^[\w-]{1,128}$/.test(value.session) ||
+            value.model !== null && (typeof value.model !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]*(?:@[a-z]+)?$/.test(value.model) || value.model.length > 256)) {
+          sendJson(res, 400, { error: "expected {session, model}" }); return;
+        }
+        if (!deps.compactPick) { sendJson(res, 501, { error: "compact picks unavailable" }); return; }
+        deps.compactPick(value.session, value.model);
+        sendJson(res, 200, { ok: true });
         return;
       }
       if (pathname === "/api/mod-settings" && method === "GET") {

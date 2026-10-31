@@ -1839,41 +1839,39 @@ test('the flame turns keep-warm off for this chat only; Settings stay as they ar
   expect(b.router().settings.keepWarm).toBe(true)
 })
 
-test('Haiku compaction returns replacement messages and forwards the keep note', async ($, on) => {
-  boundaries(on)
+test('typed compaction passes core input and output unchanged, with no model call or pick POST', async ($, on) => {
+  boundaries(on, { compactModel: 'gpt-6.1-sol@high' })
+  const urls = http(on)
+  const calls = judgeStub(on)
+  const input = { trigger: 'manual' as const, messages: MESSAGES, instructions: 'Keep file paths.' }
+  let engine = 0
+  on('session.compact', ($, e) => { engine++; expect(e).toMatchObject(input); return { messages: MESSAGES } })
+  await start($)
+  const out = await $.session.compact(input)
+  expect(out.messages).toEqual(MESSAGES)
+  expect(engine).toBe(1)
+  expect(calls).toEqual([])
+  expect(urls.some(url => url.endsWith('/api/compact-pick'))).toBe(false)
+})
+
+for (const failure of ['http', 'throw'] as const) test(`card pick ${failure} failure reports and still calls core once`, async ($, on) => {
+  const b = boundaries(on)
+  on('http.fetch', { url: /\/api\/compact-pick$/ }, () => {
+    if (failure === 'throw') throw new Error('router unavailable')
+    return { value: { ok: false, status: 503, headers: {}, text: '' } }
+  })
   http(on)
-  const calls = judgeStub(on, 'Verified continuation summary. '.repeat(20))
+  const calls = judgeStub(on)
   let engine = 0
   on('session.compact', () => { engine++; return { messages: MESSAGES } })
+  on('command.run', { command: 'compact' }, async () => { await $.session.compact({ trigger: 'manual', messages: MESSAGES }); return { text: 'done' } })
   await start($)
-  const out = await $.session.compact({ trigger: 'manual', messages: MESSAGES, instructions: 'Keep file paths.' })
-  expect(calls[0]).toMatchObject({ model: 'claude-haiku-5-5', maxTokens: 20000, timeoutMs: 240000, effort: 'medium' })
-  expect(calls[0]?.prompt).toContain('Keep file paths.')
-  expect(out.messages?.[0]?.text.includes('Continuation record')).toBe(true)
-  expect(engine).toBe(0)
-})
-
-test('compaction reattaches the current file, not the transcript result', async ($, on) => {
-  const b = boundaries(on)
-  b.files.set('/work/a.ts', 'current file content')
-  http(on)
-  judgeStub(on, 'Verified continuation summary. '.repeat(20))
-  await start($)
-  const messages: SessionMessage[] = [{ role: 'assistant', text: '', toolUses: [{ tool_use_id: 'r', tool: 'Read', input: { file_path: '/work/a.ts' }, text: 'old content' }] }]
-  const out = await $.session.compact({ trigger: 'manual', messages })
-  expect(out.messages?.[0]?.text).toContain('/work/a.ts\n```\ncurrent file content\n```')
-  expect(out.messages?.[0]?.text).not.toContain('old content')
-})
-
-test('the compaction model is the chosen one, with an @effort split off for the router', async ($, on) => {
-  boundaries(on, { compactModel: 'gpt-6.1-sol@high' })
-  http(on)
-  const calls = judgeStub(on, 'Verified continuation summary. '.repeat(20))
-  on('session.compact', () => ({ messages: MESSAGES }))
-  await start($)
-  const out = await $.session.compact({ trigger: 'manual', messages: MESSAGES })
-  expect(calls[0]).toMatchObject({ model: 'gpt-6.1-sol', effort: 'high' })
-  expect(out.messages?.[0]?.text.includes('Continuation record')).toBe(true)
+  const ui = await band($, 'desktop')
+  await ui.press({ key: 'compact' }); await ui.press({ key: 'tidy' })
+  await ui.input({ key: 'note', text: 'keep' })
+  expect(engine).toBe(1); expect(calls).toEqual([])
+  expect(b.logs.some(log => log.includes('session.compact pick'))).toBe(true)
+  await ui.unmount()
 })
 
 test('compact card warns only for an expired known cache and session compactor', async ($, on) => {
@@ -1901,8 +1899,15 @@ test('compact card warns only for an expired known cache and session compactor',
 // 2026-10-31: the card's model applies once, including after its tidy turn.
 for (const tidyFirst of [false, true]) test(`compact card model is one-shot, tidy ${tidyFirst}`, async ($, on) => {
   const b = boundaries(on, { compactModel: 'claude-haiku-5-5', compactModels: ['claude-opus-5-5', 'session'] })
+  const picks: unknown[] = []
+  on('http.fetch', { url: /\/api\/compact-pick$/ }, ($, e) => {
+    expect(e.url).toBe('http://127.0.0.1:9992/api/compact-pick')
+    expect(e.init?.method).toBe('POST')
+    picks.push(JSON.parse(e.init?.body ?? '{}'))
+    return { value: { ok: true, status: 200, headers: {}, text: '{}' } }
+  })
   http(on)
-  const calls = judgeStub(on, 'Verified continuation summary. '.repeat(20))
+  const calls = judgeStub(on)
   let native = 0
   on('session.compact', () => { native++; return { messages: MESSAGES } })
   on('command.run', { command: 'compact' }, async () => { await $.session.compact({ trigger: 'manual', messages: MESSAGES }); return { text: 'done' } })
@@ -1917,17 +1922,20 @@ for (const tidyFirst of [false, true]) test(`compact card model is one-shot, tid
     await $.turn.complete({ turnId: 'tidy-choice', answer: 'done', reason: 'answer', durationMs: 10, isAborted: false })
     await b.clock.advance(10)
   }
-  expect(calls[0]?.model).toBe('claude-opus-5-5')
+  // The pick goes before core's compaction and is forgotten after it, used or not.
+  expect(picks).toEqual([{ session: 'session-test', model: 'claude-opus-5-5' }, { session: 'session-test', model: null }])
   await $.session.compact({ trigger: 'manual', messages: MESSAGES })
-  expect(calls[1]?.model).toBe('claude-haiku-5-5')
-  expect(native).toBe(0)
+  expect(picks.length).toBe(2)
+  expect(calls).toEqual([])
+  expect(native).toBe(2)
   await ui.press({ key: 'dismiss' })
   await ui.press({ key: 'compact' })
   expect(JSON.stringify(await ui.drawn())).toContain('[Claude Haiku]')
   await ui.press({ key: 'compact-model-session' })
   if (tidyFirst) await ui.press({ key: 'tidy' })
   await ui.input({ key: 'note', text: 'keep' })
-  expect(native).toBe(1)
+  expect(native).toBe(3)
+  expect(picks).toEqual([{ session: 'session-test', model: 'claude-opus-5-5' }, { session: 'session-test', model: null }, { session: 'session-test', model: 'session' }, { session: 'session-test', model: null }])
   await ui.unmount()
 })
 
@@ -2197,20 +2205,20 @@ test('a summary that answers after a clear is not published', async ($, on) => {
   expect(writes.at(-1)?.percent).toBe(20)
 })
 
-test('failed Haiku compaction falls back; precompute skips; subagent stays with engine', async ($, on) => {
-  const b = boundaries(on)
-  http(on)
-  const calls = judgeStub(on, 'too short')
+test('auto, precompute and worker compaction always use core and POST no pick', async ($, on) => {
+  boundaries(on)
+  const urls = http(on)
+  const calls = judgeStub(on)
   let engine = 0
   on('session.compact', () => { engine++; return { messages: MESSAGES } })
   await start($)
-  await $.session.compact({ trigger: 'manual', messages: MESSAGES })
-  const skipped = await $.session.compact({ trigger: 'precompute', messages: MESSAGES })
+  await $.session.compact({ trigger: 'auto', messages: MESSAGES })
+  const computed = await $.session.compact({ trigger: 'precompute', messages: MESSAGES })
   await $.session.compact({ trigger: 'auto', messages: MESSAGES, agentId: 'worker' })
-  expect(engine).toBe(2)
-  expect(calls.length).toBe(1)
-  expect('skip' in skipped).toBe(true)
-  expect(b.toasts.some(t => t.includes('session compactor'))).toBe(true)
+  expect(engine).toBe(3)
+  expect(calls).toEqual([])
+  expect(computed.messages).toEqual(MESSAGES)
+  expect(urls.some(url => url.endsWith('/api/compact-pick'))).toBe(false)
 })
 
 test('the Compact icon counts the main chat\'s finished compactions; /clear zeroes it', async ($, on) => {

@@ -17,7 +17,47 @@ import { isWebFetchRequest } from "./webfetch.ts";
 import { webSearchQuery } from "./websearch.ts";
 
 /** What a request is, decided once from its body and path. The order below is the precedence. */
-export type RequestKind = "web-search" | "web-fetch" | "auto-mode-classifier" | "turn";
+export type RequestKind = "web-search" | "web-fetch" | "auto-mode-classifier" | "compaction" | "turn";
+
+/**
+ * CLI 2.1.309 names each request's class in `x-claude-code-request-class` (`compaction` when its
+ * query source is `compact`) whenever its gateway hint headers are on, which they are for a
+ * first-party login. That header is the answer when present: a person's own message quoting the
+ * compaction prompt is a `main` turn and must keep its model. The prompt text, in both phrasings
+ * ("of the conversation so far," / "of this conversation."), decides only for a CLI that sends no
+ * class at all (2026-10-31).
+ */
+export function isCompactionRequest(request: Record<string, unknown>, requestClass?: string): boolean {
+  if (requestClass !== undefined) return requestClass === "compaction";
+  const messages = request.messages as Message[] | undefined;
+  if (!Array.isArray(messages)) return false;
+  const content = messages.findLast(message => message?.role === "user")?.content;
+  const text = typeof content === "string" ? content : Array.isArray(content)
+    ? content.filter(block => block?.type === "text").map(block => block.text ?? "").join("\n") : "";
+  return text.includes("Your task is to create a detailed summary of");
+}
+
+/** Main-conversation picks only; workers must neither consume a pick nor inherit the default. */
+export class CompactPicks {
+  private readonly picks = new Map<string, { model: string; expires: number }>();
+  private readonly now: () => number;
+  constructor(now: () => number = Date.now) { this.now = now; }
+  set(session: string, model: string): void {
+    for (const [id, pick] of this.picks) if (pick.expires <= this.now()) this.picks.delete(id);
+    this.picks.delete(session);
+    this.picks.set(session, { model, expires: this.now() + 600_000 });
+    if (this.picks.size > 10_000) this.picks.delete(this.picks.keys().next().value!);
+  }
+  /** A compaction that ended without a request (core reused its precompute) must not leave its pick to the next one. */
+  clear(session: string): void { this.picks.delete(session); }
+  take(session: string | undefined, subagent: boolean, defaultModel: () => string | undefined): string | undefined {
+    if (subagent) return undefined;
+    const pick = session ? this.picks.get(session) : undefined;
+    if (session) this.picks.delete(session);
+    const model = pick && pick.expires > this.now() ? pick.model : defaultModel();
+    return model === "session" ? undefined : model;
+  }
+}
 
 export type Resolved = {
   provider: string;
@@ -35,12 +75,13 @@ export type Resolved = {
   ladderPick?: string;
 };
 
-export function requestKind(json: unknown, pathname: string): RequestKind {
+export function requestKind(json: unknown, pathname: string, method = "POST", requestClass?: string): RequestKind {
   if (!json || typeof json !== "object") return "turn";
   const request = json as Record<string, unknown>;
   if (pathname === "/v1/messages" && webSearchQuery(request) !== null) return "web-search";
   if (pathname === "/v1/messages" && isWebFetchRequest(request)) return "web-fetch";
   if (isAutoModeClassifier(request)) return "auto-mode-classifier";
+  if (method === "POST" && pathname === "/v1/messages" && isCompactionRequest(request, requestClass)) return "compaction";
   return "turn";
 }
 
