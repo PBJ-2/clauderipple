@@ -9,10 +9,10 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On, RenderElement, RenderPropsOf } from 'claude-code'
 
-import type { AgentRec, Settings, Skin, StatusRequest } from '../types'
+import type { AgentRec, BgTask, Settings, Skin, StatusRequest } from '../types'
 import { STRINGS } from '../hooks/i18n'
 import { normalizeSettings } from '../hooks/settings'
-import { cardRows, renderAgents, talkOf, timeCells } from '../hooks/ui/agents'
+import { DONE_SHOWN, cardRows, renderAgents, talkOf, timeCells } from '../hooks/ui/agents'
 import { chOf, displayWidth } from '../hooks/ui/theme'
 import { commandLine, editLines, runDiff, runSummary, shortPath, toolDetail } from '../hooks/ui/tools'
 import { renderAlert } from '../hooks/ui/alerts'
@@ -673,7 +673,7 @@ test('the Agents pane draws live, finished and empty', async ($, on) => {
 test('the Agents pane draws forty agents at once, and a record missing its title or type', async ($, on) => {
   // 2026-10-23: a session of dozens of workers left the pane on the engine's "Nothing to show yet":
   // the list's capsule asked for a sea taller than the 4096 px an Svg may be, and the engine refused
-  // the whole tree. The store keeps the latest 40.
+  // the whole tree. The store keeps the latest 40 finished; the list draws thirty cards of them.
   const forty: AgentRec[] = Array.from({ length: 40 }, (_, i): AgentRec => ({ ...AGENTS[0]!, id: 'w' + i, description: 'cheongju:송수아 ' + i, ...(i < 31 ? {} : { state: 'done', endedAt: NOW - i * 1000, now: undefined, toolSince: undefined }) }))
   // A record as an older mod or the engine may leave it: no description, no type, no model.
   const bare: AgentRec = { id: 'bare', state: 'done', startedAt: NOW - 5000, endedAt: NOW - 1000, cost: 0 }
@@ -689,16 +689,15 @@ test('the Agents pane draws forty agents at once, and a record missing its title
     for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
       const ui = await mount($, 'forty-' + id, surface, columns)
       // The title is the whole title on one line (the engine cuts it at the edge), so every card has it.
-      for (const i of [0, 30, 31, 39]) expect(await ui.find({ type: 'Text', text: 'cheongju:송수아 ' + i }), surface + ' ' + id + ' ' + i).toBeDefined()
+      for (const i of [1, 30, 31, 34]) expect(await ui.find({ type: 'Text', text: 'cheongju:송수아 ' + i }), surface + ' ' + id + ' ' + i).toBeDefined()
+      // Thirty cards at most: the oldest running one and the finished past the room are counted.
+      for (const i of [0, 35]) expect(await ui.find({ type: 'Text', text: 'cheongju:송수아 ' + i }), surface + ' ' + id + ' ' + i).toBeUndefined()
+      for (const count of [1, 5]) expect(await ui.find({ type: 'Text', text: 'The ' + count + ' oldest are not listed' }), surface + ' ' + id + ' ' + count).toBeDefined()
       const pictures = await ui.findAll({ type: 'Svg' })
       if (surface === 'terminal' || surface === 'mobile') expect(pictures).toHaveLength(0)
-      else {
-        const tiles = pictures.filter(p => String(p.props.source).includes('viewBox="0 4096 '))
-        expect(tiles.length > 0, surface + ' ' + id + ' continuation').toBe(true)
-        for (const picture of pictures) {
-          expect(Number(picture.props.width) <= SVG_MAX_PX).toBe(true)
-          expect(Number(picture.props.height ?? 0) <= SVG_MAX_PX).toBe(true)
-        }
+      else for (const picture of pictures) {
+        expect(Number(picture.props.width) <= SVG_MAX_PX).toBe(true)
+        expect(Number(picture.props.height ?? 0) <= SVG_MAX_PX).toBe(true)
       }
       await ui.unmount()
       const one = await mount($, 'bare-' + id, surface, columns)
@@ -706,6 +705,28 @@ test('the Agents pane draws forty agents at once, and a record missing its title
       expect(await one.find({ type: 'Text', text: 'bare' }), surface + ' ' + id).toBeDefined()
       await one.unmount()
     }
+  }
+})
+
+test('the Agents pane draws at most thirty cards, the latest running first, however many it holds', async ($, on) => {
+  // 2026-11-01: past about 70 cards the desktop left the pane on "Nothing to show yet", though the
+  // engine took the tree. Running records never age out of the store, so they can pile up.
+  const running: AgentRec[] = Array.from({ length: 120 }, (_, i): AgentRec => ({ ...AGENTS[0]!, id: 'run-' + i, description: 'run ' + i + ' end', startedAt: NOW - 200_000 + i }))
+  const done: AgentRec[] = Array.from({ length: 40 }, (_, i): AgentRec => ({ ...AGENTS[0]!, id: 'done-' + i, description: 'done ' + i + ' end', state: 'done', endedAt: NOW - i * 1000, now: undefined, toolSince: undefined }))
+  const tasks: BgTask[] = Array.from({ length: 40 }, (_, i): BgTask => ({ id: 'task-' + i, kind: 'shell', title: 'task ' + i + ' end', command: 'npm test', state: 'done', startedAt: NOW - 90_000, endedAt: NOW - 500_000 - i }))
+  const titles = [...running, ...done].map(a => a.description!).concat(tasks.map(t => t.title))
+  for (const showDone of [false, true]) drawPane(on, 'many-' + showDone, (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: [...done, ...running], tasks, now: NOW, showDone }, AGENT_NOOP))
+  for (const showDone of [false, true]) for (const surface of ['desktop', 'terminal'] as const) {
+    const ui = await mount($, 'many-' + showDone, surface, 64)
+    let drawn = 0
+    for (const title of titles) if (await ui.find({ type: 'Text', text: title })) drawn++
+    expect(drawn, surface + ' ' + showDone).toBe(30 + DONE_SHOWN)
+    for (const title of ['run 90 end', 'run 119 end', 'done 0 end', 'done 3 end']) expect(await ui.find({ type: 'Text', text: title }), surface + ' ' + title).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'run 89 end' }), surface).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: '120 running' }), surface).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'The 90 oldest are not listed' }), surface).toBeDefined()
+    if (showDone) expect(await ui.find({ type: 'Text', text: 'The 76 oldest are not listed' }), surface).toBeDefined()
+    await ui.unmount()
   }
 })
 
@@ -750,7 +771,9 @@ test('the Agents pane draws forty mixed real-world records on every surface, ski
     for (const surface of ['desktop', 'terminal', 'vscode', 'mobile'] as const) {
       const ui = await mount($, id, surface, 40)
       // The whole title is in the tree; the engine cuts it only as it draws.
-      for (const i of [0, 39]) expect(await ui.find({ type: 'Text', text: '에이전트 표시 오류 수정 ' + i }), id + ' ' + surface + ' ' + i).toBeDefined()
+      // Ten running, then the twenty newest finished: the thirty cards the list draws.
+      for (const i of [0, 36, 26]) expect(await ui.find({ type: 'Text', text: '에이전트 표시 오류 수정 ' + i }), id + ' ' + surface + ' ' + i).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: '에이전트 표시 오류 수정 ' + 27 }), id + ' ' + surface + ' 27').toBeUndefined()
       await ui.unmount()
     }
   }

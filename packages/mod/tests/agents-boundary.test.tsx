@@ -43,7 +43,7 @@ test('agents fallback survives an unavailable settings boundary and recovers on 
     selected = null
     const recovered = await $.ui.mount({ plugin: 'ripple', surface, component: 'Pane', requestId: 'ripple-agents', props: PROPS })
     // The desktop's row keeps its title to one line, as the Claude app's task list does.
-    expect(await recovered.find({ type: 'Text', text: '검토 0' }) ?? await recovered.find({ key: 'row-' + RECORDS[0]!.id })).toBeDefined()
+    expect(await recovered.find({ type: 'Text', text: '검토 30' }) ?? await recovered.find({ key: 'row-' + RECORDS[30]!.id })).toBeDefined()
     expect(await recovered.find({ key: 'close' })).toBeUndefined()
     await recovered.unmount()
   }
@@ -94,7 +94,7 @@ test('48 workers with long fallback reasons and an unfolded short-call conversat
   on('ui.render', { component: 'Pane', requestId: 'bounded-talk' }, ($, e) => renderAgents($.ui.resolve(e), { ...FRAME, surface: e.surface }, { agents: records, now: NOW, showDone: true, open: { id: records[0]!.id, talk: { entries }, runsOpen: ['t0', 't1288'] } }, ACTIONS) as RenderElement)
   for (const surface of ['desktop', 'terminal', 'vscode', 'mobile'] as const) {
     const list = await $.ui.mount({ plugin: 'test', surface, component: 'Pane', requestId: 'bounded-list', props: PROPS })
-    expect(await list.find({ type: 'Text', text: '검토 47' }) ?? await list.find({ key: 'row-worker-47' }), surface + ' last list card').toBeDefined()
+    expect(await list.find({ type: 'Text', text: '검토 31' }) ?? await list.find({ key: 'row-worker-31' }), surface + ' newest finished card').toBeDefined()
     expect((await list.findAll({ type: 'Button' })).length < 2000).toBe(true)
     for (const svg of await list.findAll({ type: 'Svg' })) {
       expect(Number(svg.props.width) <= 4096 && Number(svg.props.height ?? 0) <= 4096).toBe(true)

@@ -62,6 +62,13 @@ const BY: Record<NonNullable<AgentRec['pick']>['by'], string> = { haiku: 'settin
 /** Finished agents the list shows before "more". */
 export const DONE_SHOWN = 4
 /**
+ * Cards the list draws at most, running and finished together. Past about 70 cards the desktop
+ * left the pane on its "Nothing to show yet" although the engine took the tree (2026-11-01): each
+ * card is some 3.5k characters and three presses, and while one runs the list is drawn again every
+ * second. A running agent never ages out of the store, so the oldest past this are left out.
+ */
+export const LIST_SHOWN = 30
+/**
  * Characters of the conversation drawn in all, about: a tree draws 100,000 characters (the engine's
  * cut), and the card and the page's chrome take some. The entry bound below also leaves room for
  * the nodes of unfolded tools; past either bound the oldest entries are counted as omitted.
@@ -91,6 +98,16 @@ function itemStart(item: Item): number {
 
 function itemEnd(item: Item): number {
   return (item.kind === 'agent' ? item.agent.endedAt : item.task.endedAt) ?? 0
+}
+
+/** What the list draws: the latest running, the finished it shows, and how many of each it leaves out. */
+type Listed = { running: Item[]; liveCount: number; done: Item[]; shownDone: Item[]; hiddenRunning: number; hiddenDone: number }
+
+/** At most LIST_SHOWN cards: the latest running first, then the newest finished in the room left. */
+function listed(running: Item[], done: Item[], showDone: boolean): Listed {
+  const latest = running.slice(-LIST_SHOWN)
+  const shownDone = done.slice(0, showDone ? Math.max(DONE_SHOWN, LIST_SHOWN - latest.length) : DONE_SHOWN)
+  return { running: latest, liveCount: running.length, done, shownDone, hiddenRunning: running.length - latest.length, hiddenDone: showDone ? done.length - shownDone.length : 0 }
 }
 
 /** A title without the model tag the spawn put in front of it: the card names the model itself. */
@@ -539,12 +556,11 @@ function taskTile(el: Els, frame: Frame, task: BgTask, now: number): RenderNode 
 }
 
 /** The list on the desktop: one capsule, its head, the running agents' and tasks' tiles, then the ended. */
-function listDrawn(el: Els, frame: Frame, view: AgentsView, actions: AgentsActions, running: Item[], done: Item[]): RenderNode {
+function listDrawn(el: Els, frame: Frame, view: AgentsView, actions: AgentsActions, { running, liveCount, done, shownDone, hiddenRunning, hiddenDone }: Listed): RenderNode {
   const { Box, Text } = el
   const k = lookOf(frame)
   const L = frame.lang
   const idle = running.length === 0
-  const shownDone = view.showDone ? done : done.slice(0, DONE_SHOWN)
   const total = totals(frame, view.agents)
   const face = 32
   // The head says what all of them took; each group's count heads the group.
@@ -572,10 +588,12 @@ function listDrawn(el: Els, frame: Frame, view: AgentsView, actions: AgentsActio
   )
   const drawn = (item: Item) => item.kind === 'agent' ? tile(el, frame, item.agent, view.now, () => actions.open(item.agent.id)) : taskTile(el, frame, item.task, view.now)
   const children: RenderNode[] = [head]
-  if (running.length) children.push(section('live', t(L, 'agents.liveCount', { count: running.length })))
+  if (liveCount) children.push(section('live', t(L, 'agents.liveCount', { count: liveCount })))
+  if (hiddenRunning) children.push(section('live-hidden', t(L, 'agents.olderHidden', { count: hiddenRunning })))
   for (const item of running) children.push(drawn(item))
   if (done.length) children.push(section('done', t(L, 'agents.doneCount', { count: done.length })))
   for (const item of shownDone) children.push(drawn(item))
+  if (hiddenDone) children.push(section('done-hidden', t(L, 'agents.olderHidden', { count: hiddenDone })))
   if (done.length > DONE_SHOWN) {
     children.push(
       <Box key="more-row" flexDirection="row" justifyContent="center" width="100%">
@@ -585,7 +603,7 @@ function listDrawn(el: Els, frame: Frame, view: AgentsView, actions: AgentsActio
       </Box>,
     )
   }
-  const rows = 3 + [...running, ...shownDone].reduce((n, item) => n + (item.kind === 'agent' ? tileRows(frame, item.agent) : taskRows()) + 0.6, 0) + (done.length > DONE_SHOWN ? 2 : 0) + 3
+  const rows = 3 + [...running, ...shownDone].reduce((n, item) => n + (item.kind === 'agent' ? tileRows(frame, item.agent) : taskRows()) + 0.6, 0) + (done.length > DONE_SHOWN ? 2 : 0) + (hiddenRunning ? 1.6 : 0) + (hiddenDone ? 1.6 : 0) + 3
   return capsule(el, frame, {
     key: 'agents',
     // While nothing runs 리플이 floats at the head in calm water; while one runs the water holds
@@ -1109,24 +1127,25 @@ function taskLine(el: Els, frame: Frame, task: BgTask, now: number): RenderNode 
   )
 }
 
-function listText(el: Els, frame: Frame, view: AgentsView, actions: AgentsActions, running: Item[], done: Item[]): RenderNode {
+function listText(el: Els, frame: Frame, view: AgentsView, actions: AgentsActions, { running, liveCount, done, shownDone, hiddenRunning, hiddenDone }: Listed): RenderNode {
   const { Box, Text } = el
-  const shownDone = view.showDone ? done : done.slice(0, DONE_SHOWN)
   // The first nine agents a digit each, in the order drawn; a task has nothing to open.
   let n = 0
   const key = () => (++n <= 9 ? String(n) : undefined)
   return (
     <Box flexDirection="column" rowGap={1} width="100%">
       <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
-        <Text bold>{running.length ? t(frame.lang, 'agents.liveCount', { count: running.length }) : t(frame.lang, 'agents.noneRunning')}</Text>
+        <Text bold>{liveCount ? t(frame.lang, 'agents.liveCount', { count: liveCount }) : t(frame.lang, 'agents.noneRunning')}</Text>
         {done.length ? <Text dimColor>{t(frame.lang, 'agents.doneCount', { count: done.length })}</Text> : null}
       </Box>
+      {hiddenRunning ? <Text key="live-hidden" dimColor>{t(frame.lang, 'agents.olderHidden', { count: hiddenRunning })}</Text> : null}
       {running.map(item => item.kind === 'agent' ? liveLines(el, frame, item.agent, view.now, key(), () => actions.open(item.agent.id)) : taskLine(el, frame, item.task, view.now))}
       {shownDone.length ? (
         <Box flexDirection="column">
           {shownDone.map(item => item.kind === 'agent' ? doneLine(el, frame, item.agent, view.now, key(), () => actions.open(item.agent.id)) : taskLine(el, frame, item.task, view.now))}
         </Box>
       ) : null}
+      {hiddenDone ? <Text key="done-hidden" dimColor>{t(frame.lang, 'agents.olderHidden', { count: hiddenDone })}</Text> : null}
       {done.length > DONE_SHOWN ? (
         <Box flexDirection="row">
           {textButton(el, 'done', view.showDone ? t(frame.lang, 'agents.less') : t(frame.lang, 'agents.more', { count: done.length - DONE_SHOWN }), actions.toggleDone, 'f')}
@@ -1253,7 +1272,8 @@ function agentsTree(el: Els, frame: Frame, view: AgentsView, actions: AgentsActi
   if (items.length === 0) return speak(el, frame, { key: 'agents', face: 'calm', size: GREET_SIZE, title: t(frame.lang, 'agents.emptyTitle'), line: t(frame.lang, 'agents.emptyBody') })
   const running = items.filter(itemLive).sort((a, b) => itemStart(a) - itemStart(b))
   const done = items.filter(i => !itemLive(i)).sort((a, b) => itemEnd(b) - itemEnd(a))
-  return drawn ? listDrawn(el, frame, view, actions, running, done) : listText(el, frame, view, actions, running, done)
+  const list = listed(running, done, view.showDone)
+  return drawn ? listDrawn(el, frame, view, actions, list) : listText(el, frame, view, actions, list)
 }
 
 /**
