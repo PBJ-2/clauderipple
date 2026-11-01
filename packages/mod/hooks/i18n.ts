@@ -1079,7 +1079,7 @@ const KO: Record<Key, string> = {
   'agents.exitCode': '종료 코드 {code}',
   'agents.more': '{count}개 더 보기',
   'agents.less': '접기',
-  'agents.olderHidden': '오래된 {count}개는 목록에 표시하지 않습니다',
+  'agents.olderHidden': '오래된 기록 {count}개는 목록에 표시되지 않습니다',
   'agents.open': '대화 보기',
   'agents.back': '목록으로',
   'agents.task': '작업 지시',
