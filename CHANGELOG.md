@@ -1,5 +1,72 @@
 # Changelog
 
+## 0.12.23 — 2026-11-01
+
+### Added
+
+- **The Compact card lets you choose the summary model for one press.** The dashboard can offer the
+  saved compaction model and up to four more. Claude Code's own compactor now handles every choice,
+  keeping its recent messages and reattached files; if the chosen model fails before answering, the
+  original request is sent unchanged. Automatic and typed compactions use the saved choice.
+- **Claude and OpenAI API keys have their own provider options.** A Claude API key serves its own
+  named workers, while ordinary Claude traffic stays on the app's sign-in. The OpenAI API preset
+  supplies the endpoint and sends a conversation cache key; it has not yet been checked with a live
+  key. Metered workers are named separately so a bare model id does not displace a subscription.
+- **The remote effort picker can return to Auto** (#120). The phone and browser can turn the mod's
+  automatic effort setting back on; choosing a level turns Auto off. An older host does not offer
+  the new choice.
+- **Windows can set the router's CPU priority in the dashboard** (#117, thanks @115dkk). The router
+  and phone host now start at Normal instead of inheriting Below Normal, so other busy processes are
+  less likely to delay them. The About page offers four levels and asks for confirmation before High.
+- **The tray explains why an update or setup failed** (#116, thanks @115dkk). The dialog names the
+  problem and offers an appropriate next step where one is available; the full output stays under
+  Details and can be copied.
+
+### Changed
+
+- **The dashboard and tray use reviewed Korean wording.** The dashboard's other five languages and
+  the tray translations follow the revised text, and the phone-key rotation warning says that
+  notifications end too.
+
+### Fixed
+
+- **The Agents pane stays visible with a long list, and ended commands stop showing as running.**
+  It draws at most thirty cards, preferring running work, and reports how many records are left out.
+  A background command's end notice in a worker's own conversation now settles its card at once.
+- **Native Claude workers use the model IDs Claude Code advertises** (#115, thanks @RedBoardDev).
+  Family aliases resolve to their concrete models, and a direct marker no longer sends an `@level`
+  suffix as part of the Anthropic model name. Explicit model versions and resumed runs are left alone.
+- **Codex custom and namespaced tools reach Claude with their identities intact.** Tool choices and
+  results survive translation, while tools unavailable on the current turn cannot be returned as
+  executable calls. Supported tool-result images reach native Anthropic; invalid or unsupported
+  images are omitted instead of failing the whole turn.
+- **A routed conversation's context count no longer jumps while an answer streams.** The router
+  scales its estimate using that conversation's last measured input, even when the request shrinks.
+  The Context pane labels routed counts as estimates rather than offering a misleading precise count.
+- **A picker model's context window can be edited over the Codex catalogue.** A saved choice now
+  takes effect; clearing it returns to the catalogue, and an explicit route window still takes
+  precedence.
+- **The remote shows progress narration and pending settings accurately.** Sentences Claude Code
+  writes between tool calls appear in the conversation, and a model or effort change waiting for
+  the current answer is reported as pending rather than failed.
+- **Windows session images and scratchpad files no longer fail over equivalent temp paths** (#98,
+  thanks @115dkk). Short and long path spellings are treated alike, and a folder owned by a trusted
+  elevated administrator is accepted; access and ownership checks still apply.
+- **Windows purge and tray replacement are safer under load** (#98, thanks @115dkk). The deferred
+  purge waits longer for its cleaner and retries receipt reads and writes, avoiding false failures.
+  A tray replacement also refuses to overwrite an existing backup.
+- **Clicking the macOS app icon opens the dashboard and brings it forward.** A running app now
+  handles the reopen, and an unfocused dashboard gets a second chance to come to the front.
+- **The laptop page warns when an AlDente setting can make a closed Mac sleep.** AlDente's
+  "Disable Sleep until Charge Limit" can clear the same sleep setting ClaudeRipple holds; the warning
+  points to "Stop Charging when Sleeping" as an alternative.
+- **A chat's cache stays warm across a session-process restart.** The last reply and cache timing
+  are restored for the same session and model while the cache is still valid; a clear or model
+  change drops the saved state.
+- **Auto mode's classifier prompt reaches translated providers unchanged** (#98, thanks @115dkk).
+  Provider identity and image hints were being added to its security prompt. A saved route to a
+  provider that cannot take routed requests now also produces a warning instead of failing silently.
+
 ## 0.12.22 — 2026-10-29
 
 ### Added
