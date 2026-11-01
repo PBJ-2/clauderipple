@@ -100,13 +100,33 @@ export function endWithAgent(list: readonly BgTask[], agentId: string, now: numb
   return list.map(task => task.agentId === agentId && task.endsWithAgent && task.state === 'running' ? { ...task, state: 'stopped', endedAt: now } : task)
 }
 
+/** A running task ended as far as we can tell, until a notice says how (endTasks). */
+function settled(task: BgTask, now: number): BgTask {
+  return { ...task, state: 'done', endedAt: now, settled: true }
+}
+
 /**
- * The running tasks a Stop no longer lists in flight (its `background_tasks`, the session's), ended:
- * one whose notification has not reached a hook. How it ended is not known yet, so it reads as done
- * until a notice says otherwise (endTasks).
+ * Whether a Stop's `background_tasks` (the session's) leaves `task` running: listed itself, and, for
+ * a worker's, its worker listed too. The Claude app drops a worker's commands from its list with the
+ * worker; and a session kept four dead commands of a long-ended worker running for ten hours, no
+ * notice of theirs ever arriving (2026-11-01).
+ */
+export function stillRunning(task: BgTask, inFlight: readonly string[]): boolean {
+  return inFlight.includes(task.id) && (task.agentId === undefined || inFlight.includes(task.agentId))
+}
+
+/**
+ * The running tasks a Stop no longer holds in flight (stillRunning), ended: one whose notification
+ * has not reached a hook. How it ended is not known yet, so it reads as done until a notice says
+ * otherwise (endTasks).
  */
 export function settleTasks(list: readonly BgTask[], inFlight: readonly string[], now: number): BgTask[] {
-  return list.map(task => task.state === 'running' && !inFlight.includes(task.id) ? { ...task, state: 'done', endedAt: now, settled: true } : task)
+  return list.map(task => task.state === 'running' && !stillRunning(task, inFlight) ? settled(task, now) : task)
+}
+
+/** The running tasks agent `agentId` leaves behind as it ends, settled: they leave the list with it. */
+export function settleWithAgent(list: readonly BgTask[], agentId: string, now: number): BgTask[] {
+  return list.map(task => task.agentId === agentId && task.state === 'running' ? settled(task, now) : task)
 }
 
 /** The exit code a command's summary names ("… failed with exit code 1"), if any. */

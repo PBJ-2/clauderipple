@@ -17,7 +17,7 @@ import { afterPing, cacheMemoryKey, CACHE_MEMORY_PREFIX, laterMemo, liveContextT
 import { HEAVY_PERCENT, bandPriority, claudeLimitsFrom, claudeScopedFrom, coldAlert, contextWindow, countsPrecisely, modelCompactWindow, hotAlert, hottest, hotWindowMoved, keptAlert, routerLimitItems, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
 import type { ScopedLimit } from './session'
 import { QUICK_PROMPT, wrapForNewChat } from './handoff'
-import { addTask, endTasks, endWithAgent, settleTasks, stopTask, taskEnds, taskStarted } from './tasks'
+import { addTask, endTasks, endWithAgent, settleTasks, settleWithAgent, stillRunning, stopTask, taskEnds, taskStarted } from './tasks'
 import { addAgentStep, addJudge, addPrompt, addRequest, addWarm, addWorker, emptyStats, formatStats, sentEffort } from './stats'
 import { besideBand, renderBand, renderFooter } from './ui/band'
 import { renderAlert } from './ui/alerts'
@@ -2094,13 +2094,14 @@ export const register: Register = on => {
     return next(e)
   })
   on('classic.Stop', async ($, e, next) => {
-    // A task the session no longer holds in flight has ended, though no notice of it reached us (yet).
-    // A Stop that carries no list (an older engine) settles nothing.
+    // A task the session no longer holds in flight, or a worker's whose worker it no longer holds,
+    // has ended, though no notice of it reached us (yet). A Stop that carries no list (an older
+    // engine) settles nothing.
     try {
       if (e.background_tasks) {
         const inFlight = e.background_tasks.map(task => task.id)
         const list = await read($, bgTasks)
-        if (list.some(task => task.state === 'running' && !inFlight.includes(task.id))) {
+        if (list.some(task => task.state === 'running' && !stillRunning(task, inFlight))) {
           const now = await $.clock.now()
           await update($, bgTasks, tasks => settleTasks(tasks, inFlight, now))
         }
@@ -2262,6 +2263,9 @@ export const register: Register = on => {
         await countAgents($)
         // Its commands bound to its final response end with it; no notification follows them.
         if ((await read($, bgTasks)).some(task => task.agentId === e.agentId && task.endsWithAgent && task.state === 'running')) await update($, bgTasks, list => endWithAgent(list, e.agentId!, now))
+        // The rest leave the list with it, as the Claude app's do; a notice that comes later says how
+        // each ended (settleWithAgent).
+        if ((await read($, bgTasks)).some(task => task.agentId === e.agentId && task.state === 'running')) await update($, bgTasks, list => settleWithAgent(list, e.agentId!, now))
         // A picked worker's outcome, once, joined to its pick by id: whether the session's tier or
         // the named model was enough is read from these lines later (2026-10-24).
         if (before?.pick?.id && before.state === 'running') {

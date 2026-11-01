@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { TASKS_KEPT, addTask, endTasks, endWithAgent, exitCode, settleTasks, taskEnds, taskStarted } from '../../packages/mod/hooks/tasks.ts'
+import { TASKS_KEPT, addTask, endTasks, endWithAgent, exitCode, settleTasks, settleWithAgent, taskEnds, taskStarted } from '../../packages/mod/hooks/tasks.ts'
 import type { BgTask } from '../../packages/mod/types/index.d.ts'
 
 const shell: BgTask = { id: 'b1', kind: 'shell', title: 'Start the dev server', command: 'npm run dev', state: 'running', startedAt: 1 }
@@ -34,6 +34,17 @@ test('a Stop settles what it no longer holds until the late notice says how; a s
   assert.deepEqual(endTasks([stopped], [{ id: 'b1', status: 'killed' }], 9), [stopped])
   const bound: BgTask = { ...shell, id: 'b2', agentId: 'worker', endsWithAgent: true }
   assert.deepEqual(endWithAgent([shell, bound], 'worker', 4), [shell, { ...bound, state: 'stopped', endedAt: 4 }])
+})
+
+test("a worker's command leaves the running list with its worker, as the Claude app's does", () => {
+  const left: BgTask = { ...shell, id: 'b3', agentId: 'worker' }
+  // Listed, but its worker is not: settled, as a Stop of 2026-11-01 should have.
+  assert.deepEqual(settleTasks([shell, left], ['b1', 'b3'], 7), [shell, { ...left, state: 'done', endedAt: 7, settled: true }])
+  assert.deepEqual(settleTasks([left], ['b3', 'worker'], 7), [left])
+  // The worker's own end settles every command it left running; a later notice still says how.
+  const ended = settleWithAgent([shell, left], 'worker', 5)
+  assert.deepEqual(ended, [shell, { ...left, state: 'done', endedAt: 5, settled: true }])
+  assert.deepEqual(endTasks(ended, [{ id: 'b3', status: 'failed' }], 9)[1], { ...left, state: 'failed', endedAt: 5 })
 })
 
 test('the list keeps every running task and drops the oldest ended past its bound', () => {
