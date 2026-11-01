@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { RenderElement, RenderNode, RenderPropsOf } from 'claude-code'
 import type { AgentRec, StatusRequest } from '../types'
 import { normalizeSettings } from '../hooks/settings'
-import { renderAgents } from '../hooks/ui/agents'
+import { LIST_SHOWN, renderAgents } from '../hooks/ui/agents'
 import { renderAlert } from '../hooks/ui/alerts'
 import { renderBand, renderFooter } from '../hooks/ui/band'
 import { renderLog } from '../hooks/ui/log'
@@ -39,12 +39,13 @@ test('the display boundary removes escape payloads and refused controls without 
   expect(displayText(HUGE).length).toBe(DISPLAY.preview)
 })
 
-test('wide agent panes keep all forty cards and clickable open controls without space strips', async ($, on) => {
+test('wide agent panes keep every card they list and clickable open controls without space strips', async ($, on) => {
   const opened: string[] = []
   on('ui.render', { component: 'Pane', requestId: 'wide' }, ($, e) => renderAgents($.ui.resolve(e), frame(e.surface, e.props.bodyColumns), { agents: AGENTS, now: 1_000_000, showDone: true }, { open: id => { opened.push(id) }, back: noop, toggleDone: noop, toggleRun: noop }) as RenderElement)
   for (const surface of ['desktop', 'vscode'] as const) for (const columns of [200, 300, 600]) {
     const ui = await $.ui.mount({ plugin: 'test', surface, component: 'Pane', requestId: 'wide', props: { ...PROPS, bodyColumns: columns } })
-    for (let i = 0; i < 40; i++) {
+    // Forty running: the list draws the latest thirty (LIST_SHOWN).
+    for (let i = 40 - LIST_SHOWN; i < 40; i++) {
       expect(await ui.find({ type: 'Text', text: '검토 ' + i }), surface + ' ' + columns + ' card ' + i).toBeDefined()
       const buttons = await ui.findAll({ type: 'Button' })
       const open = buttons.find(b => String(b.props.key).startsWith('open-a' + i + '-') || b.props.key === 'open-a' + i)
@@ -53,7 +54,7 @@ test('wide agent panes keep all forty cards and clickable open controls without 
     }
     await ui.unmount()
   }
-  expect(opened.length).toBe(240)
+  expect(opened.length).toBe(6 * LIST_SHOWN)
 })
 
 test('a 120000 character phone queue preview leaves the following band controls pressable', async ($, on) => {
