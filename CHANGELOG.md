@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.12.24 — 2026-11-02
+
+### Added
+
+- **Red-team reviews have their own worker ladder.** Beside Frontend & design and Backend, the
+  dashboard's task domains now include Red team & review, with its own ordered models for light and
+  heavy work, so a review falls back to the next model when the first is out of quota. A delegation
+  marked `[[ripple: hard review]]` (or `redteam`, `red-team`) uses it; with none saved, the general
+  ladder runs. The mod's settings format moved to version 2, so a Claude session still running the
+  previous mod cannot save settings until it reloads the mod.
+
+### Fixed
+
+- **Codex tools reach Claude again with Codex 0.166** (#122, thanks @justzz). Codex now declares its
+  tools inside the request's input instead of the top-level list; those declarations were dropped, so
+  Claude printed `<invoke …>` calls as text instead of running them.
+- **The phone's "login was refused" banner clears when the Claude login recovers** (#121, thanks
+  @Lahai-Roi). A router check that overlapped the recovery could put the old banner back until the
+  host restarted, and could hide a new one the same way.
+- **A worker's background commands leave the Agents pane's running list when the worker ends**, as in
+  the Claude app.
+
 ## 0.12.23 — 2026-11-01
 
 ### Added
