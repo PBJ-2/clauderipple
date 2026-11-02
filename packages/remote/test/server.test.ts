@@ -14,7 +14,7 @@ import { BridgeClient } from "../src/bridge-client.ts";
 import type { DesktopProcess } from "../src/desktop.ts";
 import { MessageReceipts, OutcomeUnknownError } from "../src/receipts.ts";
 import { ATTACHMENT_CAP, CHUNK_MESSAGE_MAX, FRAME_CAP, PING_MS, STALE_MS } from "../src/protocol.ts";
-import type { BlobChunk, BrowseResult, ClientMsg, HostMsg, SessionEvent } from "../src/protocol.ts";
+import type { BlobChunk, BrowseResult, ClientMsg, HostInfo, HostMsg, SessionEvent } from "../src/protocol.ts";
 import { FrameAssembler } from "../src/chunks.ts";
 import { HostServer } from "../src/server.ts";
 import type { Peer as ServerPeer, ServerOptions } from "../src/server.ts";
@@ -1912,6 +1912,31 @@ test("host info carries the mod's status, refreshes limits once a minute, and re
   const down = (await peer.take("host")).msg;
   assert.equal(down.host.routerOk, false);
   assert.equal("ripple" in down.host, false, "with the router down there is no status to show");
+});
+
+// #121: the banner stayed until the host restarted, because the check copied hostInfo before an await.
+test("a desktop login problem cleared while the router check waits stays cleared", { timeout: 6000 }, async t => {
+  let activeMode = "m1", release: () => void = () => {};
+  const modRouter = {
+    ...router,
+    status: async () => ({ ok: true, proxyEnv: {} }),
+    limits: async () => ({ providers: [] }),
+    modSettings: async () => {
+      await new Promise<void>(resolve => { release = resolve; });
+      return { settings: { activeMode, effortAuto: true, floor: "low", ceiling: "max", modes: [{ id: "m1", name: "Saver" }, { id: "m2", name: "Maxing" }] } };
+    },
+  };
+  const f = await fixture(t, { router: modRouter });
+  const server = f.server as unknown as { checkRouter(): Promise<void>; hostInfo: HostInfo };
+  f.server.setDesktopProblem("401");
+  activeMode = "m2";
+  const check = server.checkRouter();
+  await new Promise(resolve => setImmediate(resolve));
+  f.server.setDesktopProblem(null);
+  release();
+  await check;
+  assert.equal(server.hostInfo.ripple?.mode?.name, "Maxing", "the check did write the changed mode");
+  assert.equal(server.hostInfo.desktopProblem, undefined, "and did not bring the cleared problem back");
 });
 
 test("the context window the SDK reports for a model is kept for Mac sessions on that model", { timeout: TEST_TIMEOUT }, async t => {

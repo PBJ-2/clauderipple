@@ -706,9 +706,11 @@ export class HostServer {
 
   private async checkRouter(): Promise<void> {
     const st = await this.opts.router.status();
+    const ripple = st.ok ? await this.readRipple() : undefined;
+    // Copied only after the last await: a copy taken before it would put back a desktopProblem
+    // that setDesktopProblem cleared (or drop one it set) while we waited (#121).
     const next: HostInfo = { ...this.hostInfo, routerOk: st.ok, ...(st.problem ? { routerProblem: st.problem } : {}) };
     if (!st.problem) delete next.routerProblem;
-    const ripple = st.ok ? await this.readRipple() : undefined;
     if (ripple) next.ripple = ripple; else delete next.ripple;
     // `at` moves on every read; only a change a phone could see is worth a message.
     const shown = (r: RippleStatus | undefined): string => JSON.stringify(r && { ...r, at: 0 });
