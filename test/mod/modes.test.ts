@@ -106,14 +106,18 @@ test('active modes route their own ordered rungs, then one rung up, then nothing
 test('modes replace domain ladders as a whole and never inherit Base overrides', () => {
   const s = normalizeSettings({ domainRules: { ui: DEFAULTS.rules.general, backend: DEFAULTS.rules.general }, modes: [
     { id: 'old', name: 'Old' },
-    { id: 'own', name: 'Own', domainRules: { backend: { mode: 'ladder', rungs: { light: { target: haiku, effort: 'low' } } }, ui: { mode: 'auto' } } },
+    { id: 'own', name: 'Own', domainRules: { backend: { mode: 'ladder', rungs: { light: { target: haiku, effort: 'low' } } }, review: { mode: 'ladder', rungs: { light: { target: sonnet, effort: 'high' } } }, ui: { mode: 'auto' } } },
   ], activeMode: 'old' })
   assert.equal(Object.hasOwn(s.modes[0]!, 'domainRules'), false)
   assert.equal(routingSettings(s).domainRules, undefined)
   const own = routingSettings({ ...s, activeMode: 'own' })
   // The mode's own domain ladder is folded like Base's: its one filled row runs every rung.
   const h = [{ target: haiku, effort: 'low' }]
-  assert.deepEqual(own.domainRules, { backend: { mode: 'ladder', rungs: { light: h, standard: h, hard: h, plan: h } } })
+  const r = [{ target: sonnet, effort: 'high' }]
+  assert.deepEqual(own.domainRules, {
+    backend: { mode: 'ladder', rungs: { light: h, standard: h, hard: h, plan: h } },
+    review: { mode: 'ladder', rungs: { light: r, standard: r, hard: r, plan: r } },
+  })
   assert.equal(own.domainRules?.ui, undefined)
   assert.equal(routingSettings({ ...s, activeMode: undefined }).domainRules, s.domainRules)
   assert.deepEqual(normalizeSettings(JSON.parse(JSON.stringify(s))), s)

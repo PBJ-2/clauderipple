@@ -39,7 +39,7 @@ test("Auto is written with the revision that was read, leaving every other setti
   assert.equal(put.url, "http://router/api/mod-settings");
   assert.equal(put.init?.method, "PUT");
   assert.equal(put.init?.headers?.["content-type"], "application/json");
-  assert.deepEqual(JSON.parse(put.init!.body!), { schemaVersion: 1, revision: 7, settings: { ...settings, effortAuto: true } });
+  assert.deepEqual(JSON.parse(put.init!.body!), { schemaVersion: 2, revision: 7, settings: { ...settings, effortAuto: true } });
 });
 
 test("a stale save retries from the 409 snapshot, at most three attempts", async () => {
@@ -53,7 +53,7 @@ test("a stale save retries from the 409 snapshot, at most three attempts", async
   assert.equal(await new RouterClient("http://router", fetch).setEffortAuto(true), true);
   assert.deepEqual(calls.map(call => call.init?.method ?? "GET"), ["GET", "PUT", "PUT"]);
   assert.equal(JSON.parse(calls[1]!.init!.body!).revision, 3);
-  assert.deepEqual(JSON.parse(calls[2]!.init!.body!), { schemaVersion: 1, revision: 5, settings: { effortAuto: true, floor: "high" } });
+  assert.deepEqual(JSON.parse(calls[2]!.init!.body!), { schemaVersion: 2, revision: 5, settings: { effortAuto: true, floor: "high" } });
 
   let stale = 0;
   const always = recording((_url, init) => init?.method !== "PUT"

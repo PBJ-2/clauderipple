@@ -83,7 +83,7 @@ export class RouterClient {
       if (!Object.keys(settings).length) throw new Error("router has no mod settings");
       const revision: number | undefined = snapshot?.revision;
       const written: { ok: boolean; status: number; data: ModSettingsBody } = await this.put<ModSettingsBody>("/api/mod-settings", {
-        schemaVersion: 1,
+        schemaVersion: 2,
         settings: { ...settings, effortAuto: on },
         ...(typeof revision === "number" ? { revision } : {}),
       });

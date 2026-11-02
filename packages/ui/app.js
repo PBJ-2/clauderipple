@@ -4631,7 +4631,7 @@ async function saveMod() {
       const sent = clone(modState.settings);
       let out;
       try {
-        out = await api("/api/mod-settings", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ schemaVersion: 1, settings: sent, revision: modState.revision }) });
+        out = await api("/api/mod-settings", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ schemaVersion: 2, settings: sent, revision: modState.revision }) });
       } catch (error) {
         if (error.status !== 409 || !error.body || !("settings" in error.body)) throw error;
         modWrites++;
@@ -4671,7 +4671,7 @@ async function saveCompactAt(value) {
   modRefresh();
   modStatus(t("slots.saving"));
   try {
-    const out = await api("/api/mod-settings", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ schemaVersion: 1, compactAt: value }) });
+    const out = await api("/api/mod-settings", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ schemaVersion: 2, compactAt: value }) });
     modState.compactAt = out && typeof out.compactAt === "number" && Number.isFinite(out.compactAt) ? out.compactAt : null;
     modStatus(t("mod.saved"));
   } catch (error) {
@@ -4882,14 +4882,14 @@ function modPickSelect(key, step, shown, label, onPick) {
     onPick(modTargetOf(value.slice(0, bar)), value.slice(bar + 1));
   }, "rung-model");
 }
-/** @typedef {"general" | "ui" | "backend"} WorkerRuleKey */
+/** @typedef {"general" | "ui" | "backend" | "review"} WorkerRuleKey */
 /** Domain selection is local UI state, independently retained for each saved worker set.
  * @type {Map<string, WorkerRuleKey>}
  */
 const modRuleTabs = new Map();
 /** Save only this set's optional rule; deleting it makes the set follow its own general ladder.
  * @param {import("../mod/types").Mode | undefined} mode
- * @param {"ui" | "backend"} key
+ * @param {"ui" | "backend" | "review"} key
  * @param {import("../mod/types").Rule | undefined} rule
  */
 function modSetDomainRule(mode, key, rule) {
@@ -4909,6 +4909,7 @@ function modWorkerRows(mode) {
     { value: "general", label: t("mod.domain.general") },
     { value: "ui", label: t("mod.domain.ui") },
     { value: "backend", label: t("mod.domain.backend") },
+    { value: "review", label: t("mod.domain.review") },
   ], key, t("mod.workerDomain"), (value) => { modRuleTabs.set(id, value); modRefresh(); }), null, "wide")];
   if (key !== "general") rows.push(cell(t("mod.domainSeparate"), modSwitch(`worker-separate:${id}:${key}`, !!rule, t("mod.domainSeparate"), (on) => {
     // Switching on copies the set's general rungs, folded the same way a domain ladder is.

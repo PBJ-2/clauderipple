@@ -2639,63 +2639,75 @@ const I18N = {
 
 // Optional domain ladders use the same editor in Base and every saved mode.
 Object.assign(I18N.ko, {
-  "mod.workerDomain": "작업 분야", "mod.domain.general": "전체", "mod.domain.ui": "프론트엔드·디자인", "mod.domain.backend": "백엔드",
+  "mod.workerDomain": "작업 분야", "mod.domain.general": "전체", "mod.domain.ui": "프론트엔드·디자인", "mod.domain.backend": "백엔드", "mod.domain.review": "레드팀·검수",
   "mod.domainSeparate": "개별 설정", "mod.domainFollowsGeneral": "전체 설정을 따릅니다.",
   "mod.domainLevel.light": "가벼운 작업", "mod.domainLevel.heavy": "무거운 작업",
   "mod.domainHint.ui.light": "문구·색상·간격 수정과 정의된 화면 구현",
   "mod.domainHint.ui.heavy": "복잡한 레이아웃·상태 버그 디버깅, 화면 구조 설계",
   "mod.domainHint.backend.light": "설정·로그 확인과 정의된 API·로직 구현",
   "mod.domainHint.backend.heavy": "동시성·정합성 디버깅, 성능·보안 최적화, 데이터 모델 설계",
+  "mod.domainHint.review.light": "작은 변경의 검수와 정해진 항목 대조",
+  "mod.domainHint.review.heavy": "여러 파일에 걸친 변경의 적대적 검수, 보안·정합성 결함 찾기",
   "mod.domainLevelNote": "low·medium 단계 작업은 '가벼운 작업' 설정을, high·max 단계 작업은 '무거운 작업' 설정을 따릅니다.",
 });
 Object.assign(I18N.en, {
-  "mod.workerDomain": "Task domain", "mod.domain.general": "General", "mod.domain.ui": "Frontend & design", "mod.domain.backend": "Backend",
+  "mod.workerDomain": "Task domain", "mod.domain.general": "General", "mod.domain.ui": "Frontend & design", "mod.domain.backend": "Backend", "mod.domain.review": "Red team & review",
   "mod.domainSeparate": "Set separately", "mod.domainFollowsGeneral": "Follows this set's general settings.",
   "mod.domainLevel.light": "Light work", "mod.domainLevel.heavy": "Heavy work",
   "mod.domainHint.ui.light": "Editing copy, colors and spacing, and building screens that are already defined",
   "mod.domainHint.ui.heavy": "Debugging complex layout and state bugs, designing a screen's structure",
   "mod.domainHint.backend.light": "Checking config and logs, and building APIs and logic that are already defined",
   "mod.domainHint.backend.heavy": "Debugging concurrency and integrity issues, optimizing performance and security, designing data models",
+  "mod.domainHint.review.light": "Reviewing small changes and checking them against a set list",
+  "mod.domainHint.review.heavy": "Adversarial review of multi-file changes, hunting security and consistency defects",
   "mod.domainLevelNote": "Tasks at the low and medium levels follow the ‘Light work’ settings; tasks at the high and max levels follow the ‘Heavy work’ settings.",
 });
 Object.assign(I18N.zh, {
-  "mod.workerDomain": "任务领域", "mod.domain.general": "全部", "mod.domain.ui": "前端与设计", "mod.domain.backend": "后端",
+  "mod.workerDomain": "任务领域", "mod.domain.general": "全部", "mod.domain.ui": "前端与设计", "mod.domain.backend": "后端", "mod.domain.review": "红队·审查",
   "mod.domainSeparate": "单独设置", "mod.domainFollowsGeneral": "沿用此组的通用设置。",
   "mod.domainLevel.light": "轻松工作", "mod.domainLevel.heavy": "繁重工作",
   "mod.domainHint.ui.light": "修改文案、颜色和间距，以及实现已确定的界面",
   "mod.domainHint.ui.heavy": "调试复杂的布局和状态缺陷，设计界面结构",
   "mod.domainHint.backend.light": "查看配置和日志，以及实现已确定的 API 与逻辑",
   "mod.domainHint.backend.heavy": "调试并发与一致性问题，优化性能与安全，设计数据模型",
+  "mod.domainHint.review.light": "小改动的审查与按既定清单核对",
+  "mod.domainHint.review.heavy": "跨多个文件改动的对抗式审查，查找安全与一致性缺陷",
   "mod.domainLevelNote": "low、medium 级别的任务遵循“轻松工作”设置，high、max 级别的任务遵循“繁重工作”设置。",
 });
 Object.assign(I18N.ja, {
-  "mod.workerDomain": "作業分野", "mod.domain.general": "全体", "mod.domain.ui": "フロントエンド・デザイン", "mod.domain.backend": "バックエンド",
+  "mod.workerDomain": "作業分野", "mod.domain.general": "全体", "mod.domain.ui": "フロントエンド・デザイン", "mod.domain.backend": "バックエンド", "mod.domain.review": "レッドチーム・レビュー",
   "mod.domainSeparate": "個別に設定", "mod.domainFollowsGeneral": "このセットの全体設定に従います。",
   "mod.domainLevel.light": "軽い作業", "mod.domainLevel.heavy": "重い作業",
   "mod.domainHint.ui.light": "文言・色・余白の修正と、決まった画面の実装",
   "mod.domainHint.ui.heavy": "複雑なレイアウトや状態のバグのデバッグ、画面構成の設計",
   "mod.domainHint.backend.light": "設定・ログの確認と、決まった API・ロジックの実装",
   "mod.domainHint.backend.heavy": "並行処理・整合性のデバッグ、性能・セキュリティの最適化、データモデルの設計",
+  "mod.domainHint.review.light": "小さな変更のレビューと決められた項目の照合",
+  "mod.domainHint.review.heavy": "複数ファイルにまたがる変更の敵対的レビュー、セキュリティ・整合性の欠陥探し",
   "mod.domainLevelNote": "low・medium 段階の作業は「軽い作業」の設定に、high・max 段階の作業は「重い作業」の設定に従います。",
 });
 Object.assign(I18N.es, {
-  "mod.workerDomain": "Área de la tarea", "mod.domain.general": "General", "mod.domain.ui": "Frontend y diseño", "mod.domain.backend": "Backend",
+  "mod.workerDomain": "Área de la tarea", "mod.domain.general": "General", "mod.domain.ui": "Frontend y diseño", "mod.domain.backend": "Backend", "mod.domain.review": "Red team y revisión",
   "mod.domainSeparate": "Configurar por separado", "mod.domainFollowsGeneral": "Usa los ajustes generales de este conjunto.",
   "mod.domainLevel.light": "Trabajo ligero", "mod.domainLevel.heavy": "Trabajo pesado",
   "mod.domainHint.ui.light": "Editar textos, colores y espacios, y crear pantallas ya definidas",
   "mod.domainHint.ui.heavy": "Depurar fallos complejos de maquetación y estado, diseñar la estructura de una pantalla",
   "mod.domainHint.backend.light": "Revisar configuración y registros, y crear APIs y lógica ya definidas",
   "mod.domainHint.backend.heavy": "Depurar problemas de concurrencia e integridad, optimizar rendimiento y seguridad, diseñar modelos de datos",
+  "mod.domainHint.review.light": "Revisar cambios pequeños y comprobarlos contra una lista fija",
+  "mod.domainHint.review.heavy": "Revisión adversarial de cambios en varios archivos, buscando fallos de seguridad y coherencia",
   "mod.domainLevelNote": "Las tareas de nivel low y medium siguen los ajustes de «Trabajo ligero»; las de nivel high y max, los de «Trabajo pesado».",
 });
 Object.assign(I18N.pt, {
-  "mod.workerDomain": "Área da tarefa", "mod.domain.general": "Geral", "mod.domain.ui": "Frontend e design", "mod.domain.backend": "Backend",
+  "mod.workerDomain": "Área da tarefa", "mod.domain.general": "Geral", "mod.domain.ui": "Frontend e design", "mod.domain.backend": "Backend", "mod.domain.review": "Red team e revisão",
   "mod.domainSeparate": "Configurar separadamente", "mod.domainFollowsGeneral": "Usa as configurações gerais deste conjunto.",
   "mod.domainLevel.light": "Trabalho leve", "mod.domainLevel.heavy": "Trabalho pesado",
   "mod.domainHint.ui.light": "Editar textos, cores e espaçamento, e criar telas já definidas",
   "mod.domainHint.ui.heavy": "Depurar falhas complexas de layout e estado, projetar a estrutura de uma tela",
   "mod.domainHint.backend.light": "Revisar configuração e logs, e criar APIs e lógica já definidas",
   "mod.domainHint.backend.heavy": "Depurar problemas de concorrência e integridade, otimizar desempenho e segurança, projetar modelos de dados",
+  "mod.domainHint.review.light": "Revisar mudanças pequenas e conferi-las com uma lista definida",
+  "mod.domainHint.review.heavy": "Revisão adversarial de mudanças em vários arquivos, buscando falhas de segurança e consistência",
   "mod.domainLevelNote": "As tarefas dos níveis low e medium seguem as configurações de “Trabalho leve”; as dos níveis high e max, as de “Trabalho pesado”.",
 });
 

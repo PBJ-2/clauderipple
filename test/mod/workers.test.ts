@@ -21,7 +21,7 @@ const verdict: WorkerVerdict = { domain: 'backend', level: 'standard', effort: '
 const pick = (s: Settings = DEFAULTS, v = verdict, workers = candidates, usable = true) => ladderPick(v, s.rules.general, s, workers, usable, 'en', s.allow)
 
 test('ripple:auto asks the session for the tier and domain, and for a model only with its source', () => {
-  for (const marker of ['[[ripple: light]]', '[[ripple: standard]]', '[[ripple: hard]]', '[[ripple: max]]', '[[ripple: standard ui]]']) assert.ok(AUTO_DESCRIPTION.includes(marker))
+  for (const marker of ['[[ripple: light]]', '[[ripple: standard]]', '[[ripple: hard]]', '[[ripple: max]]', '[[ripple: standard ui]]', '[[ripple: hard review]]']) assert.ok(AUTO_DESCRIPTION.includes(marker))
   assert.match(AUTO_DESCRIPTION, /Model reason: user/)
   assert.match(AUTO_DESCRIPTION, /Model reason: rule/)
   assert.match(AUTO_DESCRIPTION, /never carry a model over from an earlier task/)
@@ -77,20 +77,22 @@ test('every field uses the general ladder and a missing level climbs', () => {
   assert.equal(pick(DEFAULTS, { ...verdict, domain: 'design', level: 'deep' }).target?.agent, 'gpt-6-astra')
   assert.equal(pick(DEFAULTS, { ...verdict, level: 'light' }, candidates.slice(1)).target?.agent, 'gpt-6-1-sol')
 })
-test('domain ladders select UI for design/frontend, backend separately, otherwise this set\'s general', () => {
+test('domain ladders select UI for design/frontend, backend and review separately, otherwise this set\'s general', () => {
   const s = normalizeSettings({ domainRules: {
     ui: { mode: 'ladder', rungs: { standard: { target: { agent: 'deepseek-v4-1-flash' }, effort: 'max' } } },
     backend: { mode: 'ladder', rungs: { standard: { target: { agent: 'gpt-6-astra' }, effort: 'high' } } },
+    review: { mode: 'ladder', rungs: { standard: { target: { agent: 'claude-sonnet-5-5' }, effort: 'high' } } },
   } })
-  for (const domain of ['design', 'frontend', 'backend', 'general', 'docs', 'research', 'ops'] as const) {
+  for (const domain of ['design', 'frontend', 'backend', 'review', 'general', 'docs', 'research', 'ops'] as const) {
     const { rule, ladder } = workerRule(domain, s)
-    const expected = domain === 'design' || domain === 'frontend' ? 'ui' : domain === 'backend' ? 'backend' : 'general'
+    const expected = domain === 'design' || domain === 'frontend' ? 'ui' : domain === 'backend' ? 'backend' : domain === 'review' ? 'review' : 'general'
     assert.equal(rule, expected)
     assert.equal(ladder, expected === 'general' ? s.rules.general : s.domainRules![expected])
     const resolved = ladderPick({ ...verdict, domain }, ladder, s, candidates, true, 'en')
-    assert.equal(resolved.target?.agent, expected === 'ui' ? 'deepseek-v4-1-flash' : expected === 'backend' ? 'gpt-6-astra' : 'gpt-6-1-sol')
+    assert.equal(resolved.target?.agent, expected === 'ui' ? 'deepseek-v4-1-flash' : expected === 'backend' ? 'gpt-6-astra' : expected === 'review' ? 'claude-sonnet-5-5' : 'gpt-6-1-sol')
   }
   assert.deepEqual(workerRule('backend', { ...s, domainRules: { ui: s.domainRules!.ui } }), { rule: 'general', ladder: s.rules.general })
+  assert.deepEqual(workerRule('review', { ...s, domainRules: { ui: s.domainRules!.ui, backend: s.domainRules!.backend } }), { rule: 'general', ladder: s.rules.general })
   // Unavailable domain rungs climb only within that ladder, not into the general one, nor onto the
   // session's own model.
   const blocked = ladderPick(verdict, s.domainRules!.backend!, s, candidates, false, 'en')
@@ -111,10 +113,11 @@ test('under a domain ladder light and ordinary work take the light row; hard wor
 test('a tier marker\'s domain word picks the ladder; no word is general', () => {
   assert.deepEqual(readMarker('[[ripple: standard ui]]\nWork.'), { name: 'standard', domain: 'ui' })
   assert.deepEqual(readMarker('[[ripple: hard  backend ]]\nWork.'), { name: 'hard', domain: 'backend' })
+  assert.deepEqual(readMarker('[[ripple: standard red-team]]\nWork.'), { name: 'standard', domain: 'red-team' })
   assert.deepEqual(readMarker('[[ripple: gemini-3-8-flash@high]]'), { name: 'gemini-3-8-flash', level: 'high' })
-  for (const [word, domain] of [['ui', 'frontend'], ['frontend', 'frontend'], ['design', 'design'], ['backend', 'backend'], ['server', 'backend'], [undefined, 'general'], ['docs', 'general']] as const) {
+  for (const [word, domain] of [['ui', 'frontend'], ['frontend', 'frontend'], ['design', 'design'], ['backend', 'backend'], ['server', 'backend'], ['review', 'review'], ['redteam', 'review'], ['red-team', 'review'], [undefined, 'general'], ['docs', 'general']] as const) {
     assert.equal(markerDomain(word), domain)
-    assert.equal(workerRule(markerDomain(word), normalizeSettings({ domainRules: { ui: DEFAULTS.rules.general, backend: DEFAULTS.rules.general } })).rule, domain === 'frontend' || domain === 'design' ? 'ui' : domain)
+    assert.equal(workerRule(markerDomain(word), normalizeSettings({ domainRules: { ui: DEFAULTS.rules.general, backend: DEFAULTS.rules.general, review: DEFAULTS.rules.general } })).rule, domain === 'frontend' || domain === 'design' ? 'ui' : domain)
   }
 })
 

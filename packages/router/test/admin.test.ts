@@ -388,7 +388,8 @@ test("admin mod-settings keeps ten exact previous files and refuses unsupported 
       if (process.platform !== "win32") assert.equal(fs.statSync(backup).mode & 0o777, 0o600);
     }
     const final = fs.readFileSync(file, "utf8");
-    for (const schemaVersion of [undefined, 0, 2, "1", null]) {
+    // 1 is a mod from before the review ladder: its save would drop `domainRules.review`.
+    for (const schemaVersion of [undefined, 0, 1, 3, "2", null]) {
       assert.equal((await putModSettings(port, { schemaVersion, settings: {}, revision: 13 })).status, 426);
     }
     assert.equal((await putModSettings(port, { settings: {}, revision: 0 })).status, 409);

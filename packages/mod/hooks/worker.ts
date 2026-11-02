@@ -16,7 +16,7 @@ import type { DelegationPin } from '../types/index.d.ts'
  * add a domain word, `[[ripple: standard ui]]`; the router's own pattern stops at the name, so a
  * marker with a domain never reaches it as a model.
  */
-export const MARKER = /\[\[\s*(?:ripple|gpt)\s*:\s*([A-Za-z0-9._:/\-]+)\s*(?:@\s*([A-Za-z]+))?(?:\s+([A-Za-z]+))?\s*\]\]/
+export const MARKER = /\[\[\s*(?:ripple|gpt)\s*:\s*([A-Za-z0-9._:/\-]+)\s*(?:@\s*([A-Za-z]+))?(?:\s+([A-Za-z][A-Za-z-]*))?\s*\]\]/
 
 // The session's model markers no longer authorize a worker (2026-10-24). The judge reads one-shot
 // delegation intent; these name helpers remain for the user's explicit standing pin.

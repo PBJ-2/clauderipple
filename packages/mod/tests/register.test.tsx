@@ -887,10 +887,11 @@ test('a background command and a watch are listed from their calls and ended by 
   await b.clock.settle()
 })
 
-// The tier marker's optional domain word names the ladder; words outside the four keep general.
+// The tier marker's optional domain word names the ladder; words outside the domains keep general.
 const DOMAIN_RULES = {
   ui: { mode: 'ladder' as const, rungs: { light: [{ target: { agent: 'gpt-6-astra' }, effort: 'high' as const }], hard: [{ target: { agent: 'gpt-6-1-sol' }, effort: 'high' as const }] } },
   backend: { mode: 'ladder' as const, rungs: { light: [{ target: { agent: 'deepseek-v4-1-flash' }, effort: 'high' as const }], plan: [{ target: { agent: 'gpt-6-astra' }, effort: 'high' as const }] } },
+  review: { mode: 'ladder' as const, rungs: { light: [{ target: { agent: 'claude-sonnet-5-5' }, effort: 'high' as const }] } },
 }
 for (const [word, domain, rule, agent, model] of [
   [null, 'general', 'general', 'deepseek-v4-1-flash', 'deepseek-v4.1-flash@max'],
@@ -899,6 +900,9 @@ for (const [word, domain, rule, agent, model] of [
   ['design', 'design', 'ui', 'gpt-6-astra', 'gpt-6-astra@high'],
   ['backend', 'backend', 'backend', 'deepseek-v4-1-flash', 'deepseek-v4.1-flash@high'],
   ['server', 'backend', 'backend', 'deepseek-v4-1-flash', 'deepseek-v4.1-flash@high'],
+  ['review', 'review', 'review', 'ripple:auto', 'claude-sonnet-5-5@high'],
+  ['redteam', 'review', 'review', 'ripple:auto', 'claude-sonnet-5-5@high'],
+  ['red-team', 'review', 'review', 'ripple:auto', 'claude-sonnet-5-5@high'],
   ['docs', 'general', 'general', 'deepseek-v4-1-flash', 'deepseek-v4.1-flash@max'],
 ] as const) test(`a [[ripple: light${word ? ' ' + word : ''}]] marker runs the ${rule} ladder's light rung`, async ($, on) => {
   const b = boundaries(on, { domainRules: DOMAIN_RULES })
@@ -912,6 +916,17 @@ for (const [word, domain, rule, agent, model] of [
   const row = JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!)
   expect(row).toMatchObject({ rule, domain, level: 'light', rung: 'light', tier: 'light', by: 'session' })
   expect(row.raised).toBeUndefined()
+})
+
+test('a review word with no saved review ladder runs the general one', async ($, on) => {
+  const b = boundaries(on, {})
+  http(on)
+  const sent = spawnStub(on)
+  await start($)
+  await $.agent.spawn({ ...SPAWN, prompt: `[[ripple: light red-team]]\n${SPAWN.prompt}` })
+  expect(sent[0]).toMatchObject({ subagentType: 'deepseek-v4-1-flash', model: 'deepseek-v4.1-flash@max', prompt: SPAWN.prompt })
+  const row = JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!)
+  expect(row).toMatchObject({ rule: 'general', domain: 'review', level: 'light', rung: 'light', by: 'session' })
 })
 
 test('a quoted reason ignores case and spacing, and a quote under three letters is refused', async ($, on) => {

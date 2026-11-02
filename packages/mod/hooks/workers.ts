@@ -23,6 +23,7 @@ export const AUTO_DESCRIPTION = 'Delegate tasks here. Put the tier, and a domain
   'hard = subtle debugging, security review, or work where a wrong call is costly; max = planning or architecture where the deliverable is the decision itself. ' +
   'Size, file count or the brief\'s warnings do not by themselves make a task hard. Add ui only when the work needs visual judgment: visual design, a new screen\'s layout, or UX decisions, as in [[ripple: standard ui]]; ' +
   'restoring, porting, wiring or translating existing UI code takes no domain word. Add backend for server, API or database work. ' +
+  'Add review when the task is a read-only adversarial review (red team) of finished work that reports defects, as in [[ripple: hard review]]. ' +
   'With no marker the task runs as general standard. The owner\'s ladder picks the model for the tier. ' +
   'Name a model instead only when the user asked for it for this task, or a written rule (CLAUDE.md, a memory file) assigns it to this step: ' +
   'put [[ripple: <worker agent name or opus/sonnet/haiku>@<effort>]] on the first line and on the second line "Model reason: user \\"<the user\'s exact words>\\"" or "Model reason: rule <file> — <the rule>". ' +
@@ -96,7 +97,7 @@ export function userSaid(quote: string, words: readonly string[]): boolean {
 
 /** The domain a tier marker names, as the verdict domain its ladder reads. No word: general. */
 export function markerDomain(word: string | undefined): Domain {
-  return word === 'ui' || word === 'frontend' ? 'frontend' : word === 'design' ? 'design' : word === 'backend' || word === 'server' ? 'backend' : 'general'
+  return word === 'ui' || word === 'frontend' ? 'frontend' : word === 'design' ? 'design' : word === 'backend' || word === 'server' ? 'backend' : word === 'review' || word === 'redteam' || word === 'red-team' ? 'review' : 'general'
 }
 export function agentProvider(agentFileText: string): string | undefined {
   const head = /^---\r?\n([\s\S]*?)\r?\n---/.exec(agentFileText)?.[1]
@@ -244,7 +245,7 @@ function candidateOf(target: TierTarget, candidates: readonly WorkerCandidate[])
 }
 /** Domain overrides belong to the effective worker set; a missing override uses its general ladder. */
 export function workerRule(domain: Domain, settings: Settings): { rule: WorkerPick['rule']; ladder: Rule } {
-  const key = domain === 'design' || domain === 'frontend' ? 'ui' : domain === 'backend' ? 'backend' : 'general'
+  const key = domain === 'design' || domain === 'frontend' ? 'ui' : domain === 'backend' ? 'backend' : domain === 'review' ? 'review' : 'general'
   const ladder = key === 'general' ? undefined : settings.domainRules?.[key]
   return ladder ? { rule: key, ladder } : { rule: 'general', ladder: settings.rules.general }
 }

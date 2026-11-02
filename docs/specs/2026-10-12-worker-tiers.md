@@ -211,10 +211,11 @@ individual workers are edited on the dashboard. Existing effort/judge/cache cont
 
 ## Optional domain ladders (2026-10-21)
 
-Each worker set (Base or a saved mode) may store `domainRules: { ui?: Rule; backend?: Rule }`
+Each worker set (Base or a saved mode) may store `domainRules: { ui?: Rule; backend?: Rule; review?: Rule }`
 next to its general ladder, never inside `settings.rules`. `design` and `frontend` verdicts use
-`ui`; `backend` uses `backend`; other domains use general. An absent override uses **that set's**
-general ladder. An active mode replaces both general and domain rules completely: a missing mode
+`ui`; `backend` uses `backend`; `review`, `redteam` and `red-team` use `review`; other domains use
+general. An absent override uses **that set's** general ladder. An active mode replaces both general
+and domain rules completely: a missing mode
 override never inherits Base's. New modes deep-copy Base's general and optional domain ladders;
 existing modes gain no overrides on load. Normalization keeps only valid optional ladders and
 reuses ordered-step validation, then folds them into two levels (below). Retired per-field
