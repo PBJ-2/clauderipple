@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.25 — 2026-11-02
+
+### Added
+
+- **The phone's background-task list names each worker's model**, as the worker's card in the
+  conversation does (Ripple Remote 1.0.8 and the web remote). A later update without a model keeps
+  the one already known.
+
 ## 0.12.24 — 2026-11-02
 
 ### Added
