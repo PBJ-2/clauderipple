@@ -30,6 +30,7 @@ export class ToolTranslation {
 
   constructor(body: Json, oauth = false, diagnose: (diagnostic: ToolDiagnostic) => void = () => {}) {
     this.oauth = oauth;
+    const declared = new Set<string>();
     const visit = (raw: unknown, namespace?: string, namespaceDescription?: string): void => {
       const tool = object(raw);
       if (!tool) return;
@@ -43,6 +44,9 @@ export class ToolTranslation {
         diagnose({ type: typeof tool.type === "string" ? tool.type : "unknown", name: typeof tool.name === "string" ? tool.name : null, reason: "unsupported tool type or missing name" });
         return;
       }
+      // Anthropic refuses a request that names a tool twice; the first declaration wins.
+      if (declared.has(key(identity))) return;
+      declared.add(key(identity));
       const fields = object(tool.function) ?? object(tool.custom) ?? tool;
       const name = this.register(identity);
       const description = [namespaceDescription, typeof fields.description === "string" ? fields.description : ""].filter(Boolean).join("\n\n");
@@ -54,6 +58,11 @@ export class ToolTranslation {
         : { name, ...(description ? { description } : {}), input_schema: schema });
     };
     if (Array.isArray(body.tools)) for (const tool of body.tools) visit(tool);
+    // Codex 0.166 declares its tools inside the input, as an `additional_tools` item (#122).
+    if (Array.isArray(body.input)) for (const raw of body.input) {
+      const item = object(raw);
+      if (item?.type === "additional_tools" && Array.isArray(item.tools)) for (const tool of item.tools) visit(tool);
+    }
     // Historical calls can outlive their declaration. Still give them a legal, reversible name.
     if (Array.isArray(body.input)) for (const raw of body.input) {
       const item = object(raw);

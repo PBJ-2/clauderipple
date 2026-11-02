@@ -83,6 +83,21 @@ test("hosted tool diagnostics contain metadata only and impossible requirements 
   assert.equal(new ToolTranslation({ tool_choice: "auto" }).choice, undefined);
 });
 
+// Codex 0.166 sends no top-level tools; they arrive as an input item (#122).
+test("tools declared in an additional_tools input item reach the request once", () => {
+  const exec = { type: "custom", name: "exec", description: "Execute code", format };
+  const body = { input: [
+    { type: "additional_tools", role: "developer", tools: [{ type: "namespace", name: "functions", tools: [exec] }, tools[0]] },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "Read the file" }] },
+  ], tools: [tools[0]] };
+  const result = responsesToAnthropic(body, "claude-sonnet-5");
+  const translation = new ToolTranslation(body);
+  assert.deepEqual(result.tools?.map((tool) => translation.fromWire(tool.name)), [
+    { name: "read", kind: "function" }, { name: "exec", kind: "custom", namespace: "functions" },
+  ]);
+  assert.deepEqual(result.messages.map((message) => message.role), ["user"]);
+});
+
 for (const mode of ["auto", "none", "required"]) {
   test(`empty allowed_tools omits declarations unless a call is required (${mode})`, () => {
     for (const declared of [[{ type: "web_search" }], tools]) {
