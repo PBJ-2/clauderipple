@@ -21,7 +21,8 @@ export function activityOverview(items: readonly TimelineItem[], background: rea
   const workers: WorkerItem[] = items.flatMap(item => item.type === "subagent" ? [item] : item.type === "toolGroup" ? item.rows.filter((row): row is WorkerItem => row.type === "subagent") : []);
   for (const worker of workers) {
     const previous = tasks.get(worker.sub);
-    tasks.set(worker.sub, { ...previous, id: previous?.id ?? worker.toolUseId, sub: worker.sub, kind: "agent", label: worker.description, startedAt: previous?.startedAt ?? null, state: worker.status === "running" && previous?.state && previous.state !== "running" ? previous.state : worker.status });
+    const model = worker.model ?? previous?.model;
+    tasks.set(worker.sub, { ...previous, id: previous?.id ?? worker.toolUseId, sub: worker.sub, kind: "agent", label: worker.description, startedAt: previous?.startedAt ?? null, state: worker.status === "running" && previous?.state && previous.state !== "running" ? previous.state : worker.status, ...(model ? { model } : {}) });
   }
   const all = [...tasks.values()];
   const active = all.filter(task => !task.state || task.state === "running" || task.state === "unknown");

@@ -264,6 +264,8 @@ export interface BackgroundTask {
   id: string; kind: "agent" | "shell" | "monitor" | "schedule" | "subscription" | "other"; label: string; startedAt: number | null;
   sub?: string; state?: "running" | "done" | "failed" | "stopped" | "unknown";
   command?: string; schedule?: string; nextAt?: number; endedAt?: number; category?: string;
+  /** a worker's model, as its card in the conversation names it */
+  model?: string;
 }
 export interface PlanStep { id?: string; text: string; status: "pending" | "in_progress" | "completed" }
 

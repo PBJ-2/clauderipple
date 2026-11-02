@@ -65,3 +65,16 @@ test("worker overview deduplicates aliases, preserves running lists and separate
   assert.equal(view.active[0]?.id, "engine-id");
   assert.equal(view.recent.length, 3);
 });
+
+test("a worker's model reaches the task list and survives an event that does not name it", () => {
+  const activity = new BackgroundActivity();
+  const worker = (model: string | null, status: "running" | "done") => activity.accept({ kind: "subagent", toolUseId: "w", sub: "sub-w", description: "Review", model, status, steps: 0 }, text => String(text));
+  worker("gpt-6.1-sol", "running");
+  assert.equal(activity.active[0]?.model, "gpt-6.1-sol");
+  worker(null, "done");
+  assert.equal(activity.history[0]?.model, "gpt-6.1-sol");
+  const items: TimelineItem[] = [{ type: "subagent", key: "s", ver: "1", toolUseId: "w", sub: "sub-w", description: "Review", model: null, status: "running", steps: 0 }];
+  assert.equal(activityOverview(items, [{ id: "w", sub: "sub-w", kind: "agent", label: "Review", startedAt: 1, model: "gpt-6.1-sol" }]).active[0]?.model, "gpt-6.1-sol", "a timeline card without a model keeps the host's");
+  items[0] = { ...items[0]!, model: "gemini-3.8-flash" } as TimelineItem;
+  assert.equal(activityOverview(items).active[0]?.model, "gemini-3.8-flash");
+});
