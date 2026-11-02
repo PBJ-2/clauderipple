@@ -2646,8 +2646,8 @@ Object.assign(I18N.ko, {
   "mod.domainHint.ui.heavy": "복잡한 레이아웃·상태 버그 디버깅, 화면 구조 설계",
   "mod.domainHint.backend.light": "설정·로그 확인과 정의된 API·로직 구현",
   "mod.domainHint.backend.heavy": "동시성·정합성 디버깅, 성능·보안 최적화, 데이터 모델 설계",
-  "mod.domainHint.review.light": "작은 변경의 검수와 정해진 항목 대조",
-  "mod.domainHint.review.heavy": "여러 파일에 걸친 변경의 적대적 검수, 보안·정합성 결함 찾기",
+  "mod.domainHint.review.light": "작은 변경 검수와 정해진 항목 대조",
+  "mod.domainHint.review.heavy": "여러 파일에 걸친 변경의 적대적 검수, 보안·정합성 결함 탐지",
   "mod.domainLevelNote": "low·medium 단계 작업은 '가벼운 작업' 설정을, high·max 단계 작업은 '무거운 작업' 설정을 따릅니다.",
 });
 Object.assign(I18N.en, {
