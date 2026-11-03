@@ -467,6 +467,15 @@ label.check input { margin-top: 2px; }
    until it is touched or actually holds a value. */
 .picker-model > .model-window { grid-column: 2; grid-row: 2; width: 9ch; min-height: 22px; padding: 1px 6px; font-size: var(--fs-cap); text-align: right; color: var(--label-2); background: transparent; border-color: transparent; }
 .picker-model > .model-window::-webkit-inner-spin-button { display: none; }
+/* The added models in picker order: the number, the name with its provider under it, two arrows. */
+.picker-order { margin: 0; padding: 4px 12px 4px 38px; }
+.picker-order-item { padding: 6px 0; }
+.picker-order-item + .picker-order-item { border-top: 1px solid var(--separator); }
+.picker-order-item::marker { color: var(--label-2); font: var(--fs-cap) var(--mono); }
+.po-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 8px; align-items: center; }
+.po-row > .po-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-sub); }
+.po-row > small { grid-column: 1; grid-row: 2; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-cap); color: var(--label-2); }
+.po-row > .rung-actions { grid-column: 2; grid-row: 1 / span 2; margin-left: 0; }
 .picker-model > .model-window:hover, .picker-model > .model-window:focus, .picker-model > .model-window:not(:placeholder-shown) { color: var(--label); background: var(--field); border-color: var(--field-edge); }
 
 /* ---- Phone --------------------------------------------------------------------------- */

@@ -18,6 +18,8 @@ type Config = {
 type PickerBlock = {
   applyPickerSelections: (next: Config, selections: Entry[], preserveWindows?: boolean) => Config;
   pickerSelectionsExcept: (config: Config, providerName: string) => Entry[];
+  providerPickerSelections: (config: Config, providerName: string, saved: { models?: ({ id: string } | string)[] } | undefined, checkedModels: { id: string; name?: string }[], show: boolean) => Entry[];
+  orderPickerEntries: (entries: { model: string }[], ids: string[]) => { model: string }[];
 };
 
 function loadPickerBlock(): PickerBlock {
@@ -28,7 +30,7 @@ function loadPickerBlock(): PickerBlock {
   assert.ok(start > 0 && end > start, "app.js no longer contains the picker-selection block");
   const make = new Function(
     "groupedModels",
-    `${source.slice(start, end)}; return { applyPickerSelections, pickerSelectionsExcept };`,
+    `${source.slice(start, end)}; return { applyPickerSelections, pickerSelectionsExcept, providerPickerSelections, orderPickerEntries };`,
   ) as (groupedModels: unknown) => PickerBlock;
   // The real helper groups a config's providers; only the model ids matter here.
   return make((config: Config) =>
@@ -201,7 +203,7 @@ test("domain editors copy, edit and remove only the selected set's rule; new mod
   assert.ok(ui.state.settings.modes[0]!.domainRules!.ui);
 });
 
-const { applyPickerSelections: apply, pickerSelectionsExcept: except } = loadPickerBlock();
+const { applyPickerSelections: apply, pickerSelectionsExcept: except, providerPickerSelections: providerPicks, orderPickerEntries: orderEntries } = loadPickerBlock();
 const groups = loadGroupedModels();
 
 function baseConfig(): Config {
@@ -294,6 +296,44 @@ test("a model's own context window survives the rebuild; a missing or unusable o
     { model: "z-ai/glm-5.3-flash", name: "GLM", contextWindow: 400000 },
     { model: "gpt-5.6-terra", name: "Terra" },
   ]);
+});
+
+// The app picker lists the added models in stored order, so a rebuild must not be what decides it.
+test("a rebuild keeps the stored order; a model ticked now goes after the ones already there", () => {
+  const config = savedConfig();
+  config.providers.openrouter!.models!.push({ id: "z-ai/glm-6", name: "GLM 6" });
+  // Fed in provider order, as both the Clients checklist and a provider form feed it.
+  const next = apply(config, [
+    { id: "z-ai/glm-6", name: "GLM 6", provider: "openrouter" },
+    { id: "z-ai/glm-5.3-flash", name: "GLM", provider: "openrouter" },
+    { id: "gpt-5.6-terra", name: "Terra", provider: "chatgpt" },
+    { id: "muse-spark-1.3-contributor", provider: "opencode-go" },
+  ]);
+  assert.deepEqual(next.cli?.extraModels?.map((entry) => entry.model), ["gpt-5.6-terra", "muse-spark-1.3-contributor", "z-ai/glm-5.3-flash", "z-ai/glm-6"]);
+});
+
+test("an order list reorders the models it names among their places and leaves the rest in place", () => {
+  const entries = [{ model: "a" }, { model: "b" }, { model: "claude-x" }, { model: "c" }];
+  assert.deepEqual(orderEntries(entries, ["c", "a", "b"]).map((entry) => entry.model), ["c", "a", "claude-x", "b"]);
+  assert.deepEqual(orderEntries(entries, ["gone", "b", "a"]).map((entry) => entry.model), ["b", "a", "claude-x", "c"], "an id no longer stored is ignored; one not listed stays put");
+  assert.deepEqual(orderEntries(entries, []).map((entry) => entry.model), ["a", "b", "claude-x", "c"]);
+});
+
+test("a provider form keeps the subset the Clients screen chose and adds only newly declared models", () => {
+  const config = savedConfig();
+  // opencode-go declares two models; only muse was left in the picker on the Clients screen.
+  config.cli!.extraModels = config.cli!.extraModels!.filter((entry) => entry.model !== "deepseek-v4.1-flash");
+  const saved = { models: [{ id: "deepseek-v4.1-flash" }, { id: "muse-spark-1.3-contributor" }] };
+  const checked = [{ id: "deepseek-v4.1-flash" }, { id: "muse-spark-1.3-contributor" }, { id: "kimi-k3" }];
+  config.providers["opencode-go"]!.models = checked;
+  assert.deepEqual(providerPicks(config, "opencode-go", saved, checked, true).map((entry) => entry.id),
+    ["gpt-5.6-terra", "z-ai/glm-5.3-flash", "muse-spark-1.3-contributor", "kimi-k3"]);
+  assert.deepEqual(providerPicks(config, "opencode-go", saved, checked, false).map((entry) => entry.id), ["gpt-5.6-terra", "z-ai/glm-5.3-flash"]);
+  // A provider with nothing shown — a new one, or the box just ticked — shows all it declares.
+  config.cli!.extraModels = config.cli!.extraModels!.filter((entry) => entry.model !== "muse-spark-1.3-contributor");
+  assert.deepEqual(providerPicks(config, "opencode-go", saved, checked, true).map((entry) => entry.id),
+    ["gpt-5.6-terra", "z-ai/glm-5.3-flash", "deepseek-v4.1-flash", "muse-spark-1.3-contributor", "kimi-k3"]);
+  assert.deepEqual(providerPicks(config, "opencode-go", undefined, checked, true).map((entry) => entry.id).slice(2), ["deepseek-v4.1-flash", "muse-spark-1.3-contributor", "kimi-k3"]);
 });
 
 // What one save of an unrelated provider must leave alone. The rebuild is fed the entries of every
@@ -459,7 +499,7 @@ function providerSaveHarness(initial = saveFixture(), probe: Promise<ProbeResult
     ${dashboardBlock('function configSaved(', '// A save sends')}
     const document = { createTextNode: text => el('text', {text}) };
     const latestConfig = async () => clone(h.latest), configRequest = async next => { h.writes.push(clone(next)); };
-    const loadProviders = async () => {}, offerPickerOn = async () => {}, startMeasurement = () => {};
+    const loadProviders = async () => {}, offerPickerOn = async () => {}, startMeasurement = () => {}, pickerSaving = Promise.resolve();
     const confirm = () => true, closeProviderDetail = () => {}, renderProviderWorkspace = () => {};
     ${dashboardBlock('/** The two rows a setting shows', '// Claude Code refuses these')}
     ${dashboardBlock('function providerUsages(', 'function providerTabs(')}
@@ -521,6 +561,32 @@ test('provider saves preserve a picker-only context window instead of its catalo
   assert.equal(ui.h.writes[0]!.cli.extraModels.find(entry => entry.model === 'one')!.contextWindow, 345678);
   // The Clients editor can still explicitly clear an override.
   assert.equal(apply(fixture, [{ id: 'one', provider: 'p' }]).cli!.extraModels![0]!.contextWindow, undefined);
+});
+
+test('a provider save keeps the picker order and the models taken out of it on the Clients screen', async () => {
+  const fixture = saveFixture();
+  fixture.providers.q = { type: 'openai-compatible', url: 'https://q.test/v1', models: [{ id: 'three' }] };
+  // 'one' was taken out on the Clients screen, and p's model stands before q's.
+  fixture.cli.extraModels = [{ model: 'two' }, { model: 'three' }];
+  const pending = deferred<ProbeResult>(), ui = providerSaveHarness(fixture, pending.promise); ui.open();
+  const checking = ui.button('providers.check').emit('click');
+  pending.resolve({ ok: true, models: [{ id: 'one' }, { id: 'two' }, { id: 'new' }] });
+  await checking; await new Promise<void>(resolve => setImmediate(resolve));
+  const added = ui.h.root!.find(node => node.type === 'checkbox' && node.dataset.model === 'new')!;
+  added.checked = true; await added.emit('change');
+  await ui.save();
+  assert.deepEqual(ui.h.writes[0]!.providers.p!.models.map(model => model.id), ['one', 'two', 'new']);
+  assert.deepEqual(ui.h.writes[0]!.cli.extraModels.map(entry => entry.model), ['two', 'three', 'new']);
+});
+
+test('ticking "show in picker" on a provider with nothing shown still shows all its models', async () => {
+  const fixture = saveFixture(); fixture.cli.extraModels = [];
+  const ui = providerSaveHarness(fixture); ui.open();
+  const show = ui.h.root!.find(node => node.attrs.class === 'check picker-check')!.children[0]!;
+  assert.equal(show.checked, false);
+  show.checked = true;
+  await ui.save();
+  assert.deepEqual(ui.h.writes[0]!.cli.extraModels.map(entry => entry.model), ['one', 'two']);
 });
 
 test('late compatible and ChatGPT model listings respect checkboxes changed while they were in flight', async () => {
@@ -667,7 +733,7 @@ async function pickerWindowHarness(
   const h = { config, catalogWindows, windows, requests: [] as string[], box: new SaveNode('div'), card: new SaveNode('div'), rows: new SaveNode('div') };
   const ui = new Function('h', 'el', `
     let currentConfig, pickerContextWindows = {catalogWindows:{}}, clientsLoaded, status = {};
-    let pickerModelsDrawnFor = { key: null }, modelSlotsDrawnFor = { key: null };
+    let pickerModelsDrawnFor = { key: null }, modelSlotsDrawnFor = { key: null }, pickerSavesOpen = 0;
     const pickerWindowDrafts = new Map();
     const document = { activeElement: null };
     const t = key => key;
@@ -683,16 +749,16 @@ async function pickerWindowHarness(
     ${dashboardBlock('function discoveredContextWindow(', 'let currentConfig =')}
     ${dashboardBlock('function providerCannotSearch(', 'async function saveWebSearch(')}
     ${dashboardBlock('function renderClientPickerModels(', '// Claude Code picks these')}
-    ${dashboardBlock('function clientPickerSelections(', 'async function saveClientPickerModels(')}
+    ${dashboardBlock('function clientPickerSelections(', '// One picker save at a time')}
     const loadCatalogs = async () => {}, renderClients = () => renderClientPickerModels(true);
     const api = async url => { h.requests.push(url); return url === '/api/config' ? h.config : {windows:h.windows,catalogWindows:h.catalogWindows}; };
     const toast = message => { throw new Error(message); };
     ${dashboardBlock('async function loadClients(', 'async function loadProviders(')}
-    return {load:loadClients, selections:clientPickerSelections, setStatus: value => { status = value; }, render: () => { renderClientPickerModels(true); renderModelSlots(); }};
-  `)(h, (tag: string, attrs?: Record<string, unknown>, children?: SaveNode[]) => new SaveNode(tag, attrs, children)) as { load(): Promise<void>; selections(): Entry[]; setStatus(value: unknown): void; render(): void };
+    return {load:loadClients, selections:clientPickerSelections, setStatus: value => { status = value; }, render: () => { renderClientPickerModels(true); renderModelSlots(); }, savesOpen: count => { pickerSavesOpen = count; }};
+  `)(h, (tag: string, attrs?: Record<string, unknown>, children?: SaveNode[]) => new SaveNode(tag, attrs, children)) as { load(): Promise<void>; selections(): Entry[]; setStatus(value: unknown): void; render(): void; savesOpen(count: number): void };
   await ui.load();
   const field = (model: string) => h.box.find(node => node.attrs.class === 'model-window' && node.dataset.model === model)!;
-  return { h, field, selections: ui.selections, load: ui.load, render: ui.render, setStatus: ui.setStatus };}
+  return { h, field, selections: ui.selections, load: ui.load, render: ui.render, setStatus: ui.setStatus, savesOpen: ui.savesOpen };}
 
 test('the catalogue window prefills an editable field; an empty or catalogue-equal value saves no override', async () => {
   const ui = await pickerWindowHarness({ 'gpt-6.1-sol': 475000 });
@@ -977,4 +1043,225 @@ test('config revision conflicts re-read and reapply only this save; legacy route
       assert.equal(saved.configRevision, 'revision-3');
     } else assert.equal(Object.hasOwn(h.writes[0]!, 'configRevision'), false);
   }
+});
+
+// The Clients screen's picker saves, run against the real config request and its conflict retry.
+// The screen itself is reduced to what the save reads from it: the ticked ids and the order list.
+type PickerServer = { config: SavedConfig; revision: number; conflict?: (config: SavedConfig) => void; gate?: Promise<void>; putSeen?: () => void };
+function pickerSaveHarness(config: SavedConfig) {
+  const h = {
+    server: { config: { ...structuredClone(config), configRevision: 'r1' }, revision: 1 } as PickerServer,
+    writes: [] as SavedConfig[], errors: [] as string[], selections: [] as string[],
+  };
+  const ui = new Function('h', `
+    const clone = value => JSON.parse(JSON.stringify(value)); let currentConfig;
+    const toast = (message, error) => { if (error) h.errors.push(message); };
+    const fetch = async (url, options) => {
+      const s = h.server;
+      if (url !== '/api/config') return { ok: true, text: async () => '{}' };
+      if (!options || options.method !== 'PUT') return { ok: true, text: async () => JSON.stringify(s.config) };
+      const body = JSON.parse(options.body); h.writes.push(body);
+      if (s.putSeen) { s.putSeen(); s.putSeen = undefined; }
+      if (s.gate) { const gate = s.gate; s.gate = undefined; await gate; }
+      if (s.conflict) {
+        const conflict = s.conflict; s.conflict = undefined; conflict(s.config);
+        s.config.configRevision = 'r' + (++s.revision);
+        return { ok: false, status: 409, text: async () => JSON.stringify({ error: 'conflict' }) };
+      }
+      s.config = { ...body, configRevision: 'r' + (++s.revision) };
+      return { ok: true, text: async () => JSON.stringify({ configRevision: s.config.configRevision }) };
+    };
+    ${mergeBlock}
+    ${dashboardBlock('const configSnapshots =', 'function modelsOf(')}
+    const groupedModels = config => Object.entries(config.providers).map(([name, p]) => ({ name, models: p.models || [] }));
+    ${dashboardBlock('function allKnownModelIds(', 'function updateSlotSummary(')}
+    let pickerOrderPending = null, pickerContextWindows = {};
+    const pickerWindowDrafts = new Map(), t = key => key, renderClientPickerOrder = () => {}, pickerModeOn = () => true;
+    const clientPickerSelections = () => h.selections.map(id => ({ id, name: id, provider: 'p' }));
+    ${dashboardBlock('// One picker save at a time', 'function pickerModeOn(')}
+    return { save: changed => saveClientPickerModels(changed), load: latestConfig, pend: ids => { pickerOrderPending = ids; }, pending: () => pickerOrderPending };
+  `)(h) as { save(selectionsChanged?: boolean): Promise<void>; load(): Promise<unknown>; pend(ids: string[]): void; pending(): string[] | null };
+  return { h, ...ui };
+}
+function threeModels(): SavedConfig {
+  const config = saveFixture();
+  config.providers.p!.models = [{ id: 'one' }, { id: 'two' }, { id: 'three' }];
+  config.cli.extraModels = [{ model: 'one', name: 'one' }, { model: 'two', name: 'two' }, { model: 'three', name: 'three' }];
+  return config;
+}
+
+test('a reorder survives a conflict retry, after what another window added meanwhile', async () => {
+  const ui = pickerSaveHarness(threeModels());
+  await ui.load();
+  ui.h.selections = ['one', 'two', 'three'];
+  ui.pend(['three', 'one', 'two']);
+  // Another window adds a model while this save is on its way; the retry must keep both.
+  ui.h.server.conflict = config => {
+    config.providers.q = { type: 'openai-compatible', models: [{ id: 'remote' }] };
+    config.cli.extraModels.push({ model: 'remote', name: 'Remote' });
+  };
+  await ui.save();
+  assert.equal(ui.h.writes.length, 2);
+  assert.deepEqual(ui.h.server.config.cli.extraModels.map(entry => entry.model), ['three', 'one', 'two', 'remote']);
+  assert.equal(ui.pending(), null, 'the saved order is the stored one now');
+  assert.deepEqual(ui.h.errors, []);
+});
+
+test('picker saves run one at a time, and the waiting one carries the latest screen', async () => {
+  const ui = pickerSaveHarness(threeModels());
+  ui.h.server.config.cli.extraModels = [{ model: 'one', name: 'one' }];
+  await ui.load();
+  const gate = deferred<void>(), seen = deferred<void>();
+  ui.h.server.gate = gate.promise; ui.h.server.putSeen = () => seen.resolve();
+  ui.h.selections = ['one', 'two'];
+  const first = ui.save();
+  await seen.promise;
+  // Untick it again while the first save is still on the wire, then press once more.
+  ui.h.selections = ['one'];
+  const second = ui.save(), third = ui.save();
+  assert.equal(third, second, 'a save asked for while one waits is the waiting one');
+  assert.equal(ui.h.writes.length, 1, 'nothing more goes out before the first save answers');
+  gate.resolve();
+  await Promise.all([first, second]);
+  assert.deepEqual(ui.h.writes.map(write => write.cli.extraModels.map(entry => entry.model)), [['one', 'two'], ['one']]);
+  assert.deepEqual(ui.h.server.config.cli.extraModels.map(entry => entry.model), ['one'], 'the last thing done on screen is what stays');
+});
+
+test('a failed picker save leaves later saves working and drops the unsaved order', async () => {
+  const ui = pickerSaveHarness(threeModels());
+  await ui.load();
+  ui.h.selections = ['one', 'two', 'three'];
+  ui.pend(['two', 'one', 'three']);
+  // Three conflicts in a row is where configRequest gives up.
+  let conflicts = 0;
+  const conflictAgain = (config: SavedConfig) => { conflicts++; if (conflicts < 3) ui.h.server.conflict = conflictAgain; void config; };
+  ui.h.server.conflict = conflictAgain;
+  await ui.save();
+  assert.deepEqual(ui.h.errors, ['common.saveFailed']);
+  assert.equal(ui.pending(), null);
+  assert.deepEqual(ui.h.server.config.cli.extraModels.map(entry => entry.model), ['one', 'two', 'three']);
+  ui.pend(['three', 'two', 'one']);
+  await ui.save();
+  assert.deepEqual(ui.h.server.config.cli.extraModels.map(entry => entry.model), ['three', 'two', 'one']);
+});
+
+test('a reorder alone keeps the list as the router holds it, without a model another window removed', async () => {
+  const ui = pickerSaveHarness(threeModels());
+  await ui.load();
+  ui.h.selections = ['one', 'two', 'three']; // this screen still shows 'three' ticked
+  ui.h.server.config.cli.extraModels = ui.h.server.config.cli.extraModels.filter(entry => entry.model !== 'three');
+  ui.pend(['two', 'one', 'three']);
+  await ui.save(false);
+  assert.deepEqual(ui.h.server.config.cli.extraModels.map(entry => entry.model), ['two', 'one']);
+});
+
+test('a status redraw while picker saves are open leaves the ticks the waiting save will read', async () => {
+  const ui = await pickerWindowHarness({});
+  const box = (model: string) => ui.h.box.find(node => node.type === 'checkbox' && node.dataset.model === model)!;
+  const ticked = box('other');
+  ticked.checked = false; // unticked on screen; the save that will carry it is still waiting
+  ui.savesOpen(1);
+  // The save before it stored a list in which 'other' is still ticked, and the poll redraws.
+  ui.h.config = structuredClone(ui.h.config);
+  ui.h.config.providers.r = { type: 'openai-compatible', models: [{ id: 'third' }] };
+  await ui.load();
+  assert.equal(box('other'), ticked, 'the checklist is not rebuilt while a save is open');
+  assert.equal(ui.selections().some(entry => entry.id === 'other'), false);
+  ui.savesOpen(0);
+  ui.render();
+  assert.notEqual(box('other'), ticked, 'once the saves are done the screen follows the router again');
+});
+
+// The order card itself, on a DOM just big enough for it: lists, buttons, focus.
+class OrderNode {
+  children: OrderNode[] = [];
+  parent: OrderNode | null = null;
+  hidden = false;
+  readonly doc: { activeElement: OrderNode | null };
+  readonly tag: string;
+  readonly attrs: Record<string, unknown>;
+  readonly disabled: boolean;
+  constructor(doc: { activeElement: OrderNode | null }, tag: string, attrs: Record<string, unknown> = {}, children: (OrderNode | null)[] = []) {
+    this.doc = doc; this.tag = tag; this.attrs = attrs;
+    this.disabled = attrs.disabled !== undefined;
+    this.append(...children);
+  }
+  append(...nodes: (OrderNode | null)[]) { for (const node of nodes) if (node) { node.parent = this; this.children.push(node); } }
+  replaceChildren(...nodes: OrderNode[]) { for (const child of this.children) child.parent = null; this.children = []; this.append(...nodes); }
+  get childElementCount() { return this.children.length; }
+  getAttribute(name: string) { const value = this.attrs[name]; return value === undefined ? null : String(value); }
+  contains(node: OrderNode | null): boolean { for (let at = node; at; at = at.parent) if (at === this) return true; return false; }
+  all(): OrderNode[] { return [this, ...this.children.flatMap(child => child.all())]; }
+  querySelector(selector: string) { const key = /\[data-key="(.+)"\]/.exec(selector)?.[1]; return this.all().find(node => node !== this && node.attrs['data-key'] === key) ?? null; }
+  focus() { this.doc.activeElement = this; }
+  click() { (this.attrs.onclick as () => void)(); }
+}
+function orderCardHarness(extraModels: string[]) {
+  const doc = { activeElement: null as OrderNode | null };
+  const h = {
+    config: {
+      providers: { g: { models: [{ id: 'a' }, { id: 'b' }, { id: 'c' }] }, claude: { models: [{ id: 'claude-opus-5-5' }] } },
+      cli: { extraModels: extraModels.map(model => ({ model, name: model.toUpperCase() })) },
+    },
+    saves: [] as (boolean | undefined)[], card: new OrderNode(doc, 'section'), box: new OrderNode(doc, 'ol'),
+  };
+  const ui = new Function('h', 'document', 'el', `
+    let currentConfig = h.config;
+    const claudeModels = [{ id: 'claude-opus-5-5' }];
+    const $ = selector => selector === '#client-picker-order-card' ? h.card : h.box;
+    const t = (key, vars) => vars ? key + ':' + vars.name : key, CSS = { escape: value => value };
+    const providerLabel = name => name;
+    const groupedModels = config => Object.entries(config.providers).map(([name, p]) => ({ name, models: p.models }));
+    const saveClientPickerModels = changed => { h.saves.push(changed); };
+    ${dashboardBlock('function allKnownModelIds(', 'function updateSlotSummary(')}
+    ${dashboardBlock('// The order the app picker lists the added models in', '// Claude Code picks these')}
+    return { render: enabled => renderClientPickerOrder(enabled), pending: () => pickerOrderPending, drop: () => { pickerOrderPending = null; } };
+  `)(h, doc, (tag: string, attrs?: Record<string, unknown>, children?: (OrderNode | null)[]) => new OrderNode(doc, tag, attrs, children)) as { render(enabled: boolean): void; pending(): string[] | null; drop(): void };
+  const names = () => h.box.children.map(item => item.children[0]!.children[0]!.attrs.text);
+  const button = (label: string) => h.box.all().find(node => node.tag === 'button' && node.attrs['aria-label'] === label)!;
+  return { h, doc, ui, names, button };
+}
+
+test('the order card lists the added models only, and one model has no order to choose', () => {
+  const card = orderCardHarness(['claude-opus-5-5', 'a', 'b', 'c']);
+  card.ui.render(true);
+  assert.equal(card.h.card.hidden, false);
+  assert.deepEqual(card.names(), ['A', 'B', 'C'], 'a Claude model the app lists itself keeps its own place there');
+  assert.equal(card.button('slots.pickerMoveUp:A').disabled, true);
+  assert.equal(card.button('slots.pickerMoveDown:C').disabled, true);
+  card.ui.render(false);
+  assert.equal(card.h.card.hidden, true, 'picker mode off');
+  const single = orderCardHarness(['claude-opus-5-5', 'a']);
+  single.ui.render(true);
+  assert.equal(single.h.card.hidden, true);
+});
+
+test('a move shows the new order at once, saves it as a reorder only, and focus stays on the moved row', () => {
+  const card = orderCardHarness(['a', 'b', 'c']);
+  card.ui.render(true);
+  card.button('slots.pickerMoveDown:A').click();
+  assert.deepEqual(card.names(), ['B', 'A', 'C']);
+  assert.deepEqual(card.ui.pending(), ['b', 'a', 'c']);
+  assert.deepEqual(card.h.saves, [false], 'a reorder leaves the ticks alone');
+  assert.equal(card.doc.activeElement, card.button('slots.pickerMoveDown:A'));
+  // At the end of the list the arrow that was pressed is disabled; focus moves to the other one.
+  card.button('slots.pickerMoveDown:A').click();
+  assert.deepEqual(card.names(), ['B', 'C', 'A']);
+  assert.equal(card.doc.activeElement, card.button('slots.pickerMoveUp:A'));
+  // A failed save puts the stored order back; focus stays on A's arrows through that rebuild —
+  // on the one still usable now that A is first again.
+  card.ui.drop();
+  card.ui.render(true);
+  assert.deepEqual(card.names(), ['A', 'B', 'C']);
+  assert.equal(card.doc.activeElement, card.button('slots.pickerMoveDown:A'));
+});
+
+test('a tick saved with no reorder waiting keeps an order another window stored meanwhile', async () => {
+  const ui = pickerSaveHarness(threeModels());
+  await ui.load();
+  // Another window reorders before this screen redraws; this screen then unticks 'two'.
+  ui.h.server.config.cli.extraModels.reverse();
+  ui.h.selections = ['one', 'three'];
+  await ui.save();
+  assert.deepEqual(ui.h.server.config.cli.extraModels.map(entry => entry.model), ['three', 'one']);
 });
