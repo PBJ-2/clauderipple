@@ -2075,6 +2075,41 @@ test("GET /api/claude-models de-duplicates surfaces and drops our own injected i
   }
 });
 
+test("GET /api/claude-models keeps a Claude model ticked for the picker: only what was injected is ours", async () => {
+  // Ticking Opus 5 for the picker puts it in extraModels, but the app lists it already and nothing
+  // is injected for it. Dropping it by config hid it from the mapping sources.
+  const cfg = makeCfg({ cli: { extraModels: [{ model: "claude-opus-5", name: "Opus 5" }, { model: "gpt-5.6-terra", name: "GPT-5.6 Terra" }] } });
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-picker-native-"));
+  const configFile = path.join(home, "config.json");
+  fs.writeFileSync(configFile, JSON.stringify(cfg));
+  const entries = [
+    { id: "claude-opus-5", name: "Opus 5" },
+    { id: "claude-sonnet-5", name: "Sonnet 5" },
+    { id: "gpt-5.6-terra", name: "GPT-5.6 Terra" },
+  ];
+  const admin = await startAdmin({
+    config: () => cfg,
+    configFile,
+    log: new Logger(null, 1_000_000, 1, false),
+    stats: () => ({ inFlight: 0, messagesInFlight: 0, started: 0, completed: 0, failed: 0 }),
+    health: () => 0,
+    version: "0.0.0-test",
+    requests: new RequestLog(path.join(home, "logs", "requests.jsonl")),
+    picker: () => ({
+      enabled: true,
+      hosts: ["claude.ai"],
+      last: { surfaces: [{ id: "code", entries, injected: ["gpt-5.6-terra"] }, { id: "ccd", entries, injected: ["gpt-5.6-terra"] }] },
+    }),
+  });
+  try {
+    const body = (await (await fetch(`${base()}:${admin.port}/api/claude-models`)).json()) as { source: string; models: { id: string }[] };
+    assert.deepEqual(body.models.map((m) => m.id), ["claude-opus-5", "claude-sonnet-5"]);
+  } finally {
+    admin.close();
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("a chatgpt provider with no credentials is not reported as usable", async () => {
   // Reaching chatgpt.com says nothing about being able to call it. Claiming "connected" without a
   // login sends a new user away believing setup is finished (reported from a real install).

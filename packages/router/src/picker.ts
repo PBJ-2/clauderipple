@@ -136,7 +136,8 @@ export function resolvedModelWindow(cfg: Config, id: string, nativeWindow?: numb
 }
 
 export type PickerModelEntry = { id: string; name: string };
-export type InjectResult = { injected: number; surfaces: { id: string; models: string[]; entries: PickerModelEntry[] }[] };
+/** `injected` names the ids this call added: an id the app already lists (a Claude model ticked for the picker) is not one. */
+export type InjectResult = { injected: number; surfaces: { id: string; models: string[]; entries: PickerModelEntry[]; injected: string[] }[] };
 
 /**
  * Mutates `json` in place; returns what was done for logging. `effortFor` names the levels a model
@@ -154,6 +155,7 @@ export function injectPickerModels(json: Record<string, unknown>, extra: CliMode
       id,
       models: surface.models.map((m) => String(m.id ?? "?")),
       entries: surface.models.map((m) => ({ id: String(m.id ?? "?"), name: typeof m.name === "string" ? m.name : String(m.id ?? "?") })),
+      injected: [],
     });
     if (!CLI_SURFACES.has(id)) continue;
     const template = pickTemplate(surface.models);
@@ -172,6 +174,9 @@ export function injectPickerModels(json: Record<string, unknown>, extra: CliMode
       const levels = effortFor?.(e.model.split("@")[0]!);
       if (levels) narrowThinking(entry, levels);
       surface.models.push(entry);
+      // The dashboard writes each id once, but a hand-edited list can repeat one: it is still one row.
+      existing.add(e.model);
+      result.surfaces[result.surfaces.length - 1]!.injected.push(e.model);
       result.injected++;
     }
     // Per-entry window first: routed models do not share one, and `contextWindow` is only the fallback.
