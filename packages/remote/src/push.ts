@@ -13,11 +13,15 @@
 // service answering 404/410 means the subscription is gone for good, so it is dropped.
 import path from "node:path";
 import webpush from "web-push";
+import { SLOW_PING_MS } from "./protocol.ts";
 import { readJson, writeFileAtomic } from "./fsutil.ts";
 import { pushContent, type PushContext } from "./push-content.ts";
 import type { PushEvent, PushSubscriptionJSON, SessionSummary } from "./protocol.ts";
 
 export const VISIBLE_MS = 30_000;
+/** A client on the slow cadence (a presence report every SLOW_PING_MS) stays visible for three
+ * missed reports, as a fast client does at VISIBLE_MS. */
+export const SLOW_VISIBLE_MS = 3 * SLOW_PING_MS;
 /** A session a connected phone looked at within this needs no push (Paseo agent-attention-policy PRESENCE_THRESHOLD_MS). */
 export const SEEN_MS = 180_000;
 

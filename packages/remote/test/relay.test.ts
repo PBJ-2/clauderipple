@@ -138,7 +138,7 @@ test("room: phone → connect to host → data socket → open; frames forwarded
   assert.equal(room.hasClient("conn-nope"), false);
   const data = track(new FakeSock("data"));
   room.hostData(data, connect.conn);
-  assert.deepEqual(phone.texts(), [`{"relay":"open"}`]);
+  assert.deepEqual(phone.texts(), [`{"relay":"open","liveness":true}`]);
   room.message(phone, "hello from phone");
   const bin = new Uint8Array([1, 2, 3]).buffer;
   room.message(data, bin);
@@ -153,6 +153,32 @@ test("room: phone → connect to host → data socket → open; frames forwarded
   assert.equal(data.sent.length, 1);
   // The phone left: its data socket closes too.
   assert.ok(data.closed);
+});
+
+test("room: a phone's plain ping is answered by the relay itself, never forwarded to the host", () => {
+  const { room, track } = fakeRoom();
+  const host = track(new FakeSock("host"));
+  room.hostControl(host);
+  const phone = track(new FakeSock("phone"));
+  room.client(phone);
+  const conn = (JSON.parse(host.texts().find((t) => t.includes(`"connect"`))!) as { conn: string }).conn;
+  const data = track(new FakeSock("data"));
+  room.hostData(data, conn);
+  assert.deepEqual(JSON.parse(phone.texts()[0]!), { relay: "open", liveness: true }, "the relay says it answers liveness itself");
+  const forwarded = data.sent.length;
+  room.message(phone, "ping");
+  assert.equal(phone.sent.at(-1), "pong", "answered without the host");
+  assert.equal(data.sent.length, forwarded, "the ping never reaches the encrypted channel");
+  room.message(phone, "pong");
+  assert.equal(data.sent.length, forwarded, "a relay pong stops at the room too");
+  // A stray plain frame on the host's data socket is answered in place, not handed to the phone.
+  const toPhone = phone.sent.length;
+  room.message(data, "ping");
+  assert.equal(data.sent.at(-1), "pong");
+  assert.equal(phone.sent.length, toPhone);
+  // The host's control socket keeps its own liveness answer.
+  room.message(host, "ping");
+  assert.equal(host.sent.at(-1), "pong");
 });
 
 test("room: a phone with no host is told at once; a host that comes back is told about waiting phones", () => {
@@ -365,4 +391,40 @@ test("SecurePeer refuses plaintext after the handshake", () => {
   ws.emit("message", Buffer.from(`{"t":"hello"}`), false);
   assert.equal(closed, true);
   assert.equal(ws.closedWith, 4400);
+});
+
+test("RelaySocket beats only after the relay says it answers a plain ping", () => {
+  const hostKey = nacl.box.keyPair();
+  const open = (frame: string) => {
+    const sent: (string | Uint8Array)[] = [];
+    const got: unknown[] = [];
+    const raw = new FakeBrowserWs();
+    raw.out = (data) => {
+      sent.push(data);
+      if (typeof data === "string" && data.startsWith(`{"e2ee":"hello"`)) {
+        // The paired host's answer to the phone's handshake.
+        raw.onmessage?.({ data: hostAccept(nacl, hostKey, data).text });
+      }
+    };
+    const socket = new RelaySocket(raw, { url: "https://relay.example", server: "server-id-0123456789", hpk: toB64u(hostKey.publicKey) }, nacl);
+    let closed = false;
+    socket.onmessage = (ev) => got.push(ev.data);
+    socket.onclose = () => { closed = true; };
+    raw.onmessage?.({ data: frame });
+    return { socket, raw, sent, got, closed: () => closed };
+  };
+  // The current relay: it answers the plain ping itself, so the phone may beat.
+  const modern = open(`{"relay":"open","liveness":true}`);
+  assert.equal(modern.socket.liveness, true);
+  assert.equal(modern.socket.readyState, 1, "handshake done");
+  modern.socket.heartbeat();
+  assert.equal(modern.closed(), false);
+  assert.equal(modern.got.length, 0, "the plain ping is not a host frame");
+  modern.raw.onmessage?.({ data: "pong" });
+  assert.deepEqual(modern.got, ["pong"], "the relay's answer is delivered as traffic");
+  // An older relay: it never said it answers the ping, and forwarding one would break the channel.
+  const older = open(`{"relay":"open"}`);
+  assert.equal(older.socket.liveness, false);
+  older.socket.heartbeat();
+  assert.equal(older.sent.filter((d) => d === "ping").length, 0);
 });

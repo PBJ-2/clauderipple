@@ -41,6 +41,8 @@ export class RelaySocket implements SocketLike {
   onmessage: ((ev: { data: unknown }) => void) | null = null;
   onclose: ((ev: unknown) => void) | null = null;
   onerror: ((ev: unknown) => void) | null = null;
+  /** The relay said it answers a plain "ping" itself (open frame's `liveness`); older relays do not. */
+  liveness = false;
 
   private raw: RawSocket;
   private nacl: Nacl;
@@ -64,6 +66,14 @@ export class RelaySocket implements SocketLike {
     this.raw.send(this.channel.seal(data));
   }
 
+  /** The Link's liveness beat: plain text, answered by the relay runtime without waking the room.
+   * Sent only when that open frame said the relay answers it; an older relay would forward it to
+   * the host, whose channel only accepts sealed bytes. */
+  heartbeat(): void {
+    if (this.stage !== "open" || !this.liveness) return;
+    try { this.raw.send("ping"); } catch { /* close follows */ }
+  }
+
   close(code?: number, reason?: string): void {
     try { this.raw.close(code, reason); } catch { /* gone */ }
     this.end({ code });
@@ -73,7 +83,10 @@ export class RelaySocket implements SocketLike {
     try {
       if (this.stage === "relay") {
         // The relay's one word to us: the host has a data socket for this connection. Then the handshake.
-        if (typeof data !== "string" || (JSON.parse(data) as RelayMsg).relay !== "open") throw new Error("expected relay open");
+        if (typeof data !== "string") throw new Error("expected relay open");
+        const open = JSON.parse(data) as RelayMsg;
+        if (open.relay !== "open") throw new Error("expected relay open");
+        this.liveness = open.liveness === true;
         const hello = phoneHello(this.nacl);
         this.eph = hello.eph;
         this.stage = "handshake";
@@ -90,6 +103,9 @@ export class RelaySocket implements SocketLike {
         return;
       }
       if (this.stage === "open") {
+        // The relay answers our plain "ping" itself: traffic for the Link's stale detection, not a
+        // host frame. Anything else in the clear past the handshake is not ours.
+        if (data === "pong") { this.onmessage?.({ data: "pong" }); return; }
         if (!(data instanceof ArrayBuffer) || data.byteLength > RELAY_FRAME_CAP) throw new Error("bad frame");
         this.onmessage?.({ data: this.channel!.open(new Uint8Array(data)) });
       }

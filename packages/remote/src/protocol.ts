@@ -32,6 +32,16 @@ export const INLINE_CAP = 32 * 1024;
 /** Client pings this often; either side calls the link stale after STALE_MS of silence. */
 export const PING_MS = 10_000;
 export const STALE_MS = 30_000;
+/**
+ * The end-to-end check and presence cadence a client uses once the host advertises
+ * `capabilities.slowHeartbeat`. Through the relay it is what lets the room hibernate: every
+ * forwarded frame wakes the Durable Object, and a phone idle on screen should not send one
+ * every PING_MS. The relay's own plain "ping" (answered by the runtime, not the object) stays
+ * at PING_MS.
+ */
+export const SLOW_PING_MS = 60_000;
+/** The host gives a slow-cadence client three beats of silence before calling it gone (3 × 60 s). */
+export const SLOW_STALE_MS = 3 * SLOW_PING_MS;
 /** Reconnect backoff is min(BACKOFF_CAP_MS, attempt × 1 s) and never stops. */
 export const BACKOFF_CAP_MS = 30_000;
 /** A socket that opens but is not ready (relay hello, host ready) within this is abandoned. */
@@ -43,9 +53,12 @@ export const RELAY_FRAME_CAP = FRAME_CAP + 1024;
  * The relay's own words (plain text frames; everything else it forwards untouched, encrypted):
  *   to the host's control socket: {"relay":"hello"} once accepted, {"relay":"connect","conn":id} per phone;
  *   to a phone: {"relay":"open"} once the host's data socket for it is there.
- * The host pings its control socket with the text "ping" and the relay answers "pong".
+ * The host pings its control socket with the text "ping" and the relay answers "pong"; a phone may
+ * do the same on its socket. `liveness` on the open frame says this relay answers that plain ping
+ * itself (without waking the room). An older relay leaves it out, and a phone must not send one
+ * then: that relay would forward it to the host, whose channel expects sealed bytes only.
  */
-export type RelayMsg = { relay: "hello" } | { relay: "connect"; conn: string } | { relay: "open" };
+export type RelayMsg = { relay: "hello" } | { relay: "connect"; conn: string } | { relay: "open"; liveness?: true };
 /** Close codes the relay uses. `stale`: the host's control socket sent no ping for HOST_SILENT_MS. */
 export const RELAY_CLOSE = { badRequest: 4400, badSecret: 4401, hostOffline: 4404, stale: 4408, replaced: 4409, peerGone: 4410, tooBig: 1009 } as const;
 /**
@@ -296,14 +309,17 @@ export interface HostInfo { name: string; version: string; routerOk: boolean; ro
     diffScope?: boolean;
     /** `op: "effort_auto"` can write the mod's host-wide automatic effort. Absent on an older
      * host: phones must leave the Auto option out then. */
-    effortAuto?: boolean };
+    effortAuto?: boolean;
+    /** This host reads a client's `slowHeartbeat` feature and sizes its stale/visible windows for
+     * the SLOW_PING_MS cadence. Absent on an older host: clients keep PING_MS. */
+    slowHeartbeat?: boolean };
   /** the mod's mode, effort range and provider limits; absent on older hosts or when the router is down */
   ripple?: RippleStatus }
 
 // ---- client → host --------------------------------------------------------------------
 
 /** Per-connection opt-in. Missing/non-array lists mean no features; unknown entries are ignored. */
-export const CLIENT_FEATURES = ["settingsResult", "scopedAlways", "sessionFiles", "chunkedFrames", "folderFiles"] as const;
+export const CLIENT_FEATURES = ["settingsResult", "scopedAlways", "sessionFiles", "chunkedFrames", "folderFiles", "slowHeartbeat"] as const;
 export type ClientFeature = typeof CLIENT_FEATURES[number];
 
 export type ClientMsg =

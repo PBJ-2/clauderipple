@@ -13,7 +13,7 @@ import type { OutboxEntry, OutboxStart, PreservedItem } from "./outbox.ts";
 import { pushAvailability } from "./pushstate.ts";
 import { RelaySocket, browserNacl, relayClientUrl } from "./secure.ts";
 import type { RawSocket, RelayPairing } from "./secure.ts";
-import { PING_MS, defaultEffort } from "../src/protocol.ts";
+import { PING_MS, SLOW_PING_MS, defaultEffort } from "../src/protocol.ts";
 import { mergeEvents, reduce, timelineItems, workerFor, workerPrompt, workerConversationItems } from "./timeline.ts";
 import type { TimelineItem, SessionView } from "./timeline.ts";
 import * as V from "./views.ts";
@@ -113,6 +113,8 @@ export class App {
   private outboxWarned = false;
   /** The session the host was last told this phone is looking at: see watch.ts (B17). */
   private watching: string | null = null;
+  /** When presence last went out, so the loop only repeats it on the host's cadence. */
+  private lastPresenceAt = 0;
   private renderedScreen = "";
   private composerMode = "";
   private lastOpenPerm = "";
@@ -237,9 +239,10 @@ export class App {
     window.addEventListener("offline", () => link.nudge());
     document.addEventListener("visibilitychange", () => { this.sendPresence(); if (document.visibilityState === "visible") { link.foreground(); void this.refreshPush(); } });
     setInterval(() => { this.ui.now = Date.now(); this.renderChrome(); }, 1000);
-    // While in front, say so every PING_MS: the host pushes nothing to a phone that is looking, and
-    // stops counting one whose app froze in the background without saying "hidden".
-    setInterval(() => { if (document.visibilityState === "visible") this.sendPresence(); }, PING_MS);
+    // While in front, say so on the host's cadence: the host pushes nothing to a phone that is
+    // looking, and stops counting one whose app froze in the background without saying "hidden".
+    // A slow host (SLOW_PING_MS) also lets the relay room hibernate between beats.
+    setInterval(() => { if (document.visibilityState === "visible" && Date.now() - this.lastPresenceAt >= this.presenceEvery()) this.sendPresence(); }, PING_MS);
     if (window.isSecureContext && "serviceWorker" in navigator) {
       navigator.serviceWorker.register("sw.ts", { scope: "./" }).catch(() => undefined);
     }
@@ -282,7 +285,11 @@ export class App {
 
   // ---- presence and notifications ----------------------------------------------------------
 
+  /** The host's advertised cadence: a slow host sizes its windows for the slow one. */
+  private presenceEvery(): number { return this.ui.host?.capabilities?.slowHeartbeat === true ? SLOW_PING_MS : PING_MS; }
+
   private sendPresence(): void {
+    this.lastPresenceAt = Date.now();
     this.link?.send({ t: "presence", visible: document.visibilityState === "visible" });
   }
 

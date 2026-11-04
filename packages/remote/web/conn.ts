@@ -5,8 +5,13 @@
 // (background age is not proof of death) and only 3 s without a pong drops it. Only a refused token
 // stops it, because retrying a token the host rejects would just say "connecting" forever — which
 // would be a lie.
-import { BACKOFF_CAP_MS, PING_MS, READY_MS, STALE_MS } from "../src/protocol.ts";
-import type { ClientFeature, ClientMsg, HostMsg } from "../src/protocol.ts";
+//
+// Through the relay, every forwarded frame wakes the room's Durable Object. So once the host
+// advertises `capabilities.slowHeartbeat`, the end-to-end ping and presence run at SLOW_PING_MS
+// instead of PING_MS; between them only the relay's own plain "ping" goes out, which the runtime
+// answers without waking the object. The tests pin both cadences.
+import { BACKOFF_CAP_MS, PING_MS, READY_MS, SLOW_PING_MS, SLOW_STALE_MS, STALE_MS } from "../src/protocol.ts";
+import type { ClientFeature, ClientMsg, HostInfo, HostMsg } from "../src/protocol.ts";
 import { FrameAssembler, isChunkFrame, isHostFrame } from "../src/chunks.ts";
 
 /** A socket that opens but never says `ready` is as good as down (through the relay: the handshake counts too). */
@@ -37,6 +42,13 @@ export interface SocketLike {
   onmessage: ((ev: { data: unknown }) => void) | null;
   onclose: ((ev: unknown) => void) | null;
   onerror: ((ev: unknown) => void) | null;
+  /**
+   * True on a socket to the host through the relay (web/secure.ts) whose relay answers a plain
+   * "ping" itself, without waking the room. Absent on a direct WebSocket and on older relays.
+   */
+  readonly liveness?: boolean;
+  /** Send that plain "ping"; its "pong" arrives as a message with data "pong". */
+  heartbeat?: () => void;
 }
 
 export interface LinkDeps {
@@ -77,6 +89,18 @@ export class Link {
   private probeN: number | null = null;
   private pingN = 0;
   private stopped = false;
+  /**
+   * The host advertised `capabilities.slowHeartbeat`: it sizes its stale and visible windows for
+   * SLOW_PING_MS, so this link may drop its end-to-end checks and presence to that cadence. Over
+   * the relay that is what lets the room hibernate between checks.
+   */
+  private slowHost = false;
+  /** The last pong the host itself sent (not the relay's liveness answer). */
+  private hostPongAt = 0;
+  /** The last frame from the host itself, any kind. The relay's own "pong" is not one. */
+  private hostRxAt = 0;
+  /** When the next end-to-end check is due; the liveness tick runs more often than this. */
+  private nextPingAt = 0;
   /**
    * Bumped whenever the timers are dropped. A callback already queued when its timer was cleared
    * still runs (setTimeout cannot cancel what already fired), so it checks the epoch first: this is
@@ -161,7 +185,7 @@ export class Link {
     sock.onopen = () => {
       if (this.sock !== sock) return;
       this.status.lastRx = this.deps.now();
-      sock.send(JSON.stringify({ t: "hello", token: this.deps.token, clientId: this.deps.clientId, ...(this.deps.features ? { features: this.deps.features } : {}) } satisfies ClientMsg));
+      sock.send(JSON.stringify({ t: "hello", token: this.deps.token, clientId: this.deps.clientId, features: this.helloFeatures() } satisfies ClientMsg));
       this.armPing();
     };
     // From creation, not from open: a connect that hangs (a dead address after a network switch)
@@ -189,6 +213,8 @@ export class Link {
     armReady();
     const deliver = (msg: HostMsg): void => {
       if (msg.t === "pong") {
+        // Any pong is the host itself, and proves the end-to-end path even on the slow cadence.
+        this.hostPongAt = this.deps.now();
         // Only the answer to the probe still pending clears it; an older pong (or a later one after
         // the probe timed out) changes nothing.
         if (this.probeN !== null && msg.n === this.probeN) this.clearProbe();
@@ -203,14 +229,21 @@ export class Link {
       }
       if (msg.t === "ready" && !authed) {
         authed = true;
+        // `ready` is the host's own word, so the link is alive even before the first pong.
+        this.hostPongAt = this.deps.now();
+        this.observeHost(msg.host);
         this.set({ state: "open", attempt: 0, nextAt: null, downSince: null });
         this.onReady();
       }
+      if (msg.t === "host") this.observeHost(msg.host);
       this.onMessage(msg);
     };
     sock.onmessage = (ev) => {
       if (this.sock !== sock) return;
       this.status.lastRx = this.deps.now();
+      // The relay's liveness answer proves the socket to the relay, not the host behind it.
+      if (ev.data === "pong") return;
+      this.hostRxAt = this.deps.now();
       let parsed: unknown;
       try { parsed = JSON.parse(String(ev.data)); } catch { return; }
       if (isChunkFrame(parsed)) {
@@ -275,15 +308,83 @@ export class Link {
     this.tickTimer = this.deps.setTimer(tick, 1000);
   }
 
+  /**
+   * The link's one period: PING_MS. Each beat tells the relay this socket is alive (plain "ping",
+   * answered by the runtime without waking the room) and, when the end-to-end check is due, asks
+   * the host. The check is spaced at the host's cadence, so an idle phone forwards nothing between
+   * checks and the room may hibernate.
+   */
   private armPing(): void {
     const epoch = this.epoch;
+    this.nextPingAt = this.deps.now() + this.cadence();
     const loop = (): void => {
       if (this.epoch !== epoch) return;
-      this.ping();
+      this.tick();
       if (this.epoch !== epoch) return;
       this.pingTimer = this.deps.setTimer(loop, PING_MS);
     };
     this.pingTimer = this.deps.setTimer(loop, PING_MS);
+  }
+
+  private tick(): void {
+    const sock = this.sock;
+    if (!sock) return;
+    if (this.assembler.expire()) {
+      // A slice stopped arriving; the rest of that message will never come. Starting over is the
+      // only way to get a complete one, and it costs one reconnect.
+      this.sock = null;
+      try { sock.close(4002, "lost chunks"); } catch { /* gone */ }
+      this.fail(true);
+      return;
+    }
+    if (sock.liveness === true) try { sock.heartbeat?.(); } catch { /* close follows */ }
+    const now = this.deps.now();
+    if (now < this.nextPingAt) return;
+    this.nextPingAt = now + this.cadence();
+    this.check(now);
+  }
+
+  /** The cadence the host's capability allows: its own stale/visible windows match it. */
+  private cadence(): number { return this.slowHost ? SLOW_PING_MS : PING_MS; }
+
+  private check(now: number): void {
+    if (this.slowHost) {
+      // A slow link is quiet by design, so only evidence counts. A host that has not answered a
+      // check for three beats is probed; so is a relay socket whose runtime stopped answering.
+      const relaySilent = this.sock?.liveness === true && now - (this.status.lastRx ?? 0) > STALE_MS;
+      if (now - this.hostPongAt >= SLOW_STALE_MS || relaySilent) { this.probe(); return; }
+      this.sendPing();
+      return;
+    }
+    // Only the host's own frames count: relay pongs keep arriving from a room whose host died.
+    if (now - this.hostRxAt > STALE_MS) {
+      // Silence may be the phone's background, not the host's. Probe before dropping: a socket that
+      // is actually alive answers and stays, and the probe's timeout does the dropping.
+      this.probe();
+      return;
+    }
+    this.sendPing();
+  }
+
+  private sendPing(): void {
+    const sock = this.sock;
+    if (!sock) return;
+    try { sock.send(JSON.stringify({ t: "ping", n: ++this.pingN } satisfies ClientMsg)); } catch { /* close follows */ }
+  }
+
+  /** This Link understands the slow cadence; a host that also does says so in its capabilities. */
+  private helloFeatures(): ClientFeature[] {
+    const features = [...(this.deps.features ?? [])];
+    if (!features.includes("slowHeartbeat")) features.push("slowHeartbeat");
+    return features;
+  }
+
+  /** The host's own advertisement decides the cadence for this connection. */
+  private observeHost(host: HostInfo): void {
+    const slow = host.capabilities?.slowHeartbeat === true;
+    if (slow === this.slowHost) return;
+    this.slowHost = slow;
+    this.nextPingAt = this.deps.now() + this.cadence();
   }
 
   /**
@@ -314,26 +415,5 @@ export class Link {
     if (this.probeTimer !== null) this.deps.clearTimer(this.probeTimer);
     this.probeTimer = null;
     this.probeN = null;
-  }
-
-  private ping(): void {
-    const sock = this.sock;
-    if (!sock) return;
-    if (this.assembler.expire()) {
-      // A slice stopped arriving; the rest of that message will never come. Starting over is the
-      // only way to get a complete one, and it costs one reconnect.
-      this.sock = null;
-      try { sock.close(4002, "lost chunks"); } catch { /* gone */ }
-      this.fail(true);
-      return;
-    }
-    const last = this.status.lastRx ?? 0;
-    if (this.deps.now() - last > STALE_MS) {
-      // Silence may be the phone's background, not the host's. Probe before dropping: a socket that
-      // is actually alive answers and stays, and the probe's timeout does the dropping.
-      this.probe();
-      return;
-    }
-    try { sock.send(JSON.stringify({ t: "ping", n: ++this.pingN } satisfies ClientMsg)); } catch { /* close follows */ }
   }
 }

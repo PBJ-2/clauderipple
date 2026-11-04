@@ -84,7 +84,9 @@ export class RelayRoom {
 
   constructor(state: DoState) {
     this.state = state;
-    // Host pings are answered by the runtime without waking the object: idle rooms cost no duration.
+    // Plain "ping" frames (the host's control socket and a phone's socket) are answered by the
+    // runtime inside the WebSocket Hibernation API, without invoking or waking the object: an idle
+    // room then costs no duration. Room.message answers them too, for an object that is awake.
     state.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
     const ctx: RoomCtx<CfSocket> = {
       accept: (ws, tags) => state.acceptWebSocket(ws, tags),

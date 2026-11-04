@@ -13,12 +13,12 @@ import { PermissionQueue } from "../src/permissions.ts";
 import { BridgeClient } from "../src/bridge-client.ts";
 import type { DesktopProcess } from "../src/desktop.ts";
 import { MessageReceipts, OutcomeUnknownError } from "../src/receipts.ts";
-import { ATTACHMENT_CAP, CHUNK_MESSAGE_MAX, FRAME_CAP, PING_MS, STALE_MS } from "../src/protocol.ts";
+import { ATTACHMENT_CAP, CHUNK_MESSAGE_MAX, FRAME_CAP, PING_MS, SLOW_PING_MS, SLOW_STALE_MS, STALE_MS } from "../src/protocol.ts";
 import type { BlobChunk, BrowseResult, ClientMsg, HostInfo, HostMsg, SessionEvent } from "../src/protocol.ts";
 import { FrameAssembler } from "../src/chunks.ts";
 import { HostServer } from "../src/server.ts";
 import type { Peer as ServerPeer, ServerOptions } from "../src/server.ts";
-import { VISIBLE_MS } from "../src/push.ts";
+import { SLOW_VISIBLE_MS, VISIBLE_MS } from "../src/push.ts";
 import { windowsDrives } from "../src/folders.ts";
 import { Sessions } from "../src/sessions.ts";
 import type { QueryFn, SdkUserMessage } from "../src/sessions.ts";
@@ -933,7 +933,8 @@ test("hello denies and closes a wrong token, and returns ready with sessions for
   const ready = (await right.take("ready")).msg;
   // `queue`: this host keeps what the phone queues, so the app hands it over instead of holding it.
   // `diffScope`: the diff pane may ask for uncommitted work or the branch, not only the host's order.
-  assert.deepEqual(ready.host, { name: "test-host", version: "test-version", routerOk: true, queue: true, capabilities: { sessionFiles: true, folderFiles: true, diffScope: true } });
+  // `slowHeartbeat`: the phone may drop its end-to-end checks and presence to SLOW_PING_MS.
+  assert.deepEqual(ready.host, { name: "test-host", version: "test-version", routerOk: true, queue: true, capabilities: { sessionFiles: true, folderFiles: true, diffScope: true, slowHeartbeat: true } });
   assert.deepEqual(ready.sessions, f.sessions.list());
   assert.equal(ready.sessions[0]?.id, id);
 });
@@ -1797,6 +1798,32 @@ test("a client silent after hello is terminated after STALE_MS using virtual Dat
   const closed = await peer.closed;
   assert.equal(closed.code, 1006);
   assert.equal(peer.ws.readyState, WebSocket.CLOSED);
+});
+
+test("a slow-heartbeat client keeps its own stale and visible windows; an older client keeps the fast ones", { timeout: TEST_TIMEOUT }, async t => {
+  t.mock.timers.enable({ apis: ["Date", "setInterval"], now: 1_000_000 });
+  const f = await fixture(t);
+  const peer = await f.connect();
+  peer.send({ t: "hello", token, clientId: "slow", features: ["slowHeartbeat"] });
+  const ready = (await peer.take("ready")).msg;
+  assert.equal(ready.host.capabilities?.slowHeartbeat, true, "the host says it sizes the slow cadence");
+  // The host answers a ping at once whatever the cadence: an older phone that still pings every
+  // 10 s keeps working against this host.
+  await peer.barrier();
+  peer.send({ t: "presence", visible: true });
+  await peer.barrier();
+  assert.equal(f.server.someoneLooking(), true);
+  t.mock.timers.tick(SLOW_VISIBLE_MS - PING_MS);
+  assert.equal(f.server.someoneLooking(), true, "a slow report stays valid between beats");
+  assert.equal(peer.ws.readyState, WebSocket.OPEN, "not reaped at a fast client's 30 s deadline");
+  t.mock.timers.tick(PING_MS - 1);
+  assert.equal(f.server.someoneLooking(), true);
+  t.mock.timers.tick(2);
+  assert.equal(f.server.someoneLooking(), false, "three missed reports: not looking");
+  assert.equal(peer.ws.readyState, WebSocket.OPEN, "the reap window is the slow one too");
+  t.mock.timers.tick(PING_MS);
+  assert.equal((await peer.closed).code, 1006, "reaped once its own window has passed");
+  assert.ok(SLOW_STALE_MS > STALE_MS && SLOW_PING_MS > PING_MS);
 });
 
 test("blob req chunks round-trip full Unicode output with next offsets until null", { timeout: TEST_TIMEOUT }, async t => {

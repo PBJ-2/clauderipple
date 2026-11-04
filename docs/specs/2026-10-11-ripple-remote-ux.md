@@ -122,7 +122,12 @@ never 0. *Measured* in the end-to-end run below: effort followed the ripple mod'
 Liveness (same numbers as Paseo, our own code): app-level ping every 10 s, stale after 30 s of
 silence, a socket that does not reach `ready` in 8 s is abandoned (from creation, so a hanging
 connect after a network switch is caught too), backoff `min(30 s, n × 1 s)` forever, and an
-immediate retry on `online` and when the app comes to the front.
+immediate retry on `online` and when the app comes to the front. Since 2026-11-04 a phone on the
+relay also pings the relay itself (plain text, answered by the runtime without waking the Durable
+Object) every 10 s, and when `hello`'s `slowHeartbeat` feature meets the host's
+`capabilities.slowHeartbeat`, the end-to-end check and presence run at 60 s (`SLOW_PING_MS`); the
+host sizes that client's stale and visible windows at three beats (`SLOW_STALE_MS`,
+`SLOW_VISIBLE_MS`). Older hosts keep the 10 s cadence and older phones keep working as before.
 
 ## Comparison: what makes others pleasant or annoying
 
@@ -202,8 +207,12 @@ written. Figures arrived as events (cache 0 → 50 → 75 %, context 9 %, 5 h 7 
   (`worker.ts`, logic in `room.ts`). Host control socket `/ws/host`, one phone socket `/ws/client`
   and one host data socket `/ws/host-data` per phone; frames forwarded untouched, capped at
   `RELAY_FRAME_CAP` (FRAME_CAP + 1 KiB), nothing stored but a hash of the host's secret (the first
-  host to use a server id registers it; another secret gets 403). Hibernation API, host pings
-  answered by `setWebSocketAutoResponse` so an idle room costs no duration. The PWA is served from
+  host to use a server id registers it; another secret gets 403). Hibernation API; plain `ping`
+  frames from the host's control socket and from a phone socket are answered by
+  `setWebSocketAutoResponse` (and by `room.ts` while the object is awake), and a plain `ping`/`pong`
+  is never forwarded between phone and host, so an idle room costs no duration. Only after both
+  ends advertise the slow cadence do end-to-end check and presence run every 60 s (2026-11-04). The
+  PWA is served from
   the same origin as static assets (`build-web.ts` → `dist/`, headers from `dist/_headers`; only
   `/ws/*` runs the worker) — the https origin service workers and web push need. *Measured*
   2026-10-12 with `wrangler dev` 4.142.0: host connected, a headless phone completed the handshake

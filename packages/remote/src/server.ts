@@ -16,9 +16,9 @@ import { listSessionFolder, readSessionFolderFile } from "./session-folder.ts";
 import type { RecentSource } from "./folders.ts";
 import { diffScope, diffView } from "./diff.ts";
 import { gitInfo } from "./worktree.ts";
-import { ATTACHMENT_CAP, CHUNK_MESSAGE_MAX, FRAME_CAP, PING_MS, STALE_MS } from "./protocol.ts";
+import { ATTACHMENT_CAP, CHUNK_MESSAGE_MAX, FRAME_CAP, PING_MS, SLOW_STALE_MS, STALE_MS } from "./protocol.ts";
 import type { BlobChunk, ClientMsg, HostInfo, HostMsg, ProviderGroup, ReqOp, RippleStatus } from "./protocol.ts";
-import { SEEN_MS, VISIBLE_MS } from "./push.ts";
+import { SEEN_MS, SLOW_VISIBLE_MS, VISIBLE_MS } from "./push.ts";
 import type { Notifier } from "./push.ts";
 import { OutcomeUnknownError } from "./receipts.ts";
 import { rippleStatus } from "./router.ts";
@@ -164,7 +164,7 @@ export class HostServer {
     const desktopProblem = opts.sessions.desktopProblem?.();
     const canWriteAuto = typeof opts.router.setEffortAuto === "function";
     this.hostInfo = { name: opts.hostName, version: opts.version, routerOk: true, queue: true,
-      capabilities: { sessionFiles: true, folderFiles: true, diffScope: true, ...(canWriteAuto ? { effortAuto: true } : {}) },
+      capabilities: { sessionFiles: true, folderFiles: true, diffScope: true, slowHeartbeat: true, ...(canWriteAuto ? { effortAuto: true } : {}) },
       ...(desktopProblem ? { desktopProblem } : {}) };
     this.http = http.createServer((req, res) => this.serve(req, res));
     this.wss = new WebSocketServer({ noServer: true, maxPayload: FRAME_CAP });
@@ -181,10 +181,10 @@ export class HostServer {
     try { return new URL(origin).host === req.headers.host; } catch { return false; }
   }
 
-  /** True while a connected phone reported the app visible within VISIBLE_MS: then nobody needs a push. */
+  /** True while a connected phone reported the app visible within its own window: then nobody needs a push. */
   someoneLooking(): boolean {
     const now = this.now();
-    for (const c of this.clients) if (c.authed && c.visibleAt > 0 && now - c.visibleAt < VISIBLE_MS && c.ws.readyState === c.ws.OPEN) return true;
+    for (const c of this.clients) if (c.authed && c.visibleAt > 0 && now - c.visibleAt < this.visibleMs(c) && c.ws.readyState === c.ws.OPEN) return true;
     return false;
   }
 
@@ -193,8 +193,16 @@ export class HostServer {
     return this.now() - (this.seenAt.get(session) ?? 0) < SEEN_MS;
   }
 
+  /**
+   * A client that understood the slow cadence (hello's `slowHeartbeat`) reports presence every
+   * SLOW_PING_MS and is silent between checks, so its silence and its visibility get three beats
+   * of room; every other client keeps the PING_MS-based windows.
+   */
+  private idleMs(c: Client): number { return c.features.has("slowHeartbeat") ? SLOW_STALE_MS : STALE_MS; }
+  private visibleMs(c: Client): number { return c.features.has("slowHeartbeat") ? SLOW_VISIBLE_MS : VISIBLE_MS; }
+
   private markSeen(c: Client, session: string): void {
-    if (!c.authed || c.visibleAt <= 0 || this.now() - c.visibleAt >= VISIBLE_MS) return;
+    if (!c.authed || c.visibleAt <= 0 || this.now() - c.visibleAt >= this.visibleMs(c)) return;
     this.seenAt.set(session, this.now());
     if (this.seenAt.size > 500) {
       const cutoff = this.now() - SEEN_MS;
@@ -428,7 +436,7 @@ export class HostServer {
 
   private reapStale(): void {
     const now = Date.now();
-    for (const c of this.clients) if (now - c.lastRx > STALE_MS) c.ws.terminate();
+    for (const c of this.clients) if (now - c.lastRx > this.idleMs(c)) c.ws.terminate();
   }
 
   private send(c: Client, msg: HostMsg): void {
@@ -494,7 +502,7 @@ export class HostServer {
         return;
       }
       case "seen":
-        if (c.attached.has(msg.session) && c.visibleAt > 0 && this.now() - c.visibleAt < VISIBLE_MS && s.has(msg.session)) s.markSeen(msg.session);
+        if (c.attached.has(msg.session) && c.visibleAt > 0 && this.now() - c.visibleAt < this.visibleMs(c) && s.has(msg.session)) s.markSeen(msg.session);
         return;
       case "archive":
         try { s.setArchived(msg.session, msg.archived === true); }

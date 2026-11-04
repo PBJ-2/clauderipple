@@ -8,7 +8,7 @@ import { dictionaries } from "../web/i18n.ts";
 import { markdown } from "../web/md.ts";
 import { pushAvailability } from "../web/pushstate.ts";
 import { mergeEvents, reduce } from "../web/timeline.ts";
-import { BACKOFF_CAP_MS, CHUNK_TIMEOUT_MS, PING_MS, STALE_MS } from "../src/protocol.ts";
+import { BACKOFF_CAP_MS, CHUNK_TIMEOUT_MS, PING_MS, SLOW_PING_MS, SLOW_STALE_MS, STALE_MS } from "../src/protocol.ts";
 import type { ClientFeature, EventBody, HostMsg, SessionEvent } from "../src/protocol.ts";
 
 test("quoted paragraphs, line breaks, lists and code keep their structure", () => {
@@ -47,6 +47,8 @@ class FakeSocket implements SocketLike {
   readyState = 0;
   sent: string[] = [];
   closed = false;
+  liveness?: boolean;
+  heartbeat?: () => void;
   onopen: ((ev: unknown) => void) | null = null;
   onmessage: ((ev: { data: unknown }) => void) | null = null;
   onclose: ((ev: unknown) => void) | null = null;
@@ -55,14 +57,23 @@ class FakeSocket implements SocketLike {
   close(): void { if (this.closed) return; this.closed = true; this.onclose?.({}); }
   open(): void { this.readyState = 1; this.onopen?.({}); }
   recv(msg: unknown): void { this.onmessage?.({ data: JSON.stringify(msg) }); }
+  /** The relay's own liveness answer: plain text, not a host frame. */
+  pong(): void { this.onmessage?.({ data: "pong" }); }
 }
 
-function setup(online = { value: true }, features?: ClientFeature[]) {
+/** A socket through the relay: it can beat, and the relay answers without waking the room. */
+class RelayFakeSocket extends FakeSocket {
+  liveness = true;
+  beats = 0;
+  heartbeat = (): void => { this.beats++; };
+}
+
+function setup(online = { value: true }, features?: ClientFeature[], relay = false) {
   const clock = new Clock();
   const sockets: FakeSocket[] = [];
   const link = new Link({
     url: "ws://h/ws", token: "tok", clientId: "c", ...(features ? { features } : {}),
-    makeSocket: () => { const s = new FakeSocket(); sockets.push(s); return s; },
+    makeSocket: () => { const s = relay ? new RelayFakeSocket() : new FakeSocket(); sockets.push(s); return s; },
     now: () => clock.now, setTimer: clock.set, clearTimer: clock.clear, isOnline: () => online.value,
   });
   let readies = 0;
@@ -84,7 +95,7 @@ test("hello carries the token; ready opens the link", () => {
   const { sockets, link, readies } = setup();
   link.start();
   sockets[0]!.open();
-  assert.deepEqual(JSON.parse(sockets[0]!.sent[0]!), { t: "hello", token: "tok", clientId: "c" });
+  assert.deepEqual(JSON.parse(sockets[0]!.sent[0]!), { t: "hello", token: "tok", clientId: "c", features: ["slowHeartbeat"] });
   sockets[0]!.recv(ready);
   assert.equal(link.status.state, "open");
   assert.equal(readies(), 1);
@@ -309,6 +320,78 @@ test("pongs keep a quiet link alive", () => {
   for (let i = 0; i < 10; i++) { clock.advance(PING_MS); sockets[0]!.recv({ t: "pong", n: i }); }
   assert.equal(sockets[0]!.closed, false);
   assert.equal(link.status.state, "open");
+});
+
+test("through the relay the link beats every PING_MS and counts the relay's pong as traffic", () => {
+  const { clock, sockets, link } = setup({ value: true }, undefined, true);
+  link.start();
+  const sock = sockets[0] as RelayFakeSocket;
+  sock.open();
+  const hello = JSON.parse(sock.sent[0]!) as { features?: string[] };
+  assert.ok(hello.features?.includes("slowHeartbeat"), "the link says it understands the slow cadence");
+  sock.recv(ready); // an older host: no capability, so the fast cadence stays
+  const pings = (): number => sock.sent.filter(frame => (JSON.parse(frame) as { t?: string }).t === "ping").length;
+  clock.advance(PING_MS);
+  assert.equal(sock.beats, 1, "the relay hears a plain ping every PING_MS");
+  assert.equal(pings(), 1, "an older host is still checked every PING_MS");
+  // The host answers its checks; the relay's plain pongs in between are not what keeps it open.
+  for (let i = 0; i < 5; i++) { sock.pong(); sock.recv({ t: "pong", n: i + 1 }); clock.advance(PING_MS); }
+  assert.ok(clock.now > STALE_MS);
+  assert.equal(sock.closed, false);
+  assert.equal(link.status.state, "open");
+  assert.equal(pings(), 6);
+});
+
+test("through the relay, an older host that goes silent is probed and dropped although the relay still answers", () => {
+  const { clock, sockets, link } = setup({ value: true }, undefined, true);
+  link.start();
+  const sock = sockets[0] as RelayFakeSocket;
+  sock.open();
+  sock.recv(ready); // no slow capability
+  // The host is gone but its half-open data socket keeps the room answering plain pings.
+  for (let i = 0; i < 6; i++) { sock.pong(); clock.advance(PING_MS); }
+  clock.advance(10_000);
+  assert.equal(sock.closed, true, "the relay's pongs do not stand in for the host");
+  assert.notEqual(link.status.state, "open");
+});
+
+test("a host advertising slowHeartbeat is checked once per SLOW_PING_MS while the relay is beaten every PING_MS", () => {
+  const { clock, sockets, link } = setup({ value: true }, undefined, true);
+  link.start();
+  const sock = sockets[0] as RelayFakeSocket;
+  sock.open();
+  sock.recv({ ...ready, host: { ...ready.host, capabilities: { sessionFiles: true, slowHeartbeat: true } } });
+  const pings = (): number => sock.sent.filter(frame => (JSON.parse(frame) as { t?: string }).t === "ping").length;
+  for (let i = 0; i < 5; i++) { clock.advance(PING_MS); sock.pong(); }
+  assert.equal(sock.beats, 5, "the relay still hears every PING_MS, which wakes no object");
+  assert.equal(pings(), 0, "nothing end-to-end before SLOW_PING_MS");
+  clock.advance(PING_MS);
+  assert.equal(sock.beats, 6);
+  assert.equal(pings(), 1, "one check at 60 s");
+  const check = JSON.parse(sock.sent.filter(frame => (JSON.parse(frame) as { t?: string }).t === "ping").at(-1)!) as { n: number };
+  sock.recv({ t: "pong", n: check.n });
+  for (let i = 0; i < 5; i++) { clock.advance(PING_MS); sock.pong(); }
+  assert.equal(pings(), 1, "none at 70–110 s");
+  clock.advance(PING_MS);
+  assert.equal(pings(), 2, "the next check at 120 s");
+  assert.equal(sock.closed, false);
+  assert.equal(link.status.state, "open");
+});
+
+test("a slow link with a live relay but a silent host is probed after three missed checks, then dropped", () => {
+  const { clock, sockets, link } = setup({ value: true }, undefined, true);
+  link.start();
+  const sock = sockets[0] as RelayFakeSocket;
+  sock.open();
+  sock.recv({ ...ready, host: { ...ready.host, capabilities: { sessionFiles: true, slowHeartbeat: true } } });
+  // The relay keeps answering its plain pings; the host answers nothing, not even the checks.
+  for (let i = 0; i < SLOW_STALE_MS / PING_MS; i++) { clock.advance(PING_MS); sock.pong(); }
+  assert.equal(sock.closed, false, "the probe is out, not the verdict");
+  assert.equal(link.status.state, "open");
+  clock.advance(PROBE_MS);
+  assert.equal(sock.closed, true, "three beats of silence from the host: reconnect");
+  assert.equal(sockets.length, 2);
+  assert.equal(link.status.state, "connecting");
 });
 
 test("a socket that opens but never says ready is abandoned after READY_MS", () => {

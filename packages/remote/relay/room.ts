@@ -117,17 +117,26 @@ export class Room<S extends Sock> {
     for (const o of old) shut(o, RELAY_CLOSE.replaced, "replaced");
     const phone = this.ctx.sockets(`c:${conn}`)[0];
     if (!phone) { shut(ws, RELAY_CLOSE.peerGone, "phone gone"); return; }
-    say(phone, { relay: "open" });
+    // `liveness` tells the phone this relay answers its plain "ping" itself; older relays leave it
+    // out and an older phone ignores it (it only reads `relay`).
+    say(phone, { relay: "open", liveness: true });
   }
 
   message(ws: S, data: string | ArrayBuffer): void {
     if (frameBytes(data) > RELAY_FRAME_CAP) { shut(ws, RELAY_CLOSE.tooBig, "frame over cap"); return; }
     const tags = this.ctx.tags(ws);
-    if (tags.includes("host")) {
-      // Only pings come this way; the Durable Object answers them without waking (auto-response).
-      if (data === "ping") { this.pinged.set(ws, this.ctx.now()); ws.send("pong"); }
+    // Liveness never crosses the room. The runtime answers a plain "ping" itself without waking the
+    // object; when the object is awake, this answers it in the runtime's place. A "pong" is the
+    // runtime's answer on its way back and stops here too. Forwarding either would break the other
+    // end: the encrypted pair only accepts sealed bytes.
+    if (typeof data === "string" && (data === "ping" || data === "pong")) {
+      if (data === "ping") {
+        if (tags.includes("host")) this.pinged.set(ws, this.ctx.now());
+        try { ws.send("pong"); } catch { /* closing */ }
+      }
       return;
     }
+    if (tags.includes("host")) return; // only pings come this way
     const phone = this.connOf(ws, "c:");
     if (phone) { for (const d of this.ctx.sockets(`d:${phone}`)) d.send(data); return; }
     const host = this.connOf(ws, "d:");
