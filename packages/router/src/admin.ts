@@ -381,7 +381,10 @@ async function anthropicLimitAccounts(deps: AdminDeps, name: string): Promise<Li
     return [];
   }
   const inUse = claudeInUseId(deps, name);
-  const owners: { id: string; label?: string }[] = [{ id: "current" }, ...listClaudeAccounts(homeDir()).map((a) => ({ id: a.id, label: a.label }))];
+  // Paused and needs-login accounts are left out before numbering, as ChatGPT's are: one that
+  // cannot answer would otherwise hold a number and the pane would read "Claude 1, Claude 3".
+  const stored = listClaudeAccounts(homeDir()).filter((a) => !a.paused && !a.needsReauth && a.expiresAt > Date.now());
+  const owners: { id: string; label?: string }[] = [{ id: "current" }, ...stored.map((a) => ({ id: a.id, label: a.label }))];
   const out: LimitsAccount[] = [];
   owners.forEach((owner, account) => {
     const quota = usage[owner.id];
