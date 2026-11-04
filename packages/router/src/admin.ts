@@ -106,6 +106,9 @@ const MIME: Record<string, string> = {
   ".ico": "image/x-icon",
 };
 
+/** One row of a provider's credential-pool report: ids, flags and health, never a header value. */
+export type CredentialRow = { id: string; label?: string; state: string; cooldownSeconds?: number; failures: number; paused?: boolean; preferred?: boolean; inUse?: boolean };
+
 export type AdminDeps = {
   /** External boundaries for the host-local control bridge; no production side effects in tests. */
   phone?: PhoneDeps;
@@ -172,7 +175,7 @@ export type AdminDeps = {
    * Optional: per-credential cooldowns and quarantines, for providers that declare a pool. Ids and
    * labels only — never a header value.
    */
-  credentials?: () => Record<string, { id: string; label?: string; state: string; cooldownSeconds?: number; failures: number; paused?: boolean; preferred?: boolean; inUse?: boolean }[]>;
+  credentials?: () => Record<string, CredentialRow[]>;
   clearCredentialCooldown?: (provider: string, id: string) => void;
   claudeClearCooldown?: (id: string) => void;
   /** Optional: picker-mode state and the last bootstrap injection. */
@@ -246,21 +249,62 @@ function hasClaudeSubscription(cfg: Config): boolean {
 }
 
 /**
- * One row per Claude account with a known usage, current login first. Labels only: the status is
- * polled every few seconds and has no use for an email address.
+ * The Claude auth pool's rows for one provider, keyed by owner id ("current" for the app login,
+ * otherwise the stored account id). The live proxy's report when there is one; a provider with no
+ * declared pool is read from the stored accounts the same way `/api/claude-accounts` does.
  */
-async function claudeAccountUsage(deps: AdminDeps): Promise<{ id: string; label: string; quota: Record<string, unknown> }[]> {
+function claudePoolReports(deps: AdminDeps, name: string | undefined): CredentialRow[] {
+  const live = name ? deps.credentials?.()[name] : undefined;
+  if (live) return live;
+  const projection = new ClaudeAccountAuthPool({ home: homeDir(), current: claudeAuthStore(deps), log: deps.log }).peekCredentials();
+  return new CredentialPool().report(name ?? "claude", projection).map((row) => ({ ...row, id: projection.find((credential) => credential.id === row.id)!.ownerId! }));
+}
+
+/**
+ * The owner id of the Claude account the pool answers with now, or undefined when none is known.
+ * A login provider without `accountPool` passes requests through on the app login, whatever the
+ * stored accounts prefer.
+ */
+function claudeInUseId(deps: AdminDeps, name: string | undefined): string | undefined {
+  const provider = name ? deps.config().providers[name] : undefined;
+  if (provider?.type === "anthropic" && provider.accountPool !== true) return "current";
+  try {
+    return claudePoolReports(deps, name).find((row) => row.inUse === true)?.id;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The Claude Code login provider requests are routed through: the account pool when one is declared,
+ * else the first, in config order. One saved with `limits: false` (a classifier-only pool) is not it.
+ */
+function firstClaudeProvider(cfg: Config): string | undefined {
+  const logins = Object.entries(cfg.providers).filter(([, provider]) => provider.type === "anthropic" && provider.auth === "claude-code" && provider.limits !== false);
+  return (logins.find(([, provider]) => provider.type === "anthropic" && provider.accountPool === true) ?? logins[0])?.[0];
+}
+
+/**
+ * One row per Claude account with a known usage, current login first. Labels only: the status is
+ * polled every few seconds and has no use for an email address. `inUse` marks the account the pool
+ * serves with now (a preferred stored account), which the mod reads for the plan windows; a router
+ * without the flag leaves the mod on the login.
+ */
+async function claudeAccountUsage(deps: AdminDeps): Promise<{ id: string; label: string; quota: Record<string, unknown>; inUse?: boolean }[]> {
   let usage: Record<string, Record<string, unknown>>;
   try {
     usage = (await deps.claudeUsage?.()) ?? {};
   } catch {
     return [];
   }
-  const rows: { id: string; label: string; quota: Record<string, unknown> }[] = [];
-  if (usage.current) rows.push({ id: "current", label: "Current Claude login", quota: usage.current });
+  const inUse = claudeInUseId(deps, firstClaudeProvider(deps.config()));
+  const rows: { id: string; label: string; quota: Record<string, unknown>; inUse?: boolean }[] = [];
+  // The account in use is listed even while its usage is unknown, with no windows, so no reader
+  // takes another account's figures for the one that is actually spending.
+  if (usage.current || inUse === "current") rows.push({ id: "current", label: "Current Claude login", quota: usage.current ?? {}, ...(inUse === "current" ? { inUse: true } : {}) });
   for (const account of listClaudeAccounts(homeDir())) {
     const quota = usage[account.id];
-    if (quota) rows.push({ id: account.id, label: account.label, quota });
+    if (quota || inUse === account.id) rows.push({ id: account.id, label: account.label, quota: quota ?? {}, ...(inUse === account.id ? { inUse: true } : {}) });
   }
   return rows;
 }
@@ -317,15 +361,20 @@ function claudeLimitWindows(quota: Record<string, unknown>): LimitsWindow[] {
   return out;
 }
 
-/** The Claude Code login's plan windows as one account (the row shows Claude as a single group). */
-async function anthropicLimitAccounts(deps: AdminDeps): Promise<LimitsAccount[]> {
+/**
+ * The plan windows of the Claude account the pool serves with now — a stored account when one is
+ * preferred, else the login — as one account (the row shows Claude as a single group).
+ */
+async function anthropicLimitAccounts(deps: AdminDeps, name: string): Promise<LimitsAccount[]> {
   let usage: Record<string, Record<string, unknown>>;
   try {
     usage = (await deps.claudeUsage?.()) ?? {};
   } catch {
     return [];
   }
-  const quota = usage.current ?? Object.values(usage)[0];
+  const inUse = claudeInUseId(deps, name);
+  // The account in use with no usage yet shows nothing rather than another account's figures.
+  const quota = inUse !== undefined ? usage[inUse] : usage.current ?? Object.values(usage)[0];
   if (!quota) return [];
   const windows = claudeLimitWindows(quota);
   if (!windows.length) return [];
@@ -383,7 +432,7 @@ async function buildLimits(deps: AdminDeps): Promise<{ providers: LimitsProvider
   for (const [name, p] of Object.entries(deps.config().providers)) {
     if (p.limits === false) continue;
     if (p.type === "anthropic" && p.auth === "claude-code") {
-      const rows = await anthropicLimitAccounts(deps);
+      const rows = await anthropicLimitAccounts(deps, name);
       if (rows.length) providers.push({ provider: name, type: "anthropic", title: "Claude", accounts: rows });
     } else if (p.type === "chatgpt") {
       const rows = chatgptLimitAccounts(accounts[name] ?? []);
@@ -2522,9 +2571,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         const wanted = new URL(url, "http://127.0.0.1").searchParams.get("provider");
         const providers = Object.entries(deps.config().providers).filter(([, provider]) => provider.type === "anthropic" && provider.auth === "claude-code");
         const name = providers.find(([key]) => key === wanted)?.[0] ?? providers[0]?.[0];
-        const projection = new ClaudeAccountAuthPool({ home: homeDir(), current: claudeAuthStore(deps), log: deps.log }).peekCredentials();
-        const reports = (name ? deps.credentials?.()[name] : undefined)
-          ?? new CredentialPool().report(name ?? "claude", projection).map((row) => ({ ...row, id: projection.find((credential) => credential.id === row.id)!.ownerId! }));
+        const reports = claudePoolReports(deps, name);
         const accounts = listClaudeAccountsWithSubject(homeDir()).map(({ subjectHash: hash, ...account }) => {
           const same = identity !== null && (hash !== undefined
             ? hash === identity.subjectHash

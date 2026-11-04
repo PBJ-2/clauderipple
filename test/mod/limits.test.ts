@@ -37,6 +37,16 @@ test('scoped weeklies come from the current login only, fresh snapshots only', (
   assert.deepEqual(claudeScopedFrom(null, NOW), [])
 })
 
+test('scoped weeklies follow the in-use account, not the login', () => {
+  const at = NOW - 60_000
+  const scoped = [{ name: 'Fable', used_percent: 2, window_minutes: 10080, reset_at: NOW / 1000 }]
+  const status = { claude: { accounts: [
+    { id: 'current', quota: { at, scoped: [{ name: 'Fable', used_percent: 44, window_minutes: 10080 }] } },
+    { id: 'stored', inUse: true, quota: { at, scoped } },
+  ] } }
+  assert.deepEqual(claudeScopedFrom(status, NOW), [{ name: 'Fable', percent: 2, resetsAt: new Date(NOW).toISOString() }])
+})
+
 test('chatgpt provider names come from the status providers', () => {
   const status = { providers: { anthropic: { type: 'anthropic' }, chatgpt: { type: 'chatgpt' }, codex: { type: 'chatgpt' }, zai: { type: 'anthropic-compatible' } } }
   assert.deepEqual(chatgptProviders(status), ['chatgpt', 'codex'])

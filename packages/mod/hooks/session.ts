@@ -11,21 +11,31 @@ const WINDOW_KIND: Record<number, string> = { 300: 'five_hour', 10080: 'seven_da
 /** A router snapshot older than this is not shown as the plan's figure. */
 export const CLAUDE_USAGE_STALE_MS = 15 * 60_000
 
+const asRecord = (v: unknown): Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {}
+
 /**
- * The plan windows of the Claude login this session's requests pass through, from the router's
- * GET /api/status (`claude.accounts[id=current].quota`, packages/router/src/admin.ts
+ * The Claude account row the router serves with now: the one `inUse` marks, else the app login
+ * (a router before that flag marks none and only lists `current`).
+ */
+function claudeRow(status: unknown): Record<string, unknown> | undefined {
+  const accounts = asRecord(asRecord(status).claude).accounts
+  if (!Array.isArray(accounts)) return undefined
+  const rows = accounts.map(asRecord)
+  return rows.find(a => a.inUse === true) ?? rows.find(a => a.id === 'current')
+}
+
+/**
+ * The plan windows of the Claude account this session's requests pass through, from the router's
+ * GET /api/status (`claude.accounts[inUse=true].quota`, packages/router/src/admin.ts
  * claudeAccountUsage): for when the host leaves `rateLimits` empty though the requests carry them
  * (measured 2026-10-14: the router passes the `anthropic-ratelimit-unified-*` headers through).
  * Percent as the router reports it; a stale or unknown snapshot gives nothing.
  */
 export function claudeLimitsFrom(status: unknown, now: number): SessionRateLimit[] {
-  const object = (v: unknown): Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {}
-  const accounts = object(object(status).claude).accounts
-  const current = Array.isArray(accounts) ? accounts.map(object).find(a => a.id === 'current') : undefined
-  const quota = object(current?.quota)
+  const quota = asRecord(claudeRow(status)?.quota)
   if (typeof quota.at !== 'number' || now - quota.at > CLAUDE_USAGE_STALE_MS) return []
-  const limits = object(quota.rate_limits)
-  return [limits.primary, limits.secondary].map(object).flatMap(w => {
+  const limits = asRecord(quota.rate_limits)
+  return [limits.primary, limits.secondary].map(asRecord).flatMap(w => {
     const kind = typeof w.window_minutes === 'number' ? WINDOW_KIND[w.window_minutes] : undefined
     if (!kind || typeof w.used_percent !== 'number' || !Number.isFinite(w.used_percent)) return []
     const reset = typeof w.reset_at === 'number' ? w.reset_at * (w.reset_at < 1e12 ? 1000 : 1) : NaN
@@ -37,19 +47,17 @@ export function claudeLimitsFrom(status: unknown, now: number): SessionRateLimit
 export type ScopedLimit = { name: string; percent: number; resetsAt?: string }
 
 /**
- * The per-model weekly windows of the Claude login, from the router's GET /api/status
- * (`claude.accounts[id=current].quota.scoped`: `{name, used_percent, window_minutes, reset_at}`,
- * reset in epoch seconds or ms). A stale or unknown snapshot gives nothing, like claudeLimitsFrom.
+ * The per-model weekly windows of the Claude account the pool serves with now, from the router's
+ * GET /api/status (`claude.accounts[inUse=true].quota.scoped`: `{name, used_percent,
+ * window_minutes, reset_at}`, reset in epoch seconds or ms). A stale or unknown snapshot gives
+ * nothing, like claudeLimitsFrom.
  */
 export function claudeScopedFrom(status: unknown, now: number): ScopedLimit[] {
-  const object = (v: unknown): Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {}
-  const accounts = object(object(status).claude).accounts
-  const current = Array.isArray(accounts) ? accounts.map(object).find(a => a.id === 'current') : undefined
-  const quota = object(current?.quota)
+  const quota = asRecord(claudeRow(status)?.quota)
   if (typeof quota.at !== 'number' || now - quota.at > CLAUDE_USAGE_STALE_MS) return []
   const scoped = quota.scoped
   if (!Array.isArray(scoped)) return []
-  return scoped.map(object).flatMap(entry => {
+  return scoped.map(asRecord).flatMap(entry => {
     if (typeof entry.name !== 'string' || !entry.name || typeof entry.used_percent !== 'number' || !Number.isFinite(entry.used_percent)) return []
     const reset = typeof entry.reset_at === 'number' ? entry.reset_at * (entry.reset_at < 1e12 ? 1000 : 1) : NaN
     return [{ name: entry.name, percent: Math.round(entry.used_percent * 10) / 10, ...(Number.isFinite(reset) ? { resetsAt: new Date(reset).toISOString() } : {}) }]

@@ -22,6 +22,15 @@ test('the router stands in for the plan windows of the current login, fresh snap
   assert.deepEqual(claudeLimitsFrom(null, now), [])
 })
 
+test('the plan windows follow the in-use account, and the login when no row is marked', () => {
+  const at = now - 60_000
+  const account = (id: string, used: number, extra: Record<string, unknown> = {}) => ({ id, ...extra, quota: { at, rate_limits: { primary: { used_percent: used, window_minutes: 300 } } } })
+  // A stored account serves the pool now: its figure stands in, not the login's 81%.
+  assert.deepEqual(claudeLimitsFrom({ claude: { accounts: [account('current', 81), account('stored', 15, { inUse: true })] } }, now), [{ kind: 'five_hour', percentUsed: 15 }])
+  // A router that marks no row (older than the flag) keeps reading the login.
+  assert.deepEqual(claudeLimitsFrom({ claude: { accounts: [account('current', 81), account('stored', 15)] } }, now), [{ kind: 'five_hour', percentUsed: 81 }])
+})
+
 test('hottest only considers five_hour/seven_day at or above eighty', () => {
   assert.equal(hottest([]), null)
   assert.equal(hottest([{ kind: 'five_hour', percentUsed: 79.9 }]), null)

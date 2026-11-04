@@ -1349,6 +1349,10 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
     Paused entries are excluded even from the compatible adapters' all-cooling
     first-key fallback; all paused means no upstream request. `inUse` identifies the next usable
     account for a new conversation (one or none), not `active`, which remains the last responder.
+    The Claude pool's in-use account is also the one whose plan windows `GET /api/limits` reports
+    and the row `GET /api/status` marks `inUse: true` in `claude.accounts`, so the status mod
+    follows a preferred stored account rather than always the login; a router that marks no row
+    keeps the mod on the login.
     Login account PATCH bodies accept boolean `preferred`/`paused` and `clearCooldown: true`;
     Claude's existing PUT preference API remains supported. External Codex/current-Claude logins
     retain their existing ownership restrictions. Compatible credentials persist boolean flags on

@@ -15,7 +15,7 @@ import type { OpenCodeWindow } from "../src/providers/opencode-usage.ts";
 import { RequestLog } from "../src/requestlog.ts";
 import { PRESETS } from "../src/presets.ts";
 import { saveClaudeAuthFile, saveClaudeOAuthFile } from "../src/providers/anthropic-token-file.ts";
-import { listClaudeAccounts, markClaudeAccountNeedsReauth, readClaudeAccountsFile, saveClaudeOAuthAccount, subjectHash } from "../src/providers/anthropic-accounts.ts";
+import { listClaudeAccounts, markClaudeAccountNeedsReauth, readClaudeAccountsFile, saveClaudeOAuthAccount, setPreferredClaudeAccount, subjectHash } from "../src/providers/anthropic-accounts.ts";
 import { ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
 import type { ModOptions } from "../src/admin.ts";
 import type { ModSettingsSnapshot } from "../src/mod-settings.ts";
@@ -3339,4 +3339,74 @@ test("GET /api/limits assembles every readable provider and honours limits:false
       { kind: "window", used_percent: 92, window_minutes: 43200, reset_at: future },
     ] : [],
   });
+});
+
+test("GET /api/limits and /api/status follow the Claude account the pool is using now", async () => {
+  const now = Date.now();
+  const cfg = makeCfg({ providers: { anthropic: { type: "anthropic", auth: "claude-code", accountPool: true } } });
+  const quota = (used: number) => ({ at: now, rate_limits: {
+    primary: { used_percent: used, window_minutes: 300 },
+    secondary: { used_percent: used, window_minutes: 10080, reset_at: Math.floor((now + 3_600_000) / 1000) },
+  } });
+  let reports: ReturnType<NonNullable<AdminDeps["credentials"]>> = {};
+  let usage: Awaited<ReturnType<NonNullable<AdminDeps["claudeUsage"]>>> = {};
+  await withAdmin(cfg, async ({ port, home }) => {
+    const stored = saveClaudeOAuthAccount(home, { accessToken: "stored-access", refreshToken: "stored-refresh", expiresAt: now + 3_600_000, accountId: "stored-account" });
+    usage = { current: quota(81), [stored.id]: quota(15) };
+    const read = async () => {
+      const limits = await (await fetch(`${base()}:${port}/api/limits`)).json() as { providers: LimitsProvider[] };
+      const status = await (await fetch(`${base()}:${port}/api/status`)).json() as { claude: { accounts: { id: string; inUse?: boolean; quota?: { rate_limits: { primary: { used_percent: number } } } }[] } };
+      return { limits: limits.providers[0]!.accounts[0]!.windows.map((w) => w.used_percent), accounts: status.claude.accounts };
+    };
+    // No declared credential pool: the stored accounts themselves name the preferred one.
+    assert.equal(setPreferredClaudeAccount(home, stored.id), true);
+    let got = await read();
+    assert.deepEqual(got.limits, [15, 15], "the preferred stored account's plan windows, not the login's");
+    assert.equal(got.accounts.find((a) => a.id === stored.id)?.inUse, true);
+    assert.equal(got.accounts.find((a) => a.id === stored.id)?.quota?.rate_limits.primary.used_percent, 15);
+    assert.equal(got.accounts.find((a) => a.id === "current")?.inUse, undefined);
+
+    // The live proxy's pool report says the login answers now.
+    reports = { anthropic: [{ id: "current", state: "ready", failures: 0, inUse: true }] };
+    got = await read();
+    assert.deepEqual(got.limits, [81, 81]);
+    assert.equal(got.accounts.find((a) => a.id === "current")?.inUse, true);
+    assert.equal(got.accounts.find((a) => a.id === stored.id)?.inUse, undefined);
+
+    // A report with no row in use keeps the login, as before the flag existed.
+    reports = { anthropic: [{ id: "current", state: "ready", failures: 0, inUse: false }] };
+    got = await read();
+    assert.deepEqual(got.limits, [81, 81]);
+    assert.equal(got.accounts.some((a) => a.inUse === true), false);
+
+    // The stored account answers but its usage is not known yet: nothing, never the login's figures.
+    reports = { anthropic: [{ id: stored.id, state: "ready", failures: 0, inUse: true }] };
+    usage = { current: quota(81) };
+    const limits = await (await fetch(`${base()}:${port}/api/limits`)).json() as { providers: LimitsProvider[] };
+    assert.equal(limits.providers.length, 0);
+    const status = await (await fetch(`${base()}:${port}/api/status`)).json() as { claude: { accounts: { id: string; inUse?: boolean; quota?: Record<string, unknown> }[] } };
+    assert.deepEqual(status.claude.accounts.find((a) => a.inUse === true), { id: stored.id, label: listClaudeAccounts(home)[0]!.label, quota: {}, inUse: true });
+
+    // The login answers but its usage is not known: it is listed empty, not left for a stored row to stand in.
+    reports = { anthropic: [{ id: "current", state: "ready", failures: 0, inUse: true }] };
+    usage = { [stored.id]: quota(15) };
+    const empty = await (await fetch(`${base()}:${port}/api/status`)).json() as { claude: { accounts: { id: string; inUse?: boolean; quota?: Record<string, unknown> }[] } };
+    assert.deepEqual(empty.claude.accounts[0], { id: "current", label: "Current Claude login", quota: {}, inUse: true });
+  }, { credentials: () => reports, claudeUsage: async () => usage });
+});
+
+test("a Claude login without an account pool reports the app login's limits, whatever a stored account prefers", async () => {
+  const now = Date.now();
+  const cfg = makeCfg({ providers: { anthropic: { type: "anthropic", auth: "claude-code" } } });
+  const quota = (used: number) => ({ at: now, rate_limits: { primary: { used_percent: used, window_minutes: 300 } } });
+  let usage: Awaited<ReturnType<NonNullable<AdminDeps["claudeUsage"]>>> = {};
+  await withAdmin(cfg, async ({ port, home }) => {
+    const stored = saveClaudeOAuthAccount(home, { accessToken: "stored-access", refreshToken: "stored-refresh", expiresAt: now + 3_600_000, accountId: "stored-account" });
+    usage = { current: quota(81), [stored.id]: quota(15) };
+    assert.equal(setPreferredClaudeAccount(home, stored.id), true);
+    const limits = await (await fetch(`${base()}:${port}/api/limits`)).json() as { providers: LimitsProvider[] };
+    assert.deepEqual(limits.providers[0]!.accounts[0]!.windows.map((w) => w.used_percent), [81]);
+    const status = await (await fetch(`${base()}:${port}/api/status`)).json() as { claude: { accounts: { id: string; inUse?: boolean }[] } };
+    assert.equal(status.claude.accounts.find((a) => a.inUse === true)?.id, "current");
+  }, { claudeUsage: async () => usage });
 });
