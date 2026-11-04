@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classify, CredentialPool, retryAfterMs, targets, type Credential } from "../src/pool.ts";
+import { classify, CredentialPool, retryAfterMs, targets, ThreadAffinity, type Credential } from "../src/pool.ts";
 
 import { ProviderHealth, providerExhaustion } from "../src/health.ts";
 
@@ -232,6 +232,105 @@ test("an idle conversation loses its claim, so a restarted chat is not pinned fo
   assert.equal(pool.pick("p", all, "conv")?.id, "b");
   c.advance(5_000);
   assert.equal(pool.pick("p", all, "conv")?.id, "a", "claim expired, order applies again");
+});
+
+// The owner moving the preferred account is the one deliberate exception to "a held conversation
+// stays put": every conversation of that provider re-picks, and each pays one cold prompt cache.
+test("changing the preferred account moves held conversations onto it", () => {
+  const c = clock();
+  const pool = new CredentialPool({ now: c.now });
+  const plain = (): Credential[] => creds("a", "b");
+  assert.equal(pool.pick("p", plain(), "conv")?.id, "a");
+  assert.equal(pool.pick("p", plain(), "conv")?.id, "a");
+
+  const preferB = (): Credential[] => [{ ...creds("a")[0]! }, { ...creds("b")[0]!, preferred: true }];
+  assert.equal(pool.pick("p", preferB(), "conv")?.id, "b", "the held claim is dropped when the preferred owner changes");
+  assert.equal(pool.pick("p", preferB(), "conv")?.id, "b", "and the new claim holds from then on");
+  assert.equal(pool.pick("p", preferB(), "other-conv")?.id, "b", "new conversations prefer it too");
+});
+
+// Removing the preference is not a move the owner asked for, so held conversations keep their cache.
+test("removing the preference leaves held conversations where they are", () => {
+  const c = clock();
+  const pool = new CredentialPool({ now: c.now });
+  const preferA = (): Credential[] => [{ ...creds("b")[0]! }, { ...creds("a")[0]!, preferred: true }];
+  assert.equal(pool.pick("p", preferA(), "conv")?.id, "a");
+  const plain = (): Credential[] => creds("b", "a");
+  assert.equal(pool.pick("p", plain(), "conv")?.id, "a", "no preference means configured order for new chats only");
+  assert.equal(pool.pick("p", plain(), "fresh")?.id, "b");
+});
+
+// Choosing the same account again after removing its preference is a change the owner asked for.
+test("re-preferring an account after removing its preference moves held conversations again", () => {
+  const c = clock();
+  const pool = new CredentialPool({ now: c.now });
+  const preferA = (): Credential[] => [{ ...creds("b")[0]! }, { ...creds("a")[0]!, preferred: true }];
+  assert.equal(pool.pick("p", preferA(), "conv")?.id, "a");
+  assert.equal(pool.pick("p", creds("b", "a"), "fresh")?.id, "b", "with no preference a new chat takes b");
+  assert.equal(pool.pick("p", preferA(), "fresh")?.id, "a", "preferring a again moves it");
+});
+
+// A retry's list leaves out the credential it tried; that is not the owner removing the preference.
+test("a retry list without the preferred account does not count as removing the preference", () => {
+  const c = clock();
+  const pool = new CredentialPool({ now: c.now });
+  const preferA = (): Credential[] => [{ ...creds("b")[0]! }, { ...creds("a")[0]!, preferred: true }];
+  assert.equal(pool.pick("p", preferA(), "conv")?.id, "a");
+  pool.penalise("p", "a", 429, 1_000);
+  assert.equal(pool.pick("p", creds("b"), "conv")?.id, "b", "the retry answers on b");
+  c.advance(2_000);
+  assert.equal(pool.pick("p", preferA(), "conv")?.id, "b", "a recovered, the preference never changed, so the conversation stays on b");
+});
+
+// A preferred account coming back from a cooldown is not a preference change: the conversation
+// that ran elsewhere while it rested keeps the cache it built there.
+test("a preferred account recovering from cooldown does not move a held conversation", () => {
+  const c = clock();
+  const pool = new CredentialPool({ now: c.now });
+  const all = (): Credential[] => [{ ...creds("b")[0]! }, { ...creds("a")[0]!, preferred: true }];
+  pool.penalise("p", "a", 429, 1_000);
+  assert.equal(pool.pick("p", all(), "conv")?.id, "b", "preferred is cooling, so the next account answers");
+  assert.equal(pool.pick("p", all(), "conv")?.id, "b");
+  c.advance(2_000);
+  assert.equal(pool.pick("p", all(), "conv")?.id, "b", "a recovered, but the conversation stays on b");
+  assert.equal(pool.pick("p", all(), "fresh")?.id, "a", "a new conversation tries the preferred account");
+});
+
+// One provider's preference change must not move another provider's conversations.
+test("a preference change is scoped to its provider", () => {
+  const c = clock();
+  const pool = new CredentialPool({ now: c.now });
+  assert.equal(pool.pick("x", creds("x1", "x2"), "conv")?.id, "x1");
+  assert.equal(pool.pick("y", creds("y1", "y2"), "conv")?.id, "y1");
+  assert.equal(pool.pick("x", [{ ...creds("x1")[0]! }, { ...creds("x2")[0]!, preferred: true }], "conv")?.id, "x2");
+  assert.equal(pool.pick("y", creds("y1", "y2"), "conv")?.id, "y1", "y kept its own claim");
+});
+
+test("a thread continuation remembers which conversation produced its previous message id", () => {
+  const c = clock();
+  const affinity = new ThreadAffinity({ now: c.now, ttlMs: 10_000, maxEntries: 2 });
+  assert.equal(affinity.lookup("msg_unknown"), undefined, "an unknown id keeps the computed key");
+  affinity.remember("msg_1", "conversation-1");
+  assert.equal(affinity.lookup("msg_1"), "conversation-1");
+  // Re-remembering is an update, not a duplicate.
+  affinity.remember("msg_1", "conversation-2");
+  assert.equal(affinity.lookup("msg_1"), "conversation-2");
+  assert.equal(affinity.size, 1);
+  // Bounded by the size cap: the oldest entry goes first.
+  affinity.remember("msg_2", "conversation-1");
+  affinity.remember("msg_3", "conversation-1");
+  assert.deepEqual([affinity.size, affinity.lookup("msg_1"), affinity.lookup("msg_3")], [2, undefined, "conversation-1"]);
+  // Expiry is the idle claim's own lifetime.
+  c.advance(10_001);
+  assert.equal(affinity.lookup("msg_3"), undefined, "an entry older than the TTL is forgotten");
+  assert.equal(affinity.lookup("msg_2"), undefined);
+  assert.equal(affinity.size, 0);
+  // A read at the boundary still answers; the TTL has not elapsed yet.
+  affinity.remember("msg_4", "conversation-9");
+  c.advance(10_000);
+  assert.equal(affinity.lookup("msg_4"), "conversation-9");
+  c.advance(1);
+  assert.equal(affinity.lookup("msg_4"), undefined);
 });
 
 test("a single credential behaves exactly as before: one choice, or none", () => {

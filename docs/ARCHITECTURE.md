@@ -1309,8 +1309,9 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
 - **Credential pools (`providers.<name>.credentials`, 2026-09-17).** A provider may hold several
   credentials, each a complete header set. The conversation keeps the one it is on while that one
   is healthy — moving it moves the prompt cache with it, and ≥90% cache hit is an acceptance metric
-  — and only a failure moves it, including back to one that has recovered rather than to the head
-  of the list. A 401 quarantines a credential, because rejected credentials do not heal; a 429
+  — and only a failure, or the operator changing which credential is preferred (below), moves it,
+  including back to one that has recovered rather than to the head of the list. A 401 quarantines a
+  credential, because rejected credentials do not heal; a 429
   cools it until the vendor's stated reset (`retry-after`, seconds or HTTP-date, or the Codex reset
   header), clamped to six hours; a 402 cools it for half an hour; a 5xx or a connect failure for
   ten seconds. **A 4xx that is the request's own fault is charged to nobody** — retrying a bad body
@@ -1336,9 +1337,16 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
     and logs the key that answered. Antigravity rotates its own accounts (§4d-ii) and is unchanged.
   - **Shared operator controls (2026-10-23).** ChatGPT, Claude OAuth, Google CCA and compatible
     API-key pools share `preferred`, `paused`, `clearCooldown` and `inUse`. At most one stored
-    account/key is preferred: only new conversations try it first while usable; existing healthy
-    affinity keeps its prompt cache, and new conversations return to the preferred account after
-    its cooldown resets. Paused entries are excluded even from the compatible adapters' all-cooling
+    account/key is preferred. Changing which one is preferred migrates that provider's held
+    conversations: the pool notices the new preferred owner in `pick()` and drops its affinity
+    entries, so each re-picks it on its next turn and pays one cold prompt cache (a `continue`
+    meeting a thread the new account never produced answers 404 `thread_not_found`; the CLI replays
+    full history and re-claims there). New conversations try the preferred account first while
+    usable, and return to it after its cooldown resets. A preferred account merely recovering from
+    cooldown does **not** move a held conversation, and neither does removing the preference;
+    choosing the same account again after a removal is a change. A retry's list that leaves out the
+    tried preferred account is not a removal.
+    Paused entries are excluded even from the compatible adapters' all-cooling
     first-key fallback; all paused means no upstream request. `inUse` identifies the next usable
     account for a new conversation (one or none), not `active`, which remains the last responder.
     Login account PATCH bodies accept boolean `preferred`/`paused` and `clearCooldown: true`;
@@ -1366,7 +1374,11 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
     (cache-control markers excluded). `conversationKey` truncates at 4000 characters, so workers
     sharing injected instructions had shared one user's affinity indefinitely. New conversations
     try the preferred/first usable configured key; a healthy existing affinity never moves merely
-    because an earlier key recovered. Provider cache/session keys remain unchanged. Metadata-less
+    because an earlier key recovered (a preference change does move it — "Shared operator controls").
+    A successful native pool answer's `messageId` is remembered with the conversation that produced
+    it (60-minute TTL, bounded), so a later `continue` — which carries only the new messages and can
+    be keyed by none of them — asks for that conversation's account instead of seeding a new
+    affinity. Provider cache/session keys remain unchanged. Metadata-less
     one-message side requests without an agent keep their shared `conversationKey` class below.
     Request records expose `credential` (configured label or 1-based ordinal, never runtime id/token);
     `router.log` also records selection reason and candidate health, plus every same-turn retry.
@@ -2210,6 +2222,7 @@ plan unless marked otherwise.
 | A new worker could not be spawned in a session that was open when it was added: the router wrote `zai-org-glm-5-3-flash.md` at 10:51:45, the MAMBO session (idle since 10:47) got its next message 26 s later, and the Agent tool answered "not found" at 10:52 and 11:12; after a `/clear` the mod rewrote `ripple:auto` to the worker and the CLI refused that too (11:24). The ClaudeRipple session, in use at the time, listed it by 10:55 (2026-10-23). CLI 2.1.308 polls `~/.claude/agents` every 2 s in use and 30 s after a minute idle; going back to 2 s rebuilds the watcher from the directory as it then is, and the catch-up compares only skills and commands, so a write in the last 30 s of idling is never read, and `/clear` keeps the process's list | Every sync that writes or removes a generated agent touches the generated files again `RETOUCH_AFTER_MS` (45 s) later (`agents.ts` `retouchLater`): any agent file's change makes a session reread all of them, and 45 s is past the idle poll. A session that already missed one is fixed the same way, by touching any file in `~/.claude/agents`. Tests: `agents.test.ts`. |
 | A routed request's `messages` array carried Anthropic-only shapes — a mid-conversation `role: "system"` message and `tool_addition`/`tool_removal` content blocks — and the compat layer cleaned only the top-level fields, so the vendor's Anthropic skin answered 400 `Invalid Anthropic Messages API request` on every turn once a SessionStart hook or a deferred MCP tool was in play (issue #92, CLI 2.1.308+, 2026-10-26) | A compat layer validates the **whole body** it forwards, `messages` included, not just the fields the CLI adds at the top level: a role an Anthropic-shaped vendor does not accept in `messages` is folded to `user` with the text untouched, a content block type only Anthropic defines is either converted into something the wire already has (a deferred tool's definition joins `tools`) or dropped, and a message left with no content goes whole. The request log counts each fold (`system_role×N`, `tool_addition×N`, `tool_removal×N`) so a vendor's next refusal can be read against what was sent. Same rule as the tool-schema row: what is forwarded must be valid for the wire it is forwarded to, not merely for the client that produced it. |
 | The router starved behind a build on Windows (2026-10-29, measured): the scheduled task had Task Scheduler's default priority 7, so conhost, the launcher and the router ran BelowNormal. With cargo and rustc holding every core at Normal, `/api/status` took 1-3 s; an update's probe got `ECONNREFUSED` from a router that was listening (a full accept queue); `install` skipped the version restart because `/api/status` gave no answer within 10 s; and `restart` refused the router as "another ClaudeRipple installation" because the 5 s PowerShell listener lookup timed out | The task is registered with `-Priority 4` (Normal), the launcher raises itself from BelowNormal or Idle to Normal before it starts the router, and the router applies `Config.processPriority` (Normal unless set) at start and on every config change. The listener lookup waits 15 s. Below Normal is now only the person's own choice. Tests: `process-priority.test.ts`, `schtasks-definition.test.ts`, `ui-priority.test.ts`. |
+| An already-running Code tab session never used the stored Claude sub-account, which was marked preferred: every turn's `continue` carried only the delta, so `requestConversationKey` hashed a different first `tool_result` each turn, the pool seeded a new affinity, and picked the preferred account — which held no such server-side thread, so Anthropic answered `404 thread_not_found`; the CLI then replayed the full history, whose original key was sticky to the CLI login, and that answered 200. `router.log`, every turn: `KEY anthropic credential=#1 conversation=<new hash> reason=configured-order`, then `credential=#2 conversation=0016c66c… reason=affinity` (2026-11-04) | A `continue` follows the answer it continues: a successful native pool answer's message id is remembered with its conversation's affinity key (60-minute TTL, size-capped, in memory only, and not added to the request log), and a `thread.type:"continue"` naming a remembered `previous_message_id` uses that key instead of the computed one; an unknown id keeps the computed key. Separately, changing the preferred account now migrates that provider's held conversations (the pool drops their affinity when the preferred owner changes) at the cost of one cold turn — the new account answers `thread_not_found`, the CLI replays, and the full-history request claims it there; a cooldown ending or a removed preference moves nothing. Tests: `pool.test.ts`, `anthropic-account-proxy.test.ts`. |
 
 ### Router-owned automatic updates (2026-10-21)
 

@@ -39,6 +39,8 @@ export type Verdict =
 
 /** A rate limit with no stated reset. Long enough not to hammer, short enough to recover a session. */
 const DEFAULT_RATE_LIMIT_MS = 60_000;
+/** How long an idle conversation, or a rememberable answer, keeps its claim on a credential. */
+const DEFAULT_STICKY_MS = 60 * 60_000;
 const TRANSIENT_MS = 10_000;
 const EXHAUSTED_MS = 30 * 60_000;
 /** A relay passing on its upstream's failure; whatever status it chose, the credential did nothing. */
@@ -144,21 +146,31 @@ export type CredentialReport = {
  * Health and stickiness for one router's credentials, keyed `provider/credential`. In memory only:
  * a cooldown that outlived a restart would be a restart that made things worse, and a quarantine is
  * re-earned on the first request anyway.
+ *
+ * An operator changing which credential is preferred is the one move allowed to break a healthy
+ * affinity: the owner asked for that account, so held conversations re-pick it on their next turn.
+ * A credential merely recovering from a cooldown is not such a move, and neither is removing the
+ * preference.
  */
 export class CredentialPool {
   private readonly health = new Map<string, Health>();
   /** (provider, conversation) → durable owner id (or runtime id), preserving each provider's cache. */
   private readonly sticky = new Map<string, { ownerId: string; at: number }>();
+  /** The preferred owner id each provider was last seen with, so a change re-picks held conversations. */
+  private readonly lastPreferred = new Map<string, string>();
   private readonly now: () => number;
   /** How long an idle conversation keeps its claim on a credential. */
   private readonly stickyTtlMs: number;
 
   constructor(opts: { now?: () => number; stickyTtlMs?: number } = {}) {
     this.now = opts.now ?? Date.now;
-    this.stickyTtlMs = opts.stickyTtlMs ?? 60 * 60_000;
+    this.stickyTtlMs = opts.stickyTtlMs ?? DEFAULT_STICKY_MS;
   }
 
   private key(provider: string, id: string): string { return `${provider}/${id}`; }
+
+  /** A conversation's claim, scoped by provider so one provider's preference change cannot touch another's. */
+  private stickyKey(provider: string, conversation: string): string { return `${provider}\u0000${conversation}`; }
 
   private healthOf(provider: string, id: string): Health {
     const key = this.key(provider, id);
@@ -193,11 +205,15 @@ export class CredentialPool {
    * conversation's existing credential wins while it is healthy; otherwise the first usable one in
    * configured order, which makes the order meaningful rather than incidental. With a `scope`, a
    * credential whose quota for that scope is resting is skipped too.
+   *
+   * A change of preferred owner is applied before the held claim is read, so a conversation the
+   * operator has moved re-picks the new account right here rather than one turn later.
    */
   pick(provider: string, credentials: readonly Credential[], conversation?: string, scope?: string): Credential | null {
     if (credentials.length === 0) return null;
     this.expireSticky();
-    const stickyKey = JSON.stringify([provider, conversation]);
+    this.observePreference(provider, credentials);
+    const stickyKey = conversation ? this.stickyKey(provider, conversation) : "";
     if (conversation) {
       const held = this.sticky.get(stickyKey);
       if (held) {
@@ -213,6 +229,34 @@ export class CredentialPool {
     if (!next) return null;
     if (conversation) this.sticky.set(stickyKey, { ownerId: next.ownerId ?? next.id, at: this.now() });
     return next;
+  }
+
+  /**
+   * Note which credential this provider now calls preferred, whether or not it is usable: a cooldown
+   * ending is not a preference change. A defined owner that differs from the last one seen — including
+   * the first one seen after no preference at all — drops the provider's held conversations, so each
+   * re-picks; a preference change deliberately costs those conversations one cold prompt cache.
+   * Removing the preference moves nothing, but it is remembered as removed, so choosing the same
+   * account again later is a change. Only a list that still holds the last preferred owner, now
+   * unmarked, proves a removal: a retry's list leaves out the credential it already tried.
+   */
+  private observePreference(provider: string, credentials: readonly Credential[]): void {
+    const preferred = credentials.find((c) => c.preferred);
+    if (!preferred) {
+      const seen = this.lastPreferred.get(provider);
+      if (seen !== undefined && credentials.some((c) => (c.ownerId ?? c.id) === seen)) this.lastPreferred.delete(provider);
+      return;
+    }
+    const ownerId = preferred.ownerId ?? preferred.id;
+    const seen = this.lastPreferred.get(provider);
+    this.lastPreferred.set(provider, ownerId);
+    if (seen !== ownerId) this.dropSticky(provider);
+  }
+
+  /** Drop this provider's held conversations; another provider's claims must survive it. */
+  private dropSticky(provider: string): void {
+    const prefix = this.stickyKey(provider, "");
+    for (const key of this.sticky.keys()) if (key.startsWith(prefix)) this.sticky.delete(key);
   }
 
   /**
@@ -308,6 +352,58 @@ export class CredentialPool {
   private expireSticky(): void {
     const cutoff = this.now() - this.stickyTtlMs;
     for (const [conversation, held] of this.sticky) if (held.at < cutoff) this.sticky.delete(conversation);
+  }
+}
+
+/**
+ * Which conversation produced a given assistant message id, for server-side thread continuation.
+ *
+ * A `continue` carries only the new messages (tool results and attachments), so its first user
+ * message is not the conversation's and the conversation key computed from the request is a new
+ * one every turn. A pool would then start a fresh affinity and pick the preferred account, while
+ * the thread lives on the account that produced `previous_message_id` (measured 2026-11-04: every
+ * turn spent a 404 `thread_not_found` and a full replay). Remembering the producing conversation's
+ * key lets the continue ask the pool for that same key. Process memory only, bounded by the same
+ * TTL as an idle conversation and by a size cap; an unknown id keeps the computed key.
+ */
+export class ThreadAffinity {
+  private readonly entries = new Map<string, { key: string; at: number }>();
+  private readonly now: () => number;
+  private readonly ttlMs: number;
+  private readonly maxEntries: number;
+
+  constructor(opts: { now?: () => number; ttlMs?: number; maxEntries?: number } = {}) {
+    this.now = opts.now ?? Date.now;
+    this.ttlMs = opts.ttlMs ?? DEFAULT_STICKY_MS;
+    this.maxEntries = opts.maxEntries ?? 20_000;
+  }
+
+  remember(messageId: string, conversation: string): void {
+    this.prune();
+    // Re-insert so the oldest-eviction order reflects the latest use.
+    this.entries.delete(messageId);
+    this.entries.set(messageId, { key: conversation, at: this.now() });
+    for (const id of this.entries.keys()) {
+      if (this.entries.size <= this.maxEntries) break;
+      this.entries.delete(id);
+    }
+  }
+
+  lookup(messageId: string): string | undefined {
+    const entry = this.entries.get(messageId);
+    if (!entry) return undefined;
+    if (entry.at < this.now() - this.ttlMs) {
+      this.entries.delete(messageId);
+      return undefined;
+    }
+    return entry.key;
+  }
+
+  get size(): number { return this.entries.size; }
+
+  private prune(): void {
+    const cutoff = this.now() - this.ttlMs;
+    for (const [id, entry] of this.entries) if (entry.at < cutoff) this.entries.delete(id);
   }
 }
 

@@ -34,7 +34,7 @@ import { defaultAgentDir, imageLine, withAgentAliases } from "./agents.ts";
 import { forwardCompatibleHeader, resolveCompatibleCaps, sanitizeForCompatible } from "./compat.ts";
 import { applyIdentityToAnthropicBody, promptAdditions } from "./identity.ts";
 import { anthropicServerToolBackend, webPluginBackend, webSearchBlocks, webSearchErrorBlocks, webSearchMessage, webSearchQuery, webSearchSse, type WebSearchQuery } from "./websearch.ts";
-import { classify, CredentialPool, retryAfterMs, type Credential } from "./pool.ts";
+import { classify, CredentialPool, retryAfterMs, ThreadAffinity, type Credential } from "./pool.ts";
 import { PRESETS } from "./presets.ts";
 import { ChatGptAdapter, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
 import { OpenAiCompatibleAdapter } from "./providers/openai/index.ts";
@@ -276,6 +276,8 @@ export class Proxy {
   private readonly implicitCredentialHeaders = new Map<string, string>();
   /** Recent non-Anthropic answers whose vendor ids cannot identify the route by their shape. */
   private readonly routedMessageIds = new Set<string>();
+  /** Which conversation each native pool answer belonged to, for a later `continue` of that thread. */
+  private readonly threadAffinity = new ThreadAffinity();
   private readonly thinkingOrigins = new ThinkingOrigins();
   readonly providerHealth = new ProviderHealth();
   readonly modelHealth = new ModelHealth();
@@ -961,7 +963,11 @@ export class Proxy {
     // Metadata-less side requests retain their shared cache-class key, never a per-request id.
     const cacheRequest = json && Array.isArray(json.messages) ? json as AnthropicRequest : null;
     const sideRequest = cacheRequest && !subagent && !cacheRequest.metadata?.user_id && cacheRequest.messages.length <= 1;
-    const affinity = cacheRequest ? (!sideRequest ? requestConversationKey(json!, record.session, subagent ? agentId : undefined) : undefined) ?? conversationKey(cacheRequest) : undefined;
+    // A `continue` carries only the new messages, so its own first user message is not the
+    // conversation's. Ask the answer it continues which conversation produced it, so the pool
+    // stays on the account that holds the server-side thread; an unknown id keeps the old key.
+    const continued = cacheRequest ? this.continuedConversation(json!) : undefined;
+    const affinity = cacheRequest ? (continued ?? (!sideRequest ? requestConversationKey(json!, record.session, subagent ? agentId : undefined) : undefined)) ?? conversationKey(cacheRequest) : undefined;
     const recordCredential = (name: string, using: Credential, credentials: readonly Credential[], retry = false): void => {
       // count_tokens is answered locally by the translated adapters: no key was actually sent.
       const type = cfg.providers[name]?.type;
@@ -1164,6 +1170,8 @@ export class Proxy {
       let chosen: Credential | null = null;
       let credentialCandidates: readonly Credential[] = [];
       let penalised: { provider: string; id: string } | null = null;
+      /** This attempt goes out on a native Claude account-pool credential, so its answer names a thread. */
+      let poolAnswer = false;
       let target: { protocol: "http:" | "https:"; host: string; port: number; agent: http.Agent | https.Agent; extraHeaders: Record<string, string>; basePath?: string; dropClientAuth?: boolean; dropHeaders?: Set<string>; dropHeaderPrefixes?: string[] };
       // Re-enter only for the one unwritten Google turn (prompt refusal or no model capacity). Each target sees the original
       // request, not the primary's rewritten effort, stripped thread, or translated body.
@@ -1455,6 +1463,7 @@ export class Proxy {
             credentialCandidates = credentials;
             recordCredential(route.provider, using, credentials);
             penalised = { provider: route.provider, id: using.id };
+            poolAnswer = true;
             target = {
               protocol: "https:",
               host: cfg.upstream,
@@ -1934,6 +1943,12 @@ export class Proxy {
           observedStopReason = observed.stopReason;
           if (!native && observed.messageId !== undefined) record.messageId = observed.messageId;
           if (observed.servedTier !== undefined) record.servedTier = observed.servedTier;
+          // A native pool answer's id is what a later `continue` names. Remember the conversation
+          // that produced it (not in the request log, which keeps its existing shape) so that turn,
+          // carrying only its delta, finds the account whose server-side thread holds it.
+          if (poolAnswer && affinity !== undefined && observed.messageId !== undefined && status >= 200 && status < 300) {
+            this.threadAffinity.remember(observed.messageId, affinity);
+          }
           res.end();
           const errorBody = status >= 400 ? decodeBodyToText(Buffer.concat(errorHead), upRes.headers["content-encoding"]) : "";
           if (route && path.startsWith("/v1/messages") && !path.startsWith("/v1/messages/count_tokens")) {
@@ -2221,6 +2236,13 @@ export class Proxy {
     // OAuth labels are derived from account emails, not operator-supplied key labels.
     const label = !credential.ownerId && credential.label ? redactErrorText(credential.label, secrets, 80) : "";
     return label || `#${index + 1}`;
+  }
+
+  /** The conversation that produced the answer a `continue` names, when this router remembers it. */
+  private continuedConversation(json: Record<string, unknown>): string | undefined {
+    const thread = json.thread as { type?: unknown; previous_message_id?: unknown } | undefined;
+    if (!thread || typeof thread !== "object" || thread.type !== "continue") return undefined;
+    return typeof thread.previous_message_id === "string" ? this.threadAffinity.lookup(thread.previous_message_id) : undefined;
   }
 
   clearCredentialCooldown(provider: string, id: string): void {

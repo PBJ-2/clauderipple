@@ -15,7 +15,7 @@ import { DEFAULTS, type Config } from "../src/config.ts";
 import { UpstreamHealth } from "../src/health.ts";
 import { Logger } from "../src/log.ts";
 import { ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
-import { readClaudeAccountsFile, saveClaudeOAuthAccount } from "../src/providers/anthropic-accounts.ts";
+import { readClaudeAccountsFile, saveClaudeOAuthAccount, updateClaudeAccount } from "../src/providers/anthropic-accounts.ts";
 import { Proxy } from "../src/proxy.ts";
 import { RequestLog } from "../src/requestlog.ts";
 import { createCa, createLeaf } from "../src/x509.ts";
@@ -108,7 +108,7 @@ async function nativeRig(reply: (seen: Seen, attempt: number) => Reply, claude: 
   });
   await proxy.listen();
 
-  const send = async (conversation = "conversation-1"): Promise<number> => {
+  const send = async (conversation = "conversation-1", options: { content?: string; previous?: string } = {}): Promise<number> => {
     const socket = net.connect(proxyPort, "127.0.0.1");
     await new Promise<void>((resolve) => socket.once("connect", resolve));
     socket.write("CONNECT localhost:443 HTTP/1.1\r\nHost: localhost:443\r\n\r\n");
@@ -121,7 +121,8 @@ async function nativeRig(reply: (seen: Seen, attempt: number) => Reply, claude: 
       metadata: { user_id: conversation },
       tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 2 }],
       tool_choice: { type: "tool", name: "web_search" },
-      messages: [{ role: "user", content: "find this" }],
+      messages: [{ role: "user", content: options.content ?? "find this" }],
+      ...(options.previous ? { thread: { type: "continue", previous_message_id: options.previous } } : {}),
     });
     secure.write(
       "POST /v1/messages HTTP/1.1\r\n" +
@@ -169,6 +170,36 @@ test("a native Claude turn survives 429, keeps the replacement account, and pres
     assert.doesNotMatch(logs, /current-token|stored-token|stored-refresh|stored-upstream-uuid|stored@example\.test/);
     const runtimeDigest = crypto.createHash("sha256").update("stored-refresh").digest("hex").slice(0, 12);
     assert.doesNotMatch(fs.readFileSync(path.join(rig.home, "router.log"), "utf8"), new RegExp(runtimeDigest));
+  } finally {
+    await rig.stop();
+  }
+});
+
+// A session that began while the stored account was resting stays on the current login. Its next
+// turn is a `continue` carrying only the delta, whose own first user message is not the
+// conversation's; without the remembered answer→conversation mapping the pool seeds a new affinity
+// and picks the now-recovered preferred account, which answers 404 thread_not_found (router.log,
+// 2026-11-04: every turn of an already-running Code tab).
+test("a thread continue follows the conversation that produced its previous message", async () => {
+  let answered = 0;
+  const rig = await nativeRig((seen) => {
+    if (seen.authorization === "Bearer stored-token" && answered === 0) {
+      return { status: 429, headers: { "retry-after": "1" }, body: "{}" };
+    }
+    answered++;
+    return { status: 200, body: JSON.stringify({ id: `msg_native_${answered}`, type: "message", role: "assistant", model: seen.body.model, content: [], usage: {} }) };
+  });
+  try {
+    updateClaudeAccount(rig.home, rig.stored.id, { preferred: true });
+    assert.equal(await rig.send("thread-conversation"), 200, "the preferred account is resting; the current login answers");
+    assert.deepEqual(rig.seen.map((item) => item.authorization), ["Bearer stored-token", "Bearer current-token"]);
+
+    // Its one-second rest lapses: the preferred account is usable again for new conversations.
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    assert.equal(await rig.send("thread-conversation", { content: "a tool result", previous: "msg_native_1" }), 200);
+    assert.deepEqual(rig.seen.map((item) => item.authorization),
+      ["Bearer stored-token", "Bearer current-token", "Bearer current-token"],
+      "the continue stays on the account holding its thread although another is preferred");
   } finally {
     await rig.stop();
   }
