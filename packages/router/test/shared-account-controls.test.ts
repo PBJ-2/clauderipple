@@ -70,7 +70,7 @@ function fixture(kind: string, home: string, now: () => number): Fixture {
 }
 
 for (const kind of ["chatgpt", "claude", "google", "api-key"]) {
-  test(`${kind}: preferred is for new conversations, returns after reset, and never steals a sticky conversation`, () => {
+  test(`${kind}: choosing a preferred account moves held conversations, it returns after reset, and a reset alone moves nothing`, () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-controls-"));
     try {
       let time = Date.now();
@@ -82,7 +82,8 @@ for (const kind of ["chatgpt", "claude", "google", "api-key"]) {
       assert.equal(owner(pool.pick(kind, f.credentials(), "old")), a);
       assert.equal(f.update(b, { preferred: true }), true);
       assert.equal(owner(pool.pick(kind, f.credentials(), "new")), b);
-      assert.equal(owner(pool.pick(kind, f.credentials(), "old")), a);
+      // The owner chose b: a conversation held by a moves there too (2026-11-04).
+      assert.equal(owner(pool.pick(kind, f.credentials(), "old")), b);
       const runtimeB = f.credentials().find((credential) => owner(credential) === b)!;
       pool.penalise(kind, runtimeB.id, 429, 5_000);
       assert.equal(owner(pool.pick(kind, f.credentials(), "during-rest")), a);
