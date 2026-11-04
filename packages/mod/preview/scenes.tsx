@@ -76,6 +76,20 @@ const LIMITS_ALL: LimitItem[] = [
   { provider: 'opencode-go', type: 'opencode-go', title: 'Go', account: 0, kind: 'seven_day', label: '', windowMinutes: 10080, percent: 52, resetsAt: '2026-10-19T00:00:00Z' },
   { provider: 'opencode-go', type: 'opencode-go', title: 'Go', account: 0, kind: 'window', label: '', windowMinutes: 43200, percent: 92, resetsAt: '2026-10-18T05:43:30Z' },
 ]
+/**
+ * Every account the owner added (2026-11-04): the Claude app login and a stored account the router
+ * serves turns with now, then two GPT accounts, the second in use and named with a long email.
+ */
+const LIMITS_ACCOUNTS: LimitItem[] = [
+  { provider: 'anthropic', type: 'anthropic', title: 'Claude', account: 0, kind: 'five_hour', label: '', percent: 81, resetsAt: '2026-10-12T15:40:00' },
+  { provider: 'anthropic', type: 'anthropic', title: 'Claude', account: 0, kind: 'seven_day', label: '', percent: 64, resetsAt: '2026-10-15T10:00:00' },
+  { provider: 'anthropic', type: 'anthropic', title: 'Claude', account: 1, accountLabel: 'work@example.com', inUse: true, kind: 'five_hour', label: '', percent: 15, resetsAt: '2026-10-12T16:10:00' },
+  { provider: 'anthropic', type: 'anthropic', title: 'Claude', account: 1, accountLabel: 'work@example.com', inUse: true, kind: 'seven_day', label: '', percent: 32, resetsAt: '2026-10-16T09:00:00' },
+  { provider: 'anthropic', type: 'anthropic', title: 'Claude', account: 1, accountLabel: 'work@example.com', inUse: true, kind: 'scoped', label: 'Fable', percent: 2, resetsAt: '2026-10-16T09:00:00' },
+  { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 0, accountLabel: 'me@example.com', kind: 'seven_day', label: '', windowMinutes: 10080, percent: 23, resetsAt: '2026-10-19T13:20:00' },
+  { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 1, accountLabel: 'design-team-shared-account@example.com', inUse: true, kind: 'five_hour', label: '', windowMinutes: 300, percent: 64, resetsAt: '2026-10-12T15:05:00' },
+  { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 1, accountLabel: 'design-team-shared-account@example.com', inUse: true, kind: 'seven_day', label: '', windowMinutes: 10080, percent: 97, resetsAt: '2026-10-14T09:42:00' },
+]
 const SETTINGS_VIEW: SettingsView = { settings: SETTINGS, jev: { source: 'env', test: { state: 'idle' } } }
 
 /** The Agents pane's width in a wide window, ~560 px, in cells; and a narrow one, ~360 px. */
@@ -323,6 +337,12 @@ const SCENES: Scene[] = [
   { name: 'limits-pane-all', columns: 100, draw: (el, f) => renderLimits(el, f, { items: LIMITS_ALL }, noop) },
   { name: 'limits-pane-none', columns: PANE, draw: (el, f) => renderLimits(el, f, { items: [] }, noop) },
   { name: 'flat-limits-pane', columns: PANE, skin: 'flat', draw: (el, f) => renderLimits(el, f, { items: LIMITS }, noop) },
+  // Every account the owner added (2026-11-04): numbered, the label and "사용 중" dim after the
+  // name; the band's row keeps to the Claude account in use, unnumbered.
+  { name: 'limits-pane-accounts', columns: PANE, draw: (el, f) => renderLimits(el, f, { items: LIMITS_ACCOUNTS, saveUntil: Date.parse('2026-10-12T18:20:00') }, noop) },
+  { name: 'limits-pane-accounts-narrow', columns: PANE_NARROW, draw: (el, f) => renderLimits(el, f, { items: LIMITS_ACCOUNTS, saveUntil: Date.parse('2026-10-12T18:20:00') }, noop) },
+  { name: 'flat-limits-pane-accounts', columns: PANE, skin: 'flat', draw: (el, f) => renderLimits(el, f, { items: LIMITS_ACCOUNTS }, noop) },
+  { name: 'band-limits-accounts-94', columns: 94, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 32, resetsAt: '2026-10-16T09:00:00', save: false }, extras: ['context', 'limits'], limits: LIMITS_ACCOUNTS }) },
   // Every readable provider (2026-10-15): Claude, GPT, Gemini and OpenCode Go in one row, at the
   // two real widths. Narrow, the scoped windows go first, then a later provider's group.
   { name: 'band-limits-all-100', columns: 100, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS_ALL }) },

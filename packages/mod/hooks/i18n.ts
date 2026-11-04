@@ -322,6 +322,7 @@ const EN = {
   'limits.stale': 'The share shown may be from before the reset.',
   'limits.noReset': 'No reset time was given for this window.',
   'limits.saveOn': 'Save mode is on: Auto stays at medium or below until {date}.',
+  'limits.inUse': 'in use',
   // Toasts and locally generated failure/reason text.
   'toasts.keySingle': 'Paste a single TypeSafe API key',
   'toasts.keyPrivateFailed': 'Could not make the Jev key file private (chmod 600)',
@@ -921,6 +922,7 @@ const KO: Record<Key, string> = {
   'limits.stale': '표시된 사용률은 초기화 전 값일 수 있습니다.',
   'limits.noReset': '이 한도는 초기화 시간을 확인할 수 없습니다.',
   'limits.saveOn': '절약 모드가 켜져 있습니다. {date}까지 자동 추론 강도를 중간 이하로 유지합니다.',
+  'limits.inUse': '사용 중',
   // Toasts and locally generated failure/reason text.
   'toasts.keySingle': 'TypeSafe API 키는 하나만 붙여 넣어야 합니다',
   'toasts.keyPrivateFailed': 'Jev 키 파일을 본인만 읽고 쓰도록 설정하지 못했습니다 (chmod 600)',
@@ -1515,6 +1517,7 @@ const ZH: Record<Key, string> = {
   'limits.stale': '显示的用量可能是重置前的数值。',
   'limits.noReset': '此限额未提供重置时间。',
   'limits.saveOn': '节省模式已开启：在 {date} 之前，自动推理强度保持在中等及以下。',
+  'limits.inUse': '使用中',
   // Toasts and locally generated failure/reason text.
   'toasts.keySingle': '请只粘贴一个 TypeSafe API 密钥',
   'toasts.keyPrivateFailed': '无法将 Jev 密钥文件设为私有 (chmod 600)',
@@ -2109,6 +2112,7 @@ const JA: Record<Key, string> = {
   'limits.stale': '表示中の使用率はリセット前の値の可能性があります。',
   'limits.noReset': 'この上限のリセット時刻は提供されていません。',
   'limits.saveOn': '節約モードがオンです。{date}まで自動の推論強度を中以下に保ちます。',
+  'limits.inUse': '使用中',
   // Toasts and locally generated failure/reason text.
   'toasts.keySingle': 'TypeSafe の API キーを 1 つだけ貼り付けてください',
   'toasts.keyPrivateFailed': 'Jev のキーファイルを非公開にできませんでした (chmod 600)',
@@ -2703,6 +2707,7 @@ const ES: Record<Key, string> = {
   'limits.stale': 'El uso mostrado puede ser de antes del restablecimiento.',
   'limits.noReset': 'Este límite no indica cuándo se restablece.',
   'limits.saveOn': 'El modo ahorro está activado: Auto se mantiene en medio o menos hasta el {date}.',
+  'limits.inUse': 'en uso',
   // Toasts and locally generated failure/reason text.
   'toasts.keySingle': 'Pega una sola clave de API de TypeSafe',
   'toasts.keyPrivateFailed': 'No se pudo hacer privado el archivo de clave de Jev (chmod 600)',
@@ -3297,6 +3302,7 @@ const PT: Record<Key, string> = {
   'limits.stale': 'O uso mostrado pode ser de antes da renovação.',
   'limits.noReset': 'Este limite não informa quando renova.',
   'limits.saveOn': 'O modo economia está ativado: o Auto fica em médio ou abaixo até {date}.',
+  'limits.inUse': 'em uso',
   // Toasts and locally generated failure/reason text.
   'toasts.keySingle': 'Cole uma única chave de API da TypeSafe',
   'toasts.keyPrivateFailed': 'Não foi possível tornar privado o arquivo da chave do Jev (chmod 600)',

@@ -1637,6 +1637,54 @@ test('the limits pane names each window\'s exact reset and the time left', async
   await en.unmount()
 })
 
+// 2026-11-04: the pane lists every Claude account the owner added, numbered, each with its label
+// and the one in use marked; save mode's sentence stands once, under the account in use. The band's
+// row keeps to that account alone, unnumbered.
+test('the limits pane lists every account, labelled and the one in use marked; the row keeps to it', async ($, on) => {
+  const at = (h: number) => new Date(NOW + h * 3_600_000).toISOString()
+  const limits = [
+    { provider: 'anthropic', type: 'anthropic', title: 'Claude', account: 0, kind: 'five_hour' as const, label: '', percent: 81, resetsAt: at(2) },
+    { provider: 'anthropic', type: 'anthropic', title: 'Claude', account: 1, accountLabel: 'work@example.com', inUse: true as const, kind: 'five_hour' as const, label: '', percent: 15, resetsAt: at(3) },
+    { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 0, accountLabel: 'me@example.com', kind: 'seven_day' as const, label: '', windowMinutes: 10080, percent: 23, resetsAt: at(50) },
+    { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 1, accountLabel: 'design-team-shared-account@example.com', inUse: true as const, kind: 'seven_day' as const, label: '', windowMinutes: 10080, percent: 64, resetsAt: at(60) },
+  ]
+  const view = { items: limits, saveUntil: NOW + 3_600_000 }
+  for (const surface of SURFACES) drawPane(on, 'accounts-' + surface, el => renderLimits(el, { ...frameOf(surface, 80), lang: 'ko' }, view, { close: () => {} }))
+  drawPane(on, 'accounts-narrow', el => renderLimits(el, { ...frameOf('desktop', 44), lang: 'ko' }, view, { close: () => {} }))
+  drawPane(on, 'accounts-row', el => renderBand(el, { ...frameOf('desktop', 94), lang: 'ko' }, { ...DASH, extras: ['limits'], limits }, BAND_ACTIONS))
+  // "사용 중" right after the number, set apart from the account's name: a badge on the desktop,
+  // in brackets on the terminal; never one more "·" run at the end of the name.
+  const tagged = { desktop: ['work', 'design-team-shared-acco…'], terminal: ['(사용 중)', '· work', '· design-team-shared-acco…'] }
+  for (const surface of SURFACES) {
+    const ui = await mount($, 'accounts-' + surface, surface, 80)
+    const texts = (await ui.findAll({ type: 'Text' })).map(text => text.text)
+    for (const text of ['Claude 1', 'Claude 2', 'GPT 1', 'GPT 2', '81%', '15%', ...tagged[surface]]) expect(texts, surface + ' ' + text).toContain(text)
+    const said = texts.join('\n')
+    expect(said.includes('· 사용 중'), surface).toBe(false)
+    expect(said.split('절약 모드가 켜져 있습니다.').length - 1, surface).toBe(1)
+    // The sentence stands under the account in use: after its head, before the next tile's.
+    expect(said.indexOf('절약 모드가 켜져 있습니다.') > said.indexOf('Claude 2'), surface).toBe(true)
+    if (surface === 'terminal') expect(said.split('(사용 중)').length - 1).toBe(2)
+    else {
+      expect(said.includes('사용 중'), 'the desktop draws the tag, not a Text').toBe(false)
+      expect((await ui.findAll({ type: 'Svg' })).filter(svg => svg.props.alt === '사용 중').length).toBe(2)
+    }
+    await ui.unmount()
+  }
+  // Narrow, the long name gives way; both tags stay.
+  const narrow = await mount($, 'accounts-narrow', 'desktop', 44)
+  expect((await narrow.findAll({ type: 'Svg' })).filter(svg => svg.props.alt === '사용 중').length).toBe(2)
+  await narrow.unmount()
+  const row = await mount($, 'accounts-row', 'desktop', 94)
+  const shown = (await row.findAll({ type: 'Text' })).map(text => text.text)
+  expect(shown).toContain('Claude')
+  expect(shown).toContain('15%')
+  expect(shown).not.toContain('81%')
+  expect(shown).not.toContain('Claude 2')
+  expect(shown).toContain('GPT 2')
+  await row.unmount()
+})
+
 // 2026-10-25: the row itself is the way in. It lights under the pointer and says what pressing it
 // shows; the reset times are no longer written on it.
 test('the desktop limits row is a button that opens the limits pane', async ($, on) => {

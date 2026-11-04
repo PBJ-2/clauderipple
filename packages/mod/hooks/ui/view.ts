@@ -512,8 +512,14 @@ export function limitItemName(item: Pick<LimitItem, 'kind' | 'label' | 'windowMi
   return displayText(item.label || item.kind.replace(/_/g, ' '), DISPLAY.name)
 }
 
-/** One limits group as the row heads it: a provider's own, or one of its accounts ("GPT", "GPT 1", …). */
-export type LimitGroup = { key: string; provider: string; type?: string; title?: string; account: number; items: LimitItem[] }
+/**
+ * One limits group as the row heads it: a provider's own, or one of its accounts ("GPT", "GPT 1", …),
+ * with the account's label and in-use mark when the router gave them.
+ */
+export type LimitGroup = { key: string; provider: string; type?: string; title?: string; account: number; accountLabel?: string; inUse?: true; items: LimitItem[] }
+
+/** Whether a group is Claude's own plan. */
+const isClaude = (g: Pick<LimitGroup, 'provider' | 'type'>): boolean => g.type === 'anthropic' || g.provider === 'claude'
 
 /**
  * The groups the row draws, one per provider account, Claude's plan first (the row keeps it to the
@@ -526,21 +532,77 @@ export function limitGroups(items: readonly LimitItem[]): LimitGroup[] {
     const key = item.provider + '#' + item.account
     let group = index.get(key)
     if (!group) {
-      group = { key, provider: item.provider, ...(item.type ? { type: item.type } : {}), ...(item.title ? { title: item.title } : {}), account: item.account, items: [] }
+      group = {
+        key,
+        provider: item.provider,
+        ...(item.type ? { type: item.type } : {}),
+        ...(item.title ? { title: item.title } : {}),
+        account: item.account,
+        ...(item.accountLabel ? { accountLabel: item.accountLabel } : {}),
+        ...(item.inUse ? { inUse: true as const } : {}),
+        items: [],
+      }
       index.set(key, group)
       groups.push(group)
     }
     group.items.push(item)
   }
   // Claude's own plan comes first however the router ordered it; a stable sort keeps the rest.
-  const rank = (g: LimitGroup) => (g.type === 'anthropic' || g.provider === 'claude' ? 0 : 1)
+  const rank = (g: LimitGroup) => (isClaude(g) ? 0 : 1)
   return groups.sort((a, b) => rank(a) - rank(b))
+}
+
+/**
+ * The groups the band's limits row draws: of Claude's accounts only the one the router serves new
+ * turns with (the first when none is marked: an older router, or the in-use account's usage not
+ * known yet), so the narrow row reads one "Claude" as it always has; the pane lists them all
+ * (2026-11-04). Every other provider's accounts pass as they are.
+ */
+export function bandLimitGroups(groups: readonly LimitGroup[]): LimitGroup[] {
+  const kept = new Map<string, LimitGroup>()
+  for (const g of groups) {
+    if (!isClaude(g)) continue
+    const held = kept.get(g.provider)
+    if (!held || (g.inUse && !held.inUse)) kept.set(g.provider, g)
+  }
+  return groups.filter(g => !isClaude(g) || kept.get(g.provider) === g)
+}
+
+/**
+ * The generic name the router gives an account the owner never named ("Claude account 2", "ChatGPT
+ * account"): it says nothing the number does not, so the pane leaves it out.
+ */
+const PLACEHOLDER_LABEL = /^(?:Claude|ChatGPT|Google) account(?: \d+)?$/i
+
+/** The most of an account's label the pane shows, in UTF-16 units (displayText adds "…"). */
+const ACCOUNT_LABEL_MAX = 24
+
+/**
+ * An account's label as the pane shows it beside the group's name: an email's local part
+ * ("work@example.com" → "work"), anything else as given, cut short; '' for none or a placeholder.
+ */
+export function limitAccountLabel(label: string | undefined): string {
+  const clean = displayText(label ?? '', DISPLAY.name).trim()
+  if (!clean || PLACEHOLDER_LABEL.test(clean)) return ''
+  const at = clean.indexOf('@')
+  return displayText(at > 0 ? clean.slice(0, at) : clean, ACCOUNT_LABEL_MAX)
+}
+
+/**
+ * What the pane says after a numbered group's name: `tag`, "사용 중" on the account the router serves
+ * new turns with, set apart right after the name (a badge on the desktop, in brackets on the
+ * terminal) and never cut; then `label`, the account's own name short and dim, which is cut first
+ * when room runs out. Both empty for a provider with one account, which reads as it always has.
+ */
+export function limitGroupAccount(group: Pick<LimitGroup, 'accountLabel' | 'inUse'>, numbered: boolean, lang: Lang): { tag: string; label: string } {
+  if (!numbered) return { tag: '', label: '' }
+  return { tag: group.inUse ? t(lang, 'limits.inUse') : '', label: limitAccountLabel(group.accountLabel) }
 }
 
 /** The head's name when the item carries none: from its kind, else its config name. */
 function groupTitle(group: Pick<LimitGroup, 'provider' | 'type' | 'title'>): string {
   if (group.title) return group.title
-  if (group.type === 'anthropic' || group.provider === 'claude') return 'Claude'
+  if (isClaude(group)) return 'Claude'
   if (group.type === 'chatgpt' || group.provider === 'chatgpt') return 'GPT'
   if (group.type === 'google') return 'Gemini'
   return group.provider
@@ -568,7 +630,8 @@ export function limitGroupNumbered(groups: readonly LimitGroup[]): (group: Limit
  * first, one group's at a time from the last group back, so Claude's own Fable is the last of them
  * to go (all of them going at once hid Fable for Gemini's two 3P windows, 2026-10-15); then a later
  * provider's secondary accounts (the last one first), then a later provider's whole group —
- * Claude's own group (the first) stays to the last. Null when even that does not fit (no row).
+ * Claude's own group (the first) stays to the last, even when it is a stored account (account 1…)
+ * the row shows for being in use. Null when even that does not fit (no row).
  * `width` measures a set of groups the way the row draws it.
  */
 export function narrowLimitGroups(groups: readonly LimitGroup[], budget: number, width: (gs: readonly LimitGroup[]) => number): LimitGroup[] | null {
@@ -577,8 +640,9 @@ export function narrowLimitGroups(groups: readonly LimitGroup[], budget: number,
     if (!out[i]!.items.some(item => item.kind === 'scoped')) continue
     out = out.map((g, j) => j === i ? { ...g, items: g.items.filter(item => item.kind !== 'scoped') } : g).filter(g => g.items.length > 0)
   }
-  while (width(out) > budget && out.some(g => g.account > 0)) {
-    const at = out.map(g => g.account > 0).lastIndexOf(true)
+  const secondary = (g: LimitGroup, i: number) => i > 0 && g.account > 0
+  while (width(out) > budget && out.some(secondary)) {
+    const at = out.map(secondary).lastIndexOf(true)
     out = out.filter((_, i) => i !== at)
   }
   while (width(out) > budget && out.length > 1) out = out.slice(0, -1)

@@ -5,12 +5,17 @@
 // "4시간 뒤" or "수 15:35", and the owner asked for the mod's own look and the exact moment
 // (2026-10-29): the reset as a local date and time to the minute and the time left, both.
 //
+// Every account the owner added has its tile, Claude's stored accounts too (2026-11-04: the pane
+// showed only the Claude account in use); the band's row keeps to that one (view.ts bandLimitGroups).
+//
 // The desktop draws one capsule, as the Context pane does: a dial of the window closest to its cap
 // with the pane's title and how many windows are past 80%, then a tile per provider account (its
-// colour's dot, "GPT 1"/"GPT 2" when a provider has several), and in it a line per window: its name,
-// a bar of the share in limitTone's colour, the figure, and under them when it resets and the time
-// left. A window whose reset has passed says so, and that its share may be from before it. Save
-// mode, while on, says until when under Claude's tile. The terminal draws the same in lines of text.
+// colour's dot, "GPT 1"/"GPT 2" when a provider has several, then "사용 중" as a small badge on the
+// one the router serves new turns with, then the account's label, dim, cut before the badge ever is),
+// and in it a line per window: its name, a bar of the share in limitTone's colour, the figure, and
+// under them when it resets and the time left. A window whose reset has passed says so, and that its share may be from before it. Save
+// mode, while on, says until when under Claude's tile (the one in use, of several). The terminal
+// draws the same in lines of text, the badge as "(사용 중)" and the label after a "·".
 //
 // The pane redraws when the limits are read again (once a minute at most) and as the minute
 // changes, so the water holds still: no ripples to start over.
@@ -20,7 +25,7 @@ import type { Lang } from '../i18n'
 import type { RenderNode } from 'claude-code'
 
 import type { LimitItem } from '../../types'
-import { CELL_PX, INK, ROW_PX, TONE, barArt, r, svg } from './art'
+import { CELL_PX, INK, ROW_PX, TONE, barArt, esc, labelPx, r, svg } from './art'
 import type { Tone } from './art'
 import { capsule, closeButton, pic } from './kit'
 import { DISPLAY, displayText } from './display'
@@ -29,7 +34,7 @@ import type { Look } from './look'
 import { canDraw, textButton } from './parts'
 import type { Els } from './parts'
 import { chOf, displayWidth, limitTone, providerColor, svgDoc, textTone } from './theme'
-import { limitGroupName, limitGroupNumbered, limitGroups, limitItemName, resetMoment, timeLeft } from './view'
+import { limitGroupAccount, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, resetMoment, timeLeft } from './view'
 import type { Frame, LimitGroup, LimitsActions, LimitsView } from './view'
 
 // ---- What each window says -----------------------------------------------------------------------
@@ -58,10 +63,21 @@ function nearLine(items: readonly LimitItem[], lang: Lang): string {
   return near === 0 ? t(lang, 'limits.clear') : near === 1 ? t(lang, 'limits.nearOne') : t(lang, 'limits.near', { count: near })
 }
 
+const isClaudeGroup = (group: LimitGroup): boolean => group.type === 'anthropic' || group.provider === 'claude' || group.provider === 'anthropic'
+
+/**
+ * The Claude tile save mode's sentence goes under: the account in use, else the first. Save mode
+ * follows the plan of the account the turns are spent on, and once is enough: with every Claude
+ * account listed it stood under each of them (2026-11-04).
+ */
+function saveGroupOf(groups: readonly LimitGroup[]): LimitGroup | undefined {
+  const claude = groups.filter(isClaudeGroup)
+  return claude.find(group => group.inUse) ?? claude[0]
+}
+
 /** Save mode's sentence under Claude's own windows, while it holds Auto down. */
-function saveLine(view: LimitsView, group: LimitGroup, now: number, lang: Lang): string {
-  const claude = group.type === 'anthropic' || group.provider === 'claude' || group.provider === 'anthropic'
-  return claude && view.saveUntil !== undefined && view.saveUntil > now ? t(lang, 'limits.saveOn', { date: resetMoment(view.saveUntil, lang) }) : ''
+function saveLine(view: LimitsView, group: LimitGroup, saveGroup: LimitGroup | undefined, now: number, lang: Lang): string {
+  return group === saveGroup && view.saveUntil !== undefined && view.saveUntil > now ? t(lang, 'limits.saveOn', { date: resetMoment(view.saveUntil, lang) }) : ''
 }
 
 const percentOf = (item: LimitItem): string => Math.round(item.percent) + '%'
@@ -141,6 +157,27 @@ function dialOf(frame: Frame, percent: number): string {
     (length !== '0' ? '<circle cx="' + c + '" cy="' + c + '" r="' + rad + '" fill="none" stroke="' + paint + '" stroke-width="' + stroke + '" stroke-linecap="round" stroke-dasharray="' + length + ' ' + r(turn) + '" transform="rotate(-90 ' + c + ' ' + c + ')"/>' : '') +
     '<text x="' + c + '" y="' + r(c + 5) + '" text-anchor="middle" font-size="' + (figure.length > 3 ? 12 : 14) + '" font-weight="680" style="fill:' + ink + '">' + figure + '</text>'
   return flat ? svgDoc(s, s, frame.appearance, body) : svg(s, s, body)
+}
+
+/** The in-use badge's height, px, and its type size: under a line's, so the tile's head keeps its height. */
+const TAG_H = 16
+const TAG_TYPE = 10.5
+
+/**
+ * "사용 중" as a small badge right after the account's number: on the deep a faint glass capsule
+ * edged and lettered in violet (the accent, never a violet ground); on flat the app's grey with the
+ * accent. Its width is the label's own, px; it is never cut, the account's name beside it is.
+ */
+function tagOf(frame: Frame, label: string): { source: string; width: number } {
+  const flat = frame.skin === 'flat'
+  const pad = 6
+  const width = Math.ceil(labelPx(label, TAG_TYPE) + pad * 2)
+  const edge = flat ? 'var(--accent)' : TONE.violet.hi
+  const ink = flat ? 'var(--accent)' : TONE.violet.text
+  const body =
+    '<rect x=".5" y=".5" width="' + (width - 1) + '" height="' + (TAG_H - 1) + '" rx="' + r((TAG_H - 1) / 2) + '" fill="' + (flat ? '#8a867d' : '#fff') + '" fill-opacity="' + (flat ? 0.1 : 0.06) + '" stroke="' + edge + '" stroke-opacity=".5"/>' +
+    '<text x="' + r(width / 2) + '" y="' + r(TAG_H / 2 + TAG_TYPE * 0.36) + '" text-anchor="middle" font-size="' + TAG_TYPE + '" font-weight="600" style="fill:' + ink + '">' + esc(label) + '</text>'
+  return { source: flat ? svgDoc(width, TAG_H, frame.appearance, body) : svg(width, TAG_H, body), width }
 }
 
 function headDrawn(el: Els, frame: Frame, view: LimitsView, groups: readonly LimitGroup[], numbered: (g: LimitGroup) => boolean, actions: LimitsActions): RenderNode {
@@ -231,7 +268,7 @@ function windowDrawn(el: Els, frame: Frame, group: LimitGroup, item: LimitItem, 
   }
 }
 
-function groupDrawn(el: Els, frame: Frame, view: LimitsView, group: LimitGroup, numbered: boolean): { node: RenderNode; rows: number } {
+function groupDrawn(el: Els, frame: Frame, view: LimitsView, group: LimitGroup, numbered: boolean, saveGroup: LimitGroup | undefined): { node: RenderNode; rows: number } {
   const { Box, Text } = el
   const k = lookOf(frame)
   const L = frame.lang
@@ -239,16 +276,20 @@ function groupDrawn(el: Els, frame: Frame, view: LimitsView, group: LimitGroup, 
   // The tile's text room: the capsule's, less the tile's own air and edge.
   const room = innerCells(frame) - 4
   const barPx = Math.max(BAR_MIN, Math.min(BAR_MAX, Math.floor((room - name - FIGURE_CELLS - 2) * CELL_PX)))
-  const save = saveLine(view, group, frame.now, L)
+  const save = saveLine(view, group, saveGroup, frame.now, L)
+  const account = limitGroupAccount(group, numbered, L)
+  const tag = account.tag ? tagOf(frame, account.tag) : null
   const windows = group.items.map((item, i) => windowDrawn(el, frame, group, item, i, name, barPx))
   return {
     node: (
       <Box key={'limits-group-' + group.key} flexDirection="column" rowGap={1} width="100%" minWidth={0} paddingX={1.5} paddingY={0.5} {...k.tile}>
         <Box key="head" flexDirection="column" width="100%" minWidth={0}>
-          <Box key="name" flexDirection="row" alignItems="center" columnGap={1} minWidth={0}>
+          <Box key="name" flexDirection="row" alignItems="center" columnGap={1} width="100%" minWidth={0}>
             <Text color={providerColor(group.type ?? group.provider)}>●</Text>
-            <Text bold {...k.ink}>{limitGroupName(group, numbered)}</Text>
-            {save ? <Text color={k.tone('violet')}>{t(L, 'alerts.save')}</Text> : null}
+            <Box key="title" flexShrink={0}><Text bold {...k.ink}>{limitGroupName(group, numbered)}</Text></Box>
+            {tag ? <Box key="tag" flexShrink={0} alignItems="center">{pic(el, 'in-use-' + group.key, tag.source, account.tag, tag.width, TAG_H)}</Box> : null}
+            {account.label ? <Box key="label" flexShrink={1} minWidth={0}><Text {...k.mute} wrap="truncate">{account.label}</Text></Box> : null}
+            {save ? <Box key="save" flexShrink={0}><Text color={k.tone('violet')}>{t(L, 'alerts.save')}</Text></Box> : null}
           </Box>
           {save ? <Text key="save" {...k.sub} wrap="wrap">{save}</Text> : null}
         </Box>
@@ -262,7 +303,8 @@ function groupDrawn(el: Els, frame: Frame, view: LimitsView, group: LimitGroup, 
 function limitsDrawn(el: Els, frame: Frame, view: LimitsView, actions: LimitsActions): RenderNode {
   const groups = limitGroups(view.items)
   const numbered = limitGroupNumbered(groups)
-  const tiles = groups.map(group => groupDrawn(el, frame, view, group, numbered(group)))
+  const saveGroup = saveGroupOf(groups)
+  const tiles = groups.map(group => groupDrawn(el, frame, view, group, numbered(group), saveGroup))
   const top = topOf(groups)
   // Taken generously: a capsule taller than its water would show the page beneath (kit.tsx).
   const rows = (top ? 4 : 3) + tiles.reduce((n, tile) => n + tile.rows + 0.5, 0) + 2
@@ -299,18 +341,22 @@ function limitsText(el: Els, frame: Frame, view: LimitsView, actions: LimitsActi
   )
   if (!groups.length) return <Box flexDirection="column" rowGap={1} width="100%">{head}</Box>
   const numbered = limitGroupNumbered(groups)
+  const saveGroup = saveGroupOf(groups)
   const name = Math.max(NAME_MIN, ...groups.flatMap(group => group.items.map(item => displayWidth(windowName(item, group, L)))))
   return (
     <Box flexDirection="column" rowGap={1} width="100%">
       {head}
       {groups.map(group => {
-        const save = saveLine(view, group, frame.now, L)
+        const save = saveLine(view, group, saveGroup, frame.now, L)
+        const account = limitGroupAccount(group, numbered(group), L)
         return (
           <Box key={'limit-group-' + group.key} flexDirection="column">
-            <Box key="head" flexDirection="row" alignItems="center" columnGap={1}>
+            <Box key="head" flexDirection="row" alignItems="center" columnGap={1} minWidth={0}>
               <Text color={providerColor(group.type ?? group.provider)}>•</Text>
-              <Text bold>{limitGroupName(group, numbered(group))}</Text>
-              {save ? <Text color={tone.accent}>{t(L, 'alerts.save')}</Text> : null}
+              <Box key="title" flexShrink={0}><Text bold>{limitGroupName(group, numbered(group))}</Text></Box>
+              {account.tag ? <Box key="tag" flexShrink={0}><Text color={tone.accent}>{'(' + account.tag + ')'}</Text></Box> : null}
+              {account.label ? <Box key="label" flexShrink={1} minWidth={0}><Text dimColor wrap="truncate">{'· ' + account.label}</Text></Box> : null}
+              {save ? <Box key="save" flexShrink={0}><Text color={tone.accent}>{t(L, 'alerts.save')}</Text></Box> : null}
             </Box>
             {save ? <Box key="save" paddingLeft={2}><Text dimColor wrap="wrap">{save}</Text></Box> : null}
             {group.items.map((item, i) => {

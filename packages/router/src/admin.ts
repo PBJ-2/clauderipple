@@ -312,7 +312,7 @@ async function claudeAccountUsage(deps: AdminDeps): Promise<{ id: string; label:
 // ---- Limits (`GET /api/limits`) ----------------------------------------------------------------
 //
 // One shape for every provider whose quota can be read, so the status bar's second row instrument
-// them all the same way: Claude's plan windows and per-model weeklies, each ChatGPT account's
+// them all the same way: each Claude account's plan windows and per-model weeklies, each ChatGPT account's
 // windows, each Antigravity account's Gemini and third-party windows, OpenCode Go's three windows
 // and a Grok subscription's usage pool. Providers with no way to read a quota (OpenCode Zen, the
 // compatible APIs) are simply not listed, and a provider
@@ -321,7 +321,12 @@ async function claudeAccountUsage(deps: AdminDeps): Promise<{ id: string; label:
 
 /** One window the limits row reads. `reset_at` is epoch seconds, as the other readers use. */
 export type LimitsWindow = { kind: "five_hour" | "seven_day" | "scoped" | "window"; label?: string; used_percent: number; window_minutes?: number; reset_at?: number };
-export type LimitsAccount = { account: number; label?: string; windows: LimitsWindow[]; at: number };
+/**
+ * One account's windows. `account` is the account's own index, stable while others come and go, so
+ * the mod's "Claude 1"/"Claude 2" do not swap. `label` is the name the owner gave it (absent for the
+ * Claude app login); `inUse` marks the account the router serves new turns with now.
+ */
+export type LimitsAccount = { account: number; label?: string; inUse?: true; windows: LimitsWindow[]; at: number };
 export type LimitsProvider = { provider: string; type: string; title: string; accounts: LimitsAccount[] };
 
 /** A `{used_percent, window_minutes, reset_at}` snapshot window as `/api/limits` reads it, or null. */
@@ -362,8 +367,11 @@ function claudeLimitWindows(quota: Record<string, unknown>): LimitsWindow[] {
 }
 
 /**
- * The plan windows of the Claude account the pool serves with now — a stored account when one is
- * preferred, else the login — as one account (the row shows Claude as a single group).
+ * Every Claude account's plan windows, one entry each: the app login first (index 0), then the
+ * stored accounts in their saved order (index 1…), so an account keeps its number while another's
+ * usage comes and goes. Only accounts whose usage is known are listed; `inUse` marks the one the
+ * pool serves with now (claudeInUseId), and when that one's usage is not known yet no entry is
+ * marked, so no reader takes another account's figures for the one that is actually spending.
  */
 async function anthropicLimitAccounts(deps: AdminDeps, name: string): Promise<LimitsAccount[]> {
   let usage: Record<string, Record<string, unknown>>;
@@ -373,13 +381,17 @@ async function anthropicLimitAccounts(deps: AdminDeps, name: string): Promise<Li
     return [];
   }
   const inUse = claudeInUseId(deps, name);
-  // The account in use with no usage yet shows nothing rather than another account's figures.
-  const quota = inUse !== undefined ? usage[inUse] : usage.current ?? Object.values(usage)[0];
-  if (!quota) return [];
-  const windows = claudeLimitWindows(quota);
-  if (!windows.length) return [];
-  const at = typeof quota.at === "number" ? quota.at : Date.now();
-  return [{ account: 0, windows, at }];
+  const owners: { id: string; label?: string }[] = [{ id: "current" }, ...listClaudeAccounts(homeDir()).map((a) => ({ id: a.id, label: a.label }))];
+  const out: LimitsAccount[] = [];
+  owners.forEach((owner, account) => {
+    const quota = usage[owner.id];
+    if (!quota) return;
+    const windows = claudeLimitWindows(quota);
+    if (!windows.length) return;
+    const at = typeof quota.at === "number" ? quota.at : Date.now();
+    out.push({ account, ...(owner.label ? { label: owner.label } : {}), ...(owner.id === inUse ? { inUse: true as const } : {}), windows, at });
+  });
+  return out;
 }
 
 /** Every ChatGPT account's windows, paused and needs-login accounts left out and unnumbered. */
@@ -395,7 +407,7 @@ function chatgptLimitAccounts(accounts: ChatGptAccountStatus[]): LimitsAccount[]
       const win = limitWindowFrom(w);
       if (win) windows.push({ kind: windowKind(win.window_minutes), used_percent: win.used_percent, ...(win.window_minutes !== undefined ? { window_minutes: win.window_minutes } : {}), ...(win.reset_at !== undefined ? { reset_at: win.reset_at } : {}) });
     }
-    if (windows.length) out.push({ account: index, windows, at: quota.at });
+    if (windows.length) out.push({ account: index, ...(account.label ? { label: account.label } : {}), ...(account.inUse ? { inUse: true as const } : {}), windows, at: quota.at });
   });
   return out;
 }
@@ -419,7 +431,7 @@ async function googleLimitAccounts(deps: AdminDeps, name: string): Promise<Limit
     if (!quotient || !quotient.length) return;
     // Scoped is a display kind, not a third-party marker: Argon's own weekly quota is scoped too.
     const windows: LimitsWindow[] = googleWindowsFromGroups(quotient).filter((w) => thirdParty || w.kind !== "scoped" || w.label !== "3P");
-    if (windows.length) out.push({ account: index, windows, at });
+    if (windows.length) out.push({ account: index, ...(account.label ? { label: account.label } : {}), ...(account.inUse ? { inUse: true as const } : {}), windows, at });
   });
   return out;
 }

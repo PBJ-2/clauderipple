@@ -380,7 +380,8 @@ export type Hot = { kind: string; percent: number; resetsAt?: string }
  * `provider` is the provider's config name (the grouping key; 'claude' on the fallback path);
  * `type` is its kind ('anthropic', 'chatgpt', 'google', …), which picks the group head's colour;
  * `title` is the head's name ("Claude", "GPT", "Gemini"); `account` numbers the provider's eligible
- * accounts from 0 (the row reads "GPT" alone, or "GPT 1", "GPT 2", … when a provider has several);
+ * accounts from 0 (the row reads "GPT" alone, or "GPT 1", "GPT 2", … when a provider has several;
+ * Claude's are the app login, 0, then each stored account, every one the router knows usage for);
  * `kind` is 'five_hour', 'seven_day', 'scoped' (a per-model/third-party window, its name in `label`)
  * or 'window' (a window of another length, its minutes in `windowMinutes`).
  */
@@ -391,7 +392,12 @@ export type LimitItem = {
   /** The head's name; absent, derived from the provider's type or name. */
   title?: string
   account: number
+  /** The account's own name as the owner gave it (an email, often); absent for the Claude app login. */
+  accountLabel?: string
+  /** The account the router serves new turns with now; absent on the others and on older routers. */
+  inUse?: true
   kind: 'five_hour' | 'seven_day' | 'scoped' | 'window'
+  /** The window's own name (a scoped window's model, "Fable"); not the account's. */
   label: string
   windowMinutes?: number
   percent: number

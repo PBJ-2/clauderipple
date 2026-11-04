@@ -1349,10 +1349,16 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
     Paused entries are excluded even from the compatible adapters' all-cooling
     first-key fallback; all paused means no upstream request. `inUse` identifies the next usable
     account for a new conversation (one or none), not `active`, which remains the last responder.
-    The Claude pool's in-use account is also the one whose plan windows `GET /api/limits` reports
-    and the row `GET /api/status` marks `inUse: true` in `claude.accounts`, so the status mod
-    follows a preferred stored account rather than always the login; a router that marks no row
-    keeps the mod on the login.
+    The Claude pool's in-use account is also the row `GET /api/status` marks `inUse: true` in
+    `claude.accounts`, so the status mod follows a preferred stored account rather than always the
+    login; a router that marks no row keeps the mod on the login. `GET /api/limits` lists every
+    Claude account whose usage is known as its own entry under the one Claude provider: the app
+    login as `account: 0`, then the stored accounts in saved order (`account` 1…, kept while
+    another's usage comes and goes), each stored one with its `label`, and `inUse: true` on the
+    pool's in-use account (none marked while that account's usage is unknown, so no reader shows
+    another account's figures as it). ChatGPT and Antigravity entries carry `label` and `inUse` the
+    same way. The mod's limits pane draws every account; its band row and the remote's status keep
+    to the in-use Claude account (the first when none is marked).
     Login account PATCH bodies accept boolean `preferred`/`paused` and `clearCooldown: true`;
     Claude's existing PUT preference API remains supported. External Codex/current-Claude logins
     retain their existing ownership restrictions. Compatible credentials persist boolean flags on

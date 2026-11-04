@@ -67,8 +67,11 @@ export function claudeScopedFrom(status: unknown, now: number): ScopedLimit[] {
 const KINDS = ['five_hour', 'seven_day', 'scoped', 'window'] as const
 type LimitKind = (typeof KINDS)[number]
 
+/** What every window of one `GET /api/limits` account shares: its provider and the account itself. */
+type LimitOwner = Pick<LimitItem, 'provider' | 'type' | 'title' | 'account' | 'accountLabel' | 'inUse'>
+
 /** One window of `GET /api/limits` as a limits-row item, or null when it carries nothing to show. */
-function limitItemFromWindow(w: unknown, provider: string, type: string | undefined, title: string | undefined, account: number, now: number): LimitItem | null {
+function limitItemFromWindow(w: unknown, owner: LimitOwner, now: number): LimitItem | null {
   const o = w && typeof w === 'object' && !Array.isArray(w) ? w as Record<string, unknown> : {}
   const kind = o.kind
   if (typeof kind !== 'string' || !(KINDS as readonly string[]).includes(kind)) return null
@@ -80,13 +83,10 @@ function limitItemFromWindow(w: unknown, provider: string, type: string | undefi
   // reports, not gone. Dropped, Claude's five-hour window vanished from the row the minute it reset,
   // and the row read as one of Claude's figures cut off (2026-10-20).
   if (Number.isFinite(reset) && reset <= now) {
-    return { provider, ...(type ? { type } : {}), ...(title ? { title } : {}), account, kind: kind as LimitKind, label: typeof o.label === 'string' ? o.label : '', ...(minutes !== undefined ? { windowMinutes: minutes } : {}), percent: 0 }
+    return { ...owner, kind: kind as LimitKind, label: typeof o.label === 'string' ? o.label : '', ...(minutes !== undefined ? { windowMinutes: minutes } : {}), percent: 0 }
   }
   return {
-    provider,
-    ...(type ? { type } : {}),
-    ...(title ? { title } : {}),
-    account,
+    ...owner,
     kind: kind as LimitKind,
     label: typeof o.label === 'string' ? o.label : '',
     ...(minutes !== undefined ? { windowMinutes: minutes } : {}),
@@ -96,9 +96,10 @@ function limitItemFromWindow(w: unknown, provider: string, type: string | undefi
 }
 
 /**
- * Every provider's windows from the router's `GET /api/limits`: one shape for Claude, each ChatGPT
- * account and each Antigravity account (see `buildLimits` in packages/router/src/admin.ts). The
- * providers keep the router's order (Claude first), and each account's windows keep theirs.
+ * Every provider's windows from the router's `GET /api/limits`: one shape for each Claude, ChatGPT
+ * and Antigravity account (see `buildLimits` in packages/router/src/admin.ts), each window carrying
+ * its account's label and in-use mark. The providers keep the router's order (Claude first), and
+ * each account's windows keep theirs.
  */
 export function routerLimitItems(body: unknown, now: number): LimitItem[] {
   const object = (v: unknown): Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {}
@@ -115,11 +116,19 @@ export function routerLimitItems(body: unknown, now: number): LimitItem[] {
     if (!Array.isArray(accounts)) continue
     for (const a of accounts) {
       const account = object(a)
-      const index = typeof account.account === 'number' ? account.account : 0
       const windows = account.windows
       if (!Array.isArray(windows)) continue
+      // The account's label and in-use mark are newer (2026-11-04); an older router sends neither.
+      const owner: LimitOwner = {
+        provider,
+        ...(type ? { type } : {}),
+        ...(title ? { title } : {}),
+        account: typeof account.account === 'number' ? account.account : 0,
+        ...(typeof account.label === 'string' && account.label ? { accountLabel: account.label } : {}),
+        ...(account.inUse === true ? { inUse: true as const } : {}),
+      }
       for (const w of windows) {
-        const item = limitItemFromWindow(w, provider, type, title, index, now)
+        const item = limitItemFromWindow(w, owner, now)
         if (item) out.push(item)
       }
     }

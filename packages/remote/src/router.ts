@@ -257,7 +257,10 @@ export function rippleStatus(limitsJson: unknown, modSettingsJson: unknown, now:
     const provider = typeof p.provider === "string" ? p.provider : "";
     if (!provider || !Array.isArray(p.accounts)) continue;
     const title = typeof p.title === "string" && p.title ? p.title : LABELS[provider] ?? provider;
-    const accounts = p.accounts.map(obj).filter((a) => Array.isArray(a.windows));
+    const listed = p.accounts.map(obj).filter((a) => Array.isArray(a.windows));
+    // The router lists every Claude account (2026-11-04); the band's row, and so this, shows only the
+    // one in use (the first when none is marked), unnumbered, as it did when that was all it listed.
+    const accounts = p.type === "anthropic" && listed.length > 1 ? [listed.find((a) => a.inUse === true) ?? listed[0]!] : listed;
     const into = p.type === "anthropic" ? claude : limits;
     accounts.forEach((a, index) => {
       for (const w of (a.windows as unknown[]).map(obj)) {

@@ -3356,12 +3356,16 @@ test("GET /api/limits and /api/status follow the Claude account the pool is usin
     const read = async () => {
       const limits = await (await fetch(`${base()}:${port}/api/limits`)).json() as { providers: LimitsProvider[] };
       const status = await (await fetch(`${base()}:${port}/api/status`)).json() as { claude: { accounts: { id: string; inUse?: boolean; quota?: { rate_limits: { primary: { used_percent: number } } } }[] } };
-      return { limits: limits.providers[0]!.accounts[0]!.windows.map((w) => w.used_percent), accounts: status.claude.accounts };
+      // Every account with usage is listed; the in-use one carries the flag (none when none is marked).
+      const marked = limits.providers[0]!.accounts.filter((a) => a.inUse === true);
+      assert.ok(marked.length <= 1, "at most one account is in use");
+      return { limits: marked[0]?.windows.map((w) => w.used_percent) ?? [], listed: limits.providers[0]!.accounts.map((a) => a.windows[0]!.used_percent), accounts: status.claude.accounts };
     };
     // No declared credential pool: the stored accounts themselves name the preferred one.
     assert.equal(setPreferredClaudeAccount(home, stored.id), true);
     let got = await read();
     assert.deepEqual(got.limits, [15, 15], "the preferred stored account's plan windows, not the login's");
+    assert.deepEqual(got.listed, [81, 15], "the login is still listed, unmarked");
     assert.equal(got.accounts.find((a) => a.id === stored.id)?.inUse, true);
     assert.equal(got.accounts.find((a) => a.id === stored.id)?.quota?.rate_limits.primary.used_percent, 15);
     assert.equal(got.accounts.find((a) => a.id === "current")?.inUse, undefined);
@@ -3373,17 +3377,18 @@ test("GET /api/limits and /api/status follow the Claude account the pool is usin
     assert.equal(got.accounts.find((a) => a.id === "current")?.inUse, true);
     assert.equal(got.accounts.find((a) => a.id === stored.id)?.inUse, undefined);
 
-    // A report with no row in use keeps the login, as before the flag existed.
+    // A report with no row in use marks none (a reader keeps the login, as before the flag existed).
     reports = { anthropic: [{ id: "current", state: "ready", failures: 0, inUse: false }] };
     got = await read();
-    assert.deepEqual(got.limits, [81, 81]);
+    assert.deepEqual(got.limits, []);
+    assert.deepEqual(got.listed, [81, 15]);
     assert.equal(got.accounts.some((a) => a.inUse === true), false);
 
-    // The stored account answers but its usage is not known yet: nothing, never the login's figures.
+    // The stored account answers but its usage is not known yet: the login is listed unmarked, never as the one in use.
     reports = { anthropic: [{ id: stored.id, state: "ready", failures: 0, inUse: true }] };
     usage = { current: quota(81) };
     const limits = await (await fetch(`${base()}:${port}/api/limits`)).json() as { providers: LimitsProvider[] };
-    assert.equal(limits.providers.length, 0);
+    assert.deepEqual(limits.providers[0]!.accounts.map((a) => [a.account, a.inUse, a.windows[0]!.used_percent]), [[0, undefined, 81]]);
     const status = await (await fetch(`${base()}:${port}/api/status`)).json() as { claude: { accounts: { id: string; inUse?: boolean; quota?: Record<string, unknown> }[] } };
     assert.deepEqual(status.claude.accounts.find((a) => a.inUse === true), { id: stored.id, label: listClaudeAccounts(home)[0]!.label, quota: {}, inUse: true });
 
@@ -3393,6 +3398,63 @@ test("GET /api/limits and /api/status follow the Claude account the pool is usin
     const empty = await (await fetch(`${base()}:${port}/api/status`)).json() as { claude: { accounts: { id: string; inUse?: boolean; quota?: Record<string, unknown> }[] } };
     assert.deepEqual(empty.claude.accounts[0], { id: "current", label: "Current Claude login", quota: {}, inUse: true });
   }, { credentials: () => reports, claudeUsage: async () => usage });
+});
+
+test("GET /api/limits lists every Claude account with usage, in a stable order, with labels and the in-use mark", async () => {
+  const now = Date.now();
+  const cfg = makeCfg({ providers: {
+    anthropic: { type: "anthropic", auth: "claude-code", accountPool: true },
+    chatgpt: { type: "chatgpt" },
+  } });
+  const quota = (used: number) => ({ at: now, rate_limits: { primary: { used_percent: used, window_minutes: 300 } } });
+  let reports: ReturnType<NonNullable<AdminDeps["credentials"]>> = {};
+  let usage: Awaited<ReturnType<NonNullable<AdminDeps["claudeUsage"]>>> = {};
+  type Row = { account: number; label?: string; inUse?: boolean; used: number };
+  await withAdmin(cfg, async ({ port, home }) => {
+    const work = saveClaudeOAuthAccount(home, { accessToken: "work-access", refreshToken: "work-refresh", expiresAt: now + 3_600_000, accountId: "work", email: "work@example.com" });
+    const spare = saveClaudeOAuthAccount(home, { accessToken: "spare-access", refreshToken: "spare-refresh", expiresAt: now + 3_600_000, accountId: "spare", email: "spare@example.com" });
+    const read = async () => {
+      const body = await (await fetch(`${base()}:${port}/api/limits`)).json() as { providers: LimitsProvider[] };
+      const rows = (type: string): Row[] => (body.providers.find((p) => p.type === type)?.accounts ?? []).map((a) => ({ account: a.account, ...(a.label !== undefined ? { label: a.label } : {}), ...(a.inUse !== undefined ? { inUse: a.inUse } : {}), used: a.windows[0]!.used_percent }));
+      return { claude: rows("anthropic"), gpt: rows("chatgpt"), providers: body.providers.map((p) => p.type) };
+    };
+
+    // The login first (no label), then the stored accounts in saved order; the pool's account in use is marked.
+    usage = { current: quota(81), [work.id]: quota(15), [spare.id]: quota(40) };
+    reports = { anthropic: [{ id: work.id, state: "ready", failures: 0, inUse: true }] };
+    let got = await read();
+    assert.deepEqual(got.providers, ["anthropic", "chatgpt"], "one Claude provider entry holds every account");
+    assert.deepEqual(got.claude, [
+      { account: 0, used: 81 },
+      { account: 1, label: "work@example.com", inUse: true, used: 15 },
+      { account: 2, label: "spare@example.com", used: 40 },
+    ]);
+    // ChatGPT accounts carry their label and the in-use mark the same way.
+    assert.deepEqual(got.gpt, [{ account: 0, label: "A", used: 23 }, { account: 1, label: "B", inUse: true, used: 7 }]);
+
+    // An account without usage is left out, and the others keep their numbers.
+    usage = { current: quota(81), [spare.id]: quota(40) };
+    got = await read();
+    assert.deepEqual(got.claude, [{ account: 0, used: 81 }, { account: 2, label: "spare@example.com", used: 40 }], "no entry is marked while the in-use account's usage is unknown");
+
+    // The login in use.
+    usage = { current: quota(81), [work.id]: quota(15) };
+    reports = { anthropic: [{ id: "current", state: "ready", failures: 0, inUse: true }] };
+    got = await read();
+    assert.deepEqual(got.claude, [{ account: 0, inUse: true, used: 81 }, { account: 1, label: "work@example.com", used: 15 }]);
+  }, {
+    credentials: () => reports,
+    claudeUsage: async () => usage,
+    chatgpt: () => ({
+      quota: {}, auth: {},
+      accounts: () => ({
+        chatgpt: [
+          { id: "a", label: "A", paused: false, state: "ready", quota: { at: now, rate_limits: { primary: { used_percent: 23, window_minutes: 300 } } }, active: false, inUse: false },
+          { id: "b", label: "B", paused: false, state: "ready", quota: { at: now, rate_limits: { primary: { used_percent: 7, window_minutes: 300 } } }, active: true, inUse: true },
+        ] as never,
+      }),
+    }),
+  });
 });
 
 test("a Claude login without an account pool reports the app login's limits, whatever a stored account prefers", async () => {
@@ -3405,7 +3467,7 @@ test("a Claude login without an account pool reports the app login's limits, wha
     usage = { current: quota(81), [stored.id]: quota(15) };
     assert.equal(setPreferredClaudeAccount(home, stored.id), true);
     const limits = await (await fetch(`${base()}:${port}/api/limits`)).json() as { providers: LimitsProvider[] };
-    assert.deepEqual(limits.providers[0]!.accounts[0]!.windows.map((w) => w.used_percent), [81]);
+    assert.deepEqual(limits.providers[0]!.accounts.map((a) => [a.account, a.inUse, a.windows[0]!.used_percent]), [[0, true, 81], [1, undefined, 15]]);
     const status = await (await fetch(`${base()}:${port}/api/status`)).json() as { claude: { accounts: { id: string; inUse?: boolean }[] } };
     assert.equal(status.claude.accounts.find((a) => a.inUse === true)?.id, "current");
   }, { claudeUsage: async () => usage });

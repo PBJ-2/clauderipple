@@ -52,6 +52,22 @@ test("an account label appears only when a provider has more than one", () => {
   assert.deepEqual(s.limits.map(l => [l.provider, l.account, l.usedPct]), [["anthropic", undefined, 4], ["chatgpt", "#1", 1], ["chatgpt", "#2", 2], ["chatgpt", "#2", 3]]);
 });
 
+test("of several Claude accounts only the one in use shows, unnumbered, as on the desktop band", () => {
+  const claude = (accounts: Record<string, unknown>[]) => ({ providers: [{ provider: "anthropic", type: "anthropic", title: "Claude", accounts }] });
+  const marked = rippleStatus(claude([
+    { account: 0, windows: [win("five_hour", 81, NOW + 1000)] },
+    { account: 1, label: "work@example.com", inUse: true, windows: [win("five_hour", 15, NOW + 1000)] },
+    { account: 2, label: "spare", windows: [win("five_hour", 40, NOW + 1000)] },
+  ]), settings(), NOW);
+  assert.deepEqual(marked.limits.map(l => [l.account, l.usedPct]), [[undefined, 15]]);
+  // None marked (an older router, or the in-use account's usage not known yet): the first.
+  const unmarked = rippleStatus(claude([
+    { account: 0, windows: [win("five_hour", 81, NOW + 1000)] },
+    { account: 2, windows: [win("five_hour", 40, NOW + 1000)] },
+  ]), settings(), NOW);
+  assert.deepEqual(unmarked.limits.map(l => [l.account, l.usedPct]), [[undefined, 81]]);
+});
+
 test("scoped Argon weekly reaches remote status with its label, account and reset intact", () => {
   const resetAt = NOW + 2 * 86_400_000;
   const body = { providers: [{ provider: "ag", type: "google", title: "Gemini", accounts: [
