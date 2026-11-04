@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.12.26 — 2026-11-04
+
+### Added
+
+- **The limits pane shows every account you added.** Several Claude accounts each get their own
+  numbered tile with the account's name, and the one new requests go to carries an "in use" badge;
+  ChatGPT and Gemini accounts are marked the same way. The band's limits row still shows the
+  account in use only.
+
+### Fixed
+
+- **A running session moves to the Claude account you make preferred.** A thread continuation
+  carried only its new messages, so the pool could not tell which conversation it belonged to: it
+  went to the preferred account, failed with `thread_not_found`, and the full replay then stuck to
+  the old account. Continuations now follow the conversation that produced them, and changing the
+  preferred account moves held conversations onto it (one cold prompt cache each).
+- **The Claude limits show the account actually serving requests**, not always the app login, and
+  show nothing rather than another account's figures while its usage is unknown.
+- **An idle phone no longer keeps the remote relay awake.** With Ripple Remote 1.0.9 (or the web
+  remote) the phone proves its connection to the relay with a ping the relay answers without
+  waking, and checks the host and reports presence every 60 s instead of every 10 s. Older apps and
+  hosts keep the previous behavior.
+
 ## 0.12.25 — 2026-11-02
 
 ### Added
