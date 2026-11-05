@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.29 — 2026-11-05
+
+### Added
+
+- **`#local_…` session links work from the phone.** A desktop session's summary now carries its
+  Claude app session id, so Ripple Remote 1.0.11 can follow a link Claude wrote to another Code tab
+  session. Older apps ignore the field.
+
 ## 0.12.28 — 2026-11-05
 
 ### Added
