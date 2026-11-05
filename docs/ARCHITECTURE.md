@@ -1583,6 +1583,49 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
   secret is added to error redaction. The OpenAI ingress for Codex uses the same
   ordered projection only to choose one available credential; it deliberately does
   not rotate accounts or retry a turn.
+- **Pinned account workers (2026-11-05).** Every provider that keeps stored
+  accounts of its own — a Claude `accountPool` provider, ChatGPT (`own`/`auto`;
+  never `borrow-codex`), and Google Antigravity — gets one generated worker per
+  declared model × stored account, named `<model's worker name>-<pin8>` where
+  `pin8` is the first 8 characters of the durable local account id — never the
+  label, so relabelling an account or removing one of two same-label accounts
+  cannot make an existing name resolve to another account and silently move a
+  saved ladder rung, workflow or marker. The label appears only in the
+  description, the title prefix and the dashboard list; a hand-written file
+  already holding the pinned name wins and that account gets no worker, with a
+  warning like any other generated-name clash. `storedAccountsFor`
+  (`pinned-accounts.ts`) is the one place that maps a provider kind to its store;
+  the CLI/Desktop login and the borrowed Codex login are in none of them, so they
+  never get pinned workers. A worker's frontmatter model id is
+  `<provider>#<account-pin>:<model>@<effort>`: the pin is the stable local account
+  id prefix, never the label, and it rides on the provider half so
+  `qualifiedModel` (targets.ts) still selects one declaration while
+  `Resolved.model` stays the bare upstream id — the forwarded body is otherwise
+  byte-identical, so prompt caching is unaffected. Routing succeeds even when the
+  pin names no account that is present now. Each provider's own account pick
+  honours it through `pool.pinnedCredential`: the Claude native path, ChatGPT
+  `pick` and Antigravity `pickAccount` use the pinned credential when it is
+  present and usable (not paused, cooling, quarantined or resting in that quota
+  scope) and otherwise take the ordinary pick, logging
+  `account-pin fallback <pin> → <chosen>` once for that turn. An in-turn retry
+  keeps the pin first and then falls back the same way, and neither a pinned pick
+  nor its fallback writes another conversation's sticky claim or changes
+  `preferred`. Files are generated and removed through the normal manifest, so an
+  account removed from the store loses its workers at the next sync. One
+  `PinnedAgentSync` (agents.ts) owns the regeneration and remembers the account
+  signature (`storedAccountsSignature`: the configured providers' account ids and
+  labels, and nothing else) the files were last generated from; it runs at
+  startup and config load, at the admin account endpoints for all three stores
+  (add/remove/relabel/re-authorize, `AdminDeps.agentsChanged`), and on a 15-second
+  check that regenerates only when the signature moved. That check is what picks
+  up an account the terminal CLI signed in or out (`login`, `claude-login`,
+  `google-login`, `logout`), which the router is never told about; a token refresh
+  changes no label, so it never regenerates or rewrites a file. Every
+  regeneration path ends in the same `tunnels.assetsChanged()` as a config save,
+  so a remote host over an SSH tunnel never keeps stale pinned workers. The CLI
+  bootstrap advertises the
+  pinned model ids (`agentModelIds`/`routable`), without which a worker carrying
+  one silently runs on the session's model.
 - Readiness vs liveness (0.1.2): `/api/status.readiness` and `GET /readyz`
   (200 or 503 + `retry-after: 5`) list what stands between a request and a
   model: `settings` (Claude Code not pointed at us), `upstream` (consecutive

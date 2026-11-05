@@ -5,7 +5,7 @@ import crypto from "node:crypto";
 import http from "node:http";
 import type { ChatGptProvider, ProviderModel } from "../../config.ts";
 import type { Logger } from "../../log.ts";
-import { CredentialPool, retryAfterMs } from "../../pool.ts";
+import { CredentialPool, pinnedCredential, retryAfterMs } from "../../pool.ts";
 import { ChatGptAccountPool, type ChatGptAccountSummary, type ChatGptCredential, type FetchLike } from "./accounts.ts";
 import { SseParser } from "./sse.ts";
 import { fetchWithRetry } from "../retry.ts";
@@ -353,14 +353,24 @@ export class ChatGptAdapter {
   }
 
   /**
-   * An account for one turn: the conversation's own while it is healthy, else the first usable one.
-   * "none" when nothing is signed in; null when every account is cooling or already tried.
+   * An account for one turn: the pinned one while it is present and usable, else the conversation's
+   * own while it is healthy, else the first usable one. "none" when nothing is signed in; null when
+   * every account is cooling or already tried.
    */
-  private async pick(conversation: string | undefined, tried: ReadonlySet<string> = new Set()): Promise<ChatGptCredential | "none" | null> {
+  private async pick(conversation: string | undefined, tried: ReadonlySet<string> = new Set(), pin?: string): Promise<ChatGptCredential | "none" | null> {
     const all = await this.accounts.credentials();
     if (all.length === 0) return "none";
     const rest = all.filter((c) => !tried.has(c.ownerId));
-    return (this.pool.pick(this.name, rest, conversation) as ChatGptCredential | null);
+    const pinned = pinnedCredential(this.name, rest, pin, this.pool);
+    if (pinned) {
+      if (pin && tried.size === 0) this.log.info(`chatgpt ${this.name}: account-pin ${pinned.ownerId.slice(0, 8)}`);
+      return pinned;
+    }
+    const next = this.pool.pick(this.name, rest, conversation) as ChatGptCredential | null;
+    // Once per turn: a retry after the pinned account's own refusal is the normal order, not a pin
+    // that could not be honoured.
+    if (pin && tried.size === 0) this.log.info(`chatgpt ${this.name}: account-pin fallback ${pin} → ${next ? next.ownerId.slice(0, 8) : "none"}`);
+    return next;
   }
 
   /** For side calls (search, catalogue, quota) with no conversation: a usable account, else any. */
@@ -783,6 +793,8 @@ export class ChatGptAdapter {
   async sendToAnAccount(spec: {
     /** Keeps the conversation on its account (the prompt cache lives there). */
     conversation: string | undefined;
+    /** The stored account a pinned worker runs on; absent for ordinary turns. */
+    accountPin?: string;
     /** Backend path under the base, e.g. `/codex/responses`. */
     path: string;
     method?: string;
@@ -797,7 +809,7 @@ export class ChatGptAdapter {
     let last: Extract<SendResult, { kind: "refused" }> | null = null;
     let lastThrown: Error | null = null;
     for (;;) {
-      const credential = await this.pick(spec.conversation, tried);
+      const credential = await this.pick(spec.conversation, tried, spec.accountPin);
       if (credential === "none") return { kind: "no-account" };
       if (credential === null) {
         if (last) return last;
@@ -1048,7 +1060,7 @@ export class ChatGptAdapter {
    * `options.subagent` says the turn was made inside a subagent, which is what the provider's
    * `fast.subagent` switch is about. `options.imageHint` is how the session makes an image (translate.ts).
    */
-  async handle(req: http.IncomingMessage, res: http.ServerResponse, path: string, json: AnthropicRequest, model: string, effort: string | undefined, options?: { subagent?: boolean; imageHint?: string; kind?: RequestKind }): Promise<ChatGptOutcome> {
+  async handle(req: http.IncomingMessage, res: http.ServerResponse, path: string, json: AnthropicRequest, model: string, effort: string | undefined, options?: { subagent?: boolean; imageHint?: string; kind?: RequestKind; accountPin?: string }): Promise<ChatGptOutcome> {
     if (path.startsWith("/v1/messages/count_tokens")) {
       const body = JSON.stringify({ input_tokens: estimateTokens(json) });
       res.writeHead(200, { "content-type": "application/json", "content-length": String(body.length) }).end(body);
@@ -1074,6 +1086,7 @@ export class ChatGptAdapter {
     // first ask. The conversation stays on the account that answered: moving it costs the cache.
     const ask = (): Promise<SendResult> => this.sendToAnAccount({
       conversation: cacheKey,
+      ...(options?.accountPin ? { accountPin: options.accountPin } : {}),
       path: "/codex/responses",
       body,
       signal: ac.signal,

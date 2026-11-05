@@ -20,6 +20,7 @@ import {
   removeGoogleAccount,
   replaceGoogleTokens,
   saveGoogleAccount,
+  updateGoogleAccount,
 } from "../src/providers/google/accounts.ts";
 import { GoogleOAuthSession, exchangeGoogleCode } from "../src/providers/google/login.ts";
 import { createTransport } from "../src/providers/google/transport.ts";
@@ -395,13 +396,13 @@ function ccaServer(handler: (req: http.IncomingMessage, body: string) => { statu
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve({ port: (server.address() as { port: number }).port, seen, close: () => server.close() })));
 }
 
-async function callAdapter(adapter: GoogleAdapter, body: AnthropicRequest): Promise<{ status: number; text: string }> {
+async function callAdapter(adapter: GoogleAdapter, body: AnthropicRequest, accountPin?: string): Promise<{ status: number; text: string }> {
   const front = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => chunks.push(c));
     req.on("end", () => {
       const json = JSON.parse(Buffer.concat(chunks).toString("utf8")) as AnthropicRequest;
-      void adapter.handle(req, res, req.url ?? "/v1/messages", json, "gemini-3.8-flash", "high");
+      void adapter.handle(req, res, req.url ?? "/v1/messages", json, "gemini-3.8-flash", "high", undefined, accountPin ? { accountPin } : undefined);
     });
   });
   await new Promise<void>((r) => front.listen(0, "127.0.0.1", r));
@@ -573,6 +574,50 @@ test("a 403 asking for account verification passes Google's page on, without a r
     const again = await callAdapter(adapter, request);
     assert.equal(again.status, 200, "once the check is done the next turn is answered");
     assert.equal(adapter.accountStatus()[0]!.state, "ready");
+  } finally {
+    upstream.close();
+  }
+});
+
+// A pinned worker names a stored account on its route; the Antigravity pool must use it before its
+// usual order, fall back when it cannot, and keep honouring it first on an in-turn retry.
+test("a pinned Google worker runs on its stored account, falling back in the ordinary order", async (t) => {
+  let refuseB = false;
+  const upstream = await ccaServer((req) => ({
+    ...(refuseB && req.headers.authorization === "Bearer tok-b" ? { status: 429, text: "{}" } : { status: 200, frame: {
+      response: {
+        candidates: [{ content: { parts: [{ text: "Hi" }] }, finishReason: "STOP" }],
+        usageMetadata: { promptTokenCount: 20, candidatesTokenCount: 2 },
+      },
+    } }),
+  }));
+  const home = tempHome();
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const a = saveGoogleAccount(home, grant("a@example.test", "proj-a", "tok-a"));
+  const b = saveGoogleAccount(home, grant("b@example.test", "proj-b", "tok-b"));
+  const pinnedLog = new Logger(path.join(home, "router.log"), 1_000_000, 1, false);
+  const adapter = new GoogleAdapter("ag", { type: "google", auth: "antigravity", url: `http://127.0.0.1:${upstream.port}` }, home, pinnedLog, new CredentialPool());
+  const pinB = b.id.slice(0, 8);
+  try {
+    const sent = await callAdapter(adapter, request, pinB);
+    assert.equal(sent.status, 200);
+    assert.equal(upstream.seen.at(-1)!.headers.authorization, "Bearer tok-b", "the pin wins over the configured order");
+    assert.equal((upstream.seen.at(-1)!.body as { project?: string }).project, "proj-b");
+    assert.match(fs.readFileSync(path.join(home, "router.log"), "utf8"), new RegExp(`account-pin ${pinB}`), "the log names the pinned account");
+
+    updateGoogleAccount(home, b.id, { paused: true });
+    const fallback = await callAdapter(adapter, request, pinB);
+    assert.equal(fallback.status, 200);
+    assert.equal(upstream.seen.at(-1)!.headers.authorization, "Bearer tok-a", "a paused pin falls back to the pool order");
+    assert.match(fs.readFileSync(path.join(home, "router.log"), "utf8"), new RegExp(`account-pin fallback ${pinB} → ${a.id.slice(0, 8)}`));
+
+    // The pin first, then the ordinary order when it refuses: the retry is not the pin's fallback.
+    updateGoogleAccount(home, b.id, { paused: false });
+    refuseB = true;
+    const seenBefore = upstream.seen.length;
+    const retried = await callAdapter(adapter, request, pinB);
+    assert.equal(retried.status, 200);
+    assert.deepEqual(upstream.seen.slice(seenBefore).map((entry) => entry.headers.authorization), ["Bearer tok-b", "Bearer tok-a"]);
   } finally {
     upstream.close();
   }

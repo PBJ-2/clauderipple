@@ -16,7 +16,8 @@ import os from "node:os";
 import path from "node:path";
 import { adminPort, homeDir, type Config, type Provider } from "./config.ts";
 import { withFileLock } from "./locked-file.ts";
-import { declaredBy, qualifiedModel } from "./routing.ts";
+import { accountPinFor, declaredBy, pinnedModel, qualifiedModel } from "./routing.ts";
+import { storedAccountsFor, storedAccountsSignature, type PinnedAccount } from "./pinned-accounts.ts";
 import { bareOwners, isTargetProvider, namedOnly } from "./targets.ts";
 import { isJudgeOnlyModel } from "./model-policy.ts";
 import { GROK_EFFORT_LEVELS } from "./providers/grok/catalog.ts";
@@ -184,14 +185,36 @@ function workerNames(modelId: string, providerName: string, suffixed: boolean): 
 }
 
 /** One generated worker: the config it comes from, and the two names it can be known by. */
-type AgentTarget = { modelId: string; title: string; provider: string; suffix: string; legacy: string };
+type AgentTarget = { modelId: string; title: string; provider: string; suffix: string; legacy: string; account?: string };
+
+/** Where a provider's pinned workers come from: the stored accounts of that one provider. */
+export type AccountsFor = (provider: Provider) => readonly PinnedAccount[];
+
+/**
+ * The short name an account is *shown* by: its description, its title prefix and its dashboard
+ * entry. An email label keeps its local part, so the worker reads `… · mambo20211 · ` rather than
+ * carrying a whole address. Never part of the file name or the model id — those are the stable
+ * account id prefix, so a relabel cannot move a saved ladder rung to another account.
+ */
+function accountDisplayName(account: PinnedAccount): string {
+  const label = (account.label ?? "").trim();
+  if (label.includes("@")) return label.slice(0, label.indexOf("@")) || label;
+  if (label) return label;
+  const email = (account.email ?? "").trim();
+  return email.includes("@") ? email.slice(0, email.indexOf("@")) : email;
+}
 
 /**
  * One worker per outbound provider/model declaration; the first owner keeps the bare name (#94), and
  * a duplicate declaration's later provider gets `<model>-<provider>`. Two ids that sanitise alike,
  * and a name a hand file already uses, are what the caller resolves.
+ *
+ * A provider that holds stored accounts (Claude OAuth, ChatGPT, Google Antigravity) adds one
+ * pinned worker per account and declared model (`<worker name>-<account id prefix>`), whose model
+ * id names the account. `handTaken` names files a person owns; a pinned worker that would land on
+ * one is skipped with a warning, as a duplicate model name is.
  */
-function agentTargets(cfg: Config, log?: AgentLog): Map<string, AgentTarget> {
+function agentTargets(cfg: Config, log?: AgentLog, accountsFor: AccountsFor = () => [], handTaken: ReadonlySet<string> = new Set()): Map<string, AgentTarget> {
   const targets = new Map<string, AgentTarget>();
   for (const [providerName, provider] of Object.entries(cfg.providers)) {
     if (!isTargetProvider(provider)) continue;
@@ -211,7 +234,64 @@ function agentTargets(cfg: Config, log?: AgentLog): Map<string, AgentTarget> {
       targets.set(name, { modelId: duplicate ? `${providerName}:${model.id}` : model.id, title: shortName(model.name ?? model.id), provider: providerName, suffix: effortSuffix(provider, model.id), legacy });
     }
   }
+  for (const [name, target] of pinnedTargets(cfg, targets, accountsFor, handTaken, log)) targets.set(name, target);
   return targets;
+}
+
+/**
+ * One worker per declared model × stored account of an account-holding provider. Generated only
+ * when the caller resolves accounts (syncAgentFiles does; alias derivation does not need them). The
+ * name is the model's own worker name plus the account's stable id prefix, the same pin the model
+ * id carries: a label never enters it, so relabelling an account — or removing one of two accounts
+ * that share a label — cannot make an existing name resolve to a different account and move a saved
+ * ladder rung, workflow or marker. The label still shows in the description, the title and the
+ * dashboard. A name a hand file or another worker already holds is skipped with a warning, as any
+ * other generated clash is.
+ */
+function pinnedTargets(
+  cfg: Config,
+  base: ReadonlyMap<string, AgentTarget>,
+  accountsFor: AccountsFor,
+  handTaken: ReadonlySet<string>,
+  log?: AgentLog,
+): Map<string, AgentTarget> {
+  const out = new Map<string, AgentTarget>();
+  const taken = new Set<string>([...base.keys(), ...handTaken]);
+  // One store read per provider, not one per declared model.
+  const resolved = new Map<Provider, readonly PinnedAccount[]>();
+  const accountsOf = (provider: Provider): readonly PinnedAccount[] => {
+    let accounts = resolved.get(provider);
+    if (accounts === undefined) {
+      accounts = accountsFor(provider);
+      resolved.set(provider, accounts);
+    }
+    return accounts;
+  };
+  for (const [name, target] of base) {
+    const provider = cfg.providers[target.provider];
+    const accounts = provider ? accountsOf(provider) : [];
+    if (accounts.length === 0) continue;
+    const model = qualifiedModel(target.modelId, cfg)?.model ?? target.modelId.split("@")[0]!;
+    for (const account of accounts) {
+      const pin = accountPinFor(account.id);
+      const display = accountDisplayName(account) || pin;
+      const pinnedName = `${name}-${pin}`;
+      if (taken.has(pinnedName)) {
+        log?.warn(`agent files: "${pinnedName}" is taken; no pinned worker for ${display}`);
+        continue;
+      }
+      taken.add(pinnedName);
+      out.set(pinnedName, {
+        modelId: `${target.provider}#${pin}:${model}`,
+        title: `${target.title} · ${display}`,
+        provider: target.provider,
+        suffix: target.suffix,
+        legacy: pinnedName,
+        account: display,
+      });
+    }
+  }
+  return out;
 }
 
 /** The names in `dir` whose file is a person's own, not one this router wrote: no generated mark. */
@@ -333,10 +413,13 @@ function isGenerated(text: string): boolean {
   return false;
 }
 
-function fileContent(name: string, modelId: string, title: string, provider: string, suffix: string, limitTools: boolean, imagePort: number | null): string {
+function fileContent(name: string, modelId: string, title: string, provider: string, suffix: string, limitTools: boolean, imagePort: number | null, pinned?: { account: string; pin: string; model: string }): string {
   const description =
-    `${modelId} via ${provider}. Set effort with [[ripple: ${name}@<level>]] on the first line. ` +
-    titlePrefix(title, suffix);
+    pinned
+      ? `${pinned.model} via ${provider} for ${pinned.account} (account ${pinned.pin}). Set effort with [[ripple: ${name}@<level>]] on the first line. ` +
+        titlePrefix(title, suffix)
+      : `${modelId} via ${provider}. Set effort with [[ripple: ${name}@<level>]] on the first line. ` +
+        titlePrefix(title, suffix);
   const tools = limitTools ? `tools: ${TOOLS.join(", ")}\n` : "";
   const body = imagePort === null ? BODY : `${BODY}\n${imageLine(imagePort)}`;
   return `---\n${GENERATED_MARK}\nname: ${name}\ndescription: ${description}\nmodel: ${modelId}${suffix}\n${tools}---\n${body}\n`;
@@ -392,10 +475,11 @@ export function removeGeneratedAgentFiles(dir: string, manifestPath: string, sha
   });
 }
 
-export type GeneratedAgent = { name: string; model: string; provider: string };
+/** `account` is the stored Claude account a pinned worker runs on, shown beside its model. */
+export type GeneratedAgent = { name: string; model: string; provider: string; account?: string };
 
 /** Owned files that still exist and name a configured worker, not hand-written agents. */
-export function generatedAgents(cfg: Config, dir = defaultAgentDir(), manifestPath = path.join(homeDir(), "generated-agents.json"), log?: AgentLog): GeneratedAgent[] {
+export function generatedAgents(cfg: Config, dir = defaultAgentDir(), manifestPath = path.join(homeDir(), "generated-agents.json"), log?: AgentLog, accountsFor: AccountsFor = () => []): GeneratedAgent[] {
   const owned = new Set(readManifest(manifestPath).agents);
   const result: GeneratedAgent[] = [];
   for (const entry of scanDir(dir, log).values()) {
@@ -405,22 +489,40 @@ export function generatedAgents(cfg: Config, dir = defaultAgentDir(), manifestPa
     const provider = owners.length === 1 ? owners[0] : undefined;
     const target = provider ? cfg.providers[provider] : undefined;
     if (!provider || !isTargetProvider(target)) continue;
-    result.push({ name: entry.name, model: qualifiedModel(model, cfg)?.model ?? model, provider });
+    const pinned = pinnedModel(model);
+    const accounts = pinned && target ? accountsFor(target) : [];
+    const account = pinned ? accounts.find((candidate) => candidate.id.slice(0, pinned.accountPin.length) === pinned.accountPin) : undefined;
+    const display = account ? accountDisplayName(account) : undefined;
+    result.push({
+      name: entry.name,
+      model: qualifiedModel(model, cfg)?.model ?? model,
+      provider,
+      ...(display ? { account: display } : {}),
+    });
   }
   return result.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-function writeManifest(file: string, manifest: Manifest, log?: AgentLog): void {
+function writeManifest(file: string, manifest: Manifest, log?: AgentLog): boolean {
   try {
     fs.writeFileSync(file, JSON.stringify(manifest, null, 2) + "\n");
+    return true;
   } catch (e) {
     log?.warn(`generated-agents manifest: cannot write ${file}: ${(e as Error).message}`);
+    return false;
   }
 }
 
 export type SyncOptions = {
   /** Where the ownership manifest lives. Defaults to `<homeDir()>/generated-agents.json`. */
   manifestPath?: string;
+  /**
+   * Resolves a provider's stored accounts, one pinned worker each. Absent means none: a caller
+   * that does not mean to write pinned files never picks up the machine's own account stores.
+   */
+  pinnedAccounts?: AccountsFor;
+  /** Called when the pass skipped or failed to write or remove a file, so the caller retries. */
+  onIncomplete?: () => void;
 };
 
 /**
@@ -440,6 +542,7 @@ export function syncAgentFiles(cfg: Config, dir: string, log?: AgentLog, opts: S
     // Another installation's sync holds the folder (or it cannot be locked): skip this pass.
     // Nothing is left half-written; the next start or file change syncs again.
     log?.warn(`agent files: cannot lock ${dir} (${(e as Error).message}); this pass was skipped`);
+    opts.onIncomplete?.();
     return [];
   }
 }
@@ -475,12 +578,20 @@ function syncAgentFilesLocked(cfg: Config, dir: string, log: AgentLog | undefine
   const owned = new Set(manifest.agents);
   const scanned = scanDir(dir, log);
 
-  // Names already taken by files this router did not write: hand files win, always.
+  // Names already taken by files this router did not write: hand files win, always. A generated
+  // file outside the manifest is adopted by the ordinary loop below, so only a person's own file
+  // pushes a pinned worker to its owner-id suffix.
   const handNames = new Set<string>();
-  for (const entry of scanned.values()) if (!owned.has(entry.name)) handNames.add(entry.name);
+  const handOnly = new Set<string>();
+  for (const entry of scanned.values()) {
+    if (owned.has(entry.name)) continue;
+    handNames.add(entry.name);
+    if (!entry.generated) handOnly.add(entry.name);
+  }
 
   // Targets: one worker per declaring outbound provider; the first owner keeps the old name (#94).
-  const targets = agentTargets(cfg, log);
+  // An account-holding provider adds one pinned worker per stored account.
+  const targets = agentTargets(cfg, log, opts.pinnedAccounts ?? (() => []), handOnly);
 
   const imagePort = Object.values(cfg.providers).some((p) => p.type === "chatgpt") ? adminPort(cfg) : null;
   const nextOwned: string[] = [];
@@ -499,7 +610,11 @@ function syncAgentFilesLocked(cfg: Config, dir: string, log: AgentLog | undefine
       log?.info?.(`agent files: "${name}" exists and is not ours; leaving it alone`);
       continue;
     }
-    const content = fileContent(name, t.modelId, t.title, t.provider, t.suffix, cfg.cli.limitWorkerTools === true, imagePort);
+    const pinned = t.account ? pinnedModel(t.modelId) : null;
+    const content = fileContent(
+      name, t.modelId, t.title, t.provider, t.suffix, cfg.cli.limitWorkerTools === true, imagePort,
+      pinned && t.account ? { account: t.account, pin: pinned.accountPin, model: pinned.model } : undefined,
+    );
     if (current === content) {
       nextOwned.push(name); // already correct: do not rewrite
       continue;
@@ -512,6 +627,9 @@ function syncAgentFilesLocked(cfg: Config, dir: string, log: AgentLog | undefine
       log?.info?.(`agent files: wrote ${name}.md (${t.modelId} via ${t.provider})`);
     } catch (e) {
       log?.warn(`agent files: cannot write ${file}: ${(e as Error).message}`);
+      // The file this router wrote before stays, and stays owned: the retry rewrites it.
+      if (current !== null && generated) nextOwned.push(name);
+      opts.onIncomplete?.();
     }
   }
 
@@ -526,6 +644,8 @@ function syncAgentFilesLocked(cfg: Config, dir: string, log: AgentLog | undefine
   }
 
   // A model that is no longer ticked: remove the file this router wrote for it, and only that.
+  // One that could not be removed stays in the manifest, so the retry still owns it.
+  const stuck: string[] = [];
   for (const name of owned) {
     if (nextOwned.includes(name)) continue;
     try {
@@ -534,12 +654,15 @@ function syncAgentFilesLocked(cfg: Config, dir: string, log: AgentLog | undefine
       log?.info?.(`agent files: removed ${name}.md (model no longer configured)`);
     } catch (e) {
       log?.warn(`agent files: cannot remove ${name}.md: ${(e as Error).message}`);
+      stuck.push(name);
+      opts.onIncomplete?.();
     }
   }
 
   const sorted = [...nextOwned].sort();
-  if (JSON.stringify(sorted) !== JSON.stringify([...manifest.agents].sort())) {
-    writeManifest(manifestFile, { agents: sorted }, log);
+  const recorded = [...nextOwned, ...stuck].sort();
+  if (JSON.stringify(recorded) !== JSON.stringify([...manifest.agents].sort())) {
+    if (!writeManifest(manifestFile, { agents: recorded }, log)) opts.onIncomplete?.();
   }
   return changed ? sorted.map((name) => path.join(dir, `${name}.md`)) : [];
 }
@@ -572,4 +695,84 @@ export function retouchLater(files: string[], delay = RETOUCH_AFTER_MS): void {
     }
   }, delay);
   timer.unref?.();
+}
+
+export type PinnedAgentSyncOptions = {
+  /** The live config; read at each regeneration and each change check. */
+  config: () => Config;
+  /** The installation home whose account stores the pinned workers follow. */
+  home: string;
+  /** Where the generated worker files live (~/.claude/agents). */
+  dir: string;
+  log?: AgentLog;
+  /** Where the ownership manifest lives. Defaults to `<homeDir()>/generated-agents.json`. */
+  manifestPath?: string;
+  /**
+   * Called after every regeneration pass, whether or not it rewrote anything: remote hosts resync
+   * their copy of the worker files. The config callback and the dashboard's account endpoints both
+   * end here, so neither can leave a tunneled host on stale workers.
+   */
+  notify?: () => void;
+};
+
+/**
+ * Keeps the generated worker files in step with the config *and* with the stored accounts, on every
+ * path that can move either. Besides the router's own config saves and dashboard account endpoints,
+ * the terminal CLI writes the same stores (`login`, `claude-login`, `google-login`, `logout`), and
+ * a running router is never told. So the accounts the files were last generated from are reduced to
+ * a signature (`storedAccountsSignature`) and compared on a timer: a login, logout, removal or
+ * relabel regenerates; a token refresh, which changes nothing a generated file shows, does not.
+ * Regeneration itself rewrites only files whose content differs, so a pass with nothing to do
+ * touches no file at all.
+ */
+export class PinnedAgentSync {
+  /** The account signature the files were last generated from; null until a pass succeeds, and again after one fails. */
+  private signature: string | null = null;
+  private readonly opts: PinnedAgentSyncOptions;
+
+  constructor(opts: PinnedAgentSyncOptions) {
+    this.opts = opts;
+  }
+
+  /**
+   * Re-derive every generated worker file, pinned ones included, and remember the account
+   * signature they came from. Never throws: a failure keeps the previous signature, so the next
+   * change check (or the next config load) retries.
+   */
+  regenerate(cfg: Config = this.opts.config()): void {
+    let files: string[];
+    let incomplete = false;
+    // Read before the pass, so an account that changes during it still differs on the next check.
+    let signature: string | null = null;
+    try {
+      signature = storedAccountsSignature(cfg.providers, this.opts.home);
+    } catch (e) {
+      this.opts.log?.warn(`agent files: cannot read the stored accounts: ${(e as Error).message}`);
+    }
+    try {
+      files = syncAgentFiles(cfg, this.opts.dir, this.opts.log, {
+        ...(this.opts.manifestPath ? { manifestPath: this.opts.manifestPath } : {}),
+        pinnedAccounts: (provider) => storedAccountsFor(provider, this.opts.home),
+        onIncomplete: () => { incomplete = true; },
+      });
+    } catch (e) {
+      this.opts.log?.warn(`agent files: ${(e as Error).message}`);
+      return;
+    }
+    // A skipped or partly failed pass forgets the signature, so the next check tries again even
+    // when only the config moved and the accounts read the same.
+    if (incomplete) this.signature = null;
+    else if (signature !== null) this.signature = signature;
+    retouchLater(files);
+    this.opts.notify?.();
+  }
+
+  /** Whether a stored account changed since the files were last generated from them. */
+  changed(): boolean {
+    try {
+      return storedAccountsSignature(this.opts.config().providers, this.opts.home) !== this.signature;
+    } catch {
+      return false;
+    }
+  }
 }

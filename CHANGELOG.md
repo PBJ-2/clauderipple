@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Choose which account a worker runs on.** When a provider keeps signed-in accounts of its own
+  (Claude accounts, ChatGPT accounts, or Google Antigravity accounts), ClaudeRipple now writes one
+  worker per model and stored account, named after the account's stable local id (for example
+  `claude-opus-5-5-3f2a9c1b`), and the dashboard's worker ladder lists each with its account name.
+  A worker started from one of these runs on that account instead of whichever one the usual
+  rotation would pick. The name never follows the account's label, so relabelling an account — or
+  removing one of two accounts that share a label — cannot point a saved ladder rung, workflow or
+  marker at another account. Accounts added or removed in a terminal (`login`, `claude-login`,
+  `google-login`, `logout`) are picked up within a few seconds without a restart, and remote hosts
+  over SSH tunnels get the new workers too. If the account is paused, rate-limited or removed, the
+  turn quietly uses the usual account order rather than failing. They are started like any other
+  worker, through a `[[ripple: …]]` marker or as a workflow agent.
+
 ## 0.12.30 — 2026-11-05
 
 ### Fixed

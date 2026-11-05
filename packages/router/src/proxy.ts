@@ -34,7 +34,7 @@ import { defaultAgentDir, imageLine, withAgentAliases } from "./agents.ts";
 import { forwardCompatibleHeader, resolveCompatibleCaps, sanitizeForCompatible } from "./compat.ts";
 import { applyIdentityToAnthropicBody, promptAdditions } from "./identity.ts";
 import { anthropicServerToolBackend, webPluginBackend, webSearchBlocks, webSearchErrorBlocks, webSearchMessage, webSearchQuery, webSearchSse, type WebSearchQuery } from "./websearch.ts";
-import { classify, CredentialPool, retryAfterMs, ThreadAffinity, type Credential } from "./pool.ts";
+import { classify, CredentialPool, pinnedCredential, retryAfterMs, ThreadAffinity, type Credential } from "./pool.ts";
 import { PRESETS } from "./presets.ts";
 import { ChatGptAdapter, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
 import { OpenAiCompatibleAdapter } from "./providers/openai/index.ts";
@@ -997,13 +997,13 @@ export class Proxy {
     // stays on the account that holds the server-side thread; an unknown id keeps the old key.
     const continued = cacheRequest ? this.continuedConversation(json!) : undefined;
     const affinity = cacheRequest ? (continued ?? (!sideRequest ? requestConversationKey(json!, record.session, subagent ? agentId : undefined) : undefined)) ?? conversationKey(cacheRequest) : undefined;
-    const recordCredential = (name: string, using: Credential, credentials: readonly Credential[], retry = false): void => {
+    const recordCredential = (name: string, using: Credential, credentials: readonly Credential[], retry = false, pinned = false): void => {
       // count_tokens is answered locally by the translated adapters: no key was actually sent.
       const type = cfg.providers[name]?.type;
       if (pathname === "/v1/messages/count_tokens" && (type === "openai-compatible" || type === "google")) return;
       record.credential = this.credentialLabel(name, using, credentials);
       const first = this.pool.pick(name, credentials);
-      const reason = retry ? "retry" : !first ? "all-unavailable" : first.id !== using.id ? "affinity" : "configured-order";
+      const reason = pinned ? "account-pin" : retry ? "retry" : !first ? "all-unavailable" : first.id !== using.id ? "affinity" : "configured-order";
       const states = this.pool.report(name, credentials).map((row, i) => `${this.credentialLabel(name, credentials[i]!, credentials)}:${row.paused ? "paused" : row.state}`).join(", ");
       log.info(`KEY ${name} credential=${record.credential} conversation=${affinity ?? "-"} reason=${reason} candidates=[${states}]`);
     };
@@ -1255,7 +1255,7 @@ export class Proxy {
             try {
               // The adapter reports each account's outcome to the shared pool itself, so a slot pointing
               // here fails over once every account is out (chooseTarget asks the adapter).
-              const o = await this.chatgpt(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, effortOf(json), { subagent, imageHint: imageLine(adminPort(cfg)), kind: route.kind });
+              const o = await this.chatgpt(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, effortOf(json), { subagent, imageHint: imageLine(adminPort(cfg)), kind: route.kind, ...(route.accountPin ? { accountPin: route.accountPin } : {}) });
               if (!path.startsWith("/v1/messages/count_tokens")) this.providerHealth.observe(route.provider, o.status, o.exhaustion);
               finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...o, ...(searchAttempted ? { upstreamCalled: undefined } : {}) });
             } catch (e) {
@@ -1365,7 +1365,7 @@ export class Proxy {
               return candidate.headers;
             } : undefined;
             try {
-              const o = await this.google(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort, using ? { headers: provider.credentials?.length ? using.headers : {}, ...(next ? { next } : {}) } : undefined, { kind: route.kind });
+              const o = await this.google(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort, using ? { headers: provider.credentials?.length ? using.headers : {}, ...(next ? { next } : {}) } : undefined, { kind: route.kind, ...(route.accountPin ? { accountPin: route.accountPin } : {}) });
               if (o.kind === "prompt-incompatible" || o.kind === "model-capacity") {
                 const why = o.kind === "prompt-incompatible" ? "prompt" : "capacity";
                 const alreadyRetried = unwrittenSeen;
@@ -1492,13 +1492,25 @@ export class Proxy {
               const routeEffort = effortOf(json);
               if (routeEffort) record.effort = routeEffort;
               tag = `CLAUDE ${route.tag} account=app (no usable pool account)`;
+              if (route.accountPin) log.info(`account-pin fallback ${route.accountPin} → app`);
               break;
             }
-            chosen = this.pool.pick(route.provider, credentials, affinity);
+            // A pinned worker names the stored account it runs on. Use it while it can answer; a
+            // paused, cooling, quarantined or removed account falls back to the ordinary pool order,
+            // and the turn is never refused because of the pin (zero vanished requests). Choosing it
+            // directly leaves the conversation's sticky claim and the provider's preference untouched.
+            const pinned = pinnedCredential(route.provider, credentials, route.accountPin, this.pool);
+            const pinnedUsable = pinned !== undefined;
+            if (pinnedUsable) {
+              chosen = pinned;
+            } else {
+              chosen = this.pool.pick(route.provider, credentials, affinity);
+              if (route.accountPin) log.info(`account-pin fallback ${route.accountPin} → ${chosen?.ownerId?.slice(0, 8) ?? "configured-order"}`);
+            }
             const using = chosen ?? credentials[0]!;
             chosen = using;
             credentialCandidates = credentials;
-            recordCredential(route.provider, using, credentials);
+            recordCredential(route.provider, using, credentials, false, pinnedUsable);
             penalised = { provider: route.provider, id: using.id };
             poolAnswer = true;
             target = {
@@ -1701,7 +1713,10 @@ export class Proxy {
         const available = native ? this.claudeAccounts.peekCredentials() : this.credentialsOf(route.provider, provider);
         const rest = available.filter((c) => !tried.has(c.id));
         if (rest.length === 0) return null;
-        const next = this.pool.pick(route.provider, rest, affinity);
+        // A retry keeps honouring the pin first; once that account was spent, it falls back to the
+        // same pool order the first attempt would have used.
+        const pinned = native ? pinnedCredential(route.provider, rest, route.accountPin, this.pool) : undefined;
+        const next = pinned ?? this.pool.pick(route.provider, rest, affinity);
         return next && native ? { ...next, headers: withClientBetas(next.headers, req.headers["anthropic-beta"]) } : next;
       };
 
@@ -2146,7 +2161,7 @@ export class Proxy {
     const fallbacks = snapshot.fallbacks.flatMap(id => {
       const target = resolve(id, {}, cfg);
       return target && allowed.some(step => step.provider === target.provider && step.model === target.model && step.effort === target.effort)
-        ? [{ provider: target.provider, model: target.model, ...(target.effort ? { effort: target.effort } : {}) }] : [];
+        ? [{ provider: target.provider, model: target.model, ...(target.effort ? { effort: target.effort } : {}), ...(target.accountPin ? { accountPin: target.accountPin } : {}) }] : [];
     });
     return { ...resolved, fallbacks, ladderPick: snapshot.pick };
   }
@@ -2210,6 +2225,8 @@ export class Proxy {
         provider: f.provider,
         model: f.model,
         effort: f.effort ?? resolved.effort,
+        // A fallback to a pinned worker goes out on that worker's account, as a direct pick would.
+        ...(f.accountPin ? { accountPin: f.accountPin } : {}),
         tag: `${resolved.asked}->${f.model} (failover from ${resolved.provider})`,
         kind: resolved.kind,
         asked: resolved.asked,
@@ -2225,6 +2242,7 @@ export class Proxy {
       if (!this.targetUsable({ ...f, effort: f.effort ?? resolved.effort }, cfg)) continue;
       return {
         provider: f.provider, model: f.model, effort: f.effort ?? resolved.effort,
+        ...(f.accountPin ? { accountPin: f.accountPin } : {}),
         tag: `${resolved.asked}->${f.model} (${why} fallback from ${attempted.provider})`,
         kind: resolved.kind, asked: resolved.asked,
       };

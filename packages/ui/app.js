@@ -4938,7 +4938,8 @@ function modChoices() {
   const workers = modAgents().map((agent) => {
     const info = modProviderInfo(agent.provider);
     return {
-      value: agent.name, label: agent.model, model: agent.model, provider: agent.provider,
+      // A pinned worker carries the stored account it runs on; without one the model is the label.
+      value: agent.name, label: agent.account ? `${agent.model} · ${agent.account}` : agent.model, model: agent.model, provider: agent.provider,
       billing: /(?::|-)free$/i.test(agent.model) ? "free" : agent.billing || (info && info.billing) || null,
       // A spent quota group lists its models under `models` while the provider still answers others.
       usable: !info || (info.usable !== false && !(info.models && info.models[agent.model])),

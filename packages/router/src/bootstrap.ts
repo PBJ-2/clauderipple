@@ -9,6 +9,7 @@ import path from "node:path";
 import type { Config } from "./config.ts";
 import { agentAliases } from "./agents.ts";
 import { isJudgeOnlyModel } from "./model-policy.ts";
+import { qualifiedModel } from "./routing.ts";
 import { chatPickerModels, pickerWindowOverride, providerModelWindow, resolvedModelWindow } from "./picker.ts";
 import { chatgptModelWindow } from "./providers/chatgpt/windows.ts";
 
@@ -42,7 +43,8 @@ export function agentModelIds(dirs: string[] = [path.join(os.homedir(), ".claude
     for (const f of files) {
       try {
         const head = fs.readFileSync(path.join(dir, f), "utf8").slice(0, 8192);
-        const m = /^model:\s*['"]?([A-Za-z0-9._\/:\-]+(?:@[a-z]+)?)/m.exec(head);
+        // `#` carries a pinned account in a qualified id (`anthropic#3f2a9c1b:claude-opus-5-5`).
+        const m = /^model:\s*['"]?([A-Za-z0-9._\/:\-#]+(?:@[a-z]+)?)/m.exec(head);
         if (m && !isJudgeOnlyModel(m[1]!)) out.add(m[1]!);
       } catch {
         /* unreadable: skip */
@@ -56,7 +58,11 @@ function routable(id: string, cfg: Config): boolean {
   const base = id.split("@")[0]!;
   if (cfg.cli.extraModels.some((m) => m.model === base)) return true;
   if (cfg.routes[base] || cfg.aliases[base]) return true;
-  return cfg.direct.some((d) => base.startsWith(d.prefix));
+  if (cfg.direct.some((d) => base.startsWith(d.prefix))) return true;
+  // A qualified id names a configured provider that declares the model; a pinned one (`#account`)
+  // is the same declaration plus an account, and must reach the CLI's list or the worker silently
+  // runs on the parent session's model.
+  return qualifiedModel(base, cfg) !== null;
 }
 
 export function bootstrapModels(cfg: Config, agentDirs?: string[]): ReturnType<typeof chatPickerModels> {

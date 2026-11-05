@@ -71,6 +71,7 @@ import { statusModEnabled, syncModelSlots } from "../../cli/src/settings.ts";
 import { ClaudeOAuthSession, type ClaudeOAuthState } from "./providers/claude-oauth.ts";
 import { readClaudeAuthFile } from "./providers/anthropic-token-file.ts";
 import { listClaudeAccounts, listClaudeAccountsWithSubject, removeClaudeAccount, updateClaudeAccount, setPreferredClaudeAccount } from "./providers/anthropic-accounts.ts";
+import { storedAccountsFor } from "./pinned-accounts.ts";
 import { readChatGptAccounts, removeChatGptAccount, summarize as summarizeChatGptAccount, updateChatGptAccount } from "./providers/chatgpt/accounts.ts";
 import { exhaustedForMs, IMAGE_ASPECTS, IMAGE_BACKGROUNDS, IMAGE_FORMATS, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
 import type { GoogleAccountStatus } from "./providers/google/index.ts";
@@ -200,6 +201,12 @@ export type AdminDeps = {
   modelCatalog?: () => Promise<unknown>;
   /** Agent directory boundary; defaults to ~/.claude/agents, isolated in admin tests. */
   agentDir?: string;
+  /**
+   * Re-derive the generated worker files after a stored account (Claude, ChatGPT or Google) was
+   * added, removed, relabelled or reauthorized: pinned workers are named and pinned from those
+   * stores. Supplied by the router; absent in tests, which then have no account store to follow.
+   */
+  agentsChanged?: () => void;
   /** External AA dataset fetch boundary; the same cache/TTL is used in tests and production. */
   modelScoresFetch?: typeof fetch;
   /** Test seams for the Claude subscription sign-in: the token endpoint and the browser. */
@@ -747,7 +754,7 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
   const credentials = deps.credentials?.() ?? {};
   const health = deps.providerHealth?.() ?? {};
   const catalog = effortLevels(cfg).providers;
-  const agents = generatedAgents(cfg, deps.agentDir, undefined, deps.log).map(a => ({
+  const agents = generatedAgents(cfg, deps.agentDir, undefined, deps.log, (provider) => storedAccountsFor(provider, homeDir())).map(a => ({
     ...a,
     efforts: modEfforts(catalog[a.provider]?.models?.[a.model] ?? catalog[a.provider]?.default),
     billing: billingOf(cfg.providers[a.provider] as { type: string; auth?: string; preset?: string; url?: string }, a.model),
@@ -2527,6 +2534,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
             return;
           }
           deps.log.info(`admin: removed ChatGPT account ${id.slice(0, 8)}`);
+          deps.agentsChanged?.();
           sendJson(res, 200, { ok: true });
           return;
         }
@@ -2557,6 +2565,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         }
         if (change.clearCooldown === true) deps.chatgpt?.().clearCooldown?.(id);
         deps.log.info(`admin: updated ChatGPT account ${id.slice(0, 8)}`);
+        deps.agentsChanged?.();
         sendJson(res, 200, { ok: true });
         return;
       }
@@ -2571,6 +2580,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           (result) => {
             chatgptLogin = { ...chatgptLogin, running: false, finishedAt: new Date().toISOString(), ok: result.ok, output: result.output };
             deps.log.info(`admin: chatgpt-login via GUI -> ${result.ok ? "ok" : "failed"}`);
+            if (result.ok) deps.agentsChanged?.();
           },
           (error) => {
             chatgptLogin = { ...chatgptLogin, running: false, finishedAt: new Date().toISOString(), ok: false, output: errorText(error) };
@@ -2667,6 +2677,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
             return;
           }
           deps.log.info(`admin: removed Claude account ${id.slice(0, 8)}`);
+          deps.agentsChanged?.();
           sendJson(res, 200, { ok: true });
           return;
         }
@@ -2691,6 +2702,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         }
         if (change.clearCooldown === true) deps.claudeClearCooldown?.(id);
         deps.log.info(`admin: updated Claude account ${id.slice(0, 8)}`);
+        deps.agentsChanged?.();
         sendJson(res, 200, { ok: true });
         return;
       }
@@ -2720,7 +2732,11 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         const opened = deps.openBrowser ? deps.openBrowser(url) : openBrowser(url);
         deps.log.info(`admin: claude sign-in via GUI -> started (${needsCode ? "paste the code" : "loopback callback"}, browser ${opened ? "opened" : "not opened"})`);
         void session.result.then(
-          () => deps.log.info("admin: claude sign-in via GUI -> ok"),
+          () => {
+            deps.log.info("admin: claude sign-in via GUI -> ok");
+            // A new account gets its pinned workers; a reauthorized one keeps the same names.
+            deps.agentsChanged?.();
+          },
           (error: Error) => deps.log.info(`admin: claude sign-in via GUI -> failed: ${error.message}`),
         );
         sendJson(res, 200, { ...session.snapshot, opened });
@@ -2741,6 +2757,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         }
         await session.submitCode(code);
         await session.result.catch(() => {});
+        if (session.snapshot.ok) deps.agentsChanged?.();
         sendJson(res, session.snapshot.ok ? 200 : 400, session.snapshot);
         return;
       }
@@ -2758,6 +2775,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
       if (pathname === "/api/claude-logout" && method === "POST") {
         const r = await (deps.runCli ?? runCli)(["claude-logout"]);
         deps.log.info(`admin: claude-logout via GUI -> ${r.ok ? "ok" : "failed"}`);
+        if (r.ok) deps.agentsChanged?.();
         sendJson(res, r.ok ? 200 : 500, { ok: r.ok, output: r.output });
         return;
       }
@@ -2785,7 +2803,10 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         const opened = deps.openBrowser ? deps.openBrowser(started.url) : openBrowser(started.url);
         deps.log.info(`admin: google sign-in via GUI -> started (browser ${opened ? "opened" : "not opened"})`);
         void session.result.then(
-          () => deps.log.info("admin: google sign-in via GUI -> ok"),
+          () => {
+            deps.log.info("admin: google sign-in via GUI -> ok");
+            deps.agentsChanged?.();
+          },
           (error: Error) => deps.log.info(`admin: google sign-in via GUI -> failed: ${error.message}`),
         );
         sendJson(res, 200, { ...session.snapshot, opened, termsWarning: ANTIGRAVITY_WARNING });
@@ -2806,6 +2827,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         }
         await session.submitCode(code);
         await session.result.catch(() => {});
+        if (session.snapshot.ok) deps.agentsChanged?.();
         sendJson(res, session.snapshot.ok ? 200 : 400, session.snapshot);
         return;
       }
@@ -2817,6 +2839,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
       if (pathname === "/api/google-logout" && method === "POST") {
         const r = await (deps.runCli ?? runCli)(["google-logout"]);
         deps.log.info(`admin: google-logout via GUI -> ${r.ok ? "ok" : "failed"}`);
+        if (r.ok) deps.agentsChanged?.();
         sendJson(res, r.ok ? 200 : 500, { ok: r.ok, output: r.output });
         return;
       }
@@ -2848,6 +2871,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
             return;
           }
           deps.log.info(`admin: removed Google account ${id.slice(0, 8)}`);
+          deps.agentsChanged?.();
           sendJson(res, 200, { ok: true });
           return;
         }
@@ -2880,6 +2904,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           }
         }
         deps.log.info(`admin: updated Google account ${id.slice(0, 8)}`);
+        deps.agentsChanged?.();
         sendJson(res, 200, { ok: true });
         return;
       }

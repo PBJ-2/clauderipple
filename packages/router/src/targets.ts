@@ -57,14 +57,31 @@ export function ingressOnly(cfg: Config, name: string): boolean {
 }
 
 /** A colon is a qualifier only when its prefix is a configured owner of the remaining id.
- * Otherwise the whole id (including Ollama's qwen3:8b) keeps its existing meaning. */
-export function qualifiedModel(id: string, cfg: Config): { provider: string; model: string } | null {
+ * Otherwise the whole id (including Ollama's qwen3:8b) keeps its existing meaning. A pin rides on
+ * the provider half (`anthropic#3f2a9c1b:claude-opus-5-5`) and is returned beside the bare model:
+ * it selects a stored account at send time and never reaches the upstream. */
+export function qualifiedModel(id: string, cfg: Config): { provider: string; model: string; accountPin?: string } | null {
+  const pinned = pinnedModel(id);
+  if (pinned) {
+    return Object.hasOwn(cfg.providers, pinned.provider) && rawDeclaredBy(pinned.model, cfg).includes(pinned.provider) ? pinned : null;
+  }
   const base = id.split("@")[0]!;
   const colon = base.indexOf(":");
   if (colon <= 0) return null;
   const provider = base.slice(0, colon);
   const model = base.slice(colon + 1);
   return Object.hasOwn(cfg.providers, provider) && rawDeclaredBy(model, cfg).includes(provider) ? { provider, model } : null;
+}
+
+/**
+ * A pinned account carried by a model id: `<provider>#<account-pin>:<model>`. The pin rides on the
+ * provider half, so qualification still selects one declaration and the model half stays the bare
+ * upstream id. Parsed without the config; `qualifiedModel` checks the provider declares the model.
+ */
+export function pinnedModel(id: string): { provider: string; model: string; accountPin: string } | null {
+  const base = id.split("@")[0]!;
+  const m = /^([A-Za-z0-9._-]+)#([A-Za-z0-9._-]+):(.+)$/.exec(base);
+  return m ? { provider: m[1]!, model: m[3]!, accountPin: m[2]! } : null;
 }
 
 /** Declared owners, including ingress-only providers. Qualified ids select one declared owner;

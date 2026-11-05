@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DEFAULTS, type Config } from "../src/config.ts";
-import { continuesTranslatedTurn, decide, markerOverride, requestKind, resolve, rewriteBody } from "../src/routing.ts";
+import { continuesTranslatedTurn, decide, declaredBy, markerOverride, qualifiedModel, requestKind, resolve, rewriteBody } from "../src/routing.ts";
 import { injectBootstrap } from "../src/bootstrap.ts";
 import { withAgentAliases } from "../src/agents.ts";
 
@@ -291,6 +291,50 @@ test("rewriteBody sets model, effort and clamps ultra", () => {
   assert.deepEqual(j.output_config, { effort: "max" });
   const k = rewriteBody({ model: "x" }, { provider: "chatgpt", model: "m", effort: undefined, tag: "", kind: "turn", asked: "x" }, cfg.effortClamp);
   assert.equal("output_config" in k, false);
+});
+
+// A pinned worker's model id names a stored Claude account on its provider half. Routing must strip
+// it before anything is sent, and the request body must otherwise match an unpinned turn byte for byte.
+test("a pinned account id routes to its provider and forwards the bare model", () => {
+  const pinned: Config = {
+    ...DEFAULTS,
+    providers: { anthropic: { type: "anthropic", auth: "claude-code", accountPool: true, models: [{ id: "claude-opus-5-5", name: "Claude Opus 5.5" }] } },
+    routes: {}, direct: [], aliases: {},
+  };
+  const r = resolve("anthropic#3f2a9c1b:claude-opus-5-5@high", {}, pinned)!;
+  assert.deepEqual([r.provider, r.model, r.effort, r.accountPin], ["anthropic", "claude-opus-5-5", "high", "3f2a9c1b"]);
+  assert.deepEqual(qualifiedModel("anthropic#3f2a9c1b:claude-opus-5-5", pinned), { provider: "anthropic", model: "claude-opus-5-5", accountPin: "3f2a9c1b" });
+  assert.deepEqual(declaredBy("anthropic#3f2a9c1b:claude-opus-5-5", pinned), ["anthropic"]);
+  const before = { model: "anthropic#3f2a9c1b:claude-opus-5-5", max_tokens: 8, messages: [{ role: "user", content: "hi" }] };
+  const forwarded = JSON.parse(JSON.stringify({ ...before, model: "anthropic#3f2a9c1b:claude-opus-5-5@high" })) as Record<string, unknown>;
+  rewriteBody(forwarded, r, pinned.effortClamp);
+  const unpinned = JSON.parse(JSON.stringify({ ...before, model: "claude-opus-5-5@high" })) as Record<string, unknown>;
+  rewriteBody(unpinned, resolve("claude-opus-5-5@high", {}, pinned)!, pinned.effortClamp);
+  assert.equal(forwarded.model, "claude-opus-5-5", "the upstream sees the bare id");
+  assert.deepEqual(forwarded, unpinned, "the forwarded body matches an unpinned turn byte for byte");
+  // An unknown pin still routes: the account is looked up at send time and falls back there.
+  assert.equal(resolve("anthropic#nosuch00:claude-opus-5-5", {}, pinned)?.accountPin, "nosuch00");
+  assert.equal(resolve("anthropic#3f2a9c1b:claude-unknown", {}, pinned), null, "a provider that does not declare the model is no pin");
+  // A marker naming the pinned worker resolves through its agent alias, pin included.
+  const aliased: Config = { ...pinned, aliases: { "claude-opus-5-5-mambo20211": "anthropic#3f2a9c1b:claude-opus-5-5" } };
+  const viaMarker = resolve("claude-opus-5-5", body("[[ripple: claude-opus-5-5-mambo20211@max]] task"), aliased)!;
+  assert.deepEqual([viaMarker.provider, viaMarker.model, viaMarker.effort, viaMarker.accountPin], ["anthropic", "claude-opus-5-5", "max", "3f2a9c1b"]);
+});
+
+test("bootstrap advertises a pinned agent's model id so the CLI runs it", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cr-pinned-bootstrap-"));
+  try {
+    fs.writeFileSync(path.join(dir, "opus-mambo.md"), "---\nname: opus-mambo\nmodel: anthropic#3f2a9c1b:claude-opus-5-5@high\n---\n");
+    const pinned: Config = {
+      ...DEFAULTS,
+      providers: { anthropic: { type: "anthropic", auth: "claude-code", accountPool: true, models: [{ id: "claude-opus-5-5" }] } },
+      routes: {}, direct: [], aliases: {}, cli: { ...DEFAULTS.cli, extraModels: [] },
+    };
+    const out = JSON.parse(injectBootstrap(Buffer.from("{}"), pinned, [dir]).toString()) as { additional_model_options: { model: string }[] };
+    assert.deepEqual(out.additional_model_options.map((m) => m.model), ["anthropic#3f2a9c1b:claude-opus-5-5@high"]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("bootstrap injection adds CLI models and compaction windows", () => {

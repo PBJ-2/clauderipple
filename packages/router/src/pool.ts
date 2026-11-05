@@ -23,6 +23,8 @@
 // committed: replacing it mid-stream produces two half-answers spliced together. The caller
 // enforces this; `Outcome.retryable` only ever means "if nothing has been sent yet".
 
+import { matchesAccountPin } from "./routing.ts";
+
 export type FailureKind =
   /** Credentials refused. Does not heal on its own. */
   | "auth"
@@ -358,6 +360,20 @@ export class CredentialPool {
     const cutoff = this.now() - this.stickyTtlMs;
     for (const [conversation, held] of this.sticky) if (held.at < cutoff) this.sticky.delete(conversation);
   }
+}
+
+/**
+ * The credential a resolved route pins, when it is present and usable. This is the one answer for
+ * every provider whose turn picks among stored accounts (Claude OAuth, ChatGPT, Google Antigravity):
+ * a pinned account that is absent, paused, cooling or quarantined returns undefined, and the caller
+ * takes its ordinary pick, so a pin never fails a turn. A quota `scope` rests only that part of the
+ * account, as `hasUsable` does. `tried` is the caller's business: hand it a list without the
+ * accounts this turn already spent, and the pin is honoured first and then falls back like the rest.
+ */
+export function pinnedCredential<T extends Credential>(provider: string, credentials: readonly T[], pin: string | undefined, pool: CredentialPool, scope?: string): T | undefined {
+  if (!pin) return undefined;
+  const pinned = credentials.find((credential) => matchesAccountPin(credential.ownerId, pin));
+  return pinned && pool.hasUsable(provider, [pinned], scope) ? pinned : undefined;
 }
 
 /**

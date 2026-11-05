@@ -17,7 +17,7 @@ import { TetherController } from "./tether.ts";
 import { AutoUpdater } from "./autoupdate.ts";
 import { runCli, startCliDetached } from "./cli-control.ts";
 import { powerPlatform } from "./power.ts";
-import { defaultAgentDir, retouchLater, syncAgentFiles } from "./agents.ts";
+import { defaultAgentDir, PinnedAgentSync } from "./agents.ts";
 import { CertStore } from "./certs.ts";
 import { Logger } from "./log.ts";
 import { UpstreamHealth, EXIT_UPSTREAM_UNREACHABLE, checkConnectivity } from "./health.ts";
@@ -52,6 +52,19 @@ let tunnels: RemoteTunnels | null = null;
 /** The last config read's validation errors: the status and readiness report them (G-D14). */
 let configErrors: string[] = [];
 let reconcileProxyConfig: ((config: ReturnType<ConfigStore["get"]>) => void) | undefined;
+/**
+ * Every path that writes or removes a generated worker file goes through this: the config callback
+ * below, the dashboard's account endpoints (`AdminDeps.agentsChanged`), and the periodic check that
+ * catches a terminal `login`/`logout` the router was never told about. It notifies the tunnels
+ * itself, so a remote host never keeps workers after any of them.
+ */
+const agentSync = new PinnedAgentSync({
+  config: () => store.get(),
+  home,
+  dir: defaultAgentDir(),
+  log: { warn: (msg) => (log ?? console).warn(msg), info: (msg) => (log ?? console).info(msg) },
+  notify: () => tunnels?.assetsChanged(),
+});
 const store = new ConfigStore(undefined, (c, errors) => {
   configErrors = [...errors];
   applyProcessPriority(c.processPriority, { log: line => (log ?? console).info(line) });
@@ -68,16 +81,13 @@ const store = new ConfigStore(undefined, (c, errors) => {
   // One place for the truth: the agent files a worker's model comes from are derived from this
   // config, so a model ticked here cannot disagree with the alias a marker resolves to. A session
   // idle when they change can miss the change; the second touch is for it (`RETOUCH_AFTER_MS`).
-  try {
-    retouchLater(syncAgentFiles(c, defaultAgentDir(), log ?? console));
-  } catch (e) {
-    (log ?? console).warn(`agent files: ${(e as Error).message}`);
-  }
+  // The stored accounts are part of the derivation (each gets a pinned worker per model), and the
+  // regeneration notifies the tunnels, so a remote host gets the rewritten files too.
+  agentSync.regenerate(c);
   try { syncContextWindows(c); }
   catch (e) { (log ?? console).warn(`compact windows: ${(e as Error).message}`); }
-  // Remote hosts get the regenerated agent files too, and a hand edit of `remote.hosts` takes effect.
+  // A hand edit of `remote.hosts` takes effect; the agent files were already offered to the tunnels.
   tunnels?.reconcile(c.remote?.hosts ?? []);
-  tunnels?.assetsChanged();
 });
 const cfg0 = store.get();
 log = new Logger(logFile, cfg0.log.maxBytes, cfg0.log.keep, !!process.env.CLAUDERIPPLE_ECHO || !logFile);
@@ -176,6 +186,14 @@ const DRAIN_MS = 90_000; // new model calls are refused during drain, so this is
 let draining = false;
 
 /**
+ * Re-derive the worker files after a stored account was added, removed, relabelled or reauthorized
+ * from the dashboard: pinned workers are named and pinned from that store, so they follow it
+ * without a router restart or a config save. Never throws (the next check retries), and the tunnels
+ * are notified by the sync itself.
+ */
+const regenerateAgents = (): void => agentSync.regenerate();
+
+/**
  * Stop accepting, let in-flight model calls finish, exit. Idempotent.
  *
  * Reachable two ways: a POSIX signal, and `POST /api/shutdown`. The second exists because Windows
@@ -267,7 +285,15 @@ proxy
       catch (e) { log!.warn(`compact windows: ${(e as Error).message}`); }
     };
     syncCompact();
-    setInterval(syncCompact, 15_000).unref();
+    // The terminal CLI signs accounts in and out without telling a running router; the signature
+    // costs three small file reads and moves only when a worker file would change, so this is the
+    // cheapest place to notice. Same cadence as the compact-window sync above.
+    const watchAccounts = () => {
+      if (draining || !agentSync.changed()) return;
+      log!.info("agent files: the stored accounts changed; regenerating the pinned workers");
+      agentSync.regenerate();
+    };
+    setInterval(() => { syncCompact(); watchAccounts(); }, 15_000).unref();
     // Captured once, at start: this process's installation id and pid are what it reports and what
     // a control request is checked against, whatever the files say later (B01/D6).
     const instance = {
@@ -283,6 +309,7 @@ proxy
     const adminDeps: AdminDeps = {
       autoUpdater,
       instance,
+      agentsChanged: regenerateAgents,
       config: () => store.get(),
       configErrors: () => configErrors,
       configFile: configPath(),

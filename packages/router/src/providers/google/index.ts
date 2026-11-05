@@ -20,7 +20,7 @@ import type { GoogleProvider, ProviderModel } from "../../config.ts";
 import type { Logger } from "../../log.ts";
 import type { RequestUsage } from "../../requestlog.ts";
 import { exhaustionHeaders, modelDeprecation, providerExhaustion, type ModelUnavailable, type ProviderExhaustion } from "../../health.ts";
-import { CredentialPool, retryAfterMs } from "../../pool.ts";
+import { CredentialPool, pinnedCredential, retryAfterMs } from "../../pool.ts";
 import { credentialHeaderValues, redactErrorText } from "../../redact.ts";
 import { SseParser } from "../chatgpt/sse.ts";
 import { fetchWithRetry } from "../retry.ts";
@@ -497,7 +497,7 @@ export class GoogleAdapter {
   }
 
   /** Handle a fully-read Messages request. Model/effort have already been resolved by routing. */
-  async handle(req: http.IncomingMessage, res: http.ServerResponse, path: string, json: AnthropicRequest, model: string, effort: string | undefined, credential?: GoogleCredentialHandoff, options?: { kind?: RequestKind }): Promise<GoogleOutcome> {
+  async handle(req: http.IncomingMessage, res: http.ServerResponse, path: string, json: AnthropicRequest, model: string, effort: string | undefined, credential?: GoogleCredentialHandoff, options?: { kind?: RequestKind; accountPin?: string }): Promise<GoogleOutcome> {
     if (path.startsWith("/v1/messages/count_tokens")) {
       const body = JSON.stringify({ input_tokens: estimateTokens(json) });
       res.writeHead(200, { "content-type": "application/json", "content-length": String(Buffer.byteLength(body)) }).end(body);
@@ -547,7 +547,7 @@ export class GoogleAdapter {
     });
 
     if (this.cfg.auth === "antigravity") {
-      return this.handleAntigravity(res, json, upstreamRequest, transport, model, useEffort, wantStream, key, startInput, host!, signatures);
+      return this.handleAntigravity(res, json, upstreamRequest, transport, model, useEffort, wantStream, key, startInput, host!, signatures, options?.accountPin);
     }
 
     // The key this attempt goes out on: the pool's own when the proxy chose one, else the provider's
@@ -654,7 +654,7 @@ export class GoogleAdapter {
    * and its failure handling mirror the ChatGPT pool (accounts.ts), because the cache cost of moving
    * a conversation off its account is the same (§4).
    */
-  private async handleAntigravity(res: http.ServerResponse, json: AnthropicRequest, upstreamRequest: GeminiRequest, transport: GoogleTransport, model: string, effort: string | undefined, wantStream: boolean, key: string, startInput: number, host: string, signatures: ThoughtSignatureSink): Promise<GoogleOutcome> {
+  private async handleAntigravity(res: http.ServerResponse, json: AnthropicRequest, upstreamRequest: GeminiRequest, transport: GoogleTransport, model: string, effort: string | undefined, wantStream: boolean, key: string, startInput: number, host: string, signatures: ThoughtSignatureSink, accountPin?: string): Promise<GoogleOutcome> {
     const controller = new AbortController();
     const onClose = (): void => controller.abort();
     res.on("close", onClose);
@@ -663,6 +663,7 @@ export class GoogleAdapter {
     const redact = (text: string): string => redactGoogleError(text, [...upstreamSecrets]);
     const sent = await this.sendToAnAccount({
       conversation: key,
+      ...(accountPin ? { accountPin } : {}),
       redact,
       signal: controller.signal,
       system: upstreamRequest.systemInstruction,
@@ -853,6 +854,8 @@ export class GoogleAdapter {
    */
   private async sendToAnAccount(spec: {
     conversation: string | undefined;
+    /** The stored account a pinned worker runs on; absent for ordinary turns. */
+    accountPin?: string;
     redact: (text: string) => string;
     signal: AbortSignal;
     system: GeminiRequest["systemInstruction"];
@@ -871,7 +874,7 @@ export class GoogleAdapter {
     const group = antigravityQuotaScope(spec.model);
     const scope = group ? antigravityScopeKey(group, spec.host) : undefined;
     for (;;) {
-      const credential = await this.pickAccount(spec.conversation, tried, scope);
+      const credential = await this.pickAccount(spec.conversation, tried, scope, spec.accountPin);
       if (credential === "none") return { kind: "no-account" };
       if (credential === null) {
         if (last) return last;
@@ -972,14 +975,24 @@ export class GoogleAdapter {
   }
 
   /**
-   * An account for one turn: the conversation's own while it is healthy, else the first usable one.
-   * With a quota scope, an account whose quota for that group rests is passed over too.
+   * An account for one turn: the pinned one while it is present and usable, else the conversation's
+   * own while it is healthy, else the first usable one. With a quota scope, an account whose quota
+   * for that group rests is passed over too.
    */
-  private async pickAccount(conversation: string | undefined, tried: ReadonlySet<string> = new Set(), scope?: string): Promise<GoogleCredential | "none" | null> {
+  private async pickAccount(conversation: string | undefined, tried: ReadonlySet<string> = new Set(), scope?: string, pin?: string): Promise<GoogleCredential | "none" | null> {
     const all = await this.accounts.credentials();
     if (all.length === 0) return "none";
     const rest = all.filter((c) => !tried.has(c.ownerId));
-    return this.pool.pick(this.name, rest, conversation, scope) as GoogleCredential | null;
+    const pinned = pinnedCredential(this.name, rest, pin, this.pool, scope);
+    if (pinned) {
+      if (pin && tried.size === 0) this.log.info(`google ${this.name}: account-pin ${pinned.ownerId.slice(0, 8)}`);
+      return pinned;
+    }
+    const next = this.pool.pick(this.name, rest, conversation, scope) as GoogleCredential | null;
+    // Once per turn: a retry after the pinned account's own refusal is the normal order, not a pin
+    // that could not be honoured.
+    if (pin && tried.size === 0) this.log.info(`google ${this.name}: account-pin fallback ${pin} → ${next ? next.ownerId.slice(0, 8) : "none"}`);
+    return next;
   }
 
   /** When the first account can take a turn in `scope` again: the later of its own rest and the scope's. */

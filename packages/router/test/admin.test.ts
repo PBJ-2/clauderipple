@@ -15,7 +15,8 @@ import type { OpenCodeWindow } from "../src/providers/opencode-usage.ts";
 import { RequestLog } from "../src/requestlog.ts";
 import { PRESETS } from "../src/presets.ts";
 import { saveClaudeAuthFile, saveClaudeOAuthFile } from "../src/providers/anthropic-token-file.ts";
-import { listClaudeAccounts, markClaudeAccountNeedsReauth, readClaudeAccountsFile, saveClaudeOAuthAccount, setPreferredClaudeAccount, subjectHash } from "../src/providers/anthropic-accounts.ts";
+import { listClaudeAccounts, markClaudeAccountNeedsReauth, readClaudeAccountsFile, readClaudeOAuthAccounts, saveClaudeOAuthAccount, setPreferredClaudeAccount, subjectHash } from "../src/providers/anthropic-accounts.ts";
+import { PinnedAgentSync, syncAgentFiles } from "../src/agents.ts";
 import { ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
 import type { ModOptions } from "../src/admin.ts";
 import type { ModSettingsSnapshot } from "../src/mod-settings.ts";
@@ -58,6 +59,7 @@ async function withAdmin(
     claudeIdentity?: NonNullable<AdminDeps["claudeIdentity"]>;
     googleOAuthFetch?: (url: string, init?: RequestInit) => Promise<Response>;
     googleOAuthPort?: number;
+    agentsChanged?: () => void;
   } = {},
 ): Promise<void> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-admin-"));
@@ -142,6 +144,54 @@ for (const kind of ["chatgpt", "claude", "google"]) {
     });
   });
 }
+
+// Pinned worker files are named and pinned from the stored accounts, so the admin endpoints that
+// change an account re-derive them instead of waiting for a restart or a config save. The
+// regeneration is a `PinnedAgentSync`, whose notify is what resyncs remote hosts over the tunnels
+// (index.ts wires it to `tunnels.assetsChanged`), so the dashboard path is covered end to end here.
+test("relabelling or removing a Claude account re-derives the generated workers and notifies the tunnels", async () => {
+  let sync: PinnedAgentSync | undefined;
+  let notified = 0;
+  await withAdmin(makeCfg(), async ({ port, home }) => {
+    sync = new PinnedAgentSync({
+      config: makeCfg,
+      home,
+      dir: path.join(home, "agents"),
+      manifestPath: path.join(home, "generated-agents.json"),
+      notify: () => { notified++; },
+    });
+    const id = saveClaudeOAuthAccount(home, { accessToken: "t", refreshToken: "r", expiresAt: Date.now() + 3_600_000, accountId: "upstream" }).id;
+    const patch = await fetch(`${base()}:${port}/api/claude-accounts/${id}`, {
+      method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ label: "renamed" }),
+    });
+    assert.equal(patch.status, 200);
+    assert.equal(notified, 1, "a relabel regenerates and tells the tunnels");
+    const del = await fetch(`${base()}:${port}/api/claude-accounts/${id}`, { method: "DELETE" });
+    assert.equal(del.status, 200);
+    assert.equal(notified, 2, "a removal regenerates and tells the tunnels");
+  }, { agentsChanged: () => sync!.regenerate() });
+});
+
+test("mod-options lists a pinned Claude worker with the account it runs on", async () => {
+  const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "cr-pinned-mod-"));
+  const cfg = makeCfg({ providers: { anthropic: { type: "anthropic", auth: "claude-code", accountPool: true, models: [{ id: "claude-opus-5-5", name: "Claude Opus 5.5" }] } } });
+  try {
+    await withAdmin(cfg, async ({ port, home }) => {
+      const account = saveClaudeOAuthAccount(home, { accessToken: "t", refreshToken: "r", expiresAt: Date.now() + 3_600_000, accountId: "upstream", email: "mambo20211@example.test" });
+      syncAgentFiles(cfg, agentDir, undefined, {
+        manifestPath: path.join(home, "generated-agents.json"),
+        pinnedAccounts: () => readClaudeOAuthAccounts(home),
+      });
+      const options = await (await fetch(`${base()}:${port}/api/mod-options`)).json() as ModOptions;
+      const pinned = options.agents.find((agent) => agent.name === `claude-opus-5-5-${account.id.slice(0, 8)}`);
+      assert.ok(pinned, "the pinned worker is a ladder choice");
+      assert.deepEqual([pinned.model, pinned.provider, pinned.account], ["claude-opus-5-5", "anthropic", "mambo20211"]);
+      assert.equal(options.providers.find((provider) => provider.name === "anthropic")?.usable, true, "a stored account keeps the Claude provider usable");
+    }, { agentDir });
+  } finally {
+    fs.rmSync(agentDir, { recursive: true, force: true });
+  }
+});
 
 test("PUT /api/config persists credential control flags and refuses invalid or duplicate preferences", async () => {
   const cfg = makeCfg({ providers: { p: { type: "anthropic-compatible", url: "http://127.0.0.1:1", credentials: [{ id: "a", headers: {}, preferred: true, paused: true }] } } });

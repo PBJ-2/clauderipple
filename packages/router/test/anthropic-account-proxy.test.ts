@@ -16,7 +16,7 @@ import { UpstreamHealth } from "../src/health.ts";
 import { Logger } from "../src/log.ts";
 import { ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
 import { ClaudeCodeAuthStore } from "../src/providers/anthropic.ts";
-import { readClaudeAccountsFile, saveClaudeOAuthAccount, updateClaudeAccount } from "../src/providers/anthropic-accounts.ts";
+import { readClaudeAccountsFile, removeClaudeAccount, saveClaudeOAuthAccount, updateClaudeAccount } from "../src/providers/anthropic-accounts.ts";
 import { Proxy } from "../src/proxy.ts";
 import { RequestLog } from "../src/requestlog.ts";
 import { createCa, createLeaf } from "../src/x509.ts";
@@ -78,7 +78,7 @@ async function nativeRig(reply: (seen: Seen, attempt: number) => Reply, claude: 
     accountId: "stored-upstream-uuid",
     email: "stored@example.test",
   });
-  saveClaudeOAuthAccount(home, {
+  const third = saveClaudeOAuthAccount(home, {
     accessToken: "third-token",
     refreshToken: "third-refresh",
     expiresAt: Date.now() + 3_600_000,
@@ -142,6 +142,7 @@ async function nativeRig(reply: (seen: Seen, attempt: number) => Reply, claude: 
   return {
     home,
     stored,
+    third,
     seen,
     observed,
     requests,
@@ -372,5 +373,84 @@ test("Claude Code on an API key keeps the pool path", async () => {
     assert.equal(rig.seen[0]!.body.model, "claude-opus-5");
   } finally {
     await rig.stop();
+  }
+});
+
+// A pinned worker (`<provider>#<account-pin>:<model>`) runs on one stored account, whatever the
+// conversation's affinity or the provider's order would choose, and the upstream sees the bare id.
+test("a pinned worker runs on its stored Claude account and forwards the bare model", async () => {
+  const rig = await nativeRig(() => ({ status: 200 }));
+  try {
+    const pin = rig.stored.id.slice(0, 8);
+    assert.equal(await rig.send("mixed-conversation"), 200);
+    assert.equal(rig.seen[0]!.authorization, "Bearer current-token", "an unpinned turn is unchanged");
+
+    assert.equal(await rig.send("mixed-conversation", { model: `claude#${pin}:claude-opus-5` }), 200);
+    assert.equal(rig.seen[1]!.authorization, "Bearer stored-token", "the pin wins over the conversation's claim");
+    assert.equal(rig.seen[1]!.body.model, "claude-opus-5", "the pin never reaches the upstream");
+    assert.doesNotMatch(JSON.stringify(rig.seen[1]!.body), /#/);
+    const log = fs.readFileSync(path.join(rig.home, "router.log"), "utf8");
+    assert.match(log, new RegExp(`CLAUDE claude#${pin}:claude-opus-5->claude-opus-5 account=${pin}`), "the log names the account that answered");
+    assert.match(log, /reason=account-pin/);
+
+    // The pinned turn left the other conversation's claim alone: it still runs on the current login.
+    assert.equal(await rig.send("mixed-conversation", { content: "later" }), 200);
+    assert.equal(rig.seen[2]!.authorization, "Bearer current-token");
+  } finally {
+    await rig.stop();
+  }
+});
+
+test("a pinned account that is paused or removed falls back to the pool instead of failing", async () => {
+  const rig = await nativeRig(() => ({ status: 200 }));
+  try {
+    const pin = rig.stored.id.slice(0, 8);
+    const model = `claude#${pin}:claude-opus-5`;
+    updateClaudeAccount(rig.home, rig.stored.id, { paused: true });
+    assert.equal(await rig.send("paused-pin", { model }), 200, "the turn still goes out");
+    assert.equal(rig.seen[0]!.authorization, "Bearer current-token", "a paused pin falls back to the pool order");
+
+    updateClaudeAccount(rig.home, rig.stored.id, { paused: false });
+    assert.equal(await rig.send("unpaused-pin", { model }), 200);
+    assert.equal(rig.seen[1]!.authorization, "Bearer stored-token", "unpaused, the same worker pins again");
+
+    removeClaudeAccount(rig.home, rig.stored.id);
+    assert.equal(await rig.send("removed-pin", { model }), 200);
+    assert.equal(rig.seen[2]!.authorization, "Bearer current-token", "a removed account's pin falls back too");
+    const log = fs.readFileSync(path.join(rig.home, "router.log"), "utf8");
+    assert.equal((log.match(new RegExp(`account-pin fallback ${pin} → current`, "g")) ?? []).length, 2, "logged once per fallback turn");
+  } finally {
+    await rig.stop();
+  }
+});
+
+test("a cooling pin falls back on the next turn, and an in-turn retry honours the pin first", async () => {
+  let rateLimited = true;
+  const rig = await nativeRig((seen) => seen.authorization === "Bearer stored-token" && rateLimited
+    ? { status: 429, headers: { "retry-after": "300" }, body: "{}" }
+    : { status: 200 });
+  try {
+    const pin = rig.stored.id.slice(0, 8);
+    assert.equal(await rig.send("cooling-pin", { model: `claude#${pin}:claude-opus-5` }), 200);
+    assert.deepEqual(rig.seen.map((item) => item.authorization), ["Bearer stored-token", "Bearer current-token"], "the refused pin is retried from the pool");
+    rateLimited = false;
+
+    assert.equal(await rig.send("after-cooling", { model: `claude#${pin}:claude-opus-5` }), 200);
+    assert.deepEqual(rig.seen.at(-1)!.authorization, "Bearer current-token", "a cooling pin is not retried while it rests");
+    assert.match(fs.readFileSync(path.join(rig.home, "router.log"), "utf8"), new RegExp(`account-pin fallback ${pin} → current`));
+  } finally {
+    await rig.stop();
+  }
+
+  // The pin first, then the ordinary order: a pin that is not the pool's first choice leads the turn.
+  const third = await nativeRig((seen) => seen.authorization === "Bearer third-token"
+    ? { status: 429, headers: { "retry-after": "300" }, body: "{}" }
+    : { status: 200 });
+  try {
+    const pin = third.third.id.slice(0, 8);
+    assert.equal(await third.send("pin-retry", { model: `claude#${pin}:claude-opus-5` }), 200);
+    assert.deepEqual(third.seen.map((item) => item.authorization), ["Bearer third-token", "Bearer current-token"], "the pin answered first; the retry used the pool");
+  } finally {
+    await third.stop();
   }
 });

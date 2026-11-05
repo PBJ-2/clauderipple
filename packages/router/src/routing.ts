@@ -12,7 +12,7 @@
 
 import type { Config } from "./config.ts";
 import { bareOwners, ingressOnly, qualifiedModel, rawDeclaredBy, soleOwner } from "./targets.ts";
-export { qualifiedModel, declaredBy } from "./targets.ts";
+export { qualifiedModel, declaredBy, pinnedModel } from "./targets.ts";
 import { isWebFetchRequest } from "./webfetch.ts";
 import { webSearchQuery } from "./websearch.ts";
 
@@ -63,6 +63,11 @@ export type Resolved = {
   provider: string;
   model: string;
   effort: string | undefined;
+  /**
+   * The stored Claude account this turn is pinned to, when its model id carried one. Never part of
+   * what reaches the upstream: `model` is the bare id.
+   */
+  accountPin?: string;
   /** Human tag for the log line, e.g. "claude-opus-4-8->gpt-6-astra". */
   tag: string;
   /** What kind of request this route serves. Adapters read it through `promptAdditions`. */
@@ -70,7 +75,7 @@ export type Resolved = {
   /** The model id the client asked for, as sent (for example "claude-opus-4-8"). Logs and failover name it. */
   asked: string;
   /** Where this turn goes when the provider above has nothing usable left. Carried from the route. */
-  fallbacks?: { provider: string; model: string; effort?: string }[];
+  fallbacks?: { provider: string; model: string; effort?: string; accountPin?: string }[];
   /** Spawn snapshot identity, for worker-only preflight and diagnostics. */
   ladderPick?: string;
 };
@@ -86,6 +91,19 @@ export function requestKind(json: unknown, pathname: string, method = "POST", re
 }
 
 export type Decision = { route: Resolved; refusal: null } | { route: null; refusal: string | null };
+
+/** How much of a stored account's local id a pinned model id names; enough to tell accounts apart. */
+export const ACCOUNT_PIN_CHARS = 8;
+
+/** The stable account prefix a pinned model id carries (the account id, never its label or email). */
+export function accountPinFor(ownerId: string): string {
+  return ownerId.slice(0, ACCOUNT_PIN_CHARS);
+}
+
+/** Whether a credential's durable owner id is the account a pinned model id names. */
+export function matchesAccountPin(ownerId: string | undefined, pin: string): boolean {
+  return typeof ownerId === "string" && pin.length > 0 && ownerId.slice(0, pin.length) === pin;
+}
 
 const REMINDER = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
 // Anchored: the marker is honoured only at the very top of a user message. A subagent prompt starts

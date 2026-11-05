@@ -7,6 +7,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { ChatGptAdapter, rateLimitsFromHeaders, rateLimitsFromUsage, streamHold } from "../src/providers/chatgpt/index.ts";
+import { saveChatGptAccount, updateChatGptAccount } from "../src/providers/chatgpt/accounts.ts";
 import { Logger } from "../src/log.ts";
 import { decodeEnvelope, encodeEnvelope } from "../src/reasoning.ts";
 import type { AnthropicRequest } from "../src/providers/chatgpt/translate.ts";
@@ -566,6 +567,72 @@ test("a refusal naming the replayed reasoning is retried once without it", async
   assert.equal(response.status, 200, "the retry answered, the refusal did not reach the user");
   const attempts = seen.slice(-2).map((s) => JSON.stringify(s.body).includes("encrypted_content"));
   assert.deepEqual(attempts, [true, false], "the second ask carried no reasoning");
+});
+
+// A pinned worker names a stored account on its route; the adapter must use it before its usual
+// order, fall back when it cannot, and keep honouring it first on an in-turn retry.
+test("a pinned ChatGPT worker runs on its stored account, falling back in the ordinary order", async (t) => {
+  const pinnedHome = fs.mkdtempSync(path.join(os.tmpdir(), "cr-gpt-pinned-"));
+  t.after(() => fs.rmSync(pinnedHome, { recursive: true, force: true }));
+  const grant = (token: string, accountId: string) => ({ accessToken: token, refreshToken: `rt-${token}`, accountId, expiresAt: Date.now() + 3_600_000 });
+  const a = saveChatGptAccount(pinnedHome, grant("tok-a", "acct-a"));
+  const b = saveChatGptAccount(pinnedHome, grant("tok-b", "acct-b"));
+
+  const auths: string[] = [];
+  let refuseB = false;
+  const pinnedBackend = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      const authorization = String(req.headers.authorization ?? "");
+      auths.push(authorization);
+      if (refuseB && authorization === "Bearer tok-b") {
+        res.writeHead(429, { "content-type": "application/json", "retry-after": "300" }).end("{}");
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(sse(happy));
+    });
+  });
+  await listen(pinnedBackend);
+  const port = (pinnedBackend.address() as { port: number }).port;
+  const pinnedLog = new Logger(path.join(pinnedHome, "router.log"), 1_000_000, 1, false);
+  const pinnedAdapter = new ChatGptAdapter("chatgpt", { type: "chatgpt", auth: "own", url: `http://127.0.0.1:${port}` }, pinnedHome, pinnedLog);
+  const ask = (pin: string) => pinnedAdapter.sendToAnAccount({
+    conversation: "pinned-chatgpt",
+    accountPin: pin,
+    path: "/codex/responses",
+    body: "{}",
+    signal: new AbortController().signal,
+    headers: () => ({}),
+  });
+  const pinB = b.id.slice(0, 8);
+  try {
+    const sent = await ask(pinB);
+    assert.ok(sent.kind === "ok", "the turn answered");
+    assert.equal(sent.credential.ownerId, b.id, "the pin wins over the configured order");
+    assert.equal(auths.at(-1), "Bearer tok-b");
+    await sent.upstream.body?.cancel().catch(() => {});
+    assert.match(fs.readFileSync(path.join(pinnedHome, "router.log"), "utf8"), new RegExp(`account-pin ${pinB}`), "the log names the pinned account");
+
+    updateChatGptAccount(pinnedHome, b.id, { paused: true });
+    const fallback = await ask(pinB);
+    assert.ok(fallback.kind === "ok");
+    assert.equal(fallback.credential.ownerId, a.id, "a paused pin falls back to the pool order");
+    await fallback.upstream.body?.cancel().catch(() => {});
+    assert.match(fs.readFileSync(path.join(pinnedHome, "router.log"), "utf8"), new RegExp(`account-pin fallback ${pinB} → ${a.id.slice(0, 8)}`));
+
+    // The pin first, then the ordinary order when it refuses: the retry is not the pin's fallback.
+    updateChatGptAccount(pinnedHome, b.id, { paused: false });
+    refuseB = true;
+    auths.length = 0;
+    const retried = await ask(pinB);
+    assert.ok(retried.kind === "ok");
+    assert.equal(retried.credential.ownerId, a.id);
+    assert.deepEqual(auths, ["Bearer tok-b", "Bearer tok-a"], "the pin answered first; the retry used the pool");
+    await retried.upstream.body?.cancel().catch(() => {});
+  } finally {
+    pinnedBackend.close();
+  }
 });
 
 test("cleanup", () => {
