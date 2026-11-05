@@ -180,8 +180,68 @@ export interface SubagentContext {
   resolve?: (toolUseId: string, input: RecordValue) => { model: string | null; steps: number; description: string; terminal: AgentTerminal; bytes?: number };
 }
 
-/** Unknown records and malformed block shapes never become events. */
-export function transcriptEvents(line: string, cwd: string, summarize: Summarize, sink?: ImageSink, subs?: SubagentContext): { at: number | null; bodies: EventBody[] } {
+/**
+ * What one transcript record contributes to its events, for recognising a re-appended copy
+ * (#126, 2026-11-05).
+ * When Remote Control reconnects, Claude Code writes the earlier conversation into the transcript
+ * again, under the same uuids; those copies can differ in bookkeeping the app rewrites (cwd, slug,
+ * gitBranch, promptId, toolUseResult), so only the parts the conversion below reads are compared.
+ * A line whose content genuinely changes under the same uuid (a streaming rewrite) hashes
+ * differently and is emitted as before. FNV-1a: collisions only matter between two records that
+ * already share a uuid, which is rare enough for a 32-bit value.
+ */
+function lineFingerprint(r: RecordValue): number {
+  const message = object(r.message);
+  const attachment = r.type === "attachment" ? object(r.attachment) : null;
+  const identity = JSON.stringify([
+    r.type, r.isSidechain === true, str(r.sessionId),
+    message ? [message.id, message.model, message.stop_reason, message.content] : null,
+    attachment?.type === "queued_command" ? str(attachment.prompt) : null,
+    r.subtype ?? null,
+    typeof r.durationMs === "number" ? r.durationMs : null,
+    typeof r.duration_ms === "number" ? r.duration_ms : null,
+    r.is_error === true,
+    typeof r.result === "string" ? r.result : null,
+    typeof r.num_turns === "number" ? r.num_turns : null,
+  ]);
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < identity.length; i++) hash = Math.imul(hash ^ identity.charCodeAt(i), 0x01000193);
+  return hash >>> 0;
+}
+
+/**
+ * Recognises a copy inside one whole-transcript scan (#126, 2026-11-05). A Remote Control reconnect
+ * re-appends earlier lines under their old uuids, and a scan that rebuilds state rather than
+ * emitting (the tail's restart seed, the background-task scanner) has no event log to ask, so it
+ * asks itself: a uuid already seen earlier in this file with the same fingerprint is a copy and is
+ * skipped entirely. A changed line under that uuid is still processed, and a line without a uuid is
+ * never a copy. The map grows with the file being scanned, which a whole-file scan already costs.
+ */
+class LineCopies {
+  private versions = new Map<string, Set<number>>();
+  copy(line: string): boolean {
+    const r = record(line);
+    const src = str(r?.uuid);
+    if (!r || src === "") return false;
+    const hash = lineFingerprint(r);
+    const seen = this.versions.get(src);
+    if (seen?.has(hash)) return true;
+    if (seen) seen.add(hash); else this.versions.set(src, new Set([hash]));
+    return false;
+  }
+  /** Whether a line repeats one already recorded, without recording it: a live tail may read the
+   * same bytes again when its offset was not saved, and must then emit them, not skip them. */
+  recorded(line: string): boolean {
+    const r = record(line);
+    const src = str(r?.uuid);
+    return !!r && src !== "" && (this.versions.get(src)?.has(lineFingerprint(r)) ?? false);
+  }
+}
+
+/** Unknown records and malformed block shapes never become events. `seen` asks the log whether a
+ * transcript line was emitted already: such a copy is skipped before anything is converted, so it
+ * changes no state, emits no events and writes no blobs. */
+export function transcriptEvents(line: string, cwd: string, summarize: Summarize, sink?: ImageSink, subs?: SubagentContext, seen?: (src: string, hash: number) => boolean): { at: number | null; bodies: EventBody[]; src?: string; srcHash?: number } {
   const r = record(line);
   const bodies: EventBody[] = [];
   if (!r) return { at: null, bodies };
@@ -193,6 +253,14 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
   const resolve = subs?.resolve;
   const time = typeof r.timestamp === "string" ? Date.parse(r.timestamp) : NaN;
   const at = Number.isFinite(time) ? time : null;
+  // The line's uuid is the identity a re-append repeats; records without one keep today's behaviour.
+  const src = str(r.uuid);
+  const srcHash = src ? lineFingerprint(r) : 0;
+  // A copy Remote Control re-appends after a reconnect is skipped before conversion, so it changes
+  // no state: re-running it would replace a running worker's entry with a fresh one and lose the
+  // `taskId` its result carried, leaving its completion unrecognised, and a finished worker's line
+  // could then emit a second terminal event (#126, 2026-11-05).
+  if (src !== "" && seen?.(src, srcHash) === true) return { at: null, bodies: [] };
   const message = object(r.message);
   // A notification that arrives mid-turn is queued, not written as a user line (BackgroundTasks.accept).
   const queued = r.type === "attachment" && object(r.attachment)?.type === "queued_command" ? str(object(r.attachment)?.prompt) : "";
@@ -276,7 +344,12 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
   } else if (r.type === "system" && r.subtype === "turn_duration" && typeof r.durationMs === "number") {
     bodies.push({ kind: "result", ok: true, ms: r.durationMs, turns: 1 });
   }
-  return { at, bodies };
+  // Only the last body carries the line it came from, so the log answers `lineSeen` for that uuid
+  // once every event of the line is written. A crash between them leaves the line unseen and a
+  // restart emits it again — a duplicate rather than the tail of the line being lost (#126, 2026-11-05).
+  const last = bodies.at(-1);
+  if (src && last) { last.src = src; last.srcHash = srcHash; }
+  return { at, bodies, ...(src ? { src, srcHash } : {}) };
 }
 
 /** Conversation records, not trailing bridge/cost/title bookkeeping, determine turn completion.
@@ -420,10 +493,12 @@ export class DesktopSessions {
   private sources = new Map<string, Source>();
   private imported = new Map<string, Imported>();
   private subImports = new Map<string, Imported>();
-  private tasks = new Map<string, { file: string; offset: number; tracker: BackgroundTasks }>();
+  private tasks = new Map<string, { file: string; offset: number; tracker: BackgroundTasks; copies: LineCopies }>();
   /** Per-session subagent state for an incremental tail (a bridged session), so a tool_result in a
    * later poll still closes the worker its tool_use opened in an earlier one. */
   private tailSubs = new Map<string, Map<string, SubagentState>>();
+  /** Per-session record of the lines a tail's restart seed read, so a later copy of one is skipped. */
+  private tailCopies = new Map<string, LineCopies>();
   /** session → toolUseId → agentId, rebuilt when the subagents directory changes. */
   private agentMaps = new Map<string, { at: number; map: Map<string, string> }>();
   private temp: string | null = null;
@@ -514,8 +589,10 @@ export class DesktopSessions {
     return () => watcher.close();
   }
 
-  /** Tail complete transcript lines into an existing host log; never write the transcript. */
-  tail(id: string, offset: number, visit: (body: EventBody) => void, sink?: ImageSink): number {
+  /** Tail complete transcript lines into an existing host log; never write the transcript.
+   * `seen` skips a line whose uuid the log already emitted (issue #126, 2026-11-05); the seed scan below
+   * consults no log but skips a line a copy repeated inside the file itself. */
+  tail(id: string, offset: number, visit: (body: EventBody) => void, sink?: ImageSink, seen?: (src: string, hash: number) => boolean): number {
     const source = this.sources.get(id);
     if (!source) return offset;
     const fd = this.open(source.file);
@@ -529,13 +606,23 @@ export class DesktopSessions {
         this.tailSubs.set(id, state);
         // A host handoff starts after the SDK's launch lines, unlike an imported desktop log.
         // Rebuild lifecycle context once so later notifications can close those existing cards.
+        // The span is usually older than the log's line record, so a copy re-appended into it is
+        // recognised here by the file itself (#126, 2026-11-05); replaying one would replace a
+        // running worker with a fresh entry and lose the `taskId` its result carried.
         const seeded = state;
+        const copies = new LineCopies();
+        this.tailCopies.set(id, copies);
         scanLines(fd, Math.min(offset, size), line => {
+          if (copies.copy(line)) return;
           transcriptEvents(line, source.summary.cwd, this.opts.summarize, undefined, { state: seeded, resolve });
         });
       }
+      // The seeded span's lines may have no identity in the log (an SDK handoff writes its events
+      // without one), so a copy of them after the offset is caught by the seed's own record (#126).
+      const copies = this.tailCopies.get(id);
       const next = scanLines(fd, size, line => {
-        for (const body of transcriptEvents(line, this.liveProcess(id)?.cwd ?? source.summary.cwd, this.opts.summarize, sink, { state, resolve }).bodies) visit(body);
+        if (copies?.recorded(line)) return;
+        for (const body of transcriptEvents(line, this.liveProcess(id)?.cwd ?? source.summary.cwd, this.opts.summarize, sink, { state, resolve }, seen).bodies) visit(body);
       }, offset);
       // Worker transcripts grow independently of the parent, even once their model is known.
       for (const [toolUseId, running] of state) {
@@ -688,7 +775,7 @@ export class DesktopSessions {
     const resolve = (toolUseId: string, input: RecordValue) => this.subInfo(id, toolUseId, input);
     try {
       scanLines(fd, fs.fstatSync(fd).size, line => {
-        const parsed = transcriptEvents(line, this.liveProcess(id)?.cwd ?? source.summary.cwd, this.opts.summarize, data => log.image(data), { allowSidechain: true, state, resolve });
+        const parsed = transcriptEvents(line, this.liveProcess(id)?.cwd ?? source.summary.cwd, this.opts.summarize, data => log.image(data), { allowSidechain: true, state, resolve }, (src, hash) => log.lineSeen(src, hash));
         at = parsed.at ?? at;
         for (const body of parsed.bodies) log.append(body.kind === "user" && !body.clientMsgId ? { ...body, clientMsgId: `desktop-${log.lastSeq + 1}` } : body);
       });
@@ -719,10 +806,14 @@ export class DesktopSessions {
       const size = fs.fstatSync(fd).size;
       let cached = this.tasks.get(id);
       if (!cached || cached.file !== source.file || size < cached.offset) {
-        cached = { file: source.file, offset: 0, tracker: new BackgroundTasks() };
+        // The copy record lives with the offset: a re-appended line refers back into the part of the
+        // file an earlier poll already read, so a fresh set per call would not recognise it (#126).
+        cached = { file: source.file, offset: 0, tracker: new BackgroundTasks(), copies: new LineCopies() };
         this.tasks.set(id, cached);
       }
-      cached.offset = scanLines(fd, size, line => cached!.tracker.accept(line), cached.offset);
+      // A copy of an older human prompt must not start a turn: that would clear the live per-turn
+      // plan and move the turn start back to the copied line's time (#126, 2026-11-05).
+      cached.offset = scanLines(fd, size, line => { if (!cached!.copies.copy(line)) cached!.tracker.accept(line); }, cached.offset);
       return cached.tracker;
     } finally { fs.closeSync(fd); }
   }
@@ -862,7 +953,9 @@ export class DesktopSessions {
     const log = EventLog.open({ dir, now: () => importing ? at : now() });
     try {
       source.size = scanLines(fd, fs.fstatSync(fd).size, line => {
-        const parsed = transcriptEvents(line, this.liveProcess(id)?.cwd ?? source.summary.cwd, this.opts.summarize, data => log.image(data), { state, resolve });
+        // The whole conversation is rebuilt here, and a bridge reconnect may already have copied an
+        // old block into it: convert each uuid once, as the live tail does (#126).
+        const parsed = transcriptEvents(line, this.liveProcess(id)?.cwd ?? source.summary.cwd, this.opts.summarize, data => log.image(data), { state, resolve }, (src, hash) => log.lineSeen(src, hash));
         at = parsed.at ?? at;
         for (const body of parsed.bodies) {
           if (body.kind !== "user") { log.append(body); continue; }
@@ -881,6 +974,7 @@ export class DesktopSessions {
       }
       // An attached timeline starts tailing after this import, not from the worker's launch line.
       this.tailSubs.set(id, state);
+      this.tailCopies.delete(id); // an import writes line identities to the log, which dedupes from here
       importing = false;
       const figures = this.opts.figures?.(id);
       if (figures) log.append({ kind: "figures", figures });
@@ -944,6 +1038,7 @@ export class DesktopSessions {
     this.sources = next;
     for (const id of this.tasks.keys()) if (!next.has(id)) this.tasks.delete(id);
     for (const id of this.tailSubs.keys()) if (!next.has(id)) this.tailSubs.delete(id);
+    for (const id of this.tailCopies.keys()) if (!next.has(id)) this.tailCopies.delete(id);
     for (const id of this.agentMaps.keys()) if (!next.has(id)) this.agentMaps.delete(id);
     for (const [id, cached] of this.imported) if (!next.has(id)) { this.dispose(cached); this.imported.delete(id); }
     for (const [key, cached] of this.subImports) if (!next.has(key.slice(0, key.indexOf("::")))) { this.dispose(cached); this.subImports.delete(key); }
@@ -1035,6 +1130,7 @@ export class DesktopSessions {
     for (const cached of this.subImports.values()) this.dispose(cached);
     this.subImports.clear();
     this.tailSubs.clear();
+    this.tailCopies.clear();
     this.agentMaps.clear();
     if (this.temp) fs.rmSync(this.temp, { recursive: true, force: true });
     this.temp = null;

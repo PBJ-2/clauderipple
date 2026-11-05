@@ -658,3 +658,26 @@ test("desktop workers expose children and grandchildren without leaking them int
   assert.equal(reduce(refreshed.readAfter(0, 1 << 20).events).items.find(i => i.type === "subagent")?.status, "done");
   assert.equal(f.desktop.subLog(id, "sub-../../outside"), null);
 });
+
+test("a tail seeded from a handoff skips a later copy of a seeded worker launch (#126)", t => {
+  // An SDK handoff's log holds its events without transcript-line identities, so only the seed's own
+  // record can tell that a line after the offset is a copy of one before it.
+  const f = fixture(t);
+  const file = path.join(f.project, `${id}.jsonl`);
+  const launch = { type: "assistant", uuid: "launch", timestamp: "2026-11-05T01:00:02Z", message: { id: "lm", model: "model", content: [
+    { type: "tool_use", id: "worker-1", name: "Agent", input: { description: "worker", prompt: "go" } },
+  ] } };
+  const launched = { type: "user", uuid: "launched", timestamp: "2026-11-05T01:00:03Z", toolUseResult: { isAsync: true, agentId: "task-1" },
+    message: { content: [{ type: "tool_result", tool_use_id: "worker-1", content: "launched asynchronously" }] } };
+  fs.writeFileSync(file, line(user) + line(launch) + line(launched));
+  f.desktop.list();
+  const events: import("../src/protocol.ts").EventBody[] = [];
+  let offset = f.desktop.tail(id, fs.statSync(file).size, body => events.push(body));
+  fs.appendFileSync(file, line({ ...launch, cwd: "/moved/project" }));
+  offset = f.desktop.tail(id, offset, body => events.push(body));
+  assert.deepEqual(events.filter(e => e.kind === "assistant" || e.kind === "subagent"), [], "the copy emits nothing");
+  fs.appendFileSync(file, line({ type: "user", uuid: "notify", timestamp: "2026-11-05T01:00:04Z",
+    message: { content: "<task-notification><task-id>task-1</task-id><status>completed</status><result>done</result></task-notification>" } }));
+  f.desktop.tail(id, offset, body => events.push(body));
+  assert.deepEqual(events.filter(e => e.kind === "subagent").map(e => e.kind === "subagent" && [e.toolUseId, e.status]), [["worker-1", "done"]]);
+});

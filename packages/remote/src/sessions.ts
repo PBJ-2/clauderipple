@@ -884,6 +884,9 @@ export class Sessions {
     if (!this.desktop) return;
     const desktopId = r.sdkSessionId ?? r.id;
     const before = r.transcriptOffset ?? 0;
+    // The log is the record of what was already emitted, so a reconnect that re-appends an old
+    // block (same uuids) emits nothing, even across a host restart (issue #126, 2026-11-05).
+    const log = this.log(r.id);
     r.transcriptOffset = this.desktop.tail(desktopId, before, body => {
       if (body.kind === "result") {
         const bridgeId = r.environmentBridgeId ?? this.desktop?.liveProcess(desktopId)?.bridgeSessionId;
@@ -894,7 +897,15 @@ export class Sessions {
       if (!r.desktopBridge && body.kind === "user" && !body.images?.length && !body.files?.length) {
         const echo = this.takeModEcho(r.id, body.text);
         if (echo) {
-          if (!this.seen(r.id, echo)) {
+          if (this.seen(r.id, echo)) {
+            // The host already wrote this prompt as its own user event (finishMod), so nothing below
+            // appends and its transcript uuid would never reach the log. Note the line in the log's
+            // in-memory index anyway, or a reconnect that re-appends it in this run turns the same
+            // message into a second one. Nothing is written: a marker event would take a slot in the
+            // phone's 120-event cache and move lastSeq with nothing to show, so after a host restart
+            // such a line may duplicate once (issue #126, 2026-11-05).
+            if (body.src && body.srcHash !== undefined) log.remember(body.src, body.srcHash);
+          } else {
             this.personMessage(r.id);
             this.append(r.id, { ...body, clientMsgId: echo });
             this.rememberClientMsgId(r.id, echo);
@@ -906,7 +917,12 @@ export class Sessions {
         if (body.kind === "user") this.rememberClientMsgId(r.id, body.clientMsgId);
         this.append(r.id, body);
       }
-    }, data => this.log(r.id).image(data));
+    }, data => log.image(data), (src, hash) => {
+      const seen = log.lineSeen(src, hash);
+      // A line the log already holds never reaches the callback above, so its echo is retired here.
+      if (seen) this.bridgeEchoes.delete(src);
+      return seen;
+    });
     if (r.transcriptOffset !== before) {
       this.save();
       if (r.desktopBridge) {
@@ -2068,8 +2084,10 @@ export class Sessions {
     }
     this.noteBridge(bridgeId, null);
     this.bridgeRunning.set(bridgeId, this.now());
-    // The durable user event also deduplicates the desktop transcript's echo by uuid.
-    this.append(id, { kind: "user", text, clientMsgId, images: converted.images });
+    // The durable user event also deduplicates the desktop transcript's echo by uuid. `src` records
+    // that the uuid itself was shown, so a reconnect that later re-appends the echo line cannot put
+    // the same message in the timeline again, even after a restart (issue #126, 2026-11-05).
+    this.append(id, { kind: "user", text, clientMsgId, images: converted.images, src: uuid });
     this.rememberClientMsgId(id, clientMsgId);
     // A new turn event and running event reset the phone's clock even if the previous record
     // was still running. Never synthesize idle between them: that also flashes a finished turn.

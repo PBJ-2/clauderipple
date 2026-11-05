@@ -6,10 +6,19 @@ import { FRAME_CAP, INLINE_CAP } from "./protocol.ts";
 import { changeCount, toolInput } from "./tool-details.ts";
 import type { BlobRef, EventBody, SessionEvent, Text } from "./protocol.ts";
 
-export interface EventLogOptions { dir: string; segmentBytes?: number; now?: () => number }
+export interface EventLogOptions {
+  dir: string;
+  segmentBytes?: number;
+  now?: () => number;
+  /** Transcript-line entries kept for dedupe; a test seam, normally `EventLog.LINE_CAP`. */
+  lineCap?: number;
+}
 
 const LINE_CAP = 64 * 1024;
 const PAGE_CAP = FRAME_CAP - 4096;
+/** A `src` the host recorded itself (a prompt it sent over Remote Control, by the uuid the app will
+ * echo): any transcript line carrying that uuid is that same message, whatever its content (#126). */
+const HOST_LINE = -1;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 interface Segment { fd: number; bytes: number; number: number }
 interface Entry { seq: number; segment: Segment; offset: number; length: number; kind: EventBody["kind"]; msg?: string }
@@ -62,15 +71,28 @@ export class EventLog {
   private dir: string;
   private segmentBytes: number;
   private now: () => number;
+  private lineCap: number;
   private entries: Entry[] = [];
   private segments: Segment[] = [];
   private finalized = new Set<string>();
   private closed = false;
+  /** Transcript line uuid → fingerprints of every version of it already converted (#126, 2026-11-05).
+   * One uuid can legitimately be emitted twice (a partial line, then the completed one), and a
+   * reconnect re-appends both, so remembering only the newest fingerprint made the older copy look
+   * new. Rebuilt from the log on open, so the dedupe survives a host restart. Bounded per uuid and
+   * overall: the cap counts uuids, and each keeps at most VERSIONS newest fingerprints. 20k uuids is
+   * far beyond the largest re-appended block seen (about 1.3k lines), and an evicted uuid only means
+   * a later copy of it is emitted as it would have been before this record existed. */
+  private lines = new Map<string, number[]>();
+  private static readonly LINE_CAP = 20_000;
+  /** Versions of one uuid kept: a partial and its completion, with room to spare. */
+  private static readonly LINE_VERSIONS = 8;
 
   private constructor(opts: EventLogOptions, epoch: string) {
     this.dir = opts.dir;
     this.segmentBytes = opts.segmentBytes ?? 8 * 1024 * 1024;
     this.now = opts.now ?? Date.now;
+    this.lineCap = opts.lineCap && opts.lineCap > 0 ? opts.lineCap : EventLog.LINE_CAP;
     this.epoch = epoch;
     if (!Number.isFinite(this.segmentBytes) || this.segmentBytes <= 0) throw new RangeError("segmentBytes must be positive");
   }
@@ -145,7 +167,42 @@ export class EventLog {
       entry.msg = event.msg;
       if (event.kind === "assistant") this.finalized.add(event.msg);
     }
+    if (event.src) {
+      // A missing fingerprint marks the uuid itself as shown (a prompt the host sent), matching any
+      // line that carries it.
+      this.noteLine(event.src, typeof event.srcHash === "number" ? event.srcHash : HOST_LINE);
+    }
     this.entries.push(entry);
+  }
+
+  /** Add one version of a transcript line to the in-memory index `lineSeen` reads. Re-set so the
+   * most recently emitted line is the last to be evicted, and keep every version already emitted
+   * for that uuid so a replay of any of them is recognised (#126). */
+  private noteLine(src: string, hash: number): void {
+    const versions = this.lines.get(src) ?? [];
+    this.lines.delete(src);
+    const next = versions.includes(hash) ? versions : [...versions, hash];
+    while (next.length > EventLog.LINE_VERSIONS) next.shift();
+    this.lines.set(src, next);
+    while (this.lines.size > this.lineCap) this.lines.delete(this.lines.keys().next().value!);
+  }
+
+  /** Whether this transcript line was already shown in this log: any version of the same uuid with
+   * this content, or a uuid the host itself sent. A fingerprint never seen under that uuid is a real
+   * rewrite and must still emit (#126). */
+  lineSeen(src: string, hash: number): boolean {
+    this.assertOpen();
+    const versions = this.lines.get(src);
+    return versions !== undefined && (versions.includes(hash) || versions.includes(HOST_LINE));
+  }
+
+  /** Note a transcript line as already shown without writing an event: only the in-memory index
+   * `lineSeen` reads is updated, so a copy re-appended later in this run is skipped. Nothing goes to
+   * disk, so after a host restart that line is unknown again and may be emitted once more
+   * (2026-11-05). */
+  remember(src: string, hash: number): void {
+    this.assertOpen();
+    this.noteLine(src, hash);
   }
 
   append(body: EventBody): SessionEvent {

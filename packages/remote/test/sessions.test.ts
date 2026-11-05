@@ -2036,6 +2036,28 @@ for (const order of ["report-first", "transcript-first"] as const) test(`mod ech
   assert.equal(f.sessions.log(f.id).readAfter(0).events.filter(e => e.kind === "user" && e.text === "same prompt").length, 2, "a later genuine message is not an echo");
 });
 
+test("a mod echo's line is remembered in memory so a same-run re-append is not shown twice", async t => {
+  const f = await modFixture(t, 500, 500);
+  const file = path.join(f.projects, "project", `${f.sdkId}.jsonl`);
+  await f.sessions.send(f.id, "mod-repeat", "repeat prompt");
+  assert.equal(f.sessions.modInbox.claim("mod-repeat"), true);
+  // The host writes the prompt as its own user event, then the app echoes it into the transcript.
+  assert.equal(f.sessions.modInbox.result("mod-repeat", "submitted"), true);
+  const kinds = () => f.sessions.log(f.id).readAfter(0).events.map(e => e.kind);
+  const before = kinds();
+  const echo = transcriptLine({ type: "user", uuid: "app-echo", cwd: f.cwd, message: { content: "repeat prompt" } });
+  fs.appendFileSync(file, echo);
+  await f.sessions.pollDesktop();
+  const repeated = () => f.sessions.log(f.id).readAfter(0).events.filter(e => e.kind === "user" && e.text === "repeat prompt").length;
+  assert.equal(repeated(), 1, "the host's own message is the only copy");
+  assert.deepEqual(kinds(), before, "consuming the echo writes no event of its own");
+  // A reconnect re-appends the same line under the same uuid, in this same run.
+  fs.appendFileSync(file, transcriptLine({ type: "bridge-session" }) + echo);
+  await f.sessions.pollDesktop();
+  assert.equal(repeated(), 1, "the re-appended line is the same message, not a second one");
+  assert.deepEqual(kinds(), before, "remembering the line writes no event of its own");
+});
+
 test("an app message with an attachment is not mistaken for a text-only mod echo", async t => {
   const f = await modFixture(t, 500, 500);
   const file = path.join(f.projects, "project", `${f.sdkId}.jsonl`);

@@ -124,7 +124,16 @@ export function defaultEffort(efforts: Effort[]): Effort | null { return efforts
 
 export interface ToolCall { id: string; name: string; files?: SessionFile[]; /** one line a person reads: a command, a path */ summary: string; input?: Text; /** Computed before a large input becomes a blob. Counts describe supplied edits, not unseen file context. */ changes?: { added: number; removed: number } }
 
-export type EventBody = MessageImages & (
+export type EventBody = MessageImages & {
+  /** The uuid of the transcript line this event was converted from (Claude app tails only). The log
+   * keeps every fingerprint already emitted per line, so a line Remote Control re-appends under the
+   * same uuid after a reconnect is not emitted again (issue #126, 2026-11-05). Host-originated events
+   * have none. */
+  src?: string;
+  /** Fingerprint of that line's event-bearing content: a line rewritten under the same uuid with a
+   * different message still emits, as it did before #126. */
+  srcHash?: number;
+} & (
   | { kind: "user"; text: string; clientMsgId: string }
   | { kind: "turn"; model: string; effort: Effort | null }
   /** Streamed text, coalesced by the host (~80 ms). Superseded by the `assistant` event with the same `msg`. */
