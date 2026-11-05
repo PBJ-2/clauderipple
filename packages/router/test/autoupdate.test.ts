@@ -166,6 +166,35 @@ test("router completion reports host application pending and retries it independ
   successor.stop(); await f.clock.advance(60_000); assert.equal(retries, 2);
 });
 
+test("a host record older than the router is refreshed without --pending (issue #125)", async t => {
+  const { f, deps } = fixture(t);
+  const hostFile = path.join(f.home, "host-update.json");
+  fs.writeFileSync(hostFile, JSON.stringify({ version: "0.9.0", status: "applied", retryAt: 0 }));
+  const calls: string[][] = [];
+  const updater = new AutoUpdater({ ...deps, runCli: async (args) => { calls.push(args); return { ok: true, output: "" }; } });
+  t.after(() => updater.stop());
+  updater.start();
+  await f.clock.advance(60_000);
+  assert.deepEqual(calls, [["remote", "refresh"]], "the CLI writes its own version's request first");
+  // A failed run keeps the record until the host reacts; the retry cadence is the same one minute.
+  await f.clock.advance(60_000);
+  assert.equal(calls.length, 2);
+});
+
+test("a host record at or ahead of the router is never refreshed", async t => {
+  for (const [version, status] of [["1.1.0", "pending"], ["1.0.0", "applied"], ["1.0.0", "skipped"], ["1.0.0-beta", "applied"]] as const) {
+    const { f, deps } = fixture(t);
+    fs.writeFileSync(path.join(f.home, "host-update.json"), JSON.stringify({ version, status, retryAt: 0 }));
+    let calls = 0;
+    const updater = new AutoUpdater({ ...deps, runCli: async () => { calls++; return { ok: true, output: "" }; } });
+    t.after(() => updater.stop());
+    updater.start();
+    await f.clock.advance(60_000);
+    assert.equal(calls, 0, `${version} ${status}`);
+    updater.stop();
+  }
+});
+
 test("host retries remain single-flight under repeated status reads and corrupt host state stays visible", async t => {
   const { f, deps } = fixture(t);
   const hostFile = path.join(f.home, "host-update.json");

@@ -261,7 +261,14 @@ async function install(): Promise<void> {
   // its logon trigger, so the router would only appear after the next sign-in. Start it either way,
   // and believe it only once the router's process exists (supervisor.startRouter).
   // Durable before the successor router starts: its own completion does not imply host application.
-  requestHostUpdate(home, VERSION);
+  try {
+    requestHostUpdate(home, VERSION);
+  } catch (error) {
+    // Bookkeeping for the phone host must never abort an install (issue #125: one refused rename
+    // skipped the router restart, the probe and settings). The router retries it once the record
+    // is older than the version it runs.
+    console.log(`! could not schedule the phone host update (${error}); the router will retry it`);
+  }
   const started = startAgent({ onProgress: (m) => console.log(`  ${m}`) });
   console.log(
     started === "failed" ? `✗ could not start the router (${supervisorName()})`

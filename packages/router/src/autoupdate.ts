@@ -71,6 +71,24 @@ function load(file: string): Saved {
   return { ...s, failures: s.failures };
 }
 
+/**
+ * Strict "x.y.z" order for host-update records (issue #125), returning null when either side is not
+ * exactly three numbers. The CLI's `isNewer` reads a non-numeric part as 0 and drops the pre-release
+ * suffix, which is fine for "is there a release?" but not for deciding to overwrite a host record:
+ * anything this router cannot read exactly must leave the record alone.
+ */
+function compareVersions(a: string, b: string): number | null {
+  const parts = (v: string): number[] | null => {
+    const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(v);
+    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+  };
+  const pa = parts(a);
+  const pb = parts(b);
+  if (!pa || !pb) return null;
+  for (let i = 0; i < 3; i++) if (pa[i] !== pb[i]) return pa[i]! > pb[i]! ? 1 : -1;
+  return 0;
+}
+
 export class AutoUpdater {
   private readonly deps: AutoUpdateDeps;
   private readonly clock: UpdateClock;
@@ -141,7 +159,7 @@ export class AutoUpdater {
   status(): AutoUpdateStatus {
     const completed = this.saved.completed;
     const hostUpdate = this.hostState();
-    if (this.active && hostUpdate?.status === "pending" && !this.cancelHost) this.scheduleHost();
+    if (this.active && !this.cancelHost && (hostUpdate?.status === "pending" || this.hostBehind(hostUpdate))) this.scheduleHost();
     return {
       ...(hostUpdate ? { hostUpdate } : {}),
       enabled: this.deps.enabled(), running: !!this.saved.pending || this.completedInstallerRunning(),
@@ -225,17 +243,37 @@ export class AutoUpdater {
     try { return readHostUpdate(this.deps.home); }
     catch (error) { return { version: this.deps.version, status: "pending", retryAt: 0, error: `cannot read host update state: ${error}` }; }
   }
+  /**
+   * The record names a version this router is past: the install that wrote it never got its own
+   * request in, so the host is still serving the older build (issue #125). A record at or ahead of
+   * this router is left alone — an old router still running during an update must not overwrite a
+   * newer request — and one whose version cannot be compared exactly is left alone too.
+   */
+  private hostBehind(host: HostUpdate | null): boolean {
+    if (!host) return false;
+    const order = compareVersions(host.version, this.deps.version);
+    return order !== null && order < 0;
+  }
   private scheduleHost(): void {
-    if (!this.active || this.cancelHost || this.hostRefreshing || this.hostState()?.status !== "pending") return;
+    if (!this.active || this.cancelHost || this.hostRefreshing) return;
+    const host = this.hostState();
+    if (host?.status !== "pending" && !this.hostBehind(host)) return;
     this.cancelHost = this.clock.later(() => { this.cancelHost = undefined; void this.refreshHost(); }, MINUTE);
   }
   private async refreshHost(): Promise<void> {
     this.hostRefreshing = true;
     try {
       const host = readHostUpdate(this.deps.home);
-      if (host?.status === "pending" && host.version === this.deps.version && this.clock.now() >= host.retryAt && !this.pendingRunning()) {
-        const result = await this.deps.runCli(["remote", "refresh", "--pending"], 45_000);
-        if (!result.ok) this.info(`host application pending: ${result.output.slice(-1000)}`);
+      if (host?.status === "pending" && host.version === this.deps.version) {
+        if (this.clock.now() >= host.retryAt && !this.pendingRunning()) {
+          const result = await this.deps.runCli(["remote", "refresh", "--pending"], 45_000);
+          if (!result.ok) this.info(`host application pending: ${result.output.slice(-1000)}`);
+        }
+      } else if (this.hostBehind(host) && !this.pendingRunning()) {
+        // No `--pending`: the current CLI writes the request for its own version first, which is the
+        // step the interrupted install skipped.
+        const result = await this.deps.runCli(["remote", "refresh"], 45_000);
+        if (!result.ok) this.info(`host is behind ${this.deps.version}: ${result.output.slice(-1000)}`);
       }
     } catch (error) { this.info(`host application pending: ${error}`); }
     finally { this.hostRefreshing = false; this.scheduleHost(); }
