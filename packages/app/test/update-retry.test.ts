@@ -4,26 +4,27 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { stripTypeScriptTypes } from "node:module";
-import { readUpdateSeen, readReplacementTries, nextReplacementTries, rememberUpdate, replacementExhausted, updateNotice, TrayReplacement, REPLACEMENT_LIMIT } from "../src/update-model.ts";
+import { readUpdateSeen, readReplacementTries, nextReplacementTries, rememberUpdate, releaseNotesUrl, replacementExhausted, updateNotice, TrayReplacement, REPLACEMENT_LIMIT } from "../src/update-model.ts";
 
 // Execute the real Electron orchestration, replacing only the OS/CLI/notification boundaries.
 const main = fs.readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 const source = main.slice(main.indexOf("let updateSeen:"), main.indexOf("async function checkForUpdate"));
 export function updateHarness(sourceText: string, home: string, trayVersion = "1.0.0") {
-  const boundary = { calls: 0, notifications: 0, quits: 0, locks: 0, fail: true, visible: false, args: [] as string[], env: {} as Record<string, string | undefined> };
+  const boundary = { opened: [] as string[], closed: 0, click: undefined as undefined | (() => void), calls: 0, notifications: 0, quits: 0, locks: 0, fail: true, visible: false, args: [] as string[], env: {} as Record<string, string | undefined> };
   const create = new Function("deps", `
-    const { fs, path, home, readUpdateSeen, readReplacementTries, rememberUpdate, replacementExhausted, nextReplacementTries, updateNotice, TrayReplacement, REPLACEMENT_LIMIT, boundary, trayVersion: trayVersionValue } = deps;
+    const { fs, path, home, readUpdateSeen, readReplacementTries, rememberUpdate, releaseNotesUrl, replacementExhausted, nextReplacementTries, updateNotice, TrayReplacement, REPLACEMENT_LIMIT, boundary, trayVersion: trayVersionValue } = deps;
     let updating = false, routerUpdateUntil = 0, updateNotification = null, availableUpdate = null;
     const trayVersion = () => trayVersionValue;
     const app = { isPackaged: false, getVersion: () => trayVersionValue, releaseSingleInstanceLock() {}, requestSingleInstanceLock() { boundary.locks++; return true; }, quit() { boundary.quits++; } };
     const runCliResult = async (args, timeout, env) => { boundary.calls++; boundary.args = args; boundary.env = env || {}; return { ok: !boundary.fail, output: 'launch refused' }; };
     const windowVisible = () => boundary.visible === true;
-    const Notification = class { static isSupported() { return true; } on() {} show() { boundary.notifications++; } };
+    const Notification = class { static isSupported() { return true; } on(event, fn) { if (event === "click") boundary.click = fn; } show() { boundary.notifications++; } close() { boundary.closed++; } };
+    const shell = { openExternal: async url => { boundary.opened.push(url); } };
     const L = { autoUpdated: v => v, autoAvailable: v => v, trayReplaceGaveUp: v => v }, notifyIcon = () => undefined;
     ${stripTypeScriptTypes(sourceText)}
     return handleRouterUpdate;
   `);
-  const handle = create({ fs, path, home, readUpdateSeen, readReplacementTries, rememberUpdate, replacementExhausted, nextReplacementTries, updateNotice, TrayReplacement, REPLACEMENT_LIMIT, boundary, trayVersion }) as (status: object) => Promise<void>;
+  const handle = create({ fs, path, home, readUpdateSeen, readReplacementTries, rememberUpdate, releaseNotesUrl, replacementExhausted, nextReplacementTries, updateNotice, TrayReplacement, REPLACEMENT_LIMIT, boundary, trayVersion }) as (status: object) => Promise<void>;
   return { handle, boundary };
 }
 
@@ -84,7 +85,47 @@ test("a tray that comes back reporting the old version stops being replaced inst
   await handle(status);
   assert.equal(boundary.calls, 0, "no further launch once the pair cannot converge");
   assert.equal(boundary.quits, 0);
-  assert.equal(boundary.notifications, 1, "says once why it stays where it is");
+  // The trays that quit posted nothing, so the one that stays says why and what it updated to.
+  assert.equal(boundary.notifications, 2, "says once why it stays where it is, and posts the update");
   await handle(status);
-  assert.equal(boundary.notifications, 1, "not on every poll");
+  assert.equal(boundary.notifications, 2, "not on every poll");
+});
+
+test("the updated notice comes from the tray that stays, and opens that version's release notes", async t => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "tray-notes-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const status = { version: "1.1.0", autoUpdate: { kind: "npm", lastUpdatedFrom: "1.0.0", lastUpdatedTo: "1.1.0", lastUpdatedAt: 1000 } };
+  const old = updateHarness(source, home, "1.0.0");
+  old.boundary.fail = false;
+  await old.handle(status);
+  assert.equal(old.boundary.quits, 1, "the old tray is replaced");
+  assert.equal(old.boundary.notifications, 0, "and does not post a notice that dies with it");
+  const fresh = updateHarness(source, home, "1.1.0");
+  await fresh.handle(status);
+  assert.equal(fresh.boundary.calls, 0, "the new tray needs no replacement");
+  assert.equal(fresh.boundary.notifications, 1);
+  fresh.boundary.click?.();
+  assert.deepEqual(fresh.boundary.opened, [releaseNotesUrl("1.1.0")]);
+  await fresh.handle(status);
+  assert.equal(fresh.boundary.notifications, 1, "once");
+});
+
+test("a notice posted by a tray whose replacement failed is posted again by the tray that replaces it", async t => {
+  t.mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "tray-repost-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const status = { version: "1.1.0", autoUpdate: { kind: "npm", lastUpdatedFrom: "1.0.0", lastUpdatedTo: "1.1.0", lastUpdatedAt: 1000 } };
+  const old = updateHarness(source, home, "1.0.0");
+  await assert.rejects(old.handle(status), /launch refused/);
+  assert.equal(old.boundary.notifications, 1, "the tray that stays posts it");
+  t.mock.timers.tick(60_000);
+  old.boundary.fail = false;
+  await old.handle(status);
+  assert.equal(old.boundary.quits, 1);
+  assert.equal(old.boundary.closed, 1, "its notice, whose click dies with it, is withdrawn");
+  const fresh = updateHarness(source, home, "1.1.0");
+  await fresh.handle(status);
+  assert.equal(fresh.boundary.notifications, 1, "and the new tray posts it with a live click");
+  fresh.boundary.click?.();
+  assert.deepEqual(fresh.boundary.opened, [releaseNotesUrl("1.1.0")]);
 });

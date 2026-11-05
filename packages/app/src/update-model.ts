@@ -98,6 +98,12 @@ export class TrayReplacement {
   }
 }
 
+/** The GitHub release that lists what changed in `version`; an unexpected version string gets the latest release. */
+export function releaseNotesUrl(version: string): string {
+  const base = "https://github.com/PBJ-2/clauderipple/releases";
+  return /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version) ? `${base}/tag/v${version}` : `${base}/latest`;
+}
+
 export function rememberUpdate(seen: UpdateSeen, notice: UpdateNotice): UpdateSeen {
   return { ...seen, [notice.kind]: [...new Set([...seen[notice.kind], notice.version])] };
 }

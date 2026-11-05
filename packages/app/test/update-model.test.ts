@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readUpdateSeen, readReplacementTries, rememberUpdate, replacementExhausted, nextReplacementTries, resolveTrayVersion, updateNotice, REPLACEMENT_LIMIT, type RouterUpdate, type UpdateSeen } from "../src/update-model.ts";
+import { readUpdateSeen, readReplacementTries, rememberUpdate, releaseNotesUrl, replacementExhausted, nextReplacementTries, resolveTrayVersion, updateNotice, REPLACEMENT_LIMIT, type RouterUpdate, type UpdateSeen } from "../src/update-model.ts";
 
 const empty = (): UpdateSeen => ({ updated: [], available: [] });
 const completed: RouterUpdate = { enabled: true, kind: "script", lastUpdatedFrom: "1.0.0", lastUpdatedTo: "1.1.0", lastUpdatedAt: 1000 };
@@ -87,4 +87,12 @@ test("a damaged replacement state is ignored rather than stopping updates", () =
     assert.equal(readReplacementTries(value), null);
   }
   assert.deepEqual(readReplacementTries(JSON.parse('{"routerVersion":"1.1.0","trayVersion":"1.0.0","attempts":-2}')), { routerVersion: "1.1.0", trayVersion: "1.0.0", attempts: 0 });
+});
+
+test("an update notice links to that version's release notes", () => {
+  assert.equal(releaseNotesUrl("0.12.30"), "https://github.com/PBJ-2/clauderipple/releases/tag/v0.12.30");
+  assert.equal(releaseNotesUrl("1.0.0-beta.2"), "https://github.com/PBJ-2/clauderipple/releases/tag/v1.0.0-beta.2");
+  for (const odd of ["", "v0.12.30", "0.12", "0.12.30/../../x", "0.12.30?x=1"]) {
+    assert.equal(releaseNotesUrl(odd), "https://github.com/PBJ-2/clauderipple/releases/latest", odd);
+  }
 });

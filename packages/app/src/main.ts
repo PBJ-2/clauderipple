@@ -15,7 +15,7 @@ import path from "node:path";
 
 import { claudeStartedAt, reopenClaude } from "./claude-desktop";
 import { failureAction, failureKinds, type FailureAction, type FailureKind } from "./failure-model";
-import { readUpdateSeen, readReplacementTries, rememberUpdate, replacementExhausted, nextReplacementTries, resolveTrayVersion, updateNotice, TrayReplacement, REPLACEMENT_LIMIT, type ReplacementTries, type RouterUpdate, type UpdateSeen } from "./update-model";
+import { readUpdateSeen, readReplacementTries, rememberUpdate, releaseNotesUrl, replacementExhausted, nextReplacementTries, resolveTrayVersion, updateNotice, TrayReplacement, REPLACEMENT_LIMIT, type ReplacementTries, type RouterUpdate, type UpdateSeen, type UpdateNotice } from "./update-model";
 import { handleScheme, ORIGIN, registerScheme } from "./protocol";
 import { parseJsonOutput, repairDetails, restartStillOwed, shouldNotifyDown, tailLines, trayState, type Action, type ActionResult, type AppState, type Busy, type DirectOutput, type Doctor, type RepairOutput } from "./status-model";
 import { mainWindow, openWindow, sendToWindow, windowVisible, type Bounds } from "./window";
@@ -1402,6 +1402,10 @@ const trayReplacement = new TrayReplacement();
 const updateSeenFile = path.join(home, "update-notifications.json");
 const replacementTriesFile = path.join(home, "tray-replacement.json");
 let replacementGaveUp = false;
+/** Set once a replacement tray has started and this one is quitting. */
+let handedOver = false;
+/** The version whose "updated" notice this tray posted, which a replacement must post again. */
+let postedUpdated: { version: string; notification: Notification } | null = null;
 
 function loadUpdateSeen(): UpdateSeen {
   try { return readUpdateSeen(JSON.parse(fs.readFileSync(updateSeenFile, "utf8"))); }
@@ -1434,15 +1438,30 @@ async function relaunchTray(): Promise<void> {
   // The replacement starts as this one did: the CLI's own `tray` opens the window, which brought a
   // hidden dashboard to the front after every automatic update (B14). A window that was up stays up.
   const visible = windowVisible();
+  // A notice this tray posted loses its click when it quits; the replacement, which reads the
+  // history on its first poll, posts it again if the version is forgotten and the notice withdrawn
+  // before it starts. A replacement that does not start leaves this tray, which posts it again.
+  const posted = postedUpdated?.version;
+  const notice = postedUpdated?.notification;
+  if (posted) {
+    const seen = updateSeen ?? loadUpdateSeen();
+    saveUpdateSeen({ ...seen, updated: seen.updated.filter((v) => v !== posted) });
+    notice?.close();
+  }
   app.releaseSingleInstanceLock();
   try {
     const result = await runCliResult(["tray", "--at-login"], 30_000, visible ? { CLAUDERIPPLE_APP_SHOW: "1" } : {});
     if (!result.ok) throw new Error(result.output || "could not relaunch tray");
   } catch (error) {
+    if (posted) {
+      saveUpdateSeen(rememberUpdate(updateSeen ?? loadUpdateSeen(), { kind: "updated", version: posted, relaunch: false }));
+      notice?.show();
+    }
     // Keep a functioning tray if its replacement could not start, including spawn/timeout failures.
     if (!app.requestSingleInstanceLock()) app.quit();
     throw error;
   }
+  handedOver = true;
   app.quit();
 }
 
@@ -1452,20 +1471,21 @@ async function handleRouterUpdate(status: Status): Promise<void> {
   if (updating) return;
   updateSeen ??= loadUpdateSeen();
   const notice = updateNotice(status.version, trayVersion(), status.autoUpdate, updateSeen);
-  if (!notice) {
-    await replaceUpdatedTray(status);
+  // A tray about to be replaced would quit under its own notification, taking the click that opens
+  // the release notes with it: the new tray, already on this version, posts it instead. A tray
+  // that stays (launch failed, backing off, or given up) posts it itself.
+  if (notice?.kind === "updated" && notice.relaunch) {
+    try { await replaceUpdatedTray(status); }
+    finally { if (!handedOver) announceUpdate(status, notice); }
     return;
   }
+  if (notice) announceUpdate(status, notice);
+  if (notice?.kind !== "available") await replaceUpdatedTray(status);
+}
+
+function announceUpdate(status: Status, notice: UpdateNotice): void {
   // Notification delivery history is independent of replacement success.
-  updateSeen = rememberUpdate(updateSeen, notice);
-  fs.mkdirSync(home, { recursive: true });
-  const tmp = `${updateSeenFile}.${process.pid}.tmp`;
-  try {
-    fs.writeFileSync(tmp, JSON.stringify(updateSeen) + "\n", { mode: 0o600 });
-    fs.renameSync(tmp, updateSeenFile);
-  } finally {
-    try { fs.unlinkSync(tmp); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-  }
+  saveUpdateSeen(rememberUpdate(updateSeen ?? loadUpdateSeen(), notice));
   if (notice.kind === "available") {
     const check: UpdateCheck = { current: status.version, latest: notice.version, newer: true, kind: status.autoUpdate?.kind ?? "unknown" };
     availableUpdate = check;
@@ -1478,9 +1498,24 @@ async function handleRouterUpdate(status: Status): Promise<void> {
   }
   if (Notification.isSupported()) {
     updateNotification = new Notification({ title: "ClaudeRipple", body: L.autoUpdated(notice.version), icon: notifyIcon() });
+    const notes = releaseNotesUrl(notice.version);
+    updateNotification.on("click", () => { void shell.openExternal(notes); });
     updateNotification.show();
+    // Its own reference: a later "available" notice takes over updateNotification.
+    postedUpdated = { version: notice.version, notification: updateNotification };
   }
-  await replaceUpdatedTray(status);
+}
+
+function saveUpdateSeen(seen: UpdateSeen): void {
+  updateSeen = seen;
+  fs.mkdirSync(home, { recursive: true });
+  const tmp = `${updateSeenFile}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(seen) + "\n", { mode: 0o600 });
+    fs.renameSync(tmp, updateSeenFile);
+  } finally {
+    try { fs.unlinkSync(tmp); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  }
 }
 
 async function replaceUpdatedTray(status: Status): Promise<void> {
