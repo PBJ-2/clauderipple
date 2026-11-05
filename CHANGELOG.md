@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Changed
+
+- **Account tabs in the worker settings.** A provider with several accounts shows "계정 1",
+  "계정 2" … tabs on its model list; each tab lists that account's models by name, numbered as in
+  the limits pane. The worker ladder menu is grouped the same way.
+
 ### Fixed
 
 - **Naming a worker pinned to an account now runs it on that account.** In 0.12.31 the mod could
