@@ -650,9 +650,8 @@ function limitGroupDrawn(el: Els, frame: Frame, group: LimitGroup, name: string,
  * The second row, or null: no `limits` extra, no windows at all, or not even Claude's own windows
  * fitting. Narrow, the scoped windows (Fable, 3P, …) go first, then a later provider's secondary
  * accounts (the last one first), then a later provider's whole group — Claude's own group stays to
- * the last. Of Claude's accounts the row shows only the one in use (bandLimitGroups), unnumbered.
- * Another provider with several accounts numbers them ("GPT 1", "GPT 2"); the number is the
- * account's, not its place in this row, so it holds even when only one of them fits.
+ * the last. Of each provider's accounts the row shows only the one in use (bandLimitGroups),
+ * unnumbered; the limits pane lists them all.
  * `onPress`: the row is a button (the limits pane); pressed it says so in the tip place, and each
  * window's own tip (its name and reset) gives way to that one.
  */
@@ -660,7 +659,7 @@ function limitsRowDrawn(el: Els, frame: Frame, view: DashboardView, budget: numb
   const { Box } = el
   const items = view.limits ?? []
   if (!items.length || !view.extras.includes('limits')) return null
-  // Of Claude's accounts only the one in use: the pane lists the rest, the row stays as narrow as it was.
+  // Of each provider's accounts only the one in use: the pane lists the rest.
   const all = bandLimitGroups(limitGroups(items))
   // Numbering follows the whole set of accounts a provider has, decided before any narrowing.
   const numbered = limitGroupNumbered(all)

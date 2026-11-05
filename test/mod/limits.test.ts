@@ -346,12 +346,12 @@ test('an account label reads short: an email\'s local part, a long name cut, a p
   assert.equal(limitAccountLabel('  '), '')
 })
 
-test('the band keeps one Claude account, the one in use, unnumbered; other providers keep every account', () => {
+test('the band keeps one account per provider, the one in use, unnumbered', () => {
   const groups = limitGroups(routerLimitItems(MANY, NOW))
   const band = bandLimitGroups(groups)
-  assert.deepEqual(band.map(g => g.key), ['anthropic#1', 'chatgpt#0', 'chatgpt#1'])
+  assert.deepEqual(band.map(g => g.key), ['anthropic#1', 'chatgpt#1'])
   const numbered = limitGroupNumbered(band)
-  assert.deepEqual(band.map(g => limitGroupName(g, numbered(g))), ['Claude', 'GPT 1', 'GPT 2'])
+  assert.deepEqual(band.map(g => limitGroupName(g, numbered(g))), ['Claude', 'GPT'])
   // None marked (an older router, or the in-use account's usage unknown): the first, the app login.
   const unmarked = limitGroups(routerLimitItems({ providers: [{ ...MANY.providers[0]!, accounts: MANY.providers[0]!.accounts.map(({ inUse: _, ...a }) => a) }] }, NOW))
   assert.deepEqual(bandLimitGroups(unmarked).map(g => g.key), ['anthropic#0'])

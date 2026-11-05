@@ -553,19 +553,19 @@ export function limitGroups(items: readonly LimitItem[]): LimitGroup[] {
 }
 
 /**
- * The groups the band's limits row draws: of Claude's accounts only the one the router serves new
- * turns with (the first when none is marked: an older router, or the in-use account's usage not
- * known yet), so the narrow row reads one "Claude" as it always has; the pane lists them all
- * (2026-11-04). Every other provider's accounts pass as they are.
+ * The groups the band's limits row draws: of each provider's accounts only the one the router serves
+ * new turns with (the first when none is marked: an older router, or the in-use account's usage not
+ * known yet), so the narrow row reads one "Claude", one "GPT", one "Gemini"; the pane lists them all.
+ * Until 2026-11-05 only Claude was narrowed: a second Gemini account in use left the row showing the
+ * first, spent one, because the narrow row dropped later accounts first.
  */
 export function bandLimitGroups(groups: readonly LimitGroup[]): LimitGroup[] {
   const kept = new Map<string, LimitGroup>()
   for (const g of groups) {
-    if (!isClaude(g)) continue
     const held = kept.get(g.provider)
     if (!held || (g.inUse && !held.inUse)) kept.set(g.provider, g)
   }
-  return groups.filter(g => !isClaude(g) || kept.get(g.provider) === g)
+  return groups.filter(g => kept.get(g.provider) === g)
 }
 
 /**
