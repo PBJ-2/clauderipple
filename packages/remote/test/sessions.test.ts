@@ -1843,6 +1843,13 @@ function appNativeModFixture(t: TestContext, modOfferMs = 500) {
   return { ...f, id, registry, boundary, file };
 }
 
+test("a desktop session's summary carries the Claude app's own session id", async t => {
+  const f = appNativeModFixture(t);
+  const expected = `local_${f.id}`;
+  assert.equal(f.sessions.summaryOf(f.id)?.appSessionId, expected);
+  assert.equal(f.sessions.list().find(s => s.id === f.id)?.appSessionId, expected);
+});
+
 for (const order of ["report-first", "transcript-first"] as const) test(`an app-created session delivers through the mod exactly once with ${order}`, async t => {
   const f = appNativeModFixture(t);
   f.sessions.watchAttached(new Set([f.id]));

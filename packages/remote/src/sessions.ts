@@ -680,7 +680,8 @@ export class Sessions {
     const sessions = [...host, ...(this.desktop?.list() ?? []).filter(s => !this.records.has(s.id) && !hostCliIds.has(s.id)).map(s => {
       const process = this.desktop?.liveProcess(s.id);
       const status = this.statusLine(s.id);
-      return { ...s, ...this.desktopModels.get(s.id), controls: this.sessionControls(s.id), ...(process?.bridgeSessionId ? { state: this.bridgeState(process), desktopBridge: true, background: this.background(process) } : {}), ...(this.archived.has(s.id) ? { archived: true } : {}), attention: this.attention.get(s.id) ?? null, ...(status ? { status } : {}), ...this.queueSummary(s.id) };
+      const appSessionId = this.desktopSettings?.appSessionIdFor(s.id);
+      return { ...s, ...(appSessionId ? { appSessionId } : {}), ...this.desktopModels.get(s.id), controls: this.sessionControls(s.id), ...(process?.bridgeSessionId ? { state: this.bridgeState(process), desktopBridge: true, background: this.background(process) } : {}), ...(this.archived.has(s.id) ? { archived: true } : {}), attention: this.attention.get(s.id) ?? null, ...(status ? { status } : {}), ...this.queueSummary(s.id) };
     })];
     const listed = this.sidebar?.join(sessions, id => this.records.get(id)?.sdkSessionId ?? id, id => !!this.records.get(id)?.environmentBridgeId) ?? sessions;
     // A session the list no longer holds keeps no read record (this map must not outgrow the list).

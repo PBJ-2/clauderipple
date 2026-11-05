@@ -226,6 +226,9 @@ export interface SessionSummary {
   id: string;
   origin?: "host" | "desktop";
   readOnly?: boolean;
+  /** Desktop sessions: the Claude app's own session id (`local_…`), so a `#local_…` link in a
+   * conversation can find this session. Absent on older hosts and for host-created sessions. */
+  appSessionId?: string;
   title: string;
   /** Desktop sidebar metadata; absent on older hosts. */
   unread?: boolean;
