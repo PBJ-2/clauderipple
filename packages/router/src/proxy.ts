@@ -139,6 +139,26 @@ export function withCredential(
  * the client's, never used in their place. Only for native Claude accounts: a compatible vendor's
  * beta filtering happens elsewhere and must not be undone here.
  */
+/**
+ * A Messages request that brings its own Anthropic API key and is not Claude Code: a script or SDK
+ * run from a session's shell, which inherits the session's HTTPS_PROXY. It goes out on its own key.
+ * Routing it put it on the subscription accounts instead (2026-11-05: another project's haiku and
+ * sonnet tests were answered 429 by the subscription, both accounts cooled for a minute, and the
+ * mod fell back from named Claude workers). Claude Code keeps its own path even on an API key: it
+ * says so in `x-app: cli` and its `claude-cli/` user agent, and a request carrying a login is never a
+ * caller key.
+ */
+export function callerOwnsKey(headers: http.IncomingHttpHeaders): boolean {
+  const key = headers["x-api-key"];
+  if (typeof key !== "string" || !key.trim()) return false;
+  // A login beside the key keeps the old path: a client with a real Bearer and a placeholder key is
+  // common, and sending that pair out unchanged would fail on the placeholder.
+  if (typeof headers.authorization === "string" && headers.authorization.trim()) return false;
+  if (headers["x-app"] === "cli") return false;
+  const agent = headers["user-agent"];
+  return !(typeof agent === "string" && /^claude-cli\//i.test(agent));
+}
+
 export function withClientBetas(credential: Record<string, string>, clientBeta: string | string[] | undefined): Record<string, string> {
   if (clientBeta === undefined) return credential;
   const name = Object.keys(credential).find((key) => key.toLowerCase() === "anthropic-beta") ?? "anthropic-beta";
@@ -899,7 +919,8 @@ export class Proxy {
             if (oldest !== undefined) this.routedMessageIds.delete(oldest);
           }
         }
-        if (completed.ok && completed.kind === "messages" && numericStatus >= 200 && numericStatus < 300 && extra?.upstreamCalled !== false) {
+        // A caller's own key answering says nothing about the pool's accounts or models.
+        if (completed.ok && completed.kind === "messages" && numericStatus >= 200 && numericStatus < 300 && extra?.upstreamCalled !== false && !ownKey) {
           this.modelHealth.success(completed.provider, completed.target);
         }
         this.deps.requests.add(completed);
@@ -930,6 +951,7 @@ export class Proxy {
     // anything else (claude.ai in picker mode) is passed through, with bootstrap injection.
     const reqHost = (req.headers.host ?? cfg.upstream).split(":")[0]!;
     const isApiHost = reqHost === cfg.upstream;
+    const ownKey = isApiHost && isMessages && callerOwnsKey(req.headers);
 
     // Route decision: only Messages requests carry a model.
     let json: Record<string, unknown> | null = null;
@@ -941,6 +963,13 @@ export class Proxy {
       } catch {
         json = null;
       }
+    }
+    // A request on its own API key is not this router's to route: with no body to read it takes the
+    // un-routed path, on its own headers, byte for byte. The model is kept for the log line only.
+    if (ownKey) {
+      if (typeof model === "string") record.source = model;
+      record.stream = json?.stream === true;
+      json = null;
     }
     const kind: RequestKind = json && isApiHost && path.startsWith("/v1/messages") ? requestKind(json, pathname, method, requestClass) : "turn";
     // A WebSearch arrives as its own request aimed at ANTHROPIC_SMALL_FAST_MODEL, recognised by the
@@ -1123,7 +1152,8 @@ export class Proxy {
         ...record,
         source,
         target: override?.purpose === "compaction" && !fetchTarget ? String(json?.model ?? source) : source,
-        stream: json?.stream === true,
+        // A caller-key request has no body left to read; its flag was taken before it was dropped.
+        stream: ownKey ? record.stream : json?.stream === true,
       };
       const requestedEffort = effortOf(json ?? {});
       if (requestedEffort) record.effort = requestedEffort;
@@ -1559,7 +1589,7 @@ export class Proxy {
           }
         } else if (isApiHost) {
           target = { protocol: "https:", host: cfg.upstream, port: this.deps.upstreamPort ?? 443, agent: this.deps.upstreamAgent ?? this.upstreamAgent, extraHeaders: {} };
-          tag = `PASS ${typeof model === "string" ? model : "-"}`;
+          tag = `PASS ${ownKey ? "caller-key " : ""}${typeof model === "string" ? model : "-"}`;
           // An un-routed native Messages turn goes out on the app's own sign-in, and its answer is the
           // only statement of that login's unified limits when the usage endpoint refuses (2026-11-05).
           ownLogin = isMessages && typeof req.headers.authorization === "string";

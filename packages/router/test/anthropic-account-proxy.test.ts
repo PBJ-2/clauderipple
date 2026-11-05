@@ -109,7 +109,7 @@ async function nativeRig(reply: (seen: Seen, attempt: number) => Reply, claude: 
   });
   await proxy.listen();
 
-  const send = async (conversation = "conversation-1", options: { content?: string; previous?: string; model?: string } = {}): Promise<number> => {
+  const send = async (conversation = "conversation-1", options: { content?: string; previous?: string; model?: string; auth?: string } = {}): Promise<number> => {
     const socket = net.connect(proxyPort, "127.0.0.1");
     await new Promise<void>((resolve) => socket.once("connect", resolve));
     socket.write("CONNECT localhost:443 HTTP/1.1\r\nHost: localhost:443\r\n\r\n");
@@ -130,8 +130,7 @@ async function nativeRig(reply: (seen: Seen, attempt: number) => Reply, claude: 
       "Host: localhost\r\n" +
       "content-type: application/json\r\n" +
       // The app's own login is the observed one: every request carries it, routed or not.
-      "authorization: Bearer current-token\r\n" +
-      "anthropic-client-current-only: current-fingerprint\r\n" +
+      (options.auth ?? "authorization: Bearer current-token\r\nanthropic-client-current-only: current-fingerprint\r\n") +
       `anthropic-beta: ${clientBeta}\r\n` +
       `content-length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
     );
@@ -337,6 +336,40 @@ test("a 401 on the current login drops it and does not readopt the same token (#
     assert.equal(store.describeSource(), null, "the rejected login is no longer the current one");
     assert.equal(await rig.send("after-signout"), 200);
     assert.equal(rig.seen.at(-1)?.authorization, "Bearer stored-token", "the dead token is not tried again");
+  } finally {
+    await rig.stop();
+  }
+});
+
+// A script in a session's shell inherits HTTPS_PROXY and calls the API on its own key. Routing it
+// put it on the subscription accounts, whose 429 cooled both for a minute (2026-11-05).
+test("a script's own API key goes out on that key, unrouted, and its 429 cools no account", async () => {
+  const rig = await nativeRig((seen) => seen.apiKey
+    ? { status: 429, body: JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: "Error" } }) }
+    : { status: 200 });
+  try {
+    const script = "x-api-key: sk-ant-api03-script\r\nuser-agent: Python-urllib/3.12\r\n";
+    assert.equal(await rig.send("script-1", { auth: script }), 429, "the key's own answer reaches the script");
+    assert.equal(rig.seen.length, 1, "no stored account is tried for it");
+    assert.equal(rig.seen[0]!.apiKey, "sk-ant-api03-script");
+    assert.equal(rig.seen[0]!.authorization, undefined);
+    assert.equal(rig.seen[0]!.body.model, "claude-opus-4-8", "a mapped model is not rewritten for a caller key");
+    assert.equal(await rig.send("conversation-1"), 200);
+    assert.equal(rig.seen[1]!.authorization, "Bearer current-token", "the current login was not cooled by the script's 429");
+    assert.doesNotMatch(JSON.stringify(rig.requests.list(20)), /sk-ant-api03-script/);
+  } finally {
+    await rig.stop();
+  }
+});
+
+test("Claude Code on an API key keeps the pool path", async () => {
+  const rig = await nativeRig(() => ({ status: 200 }));
+  try {
+    const cli = "x-api-key: sk-ant-api03-cli\r\nx-app: cli\r\nuser-agent: claude-cli/2.1.317 (external, cli)\r\n";
+    assert.equal(await rig.send("conversation-1", { auth: cli }), 200);
+    assert.equal(rig.seen[0]!.authorization, "Bearer current-token");
+    assert.equal(rig.seen[0]!.apiKey, undefined, "the pool's identity replaces the caller's key, as before");
+    assert.equal(rig.seen[0]!.body.model, "claude-opus-5");
   } finally {
     await rig.stop();
   }
