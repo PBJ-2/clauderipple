@@ -101,6 +101,25 @@ for (const kind of ["chatgpt", "claude", "google", "api-key"]) {
     } finally { fs.rmSync(home, { recursive: true, force: true }); }
   });
 
+  test(`${kind}: clearing the preferred account moves held conversations back to the configured order`, () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-controls-"));
+    try {
+      const pool = new CredentialPool();
+      const f = fixture(kind, home, Date.now);
+      const a = f.add("a");
+      const b = f.add("b");
+      assert.equal(f.update(b, { preferred: true }), true);
+      assert.equal(owner(pool.pick(kind, f.credentials(), "held")), b);
+      // A retry's list leaves out the credential it tried: that is not the owner clearing the flag.
+      assert.equal(owner(pool.pick(kind, f.credentials().filter((c) => owner(c) !== b), "other")), a);
+      assert.equal(owner(pool.pick(kind, f.credentials(), "held")), b);
+      // The owner clears it (2026-11-05: conversations stayed on the account just un-preferred).
+      assert.equal(f.update(b, { preferred: false }), true);
+      assert.equal(owner(pool.pick(kind, f.credentials(), "held")), a);
+      assert.equal(owner(pool.pick(kind, f.credentials(), "held")), a, "and stays there");
+    } finally { fs.rmSync(home, { recursive: true, force: true }); }
+  });
+
   test(`${kind}: pause overrides affinity, all-cooling selection excludes paused accounts, and clear restores readiness`, () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-controls-"));
     try {

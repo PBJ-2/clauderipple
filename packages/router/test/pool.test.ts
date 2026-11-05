@@ -250,14 +250,17 @@ test("changing the preferred account moves held conversations onto it", () => {
 });
 
 // Removing the preference is not a move the owner asked for, so held conversations keep their cache.
-test("removing the preference leaves held conversations where they are", () => {
+// Removing the preference asks for the configured order back (2026-11-05: held conversations used to
+// stay on the account the owner had just stopped preferring).
+test("removing the preference moves held conversations back to the configured order", () => {
   const c = clock();
   const pool = new CredentialPool({ now: c.now });
   const preferA = (): Credential[] => [{ ...creds("b")[0]! }, { ...creds("a")[0]!, preferred: true }];
   assert.equal(pool.pick("p", preferA(), "conv")?.id, "a");
   const plain = (): Credential[] => creds("b", "a");
-  assert.equal(pool.pick("p", plain(), "conv")?.id, "a", "no preference means configured order for new chats only");
+  assert.equal(pool.pick("p", plain(), "conv")?.id, "b", "the held conversation re-picks from the configured order");
   assert.equal(pool.pick("p", plain(), "fresh")?.id, "b");
+  assert.equal(pool.pick("p", plain(), "conv")?.id, "b", "and stays there");
 });
 
 // Choosing the same account again after removing its preference is a change the owner asked for.

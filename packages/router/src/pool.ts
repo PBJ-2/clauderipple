@@ -236,15 +236,20 @@ export class CredentialPool {
    * ending is not a preference change. A defined owner that differs from the last one seen — including
    * the first one seen after no preference at all — drops the provider's held conversations, so each
    * re-picks; a preference change deliberately costs those conversations one cold prompt cache.
-   * Removing the preference moves nothing, but it is remembered as removed, so choosing the same
-   * account again later is a change. Only a list that still holds the last preferred owner, now
-   * unmarked, proves a removal: a retry's list leaves out the credential it already tried.
+   * Removing the preference is a change too: the owner is asking for the configured order back, so
+   * held conversations re-pick from it. Until 0.12.27 a removal moved nothing, and conversations
+   * kept running on the account the owner had just stopped preferring (2026-11-05). Only a list that
+   * still holds the last preferred owner, now unmarked, proves a removal: a retry's list leaves out
+   * the credential it already tried.
    */
   private observePreference(provider: string, credentials: readonly Credential[]): void {
     const preferred = credentials.find((c) => c.preferred);
     if (!preferred) {
       const seen = this.lastPreferred.get(provider);
-      if (seen !== undefined && credentials.some((c) => (c.ownerId ?? c.id) === seen)) this.lastPreferred.delete(provider);
+      if (seen !== undefined && credentials.some((c) => (c.ownerId ?? c.id) === seen)) {
+        this.lastPreferred.delete(provider);
+        this.dropSticky(provider);
+      }
       return;
     }
     const ownerId = preferred.ownerId ?? preferred.id;
