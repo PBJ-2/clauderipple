@@ -513,7 +513,11 @@ export class ChatGptAdapter {
       input: [{ type: "message", role: "user", content }],
       tools: [tool],
       tool_choice: "required",
-      reasoning: { effort: "low", summary: "auto" },
+      // No `reasoning` here (issue #129). Since 2026-11-04 the image tool reads the outer
+      // `reasoning.effort` as its planning `complexity` — openai-python 0152e3a, ImageGeneration.complexity:
+      // "inherits a supported outer reasoning effort" — and the default image model takes no
+      // complexity at all: "Complexity 'low' is not supported for this image model", 'medium' alike.
+      // Codex itself sends images without reasoning (codex-rs/ext/image-generation, Images API).
       store: false,
       stream: true,
       prompt_cache_key: id,

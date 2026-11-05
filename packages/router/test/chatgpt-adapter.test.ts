@@ -269,6 +269,8 @@ test("image generation sends the hosted tool with references and returns the dec
   const s = seen.at(-1)!;
   assert.equal(s.path, "/codex/responses");
   assert.equal(s.body.tool_choice, "required");
+  // The image tool reads an outer reasoning effort as its complexity and refuses it (issue #129).
+  assert.equal("reasoning" in s.body, false);
   // No size or quality: the backend ignores both, so the shape travels in the prompt.
   assert.deepEqual(s.body.tools, [{ type: "image_generation", output_format: "png", background: "transparent" }]);
   const content = (s.body.input as { content: Record<string, unknown>[] }[])[0]!.content;
