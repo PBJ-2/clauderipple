@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.12.27 — 2026-11-05
+
+### Fixed
+
+- **ChatGPT image generation works again** (#129). Since 2026-11-04 the hosted image tool reads a
+  request's reasoning effort as its new "complexity" setting, which the default image model
+  refuses, so every image failed with "Complexity 'low' is not supported". Image requests no longer
+  carry a reasoning effort. The subscription backend chooses the image model itself (Images 2.6);
+  naming Sunburst or Flare in the request has no effect there.
+- **Codex no longer stops with HTTP 400 after a long `exec` that sends `notify()` progress** (#124).
+  Codex records two outputs under one call id; they now reach Claude as one tool result.
+- **A Windows update no longer leaves the phone host on the old version** (#125). A rename refused
+  while another process or a virus scanner held the file is retried, scheduling the host update can
+  no longer abort the install, and the router re-requests a host update left at an older version.
+- **The current Claude login stays in the account list while the pool uses it** (#123). It used to
+  drop out 12 hours after the last un-routed request even when it was serving requests; a 401 still
+  drops that exact token. A refused usage lookup keeps the last figures marked stale, and the rate
+  limit headers on Claude answers keep them current meanwhile.
+- **Old messages no longer pile up on the phone after Remote Control reconnects** (#126). Lines
+  Claude Code re-appends under the same ids are recognised and not shown again, also after the host
+  restarts, and they no longer disturb running workers or the current plan.
+- **Phone photos reach the model in their real format** (#127). The host reads the image type from
+  the bytes rather than the phone's label, so a JPEG labelled PNG no longer makes the model refuse
+  the turn. The app side of this fix ships with the next Ripple Remote update.
+
 ## 0.12.26 — 2026-11-04
 
 ### Added
