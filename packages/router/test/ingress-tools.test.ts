@@ -255,6 +255,52 @@ for (const kind of ["function", "custom"]) {
     }
     assert.deepEqual(result, before, "compatibility sanitization never mutates the original images");
   });
+
+  const merged = (outputs: unknown[]) => {
+    const result = responsesToAnthropic({ input: outputs.map((output) => ({ type: outputType, call_id: "exec_1", output })) }, "claude-sonnet-5", undefined, undefined, undefined, true);
+    const blocks = result.messages.flatMap((message) => message.content).filter((block) => block.type === "tool_result");
+    assert.equal(blocks.length, 1, "one call id must carry one tool_result (issue #124)");
+    return blocks[0]!.content;
+  };
+
+  test(`${kind} two outputs for one call id merge into one tool_result`, () => {
+    assert.equal(merged([
+      "Script running with cell ID g7:25\nWall time 61.0 seconds\nOutput:",
+      "빌드 진행: objs: 130",
+    ]), "Script running with cell ID g7:25\nWall time 61.0 seconds\nOutput:\n\n빌드 진행: objs: 130");
+  });
+
+  test(`${kind} a later output with images extends the existing tool_result`, () => {
+    const image = { type: "input_image", image_url: `data:image/png;base64,${smallPng}` };
+    assert.deepEqual(merged(["first", [{ type: "input_text", text: "Screenshot follows" }, image]]), [
+      { type: "text", text: "first" },
+      { type: "text", text: "Screenshot follows" },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: smallPng } },
+    ]);
+    assert.deepEqual(merged([[{ type: "input_text", text: "Screenshot follows" }, image], "done"]), [
+      { type: "text", text: "Screenshot follows" },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: smallPng } },
+      { type: "text", text: "done" },
+    ]);
+  });
+
+  test(`${kind} an identical or empty later output adds nothing`, () => {
+    assert.equal(merged(["same output", "same output"]), "same output");
+    assert.equal(merged(["same output", ""]), "same output");
+    assert.equal(merged(["", "later"]), "later");
+  });
+
+  test(`${kind} distinct call ids keep their own tool_result in order`, () => {
+    const result = responsesToAnthropic({ input: [
+      { type: outputType, call_id: "a", output: "first" },
+      { type: outputType, call_id: "b", output: "second" },
+    ] }, "claude-sonnet-5", undefined, undefined, undefined, true);
+    assert.deepEqual(result.messages.map((message) => message.content.map((block) =>
+      block.type === "tool_result" ? { id: block.tool_use_id, content: block.content } : block.type)), [
+      [{ id: "a", content: "first" }],
+      [{ id: "b", content: "second" }],
+    ]);
+  });
 }
 
 test("chat history and choices use the same OAuth identity as declarations", () => {

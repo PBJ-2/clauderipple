@@ -117,6 +117,23 @@ function toolResultContent(value: unknown, nativeImages: boolean): string | Anth
   });
 }
 
+/**
+ * Codex records a second `*_tool_call_output` for one call id when a running exec later reports
+ * progress through `notify()` (issue #124). Anthropic rejects a second `tool_result` for the same
+ * `tool_use`, so a later output joins the first block instead of becoming its own: two strings are
+ * joined by a blank line (an empty or identical later string adds nothing), and anything with
+ * blocks keeps both sides as blocks in their original order. Nothing is dropped.
+ */
+function mergeToolOutput(current: string | AnthropicContent[], next: string | AnthropicContent[]): string | AnthropicContent[] {
+  if (typeof current === "string" && typeof next === "string") {
+    if (!current) return next;
+    return !next || next === current ? current : `${current}\n\n${next}`;
+  }
+  const blocks = (content: string | AnthropicContent[]): AnthropicContent[] =>
+    typeof content === "string" ? (content ? [{ type: "text", text: content }] : []) : content;
+  return [...blocks(current), ...blocks(next)];
+}
+
 function messageContent(value: unknown): AnthropicContent[] {
   if (typeof value === "string") return value ? [{ type: "text", text: value }] : [];
   if (!Array.isArray(value)) return [];
@@ -217,6 +234,10 @@ function responseItems(value: unknown, onIgnoredCompaction: () => void, translat
   if (typeof value === "string") return value ? [{ role: "user", content: [{ type: "text", text: value }] }] : [];
   if (!Array.isArray(value)) return [];
   const messages: AnthropicMessage[] = [];
+  // One tool_result per call id: Codex can record two outputs for a single call (issue #124), and
+  // Anthropic rejects the second ("each tool_use must have a single result"). The map holds the
+  // emitted block so a later output extends it where it already sits.
+  const toolResults = new Map<string, Extract<AnthropicContent, { type: "tool_result" }>>();
   for (const raw of value) {
     const item = object(raw);
     if (!item) continue;
@@ -230,7 +251,17 @@ function responseItems(value: unknown, onIgnoredCompaction: () => void, translat
     }
     if (type === "function_call_output" || type === "custom_tool_call_output") {
       const callId = string(item.call_id) ?? "";
-      if (callId) messages.push({ role: "user", content: [{ type: "tool_result", tool_use_id: callId, content: toolResultContent(item.output, nativeImages) }] });
+      if (callId) {
+        const content = toolResultContent(item.output, nativeImages);
+        const seen = toolResults.get(callId);
+        if (seen) seen.content = mergeToolOutput(seen.content, content);
+        else {
+          // A first output keeps the exact shape (and property order) it had before merging existed.
+          const block = { type: "tool_result" as const, tool_use_id: callId, content };
+          toolResults.set(callId, block);
+          messages.push({ role: "user", content: [block] });
+        }
+      }
       continue;
     }
     if (type === "compaction") {
