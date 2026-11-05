@@ -12,7 +12,7 @@
 
 <p align="center">
   <a href="https://apps.apple.com/es/app/id6823063731"><img height="40" alt="App Store" src="https://img.shields.io/badge/App%20Store-Descargar-0D96F6?style=for-the-badge&logo=apple&logoColor=white"></a>
-  <img height="40" alt="Google Play" src="https://img.shields.io/badge/Google%20Play-Pr%C3%B3ximamente-666666?style=for-the-badge&logo=googleplay&logoColor=white">
+  <a href="https://play.google.com/store/apps/details?id=com.clauderipple.remote&hl=es"><img height="40" alt="Google Play" src="https://img.shields.io/badge/Google%20Play-Descargar-01875F?style=for-the-badge&logo=googleplay&logoColor=white"></a>
   <a href="https://discord.gg/R8ZgGSNHjw"><img height="40" alt="Discord" src="https://img.shields.io/badge/Discord-Unirse-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
 </p>
 
@@ -381,8 +381,7 @@ sesiones, sea cual sea el modelo que las ejecute, en tu teléfono, y no te desco
 
 Instala ClaudeRipple en tu computadora, abre la vista **Teléfono** del panel y escanea el
 código QR una vez. iPhone: [App Store](https://apps.apple.com/es/app/id6823063731). Android:
-en prueba cerrada en Google Play; pide acceso en
-[Discord](https://discord.gg/R8ZgGSNHjw). Las sesiones de la app de Claude funcionan en
+[Google Play](https://play.google.com/store/apps/details?id=com.clauderipple.remote&hl=es). Las sesiones de la app de Claude funcionan en
 macOS; la app incluye una demo para probarla sin computadora.
 
 ## Instalación
@@ -716,7 +715,7 @@ El autor lo usa a diario, pero es un proyecto joven. Cuenta con algunas aspereza
 
 ## Comunidad
 
-Las preguntas, los informes de errores y la beta de Ripple Remote para Android (una prueba cerrada en Google Play) están en Discord: [https://discord.gg/R8ZgGSNHjw](https://discord.gg/R8ZgGSNHjw). Para unirte a la beta de Android, envía la dirección de Gmail que usas en Google Play a @pbj_ripple por mensaje directo, no en un canal donde todos pueden leerla.
+Las preguntas y los informes de errores están en Discord: [https://discord.gg/R8ZgGSNHjw](https://discord.gg/R8ZgGSNHjw).
 
 ## Sin afiliación
 

@@ -12,7 +12,7 @@
 
 <p align="center">
   <a href="https://apps.apple.com/us/app/id6823063731"><img height="40" alt="App Store" src="https://img.shields.io/badge/App%20Store-%E4%B8%8B%E8%BD%BD-0D96F6?style=for-the-badge&logo=apple&logoColor=white"></a>
-  <img height="40" alt="Google Play" src="https://img.shields.io/badge/Google%20Play-%E5%8D%B3%E5%B0%86%E6%8E%A8%E5%87%BA-666666?style=for-the-badge&logo=googleplay&logoColor=white">
+  <a href="https://play.google.com/store/apps/details?id=com.clauderipple.remote&hl=zh-CN"><img height="40" alt="Google Play" src="https://img.shields.io/badge/Google%20Play-%E4%B8%8B%E8%BD%BD-01875F?style=for-the-badge&logo=googleplay&logoColor=white"></a>
   <a href="https://discord.gg/R8ZgGSNHjw"><img height="40" alt="Discord" src="https://img.shields.io/badge/Discord-%E5%8A%A0%E5%85%A5-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
 </p>
 
@@ -214,8 +214,8 @@ Claude Code 的系统提示词和工具描述是为 Claude 编写的，所以其
   无需注册、无广告、无跟踪，免费。
 
 在电脑上安装 ClaudeRipple，打开控制面板的**手机**页面，扫一次二维码即可。
-iPhone：[App Store](https://apps.apple.com/us/app/id6823063731)。Android：正在 Google Play
-进行封闭测试，请到 [Discord](https://discord.gg/R8ZgGSNHjw) 申请。Claude 应用会话联动
+iPhone：[App Store](https://apps.apple.com/us/app/id6823063731)。Android：[Google Play](https://play.google.com/store/apps/details?id=com.clauderipple.remote&hl=zh-CN)。
+Claude 应用会话联动
 支持 macOS；即使没有电脑，也能先用应用内的演示体验。
 
 ## 安装
@@ -423,7 +423,7 @@ Codex app / CLI ──/v1/responses──▶ ClaudeRipple ingress ──▶ Clau
 
 ## 社区
 
-提问、报告问题以及报名 Ripple Remote Android 测试版（Google Play 封闭测试）都在 Discord：[https://discord.gg/R8ZgGSNHjw](https://discord.gg/R8ZgGSNHjw)。想参加 Android 测试版，请把你在 Google Play 上使用的 Gmail 地址私信发给 @pbj_ripple，不要发在所有人都能看到的频道里。
+提问和报告问题都在 Discord：[https://discord.gg/R8ZgGSNHjw](https://discord.gg/R8ZgGSNHjw)。
 
 ## 无关联声明
 

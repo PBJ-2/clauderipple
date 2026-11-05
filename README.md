@@ -20,7 +20,7 @@
 
 <p align="center">
   <a href="https://apps.apple.com/us/app/id6823063731"><img height="40" alt="App Store" src="https://img.shields.io/badge/App%20Store-Download-0D96F6?style=for-the-badge&logo=apple&logoColor=white"></a>
-  <img height="40" alt="Google Play" src="https://img.shields.io/badge/Google%20Play-Coming%20soon-666666?style=for-the-badge&logo=googleplay&logoColor=white">
+  <a href="https://play.google.com/store/apps/details?id=com.clauderipple.remote&hl=en"><img height="40" alt="Google Play" src="https://img.shields.io/badge/Google%20Play-Download-01875F?style=for-the-badge&logo=googleplay&logoColor=white"></a>
   <a href="https://discord.gg/R8ZgGSNHjw"><img height="40" alt="Discord" src="https://img.shields.io/badge/Discord-Join-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
 </p>
 
@@ -362,8 +362,8 @@ runs them, on your phone, and it does not drop you after 30 minutes.
   tracking, free.
 
 Install ClaudeRipple on your computer, open the dashboard's **Phone** view and scan the
-QR code once. iPhone: [App Store](https://apps.apple.com/us/app/id6823063731). Android: in a
-closed test on Google Play — ask on [Discord](https://discord.gg/R8ZgGSNHjw).
+QR code once. iPhone: [App Store](https://apps.apple.com/us/app/id6823063731). Android:
+[Google Play](https://play.google.com/store/apps/details?id=com.clauderipple.remote&hl=en).
 Claude app sessions are supported on macOS; the app has a demo you can try without a
 computer.
 
@@ -703,7 +703,7 @@ In daily use by the author, but young. Expect rough edges:
 
 ## Community
 
-Questions, bug reports and the Ripple Remote Android beta (a closed test on Google Play) are on Discord: [https://discord.gg/R8ZgGSNHjw](https://discord.gg/R8ZgGSNHjw). To join the Android beta, send the Gmail address you use on Google Play to @pbj_ripple as a direct message, not in a channel where everyone can read it.
+Questions and bug reports are on Discord: [https://discord.gg/R8ZgGSNHjw](https://discord.gg/R8ZgGSNHjw).
 
 ## Not affiliated
 

@@ -19,7 +19,7 @@
 
 <p align="center">
   <a href="https://apps.apple.com/kr/app/id6823063731"><img height="40" alt="App Store" src="https://img.shields.io/badge/App%20Store-%EB%8B%A4%EC%9A%B4%EB%A1%9C%EB%93%9C-0D96F6?style=for-the-badge&logo=apple&logoColor=white"></a>
-  <img height="40" alt="Google Play" src="https://img.shields.io/badge/Google%20Play-%EC%A4%80%EB%B9%84%20%EC%A4%91-666666?style=for-the-badge&logo=googleplay&logoColor=white">
+  <a href="https://play.google.com/store/apps/details?id=com.clauderipple.remote&hl=ko"><img height="40" alt="Google Play" src="https://img.shields.io/badge/Google%20Play-%EB%8B%A4%EC%9A%B4%EB%A1%9C%EB%93%9C-01875F?style=for-the-badge&logo=googleplay&logoColor=white"></a>
   <a href="https://discord.gg/R8ZgGSNHjw"><img height="40" alt="Discord" src="https://img.shields.io/badge/Discord-%EC%B0%B8%EC%97%AC%ED%95%98%EA%B8%B0-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
 </p>
 
@@ -301,8 +301,8 @@ Claude 데스크톱 앱에 일을 맡기고, 노트북을 덮고, 소파에서 �
   회원가입·광고·추적 없음, 무료.
 
 컴퓨터에 ClaudeRipple을 설치하고 대시보드의 **휴대폰** 화면에서 QR 코드를 한 번 스캔하면 끝입니다.
-아이폰: [App Store](https://apps.apple.com/kr/app/id6823063731). 안드로이드: Google Play 비공개 테스트 중이며
-[디스코드](https://discord.gg/R8ZgGSNHjw)에서 신청받습니다. Claude 앱 세션 연동은 macOS에서 되고,
+아이폰: [App Store](https://apps.apple.com/kr/app/id6823063731). 안드로이드:
+[Google Play](https://play.google.com/store/apps/details?id=com.clauderipple.remote&hl=ko). Claude 앱 세션 연동은 macOS에서 되고,
 컴퓨터 없이도 앱 안의 데모로 먼저 써 볼 수 있습니다.
 
 ## 설치
@@ -575,7 +575,7 @@ Codex 앱 / CLI ──/v1/responses──▶ ClaudeRipple 입구 ──▶ Claud
 
 ## 커뮤니티
 
-질문, 버그 제보, Ripple Remote 안드로이드 베타(Google Play 비공개 테스트) 신청은 디스코드에서 받습니다: [https://discord.gg/R8ZgGSNHjw](https://discord.gg/R8ZgGSNHjw). 안드로이드 베타에 참여하려면 Google Play에서 쓰는 Gmail 주소를 @pbj_ripple에게 DM으로 보내 주세요. 모두가 읽는 채널에는 올리지 마세요.
+질문과 버그 제보는 디스코드에서 받습니다: [https://discord.gg/R8ZgGSNHjw](https://discord.gg/R8ZgGSNHjw).
 
 ## 비제휴
 
