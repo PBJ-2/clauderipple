@@ -185,6 +185,23 @@ export class ClaudeAccountAuthPool {
     return account.token === token ? [ownerId, "current"] : [ownerId];
   }
 
+  /**
+   * The pool answered on one of its credentials. For the current login held as an observation that
+   * answer is the only validity evidence there is: a 401 means it was signed out or revoked and is
+   * dropped, any other answer means the token was accepted, so the 12 h idle guard starts over.
+   * Without this, use through the pool did not count and an actively used login vanished from the
+   * accounts list and the rotation after 12 h of un-routed silence (issue #123, 2026-11-05).
+   * Keychain/env/token-file sources are left alone: their own expiry is authoritative.
+   */
+  noteAnswer(id: string, status: number): void {
+    const current = this.current.get();
+    if (current instanceof Error || current.source !== "observed") return;
+    const authorization = current.observed.authorization;
+    if (credentialId("current", authorization.replace(/^Bearer\s+/i, "")) !== id) return;
+    if (status === 401) this.current.forgetObserved(authorization);
+    else this.current.noteObservedUse(authorization);
+  }
+
   /** Persist a rejected stored account as requiring re-login. The current CLI account stays external. */
   reject(id: string): void {
     const ownerId = id.split(":", 1)[0]!;

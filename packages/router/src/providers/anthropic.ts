@@ -198,6 +198,16 @@ export class ClaudeCodeAuthStore {
   observedCliVersion(): string | null {
     return this.observed?.cliVersion(this.now()) ?? null;
   }
+
+  /** Counts an observed login being presented or answered on as still current (issue #123). */
+  noteObservedUse(authorization: string): void {
+    this.observed?.noteUsed(authorization, this.now());
+  }
+
+  /** Drops an observed login the upstream rejected; a newer observed token is left alone (issue #123). */
+  forgetObserved(authorization: string): void {
+    this.observed?.forget(authorization);
+  }
 }
 
 /**

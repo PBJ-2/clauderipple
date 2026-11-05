@@ -24,6 +24,7 @@ import { ToolTranslation, ToolTranslationError } from "./tools.ts";
 import { ClaudeAccountAuthPool } from "../providers/anthropic-account-pool.ts";
 import { ObservedClaudeCodeAuth } from "../providers/anthropic-observed.ts";
 import type { ChatGptAdapter } from "../providers/chatgpt/index.ts";
+import type { Credential } from "../pool.ts";
 import {
   ResponsesEventMapper,
   chatToAnthropic,
@@ -448,12 +449,14 @@ export class OpenAiIngress {
     const protocol = upstream.protocol === "https:" ? "https:" : "http:";
     const body = Buffer.from(JSON.stringify(wire));
     let authentication: Record<string, string>;
+    let poolCredential: Credential | undefined;
     if (native && provider.auth === "claude-code") {
       // Codex ingress deliberately uses one credential per request and does not fail over. The shared
       // projection preserves source precedence and keeps ClaudeRipple's added accounts as the fallback
       // that the old single OAuth file provided before multi-account storage.
       const credential = (await this.claudeAccounts.credentials())[0];
       if (!credential) return { status: 401, bytes: sendJson(res, 401, openAiError("Claude login unavailable — connect a Claude subscription", "authentication_error")), note: "Claude OAuth unavailable" };
+      poolCredential = credential;
       authentication = credential.headers;
     } else if (native) {
       try {
@@ -470,6 +473,9 @@ export class OpenAiIngress {
       res.once("close", () => request.destroy());
       request.end(body);
     });
+    // An answer on the pool's credential is what keeps a login used only by the ingress current;
+    // a 401 on it drops the observed copy (issue #123, 2026-11-05).
+    if (poolCredential) this.claudeAccounts.noteAnswer(poolCredential.id, response.statusCode ?? 0);
     if ((response.statusCode ?? 0) < 200 || (response.statusCode ?? 0) >= 300) {
       const text = await new Promise<string>((resolveP) => {
         let output = "";

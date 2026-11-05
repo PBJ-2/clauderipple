@@ -15,6 +15,7 @@ import {
   setPreferredClaudeAccount,
 } from "../src/providers/anthropic-accounts.ts";
 import { ClaudeCodeAuthStore, ClaudeCodeCredentialStore } from "../src/providers/anthropic.ts";
+import { ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
 
 function home(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "cr-claude-account-pool-"));
@@ -230,6 +231,68 @@ test("a refreshed or re-signed-in grant gets a new runtime identity without chan
     const afterBoth = pool.peekCredentials()[0]!;
     assert.equal(afterBoth.ownerId, first.id);
     assert.notEqual(afterBoth.id, afterAccessOnly.id);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Issue #123: the 12 h guard counted from the last un-routed request, so an account answering
+// every turn through the pool was forgotten and then listed nowhere. Pool use is now evidence.
+test("use through the pool keeps the observed current login inside the 12 h guard (#123)", () => {
+  const dir = home();
+  try {
+    const HOUR = 3_600_000;
+    let time = 10_000_000;
+    const now = () => time;
+    const observed = new ObservedClaudeCodeAuth();
+    observed.observe(["authorization", "Bearer current-token"], time);
+    const current = new ClaudeCodeAuthStore(undefined, { observed, home: dir, env: {}, now });
+    const pool = new ClaudeAccountAuthPool({ home: dir, now, current, log: log().logger });
+
+    // The last un-routed request is the observation above; from now on the pool answers on it.
+    for (let hour = 1; hour <= 13; hour += 1) {
+      time += HOUR;
+      const credential = pool.peekCredentials().find((candidate) => candidate.ownerId === "current");
+      assert.ok(credential, `the current login is still listed after ${hour} h of routed use`);
+      pool.noteAnswer(credential.id, 429);
+    }
+    assert.equal(current.describeSource(), "observed");
+    assert.equal(pool.peekCredentials()[0]?.headers.authorization, "Bearer current-token");
+
+    // Without any evidence for 12 h it is dropped, as before.
+    time += 13 * HOUR;
+    assert.equal(current.describeSource(), null);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a 401 drops the observed current login and the same dead token is not readopted (#123)", () => {
+  const dir = home();
+  try {
+    let time = 10_000_000;
+    const now = () => time;
+    const observed = new ObservedClaudeCodeAuth();
+    observed.observe(["authorization", "Bearer current-token"], time);
+    const current = new ClaudeCodeAuthStore(undefined, { observed, home: dir, env: {}, now });
+    const pool = new ClaudeAccountAuthPool({ home: dir, now, current, log: log().logger });
+    const credential = pool.peekCredentials()[0]!;
+    assert.equal(credential.ownerId, "current");
+
+    time += 1_000;
+    pool.noteAnswer(credential.id, 401);
+    assert.equal(current.describeSource(), null);
+    assert.deepEqual(pool.peekCredentials(), []);
+
+    // The client has not signed in again and keeps presenting the rejected token: not adopted.
+    observed.observe(["authorization", "Bearer current-token"], time);
+    assert.equal(current.describeSource(), null);
+    assert.deepEqual(pool.peekCredentials(), []);
+
+    // A different token is a new login and becomes the current one again.
+    observed.observe(["authorization", "Bearer fresh-token"], time);
+    assert.equal(current.describeSource(), "observed");
+    assert.equal(pool.peekCredentials()[0]?.headers.authorization, "Bearer fresh-token");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

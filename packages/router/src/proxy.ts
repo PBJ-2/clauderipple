@@ -1128,9 +1128,13 @@ export class Proxy {
       const requestedEffort = effortOf(json ?? {});
       if (requestedEffort) record.effort = requestedEffort;
 
-      // Only a real, un-routed Claude Code Messages request may refresh this RAM-only source.
+      // Only a real Claude Code Messages request may refresh this RAM-only source. A routed one
+      // carries the same app login as an un-routed one, and the router answers it with a pool
+      // account instead of that login; ignoring it left the login forgotten after 12 h of nothing
+      // but routed traffic while it was being used through the pool (issue #123, 2026-11-05). The
+      // observation also follows a token refresh or an account switch on the app's next request.
       // Do not inspect it elsewhere: it must never enter logs, RequestLog, picker diagnostics, or admin data.
-      if (isApiHost && pathname === "/v1/messages" && !route) this.deps.observedClaudeCodeAuth?.observe(req.rawHeaders);
+      if (isApiHost && pathname === "/v1/messages") this.deps.observedClaudeCodeAuth?.observe(req.rawHeaders);
 
       // A `WebSearch` side request routed to a provider that cannot run the server tool must not be
       // sent. The tool is dropped on every translated path, which leaves "you are an assistant for
@@ -1170,6 +1174,8 @@ export class Proxy {
       let chosen: Credential | null = null;
       let credentialCandidates: readonly Credential[] = [];
       let penalised: { provider: string; id: string } | null = null;
+      /** This attempt goes out on the app's own Claude login rather than a pool credential. */
+      let ownLogin = false;
       /** This attempt goes out on a native Claude account-pool credential, so its answer names a thread. */
       let poolAnswer = false;
       let target: { protocol: "http:" | "https:"; host: string; port: number; agent: http.Agent | https.Agent; extraHeaders: Record<string, string>; basePath?: string; dropClientAuth?: boolean; dropHeaders?: Set<string>; dropHeaderPrefixes?: string[] };
@@ -1452,6 +1458,7 @@ export class Proxy {
             body = Buffer.from(JSON.stringify(json));
             if (ownSignIn) {
               target = { protocol: "https:", host: cfg.upstream, port: this.deps.upstreamPort ?? 443, agent: this.deps.upstreamAgent ?? this.agentFor(route.provider, "https:"), extraHeaders: {} };
+              ownLogin = true;
               const routeEffort = effortOf(json);
               if (routeEffort) record.effort = routeEffort;
               tag = `CLAUDE ${route.tag} account=app (no usable pool account)`;
@@ -1553,6 +1560,9 @@ export class Proxy {
         } else if (isApiHost) {
           target = { protocol: "https:", host: cfg.upstream, port: this.deps.upstreamPort ?? 443, agent: this.deps.upstreamAgent ?? this.upstreamAgent, extraHeaders: {} };
           tag = `PASS ${typeof model === "string" ? model : "-"}`;
+          // An un-routed native Messages turn goes out on the app's own sign-in, and its answer is the
+          // only statement of that login's unified limits when the usage endpoint refuses (2026-11-05).
+          ownLogin = isMessages && typeof req.headers.authorization === "string";
           // Passthrough stays byte-exact unless another model's thinking would get the turn refused.
           if (json) {
             const removed = this.thinkingOrigins.dropKnownForeign(json, "anthropic");
@@ -1791,6 +1801,18 @@ export class Proxy {
             this.pool.penalise(penalised.provider, penalised.id, status, retryAfterMs(upRes.headers), errBody);
             if (status === 401 && cfg.providers[penalised.provider]?.type === "anthropic") this.claudeAccounts.reject(penalised.id);
           } else this.pool.succeed(penalised.provider, penalised.id);
+          if (cfg.providers[penalised.provider]?.type === "anthropic") {
+            // An answer on the app's own login is what keeps it in the pool; a 401 drops it
+            // (issue #123, 2026-11-05). A message answer also states its window usage in the
+            // unified limit headers, the only reading available while the usage endpoint refuses.
+            this.claudeAccounts.noteAnswer(penalised.id, status);
+            this.claudeUsage.observeAnswer(penalised.id.split(":", 1)[0]!, upRes.headers);
+          }
+        } else if (ownLogin) {
+          // No pool credential answered: the app's own login did. Its unified limit headers are the
+          // only fresh reading of that account while GET /api/oauth/usage refuses; without them the
+          // current login's card kept an old number through the whole backoff (2026-11-05).
+          this.claudeUsage.observeAnswer("current", upRes.headers);
         }
 
         // Nothing has been written to the client yet, so a refused credential can still be replaced

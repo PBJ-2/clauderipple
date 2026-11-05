@@ -15,6 +15,7 @@ import { DEFAULTS, type Config } from "../src/config.ts";
 import { UpstreamHealth } from "../src/health.ts";
 import { Logger } from "../src/log.ts";
 import { ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
+import { ClaudeCodeAuthStore } from "../src/providers/anthropic.ts";
 import { readClaudeAccountsFile, saveClaudeOAuthAccount, updateClaudeAccount } from "../src/providers/anthropic-accounts.ts";
 import { Proxy } from "../src/proxy.ts";
 import { RequestLog } from "../src/requestlog.ts";
@@ -108,7 +109,7 @@ async function nativeRig(reply: (seen: Seen, attempt: number) => Reply, claude: 
   });
   await proxy.listen();
 
-  const send = async (conversation = "conversation-1", options: { content?: string; previous?: string } = {}): Promise<number> => {
+  const send = async (conversation = "conversation-1", options: { content?: string; previous?: string; model?: string } = {}): Promise<number> => {
     const socket = net.connect(proxyPort, "127.0.0.1");
     await new Promise<void>((resolve) => socket.once("connect", resolve));
     socket.write("CONNECT localhost:443 HTTP/1.1\r\nHost: localhost:443\r\n\r\n");
@@ -116,7 +117,7 @@ async function nativeRig(reply: (seen: Seen, attempt: number) => Reply, claude: 
     const secure = tls.connect({ socket, servername: "localhost", ca: ca.certPem });
     await new Promise<void>((resolve) => secure.once("secureConnect", resolve));
     const body = JSON.stringify({
-      model: "claude-opus-4-8",
+      model: options.model ?? "claude-opus-4-8",
       max_tokens: 32,
       metadata: { user_id: conversation },
       tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 2 }],
@@ -128,8 +129,9 @@ async function nativeRig(reply: (seen: Seen, attempt: number) => Reply, claude: 
       "POST /v1/messages HTTP/1.1\r\n" +
       "Host: localhost\r\n" +
       "content-type: application/json\r\n" +
-      "authorization: Bearer caller-token\r\n" +
-      "anthropic-client-current-only: caller-fingerprint\r\n" +
+      // The app's own login is the observed one: every request carries it, routed or not.
+      "authorization: Bearer current-token\r\n" +
+      "anthropic-client-current-only: current-fingerprint\r\n" +
       `anthropic-beta: ${clientBeta}\r\n` +
       `content-length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
     );
@@ -142,7 +144,9 @@ async function nativeRig(reply: (seen: Seen, attempt: number) => Reply, claude: 
     home,
     stored,
     seen,
+    observed,
     requests,
+    proxy,
     send,
     stop: async () => {
       proxy.close();
@@ -272,6 +276,67 @@ test("a stored Claude account rejected with 401 is persisted as needing reauthen
     assert.equal(await rig.send(), 401);
     const stored = readClaudeAccountsFile(rig.home).find((account) => account.id === rig.stored.id)!;
     assert.equal(stored.needsReauth, true);
+  } finally {
+    await rig.stop();
+  }
+});
+
+// The reporter's timeline (issue #123): the last un-routed `/v1/messages` request was over 12 h
+// ago, everything since was routed, and the login vanished from the accounts list and the pool.
+test("routed use keeps the current login 12 h after the last un-routed request (#123)", async () => {
+  const rig = await nativeRig(() => ({ status: 200 }));
+  try {
+    rig.observed.observe(["authorization", "Bearer current-token", "anthropic-version", "2023-06-01"], Date.now() - 13 * 3_600_000);
+    assert.equal(await rig.send(), 200);
+    assert.equal(rig.seen[0]?.authorization, "Bearer current-token", "the app's own login still leads the pool");
+    const store = new ClaudeCodeAuthStore(undefined, { observed: rig.observed, home: rig.home, env: {} });
+    assert.equal(store.describeSource(), "observed", "the login is still listed after the routed request");
+  } finally {
+    await rig.stop();
+  }
+});
+
+// An un-routed native Messages turn is pass-through traffic on the app's own sign-in: no pool
+// credential answers, so nothing else ever reports that login's unified limits. While
+// /api/oauth/usage refuses, this answer's headers are the only reading it gets (issue #123).
+test("an un-routed answer on the app's own login feeds its unified limit headers to usage (#123)", async () => {
+  const reset = Math.floor(Date.now() / 1000) + 600;
+  const rig = await nativeRig(() => ({
+    status: 200,
+    headers: {
+      "anthropic-ratelimit-unified-status": "allowed",
+      "anthropic-ratelimit-unified-5h-utilization": "0.42",
+      "anthropic-ratelimit-unified-5h-reset": String(reset),
+    },
+  }));
+  const realFetch = globalThis.fetch;
+  // The usage lookup is refused, as it is while the reading matters; only the answer is left.
+  globalThis.fetch = (async () => new Response("no", { status: 429 })) as typeof fetch;
+  try {
+    assert.equal(await rig.send("unrouted-current", { model: "claude-sonnet-5" }), 200);
+    assert.equal(rig.seen[0]?.authorization, "Bearer current-token", "the turn went out on the app's own sign-in");
+    assert.equal(rig.seen[0]?.body.model, "claude-sonnet-5", "the native model id passed through un-routed");
+    const usage = (await rig.proxy.claudeUsage.snapshot()).current as { rate_limits: { primary: { used_percent: number } } };
+    assert.equal(usage.rate_limits.primary.used_percent, 42, "the answer's headers became the current login's reading");
+  } finally {
+    globalThis.fetch = realFetch;
+    await rig.stop();
+  }
+});
+
+// A 401 is the upstream saying this exact token is signed out or revoked; it must leave the pool,
+// and re-presenting the same dead token must not bring it back (issue #123).
+test("a 401 on the current login drops it and does not readopt the same token (#123)", async () => {
+  const rig = await nativeRig((seen) => seen.authorization === "Bearer current-token"
+    ? { status: 401, body: JSON.stringify({ type: "error", error: { type: "authentication_error" } }) }
+    : { status: 200 });
+  try {
+    assert.equal(await rig.send(), 200, "the turn is answered on the next account");
+    assert.deepEqual(rig.seen.map((item) => item.authorization), ["Bearer current-token", "Bearer stored-token"]);
+    const store = new ClaudeCodeAuthStore(undefined, { observed: rig.observed, home: rig.home, env: {} });
+    assert.equal(store.describeSource(), null, "the rejected login is no longer the current one");
+    assert.equal(await rig.send("after-signout"), 200);
+    assert.equal(rig.seen.at(-1)?.authorization, "Bearer stored-token", "the dead token is not tried again");
   } finally {
     await rig.stop();
   }
