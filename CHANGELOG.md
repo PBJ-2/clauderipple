@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.12.30 — 2026-11-05
+
+### Fixed
+
+- **A script's own Anthropic API key is no longer swapped for your Claude login.** Scripts run from
+  a Code session's shell inherit its proxy. A `/v1/messages` call on the script's own `x-api-key`
+  used to be routed onto your Claude accounts: it was billed to your subscription, and a 429 there
+  paused every account for a minute, which made the mod replace named Claude workers with another
+  model. Such a request now goes to Anthropic on its own key, unchanged, and its answers no longer
+  affect your accounts. Claude Code itself, including on an API key, is unchanged.
+
 ## 0.12.29 — 2026-11-05
 
 ### Added
