@@ -1704,15 +1704,14 @@ async function showPhoneQr(button) {
   } catch { if (generation === phoneQrGeneration) toast(t("common.loadFailed"), true); }
   finally { button.disabled = false; }
 }
-// Ripple Remote in the stores. iPhone links to the storefront of the dashboard's language, as the
-// README headers do; Android is a closed test on Google Play, joined through Discord, so no Play link.
+// Ripple Remote in the stores, each in the dashboard's language, as the README headers link them.
 const REMOTE_STOREFRONT = { ko: "kr", en: "us", zh: "us", ja: "jp", es: "es", pt: "br" };
+const REMOTE_PLAY_LANG = { ko: "ko", en: "en", zh: "zh-CN", ja: "ja", es: "es", pt: "pt-BR" };
 /** Read when drawn, not at load: this block is also evaluated on its own by the phone tests. */
 function remoteAppStoreUrl() { return `https://apps.apple.com/${REMOTE_STOREFRONT[CURRENT_LANG] || "us"}/app/id6823063731`; }
-const COMMUNITY_URL = "https://discord.gg/R8ZgGSNHjw";
+function remotePlayUrl() { return `https://play.google.com/store/apps/details?id=com.clauderipple.remote&hl=${REMOTE_PLAY_LANG[CURRENT_LANG] || "en"}`; }
 function externalLink(href, cls, children) { return el("a", { class: cls, href, target: "_blank", rel: "noopener noreferrer" }, children); }
 function phonePaired(data) { return Boolean(data && data.hostRunning && data.phones && data.phones.length); }
-function remoteAndroidNote(cls) { return el("span", { class: `${cls} remote-android` }, [t("phone.promo.android"), " · ", externalLink(COMMUNITY_URL, "login-link", [t("phone.promo.androidLink")])]); }
 /** No phone paired yet: what the app does that nothing else does, the store, and how the QR below fits in. */
 function remotePromo(data) {
   const points = ["models", "hours", "private"].map(key => el("li", {}, [el("strong", { text: t(`phone.promo.${key}`) }), " ", t(`phone.promo.${key}Body`)]));
@@ -1726,13 +1725,19 @@ function remotePromo(data) {
       el("p", { class: "conn-lead", text: t("phone.promo.lead") }),
     ])]),
     el("ul", { class: "remote-points" }, points),
-    el("div", { class: "remote-get" }, [externalLink(remoteAppStoreUrl(), "btn large remote-store", [download, t("phone.promo.appStore")]), remoteAndroidNote("hint")]),
+    el("div", { class: "remote-get" }, [
+      externalLink(remoteAppStoreUrl(), "btn large remote-store", [download, t("phone.promo.appStore")]),
+      externalLink(remotePlayUrl(), "btn large remote-store", [download.cloneNode(true), t("phone.promo.googlePlay")]),
+    ]),
     el("p", { class: "remote-next", text: t(data.hostRunning ? "phone.promo.nextQr" : "phone.promo.nextHost") }),
   ]);
 }
 /** A phone is paired already: one quiet row for the next phone instead of the pitch. */
 function remoteGetApp() {
-  return section(null, [cell(t("phone.promo.compact"), externalLink(remoteAppStoreUrl(), "btn secondary compact", [t("phone.promo.appStoreShort")]), [remoteAndroidNote("cell-sub")])]);
+  return section(null, [cell(t("phone.promo.compact"), [
+    externalLink(remoteAppStoreUrl(), "btn secondary compact", [t("phone.promo.appStoreShort")]),
+    externalLink(remotePlayUrl(), "btn secondary compact", [t("phone.promo.googlePlayShort")]),
+  ])]);
 }
 function renderPhoneStatus(data) {
   const rows = [cell(t("phone.host"), badge(data.hostRunning ? "ok" : "warn", t(data.hostRunning ? "phone.running" : "phone.stopped")))];

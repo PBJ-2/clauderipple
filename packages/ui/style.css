@@ -501,8 +501,6 @@ label.check input { margin-top: 2px; }
 .remote-get { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin: 20px 0 0 60px; }
 .btn.large.remote-store { width: auto; gap: 8px; }
 .remote-store-icon { width: 18px; height: 18px; stroke-width: 2; }
-.remote-get .hint { flex: 1 1 200px; }
-.remote-android .login-link { white-space: nowrap; }
 .remote-next { margin: 16px 0 0 60px; padding-top: 14px; border-top: 1px solid var(--separator); color: var(--label-2); font-size: var(--fs-foot); line-height: 1.45; }
 
 /* ---- Providers ----------------------------------------------------------------------- */
@@ -1059,7 +1057,6 @@ a.cell { color: inherit; text-decoration: none; }
   .remote-points, .remote-get, .remote-next { margin-left: 0; padding-left: 0; }
   .remote-get { flex-direction: column; align-items: stretch; }
   .btn.large.remote-store { width: 100%; }
-  .remote-get .hint { flex: 0 0 auto; text-align: center; }
 
   /* Requests read as a list: model and status on top, the numbers on one quiet line below. */
   .logs-table-card { overflow: visible; }
