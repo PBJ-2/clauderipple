@@ -70,7 +70,11 @@ async function api(path, opts) {
 // The router writes `cli.models` to settings.json on this save (they only take effect there). If
 // that write could not happen it says so here — a slot that silently does nothing is the bug this
 // call used to be, so a failure must reach the screen rather than the router log.
-/** @param {Object} next @param {(fresh: Object) => Object} [rebase] Reapply an editor's atomic changes on a conflict. */
+/**
+ * @param {Object} next
+ * @param {(fresh: Object, replay: () => Object) => Object} [rebase] Reapply an editor's atomic changes
+ *   on a conflict; `replay` is the default merge of this save's field changes onto `fresh`.
+ */
 async function configRequest(next, rebase) {
   // Older routers return a raw config without a revision: keep their existing PUT contract.
   const base = configSnapshots.get(next.configRevision);
@@ -84,7 +88,8 @@ async function configRequest(next, rebase) {
     } catch (error) {
       if (error.status !== 409 || (!changes && !rebase) || attempt >= 3) throw error;
       const fresh = await api("/api/config");
-      const rebased = rebase ? rebase(fresh) : modApply(fresh, changes, arrayKeys);
+      const replay = () => changes ? modApply(fresh, changes, arrayKeys) : clone(fresh);
+      const rebased = rebase ? rebase(fresh, replay) : replay();
       // Callers retain `next` as their saved copy, including everything the retry preserved.
       for (const key of Object.keys(next)) delete next[key];
       Object.assign(next, rebased);
@@ -1022,6 +1027,7 @@ function renderClients() {
     void togglePicker(!picker.enabled, true);
   };
   renderClientPickerModels(picker.enabled);
+  renderClientPickerOrder(picker.enabled);
   renderModelSlots();
   renderAutoClassifier();
   const modEnabled = Boolean(status.statusMod);
@@ -1076,8 +1082,10 @@ function renderClientPickerModels(enabled) {
     ])]),
   ]);
   // Typing in a window changes none of this, and the catalogue arrives once with the screen, so a
-  // repeat poll — or a save elsewhere on this screen — has nothing new to draw.
-  if (key === pickerModelsDrawnFor.key && box.childElementCount) return;
+  // repeat poll — or a save elsewhere on this screen — has nothing new to draw. Nor does a redraw
+  // while picker saves are open: it would show what the first of them stored and undo the ticks the
+  // waiting one is about to read.
+  if ((key === pickerModelsDrawnFor.key || pickerSavesOpen > 0) && box.childElementCount) return;
   const typing = document.activeElement;
   const typingModel = typing && typing.classList && typing.classList.contains("model-window") && box.contains(typing) ? typing.dataset.model : null;
   const typingCaret = typingModel ? typing.selectionStart : null;
@@ -1137,6 +1145,77 @@ function renderClientPickerModels(enabled) {
       again.focus();
       if (typingCaret !== null) { try { again.setSelectionRange(typingCaret, typingCaret); } catch { /* number inputs have no selection */ } }
     }
+  }
+}
+// The order the app picker lists the added models in: it shows them after Claude's own, in the
+// order `cli.extraModels` stores them (picker.ts appends them as stored). A reorder not yet saved is
+// `pickerOrderPending`; the list shows it at once, and the save that carries it clears it.
+let pickerOrderDrawnFor = { key: null };
+let pickerOrderPending = null;
+let pickerOrderFocus = null;
+/** The added models in picker order. Claude's own ids are left out: those keep their own place there. */
+function pickerOrderIds() {
+  const native = new Set(claudeModels.map((model) => model.id));
+  const known = allKnownModelIds(currentConfig);
+  const entries = orderPickerEntries((currentConfig.cli && currentConfig.cli.extraModels) || [], pickerOrderPending || []);
+  return [...new Set(entries.map((entry) => entry.model))].filter((id) => known.has(id) && !native.has(id));
+}
+function renderClientPickerOrder(enabled) {
+  const card = $("#client-picker-order-card");
+  const ids = enabled && currentConfig ? pickerOrderIds() : [];
+  // One model has no order to choose.
+  card.hidden = ids.length < 2;
+  if (card.hidden) { pickerOrderDrawnFor = { key: null }; return; }
+  const box = $("#client-picker-order");
+  const entries = (currentConfig.cli && currentConfig.cli.extraModels) || [];
+  const rows = ids.map((id) => {
+    const entry = entries.find((item) => item.model === id);
+    const owner = pickerOwner(currentConfig, id);
+    return { id, name: (entry && entry.name) || id, provider: owner ? providerLabel(owner, currentConfig.providers[owner] || {}) : "" };
+  });
+  const key = JSON.stringify(rows);
+  if (key === pickerOrderDrawnFor.key && box.childElementCount) return;
+  // An arrow that has focus when the list is rebuilt for any other reason (a poll, a failed save
+  // putting the old order back) keeps it the same way a move does.
+  const active = document.activeElement;
+  const activeKey = active && box.contains(active) ? active.getAttribute("data-key") : null;
+  if (!pickerOrderFocus && activeKey && activeKey.startsWith("picker-order:")) {
+    const at = activeKey.lastIndexOf(":");
+    pickerOrderFocus = { id: activeKey.slice("picker-order:".length, at), suffix: activeKey.slice(at + 1) };
+  }
+  box.replaceChildren(...rows.map((row, index) => {
+    const move = (delta, suffix) => {
+      const next = rows.map((item) => item.id);
+      [next[index], next[index + delta]] = [next[index + delta], next[index]];
+      pickerOrderPending = next;
+      pickerOrderFocus = { id: row.id, suffix };
+      renderClientPickerOrder(true);
+      void saveClientPickerModels(false);
+    };
+    const button = (suffix, text, labelKey, disabled, delta) => el("button", {
+      type: "button", class: "btn secondary compact", "data-key": `picker-order:${row.id}:${suffix}`, text,
+      "aria-label": t(labelKey, { name: row.name }), title: t(labelKey, { name: row.name }),
+      ...(disabled ? { disabled: "" } : {}), onclick: () => move(delta, suffix),
+    });
+    return el("li", { class: "picker-order-item" }, [el("div", { class: "po-row", title: row.id }, [
+      el("span", { class: "po-name", text: row.name }),
+      row.provider ? el("small", { text: row.provider }) : null,
+      el("div", { class: "rung-actions" }, [
+        button("up", "↑", "slots.pickerMoveUp", index === 0, -1),
+        button("down", "↓", "slots.pickerMoveDown", index === rows.length - 1, 1),
+      ]),
+    ])]);
+  }));
+  pickerOrderDrawnFor = { key };
+  // The button just pressed is rebuilt with its row; keyboard focus follows the row, onto the other
+  // arrow once this one has reached the end.
+  if (pickerOrderFocus) {
+    const { id, suffix } = pickerOrderFocus;
+    pickerOrderFocus = null;
+    const find = (which) => box.querySelector(`[data-key="${CSS.escape(`picker-order:${id}:${which}`)}"]`);
+    const same = find(suffix);
+    const target = same && !same.disabled ? same : find(suffix === "up" ? "down" : "up");
+    if (target) target.focus();
   }
 }
 // Claude Code picks these before a request exists, so routing cannot reach them: a search, a title
@@ -1452,20 +1531,63 @@ function clientPickerSelections() {
     return { id: input.dataset.model, name: input.dataset.name, provider: input.dataset.provider, contextWindow };
   });
 }
-async function saveClientPickerModels() {
+// One picker save at a time, each built from the screen as it is when that save starts. Two quick
+// clicks used to race: the earlier save's conflict retry put back a tick the later one had removed.
+// A save asked for while one is waiting adds nothing, since the waiting one reads the newer screen;
+// and while any is open the checklist is not redrawn (renderClientPickerModels), so the screen it
+// reads is still the one the person clicked, not the copy the save before it stored.
+let pickerSaving = Promise.resolve();
+let pickerSaveWaiting = false;
+let pickerSavesOpen = 0;
+// Whether a tick or a window changed since the last save read them. A reorder alone leaves the list
+// as the router holds it: rebuilding it from this screen put back a model another window had removed.
+let pickerSelectionsChanged = false;
+function saveClientPickerModels(selectionsChanged = true) {
+  if (selectionsChanged) pickerSelectionsChanged = true;
+  if (pickerSaveWaiting) return pickerSaving;
+  pickerSaveWaiting = true;
+  pickerSavesOpen++;
+  pickerSaving = pickerSaving.catch(() => {})
+    .then(() => { pickerSaveWaiting = false; return saveClientPickerModelsNow(); })
+    .finally(() => { pickerSavesOpen--; });
+  return pickerSaving;
+}
+async function saveClientPickerModelsNow() {
   if (!currentConfig) return;
-  const next = applyPickerSelections(clone(await latestConfig()), clientPickerSelections());
+  // A reorder rides on this save only when one is waiting; otherwise the stored order stands, even
+  // one another window saved since this screen last drew.
+  const pendingOrder = pickerOrderPending;
+  const selections = pickerSelectionsChanged ? clientPickerSelections() : null;
+  pickerSelectionsChanged = false;
+  const next = clone(await latestConfig());
+  if (selections) applyPickerSelections(next, selections);
+  if (pendingOrder) next.cli = { ...(next.cli || {}), extraModels: orderPickerEntries((next.cli && next.cli.extraModels) || [], pendingOrder) };
+  // A conflict retry merges this save's ticks and windows field by field, as every save does, and
+  // then puts the order back: an order is no field change, so the merge alone would drop it.
+  const rebase = pendingOrder ? (fresh, replay) => {
+    const merged = replay();
+    merged.cli = { ...(merged.cli || {}), extraModels: orderPickerEntries((merged.cli && merged.cli.extraModels) || [], pendingOrder) };
+    return merged;
+  } : undefined;
   try {
-    const out = await configRequest(next);
+    const out = await configRequest(next, rebase);
     currentConfig = next;
+    if (pickerOrderPending === pendingOrder) pickerOrderPending = null;
+    renderClientPickerOrder(pickerModeOn());
     // The override changes which window the router resolves; the rows read that map to decide
     // whether the catalogue is in effect, so read it again before the next redraw.
     pickerContextWindows = await api("/api/context-windows").catch(() => pickerContextWindows);
     // Everything the fields held, drafts included, is now the saved copy: there is nothing left to
     // carry over the next rebuild.
     pickerWindowDrafts.clear();
-    configSaved(out, t("slots.saved"));
-  } catch (error) { toast(t("common.saveFailed"), true, error.message); }
+    // A tick or a window applies to the next session; an order only once the app is reopened.
+    configSaved(out, t(pendingOrder ? "slots.pickerOrderSaved" : "slots.saved"));
+  } catch (error) {
+    // The order list goes back to what is saved rather than show an order the router never took.
+    if (pickerOrderPending === pendingOrder) pickerOrderPending = null;
+    renderClientPickerOrder(pickerModeOn());
+    toast(t("common.saveFailed"), true, error.message);
+  }
 }
 function pickerModeOn() {
   return Boolean(status && status.picker && status.picker.enabled);
@@ -2227,7 +2349,13 @@ function applyPickerSelections(next, selections, preserveWindows = false) {
   // one) is not an orphan and stays.
   const currentExtras = (next.cli && next.cli.extraModels) || [];
   const orphans = new Set(currentExtras.filter((entry) => entry.model && !known.has(entry.model)).map((entry) => entry.model));
-  const selected = selections.filter((entry) => entry.id && entry.provider && known.has(entry.id));
+  // The app picker lists these in stored order, and that order is the operator's: an entry that
+  // stays keeps its place and one ticked now goes after them. The rebuild used to follow the order
+  // of `selections`, so every provider save moved that provider's models to the end.
+  const stored = new Map();
+  currentExtras.forEach((entry, index) => { if (!stored.has(entry.model)) stored.set(entry.model, index); });
+  const place = (entry) => stored.has(entry.id) ? stored.get(entry.id) : currentExtras.length;
+  const selected = selections.filter((entry) => entry.id && entry.provider && known.has(entry.id)).sort((a, b) => place(a) - place(b));
   const extras = new Map();
   const direct = new Map();
   for (const entry of selected) {
@@ -2256,6 +2384,33 @@ function applyPickerSelections(next, selections, preserveWindows = false) {
   next.direct = [...byPrefix.values()];
   // A legacy gpt- prefix rule is intentionally retained by the filter above.
   return next;
+}
+/**
+ * What a provider form's save leaves in the picker: every other provider's entries, and of its own
+ * the ones the "show in picker" box speaks for. A provider already in the picker keeps the subset
+ * the Clients screen chose, plus any model this save declares for the first time; ticking all of
+ * them again put back the models the operator had taken out there. A provider that had none shown
+ * — a new one, or the box just ticked — shows everything it declares, as before.
+ */
+function providerPickerSelections(config, providerName, saved, checkedModels, show) {
+  const others = pickerSelectionsExcept(config, providerName);
+  if (!show) return others;
+  const shown = new Set(((config.cli && config.cli.extraModels) || []).map((entry) => entry.model));
+  const declared = new Set(((saved && saved.models) || []).map((model) => typeof model === "string" ? model : model && model.id));
+  const keepSubset = [...declared].some((id) => shown.has(id));
+  const own = keepSubset ? checkedModels.filter((model) => shown.has(model.id) || !declared.has(model.id)) : checkedModels;
+  return [...others, ...own.map((model) => ({ ...model, provider: providerName }))];
+}
+/**
+ * `entries` (picker entries) with the ones `ids` names put into that order, among the places they
+ * already hold. The rest — ticked since the order was read, or not in the order list at all, as a
+ * Claude model the app lists itself — stay where they are.
+ */
+function orderPickerEntries(entries, ids) {
+  const rank = new Map(ids.map((id, index) => [id, index]));
+  const listed = entries.filter((entry) => rank.has(entry.model)).sort((a, b) => rank.get(a.model) - rank.get(b.model));
+  let next = 0;
+  return entries.map((entry) => rank.has(entry.model) ? listed[next++] : entry);
 }
 function updateSlotSummary() {
   const summaries = $all("#slots-list .map-row").map((row) => row._get()).filter((item) => item.route).slice(0, 3).map((item) => {
@@ -3936,6 +4091,9 @@ function openGrokProviderForm(options) {
   saveButton.addEventListener("click", async () => {
     const typedName = nameInput.value.trim();
     if (!typedName) { toast(t("providers.nameRequired"), true); return; }
+    // A Clients-screen picker save still open would land after this one and rebuild the list from
+    // the screen it read before: let it land first, so this save starts from what it stored.
+    await pickerSaving.catch(() => {});
     const next = clone(await latestConfig());
     const providerName = existing ? options.name : uniqueName(typedName, next.providers);
     const saved = existing && (next.providers[options.name] || existing);
@@ -3951,8 +4109,7 @@ function openGrokProviderForm(options) {
       models: checkedModels,
     };
     applyProviderLabel(next.providers[providerName], providerName, typedName);
-    const existingSelections = pickerSelectionsExcept(next, providerName);
-    applyPickerSelections(next, pickerInput.checked ? [...existingSelections, ...checkedModels.map((model) => ({ ...model, provider: providerName }))] : existingSelections, true);
+    applyPickerSelections(next, providerPickerSelections(next, providerName, saved, checkedModels, pickerInput.checked), true);
     saveButton.disabled = true;
     try { const out = await configRequest(next); currentConfig = next; selectedProviderName = providerName; providerDetailTab = "overview"; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); configSaved(out, t("common.saved")); await offerPickerOn(pickerInput.checked && checkedModels.length > 0); }
     catch (error) { toast(t("common.saveFailed"), true, error.message); }
@@ -4043,6 +4200,8 @@ function openGoogleProviderForm(options) {
   saveButton.addEventListener("click", async () => {
     const typedName = nameInput.value.trim();
     if (!typedName) { toast(t("providers.nameRequired"), true); return; }
+    // As in the Grok form: an open Clients-screen picker save lands first.
+    await pickerSaving.catch(() => {});
     const next = clone(await latestConfig());
     const providerName = existing ? options.name : uniqueName(typedName, next.providers);
     const apiKey = auth.value === "api-key" ? keyInput.value.trim() || (existing && existing.apiKey) : undefined;
@@ -4065,8 +4224,7 @@ function openGoogleProviderForm(options) {
     applyProviderLabel(next.providers[providerName], providerName, typedName);
     // Same rule as the other provider forms: read after the provider is updated, so an unticked
     // model is already undeclared and falls out of the picker on its own.
-    const existingSelections = pickerSelectionsExcept(next, providerName);
-    applyPickerSelections(next, pickerInput.checked ? [...existingSelections, ...checkedModels.map((model) => ({ ...model, provider: providerName }))] : existingSelections, true);
+    applyPickerSelections(next, providerPickerSelections(next, providerName, saved, checkedModels, pickerInput.checked), true);
     saveButton.disabled = true;
     try { const out = await configRequest(next); currentConfig = next; selectedProviderName = providerName; providerDetailTab = auth.value === "antigravity" ? "accounts" : "overview"; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); configSaved(out, t("common.saved")); await offerPickerOn(pickerInput.checked && checkedModels.length > 0); }
     catch (error) { toast(t("common.saveFailed"), true, error.message); }
@@ -4343,6 +4501,8 @@ function openProviderForm(options) {
     if (!typedName) { toast(t("providers.nameRequired"), true); return; }
     const provider = draftProvider();
     if (!isChatgpt && (!provider.url || !/^https?:\/\//.test(provider.url))) { toast(t("providers.urlRequired"), true); return; }
+    // As in the Grok form: an open Clients-screen picker save lands first.
+    await pickerSaving.catch(() => {});
     const next = clone(await latestConfig());
     const providerName = existing ? options.name : uniqueName(typedName, next.providers, provider.url);
     const saved = existing && (next.providers[options.name] || existing);
@@ -4370,12 +4530,7 @@ function openProviderForm(options) {
     if (Array.isArray(pooled) && pooled.length && normalizeKey(keyInput.value) && provider.headers) pooled[0] = { ...pooled[0], headers: { ...provider.headers } };
     // Read after `next.providers` has been updated, so an unticked model is already undeclared here
     // and falls out on its own, and a renamed provider answers to its new name.
-    const existingSelections = pickerSelectionsExcept(next, providerName);
-    if (pickerInput.checked) {
-      applyPickerSelections(next, [...existingSelections, ...checkedModels.map((model) => ({ ...model, provider: providerName }))], true);
-    } else {
-      applyPickerSelections(next, existingSelections);
-    }
+    applyPickerSelections(next, providerPickerSelections(next, providerName, saved, checkedModels, pickerInput.checked), pickerInput.checked);
     saveButton.disabled = true;
     try {
       const out = await configRequest(next);

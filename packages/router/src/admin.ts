@@ -1853,8 +1853,9 @@ async function runMeasureJob(jobId: string, providerName: string, models: string
 
 async function pickerModels(deps: AdminDeps): Promise<{ models: { id: string; name: string }[]; source: "picker" | "fallback" }> {  const last = deps.picker?.().last;
   if (last && typeof last === "object" && Array.isArray((last as { surfaces?: unknown }).surfaces)) {
-    const entries = (last as { surfaces: { id?: unknown; entries?: unknown }[] }).surfaces
-      .filter((surface) => surface.id === "code" || surface.id === "ccd")
+    const surfaces = (last as { surfaces: { id?: unknown; entries?: unknown; injected?: unknown }[] }).surfaces
+      .filter((surface) => surface.id === "code" || surface.id === "ccd");
+    const entries = surfaces
       .flatMap((surface) => (Array.isArray(surface.entries) ? surface.entries : []))
       .flatMap((entry) => {
         if (!entry || typeof entry !== "object") return [];
@@ -1863,8 +1864,13 @@ async function pickerModels(deps: AdminDeps): Promise<{ models: { id: string; na
       });
     // The surfaces carry the same catalog, so "code" + "ccd" lists every model twice. And the
     // snapshot is taken *after* injection, so our own entries are in it — offering GPT ids as
-    // mapping *sources* is meaningless, they are what a source maps to.
-    const injected = new Set(deps.config().cli.extraModels.map((m) => m.model));
+    // mapping *sources* is meaningless, they are what a source maps to. The snapshot names what it
+    // added: a Claude model ticked for the picker is in `extraModels` but was the app's own, and
+    // dropping it by config hid Opus 5.5 from the mapping sources and the dashboard's picker order.
+    const recorded = surfaces.flatMap((surface) => (Array.isArray(surface.injected) ? surface.injected : []));
+    const injected = new Set<unknown>(surfaces.some((surface) => Array.isArray(surface.injected))
+      ? recorded
+      : deps.config().cli.extraModels.map((m) => m.model));
     const seen = new Set<string>();
     const models = entries.filter((e) => {
       if (injected.has(e.id) || seen.has(e.id) || isJudgeOnlyModel(e.id)) return false;

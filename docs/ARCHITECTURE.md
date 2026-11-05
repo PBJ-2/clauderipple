@@ -312,6 +312,17 @@ chat is out of reach for every approach, ours included.
   entry now keeps only the template options whose id the model's ladder holds,
   recommends high (or the nearest), and drops `thinking` when none remain. The
   real bootstrap's option fields beyond `id`/`recommended` were not captured.
+- **The order is the array's.** The Code tab lists a surface's `section: "main"`
+  entries in `model_selector_config` order, unsorted; other natives sit in a
+  "More models" submenu (the bundled `ion-dist` filters `main` and sorts only
+  `overflow`; measured on the live claude.ai Code tab, Desktop 4.4212, Windows,
+  2026-11-03: Opus 5.5, Fable 5.1, Sonnet 5.5, Haiku 5.5, then the eight injected
+  models exactly in `cli.extraModels` order). Injection appends after the natives
+  and skips an id the app already lists, so a Claude id in `extraModels` keeps
+  Claude's own place, and the dashboard's order list leaves it out. The picker
+  snapshot (`picker.last`) records per surface the ids it `injected`;
+  `/api/claude-models` drops exactly those, not every `extraModels` id, which hid
+  a ticked Claude model from the mapping sources.
 - **Windows uses the same mechanism** (measured end to end in a Windows 11 VM,
   2026-09-14: picker listed the GPT models, a call routed, the model answered).
   Two things differ and nothing else does:

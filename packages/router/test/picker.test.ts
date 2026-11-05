@@ -51,6 +51,26 @@ test("injects into CLI-backed surfaces (code/ccd/ccr/cowork) using an enabled Cl
   assert.equal(injectPickerModels(j, [{ model: "gpt-6-astra@high", name: "GPT-6 Astra" }]).injected, 0);
 });
 
+// The dashboard's order list is only worth having because the app shows `main` rows as the array
+// gives them: the added models follow Claude's own, in config order, each once.
+test("added models follow Claude's own in config order; an id already listed or repeated adds no row", () => {
+  const j = bootstrap();
+  const r = injectPickerModels(j, [
+    { model: "gemini-4-argon", name: "Argon" },
+    { model: "claude-opus-4-8", name: "Opus 4.8" },
+    { model: "deepseek-v4.1-flash", name: "DeepSeek" },
+    { model: "gemini-4-argon", name: "Argon again" },
+    { model: "gpt-6-luna", name: "Luna" },
+  ]);
+  assert.equal(r.injected, 3);
+  const code = (j.model_selector_config as { id: string; models: { id: string; name: string }[] }[])[1]!;
+  assert.deepEqual(code.models.map((m) => m.id), ["claude-opus-4-8", "claude-opus-3-7", "gemini-4-argon", "deepseek-v4.1-flash", "gpt-6-luna"]);
+  assert.equal(code.models[2]!.name, "Argon", "the first of a repeated id is the one shown");
+  // The snapshot names only what was added: the Claude id stays the app's own.
+  assert.deepEqual(r.surfaces.find((s) => s.id === "code")?.injected, ["gemini-4-argon", "deepseek-v4.1-flash", "gpt-6-luna"]);
+  assert.deepEqual(r.surfaces.find((s) => s.id === "chat")?.injected, []);
+});
+
 test("each picker entry gets its own context window; the global value is only the fallback", () => {
   const j = bootstrap();
   injectPickerModels(j, [
