@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Ripple Remote for Android is on Google Play.** The dashboard's phone view shows a Google Play
+  button beside the App Store one, instead of the Discord sign-up for the closed test.
+
 ## 0.12.32 — 2026-11-05
 
 ### Changed
