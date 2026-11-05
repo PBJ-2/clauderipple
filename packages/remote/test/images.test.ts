@@ -334,6 +334,35 @@ test("the attachment folder is created 0700, not 0755", { skip: needsPosixModes 
   assert.equal(fs.statSync(path.join(cwd, ".ripple-attachments")).mode & 0o777, 0o700);
 });
 
+test("an attachment's image type comes from its bytes, not the phone's label", t => {
+  const { cwd, log, sink } = fixture(t);
+  const blobs = new Map<string, string>();
+  const read = (id: string) => blobs.get(id) ?? null;
+  function attach(name: string, mediaType: string, bytes: Buffer) {
+    blobs.set(name, bytes.toString("base64"));
+    const converted = attachmentContent(cwd, "photo", [{ blob: name, name, mediaType }], read, sink);
+    assert.ok(Array.isArray(converted.content));
+    const block = converted.content.find(value => value.type === "image");
+    return { block: block?.type === "image" ? block.source.media_type : null, stored: converted.images[0], blob: converted.images[0]?.blob };
+  }
+  // A JPEG screenshot labelled image/png used to make upstream reject the whole turn.
+  const jpeg = Buffer.from([255, 216, 255, 224, 0, 16, 74, 70, 73, 70, 0, 1]);
+  const disguised = attach("사진.png", "image/png", jpeg);
+  assert.equal(disguised.block, "image/jpeg");
+  assert.equal(disguised.stored?.mediaType, "image/jpeg");
+  assert.equal(log.blob(disguised.blob!), jpeg.toString("base64"));
+  assert.equal(attach("스크린샷.png", "image/png", png).stored?.mediaType, "image/png");
+  const webp = Buffer.from("RIFF\u0000\u0000\u0000\u0000WEBPVP8 ", "latin1");
+  const assumed = attach("그림.png", "image/png", webp);
+  assert.equal(assumed.block, "image/webp");
+  assert.equal(assumed.stored?.mediaType, "image/webp");
+  assert.equal(attach("움짤.jpeg", "image/jpeg", Buffer.from("GIF89a\u0001\u0000", "latin1")).stored?.mediaType, "image/gif");
+  // Bytes of no known raster type keep the old behaviour: the claimed type stands, an unsupported one still fails.
+  assert.equal(attach("이상한.png", "image/png", Buffer.from("not really a png")).stored?.mediaType, "image/png");
+  assert.equal(attach("HEIC.png", "image/heic", png).stored?.mediaType, "image/png");
+  assert.throws(() => attach("사진.heic", "image/heic", Buffer.from("not really a heic")), /Use PNG, JPEG, GIF or WebP images/);
+});
+
 test("summarize names a SendUserFile's files and caption without a caption, and blank input is empty", t => {
   const cwd = directory(t);
   assert.equal(summarize("SendUserFile", { files: ["a.png", path.join(cwd, "b.jpg")], caption: "before vs after" }, cwd), "a.png, b.jpg, before vs after");

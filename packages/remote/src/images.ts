@@ -7,7 +7,17 @@ import os from "node:os";
 import path from "node:path";
 import { ATTACHMENT_CAP, ATTACHMENT_COUNT, SESSION_FILE_NAME, SESSION_FILE_TOTAL, type Attachment, type ImagePart, type SessionFile, type ToolCall } from "./protocol.ts";
 
-export type InputBlock = { type: "text"; text: string } | { type: "image"; source: { type: "base64"; media_type: "image/png" | "image/jpeg" | "image/gif" | "image/webp"; data: string } };
+export type ImageMediaType = "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+export type InputBlock = { type: "text"; text: string } | { type: "image"; source: { type: "base64"; media_type: ImageMediaType; data: string } };
+
+/** The four raster types an image block may carry, read from the bytes rather than the sender's label. */
+function imageMediaType(bytes: Buffer): ImageMediaType | null {
+  if (bytes.subarray(0, 4).equals(Buffer.from([137, 80, 78, 71]))) return "image/png";
+  if (bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) return "image/jpeg";
+  if (bytes.subarray(0, 4).toString("latin1") === "GIF8") return "image/gif";
+  if (bytes.subarray(0, 4).toString("latin1") === "RIFF" && bytes.subarray(8, 12).toString("latin1") === "WEBP") return "image/webp";
+  return null;
+}
 
 /** Validate everything before writing; generated filenames cannot escape or overwrite a user file. */
 export function attachmentContent(cwd: string, text: string, attachments: Attachment[], read: (id: string) => string | null, store?: ImageSink): { content: string | InputBlock[]; images: ImagePart[] } {
@@ -18,15 +28,21 @@ export function attachmentContent(cwd: string, text: string, attachments: Attach
     if (!data || data.length > Math.ceil(ATTACHMENT_CAP / 3) * 4 || data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) throw new Error("Attachment missing or too large (8 MB limit).");
     const bytes = Buffer.from(data, "base64");
     if (bytes.length > ATTACHMENT_CAP) throw new Error("Attachment exceeds 8 MB.");
+    // The phone's label is a guess and upstream rejects the whole turn when it disagrees with the
+    // bytes ("image appears to be image/jpeg"), so the sniffed format wins whatever was claimed
+    // (2026-11-05, issue #127). Bytes of no known raster type keep the old handling below.
+    const detected = imageMediaType(bytes);
+    if (detected) return { a, data, bytes, mediaType: detected };
     if (a.mediaType.startsWith("image/") && !MIME.has(a.mediaType)) throw new Error("Use PNG, JPEG, GIF or WebP images.");
-    return { a, data, bytes };
+    return { a, data, bytes, mediaType: null };
   });
   const blocks: InputBlock[] = [], images: ImagePart[] = [];
   const mentions: string[] = [];
-  for (const { a, data, bytes } of items) {
-    if (a.mediaType === "image/png" || a.mediaType === "image/jpeg" || a.mediaType === "image/gif" || a.mediaType === "image/webp") {
-      blocks.push({ type: "image", source: { type: "base64", media_type: a.mediaType, data } });
-      images.push({ type: "image", blob: store ? store(data) : a.blob, mediaType: a.mediaType });
+  for (const { a, data, bytes, mediaType } of items) {
+    const type = mediaType ?? (MIME.has(a.mediaType) ? a.mediaType as ImageMediaType : null);
+    if (type) {
+      blocks.push({ type: "image", source: { type: "base64", media_type: type, data } });
+      images.push({ type: "image", blob: store ? store(data) : a.blob, mediaType: type });
       continue;
     }
     const root = path.join(cwd, ".ripple-attachments");
@@ -159,10 +175,8 @@ function secretBytes(bytes: Buffer): boolean {
 }
 /** Extensions may refine validated UTF-8 text, but never authorize binary bytes as an active format. */
 function sniff(bytes: Buffer, name: string): string {
-  if (bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return "image/png";
-  if (bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) return "image/jpeg";
-  if (/^GIF8[79]a/.test(bytes.subarray(0, 6).toString("ascii"))) return "image/gif";
-  if (bytes.subarray(0, 4).toString() === "RIFF" && bytes.subarray(8, 12).toString() === "WEBP") return "image/webp";
+  const image = imageMediaType(bytes);
+  if (image) return image;
   if (bytes.subarray(0, 5).toString() === "%PDF-") return "application/pdf";
   let text: string;
   try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { return "application/octet-stream"; }
