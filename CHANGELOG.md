@@ -16,6 +16,18 @@
   over SSH tunnels get the new workers too. If the account is paused, rate-limited or removed, the
   turn quietly uses the usual account order rather than failing. They are started like any other
   worker, through a `[[ripple: …]]` marker or as a workflow agent.
+- **The "updated" notification opens that version's release notes.** Click it to see what changed.
+  After an automatic update the notice now comes from the tray that keeps running, so the click
+  still works once the old tray has handed over.
+
+### Fixed
+
+- **The mod band shows each provider's account in use.** Only Claude was narrowed to the account
+  being spent; with a second Gemini or ChatGPT account in use, the band kept showing the first.
+  The limits pane still lists every account.
+- **An open accounts tab in the dashboard follows the router.** It was drawn once, so a Google
+  account that started asking for verification kept reading "in use" with no verify button. The
+  list now refreshes every 10 seconds while it is open.
 
 ## 0.12.30 — 2026-11-05
 
