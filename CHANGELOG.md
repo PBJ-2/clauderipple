@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.12.28 — 2026-11-05
+
+### Added
+
+- **Choose the order of the models ClaudeRipple adds to the Claude Desktop picker** (#128, thanks
+  @csa906). The Clients screen has an "Order in the picker" card with ↑/↓ buttons; Claude's own
+  models keep their place. The order survives provider saves, a provider form no longer brings back
+  models you took out of the picker, and two quick picker saves no longer race. Reopen Claude
+  Desktop to see a new order.
+
+### Fixed
+
+- **Un-preferring an account moves running conversations back.** Removing the preferred flag used
+  to affect new conversations only, so going back from a sub-account to your own login left every
+  running session on the sub-account. They now return to the configured order (one cold prompt
+  cache each), as choosing a preferred account already did.
+- **Ticking a Claude model for the picker no longer hides it from the Model mapping sources** (#128),
+  and a model listed twice in `extraModels` shows once.
+
 ## 0.12.27 — 2026-11-05
 
 ### Fixed

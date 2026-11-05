@@ -1,6 +1,6 @@
 {
   "name": "@clauderipple/cli",
-  "version": "0.12.27",
+  "version": "0.12.28",
   "private": true,
   "type": "module",
   "description": "Installer and control CLI for ClaudeRipple.",
