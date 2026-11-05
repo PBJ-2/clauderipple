@@ -11,9 +11,11 @@ import { DEFAULTS, type Config, type Provider } from "../src/config.ts";
 import { generatedAgents, syncAgentFiles } from "../src/agents.ts";
 import { storedAccountsFor } from "../src/pinned-accounts.ts";
 import { CredentialPool, pinnedCredential } from "../src/pool.ts";
-import { saveClaudeOAuthAccount } from "../src/providers/anthropic-accounts.ts";
+import { markClaudeAccountNeedsReauth, saveClaudeOAuthAccount } from "../src/providers/anthropic-accounts.ts";
 import { saveChatGptAccount, updateChatGptAccount, removeChatGptAccount } from "../src/providers/chatgpt/accounts.ts";
 import { saveGoogleAccount, updateGoogleAccount } from "../src/providers/google/accounts.ts";
+/** packages/mod/hooks/workers.ts `agentProvider`, which test/mod/workers.test.ts checks on the same shape. */
+const modAgentProvider = (file: string): string | undefined => /^description:\s*.*?\bvia\s+([A-Za-z0-9_-]+)\./m.exec(file)?.[1]?.toLowerCase();
 
 const tempHome = (): string => fs.mkdtempSync(path.join(os.tmpdir(), "cr-pinned-"));
 const grant = { accessToken: "tok", refreshToken: "rt", expiresAt: Date.now() + 3_600_000 };
@@ -33,6 +35,9 @@ test("each account-holding provider resolves its own store; keys and the borrow-
   assert.deepEqual(ids({ type: "chatgpt", auth: "borrow-codex" }), [], "the Codex CLI's login is the main account");
   assert.deepEqual(ids({ type: "google", auth: "antigravity" }), [google.id]);
   assert.deepEqual(ids({ type: "google", auth: "api-key", apiKey: "k" }), []);
+  // An account waiting for a sign-in could only ever fall back: no worker until it signs in again.
+  assert.ok(markClaudeAccountNeedsReauth(home, claude.id, grant.refreshToken));
+  assert.deepEqual(ids({ type: "anthropic", auth: "claude-code", accountPool: true }), []);
 });
 
 test("a pinned worker is generated for every stored account of every kind, and removed with it", (t) => {
@@ -70,9 +75,11 @@ test("a pinned worker is generated for every stored account of every kind, and r
     assert.match(file, new RegExp(`\\nname: ${name}\\n`), name);
     assert.match(file, new RegExp(`\\nmodel: ${model.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n`), `${name} pins its account`);
     assert.match(file, /Start the Agent description with "/, "the title convention survives");
+    // The mod finds a worker's provider in "via <provider>."; without it naming one ran the ladder.
+    assert.equal(modAgentProvider(file), model.split("#")[0], `${name}: the mod reads its provider`);
   }
   assert.match(fs.readFileSync(path.join(dir, `claude-opus-5-5-${claude.id.slice(0, 8)}.md`), "utf8"), /Start the Agent description with "5\.5 · mambo · "/, "the label shows in prose even though it is not in the name");
-  assert.match(fs.readFileSync(path.join(dir, `gpt-6-1-sol-${chatgpt.id.slice(0, 8)}.md`), "utf8"), /for gpt-work \(account /, "the description names the account, not a Claude-only word");
+  assert.match(fs.readFileSync(path.join(dir, `gpt-6-1-sol-${chatgpt.id.slice(0, 8)}.md`), "utf8"), /Runs on gpt-work \(account /, "the description names the account, not a Claude-only word");
   assert.deepEqual(generatedAgents(cfg, dir, manifest, undefined, accountsFor).map((agent) => [agent.name, agent.model, agent.provider, agent.account]), [
     ["claude-opus-5-5", "claude-opus-5-5", "anthropic", undefined],
     [`claude-opus-5-5-${claude.id.slice(0, 8)}`, "claude-opus-5-5", "anthropic", "mambo"],

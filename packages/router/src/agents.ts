@@ -416,7 +416,10 @@ function isGenerated(text: string): boolean {
 function fileContent(name: string, modelId: string, title: string, provider: string, suffix: string, limitTools: boolean, imagePort: number | null, pinned?: { account: string; pin: string; model: string }): string {
   const description =
     pinned
-      ? `${pinned.model} via ${provider} for ${pinned.account} (account ${pinned.pin}). Set effort with [[ripple: ${name}@<level>]] on the first line. ` +
+      // "via <provider>." stays the first sentence: the mod reads the provider from it (workers.ts
+      // agentProvider), and without it a pinned worker was never a candidate, so naming one ran the
+      // ladder's pick instead (0.12.31).
+      ? `${pinned.model} via ${provider}. Runs on ${pinned.account} (account ${pinned.pin}). Set effort with [[ripple: ${name}@<level>]] on the first line. ` +
         titlePrefix(title, suffix)
       : `${modelId} via ${provider}. Set effort with [[ripple: ${name}@<level>]] on the first line. ` +
         titlePrefix(title, suffix);

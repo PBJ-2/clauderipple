@@ -57,6 +57,8 @@ test('markers and frontmatter provider retain existing parsing semantics', () =>
   assert.deepEqual(readMarker('context\n[[ ripple : GPT-6.1-SOL @ HIGH ]]'), { name: 'gpt-6.1-sol', level: 'high' })
   assert.equal(agentProvider('---\ndescription: Executor via chatgpt.\n---\n'), 'chatgpt')
   assert.equal(agentProvider('description: via chatgpt.'), undefined)
+  // The router's account-pinned worker (agents.ts fileContent) keeps "via <provider>." first.
+  assert.equal(agentProvider('---\nname: claude-haiku-4-5-f952fac6\ndescription: claude-haiku-4-5 via anthropic. Runs on mambo20211 (account f952fac6). Set effort with [[ripple: claude-haiku-4-5-f952fac6@<level>]] on the first line.\nmodel: anthropic#f952fac6:claude-haiku-4-5\n---\n'), 'anthropic')
 })
 test('account readiness and all windows decide availability; unknown is not exhaustion', () => {
   const status = (accounts: unknown[]) => ({ chatgpt: { accounts: { chatgpt: accounts } } })

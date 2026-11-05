@@ -14,6 +14,15 @@ export type PinnedAccount = { id: string; label: string; email?: string };
 
 /** The stored accounts one provider may pin a worker to; empty when it has none of its own. */
 export function storedAccountsFor(provider: Provider | undefined, home: string): readonly PinnedAccount[] {
+  return accountsOf(provider, home).filter((account) => (account as { needsReauth?: boolean }).needsReauth !== true);
+}
+
+/**
+ * Every stored account, before the ones waiting for a sign-in are left out: a worker for one of
+ * those could only ever run on another account. Signing in again changes the list, so the worker
+ * comes back on the next check.
+ */
+function accountsOf(provider: Provider | undefined, home: string): readonly PinnedAccount[] {
   if (!provider) return [];
   if (provider.type === "anthropic") return provider.auth === "claude-code" && provider.accountPool === true ? readClaudeOAuthAccounts(home) : [];
   // A provider borrowing the Codex CLI's login uses no store of ours; in every other mode its own

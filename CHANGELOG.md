@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Naming a worker pinned to an account now runs it on that account.** In 0.12.31 the mod could
+  not read the provider of these workers, so a task that named one ran on the worker ladder's
+  usual pick instead. The ladder could not list them either.
+- **No pinned workers for an account that needs signing in again.** Such a worker could only run
+  on another account. It comes back on its own once the account is signed in.
+
 ## 0.12.31 — 2026-11-05
 
 ### Added
