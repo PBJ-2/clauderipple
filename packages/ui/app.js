@@ -1667,6 +1667,13 @@ async function toggleCodex(enabled) {
 }
 void Promise.all([loadCatalogs(), refreshHealth()]);
 setInterval(refreshHealth, 5000);
+// The open accounts tab follows the router (each refresher returns at once when its list is not shown).
+setInterval(() => {
+  if (document.visibilityState !== "visible" || !$("#modal-backdrop").hidden || !selectedProviderName) return;
+  void refreshClaudeAccountPanel(selectedProviderName);
+  void refreshChatgptAccountPanel(selectedProviderName);
+  void refreshGoogleAccountPanel(selectedProviderName);
+}, 10_000);
 
 // ---- Phone --------------------------------------------------------------------------
 
@@ -3011,12 +3018,29 @@ function renderClaudeAccountRows(target, data, name, generation) {
   if (countNode) countNode.textContent = t("providers.accountCount", { count });
 }
 
+/**
+ * The answer each account list was last drawn from. The open list is fetched again on a timer, so a
+ * state the router learns later (Google asking for verification, a cooldown, a needs-login) shows
+ * without reopening the tab; an unchanged answer is not redrawn, so a button under the pointer stays.
+ */
+const accountRowsDrawn = new WeakMap();
+function drawAccountRows(target, data, draw) {
+  const json = JSON.stringify(data);
+  if (accountRowsDrawn.get(target) === json) return;
+  accountRowsDrawn.set(target, json);
+  draw();
+}
+function accountRowsFailed(target, error) {
+  accountRowsDrawn.delete(target);
+  target.replaceChildren(el("div", { class: "bad-text small", text: error.message }));
+}
+
 async function refreshClaudeAccountPanel(name) {
   const target = $("#claude-account-rows");
   if (!target || selectedProviderName !== name || providerDetailTab !== "accounts") return;
   const generation = providerDetailGeneration;
-  try { renderClaudeAccountRows(target, await api("/api/claude-accounts"), name, generation); }
-  catch (error) { if (generation === providerDetailGeneration) target.replaceChildren(el("div", { class: "bad-text small", text: error.message })); }
+  try { const data = await api("/api/claude-accounts"); drawAccountRows(target, data, () => renderClaudeAccountRows(target, data, name, generation)); }
+  catch (error) { if (generation === providerDetailGeneration) accountRowsFailed(target, error); }
 }
 
 function anthropicAccountsPanel(name, provider) {
@@ -3265,8 +3289,8 @@ async function refreshGoogleAccountPanel(name) {
   const target = $("#google-account-rows");
   if (!target || selectedProviderName !== name || providerDetailTab !== "accounts") return;
   const generation = providerDetailGeneration;
-  try { renderGoogleAccountRows(target, await api(`/api/google-accounts?provider=${encodeURIComponent(name)}`), name, generation); }
-  catch (error) { if (generation === providerDetailGeneration) target.replaceChildren(el("div", { class: "bad-text small", text: error.message })); }
+  try { const data = await api(`/api/google-accounts?provider=${encodeURIComponent(name)}`); drawAccountRows(target, data, () => renderGoogleAccountRows(target, data, name, generation)); }
+  catch (error) { if (generation === providerDetailGeneration) accountRowsFailed(target, error); }
 }
 
 function googleAccountsPanel(name) {
@@ -3292,8 +3316,8 @@ async function refreshChatgptAccountPanel(name) {
   const target = $("#chatgpt-account-rows");
   if (!target || selectedProviderName !== name || providerDetailTab !== "accounts") return;
   const generation = providerDetailGeneration;
-  try { renderChatgptAccountRows(target, await api(`/api/chatgpt-accounts?provider=${encodeURIComponent(name)}`), name, generation); }
-  catch (error) { if (generation === providerDetailGeneration) target.replaceChildren(el("div", { class: "bad-text small", text: error.message })); }
+  try { const data = await api(`/api/chatgpt-accounts?provider=${encodeURIComponent(name)}`); drawAccountRows(target, data, () => renderChatgptAccountRows(target, data, name, generation)); }
+  catch (error) { if (generation === providerDetailGeneration) accountRowsFailed(target, error); }
 }
 
 function chatgptAccountsPanel(name) {
