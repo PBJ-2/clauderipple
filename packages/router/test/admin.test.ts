@@ -193,6 +193,42 @@ test("mod-options lists a pinned Claude worker with the account it runs on", asy
   }
 });
 
+// The mod settings' account tabs say "계정 n" for the account the limits call "Claude n": the app
+// login is 1, the stored accounts follow in saved order, and one the limits leave out (paused) still
+// gets a number after them so its pinned workers can be shown.
+test("mod-options numbers a pinned worker's account as the limits do", async () => {
+  const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "cr-pinned-number-"));
+  const cfg = makeCfg({ providers: { anthropic: { type: "anthropic", auth: "claude-code", accountPool: true, models: [{ id: "claude-opus-5-5", name: "Claude Opus 5.5" }] } } });
+  try {
+    await withAdmin(cfg, async ({ port, home }) => {
+      const first = saveClaudeOAuthAccount(home, { accessToken: "t1", refreshToken: "r1", expiresAt: Date.now() + 3_600_000, accountId: "one", email: "first@example.test" });
+      const second = saveClaudeOAuthAccount(home, { accessToken: "t2", refreshToken: "r2", expiresAt: Date.now() + 3_600_000, accountId: "two", email: "second@example.test" });
+      syncAgentFiles(cfg, agentDir, undefined, { manifestPath: path.join(home, "generated-agents.json"), pinnedAccounts: () => readClaudeOAuthAccounts(home) });
+      const read = async () => {
+        const options = await (await fetch(`${base()}:${port}/api/mod-options`)).json() as ModOptions;
+        const number = (id: string) => options.agents.find((agent) => agent.name === `claude-opus-5-5-${id.slice(0, 8)}`)?.accountNumber;
+        return { first: number(first.id), second: number(second.id), bare: options.agents.find((agent) => agent.name === "claude-opus-5-5")?.accountNumber, accounts: options.providers.find((provider) => provider.name === "anthropic")?.accounts };
+      };
+      const before = await read();
+      assert.deepEqual([before.first, before.second, before.bare], [2, 3, undefined], "the app login is account 1; an ordinary worker has no number");
+      assert.deepEqual(before.accounts?.map((account) => account.number), [1, 2, 3]);
+      assert.equal(before.accounts?.[1]?.label, accountLabel(home, first.id));
+      const paused = await fetch(`${base()}:${port}/api/claude-accounts/${first.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ paused: true }) });
+      assert.equal(paused.status, 200);
+      const after = await read();
+      assert.deepEqual([after.first, after.second], [3, 2], "a paused account leaves the limits' numbering and follows the numbered ones");
+    }, { agentDir });
+  } finally {
+    fs.rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
+function accountLabel(home: string, id: string): string | undefined {
+  const account = listClaudeAccounts(home).find((entry) => entry.id === id);
+  if (!account) return undefined;
+  return account.email && account.email !== account.label ? `${account.label} · ${account.email}` : account.label;
+}
+
 test("PUT /api/config persists credential control flags and refuses invalid or duplicate preferences", async () => {
   const cfg = makeCfg({ providers: { p: { type: "anthropic-compatible", url: "http://127.0.0.1:1", credentials: [{ id: "a", headers: {}, preferred: true, paused: true }] } } });
   await withAdmin(cfg, async ({ port, configFile }) => {

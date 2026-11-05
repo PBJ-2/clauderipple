@@ -660,6 +660,15 @@ a.cell { color: inherit; text-decoration: none; }
 .tick-group + .tick-group { border-top: 1px solid var(--separator); }
 .tick-head { padding: 12px 16px 0; color: var(--label-2); font-size: var(--fs-foot); font-weight: 500; }
 .tick-group .model-check .model-effort-tag { margin-left: auto; }
+/* A provider with pinned workers: its account tabs at the head's right, one account's models below.
+   The lists share one cell, so the block is as tall as the longest and switching moves nothing. */
+.tick-head.has-tabs { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px 0 16px; }
+.tick-head.has-tabs > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-tabs { flex: 0 1 auto; }
+.account-tabs button { padding: 3px 12px; }
+.account-panels { display: grid; }
+.account-panels > .model-checklist { grid-area: 1 / 1; align-content: start; }
+.account-panels > .account-hidden { visibility: hidden; }
 
 /* The four workers: a name and its meaning on the left; one menu for the model and effort on the right. */
 .rung-row { align-items: flex-start; }

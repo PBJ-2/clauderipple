@@ -4937,9 +4937,12 @@ function modChoices() {
   const claudeEfforts = Array.isArray(options.claudeEfforts) && options.claudeEfforts.length ? options.claudeEfforts : ["low", "medium", "high", "xhigh", "max"];
   const workers = modAgents().map((agent) => {
     const info = modProviderInfo(agent.provider);
+    const pinned = agent.account !== undefined || typeof agent.accountNumber === "number";
     return {
-      // A pinned worker carries the stored account it runs on; without one the model is the label.
-      value: agent.name, label: agent.account ? `${agent.model} · ${agent.account}` : agent.model, model: agent.model, provider: agent.provider,
+      // A pinned worker runs on one stored account: its number (the limits' "Claude n") picks the
+      // account tab it is listed under, so the label stays the bare model.
+      value: agent.name, label: agent.model, model: agent.model, provider: agent.provider,
+      pinned, accountNumber: pinned && typeof agent.accountNumber === "number" ? agent.accountNumber : null, accountName: agent.account || "",
       billing: /(?::|-)free$/i.test(agent.model) ? "free" : agent.billing || (info && info.billing) || null,
       // A spent quota group lists its models under `models` while the provider still answers others.
       usable: !info || (info.usable !== false && !(info.models && info.models[agent.model])),
@@ -4984,6 +4987,41 @@ function modGroups(choices) {
 }
 function modGroupLabel(group) { return group.billing ? `${group.name} · ${t(`mod.billing.${group.billing}`)}` : group.name; }
 
+// ---- Accounts: a provider with pinned workers lists one account at a time
+//
+// Account 1 is the provider's default: its ordinary workers, which run on the pool's own choice
+// (preferred account, else the saved order). Accounts 2… list their pinned workers. The numbers are
+// the limits' "Claude n"/"GPT n" (/api/mod-options `accounts`). The pinned workers of account 1, and
+// of an account no longer stored, are not listed; they stay valid where a setting already names them.
+
+/** The account tab a provider group shows, kept while the page is open; never saved. @type {Map<string, number>} */
+const modAccountTabs = new Map();
+/** The account a choice is listed under: 1 for an ordinary worker, its own number for a pinned one. */
+function modAccountOf(choice) { return choice.pinned ? choice.accountNumber : 1; }
+/** Whether a choice is listed at all: an ordinary worker, or a pinned one on account 2 or later. */
+function modListed(choice) { return !choice.pinned || choice.accountNumber > 1; }
+/** A choice's name where its account is not otherwise shown (a pick no longer offered, a hidden pin). */
+function modChoiceName(choice) {
+  if (!choice.pinned || !choice.accountNumber && !choice.accountName) return choice.label;
+  const account = choice.accountNumber > 1 || !choice.accountName ? t("mod.accountTab", { n: choice.accountNumber }) : choice.accountName;
+  return `${choice.label} · ${account}`;
+}
+/** A worker group's account tabs (`{number, label}`), or null when it has one account to show. */
+function modAccountTabsOf(group) {
+  if (!group.items.length || group.items[0].claude) return null;
+  const numbers = new Set(group.items.filter((choice) => choice.pinned && modListed(choice)).map((choice) => choice.accountNumber));
+  if (!numbers.size) return null;
+  const info = modProviderInfo(group.items[0].provider);
+  const accounts = info && Array.isArray(info.accounts) ? info.accounts : [];
+  const tabs = [1, ...[...numbers].sort((a, b) => a - b)].map((number) => accounts.find((account) => account.number === number) || { number });
+  return tabs.length > 1 ? tabs : null;
+}
+/** The tab shown for a group: the one picked here while it still exists, else account 1. */
+function modAccountTab(group, tabs) {
+  const picked = modAccountTabs.get(group.name);
+  return tabs.some((tab) => tab.number === picked) ? picked : 1;
+}
+
 // ---- The models to use: what the four workers are filled from and may run on
 
 /** An allow-list key: a worker's agent name, or `general-purpose:<model>` for Claude's own. */
@@ -5010,17 +5048,38 @@ function modTickRows() {
   if (!choices.length) return [el("div", { class: "cell-note", text: t("mod.noModels") })];
   const onCount = choices.filter(modTicked).length;
   return modGroups(choices).map((group) => {
-    const boxes = group.items.map((choice) => {
+    const tabs = modAccountTabsOf(group);
+    const box = (choice) => {
       const on = modTicked(choice);
-      const input = el("input", { type: "checkbox", "data-key": `tick:${modTickKey(choice)}`, "aria-label": `${choice.label} · ${group.name}`, checked: on });
+      const account = tabs ? ` · ${t("mod.accountTab", { n: modAccountOf(choice) })}` : "";
+      const input = el("input", { type: "checkbox", "data-key": `tick:${modTickKey(choice)}`, "aria-label": `${choice.label} · ${group.name}${account}`, checked: on });
       if (on && onCount === 1) input.disabled = true;
       input.addEventListener("change", () => modTick(choice, input.checked));
       // A model paid differently from its group (a :free model on a paid provider) says so beside its name.
       const other = choice.billing && choice.billing !== group.billing ? el("span", { class: "model-effort-tag", text: t(`mod.billing.${choice.billing}`) }) : null;
       const off = choice.usable ? null : el("span", { class: "model-effort-tag warn-text", text: t("mod.notUsable") });
       return el("label", { class: "model-check", title: choice.model || choice.label }, [input, el("span", { text: choice.label }), other, off]);
+    };
+    const listed = group.items.filter(modListed);
+    if (!tabs) return el("div", { class: "tick-group" }, [el("div", { class: "tick-head", text: modGroupLabel(group) }), el("div", { class: "model-checklist" }, listed.map(box))]);
+    // Every account's list is drawn in the same place and only the picked one is visible, so the
+    // block keeps the tallest list's height and switching accounts moves nothing below it.
+    const shown = modAccountTab(group, tabs);
+    const id = (number) => `mod-account-${group.name}-${number}`;
+    const tabList = el("div", { class: "segmented account-tabs", role: "tablist", "aria-label": group.name }, tabs.map((tab) => el("button", {
+      type: "button", role: "tab", class: tab.number === shown ? "active" : "", "aria-selected": String(tab.number === shown), "aria-controls": id(tab.number),
+      "data-key": `account-tab:${group.name}:${tab.number}`, text: t("mod.accountTab", { n: tab.number }), ...(tab.label ? { title: tab.label } : {}),
+      onclick: () => { if (tab.number !== shown) { modAccountTabs.set(group.name, tab.number); modRefresh(); } },
+    })));
+    const panels = tabs.map((tab) => {
+      const panel = el("div", { class: `model-checklist${tab.number === shown ? "" : " account-hidden"}`, id: id(tab.number), role: "tabpanel" }, listed.filter((choice) => modAccountOf(choice) === tab.number).map(box));
+      if (tab.number !== shown) { panel.inert = true; panel.setAttribute("aria-hidden", "true"); }
+      return panel;
     });
-    return el("div", { class: "tick-group" }, [el("div", { class: "tick-head", text: modGroupLabel(group) }), el("div", { class: "model-checklist" }, boxes)]);
+    return el("div", { class: "tick-group" }, [
+      el("div", { class: "tick-head has-tabs" }, [el("span", { text: modGroupLabel(group) }), tabList]),
+      el("div", { class: "account-panels" }, panels),
+    ]);
   });
 }
 
@@ -5044,17 +5103,29 @@ function modTwoLevelRungs(rungs) {
 }
 /** One menu of `model · effort` for the ticked models, effort limited to what each model takes; the session's model too. */
 function modPickSelect(key, step, shown, label, onPick) {
-  const choices = modChoices().filter((choice) => choice.value === "general-purpose" || modTicked(choice));
-  const groups = modGroups(choices).map((group) => ({
-    group: modGroupLabel(group),
-    items: group.items.flatMap((choice) => modLadderOf(choice).map((effort) => ({ value: `${choice.value}|${effort}`, label: `${choice.label} · ${modEffortName(effort)}${choice.usable ? "" : t("mod.unavailableNow")}` }))),
-  }));
-  const current = step ? `${modTargetValue(step.target)}|${shown}` : "";
+  const picked = step ? modTargetValue(step.target) : "";
+  // An unlisted pinned worker (account 1's, see modListed) is offered only where it is the pick already.
+  const choices = modChoices().filter((choice) => choice.value === "general-purpose" || modTicked(choice) && (modListed(choice) || choice.value === picked));
+  const entries = (list) => list.flatMap((choice) => {
+    // A closed menu shows the option alone, not its group: a pinned worker names its account there.
+    const number = modListed(choice) ? modAccountOf(choice) : null;
+    const name = modListed(choice) ? (number && number > 1 ? `${choice.label} · ${t("mod.accountTab", { n: number })}` : choice.label) : modChoiceName(choice);
+    return modLadderOf(choice).map((effort) => ({ value: `${choice.value}|${effort}`, label: `${name} · ${modEffortName(effort)}${choice.usable ? "" : t("mod.unavailableNow")}` }));
+  });
+  // A provider with account tabs gets one group per account, named as its tab is.
+  const all = modGroups(modTickable());
+  const groups = modGroups(choices).flatMap((group) => {
+    const whole = all.find((entry) => entry.name === group.name);
+    const tabs = whole ? modAccountTabsOf(whole) : null;
+    if (!tabs) return [{ group: modGroupLabel(group), items: entries(group.items) }];
+    return tabs.map((tab) => ({ group: `${modGroupLabel(group)} · ${t("mod.accountTab", { n: tab.number })}`, items: entries(group.items.filter((choice) => modAccountOf(choice) === tab.number)) }));
+  });
+  const current = step ? `${picked}|${shown}` : "";
   const items = [...(step ? [] : [{ value: "", label: "—" }]), ...groups];
   // A pick that is not on offer now (its model unticked, or gone) keeps showing rather than a wrong neighbour.
   if (step && !groups.some((group) => group.items.some((item) => item.value === current))) {
     const choice = modChoiceOf(step.target);
-    items.unshift({ value: current, label: `${choice ? choice.label : modTargetValue(step.target)} · ${modEffortName(shown)}${t("mod.unavailable")}` });
+    items.unshift({ value: current, label: `${choice ? modChoiceName(choice) : picked} · ${modEffortName(shown)}${t("mod.unavailable")}` });
   }
   return modSelect(key, items, current, label, (value) => {
     if (!value) return;
@@ -5126,7 +5197,7 @@ function modRungRow(mode, ruleKey, rowKey, name, hintKey, steps, save) {
     ]);
   });
   const add = el("button", { type: "button", class: "btn secondary compact", "data-key": `worker-add:${mode ? mode.id : "base"}:${ruleKey}:${rowKey}`, text: t("mod.modeAddModel"), onclick: () => {
-    const choice = modChoices().find((item) => item.value !== "general-purpose" && modTicked(item)) || modChoices().at(-1);
+    const choice = modChoices().find((item) => item.value !== "general-purpose" && modTicked(item) && modListed(item)) || modChoices().at(-1);
     save([...steps, { target: modTargetOf(choice.value), effort: modNearest("medium", modLadderOf(choice)) }]);
   } });
   return cell(el("span", { class: "cell-label strong", text: name }), el("div", { class: "rung-list" }, [el("ol", {}, rows), add]), modCap(t(hintKey)), "wide rung-row");

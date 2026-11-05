@@ -43,7 +43,7 @@ import { billingOf, claudeChoices, fillLadder, ladderNeedsFill } from "../../mod
 import { normalizeSettings, twoLevelRungs } from "../../mod/hooks/settings.ts";
 import type { Billing, DomainRules, Effort, LadderChoice, Rungs, Settings, Step } from "../../mod/types/index.d.ts";
 import { chatPickerModels } from "./picker.ts";
-import { declaredBy, resolve } from "./routing.ts";
+import { accountPinFor, declaredBy, resolve } from "./routing.ts";
 import type { Logger } from "./log.ts";
 import { CredentialPool } from "./pool.ts";
 import { ClaudeAccountAuthPool } from "./providers/anthropic-account-pool.ts";
@@ -374,11 +374,27 @@ function claudeLimitWindows(quota: Record<string, unknown>): LimitsWindow[] {
 }
 
 /**
- * Every Claude account's plan windows, one entry each: the app login first (index 0), then the
- * stored accounts in their saved order (index 1…), so an account keeps its number while another's
- * usage comes and goes. Only accounts whose usage is known are listed; `inUse` marks the one the
- * pool serves with now (claudeInUseId), and when that one's usage is not known yet no entry is
- * marked, so no reader takes another account's figures for the one that is actually spending.
+ * The Claude accounts in the order the limits are numbered by: the app login first (index 0), then
+ * the stored accounts in their saved order. Paused and needs-login accounts are left out before
+ * numbering, as ChatGPT's are: one that cannot answer would otherwise hold a number and the pane
+ * would read "Claude 1, Claude 3". The mod settings' account tabs number by the same list.
+ */
+function claudeNumberedAccounts(): { id: string; label?: string; email?: string }[] {
+  const stored = listClaudeAccounts(homeDir()).filter((a) => !a.paused && !a.needsReauth && a.expiresAt > Date.now());
+  return [{ id: "current" }, ...stored.map((a) => ({ id: a.id, label: a.label, ...(a.email ? { email: a.email } : {}) }))];
+}
+
+/** A ChatGPT or Google provider's accounts as the limits number them: paused and needs-login left out. */
+function numberedAccounts<T extends { state: string }>(accounts: readonly T[]): T[] {
+  return accounts.filter((a) => a.state !== "paused" && a.state !== "needs-login");
+}
+
+/**
+ * Every Claude account's plan windows, one entry each, numbered by claudeNumberedAccounts so an
+ * account keeps its number while another's usage comes and goes. Only accounts whose usage is
+ * known are listed; `inUse` marks the one the pool serves with now (claudeInUseId), and when that
+ * one's usage is not known yet no entry is marked, so no reader takes another account's figures
+ * for the one that is actually spending.
  */
 async function anthropicLimitAccounts(deps: AdminDeps, name: string): Promise<LimitsAccount[]> {
   let usage: Record<string, Record<string, unknown>>;
@@ -388,10 +404,7 @@ async function anthropicLimitAccounts(deps: AdminDeps, name: string): Promise<Li
     return [];
   }
   const inUse = claudeInUseId(deps, name);
-  // Paused and needs-login accounts are left out before numbering, as ChatGPT's are: one that
-  // cannot answer would otherwise hold a number and the pane would read "Claude 1, Claude 3".
-  const stored = listClaudeAccounts(homeDir()).filter((a) => !a.paused && !a.needsReauth && a.expiresAt > Date.now());
-  const owners: { id: string; label?: string }[] = [{ id: "current" }, ...stored.map((a) => ({ id: a.id, label: a.label }))];
+  const owners = claudeNumberedAccounts();
   const out: LimitsAccount[] = [];
   owners.forEach((owner, account) => {
     const quota = usage[owner.id];
@@ -406,7 +419,7 @@ async function anthropicLimitAccounts(deps: AdminDeps, name: string): Promise<Li
 
 /** Every ChatGPT account's windows, paused and needs-login accounts left out and unnumbered. */
 function chatgptLimitAccounts(accounts: ChatGptAccountStatus[]): LimitsAccount[] {
-  const kept = accounts.filter((a) => a.state !== "paused" && a.state !== "needs-login");
+  const kept = numberedAccounts(accounts);
   const out: LimitsAccount[] = [];
   kept.forEach((account, index) => {
     const quota = account.quota;
@@ -428,7 +441,7 @@ async function googleLimitAccounts(deps: AdminDeps, name: string): Promise<Limit
   if (!google) return [];
   const statuses = google.accounts()[name] ?? [];
   const groups = (await google.usage?.(name)) ?? {};
-  const kept = statuses.filter((a) => a.state !== "paused" && a.state !== "needs-login");
+  const kept = numberedAccounts(statuses);
   const at = Date.now();
   // The third-party (Claude and GPT) windows only when this provider has such a model selected:
   // beside Gemini's own they made four figures, two of them a pool nobody here spends (2026-10-20).
@@ -676,17 +689,70 @@ async function chatgptStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}):
 
 export type ModOptions = {
   /** Each worker with its model's effort ladder (mod efforts only) and how it is paid for. */
-  agents: (ReturnType<typeof generatedAgents>[number] & { efforts: Effort[]; billing: Billing })[];
+  /**
+   * A pinned worker's `accountNumber` is its account's number in the provider's `accounts`, the
+   * same `n` the limits show as "Claude n"/"GPT n" (`account` + 1 there).
+   */
+  agents: (ReturnType<typeof generatedAgents>[number] & { efforts: Effort[]; billing: Billing; accountNumber?: number })[];
   models: { model: string; provider: string; name: string; judgeOnly: boolean }[];
-  providers: { name: string; type: Provider["type"]; usable: boolean; billing: Billing; reason?: string; exhaustedAt?: number; exhaustedUntil?: number; models?: Record<string, ModelUnavailable> }[];
+  /**
+   * `accounts`, only on a provider with pinned workers: its accounts numbered as the limits number
+   * them, then any stored account the limits leave out (paused, waiting for a sign-in) after them,
+   * so every pinned worker has one. `label` is the account's name and email, when known.
+   */
+  providers: { name: string; type: Provider["type"]; usable: boolean; billing: Billing; reason?: string; exhaustedAt?: number; exhaustedUntil?: number; models?: Record<string, ModelUnavailable>; accounts?: ModAccount[] }[];
   zen: { configured: boolean; model: string | null };
   scores: ReturnType<typeof buildModelScores>;
   /** Claude's own models' effort ladder, for the rungs that run Claude Code's own agent. */
   claudeEfforts: Effort[];
 };
 
+/** One account of a provider with pinned workers, as the mod settings' account tabs show it. */
+export type ModAccount = { number: number; label?: string };
+
+/** An account's name and its email beside it when the name is not already the email. */
+function accountTitle(account: { label?: string; email?: string }): string | undefined {
+  const label = account.label?.trim();
+  const email = account.email?.trim();
+  if (label && email && label.toLowerCase() !== email.toLowerCase()) return `${label} · ${email}`;
+  return label || email || undefined;
+}
+
+/**
+ * The accounts of each provider that has pinned workers, numbered as `/api/limits` numbers them,
+ * and each pinned worker's number. A pinned worker is `<worker>-<account id prefix>`
+ * (agents.ts pinnedTargets), which is how it is matched to its account here.
+ */
+async function numberPinnedAccounts(deps: AdminDeps, cfg: Config, agents: ModOptions["agents"], chatgpt: Record<string, ChatGptAccountStatus[]>, google: Record<string, GoogleAccountStatus[]>): Promise<Map<string, ModAccount[]>> {
+  const out = new Map<string, ModAccount[]>();
+  for (const name of new Set(agents.filter((a) => a.account !== undefined).map((a) => a.provider))) {
+    const provider = cfg.providers[name];
+    if (!provider) continue;
+    let numbered: { id: string; label?: string; email?: string }[] = [];
+    if (provider.type === "anthropic") {
+      numbered = claudeNumberedAccounts();
+      // The app login's own email, for the first tab's title; the lookup is cached for minutes.
+      const identity = await deps.claudeIdentity?.().catch(() => null);
+      if (identity) numbered[0] = { id: "current", email: identity.email };
+    } else if (provider.type === "chatgpt") numbered = numberedAccounts(chatgpt[name] ?? []);
+    else if (provider.type === "google") numbered = numberedAccounts(google[name] ?? []);
+    const ids = new Set(numbered.map((a) => a.id));
+    const all = [...numbered, ...storedAccountsFor(provider, homeDir()).filter((a) => !ids.has(a.id))];
+    out.set(name, all.map((account, index) => {
+      const label = accountTitle(account);
+      return { number: index + 1, ...(label ? { label } : {}) };
+    }));
+    for (const agent of agents) {
+      if (agent.provider !== name || agent.account === undefined) continue;
+      const at = all.findIndex((account) => account.id !== "current" && agent.name.endsWith(`-${accountPinFor(account.id)}`));
+      if (at >= 0) agent.accountNumber = at + 1;
+    }
+  }
+  return out;
+}
+
 /** One model out while its provider still answers others: a spent quota group, until it resets. */
-export type ModelUnavailable = { reason: string; exhaustedAt?: number; exhaustedUntil?: number };
+export type ModelUnavailable ={ reason: string; exhaustedAt?: number; exhaustedUntil?: number };
 
 /**
  * An Antigravity provider's spent quota groups: a group resting on every account that is otherwise
@@ -754,11 +820,12 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
   const credentials = deps.credentials?.() ?? {};
   const health = deps.providerHealth?.() ?? {};
   const catalog = effortLevels(cfg).providers;
-  const agents = generatedAgents(cfg, deps.agentDir, undefined, deps.log, (provider) => storedAccountsFor(provider, homeDir())).map(a => ({
+  const agents: ModOptions["agents"] = generatedAgents(cfg, deps.agentDir, undefined, deps.log, (provider) => storedAccountsFor(provider, homeDir())).map(a => ({
     ...a,
     efforts: modEfforts(catalog[a.provider]?.models?.[a.model] ?? catalog[a.provider]?.default),
     billing: billingOf(cfg.providers[a.provider] as { type: string; auth?: string; preset?: string; url?: string }, a.model),
   }));
+  const accountsOf = await numberPinnedAccounts(deps, cfg, agents, chatgpt.accounts, google);
   const now = Date.now();
   const providers = await Promise.all(Object.entries(cfg.providers).map(async ([name, p]) => {
     let usable = true;
@@ -802,6 +869,7 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
     return { name, type: p.type, usable: usable && !out, billing: billingOf(p as { type: string; auth?: string; preset?: string; url?: string }),
       ...(out ? { reason: out.reason, ...(out.exhaustedAt !== undefined ? { exhaustedAt: out.exhaustedAt } : {}), exhaustedUntil: out.exhaustedUntil } : {}),
       ...(Object.keys(modelsOut).length ? { models: modelsOut } : {}),
+      ...(accountsOf.has(name) ? { accounts: accountsOf.get(name)! } : {}),
     };
   }));
   const models = Object.entries(cfg.providers).flatMap(([provider, p]) => (p.models ?? []).map(m => ({ model: declaredBy(m.id, cfg).length > 1 ? `${provider}:${m.id}` : m.id, provider, name: m.name ?? m.id, judgeOnly: isJudgeOnlyModel(m.id) })));
