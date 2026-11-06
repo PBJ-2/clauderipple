@@ -334,6 +334,29 @@ export function cachePercent(usage: Usage | undefined): number | undefined {
   return prompt > 0 ? Math.floor((usage.cached / prompt) * 100) : undefined
 }
 
+// Below this a request is mostly fixed overhead, and a rate from it is noise.
+const OUTPUT_RATE_MIN_MS = 500
+
+/**
+ * Output tokens per second over the request's whole recorded time, the dashboard's figure: the
+ * router's `ms` runs from the body read to the response end, so the wait for the first token is in
+ * it and this is not the model's generation speed. Only a finished model answer with a real output
+ * count has one: not a failure, a resend, a refusal the router answered itself or a web search
+ * (answered in one piece), and not an output of 0, which a missing usage also reads as.
+ */
+export function outputRate(record: StatusRequest): number | undefined {
+  if ((record.kind !== undefined && record.kind !== 'messages') || record.purpose === 'web-search' || !record.ok || record.resent || record.upstreamCalled === false) return undefined
+  const output = record.usage?.output
+  if (typeof output !== 'number' || !Number.isFinite(output) || output <= 0) return undefined
+  if (typeof record.ms !== 'number' || !Number.isFinite(record.ms) || record.ms < OUTPUT_RATE_MIN_MS) return undefined
+  return (output * 1000) / record.ms
+}
+
+/** A rate as the log shows it: one decimal below 100, whole above. */
+export function rateText(rate: number): string {
+  return rate >= 100 ? String(Math.round(rate)) : rate.toFixed(1)
+}
+
 // The requested name's `@effort` is the agent file's default, not what was sent; the sent effort is
 // its own field.
 export function modelOf(record: StatusRequest): string {
