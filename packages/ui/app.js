@@ -5727,6 +5727,7 @@ async function loadConfiguredProviders() {
 }
 function modelUsageRow(entry) {
   const total = totalInputOf(entry);
+  const rate = modelRateOf(entry);
   const model = el("div", { class: "request-models" }, [
     el("span", { class: "model", text: entry.model, title: entry.model }),
     // A WebSearch side request is counted apart from the model's own turns; the router marks it.
@@ -5739,7 +5740,10 @@ function modelUsageRow(entry) {
     el("td", { class: "c-count", "data-label": t("logs.th.count") }, [formatNumber(entry.count)]),
     el("td", { class: "c-in", "data-label": t("logs.th.input") }, [el("span", { class: "token-cell", text: formatNumber(total) }, [el("span", { class: "cache-pill", text: t("logs.cacheHit", { percent: entry.cacheHitPercent || 0 }) })])]),
     el("td", { class: "c-out", "data-label": t("logs.th.output") }, [formatNumber(entry.output)]),
-    el("td", { class: "c-dur", "data-label": t("logs.th.avg") }, [formatSeconds(entry.avgMs)]),
+    el("td", { class: "c-dur", "data-label": t("logs.th.avg"), title: rate === null ? undefined : t("logs.modelRateHelp") }, [
+      formatSeconds(entry.avgMs),
+      rate === null ? null : el("span", { class: "rate-pill", text: t("logs.rateApprox", { value: rateValue(rate) }) }),
+    ]),
   ]);
 }
 function renderModelUsage(summary) {
@@ -5769,8 +5773,24 @@ function outputRateOf(record) {
   if (typeof record.ms !== "number" || !Number.isFinite(record.ms) || record.ms < OUTPUT_RATE_MIN_MS) return null;
   return (output * 1000) / record.ms;
 }
+/**
+ * A model row's output rate, approximated from the summary it already has: its output over all its
+ * requests' time (`avgMs × count`). That time also holds failed, resent and token-count requests,
+ * which bring no output, so a model with long failures reads lower than its answers ran. A web
+ * search row has none, as on the request list.
+ */
+function modelRateOf(entry) {
+  if (!entry || entry.purpose === "web-search") return null;
+  const { output, avgMs, count } = entry;
+  if (![output, avgMs, count].every((n) => typeof n === "number" && Number.isFinite(n) && n > 0)) return null;
+  if (avgMs < OUTPUT_RATE_MIN_MS) return null;
+  return (output * 1000) / (avgMs * count);
+}
+function rateValue(rate) {
+  return rate >= 100 ? Math.round(rate).toLocaleString() : rate.toFixed(1);
+}
 function formatRate(rate) {
-  return t("logs.rate", { value: rate >= 100 ? Math.round(rate).toLocaleString() : rate.toFixed(1) });
+  return t("logs.rate", { value: rateValue(rate) });
 }
 function requestDetail(record) {
   const details = [
