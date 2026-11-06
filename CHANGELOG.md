@@ -2,10 +2,40 @@
 
 ## Unreleased
 
+### Added
+
+- **The phone is told when the computer loses its connection while Claude is working.** While a
+  turn, an approval or a Claude app conversation is active, the host renews a watch on its relay
+  every minute; if the computer sleeps, drops off the network or the host process dies, the relay
+  pushes "the PC disconnected" to the phone's Expo devices once per outage, and the host sends "the
+  PC is connected again" with the outage length when it is back. The relay holds only the phones'
+  Expo tokens, their language and the host's public key for this — no conversation content. An
+  expired Claude login while work is active now also reaches the phone (native and web) as its own
+  notice. Web push is not part of the relay watch: it needs the host's VAPID signing key.
+
 ### Changed
 
 - **Ripple Remote for Android is on Google Play.** The dashboard's phone view shows a Google Play
   button beside the App Store one, instead of the Discord sign-up for the closed test.
+
+### Fixed
+
+- **Hotspot failover leaves macOS's own join alone, and comes back only to a Wi-Fi that is really
+  there.** With no Wi-Fi address at all the router now waits a minute before trying the hotspot
+  itself, so macOS can wake an iPhone through Instant Hotspot; our `networksetup` join cancelled
+  that auto-join and could not wake a hidden phone. A return needs a saved network at -70 dBm or
+  better from a scan the radio really ran, not a weak one heard in airportd's cache, and the
+  hotspot is rejoined at once when nothing associated within 8 seconds of leaving. A changed Wi-Fi
+  address, subnet or network class resets the probe window for 30 seconds, so joining home Wi-Fi no
+  longer sends the Mac back to the hotspot.
+- **Account limits are read from the provider, not guessed.** A Claude subscription 429 whose unified
+  limit headers say the 5-hour or weekly window is spent now rests that account until the stated
+  reset instead of retrying it every minute, and the caller is answered with `x-should-retry: false`
+  and that reset as `retry-after`. A token refresh no longer brings a resting account back early.
+  OpenCode Go's 429 for its own failing upstream (`[prefill_cap_refused]`, `[overloaded]`) is retried
+  inside the turn and no longer cools the key, and a Google account banned for a Terms of Service
+  violation is parked instead of being refreshed and replayed. After an in-turn retry, the log line
+  and `requests.jsonl` name the account that actually answered.
 
 ## 0.12.32 — 2026-11-05
 

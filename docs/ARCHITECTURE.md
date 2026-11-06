@@ -1576,9 +1576,10 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
   response starts. A 401 permanently marks only that stored token generation as
   needing re-login; 429 and transient failures cool down without deleting it. Refresh
   is per-account process-wide single-flight and persisted with compare-and-swap so a
-  stale refresh or rejection cannot overwrite a newer sign-in. Credential health uses
-  a token-generation runtime id while affinity and admin APIs use the durable local
-  account id, so a fresh login cannot inherit an old quarantine or lose its cache claim.
+  stale refresh or rejection cannot overwrite a newer sign-in. A rest (cooldown, failure
+  count, quota scope) counts against the durable local account id, so a token refresh keeps
+  a spent account resting, while a quarantine belongs to the token-generation runtime id so a
+  fresh login cannot inherit an old one; affinity and admin APIs use the durable account id.
   Retry replaces every previous identity header, and every sent
   secret is added to error redaction. The OpenAI ingress for Codex uses the same
   ordered projection only to choose one available credential; it deliberately does
@@ -2253,7 +2254,7 @@ plan unless marked otherwise.
 | "Connect Claude subscription" from the tray/GUI failed with "setup-token failed": `claude setup-token` is an interactive terminal flow and neither place has a terminal (2026-09-15, Windows) | Without a TTY the error says to run `clauderipple claude-login` in a terminal and that an existing Claude Code login is reused anyway; other failures carry what `claude` printed. A button that cannot work where it is must say where it works. |
 | Closing Claude Desktop's window does not quit it; reopening hits `Not main instance, returning early` and the app silently keeps the OLD proxy setting. The user sees "I configured it and nothing happened" with no error anywhere (2026-09-14) | Tell the user that closing the window is not enough, and detect it: with picker mode on, the router knows whether the app is actually routing through it. Surface "configured, but the app has not restarted yet" rather than letting it fail silently. |
 | A subagent prompt carried `[[ripple: deepseek@high]]` while `aliases` had no `deepseek`; the marker resolved to a model id nobody declared, `resolve()` returned null, and the request went to Anthropic as an ordinary `PASS` — 30 × `404 model: deepseek-v4.1-flash` over two days, read by the session as "the model stopped working" (2026-09-19/20) | A non-`claude-*` model this router cannot route is **refused here, by name**: `400 invalid_request_error "ClaudeRipple: <reason>"`, tag `REFUSE`, reason in the request record (`decide()`'s `refusal`: undeclared / declared by two providers / ingress-only owner / unknown marker alias / alias to an undeclared model). Native `claude-*` ids keep passing through untouched — Claude traffic is never hijacked to say no. And the marker alias table is derived from the agent files themselves (§4), so an agent that exists is an alias that resolves. |
-| A rejected Claude account remained quarantined after its access/refresh token was replaced, because runtime health used the durable account id; keying affinity on that same generation id would instead move a healthy conversation after every refresh (found during multi-account implementation, 2026-09-20) | Runtime health keys on `<local-owner>:<token-generation-digest>`, while conversation affinity and admin state key on the durable local owner. A refresh or re-login receives fresh health without losing its prompt-cache claim; compare-and-swap prevents an old rejection from marking the new generation. |
+| A rejected Claude account remained quarantined after its access/refresh token was replaced, because runtime health used the durable account id; keying affinity on that same generation id would instead move a healthy conversation after every refresh (found during multi-account implementation, 2026-09-20) | Runtime health keys on `<local-owner>:<token-generation-digest>`, while conversation affinity and admin state key on the durable local owner. A refresh or re-login receives fresh health without losing its prompt-cache claim; compare-and-swap prevents an old rejection from marking the new generation. **Refined 2026-11-07:** a *rest* — a 429 cooldown, its failure count and a quota scope — is keyed by the durable account (`ownerId`), so a token refresh during a 5h/7d window rest does not hand back a fresh credential with no cooldown; only the quarantine stays with the token generation. Every generation of the app's own login is named `current`, so that login states its account explicitly (`healthKey`): Claude Code's local `oauthAccount.accountUuid` (or organization id), hashed and never stored or logged; a token refresh keeps it and switching the app's login changes it, so the old account's rest is left behind. When that identity is unreadable the runtime generation is used, so a refresh may revive a rest but a different login never inherits one. |
 | The worker registry was four places that did not know each other — `providers.*.models`, `aliases`, `~/.claude/agents/*.md`, and prose in CLAUDE.md — and every new provider needed all four edited by hand; the one left out was the one that failed (2026-09-19, DeepSeek) | One source: a ticked model *is* a worker. Agent files and marker aliases are generated from `config.json` (§4 "worker definitions"); nothing about a worker is written twice. |
 | ChatGPT prompt-cache hit fell from 93% (2026-09-13) to 9% (2026-09-20) with nothing in our request changing — the backend had started keying the cache on the conversation's identity (`session-id`/`thread-id`/`x-client-request-id`/`client_metadata`), which we never sent; `prompt_cache_key` alone no longer earned a write | The adapter states the conversation's identity the way the Codex CLI does (§4) and echoes `x-codex-turn-state`. The acceptance metric (≥90% on translated providers) is watched per day in `requests.jsonl`; a fall with an unchanged request means the wire changed under us, and the reference to diff against is the real CLI captured through a local proxy, not our own memory of the protocol. |
 | Remote Control registration failed locally with 405 before Anthropic saw it: Claude Code 2.1.275 uses HTTPS absolute-form (`POST https://api.anthropic.com/v1/environments/bridge HTTP/1.1`) rather than CONNECT for registration, polling and heartbeats, while the forward-proxy socket accepted CONNECT only (issue #10, Windows 11) | Accept valid HTTPS absolute-form, strip proxy-only headers, replace Host, rewrite only the target to origin-form, and relay one request over direct TLS outside model routing. Force `Connection: close`: reusing that TLS socket could send a later proxy-form request to the first origin. Parser tests plus a live local TLS origin verify body and credential preservation. |
@@ -2289,6 +2290,11 @@ plan unless marked otherwise.
 | An already-running Code tab session never used the stored Claude sub-account, which was marked preferred: every turn's `continue` carried only the delta, so `requestConversationKey` hashed a different first `tool_result` each turn, the pool seeded a new affinity, and picked the preferred account — which held no such server-side thread, so Anthropic answered `404 thread_not_found`; the CLI then replayed the full history, whose original key was sticky to the CLI login, and that answered 200. `router.log`, every turn: `KEY anthropic credential=#1 conversation=<new hash> reason=configured-order`, then `credential=#2 conversation=0016c66c… reason=affinity` (2026-11-04) | A `continue` follows the answer it continues: a successful native pool answer's message id is remembered with its conversation's affinity key (60-minute TTL, size-capped, in memory only, and not added to the request log), and a `thread.type:"continue"` naming a remembered `previous_message_id` uses that key instead of the computed one; an unknown id keeps the computed key. Separately, changing the preferred account now migrates that provider's held conversations (the pool drops their affinity when the preferred owner changes) at the cost of one cold turn — the new account answers `thread_not_found`, the CLI replays, and the full-history request claims it there; a cooldown ending moves nothing. Removing the preference also migrates held conversations, back to the configured order: until 0.12.27 it moved nothing, and after the owner un-preferred a sub-account and went back to the app login, every conversation already running stayed on the sub-account while only new ones used the app login (2026-11-05, 59 of the last 300 picks still `credential=#2 reason=affinity`). A retry's list that merely leaves out the preferred credential is not a removal. Tests: `pool.test.ts`, `shared-account-controls.test.ts`, `anthropic-account-proxy.test.ts`. |
 | The current Claude login vanished from Providers → Claude → Accounts and got no traffic while it was being used through the pool (2026-11-01/02, issue #123): `ObservedClaudeCodeAuth` held it 12 h from the last **un-routed** `/v1/messages` only, so 12 h after that request it dropped out of the accounts list and the pool, and the router logged 27,252 routed and 0 un-routed `/v1/messages` in between; a later router restart plus one un-routed request was the only way back. Its usage card also stayed at the last successful `/api/oauth/usage` reading (5h 58%) for hours while the account was at 100% and the endpoint answered 429 | The app's own login is observed on every `/v1/messages` it carries, routed or not, and an answer on it through the pool (proxy or OpenAI ingress) refreshes the same 12 h idle guard, so the guard counts from the last evidence of that token rather than from the last un-routed request; a different token (sign-in, account switch) replaces it on the next request. The login is not kept past its validity: a 401 for that exact token drops the observed copy, the rejected token is not re-adopted, and only a different token becomes current again. A refused usage lookup keeps the last numbers but marks the snapshot `stale` with `failed_at`/`failed_status`, backs off for the 429's `retry-after` (or a doubling wait) and logs it, and the unified limit headers on any Messages answer — fractions 0..1 and epoch-second resets, measured in the installed CLI 2.1.317 — refill the windows while the body source is stale. Tests: `anthropic-account-pool.test.ts`, `anthropic-account-proxy.test.ts`, `anthropic-usage.test.ts`. |
 | Named Claude workers fell back to DeepSeek although Claude answered (2026-11-05 14:07–14:12 KST): a script in another project's session, inheriting the session's `HTTPS_PROXY`, called `api.anthropic.com/v1/messages` on its own API key (`x-api-key`, no `?beta=true`, `Python-urllib`). The pool dropped the key and sent it on the subscription accounts (`account=current`), which answered `429 rate_limit_error`; both accounts cooled for 60 s, `/api/mod-options` reported `anthropic` unusable, and the mod replaced `claude-opus-5-5`/`claude-sonnet-5-5` with the ladder. The script's calls were also billed to the subscription instead of its key | A Messages request that carries its own `x-api-key`, no `Authorization`, and neither `x-app: cli` nor a `claude-cli/` user agent is not routed (a login beside a key keeps the old path: a real Bearer with a placeholder key is common): it takes the un-routed path on its own headers, byte for byte, with no pool, no mapping, no search or compaction override (`callerOwnsKey`, log tag `PASS caller-key`). Its answers touch no account's cooldown. Claude Code on an API key keeps the pool path as before. Tests: `anthropic-account-proxy.test.ts`. |
+| A Claude subscription 429 without `retry-after` cooled the account for 60 s although `anthropic-ratelimit-unified-status: rejected` with `-5h-utilization: 1` said its window was spent until a reset hours away; a token refresh during that rest produced a fresh credential id with no cooldown, so the spent account was tried again (2026-11-06/07, account-pool audit) | A rejected unified window rests the account until the soonest stated reset (`claudeLimitResetMs` in `anthropic-usage.ts`; the documented 6 h clamp still bounds it). A rest belongs to the durable account, so a token refresh never clears it; a quarantine still belongs to the token generation, so a re-login does not inherit it (pool.ts). A shorter `retry-after` on the same answer cannot shorten that rest: the account cools for the later of the two, and when no account can take the turn the 429 carries `x-should-retry: false` and `retry-after` with that same value, so pool and caller agree on the reset. Tests: `pool.test.ts`, `anthropic-usage.test.ts`, `anthropic-account-pool.test.ts`, `anthropic-account-proxy.test.ts`. |
+| OpenCode Go answered 429 `{"error":{"type":"server_error","message":"Upstream request failed: [prefill_cap_refused] the cell is at capacity; retry shortly (after 5 s)"}}` (2026-11-06 15:34:34; `[overloaded] … retry shortly` the same day) for its own failing upstream. The key was charged a rate-limit cooldown and the turn reached the user as a 429, though the same key answered 200 five seconds later | A 429 whose body matches `RELAY_UPSTREAM_FAILED` is transient: zero cooldown, and `fetchWithRetry` retries it in-turn on the same ladder as a relay 403/402. Tests: `pool.test.ts`, `retry.test.ts`. |
+| Google answered 403 `PERMISSION_DENIED` with ErrorInfo `reason: "TOS_VIOLATION"` ("This service has been disabled in this account for violation of Terms of Service…", 2026-11-06, router.log.1; 73 such 403s and 39 refresh+replays on one account in one night) and the auth heuristic refreshed and replayed the token, rested the account 60 s and kept it in rotation | A 403 with `TOS_VIOLATION` parks the account as a dead credential (pool quarantine, one warn naming the account and the reason, no refresh or replay); the account reads as not ready until an operator clears it. Tests: `google-quota-scope.test.ts`. |
+| After an in-turn retry the completion line still named the account the turn started on, and a credential refreshed between the first pick and the retry was printed as `#0` in the RETRY line and `requests.jsonl` (2026-11-07) | The `CLAUDE` completion tag is updated to the credential that answered, and `credentialLabel` falls back to the durable owner when the runtime id is not in the first pick's list. Tests: `anthropic-account-proxy.test.ts`. |
+| Three failovers measured on 2026-11-06 each harmed the connection they meant to protect (owner's MacBook, router.log + `log show` of airportd/WiFiAgent/sharingd). On the iPhone hotspot "PBJ" from 18:32: (1) a directed scan said a known Wi-Fi was visible at 18:37/18:39; the router disassociated at 18:39:25, then every `sudo networksetup -setairportnetwork en0 PBJ` failed ("Failed to join network PBJ", then "Could not find network PBJ") because an idle iPhone stops advertising, and each call cancelled macOS's own Instant Hotspot auto-join (`Auto-join COMPLETED … error=(53 'Auto-join disabled'), wasCancelled=1`), leaving the Mac offline until the owner rejoined from Control Center at 18:43:28. airportd's own auto-join right after the scan found `candidateBSSCount=0`, and a CoreWLAN answer measured then is airportd's cache (~25ms, ~8-10s old) whose membership differed from the next real scan's (13 vs 11). (2) At 19:43:45, 37s after the owner joined home Wi-Fi, the 5-probe window still held the hotspot period's and the switch's failures (probes bound to the old address: `EADDRNOTAVAIL`), so the router joined PBJ over a working home Wi-Fi and disassociated it at 19:44:01. | macOS with no address at all leaves the first `HOTSPOT_JOIN_GRACE_MS` (60s) to macOS and then tries at most once a minute — no 10s ladder — because macOS's auto-join can wake the iPhone and ours cannot and cancels it. A return requires a saved non-hotspot SSID at `RETURN_MIN_RSSI_DBM` (-70 dBm; measured in range -36..-40, merely heard -69..-92) seen by a scan that took at least `SCAN_FRESH_MIN_MS` (1s); a cached answer is re-asked after `SCAN_CACHE_TTL_MS` (10s), else the return is refused. Nothing associated within `JOIN_KNOWN_AFTER_MS` (8s) of leaving → rejoin the hotspot at once while the iPhone still advertises. A change of the Wi-Fi address, subnet or class empties the probe window, and one that brought an address also gives the new network `NETWORK_SETTLE_MS` (30s) in which failures do not count — so a network the OS or the person joined is never failed over in that period, while losing the address keeps the old failover timing (the third failed round). The address is read again after the probe and before the join, so a Wi-Fi joined mid-tick is not evicted. Tests: `tether.test.ts`, `tether-win.test.ts`. |
 
 ### Router-owned automatic updates (2026-10-21)
 
@@ -2502,12 +2508,18 @@ says nothing the subnet does not. Limits: a by-hand join is recognised only on a
 before; a Wi-Fi elsewhere that happens to use the learned /24 reads as the hotspot. The way back
 can drop it only when another saved SSID is visible (visibility guard, 2026-10-21, below);
 `tether.pin` stops switching entirely. Failover (on Wi-Fi or no
-address, outage): wait at most 30s for an in-flight call, then `sudo -n networksetup
--setairportnetwork <dev> <NAME>` (macOS takes the password from the System keychain). Switches are at
-least a minute apart, but a join that failed ("Failed to join network", or not visible) switched
-nothing, so it is tried again 10 s, 20 s, 30 s … later up to that minute: walking out of the office
-the first join came as the hotspot was only just in range, failed, and the Mac stayed offline for the
-rest of the minute (2026-10-22). Setup failures (sudo, profile, Location) still wait the minute. The probe window
+address, outage): wait at most 30s for an in-flight call. **macOS with no address at all leaves the
+first `HOTSPOT_JOIN_GRACE_MS` (60s) to macOS and then tries at most once a minute** (`tether.ts`,
+2026-11-06): macOS's Instant Hotspot auto-join wakes the iPhone over Bluetooth and joins it, while a
+`networksetup` join cancels that auto-join in progress (`Auto-join COMPLETED … error=(53 'Auto-join
+disabled'), wasCancelled=1`, 22s and every later try "Could not find network PBJ") and cannot wake a
+phone whose SSID is hidden. Then `sudo -n networksetup -setairportnetwork <dev> <NAME>` (macOS takes
+the password from the System keychain). Switches are at least a minute apart, but a join that failed
+while the Wi-Fi still had an address ("Failed to join network", or not visible) switched nothing, so
+it is tried again 10 s, 20 s, 30 s … later up to that minute: walking out of the office the first
+join came as the hotspot was only just in range, failed, and the Mac stayed offline for the rest of
+the minute (2026-10-22). The no-address case has no such ladder on macOS. Setup failures (sudo,
+profile, Location) still wait the minute. The probe window
 lives in the process, so it only works if the router is not restarted every few seconds while the
 machine is offline (§5, health self-exit refined 2026-10-20). networksetup
 reports failure on stdout and may exit 0, so its text decides: "Could not find network" →
@@ -2520,16 +2532,25 @@ on a fixed schedule counted from landing there — 5, 10, 20, 30, 40, 50 and 60 
 10 minutes for as long as it stays (owner's decision, 2026-10-20: at most ~10 minutes on the hotspot
 after reaching a known Wi-Fi — a doubling backoff held it for up to 15 minutes). **Since
 2026-10-21 each point first checks whether another saved Wi-Fi is actually in range, without
-leaving the hotspot** (below). Only with a positive check, no call in flight and none started in the
-last 20s, disassociate via JXA as the console user (wifihop's exact call: `ObjC.import("CoreWLAN");
-$.CWWiFiClient.sharedWiFiClient.interface.disassociate`) so macOS auto-joins the best known network;
-two good probes within 20s keep it; otherwise stay on (or rejoin) the hotspot and move to the next
-scheduled point (a point already passed — a slow tick, a long gap attempt — is skipped for the next
-one at least `MIN_SWITCH_INTERVAL` out). Leaving the hotspot resets the schedule; landing again
-starts it over. At most one switch per 60s. `tether.pin` (in memory, via the API) pauses all
+leaving the hotspot** (below); since 2026-11-06 that means `RETURN_MIN_RSSI_DBM` (-70 dBm) or better
+in a scan the radio really ran, not an airportd cache answer. Only with a positive check, no call in
+flight and none started in the last 20s, disassociate via JXA as the console user (wifihop's exact
+call: `ObjC.import("CoreWLAN"); $.CWWiFiClient.sharedWiFiClient.interface.disassociate`) so macOS
+auto-joins the best known network; two good probes through it within 20s keep it. **Nothing
+associated within `JOIN_KNOWN_AFTER_MS` (8s) of leaving → the hotspot is rejoined at once**
+(`rejoinHotspotIfUnassociated`, macOS; 2026-11-06: waiting out the rest of the 20s can lose the only
+way back once the iPhone stops advertising). A Wi-Fi whose address appears late gets its
+**`NETWORK_SETTLE_MS`** from then before the loop calls it dead (below), so the 20s can stretch by up
+to one settle. Otherwise stay on (or rejoin) the hotspot and move to
+the next scheduled point (a point already passed — a slow tick, a long gap attempt — is skipped for
+the next one at least `MIN_SWITCH_INTERVAL` out). Leaving the hotspot resets the schedule; landing
+again starts it over. At most one switch per 60s. `tether.pin` (in memory, via the API) pauses all
 switching. Every decision is logged once, with its reason. "Ask to join hotspots: Automatic"
-(macOS 26+, Apple 109321) covers the no-Wi-Fi-at-all case by itself; its setting lives in a root-only
-file (`com.apple.airport.preferences.plist`: permission denied, measured), so it is only hinted at.
+(macOS 26+, Apple 109321) covers the no-Wi-Fi-at-all case by itself; its setting,
+`AutoHotspotMode` in `/Library/Preferences/SystemConfiguration/com.apple.airport.preferences`, read
+`Automatic` here with `defaults read` and no privilege on 2026-11-06 (the separate
+`com.apple.airport.preferences.plist` was permission denied on 2026-10-21). It is not read by the
+router, so no behaviour depends on it.
 
 **Visibility before return (2026-10-21).** The blind drop was not brief: while travelling with
 the lid closed and no known Wi-Fi, the owner reported this sequence in router.log, 18:40–19:08 KST:
@@ -2570,6 +2591,23 @@ Read-only measurements on the owner's Mac (2026-10-21, `sw_vers`: macOS **27.0.1
   current network. These were successive snapshots while travelling, not simultaneous counts.
   This path cannot identify a saved SSID here and is not used.
 
+**Re-measured 2026-11-06** (the same Mac, at home; read-only, no join/leave/disassociate; en0
+**192.168.45.242/24**, 50 saved SSIDs). A full `scanForNetworksWithNameError($(), error)` took
+**9.5–9.8s** — a real radio scan — and returned 9–13 CWNetworks with SSIDs and RSSIs. Every scan
+answer for the next **~8–10s** took **19–32ms** and came from airportd's cache: at +2/+4/+6/+8s the
+same call answered from cache (count 13), at +10s the radio scanned again (count 11), and a cached
+full scan carried two `ssid` fields as null where a fresh one had none. In range, the saved
+`SK_6954_5G`/`_2.4G`/`_Mesh` read **-36 to -40 dBm**; networks the scan merely heard read **-58 to
+-92** (-69, -73, -74, -79, -81, -83, -85, -92). Directed scans for out-of-range saved SSIDs
+(`mambo_academy 5G`, `KT_starbucks`) and an absent control returned **count 0**; in-range ones
+**count 1**. The shipped `SCAN_KNOWN_JS` was then executed as written: `{"freshMs":9507,…,
+"found":[{"name":"SK_6954_2.4G","rssi":-37}]}`. So the guard takes only a saved non-hotspot SSID at
+**`RETURN_MIN_RSSI_DBM` = -70** or better from a scan that took at least **`SCAN_FRESH_MIN_MS`**
+(1s); a faster answer is re-asked once after **`SCAN_CACHE_TTL_MS`** (10s), and a second cached
+answer is unknown visibility and stays. The 2026-10-21 rule (a non-empty directed set) was true but
+not sufficient: the 18:37 return's "visible" network was weak or already gone — airportd's own
+auto-join right after found `candidateBSSCount=0` — which is what dropped a working hotspot.
+
 Windows uses `netsh wlan show networks mode=ssid interface="<adapter>"` and saved profiles from
 `show profiles` plus exported XML (SSID and auto/manual mode), excluding the hotspot. Only a visible
 SSID with an automatic profile permits return; names of profiles alone are not SSID evidence.
@@ -2588,7 +2626,9 @@ refused, not 503 — until the gate is released or `HOLD_MAX_MS` (120s) has pass
 it proceeds normally (logged `HOLD POST /v1/messages waited N.Ns`). WEB/PASS and any non-model
 request is never held. (2) Wait up to `RETURN_DRAIN_WAIT_MS` (60s; with the switch it stays inside `HOLD_MAX_MS`, and far under the ~180s after which Claude Code gave up on an unanswered call on 2026-10-20) for the calls already running
 (held ones are not counted, so this can only fall, except for a call that hit its 120s). (3) They
-finished → the ordinary leave → probe → keep-or-rejoin sequence above; they did not → no switch, move
+finished → the ordinary leave → probe → keep-or-rejoin sequence above, with its probe loop capped so
+the hotspot is back before the earliest held call goes ahead by itself (120s after the engagement,
+less the ≤45s rejoin — see "A change after an await wins"); they did not → no switch, move
 to the next scheduled point (the same fixed 5/10/20/30/40/50/60-minute schedule, no doubling).
 (4) Release the gate in a `finally`, whatever happened —
 a thrown error included; `stop()` releases it too, the gate releases itself after
@@ -2598,6 +2638,53 @@ self-exit. Each step is logged once: "Wi-Fi return postponed Ns past due while m
 holding new model calls to make a gap…", "running model calls finished after Ns; N held", "hold
 released; N held model calls going ahead". Not measured: how long the CLI's own request timeout lets a
 held request sit (10 min in the Anthropic SDK by default, far above 120s, but the CLI closed unanswered Google turns at 182–190s on 2026-10-20) — no real switch has run yet.
+
+**A network change resets judgement (2026-11-06).** When the Wi-Fi interface's IPv4 address or
+subnet changes, or its class (hotspot↔wifi↔none), `tether.ts` empties the probe window, clears the
+join-failure ladder and the trusted-visibility stamp; a network that **arrived** (the new state has
+an address) also gets **`NETWORK_SETTLE_MS`** (30s) during which failed probes do not count. The
+switch itself fails probes bound to the old address (`EADDRNOTAVAIL`); at 19:43:45, 37s after the
+owner joined home Wi-Fi, five such failures were still in the window and the router joined the
+hotspot over the working network, disassociating it at 19:44:01 (§5). **Losing the address does not
+settle**: a Wi-Fi that went away has no new network to protect, and giving it 30s of ignored
+failures pushed Windows' first hotspot join from ~20s to ~50s after the loss (the window is still
+emptied, which leaves the timing of a healthy Wi-Fi's loss the same as before the settle logic: the
+third failed round). The first observation after a start is a baseline, not a change, so a restart
+does not delay failover.
+
+**A change after an await wins (2026-11-06).** A tick samples the address, then probes it (seconds)
+and, in failover, waits up to `FAILOVER_IDLE_WAIT_MS` (30s) for in-flight calls. Both places read the
+address again before acting: if it changed, the change is handled as above and the tick does not fail
+over — otherwise a Wi-Fi the OS or the person joined during the probe or the wait would be evicted by
+the failover that began before it. A lost address has nothing to evict, so the hotspot join still
+goes ahead. The way back reads it again before the leave too, after either await that precedes it —
+the visibility scan on the quiet path and the drain wait in `returnWithGap` (2026-11-07): a change,
+or a hotspot no longer held, stops the leave, the hold is still released in the `finally`, and the
+next tick judges the new network with its settle (`sampleNetwork` has already reset the window and
+started it). So a Wi-Fi the person or the OS joined while the running calls drained is not
+disassociated by the return decided before it arrived. `leaveHotspot`'s loop then probes for
+`RETURN_PROBE_MS` (20s) and re-reads the address **and subnet** after every probe, so each non-hotspot
+network that appears — even during a probe — resets the good-probe count and extends the deadline to
+`NETWORK_SETTLE_MS` from that appearance, every time (no cap one settle past the base window: a second
+network at +28s keeps its full 30s) before declaring "the Wi-Fi macOS chose has no internet" — a
+network's address can arrive seconds after the disassociate while it is still initialising. A Wi-Fi
+that went away and came back is a new network: a `none` (or the hotspot again) observation clears
+the last-seen Wi-Fi key, so the same address and subnet reappearing gets a full settle instead of
+the deadline of its first appearance (2026-11-07). The whole quiet loop is bounded by
+`RETURN_LOOP_CEILING_MS` (100s); if it is hit, the hotspot is rejoined as after the deadline and the
+loop logs why. A loop under a held gap (`returnWithGap`) is bounded tighter instead: the earliest
+call held at the gate goes ahead `HOLD_MAX_MS` (120s) after the gate engaged, and the final hotspot
+rejoin needs up to `HOTSPOT_REJOIN_BUDGET_MS` (networksetup ≤30s + 15s join settle) of that, so the
+loop and every settle in it end 45s before that — 75s from the engagement at most, drain and leave
+included, never a negative wait (if less than the 20s base window is left, the loop uses what
+remains and logs that the held-call budget cut it). A probe cannot be recalled, so one that would
+still be running at that bound is not started at all (a probe's own maximum is `PROBE_TIMEOUT_MS`,
+4s): the rejoin goes ahead instead — a 58s drain with failing 4s probes starts the rejoin at +72s,
+inside the cap, where starting the last probe put it at +76s, after the 120s a held call waits
+(2026-11-07). Without that cap a held call could go out onto a Wi-Fi with no internet before the
+hotspot was back. The 8s early rejoin when nothing is associated is unchanged, and the hold's own
+failsafe still releases it at engagement + `RETURN_HOLD_FAILSAFE_MS`
+(240s) if the return never came back to release it. Tests: `tether.test.ts`, `tether-win.test.ts`.
 
 **Surfaces.** `GET /api/power` → `{ platform: "darwin"|"win32"|"linux", awake: { mode, applied, reason,
 setup, battery, thermal, lidClosed, until }, tether: { enabled, network, state, pinned, hotspotSsid,
@@ -2712,3 +2799,110 @@ C# compiling under Add-Type, the child's stdin/EOF behaviour under powershell.ex
 SetSuspendState, `powercfg /q` output on a real laptop, and every netsh path are covered only by
 fakes and by a Node stand-in for the child's line protocol. Lid and Wi-Fi need a real laptop with a
 phone in any case — and the learned-network path (§5, 2026-10-20) a real Android phone on both OSes.
+
+## 9. Ripple Remote dead-man switch (2026-11-06)
+
+**What.** The phone is told when the computer it drives stops answering while Claude was working:
+the network dropped, the computer slept, or the host process died. The host cannot push in that
+state, so the relay does it. Code: `packages/remote/src/watch.ts` (host), `relay/room.ts` (room
+logic), `relay/worker.ts` (Durable Object glue), `src/expo-push.ts` (`ExpoNotifier.targets`,
+`system`), `src/relay.ts` (`control`, `onHello`), `src/sessions.ts` (`workActive`).
+
+**Armed while work is active.** `Sessions.workActive()` is the host's own knowledge: a session
+starting/running/waiting, a pending approval, a blocked wrap_up question nobody has answered yet
+(read from the Claude app transcript's own pending state, not from the attention flag that opening
+the session clears), background work a finished turn left running (a host-run session's
+`BackgroundActivity.active` — an async Agent, a background shell, a monitor; observing it active
+also refreshes the idle tail, so the two quiet minutes start when that work finishes), a Claude app
+conversation the host tails or alerts on (its registry status, or `macStates`), or a queue/send in
+flight. While it is true the host sends, every `WATCH_RENEW_MS` (60 s, checked on a 10 s tick) on
+its control socket:
+
+- `{"t":"watch","tokens":[{"token","lang"}],"host":"<host public key>"}` — at most
+  `WATCH_TOKENS_MAX` (10) native Expo tokens, validated with `EXPO_TOKEN_RE` (the same shape
+  `ExpoNotifier` accepts).
+- `{"t":"unwatch"}` once work has been idle for `WATCH_IDLE_MS` (2 min), and as the first control
+  frame a new process sends when it starts idle. The idle window lives in `workActive` (it returns
+  true for `WATCH_IDLE_MS` after the last observation of a running turn — and is moved forward while
+  background work is observed — so even a turn shorter than the relay poll arms the switch);
+  `RelayWatch` sends the unwatch on its first inactive tick.
+
+Every relay `hello` on a new control socket is answered with the current state outright — `watch`
+(renewal) while active, `unwatch` while idle — never "what the host believes the room last heard": a
+frame sent on a socket that died looks sent here, and an idle host that stayed silent after
+reconnecting would leave the old alarm to fire.
+
+**At the room.** A `watch` is kept in Durable Object storage (`watch`) and sets a DO alarm at
+`now + WATCH_ALARM_MS` (3 min); every renewal moves it. If the alarm fires, the room writes
+`firedAt`, POSTs one Expo batch to `https://exp.host/--/api/v2/push/send` (the only network call)
+with `{"to", title:"Ripple Remote", body, data:{session:"",host}, sound:"default", ttl:3600}`, and
+never repeats for that outage — a retried alarm sees `firedAt` and does nothing. Body copy is built
+at the relay from each token's `lang` (`OUTAGE_COPY` in `src/protocol.ts`); the host sends no text.
+Control frames only come from the host's control socket, which the secret was checked for before
+acceptance; a phone socket sending one changes nothing. Liveness is untouched: plain "ping" is
+still answered by the runtime inside the hibernation API. The room's only wake-ups are renewals and
+the alarm.
+
+**Recovery.** On reconnection the room sends `{"relay":"hello"}` then, if this watch has `firedAt`,
+`{"relay":"fired","firedAt":<ms>}`. A `watch` renewal that arrives while `firedAt` is set is that
+same reconnection on a control socket that survived the outage: the computer slept past the alarm
+and resumed on the same WebSocket, so the room says `fired` on that (newest, authenticated) socket
+too and re-arms the alarm; the host's dedupe below keeps it to one notice. An `unwatch` arriving
+while `firedAt` is set is the same reconnection with no renewal — the computer woke idle and drops
+the watch before it renews — so the room says `fired` on that socket as well and keeps `firedAt`
+until the host's `cleared` (with no tokens and no alarm, so no new outage can be pushed while
+unwatched). The host answers `fired` the same way whether or not it is watching: it pushes one
+recovery notice with the outage length in whole minutes (`max(1, round(ms/60000))`) through
+`ExpoNotifier.system`, answers `{"t":"cleared","firedAt"}`, and the room forgets the moment and
+goes back to ordinary renewals. The reported `firedAt` is persisted in `<home>/watch.json` so a host
+restart inside the acknowledge window does not push the same recovery twice (`relay.ts` hands the
+frame to `RelayWatch.hello`).
+
+**No false alarm.** Renewal every 60 s, the idle tail 120 s after the last observed work, alarm
+180 s after the last renewal; the 10 s tick puts `unwatch` at most ~10 s past the idle tail, while
+the last renewal is at most 60 s older, so the alarm is cleared with a minute or more to spare. A
+host restart takes seconds: the new process's first control frame is `unwatch` when it starts with
+no work, which removes the previous process's alarm (and, if an outage was already reported,
+carries the `fired` frame above); a process that starts with work already
+running sends `watch` and moves it. A host that is idle and sleeps leaves no alarm at all. A
+restart longer than 3 min does fire (the host really was gone for that long).
+
+**Online notice: expired Claude login.** Two sources feed one host state: `Sessions.noteBridge`
+entering the existing `HostInfo.desktopProblem` state (a `BridgeAuthError`), and a host-run SDK turn
+refused because the CLI's own login is missing or expired (`isLoginRefusal`; the result error or a
+thrown turn failure). Each source reports beside the other, and `main.ts` asks one
+`DesktopProblemAlert` about `desktopProblem ?? cliLoginProblem` on every problem change and on every
+session update, and the alert pushes once per occurrence the first time the problem holds while
+`workActive()` — to every Expo device (`ExpoNotifier.system`) and every web subscriber
+(`Notifier.system`) regardless of `SEEN_MS`. A problem first seen while nothing was running
+therefore notifies when work starts while it persists; a message that changes without clearing is
+the same occurrence, and a clear followed by a new problem is a new one. The CLI problem clears only when a
+later turn succeeds; any other failure (a dropped connection, an API error) says nothing about the
+login and leaves the problem as it was, so a refusal that recurs after such a failure is the same
+occurrence and sends no second notice. The app problem clears when a bridge request succeeds.
+
+**Privacy.** The relay now stores, per host, the Expo push tokens of the owner's phones, each
+token's language, and the host's public key — the first content the relay holds. It still never
+sees session data (frames stay end-to-end encrypted) and the disconnect body is fixed copy, but
+Expo/Apple/Google now learn that one of this host's phones exists and can be pushed until
+`unwatch`. Web push is not watched: signing a web push needs the host's VAPID private key, which
+must not go to the relay, so only native Expo devices get these two notices.
+
+**Tap behaviour.** Both notices carry no session (`session:""`). The private app ignores a response
+whose session is empty or blank (`app/_layout.tsx` `open`): it clears no destination, navigates
+nowhere and shows no error — a cold or warm tap simply opens the app where it was (iOS and
+Android). The Android push task leaves a message without `e` to the OS notification
+(`push-delivery.ts`), so it is not duplicated and the system shows the title/body. The web push
+path, when used for the login notice, opens Home (`session` is falsy in `web/sw.ts`).
+
+Tests: `test/relay-deadman.test.ts` (alarm moving, one Expo POST with exact payload, unwatch,
+fired/cleared, a renewal on the socket that survived the outage re-announcing `fired` and re-arming,
+an idle unwatch on that socket announcing `fired` and keeping it until `cleared`, token validation
+and cap, unauthenticated socket) and `test/deadman.test.ts` (renewal/idle, current state stated on
+every hello even after a lost frame, fired after the watch was taken away, stale-watch clear,
+recovery minutes and persistence, login notice once per occurrence including a problem seen while
+idle and work starting behind it); `test/sessions.test.ts` covers `workActive` for the idle tail and
+for background work left by a finished turn (its tail starting when that work ends), and the
+CLI-refusal path that feeds the login notice (including an unrelated failure between two refusals
+not resetting it); `test/wrap-up.test.ts` covers a blocked question keeping `workActive` true after
+`markSeen` clears its attention.
