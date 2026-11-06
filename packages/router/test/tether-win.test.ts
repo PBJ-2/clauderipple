@@ -357,3 +357,109 @@ test("Windows, Android hotspot: our connect lands on a new subnet, it is remembe
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("Windows with no address still joins on the third failed round: the macOS-only 60s grace is not applied", async () => {
+  const r = rig({ net: { ip: null, probeOk: () => false } });
+  await r.ticks(2);
+  assert.equal(r.count(/wlan connect/), 0);
+  await r.ticks(1);
+  assert.equal(r.count(/wlan connect/), 1);
+  assert.equal(r.c.status().network, "hotspot", "the connect's 172.20.10.3 is recognised as the iPhone range");
+});
+
+// ---- 2026-11-06 red team: a change during a tick, and a lost address ------------------------
+
+test("Windows: a network joined while the tick probes is not evicted by the failover it started", async () => {
+  let probes = 0;
+  const r: ReturnType<typeof rig> = rig({
+    net: {
+      probeOk: () => {
+        // The third failing round: while its probe is out, the OS or the person joins a working Wi-Fi.
+        if (++probes === 3) {
+          r.net.ip = "10.0.0.50";
+          r.net.probeOk = () => true;
+        }
+        return false;
+      },
+    },
+  });
+  await r.ticks(3);
+  assert.equal(r.count(/wlan connect/), 0, "the Wi-Fi that arrived is not evicted");
+  assert.equal(r.c.status().lastSwitch, null, "no switch happened");
+  assert.equal(r.c.status().network, "wifi");
+  assert.ok(r.lines.some((l) => /network changed \(wifi 192\.168\.1\.4 → wifi 10\.0\.0\.50\); probe window reset, 30s settle$/.test(l)), r.lines.join("\n"));
+  await r.ticks(1);
+  assert.equal(r.c.status().state, "watching");
+  assert.equal(r.count(/wlan connect/), 0);
+});
+
+test("Windows: a network joined while failover waits for in-flight calls is not evicted", async () => {
+  const busy = { inFlight: 0, changeAt: 0, changed: false };
+  const r: ReturnType<typeof rig> = rig({
+    net: { probeOk: () => false },
+    activity: () => {
+      // 3 s into the wait for the running call, the OS or the person joins a working Wi-Fi.
+      if (busy.changeAt > 0 && !busy.changed && r.clock.t >= busy.changeAt) {
+        busy.changed = true;
+        busy.inFlight = 0;
+        r.net.ip = "10.0.0.50";
+        r.net.probeOk = () => true;
+      }
+      return { inFlight: busy.inFlight };
+    },
+  });
+  await r.ticks(2); // two failed rounds
+  assert.equal(r.count(/wlan connect/), 0);
+  busy.inFlight = 1; // a model call is running: the failover waits for it
+  busy.changeAt = r.clock.t + 3_000;
+  await r.ticks(1);
+  assert.equal(busy.changed, true, "the wait ran into the change");
+  assert.equal(r.count(/wlan connect/), 0, "the Wi-Fi that arrived is not evicted");
+  assert.equal(r.c.status().lastSwitch, null, "no switch happened");
+  assert.equal(r.c.status().network, "wifi");
+  await r.ticks(1);
+  assert.equal(r.c.status().state, "watching");
+  assert.equal(r.count(/wlan connect/), 0);
+});
+
+test("Windows: an address lost while failover waits for a call still joins at once", async () => {
+  // Nothing is left to evict, so the join the tick already decided on goes ahead: a change to "none"
+  // must not cost three more failed rounds the way a settle would.
+  const busy = { inFlight: 0, loseAt: 0, lost: false };
+  const r: ReturnType<typeof rig> = rig({
+    net: { probeOk: () => false },
+    activity: () => {
+      if (busy.loseAt > 0 && !busy.lost && r.clock.t >= busy.loseAt) {
+        busy.lost = true;
+        busy.inFlight = 0;
+        r.net.ip = null;
+      }
+      return { inFlight: busy.inFlight };
+    },
+  });
+  await r.ticks(2); // two failed rounds
+  busy.inFlight = 1; // a model call is running: the failover waits for it
+  busy.loseAt = r.clock.t + 3_000;
+  await r.ticks(1);
+  assert.equal(busy.lost, true, "the wait ran into the loss");
+  assert.equal(r.count(/wlan connect/), 1, "joined on this tick");
+  assert.equal(r.c.status().network, "hotspot");
+});
+
+test("Windows: losing the Wi-Fi address fails over on the timing it had before the settle logic", async () => {
+  const r = rig({ net: { probeOk: () => true } });
+  await r.ticks(4); // healthy Wi-Fi: the window is all successes
+  assert.equal(r.c.status().state, "watching");
+  r.net.ip = null;
+  r.net.probeOk = () => false;
+  // Before any settle logic the loss was the third failed round: three 10 s ticks, so 20 s. A
+  // settle on the loss would ignore those rounds and put the first join at ~50 s.
+  await r.ticks(2);
+  assert.equal(r.count(/wlan connect/), 0, "two failed rounds are not yet an outage");
+  await r.ticks(1);
+  assert.equal(r.count(/wlan connect/), 1);
+  assert.equal(r.c.status().network, "hotspot");
+  const loss = r.lines.find((l) => l.includes("network changed (wifi 192.168.1.4 → none)"));
+  assert.ok(loss, r.lines.join("\n"));
+  assert.match(loss, /; probe window reset$/, "a lost address gets no settle");
+});

@@ -185,7 +185,7 @@ test("postponed → hold engaged after the grace period → the held call waits,
       if (file === "/usr/bin/osascript" && args[3] === SCAN_KNOWN_JS) {
         assert.equal(hold.engaged, false, "visibility is established before the hold gate engages");
         assert.deepEqual(JSON.parse(args[5]!), ["Home"]);
-        return { code: 0, stdout: "visible\n", stderr: "" };
+        return { code: 0, stdout: JSON.stringify({ freshMs: 9_500, nets: [{ ssid: "Home", rssi: -40 }], found: [{ name: "Home", rssi: -40 }] }), stderr: "" };
       }
       if (file === "/usr/bin/osascript" && args[3] === DISASSOCIATE_JS) {
         events.push(`leave (held ${hold.waiting}, provider saw ${r.up.seen.join(",")})`);

@@ -10,19 +10,36 @@
 //
 //   failover  on Wi-Fi (or none), 3 of the last 5 probe rounds failed → `sudo -n networksetup
 //             -setairportnetwork <dev> <hotspot>`; macOS takes the password from the System keychain.
+//             macOS with no address at all leaves the first HOTSPOT_JOIN_GRACE_MS to macOS, then
+//             tries once a minute: macOS's own Instant Hotspot auto-join can wake the iPhone, and
+//             our networksetup call cancels it (measured 2026-11-06, §5).
 //   return    on the hotspot, at 5, 10, 20, 30, 40, 50 and 60 min after landing and every 10 min
-//             after that, only if another known Wi-Fi is visible, while no model call runs →
+//             after that, only if another known Wi-Fi is visible with RSSI ≥ RETURN_MIN_RSSI_DBM in
+//             a scan the radio actually ran (not airportd's ≤10s cache), while no model call runs →
 //             disassociate (CoreWLAN through JXA, as the
 //             console user — the router is a launchd agent in the user's session) so macOS
-//             auto-joins the best known network in range; probe it; if that does not give working
-//             Wi-Fi within 20s, rejoin the hotspot and wait for the next point. The times are fixed
+//             auto-joins the best known network in range; probe it; nothing associated within 8s →
+//             rejoin the hotspot at once while the iPhone still advertises; each non-hotspot network
+//             that appears (address or subnet, re-read after every probe) gets NETWORK_SETTLE_MS
+//             from then, every time, inside a RETURN_LOOP_CEILING_MS loop; one that still has no
+//             internet → rejoin it and wait for the next point. A network that went away (no
+//             address, or the hotspot again) and comes back counts as a new one, with its own
+//             settle. The times are fixed
 //             from landing rather than a doubling backoff (owner's decision, 2026-10-20): at most
 //             ~10 min on the hotspot after arriving at a known Wi-Fi. On the move, a read-only scan
 //             replaces the old blind drop (2026-10-21): no known Wi-Fi in range → no leave, no hold.
+//   change    a new address, subnet or network class resets the probe window, and a network that
+//             just arrived also gets NETWORK_SETTLE_MS in which failures do not count (2026-11-06:
+//             the switch's own EADDRNOTAVAIL probes sent a just-joined home Wi-Fi back to the
+//             hotspot). Losing the address ("none") resets but does not settle: a dead Wi-Fi still
+//             fails over on the old timing. A change is re-read after every await, so a network the
+//             OS or the person joined meanwhile is not evicted by the tick that began before it.
 //   gap       a return still postponed RETURN_FORCE_AFTER_MS past due (calls back-to-back, so never
 //             a quiet moment — 2026-10-20) makes the gap itself: new model calls are held (hold.ts:
 //             they wait, they are not refused), the running ones get up to RETURN_DRAIN_WAIT_MS to
 //             finish, then the return above runs and the hold is released whatever the outcome.
+//             The probe loop is capped so the hotspot is back before the earliest held call goes
+//             ahead by itself (HOLD_MAX_MS, hold.ts), measured from the engagement.
 //
 // Never more than one switch per 60s; nothing switches while the user has pinned the network.
 // "On the hotspot" is read from the address, not the SSID (macOS redacts it without Location;
@@ -40,29 +57,94 @@ import os from "node:os";
 import path from "node:path";
 import type { TetherSettings } from "./config.ts";
 import { SUDO, sudoRefused, type Activity, type Runner } from "./awake.ts";
-import { HoldGate } from "./hold.ts";
+import { HOLD_MAX_MS, HoldGate } from "./hold.ts";
 import { HOTSPOT_NOT_VISIBLE_STEPS, WinTetherBackend } from "./tether-win.ts";
 
 export const NETWORKSETUP = "/usr/sbin/networksetup";
 export const OSASCRIPT = "/usr/bin/osascript";
 /** wifihop's exact call (verified in its source, `mac_disassociate_js`): a zero-argument ObjC method is invoked by reading it. */
 export const DISASSOCIATE_JS = 'ObjC.import("CoreWLAN"); $.CWWiFiClient.sharedWiFiClient.interface.disassociate; "ok";';
-/** Read-only directed scans: a non-empty set proves visibility even if CWNetwork.ssid is redacted. */
+/**
+ * Read-only scan for the saved SSIDs, with RSSI. One full scan first: it is the call that makes the
+ * radio scan (measured 2026-11-06: ~9.5s cold; every scan answer for the next ~8-10s is airportd's
+ * cache, ~25ms, and its membership can differ from a real scan's — 13 cached vs 11 fresh). The
+ * directed queries after it are answered from that fresh snapshot; a non-empty set proves visibility
+ * even if CWNetwork.ssid is redacted. `freshMs` says which kind of answer this was.
+ */
 export const SCAN_KNOWN_JS = `function run(argv) {
   ObjC.import("CoreWLAN");
   var wifi = $.CWWiFiClient.sharedWiFiClient.interfaceWithName(argv[0]);
   var names = JSON.parse(argv[1]);
-  for (var n = 0; n < names.length; n++) {
-    var error = Ref();
-    var found = wifi.scanForNetworksWithNameError(names[n], error);
-    var count = Number(found.count);
-    if (!isFinite(count) || count < 0) {
-      throw new Error("CoreWLAN scan unavailable: " + (ObjC.unwrap(error[0].localizedDescription) || "no result set"));
-    }
-    if (count > 0) return "visible";
+  var started = Date.now();
+  var error = Ref();
+  var all = wifi.scanForNetworksWithNameError($(), error);
+  if (!all || !isFinite(Number(all.count))) {
+    throw new Error("CoreWLAN scan unavailable: " + (ObjC.unwrap(error[0].localizedDescription) || "no result set"));
   }
-  return "none";
+  var freshMs = Date.now() - started;
+  var nets = [];
+  var list = all.allObjects;
+  for (var i = 0; i < Number(list.count); i++) {
+    var n = list.objectAtIndex(i);
+    var ssid = ObjC.unwrap(n.ssid);
+    nets.push({ ssid: ssid ? String(ssid) : null, rssi: Number(n.rssiValue) });
+  }
+  var found = [];
+  for (var k = 0; k < names.length; k++) {
+    var why = Ref();
+    var set = wifi.scanForNetworksWithNameError(names[k], why);
+    var count = set ? Number(set.count) : NaN;
+    if (!isFinite(count) || count < 0) {
+      throw new Error("CoreWLAN scan unavailable: " + (ObjC.unwrap(why[0].localizedDescription) || "no result set"));
+    }
+    if (count === 0) continue;
+    var best = null;
+    var arr = set.allObjects;
+    for (var j = 0; j < Number(arr.count); j++) {
+      var rssi = Number(arr.objectAtIndex(j).rssiValue);
+      if (best === null || rssi > best) best = rssi;
+    }
+    if (best !== null) found.push({ name: names[k], rssi: best });
+  }
+  return JSON.stringify({ freshMs: freshMs, nets: nets, found: found });
 }`;
+
+/** The scan's shape, as SCAN_KNOWN_JS returns it. */
+export type KnownWifiScan = {
+  /** How long the full scan took: a real radio scan takes seconds; ~25ms means airportd's cache answered. */
+  freshMs: number;
+  /** The full scan's own list (SSIDs may be redacted). */
+  nets: { ssid: string | null; rssi: number }[];
+  /** Directed hits: a saved name with its strongest RSSI, even if the full scan redacted it. */
+  found: { name: string; rssi: number }[];
+};
+
+/** Parse and bound-check SCAN_KNOWN_JS's stdout; null for anything this module did not write. */
+export function parseKnownWifiScan(stdout: string): KnownWifiScan | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  const j = raw as { freshMs?: unknown; nets?: unknown; found?: unknown };
+  if (!j || typeof j !== "object" || typeof j.freshMs !== "number" || !Number.isFinite(j.freshMs) || j.freshMs < 0) return null;
+  if (!Array.isArray(j.nets) || !Array.isArray(j.found)) return null;
+  const nets: KnownWifiScan["nets"] = [];
+  for (const n of j.nets as unknown[]) {
+    const x = n as { ssid?: unknown; rssi?: unknown };
+    if (!x || typeof x.rssi !== "number" || !Number.isFinite(x.rssi)) return null;
+    if (x.ssid !== null && typeof x.ssid !== "string") return null;
+    nets.push({ ssid: x.ssid, rssi: x.rssi });
+  }
+  const found: KnownWifiScan["found"] = [];
+  for (const f of j.found as unknown[]) {
+    const x = f as { name?: unknown; rssi?: unknown };
+    if (!x || typeof x.name !== "string" || typeof x.rssi !== "number" || !Number.isFinite(x.rssi)) return null;
+    found.push({ name: x.name, rssi: x.rssi });
+  }
+  return { freshMs: j.freshMs, nets, found };
+}
 
 export const PROBE_URLS = {
   apple: "http://captive.apple.com/hotspot-detect.html",
@@ -81,6 +163,47 @@ export const JOIN_RETRY_MS = 10_000;
 export const KNOWN_VISIBLE_TRUST_MS = 60_000;
 export const RETURN_PROBE_MS = 20_000;
 /**
+ * A saved Wi-Fi is worth leaving the hotspot for at this signal or better. Measured on the owner's
+ * Mac (2026-11-06): home networks -36/-40 dBm; networks in the same building -64/-65; weak/foreign
+ * ones -73, -79, -92. The weaker half is exactly the "visible" network that made the return drop a
+ * working hotspot (18:37, §5), so -70 separates what is in the room from what the scan merely hears.
+ */
+export const RETURN_MIN_RSSI_DBM = -70;
+/**
+ * A full CoreWLAN scan takes seconds; an answer this fast came from airportd's scan cache (measured
+ * 2026-11-06: ~9.5s cold, ~25ms cached, the cache standing about 8-10s). Visibility from a cached
+ * answer is not trusted: its membership differed from the next real scan's (13 vs 11 networks).
+ */
+export const SCAN_FRESH_MIN_MS = 1_000;
+/** How long to let the scan cache expire before asking again for a real scan (~10s measured). */
+export const SCAN_CACHE_TTL_MS = 10_000;
+/**
+ * macOS with no Wi-Fi address: leave the join to macOS this long before calling networksetup. macOS
+ * wakes a sleeping iPhone through Instant Hotspot and joins it by itself, while our networksetup join
+ * cancels that auto-join in progress and cannot wake a phone with no client ("Auto-join COMPLETED …
+ * error=(53 'Auto-join disabled'), wasCancelled=1", then "Could not find network PBJ", 2026-11-06).
+ */
+export const HOTSPOT_JOIN_GRACE_MS = 60_000;
+/**
+ * A changed Wi-Fi address, subnet or network class gets this long before its failed probes count.
+ * The switch itself produces EADDRNOTAVAIL probes on the old address; on 2026-11-06 five such
+ * failures were still in the window when the owner joined home Wi-Fi and sent it back to the hotspot.
+ */
+export const NETWORK_SETTLE_MS = 30_000;
+/**
+ * The whole return probe loop's ceiling for a quiet (idle) return, however many networks appear in
+ * it: each newly appeared one gets its full NETWORK_SETTLE_MS (a Wi-Fi can appear, vanish and be
+ * replaced while the loop watches), so without a ceiling a flapping radio could stretch it
+ * indefinitely. A return with a held gap is bounded by the earliest held call instead: it goes
+ * ahead HOLD_MAX_MS (120s) after the gate engaged, and the final hotspot rejoin needs up to
+ * HOTSPOT_REJOIN_BUDGET_MS (networksetup ≤30s + JOIN_SETTLE_MS 15s = 45s) of that, so the loop and
+ * every settle in it must end by engage + 120s − 45s = 75s (leaveHotspot). Without that cap the
+ * drain (60s) + leave (≤15s) + this ceiling (100s) = 175s, and a held call would go out onto a
+ * Wi-Fi with no internet before the hotspot came back. The failsafe on the hold itself still
+ * covers a return that never came back to release it: engage + RETURN_HOLD_FAILSAFE_MS.
+ */
+export const RETURN_LOOP_CEILING_MS = 100_000;
+/**
  * When to try the way back, counted from the moment the Mac landed on the hotspot: 5, 10, 20, 30,
  * 40, 50 and 60 min, then every 10 min for as long as it stays there (owner's decision, 2026-10-20 —
  * a fixed schedule rather than a doubling one: at most ~10 min on the hotspot after arriving at a
@@ -97,14 +220,20 @@ export const FAILOVER_IDLE_WAIT_MS = 30_000;
 export const RETURN_FORCE_AFTER_MS = 2 * 60_000;
 /**
  * With new calls held, the running ones get this long to finish before the attempt is given up.
- * With the switch after it (up to ~35s) it stays inside a held call's HOLD_MAX_MS, so no held call
- * goes ahead and refills the gap before the switch; and well under the ~180s after which Claude
+ * A long drain leaves the return probe loop less time (leaveHotspot ends the loop so the hotspot
+ * is back inside a held call's HOLD_MAX_MS), and it stays well under the ~180s after which Claude
  * Code gave up on a call that had no answer yet (13 Google turns closed at 182–190s, 2026-10-20).
  */
 export const RETURN_DRAIN_WAIT_MS = 60_000;
 /** The hold releases itself after this even if the return never comes back to release it. */
 export const RETURN_HOLD_FAILSAFE_MS = RETURN_DRAIN_WAIT_MS + 3 * 60_000;
 const JOIN_SETTLE_MS = 15_000;
+/**
+ * The worst case for putting the hotspot back after the return loop: the networksetup join's own
+ * timeout (30s) plus JOIN_SETTLE_MS. A return with a held gap cuts the loop short by this much so
+ * the hotspot is back before the earliest held call goes ahead (RETURN_LOOP_CEILING_MS).
+ */
+const HOTSPOT_REJOIN_BUDGET_MS = 30_000 + JOIN_SETTLE_MS;
 /** States that say why the last join failed; they stay (with their hint) until the next attempt. */
 const JOIN_FAILURES: ReadonlySet<string> = new Set(["hotspot-not-visible", "join-failed", "needs-setup", "no-hotspot-profile", "needs-location"]);
 /** Failures a moment later can cure (the phone coming into range); setup problems wait the full minute. */
@@ -254,9 +383,21 @@ export class ProbeWindow {
 
 export type ProbeGet = (url: string, localAddress: string, timeoutMs: number) => Promise<{ status: number; body: string }>;
 
-/** One HTTP GET bound to a local address (so the request leaves through that interface). */
+/**
+ * One HTTP GET bound to a local address (so the request leaves through that interface). `timeoutMs`
+ * is a whole-request deadline: Node's own `timeout` is only socket inactivity, and a captive portal
+ * that trickles bytes kept a 4 s probe open 6.5 s, past the held-gap cap that counts on the bound.
+ */
 export const httpGet: ProbeGet = (url, localAddress, timeoutMs) =>
   new Promise((resolve, reject) => {
+    const deadline = setTimeout(() => req.destroy(new Error("probe timed out")), timeoutMs);
+    deadline.unref();
+    const done = <T>(fn: (v: T) => void) => (v: T) => {
+      clearTimeout(deadline);
+      fn(v);
+    };
+    resolve = done(resolve);
+    reject = done(reject);
     const req = http.get(url, { localAddress, timeout: timeoutMs, headers: { "cache-control": "no-cache" } }, (res) => {
       let body = "";
       res.setEncoding("utf8");
@@ -312,6 +453,11 @@ export interface TetherBackend {
   leave(): Promise<string | null>;
   /** Once, when leave() gave no address after a few seconds: join a known network by name. */
   joinKnown?(ssid: string): Promise<void>;
+  /**
+   * macOS: an idle iPhone stops advertising, so when nothing has been associated
+   * JOIN_KNOWN_AFTER_MS after leaving, the hotspot is joined again at once instead of probing on.
+   */
+  readonly rejoinHotspotIfUnassociated?: boolean;
   /** Read-only check before holding calls or leaving: null ONLY if another known Wi-Fi is visible. */
   returnBlocked(ssid: string): Promise<string | null>;
   readonly hints: Partial<Record<TetherState, string>>;
@@ -354,7 +500,7 @@ const MAC_HINTS: Partial<Record<TetherState, string>> = {
   "hotspot-not-visible": `The phone is not broadcasting its hotspot, so the Mac cannot see it. ${HOTSPOT_NOT_VISIBLE_STEPS}`,
   "needs-setup": "Run `clauderipple awake setup --ssid <hotspot name>` once: joining the hotspot needs the rule it installs (and the name must match it).",
   "no-hotspot-ssid": "Set the phone hotspot's name: `clauderipple awake setup --ssid <hotspot name>`.",
-  "no-wifi": "Wi-Fi is not connected. macOS joins an iPhone hotspot by itself when no Wi-Fi is available if System Settings → Wi-Fi → \"Ask to join hotspots\" is Automatic (ClaudeRipple cannot read that setting: the file is root-only); an Android hotspot is joined like any known Wi-Fi with Auto-Join on.",
+  "no-wifi": "Wi-Fi is not connected. macOS joins an iPhone hotspot by itself when no Wi-Fi is available if System Settings → Wi-Fi → \"Ask to join hotspots\" is Automatic; ClaudeRipple leaves the first minute to it, because a networksetup join cancels that auto-join. An Android hotspot is joined like any known Wi-Fi with Auto-Join on.",
   "join-failed": "Joining the hotspot failed. Check the hotspot name, and that the Mac has joined it once before (macOS keeps its password).",
   pinned: "Switching is paused because the network was pinned.",
 };
@@ -362,13 +508,16 @@ const MAC_HINTS: Partial<Record<TetherState, string>> = {
 class MacTetherBackend implements TetherBackend {
   readonly noAddressOutcome = "join-failed" as const;
   readonly hints = MAC_HINTS;
+  readonly rejoinHotspotIfUnassociated = true as const;
   private readonly run: Runner;
   private readonly log: { info(m: string): void; warn(m: string): void };
+  private readonly sleep: (ms: number) => Promise<void>;
   private device: string | null = null;
 
-  constructor(run: Runner, log: { info(m: string): void; warn(m: string): void }) {
+  constructor(run: Runner, log: { info(m: string): void; warn(m: string): void }, sleep: (ms: number) => Promise<void>) {
     this.run = run;
     this.log = log;
+    this.sleep = sleep;
   }
 
   async findWifi(): Promise<string | null> {
@@ -390,11 +539,45 @@ class MacTetherBackend implements TetherBackend {
     if (preferred.code !== 0) throw new Error(`preferred Wi-Fi list failed: ${(preferred.stderr || preferred.stdout).trim().slice(0, 200) || `exit ${preferred.code}`}`);
     const names = parsePreferredNetworks(preferred.stdout).filter((name) => name !== ssid);
     if (!names.length) return "no known Wi-Fi in range";
+    let scan = await this.scanKnown(names);
+    if (scan.freshMs < SCAN_FRESH_MIN_MS) {
+      // A cached answer can name a network that is no longer there (2026-11-06): ask again once.
+      this.log.info(`tether: the return scan was answered from cache after ${scan.freshMs}ms; scanning again once it expires`);
+      await this.sleep(SCAN_CACHE_TTL_MS);
+      scan = await this.scanKnown(names);
+      if (scan.freshMs < SCAN_FRESH_MIN_MS) return "Wi-Fi visibility is unknown (the scan was answered from cache)";
+    }
+    const best = this.bestKnown(scan, names);
+    if (best && best.rssi >= RETURN_MIN_RSSI_DBM) {
+      this.log.info(`tether: a known Wi-Fi is visible (${best.name} ${best.rssi} dBm)`);
+      return null;
+    }
+    if (best) return `the strongest known Wi-Fi is too weak (${best.name} ${best.rssi} dBm, needs ${RETURN_MIN_RSSI_DBM})`;
+    return "no known Wi-Fi in range";
+  }
+
+  /** One full scan plus directed queries; throws on anything that is not an answer this module can read. */
+  private async scanKnown(names: string[]): Promise<KnownWifiScan> {
     const r = await this.run(OSASCRIPT, ["-l", "JavaScript", "-e", SCAN_KNOWN_JS, this.device!, JSON.stringify(names)], { timeoutMs: 30_000 });
     if (r.code !== 0) throw new Error(`CoreWLAN scan failed: ${(r.stderr || r.stdout).trim().slice(0, 200) || `exit ${r.code}`}`);
-    if (r.stdout.trim() === "visible") return null;
-    if (r.stdout.trim() === "none") return "no known Wi-Fi in range";
-    throw new Error("CoreWLAN scan returned an unsupported result");
+    const scan = parseKnownWifiScan(r.stdout);
+    if (!scan) throw new Error("CoreWLAN scan returned an unsupported result");
+    return scan;
+  }
+
+  /** The strongest signal among the saved names, from the full scan's list or the directed hits. */
+  private bestKnown(scan: KnownWifiScan, names: string[]): { name: string; rssi: number } | null {
+    const wanted = new Set(names);
+    let best: { name: string; rssi: number } | null = null;
+    for (const n of scan.nets) {
+      if (n.ssid === null || !wanted.has(n.ssid)) continue;
+      if (!best || n.rssi > best.rssi) best = { name: n.ssid, rssi: n.rssi };
+    }
+    for (const f of scan.found) {
+      if (!wanted.has(f.name)) continue;
+      if (!best || f.rssi > best.rssi) best = { name: f.name, rssi: f.rssi };
+    }
+    return best;
   }
 
   async leave(): Promise<string | null> {
@@ -436,6 +619,15 @@ export class TetherController {
   private learned: LearnedHotspot | null;
   /** The subnet last watched as ordinary Wi-Fi: a join landing on it cannot be told apart from it. */
   private lastWifiNetwork: string | null = null;
+  /** When the Wi-Fi interface was first seen with no IPv4 address; null while it has one. */
+  private noAddressSince: number | null = null;
+  /** The network the last tick saw (address, subnet, class), to notice a change and settle it. */
+  private seenIp: string | null = null;
+  private seenSubnet: string | null = null;
+  private seenNetwork: Network = "none";
+  private seenOnce = false;
+  /** Until this time the new network's failed probes do not count toward an outage (NETWORK_SETTLE_MS). */
+  private settleUntil = 0;
 
   constructor(deps: TetherDeps) {
     this.deps = deps;
@@ -446,7 +638,7 @@ export class TetherController {
     this.interfaces = deps.interfaces ?? os.networkInterfaces;
     this.probe = deps.probe ?? ((addr) => probeRound(addr));
     this.backend =
-      deps.platform === "darwin" ? new MacTetherBackend(deps.run, deps.log) : deps.platform === "win32" ? new WinTetherBackend(deps.run, deps.log) : null;
+      deps.platform === "darwin" ? new MacTetherBackend(deps.run, deps.log, this.sleep) : deps.platform === "win32" ? new WinTetherBackend(deps.run, deps.log) : null;
     if (!this.backend) this.state = "unsupported";
   }
 
@@ -543,6 +735,65 @@ export class TetherController {
     return a.inFlight === 0 && (a.lastStartedAt === undefined || this.now() - a.lastStartedAt >= RETURN_QUIET_MS);
   }
 
+  /**
+   * Notices a new Wi-Fi address, subnet or network class and resets the probe window, so failures
+   * belonging to the network just left cannot count against the one the OS or the person joined.
+   * The first observation is only a baseline: a start is not a change. Returns whether it was one.
+   */
+  private noteNetwork(ip: string | null, subnet: string | null, now: number): boolean {
+    if (!this.seenOnce) {
+      this.seenOnce = true;
+      this.seenIp = ip;
+      this.seenSubnet = subnet;
+      this.seenNetwork = this.network;
+      return false;
+    }
+    if (ip === this.seenIp && this.network === this.seenNetwork && (this.network === "none" || subnet === this.seenSubnet)) return false;
+    const from = `${this.seenNetwork}${this.seenIp ? ` ${this.seenIp}` : ""}`;
+    const to = `${this.network}${ip ? ` ${ip}` : ""}`;
+    this.seenIp = ip;
+    this.seenSubnet = subnet;
+    this.seenNetwork = this.network;
+    this.window.reset();
+    this.joinFailures = 0;
+    this.knownVisibleAt = -Infinity;
+    // Only a network that just arrived settles: the switch's own probes fail until it is up, and
+    // they are not its failures. A lost address has no new network to protect — a settle there
+    // pushed Windows' first hotspot join from ~20s to ~50s after the loss (2026-11-06).
+    this.settleUntil = ip !== null ? now + NETWORK_SETTLE_MS : 0;
+    this.step(`network changed (${from} → ${to}); probe window reset${ip !== null ? `, ${NETWORK_SETTLE_MS / 1000}s settle` : ""}`);
+    return true;
+  }
+
+  /**
+   * Reads the Wi-Fi address now and applies what it says (class, subnet, and the reset/settle in
+   * noteNetwork). A tick that awaits — a probe, a wait for in-flight calls — must ask again before
+   * acting: the OS or the person may have joined another network meanwhile.
+   */
+  private sampleNetwork(now: number): { ip: string | null; changed: boolean } {
+    const ip = this.currentIp();
+    this.network = classifyNetwork(ip, this.learnedNetwork());
+    const subnet = this.currentNetwork();
+    const changed = this.noteNetwork(ip, subnet, now);
+    if (this.network === "wifi") this.lastWifiNetwork = subnet;
+    this.noAddressSince = ip === null ? (this.noAddressSince ?? now) : null;
+    return { ip, changed };
+  }
+
+  /**
+   * Reads the network again before disassociating, after an await (the visibility scan, the drain
+   * wait for running calls). Leaving now would disassociate whatever the OS or the person joined
+   * meanwhile (§8 "A change after an await wins"); a change, or a hotspot no longer held, stops the
+   * leave. `sampleNetwork` has already reset the window and started the new network's settle, so
+   * the next tick judges it. Returns true when it is not safe to leave; logged once per attempt.
+   */
+  private networkMovedBeforeLeave(when: string): boolean {
+    const s = this.sampleNetwork(this.now());
+    if (!s.changed && this.onHotspot(s.ip)) return false;
+    this.step(`not leaving the hotspot: the network changed ${when} (now ${this.network}${s.ip ? ` ${s.ip}` : ""}); the new network is judged by the next tick`);
+    return true;
+  }
+
   private async evaluate(): Promise<void> {
     const settings = this.deps.settings();
     if (!settings.enabled) {
@@ -560,12 +811,24 @@ export class TetherController {
         return;
       }
     }
-    const ip = this.currentIp();
-    this.network = classifyNetwork(ip, this.learnedNetwork());
-    if (this.network === "wifi") this.lastWifiNetwork = this.currentNetwork();
-    const ok = ip ? await this.probe(ip) : false;
-    this.window.push(ok);
+    const now = this.now();
+    const ip = this.sampleNetwork(now).ip;
+    let settling = now < this.settleUntil;
+    let ok = ip ? await this.probe(ip) : false;
     this.lastProbe = { at: new Date(this.now()).toISOString(), ok, network: this.network };
+    const after = this.sampleNetwork(this.now());
+    if (after.changed) {
+      // A probe takes seconds: whatever this round found belongs to the address the tick began on.
+      // A network that arrived meanwhile is judged by the next tick, once it has had its settle —
+      // failing over now would evict the Wi-Fi the OS or the person just joined. A lost address is
+      // simply a failure, and one with nothing to protect the hotspot join stays right.
+      if (after.ip !== null) return;
+      ok = false;
+      settling = false;
+    }
+    // The switch's own failures (a probe bound to the old address fails EADDRNOTAVAIL) are not the
+    // new network's: during its settle time only successes count (2026-11-06).
+    if (!settling || ok) this.window.push(ok);
     if (this.pinned) {
       this.state = "pinned";
       return;
@@ -594,6 +857,19 @@ export class TetherController {
     await this.failover(settings);
   }
 
+  /**
+   * macOS with no address at all: the first HOTSPOT_JOIN_GRACE_MS belongs to macOS. Its Instant
+   * Hotspot auto-join can wake the iPhone; a networksetup join cancels that auto-join and cannot
+   * wake a hidden phone (2026-11-06). Says so, and returns true when the join is not ours yet.
+   */
+  private leaveJoinToOs(): boolean {
+    if (this.deps.platform !== "darwin" || this.network !== "none") return false;
+    if (this.now() - (this.noAddressSince ?? this.now()) >= HOTSPOT_JOIN_GRACE_MS) return false;
+    this.state = "no-wifi";
+    this.decide(`Wi-Fi is not connected; leaving the hotspot join to macOS for ${HOTSPOT_JOIN_GRACE_MS / 1000}s (its auto-join can wake the iPhone; a networksetup join cancels it)`);
+    return true;
+  }
+
   private async failover(settings: TetherSettings): Promise<void> {
     const why = this.network === "wifi" ? "Wi-Fi has no internet (3 of the last 5 probes failed)" : "Wi-Fi is not connected";
     if (!settings.hotspotSsid) {
@@ -601,8 +877,12 @@ export class TetherController {
       this.decide(`${why}, but no hotspot name is set`);
       return;
     }
+    // macOS with no address at all: past the grace, one try a minute — here a failed join switched
+    // nothing either, but the 10 s ladder is what kept cutting macOS's next auto-join short.
+    const leaveToOs = this.deps.platform === "darwin" && this.network === "none";
+    if (this.leaveJoinToOs()) return;
     const since = this.now() - this.lastSwitchAt;
-    const retrying = this.joinFailures > 0 && RETRIABLE_JOIN.has(this.state);
+    const retrying = !leaveToOs && this.joinFailures > 0 && RETRIABLE_JOIN.has(this.state);
     const gap = retrying ? Math.min(MIN_SWITCH_INTERVAL_MS, JOIN_RETRY_MS * this.joinFailures) : MIN_SWITCH_INTERVAL_MS;
     if (since < gap) {
       // A failed join keeps saying why (and its hint) until the next attempt.
@@ -613,6 +893,12 @@ export class TetherController {
     // A call in flight on a dead network cannot finish anyway; give it a short chance, no more.
     const waitUntil = this.now() + FAILOVER_IDLE_WAIT_MS;
     while (this.deps.activity().inFlight > 0 && this.now() < waitUntil) await this.sleep(1_000);
+    // Waiting that long gives the OS or the person time to join another network; joining the
+    // hotspot now would evict it. The change is handled (reset, settle) and the next tick judges
+    // the network that arrived. A lost address has nothing to evict: the hotspot join stays right.
+    if (this.sampleNetwork(this.now()).changed && this.network !== "none") return;
+    // …but a loss during that wait gives macOS its own grace from the moment it happened.
+    if (this.leaveJoinToOs()) return;
     this.state = "joining-hotspot";
     this.lastSwitchAt = this.now();
     this.decide(`${why}: joining hotspot "${settings.hotspotSsid}"`);
@@ -708,7 +994,11 @@ export class TetherController {
     }
     // A scan is asynchronous: a pin/stop/settings change or an OS join meanwhile cancels the return.
     const current = this.deps.settings();
-    if (this.stopped || this.pinned || !current.enabled || current.hotspotSsid !== settings.hotspotSsid || !this.onHotspot(this.currentIp())) return;
+    if (this.stopped || this.pinned || !current.enabled || current.hotspotSsid !== settings.hotspotSsid) return;
+    // The scan above is an await: leaving now would disassociate a Wi-Fi the person or the OS
+    // joined meanwhile (§8 "A change after an await wins"). The change is handled and settled, and
+    // the next tick judges the new network.
+    if (this.networkMovedBeforeLeave("while the return was being prepared")) return;
     const idle = this.idle();
     if (!idle && (this.now() - this.nextReturnAt < RETURN_FORCE_AFTER_MS || this.hold.closed)) {
       this.decide(`Wi-Fi return postponed: a model call is running or just started (after ${RETURN_FORCE_AFTER_MS / 1000}s of this, new calls are held to make a gap)`);
@@ -727,6 +1017,9 @@ export class TetherController {
     const late = Math.round((this.now() - this.nextReturnAt) / 1000);
     if (!this.hold.engage("going back to Wi-Fi", RETURN_HOLD_FAILSAFE_MS)) return;
     this.holding = true;
+    // The earliest call held by this engagement goes ahead HOLD_MAX_MS from here; the return must
+    // be done by then (leaveHotspot caps its loop against this).
+    const gateEngagedAt = this.now();
     try {
       const running = this.deps.activity().inFlight;
       this.step(`Wi-Fi return postponed ${late}s past due while model calls keep running: holding new model calls to make a gap (waiting up to ${RETURN_DRAIN_WAIT_MS / 1000}s for ${running} running)`);
@@ -741,7 +1034,10 @@ export class TetherController {
         return;
       }
       this.step(`running model calls finished after ${Math.round((this.now() - started) / 1000)}s; ${this.hold.waiting} held`);
-      await this.leaveHotspot(settings);
+      // The drain is an await too: a Wi-Fi joined during it must not be disassociated by the leave
+      // that was decided before it arrived.
+      if (this.networkMovedBeforeLeave("while the drain waited for running calls")) return;
+      await this.leaveHotspot(settings, gateEngagedAt);
     } finally {
       this.releaseHold();
     }
@@ -760,8 +1056,12 @@ export class TetherController {
     this.deps.log.info(`tether: ${line}`);
   }
 
-  /** Leave the hotspot so the OS joins its best known network; keep it only if it has internet. */
-  private async leaveHotspot(settings: TetherSettings): Promise<void> {
+  /**
+   * Leave the hotspot so the OS joins its best known network; keep it only if it has internet.
+   * `gateEngagedAt` is set by returnWithGap: the earliest call held there goes ahead HOLD_MAX_MS
+   * after it, so the loop must leave HOTSPOT_REJOIN_BUDGET_MS for putting the hotspot back first.
+   */
+  private async leaveHotspot(settings: TetherSettings, gateEngagedAt: number | null = null): Promise<void> {
     const backend = this.backend!;
     this.state = "returning";
     this.lastSwitchAt = this.now();
@@ -776,19 +1076,98 @@ export class TetherController {
     // Back on Wi-Fi only after two good probes through it (one could be a lucky blip).
     let good = 0;
     let askedKnown = false;
+    /** Set when the hotspot was joined back at 8s (macOS); its outcome decides the reason below. */
+    let earlyRejoin: JoinOutcome | null = null;
     const started = this.now();
-    const deadline = started + RETURN_PROBE_MS;
-    while (this.now() < deadline) {
-      await this.sleep(2_000);
+    // A Wi-Fi macOS joins can get its address seconds after we leave and still be initialising
+    // (its own DHCP, EADDRNOTAVAIL probes): each non-hotspot network that appears in this loop gets
+    // NETWORK_SETTLE_MS from the moment it was seen before it is called dead. A probe takes seconds
+    // and the OS can join another network meanwhile, so the address AND subnet are read again after
+    // every probe: a change wins, resets the good-probe count and settles the new network from then
+    // (§8 "A change after an await wins"). The whole loop is bounded by RETURN_LOOP_CEILING_MS,
+    // and with a held gap by the earliest held call too: that one goes ahead HOLD_MAX_MS after the
+    // gate engaged, so this loop and every settle in it end HOTSPOT_REJOIN_BUDGET_MS before that,
+    // measured from the engagement (a long drain and leave eat into the same budget). A probe that
+    // could still be running at that bound is not started — the rejoin goes ahead instead.
+    const limit = started + RETURN_LOOP_CEILING_MS;
+    const gapCap = gateEngagedAt === null ? Infinity : gateEngagedAt + HOLD_MAX_MS - HOTSPOT_REJOIN_BUDGET_MS;
+    const ceiling = Math.min(limit, gapCap);
+    let deadline = started + RETURN_PROBE_MS;
+    if (deadline > ceiling) {
+      // Whatever the engagement left is what the loop gets; never a negative wait.
+      const remaining = Math.max(0, ceiling - started);
+      this.step(`the held-call budget leaves ${Math.round(remaining / 1000)}s for the return probe loop (the earliest held call goes ahead ${HOLD_MAX_MS / 1000}s after the hold engaged, and the hotspot needs up to ${HOTSPOT_REJOIN_BUDGET_MS / 1000}s of that); the base ${RETURN_PROBE_MS / 1000}s wait is cut to fit`);
+      deadline = Math.max(started, ceiling);
+    }
+    /** The non-hotspot network (address + subnet) the loop has already admitted and settled. */
+    let seenWifi: string | null = null;
+    /** Reads the interface now; the key makes a subnet-only change a change too. */
+    const sample = (): { ip: string | null; key: string } => {
       const ip = this.currentIp();
-      if (!ip && !askedKnown && backend.joinKnown && this.now() - started >= JOIN_KNOWN_AFTER_MS) {
-        askedKnown = true;
-        await backend.joinKnown(settings.hotspotSsid);
+      return { ip, key: `${ip ?? "none"}/${this.currentNetwork() ?? "none"}` };
+    };
+    /** A non-hotspot network not seen yet in this loop gets its full settle and a fresh good count. */
+    const admit = (s: { ip: string | null; key: string }): void => {
+      // No address, or the hotspot again: the Wi-Fi seen before is not the one that will come
+      // back, so a reappearance of the same address and subnet is a new network (§8) — without
+      // this, Wi-Fi → none → the same Wi-Fi got no fresh settle and was called dead on the
+      // deadline that belonged to the earlier appearance.
+      if (s.ip === null || this.onHotspot(s.ip)) {
+        seenWifi = null;
+        return;
       }
-      if (ip && !this.onHotspot(ip) && (await this.probe(ip))) {
-        if (++good >= 2) break;
+      if (s.key === seenWifi) return;
+      seenWifi = s.key;
+      good = 0;
+      deadline = Math.min(ceiling, Math.max(deadline, this.now() + NETWORK_SETTLE_MS));
+    };
+    /** Set when the loop stopped because a probe would not fit, not because the bound was reached. */
+    let probeSkipped = false;
+    while (this.now() < deadline && this.now() < ceiling) {
+      // Never sleep past a bound: with a held gap the hotspot rejoin is budgeted from the ceiling,
+      // so a last wait that ran past it would take that time from the hotspot.
+      const remaining = Math.min(2_000, deadline - this.now(), ceiling - this.now());
+      await this.sleep(Math.max(0, remaining));
+      if (this.now() >= ceiling) break;
+      const before = sample();
+      admit(before);
+      const ip = before.ip;
+      if (!ip && !askedKnown && this.now() - started >= JOIN_KNOWN_AFTER_MS) {
+        if (backend.rejoinHotspotIfUnassociated) {
+          // An idle iPhone stops advertising (2026-11-06), so waiting out the rest of the 20s can
+          // lose the only way back; go now, while it still advertises.
+          askedKnown = true;
+          this.step(`no network was joined ${Math.round((this.now() - started) / 1000)}s after leaving; rejoining the hotspot at once (an idle iPhone stops advertising)`);
+          earlyRejoin = await this.join(settings.hotspotSsid);
+          break;
+        }
+        if (backend.joinKnown) {
+          askedKnown = true;
+          await backend.joinKnown(settings.hotspotSsid);
+        }
+      }
+      if (ip && !this.onHotspot(ip)) {
+        // A probe cannot be recalled. One started so late that it would still be running when the
+        // bound arrives would take the rejoin past that bound (a 4s probe past the 75s held-gap cap
+        // puts the hotspot back after the earliest held call's 120s), so go straight to the rejoin.
+        if (this.now() + PROBE_TIMEOUT_MS > ceiling) {
+          probeSkipped = true;
+          break;
+        }
+        const ok = await this.probe(ip);
+        const after = sample();
+        if (after.key !== before.key) {
+          // The result belongs to the network this round began on; the one that arrived now is
+          // judged from its own settle, not the deadline that was running before it appeared.
+          admit(after);
+          good = 0;
+          continue;
+        }
+        if (!ok) good = 0;
+        else if (++good >= 2) break;
       } else good = 0;
     }
+    const ceilingHit = this.now() >= ceiling || probeSkipped;
     this.window.reset();
     if (good >= 2) {
       this.network = "wifi";
@@ -798,11 +1177,19 @@ export class TetherController {
       this.decide("back on Wi-Fi with internet");
       return;
     }
+    if (ceilingHit) {
+      this.step(gapCap <= limit
+        ? `the return probe loop stopped at the held-call budget (${Math.round(Math.max(0, ceiling - started) / 1000)}s, so the hotspot is back by the time a held call goes ahead at ${HOLD_MAX_MS / 1000}s) with the Wi-Fi still unsettled; rejoining the hotspot`
+        : `the return probe loop hit its ${RETURN_LOOP_CEILING_MS / 1000}s ceiling with the Wi-Fi still unsettled; rejoining the hotspot`);
+    }
     const ip = this.currentIp();
     let reason: string;
     const osName = this.deps.platform === "win32" ? "Windows" : "macOS";
     let rejoined = false;
-    if (this.onHotspot(ip)) reason = `${osName} rejoined the hotspot (no better network in range)`;
+    if (earlyRejoin !== null) {
+      rejoined = earlyRejoin === "joined";
+      reason = `no network was joined ${JOIN_KNOWN_AFTER_MS / 1000}s after leaving; rejoined the hotspot at once${rejoined ? "" : `; that failed: ${earlyRejoin}`}`;
+    } else if (this.onHotspot(ip)) reason = `${osName} rejoined the hotspot (no better network in range)`;
     else {
       reason = ip ? `the Wi-Fi ${osName} chose has no internet` : "no network was joined";
       const outcome = await this.join(settings.hotspotSsid);

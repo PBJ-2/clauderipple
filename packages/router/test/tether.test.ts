@@ -5,12 +5,13 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type os from "node:os";
 import {
-  classifyJoin, classifyNetwork, DISASSOCIATE_JS, SCAN_KNOWN_JS, inNetwork, ipv4Network, isHotspotAddress, isLinkLocal, nextReturnPoint, parsePreferredNetworks, parseWifiDevice, ProbeWindow,
-  probeRound, readLearnedHotspot, RETURN_DRAIN_WAIT_MS, RETURN_FORCE_AFTER_MS, TetherController, wifiIPv4, wifiIPv4Network, writeLearnedHotspot,
+  classifyJoin, classifyNetwork, DISASSOCIATE_JS, HOTSPOT_JOIN_GRACE_MS, NETWORK_SETTLE_MS, parseKnownWifiScan, parsePreferredNetworks, parseWifiDevice, PROBE_TIMEOUT_MS, ProbeWindow,
+  probeRound, readLearnedHotspot, RETURN_DRAIN_WAIT_MS, RETURN_FORCE_AFTER_MS, RETURN_HOLD_FAILSAFE_MS, RETURN_LOOP_CEILING_MS, RETURN_MIN_RSSI_DBM, RETURN_PROBE_MS, SCAN_KNOWN_JS, inNetwork, ipv4Network, isHotspotAddress, isLinkLocal,
+  httpGet, nextReturnPoint, TetherController, wifiIPv4, wifiIPv4Network, writeLearnedHotspot,
   type ProbeGet,
 } from "../src/tether.ts";
 import type { Activity, RunResult } from "../src/awake.ts";
-import { HoldGate } from "../src/hold.ts";
+import { HOLD_MAX_MS, HoldGate } from "../src/hold.ts";
 import { ConfigStore, DEFAULTS, TETHER_DEFAULTS, tetherSettings, validate, type TetherSettings } from "../src/config.ts";
 
 // `networksetup -listallhardwareports` measured on this project's Mac (2026-10-20), shortened.
@@ -100,6 +101,21 @@ test("the disassociate call is wifihop's exact JXA", () => {
   assert.equal(DISASSOCIATE_JS, 'ObjC.import("CoreWLAN"); $.CWWiFiClient.sharedWiFiClient.interface.disassociate; "ok";');
 });
 
+test("the visibility scan asks the radio once and reports RSSI; a threshold below -70 dBm is not evidence", () => {
+  // The measured shape (2026-11-06): one full scan starts the radio scan, directed hits carry RSSI.
+  assert.match(SCAN_KNOWN_JS, /scanForNetworksWithNameError\(\$\(\), error\)/);
+  assert.match(SCAN_KNOWN_JS, /rssiValue/);
+  assert.equal(RETURN_MIN_RSSI_DBM, -70);
+  assert.deepEqual(parseKnownWifiScan(JSON.stringify({ freshMs: 9_500, nets: [{ ssid: "Home", rssi: -40 }, { ssid: null, rssi: -82 }], found: [{ name: "Home", rssi: -40 }] })), {
+    freshMs: 9_500,
+    nets: [{ ssid: "Home", rssi: -40 }, { ssid: null, rssi: -82 }],
+    found: [{ name: "Home", rssi: -40 }],
+  });
+  assert.equal(parseKnownWifiScan("visible\n"), null, "the old text answer is not a scan result");
+  assert.equal(parseKnownWifiScan(JSON.stringify({ freshMs: "9", nets: [], found: [] })), null);
+  assert.equal(parseKnownWifiScan(JSON.stringify({ freshMs: 1, nets: [{ ssid: "Home" }], found: [] })), null);
+});
+
 test("a config that still carries tether.returnEverySec loads without error and the key is ignored", () => {
   const dir = fs.mkdtempSync(path.join(tmpdir(), "cr-tether-cfg-"));
   try {
@@ -121,7 +137,12 @@ test("a config that still carries tether.returnEverySec loads without error and 
 
 type Net = { ip: string | null; netmask: string; probeOk: (ip: string) => boolean; joinOutput: RunResult; joinLandsOn: string | null; disassociateLandsOn: string | null; preferred: RunResult; scan: RunResult | Error };
 
-function rig(o: { settings?: Partial<TetherSettings>; net?: Partial<Net>; activity?: () => Activity; platform?: NodeJS.Platform; hold?: HoldGate; onLeave?: () => void; onScan?: () => void; stateFile?: string } = {}) {
+/** A scan answer the Mac backend trusts: a real radio scan (seconds) that saw `Home` at -40 dBm. */
+const FRESH_HOME = { code: 0, stdout: JSON.stringify({ freshMs: 9_500, nets: [{ ssid: "Home", rssi: -40 }], found: [{ name: "Home", rssi: -40 }] }), stderr: "" };
+/** A scan answer from airportd's cache (measured 2026-11-06: ~25ms); not evidence by itself. */
+const CACHED_HOME = { code: 0, stdout: JSON.stringify({ freshMs: 25, nets: [{ ssid: "Home", rssi: -40 }], found: [] }), stderr: "" };
+
+function rig(o: { settings?: Partial<TetherSettings>; net?: Partial<Net>; activity?: () => Activity; platform?: NodeJS.Platform; hold?: HoldGate; onLeave?: () => void; onJoin?: () => void; onScan?: () => void; onSleep?: () => void; stateFile?: string } = {}) {
   const clock = { t: 1_000_000 };
   const calls: string[] = [];
   const lines: string[] = [];
@@ -133,7 +154,7 @@ function rig(o: { settings?: Partial<TetherSettings>; net?: Partial<Net>; activi
     joinLandsOn: "172.20.10.2",
     disassociateLandsOn: "172.20.10.2",
     preferred: { code: 0, stdout: "Preferred networks on en0:\n\tPBJ\n\tHome\n", stderr: "" },
-    scan: { code: 0, stdout: "visible\n", stderr: "" },
+    scan: FRESH_HOME,
     ...o.net,
   };
   let settings: TetherSettings = { ...TETHER_DEFAULTS, enabled: true, hotspotSsid: "PBJ", ...o.settings };
@@ -142,6 +163,7 @@ function rig(o: { settings?: Partial<TetherSettings>; net?: Partial<Net>; activi
     calls.push(line);
     if (line === "/usr/sbin/networksetup -listallhardwareports") return { code: 0, stdout: PORTS, stderr: "" };
     if (line.startsWith("/usr/bin/sudo -n /usr/sbin/networksetup -setairportnetwork en0 ")) {
+      o.onJoin?.();
       if (!classifyJoin(net.joinOutput)) net.ip = net.joinLandsOn;
       return net.joinOutput;
     }
@@ -168,7 +190,7 @@ function rig(o: { settings?: Partial<TetherSettings>; net?: Partial<Net>; activi
     activity: o.activity ?? (() => ({ inFlight: 0 })),
     log: { info: (m) => lines.push(m), warn: (m) => lines.push(`WARN ${m}`) },
     now: () => clock.t,
-    sleep: async (ms) => { clock.t += ms; },
+    sleep: async (ms) => { clock.t += ms; o.onSleep?.(); },
     interfaces: () => (net.ip ? { en0: [iface(net.ip, "IPv4", net.netmask)] } : {}),
     probe: async (ip) => net.probeOk(ip),
     schedule: () => () => {},
@@ -329,7 +351,8 @@ test("preferred SSIDs preserve spaces and Unicode, with only the list indent rem
 
 for (const busy of [false, true]) {
   const cases: { name: string; net: Partial<Net>; reason: RegExp }[] = [
-    { name: "none visible", net: { scan: { code: 0, stdout: "none\n", stderr: "" } }, reason: /no known Wi-Fi in range/ },
+    { name: "none visible", net: { scan: { code: 0, stdout: JSON.stringify({ freshMs: 9_500, nets: [], found: [] }), stderr: "" } }, reason: /no known Wi-Fi in range/ },
+    { name: "only a weak known Wi-Fi", net: { scan: { code: 0, stdout: JSON.stringify({ freshMs: 9_500, nets: [], found: [{ name: "Home", rssi: -82 }] }), stderr: "" } }, reason: /too weak \(Home -82 dBm, needs -70\)/ },
     { name: "scan nonzero", net: { scan: { code: 1, stdout: "", stderr: "Location denied" } }, reason: /scan failed.*Location denied/ },
     { name: "scan crash", net: { scan: { code: 139, stdout: "", stderr: "" } }, reason: /scan failed.*exit 139/ },
     { name: "runner error", net: { scan: new Error("scan timed out") }, reason: /scan failed.*scan timed out/ },
@@ -617,7 +640,7 @@ test("after a join, a self-assigned (169.254) address or an unchanged one is no 
 // ---- Making a gap when calls never stop (2026-10-20: postponed from 19:22:54 until the hotspot went) ----
 
 /** Calls run back-to-back until `quietAfterMs` after the gate engages; one new call arrives at the gate as it engages. */
-function gapRig(o: { quietAfterMs: number; onLeave?: () => void; net?: Partial<Net>; onEngagedTick?: (sinceMs: number, r: ReturnType<typeof rig>) => void }) {
+function gapRig(o: { quietAfterMs: number; onLeave?: () => void; onJoin?: () => void; net?: Partial<Net>; onEngagedTick?: (sinceMs: number, r: ReturnType<typeof rig>) => void }) {
   const hold = new HoldGate();
   const events: string[] = [];
   let engagedAt: number | null = null;
@@ -639,6 +662,7 @@ function gapRig(o: { quietAfterMs: number; onLeave?: () => void; net?: Partial<N
       events.push(`leave (holding ${hold.waiting})`);
       o.onLeave?.();
     },
+    ...(o.onJoin ? { onJoin: o.onJoin } : {}),
   });
   return { ...r, hold, events, held: () => held, engagedAt: () => engagedAt };
 }
@@ -725,11 +749,12 @@ test("a draining router (closed gate) holds nothing: the return just stays postp
   assert.equal(r.c.status().state, "on-hotspot");
 });
 
-// Walking out of the office the first join failed while the hotspot was only just in range, and the
-// once-a-minute rule kept the Mac offline for the rest of the minute (2026-10-22). A failed join
-// switched nothing: try again after 10 s, then 20 s, then 30 s.
-test("a failed hotspot join is tried again within seconds, not after a minute", async () => {
-  const r = rig({ net: { ip: "", probeOk: () => false, joinOutput: { code: 0, stdout: "Failed to join network PBJ.", stderr: "" } } });
+// A Wi-Fi that is still associated but answers no probe: the first join failed while the hotspot
+// was only just in range, and the once-a-minute rule kept the Mac offline for the rest of the minute
+// (2026-10-22). A failed join switched nothing: try again after 10 s, then 20 s, then 30 s. The
+// no-address case is different on macOS and is tested below (the join is macOS's own first).
+test("an associated Wi-Fi with no internet: a failed hotspot join is tried again within seconds", async () => {
+  const r = rig({ net: { probeOk: () => false, joinOutput: { code: 0, stdout: "Failed to join network PBJ.", stderr: "" } } });
   await r.ticks(3); // outage, then the first join
   assert.equal(r.joins(), 1);
   assert.equal(r.c.status().state, "join-failed");
@@ -737,4 +762,393 @@ test("a failed hotspot join is tried again within seconds, not after a minute", 
   await r.ticks(1); // 10 s later, not a minute
   assert.equal(r.joins(), 2, r.lines.join("\n"));
   assert.equal(r.c.status().network, "hotspot");
+});
+
+// ---- 2026-11-06: a hidden iPhone, a cached scan and a just-joined Wi-Fi --------------------------
+
+test("macOS, no Wi-Fi address: the join is left to macOS for 60s, then one try a minute", async () => {
+  const r = rig({ net: { ip: null, probeOk: () => false, joinOutput: { code: 0, stdout: "Failed to join network PBJ.", stderr: "" } } });
+  await r.ticks(6); // 0..50s: three failed rounds by 20s, still inside the grace
+  assert.equal(r.joins(), 0, "networksetup is not called while macOS may be auto-joining");
+  assert.equal(r.c.status().state, "no-wifi");
+  const grace = r.lines.filter((l) => l.includes(`leaving the hotspot join to macOS for ${HOTSPOT_JOIN_GRACE_MS / 1000}s`));
+  assert.equal(grace.length, 1, "the grace is logged once, not on every tick");
+  await r.ticks(1); // 60s: the grace is over
+  assert.equal(r.joins(), 1);
+  assert.equal(r.c.status().state, "join-failed");
+  await r.ticks(5); // 70..110s: a failed join here does not get the 10 s ladder
+  assert.equal(r.joins(), 1);
+  await r.ticks(1); // 120s
+  assert.equal(r.joins(), 2);
+});
+
+test("macOS: an address lost while failover waits for a call still gets its own auto-join grace", async () => {
+  const busy = { inFlight: 0, loseAt: 0, lost: false };
+  const r: ReturnType<typeof rig> = rig({
+    net: { probeOk: () => false },
+    activity: () => {
+      if (busy.loseAt > 0 && !busy.lost && r.clock.t >= busy.loseAt) {
+        busy.lost = true;
+        busy.inFlight = 0;
+        r.net.ip = null;
+      }
+      return { inFlight: busy.inFlight };
+    },
+  });
+  await r.ticks(2); // two failed rounds
+  busy.inFlight = 1; // a model call is running: the failover waits for it
+  busy.loseAt = r.clock.t + 3_000;
+  await r.ticks(1);
+  assert.equal(busy.lost, true, "the wait ran into the loss");
+  assert.equal(r.joins(), 0, "networksetup is not called: the grace counts from the loss");
+  assert.equal(r.c.status().state, "no-wifi");
+  await r.ticks(6); // the grace passes from the loss, not from the tick
+  assert.equal(r.joins(), 1);
+});
+
+test("the way back needs a saved Wi-Fi at -70 dBm or better; a weak one stays on the hotspot", async () => {
+  const r = rig({ net: { ip: "172.20.10.2", scan: { code: 0, stdout: JSON.stringify({ freshMs: 9_500, nets: [], found: [{ name: "Home", rssi: -82 }] }), stderr: "" } } });
+  await r.ticks(31); // the 5 min point
+  assert.equal(r.returns(), 0);
+  assert.equal(r.joins(), 0);
+  assert.ok(r.lines.some((l) => /strongest known Wi-Fi is too weak \(Home -82 dBm, needs -70\)/.test(l)), r.lines.join("\n"));
+});
+
+test("a scan answered from airportd's cache is not trusted: it is asked again once the cache expires", async () => {
+  let scans = 0;
+  const r: ReturnType<typeof rig> = rig({
+    net: { ip: "172.20.10.2", disassociateLandsOn: "192.168.1.4", scan: CACHED_HOME },
+    onScan: () => {
+      if (++scans === 2) r.net.scan = FRESH_HOME;
+    },
+  });
+  await r.ticks(31);
+  assert.equal(scans, 2);
+  assert.equal(r.returns(), 1);
+  assert.equal(r.c.status().network, "wifi");
+  assert.ok(r.lines.some((l) => /the return scan was answered from cache after 25ms; scanning again/.test(l)), r.lines.join("\n"));
+});
+
+test("a scan answered from cache twice is unknown visibility: the hotspot is kept", async () => {
+  const r = rig({ net: { ip: "172.20.10.2", scan: CACHED_HOME } });
+  await r.ticks(31);
+  assert.equal(r.returns(), 0);
+  assert.equal(r.joins(), 0);
+  assert.ok(r.lines.some((l) => /staying on the hotspot: Wi-Fi visibility is unknown \(the scan was answered from cache\)/.test(l)), r.lines.join("\n"));
+});
+
+test("leaving with nothing joined: the hotspot is rejoined at 8s, not after the 20s probe", async () => {
+  let leftAt = 0;
+  let joinAt = 0;
+  const r: ReturnType<typeof rig> = rig({
+    net: { ip: "172.20.10.2", disassociateLandsOn: null },
+    onLeave: () => { leftAt = r.clock.t; },
+    onJoin: () => { joinAt = r.clock.t; },
+  });
+  await r.ticks(31); // the 5 min point
+  assert.equal(r.returns(), 1);
+  assert.equal(r.joins(), 1);
+  assert.equal(joinAt - leftAt, 8_000, `rejoined after ${joinAt - leftAt}ms`);
+  assert.ok(r.lines.some((l) => /no network was joined 8s after leaving; rejoining the hotspot at once/.test(l)), r.lines.join("\n"));
+  assert.match(r.c.status().lastSwitch?.reason ?? "", /rejoined the hotspot at once/);
+  assert.equal(r.c.status().state, "on-hotspot");
+});
+
+test("the Wi-Fi macOS joins is given its settle time before it is called dead", async () => {
+  let leftAt = 0;
+  const probes: number[] = [];
+  const r: ReturnType<typeof rig> = rig({
+    net: {
+      ip: "172.20.10.2",
+      disassociateLandsOn: "192.168.50.7",
+      // The network macOS joins answers only 26s after we leave (its own DHCP, EADDRNOTAVAIL
+      // probes through an address seconds old): the 20s base window would call it dead.
+      probeOk: (ip) => {
+        probes.push(r.clock.t - leftAt);
+        return isHotspotAddress(ip) || r.clock.t - leftAt >= 26_000;
+      },
+    },
+    onLeave: () => { leftAt = r.clock.t; },
+  });
+  await r.ticks(31); // the 5 min point
+  const late = probes.filter((t) => t > RETURN_PROBE_MS);
+  assert.ok(late.length >= 2, `two good probes after the base window: ${probes.join(", ")}`);
+  assert.equal(r.returns(), 1);
+  assert.equal(r.joins(), 0, "a Wi-Fi that was still coming up is not dropped for the hotspot");
+  const s = r.c.status();
+  assert.equal(s.network, "wifi");
+  assert.equal(s.state, "watching");
+  assert.equal(s.lastSwitch?.ok, true);
+  assert.ok(!r.lines.some((l) => /has no internet|rejoined the hotspot at once/.test(l)), r.lines.join("\n"));
+});
+
+test("holding calls through a settling return stays inside the hold failsafe", () => {
+  // returnWithGap holds for the drain wait plus leaveHotspot: the OS calls at either end (leave
+  // up to 15s, the final join up to 30s + JOIN_SETTLE_MS 15s) and the probe loop, which is bounded
+  // by RETURN_LOOP_CEILING_MS however many networks appear and get their settle.
+  const osBudget = 15_000 + 30_000 + 15_000;
+  const worst = RETURN_DRAIN_WAIT_MS + RETURN_LOOP_CEILING_MS + osBudget;
+  assert.ok(worst < RETURN_HOLD_FAILSAFE_MS, `held at most ${worst}ms, failsafe ${RETURN_HOLD_FAILSAFE_MS}ms`);
+});
+
+// 2026-11-07 red team: a call held at the gate goes ahead by itself HOLD_MAX_MS (120s) after the
+// gate engaged, while the drain + leave + loop + rejoin could run to ~220s — so a held call could
+// go out onto a Wi-Fi with no internet before the hotspot was back. The loop now ends early enough
+// that the rejoin's worst case still fits inside the 120s, measured from the engagement.
+test("a held gap ends its return in time for the hotspot to be back before a held call's 120s", async () => {
+  const rejoinBudget = 30_000 + 15_000; // networksetup join ≤30s + JOIN_SETTLE_MS
+  let joinAt: number | null = null;
+  let moves = 0;
+  const r = gapRig({
+    quietAfterMs: 58_000, // a long drain: the budget the loop has left is below the 20s base wait
+    onJoin: () => { joinAt ??= r.clock.t - (r.engagedAt() ?? 0); },
+    net: {
+      ip: "172.20.10.2",
+      disassociateLandsOn: "192.168.50.7",
+      // A radio that never settles: every probe finds another network, each of which would get its
+      // own NETWORK_SETTLE_MS and push the loop to RETURN_LOOP_CEILING_MS.
+      probeOk: (ip) => {
+        if (isHotspotAddress(ip)) return true;
+        r.net.ip = `10.9.${++moves}.7`;
+        return false;
+      },
+    },
+  });
+  await r.ticks(43); // the 5 min point + 120s
+  await r.held();
+  assert.equal(r.returns(), 1, "the hotspot was left");
+  assert.equal(r.joins(), 1, "the hotspot was put back by our own join");
+  assert.ok(joinAt !== null, r.lines.join("\n"));
+  assert.ok(joinAt! <= HOLD_MAX_MS - rejoinBudget, `the rejoin started ${joinAt}ms after the hold engaged; the loop must leave ${rejoinBudget}ms for it\n${r.lines.join("\n")}`);
+  assert.ok(joinAt! + rejoinBudget <= HOLD_MAX_MS, `the hotspot is back ${joinAt! + rejoinBudget}ms after the hold engaged, past a held call's ${HOLD_MAX_MS}ms\n${r.lines.join("\n")}`);
+  assert.equal(r.hold.engaged, false);
+  assert.equal(r.c.status().network, "hotspot");
+  const log = r.lines.join("\n");
+  assert.match(log, /the held-call budget leaves 17s for the return probe loop/);
+  assert.match(log, /the return probe loop stopped at the held-call budget \(17s, so the hotspot is back by the time a held call goes ahead at 120s\)/);
+});
+
+// 2026-11-07 red team: a probe cannot be recalled, and one started just before the held-gap cap ran
+// 4s past it (58s drain + failing 4s probes → the rejoin began at +76s instead of ≤ +75s, so the
+// hotspot was back only after the 120s the earliest held call waits). A probe that would not finish
+// inside the cap is not started; the rejoin goes ahead.
+test("a probe that would run past the held-gap cap is not started: the rejoin starts within it", async () => {
+  const rejoinBudget = 30_000 + 15_000; // networksetup join ≤30s + JOIN_SETTLE_MS
+  let joinAt: number | null = null;
+  const r = gapRig({
+    quietAfterMs: 58_000,
+    onJoin: () => { joinAt ??= r.clock.t - (r.engagedAt() ?? 0); },
+    net: {
+      ip: "172.20.10.2",
+      disassociateLandsOn: "192.168.50.7",
+      // Every probe through the left-behind Wi-Fi takes its full timeout and fails.
+      probeOk: (ip) => {
+        if (isHotspotAddress(ip)) return true;
+        r.clock.t += PROBE_TIMEOUT_MS;
+        return false;
+      },
+    },
+  });
+  await r.ticks(43); // the 5 min point + 120s
+  await r.held();
+  assert.equal(r.returns(), 1, "the hotspot was left");
+  assert.equal(r.joins(), 1, "the hotspot was put back by our own join");
+  assert.ok(joinAt !== null, r.lines.join("\n"));
+  assert.ok(joinAt! <= HOLD_MAX_MS - rejoinBudget, `the rejoin started ${joinAt}ms after the hold engaged; it must start by ${HOLD_MAX_MS - rejoinBudget}ms\n${r.lines.join("\n")}`);
+  assert.ok(joinAt! + rejoinBudget <= HOLD_MAX_MS, `the hotspot is back ${joinAt! + rejoinBudget}ms after the hold engaged, past a held call's ${HOLD_MAX_MS}ms\n${r.lines.join("\n")}`);
+  assert.equal(r.hold.engaged, false);
+  assert.equal(r.c.status().network, "hotspot");
+  assert.match(r.lines.join("\n"), /the return probe loop stopped at the held-call budget \(17s, so the hotspot is back by the time a held call goes ahead at 120s\)/);
+});
+
+// 2026-11-07 red team: a Wi-Fi joined during the drain was disassociated by the leave decided
+// before it arrived. The network is read again after the drain; a change (or a hotspot already
+// lost) stops the leave, the hold is released, and the next tick judges the new network.
+test("a Wi-Fi joined while calls drain is not disassociated by the return", async () => {
+  let joinedAt: number | null = null;
+  const r: ReturnType<typeof gapRig> = gapRig({
+    quietAfterMs: 58_000,
+    onEngagedTick: (since, rr) => {
+      if (joinedAt === null && since >= 30_000) {
+        joinedAt = since;
+        rr.net.ip = "192.168.1.4"; // the person joins home Wi-Fi while the calls drain
+      }
+    },
+  });
+  await r.ticks(43); // the 5 min point + 120s
+  await r.held();
+  assert.equal(joinedAt, 30_000, "the Wi-Fi arrived mid-drain");
+  assert.equal(r.returns(), 0, "the Wi-Fi joined during the drain was not disassociated");
+  assert.equal(r.joins(), 0);
+  assert.ok(!r.events.some((e) => e.startsWith("leave")), r.events.join(", "));
+  assert.equal(r.hold.engaged, false);
+  assert.equal(r.hold.waiting, 0);
+  assert.ok(
+    r.lines.some((l) => /not leaving the hotspot: the network changed while the drain waited for running calls \(now wifi 192\.168\.1\.4\); the new network is judged by the next tick/.test(l)),
+    r.lines.join("\n"),
+  );
+  // sampleNetwork() reset the window and started the new network's settle; the next tick watches it.
+  await r.ticks(1);
+  assert.equal(r.c.status().network, "wifi");
+  assert.equal(r.c.status().state, "watching");
+  assert.equal(r.c.status().lastSwitch, null, "no switch was recorded");
+});
+
+test("an address change during the last probe is not lost to the old deadline", async () => {
+  let aProbes = 0;
+  const r: ReturnType<typeof rig> = rig({
+    net: {
+      ip: "172.20.10.2",
+      disassociateLandsOn: "192.168.1.4",
+      probeOk: (ip) => {
+        if (ip !== "192.168.1.4") return true;
+        // The OS moves to another Wi-Fi while the probe through the old address is running: the
+        // round belongs to the old network, and the 32s deadline it was running under must not
+        // rejoin the hotspot 0s after this one appeared.
+        if (++aProbes === 16) {
+          r.net.ip = "10.9.9.9";
+          return false;
+        }
+        return false;
+      },
+    },
+  });
+  await r.ticks(31); // the 5 min point
+  assert.equal(r.returns(), 1);
+  assert.equal(r.joins(), 0, "the network that appeared during the last probe was not evicted");
+  const s = r.c.status();
+  assert.equal(s.network, "wifi");
+  assert.equal(s.state, "watching");
+  assert.equal(s.lastSwitch?.ok, true);
+});
+
+test("a subnet-only change during the last probe settles the new network too", async () => {
+  let probes = 0;
+  let moved = false;
+  const r: ReturnType<typeof rig> = rig({
+    net: {
+      ip: "172.20.10.2",
+      disassociateLandsOn: "192.168.1.4",
+      probeOk: () => {
+        if (moved) return true;
+        // Same address, different mask: the OS moved to another Wi-Fi's subnet while probing.
+        if (++probes === 16) {
+          moved = true;
+          r.net.netmask = "255.255.0.0";
+        }
+        return false;
+      },
+    },
+  });
+  await r.ticks(31); // the 5 min point
+  assert.equal(r.returns(), 1);
+  assert.equal(r.joins(), 0, "a subnet-only change is a change too");
+  assert.equal(r.c.status().network, "wifi");
+  assert.equal(r.c.status().lastSwitch?.ok, true);
+});
+
+test("a second network at 28s still gets its full 30s settle, not one capped past the base window", async () => {
+  let leftAt = 0;
+  const probes: number[] = [];
+  const r: ReturnType<typeof rig> = rig({
+    net: {
+      ip: "172.20.10.2",
+      disassociateLandsOn: "192.168.1.4",
+      probeOk: (ip) => {
+        const t = r.clock.t - leftAt;
+        probes.push(t);
+        // At 28s the OS moves from the first Wi-Fi to another, which only answers at 52s: the old
+        // cap (a settle past the 20s base window, i.e. 50s) evicted it at 50s.
+        if (ip === "192.168.1.4" && t >= 28_000) r.net.ip = "10.9.9.9";
+        return ip === "10.9.9.9" && t >= 52_000;
+      },
+    },
+    onLeave: () => { leftAt = r.clock.t; },
+  });
+  await r.ticks(31); // the 5 min point
+  assert.equal(r.returns(), 1);
+  assert.equal(r.joins(), 0, "the second network got its full 30s");
+  assert.ok(probes.some((t) => t > 50_000), `probed past the old cap: ${probes.join(", ")}`);
+  assert.equal(r.c.status().network, "wifi");
+});
+
+// A Wi-Fi that drops out and comes back is not the network the loop saw before: its reappearance
+// is a new network with its own settle (2026-11-07 red team: the same address and subnet came back
+// after "none" and was judged on the deadline of its first appearance).
+test("Wi-Fi → none → the same Wi-Fi is a new network: it gets a full settle", async () => {
+  const probes: number[] = [];
+  let leftAt = 0;
+  const r: ReturnType<typeof rig> = rig({
+    net: {
+      ip: "172.20.10.2",
+      disassociateLandsOn: "192.168.1.4",
+      // The Wi-Fi answers only from 34s after we left: with the settle belonging to the first
+      // appearance (deadline 32s) it would be called dead a second before it came up.
+      probeOk: (ip) => {
+        if (isHotspotAddress(ip)) return true;
+        if (ip !== "192.168.1.4") return false;
+        const t = r.clock.t - leftAt;
+        probes.push(t);
+        return t >= 34_000;
+      },
+    },
+    onLeave: () => { leftAt = r.clock.t; },
+    onSleep: () => {
+      if (!leftAt) return;
+      const t = r.clock.t - leftAt;
+      if (t === 6_000) r.net.ip = null; // the Wi-Fi drops out while the loop watches…
+      else if (t === 8_000) r.net.ip = "192.168.1.4"; // …and the same address and subnet come back
+    },
+  });
+  await r.ticks(31); // the 5 min point
+  assert.equal(r.returns(), 1);
+  assert.equal(r.joins(), 0, "the reappearing Wi-Fi got a fresh settle instead of the old deadline");
+  assert.equal(r.c.status().network, "wifi");
+  assert.equal(r.c.status().state, "watching");
+  assert.equal(r.c.status().lastSwitch?.ok, true);
+  assert.ok(probes.some((t) => t > 32_000), `probed past the deadline of the first appearance: ${probes.join(", ")}`);
+});
+
+test("a network the OS just joined is not failed over on the network left behind's probe failures", async () => {
+  const r = rig({ net: { ip: "172.20.10.2", probeOk: () => false } });
+  await r.ticks(5); // the hotspot's probes all failed: the window is full of failures
+  assert.equal(r.joins(), 0);
+  let ok = false;
+  // The owner joins home Wi-Fi: address, subnet and class all change, and the switch's own probes fail.
+  r.net.ip = "192.168.1.4";
+  r.net.probeOk = () => ok;
+  await r.ticks(4); // 0..30s of the new network: settle time
+  assert.equal(r.joins(), 0, "the old failures were not carried over");
+  assert.ok(r.lines.some((l) => new RegExp(`network changed \\(hotspot 172\\.20\\.10\\.2 → wifi 192\\.168\\.1\\.4\\); probe window reset, ${NETWORK_SETTLE_MS / 1000}s settle`).test(l)), r.lines.join("\n"));
+  ok = true;
+  await r.ticks(3);
+  assert.equal(r.joins(), 0);
+  assert.equal(r.c.status().state, "watching");
+});
+
+test("a new address within the same class resets the probe window too", async () => {
+  const r = rig({ net: { ip: "192.168.1.4", probeOk: () => false } });
+  await r.ticks(2); // two failures, one short of an outage
+  r.net.ip = "192.168.2.9"; // the OS moved to another Wi-Fi
+  await r.ticks(4); // in the old window this would already be an outage
+  assert.equal(r.joins(), 0);
+});
+
+test("httpGet's timeout bounds the whole request, not only socket silence (a trickling portal)", async () => {
+  const http = await import("node:http");
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "text/plain" });
+    const tick = setInterval(() => res.write("."), 100);
+    res.on("close", () => clearInterval(tick));
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  try {
+    const { port } = server.address() as { port: number };
+    const started = Date.now();
+    await assert.rejects(httpGet(`http://127.0.0.1:${port}/`, "127.0.0.1", 500), /probe timed out/);
+    assert.ok(Date.now() - started < 1_500, `took ${Date.now() - started}ms`);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((r) => server.close(() => r()));
+  }
 });
