@@ -9,7 +9,7 @@ import { PermissionQueue } from "../src/permissions.ts";
 import { MessageReceipts } from "../src/receipts.ts";
 import { reduce, timelineItems } from "../web/timeline.ts";
 import { sessionGroup, sidebarState } from "../web/sidebar.ts";
-import { INLINE_CAP } from "../src/protocol.ts";
+import { INLINE_CAP, WATCH_IDLE_MS } from "../src/protocol.ts";
 import type { Effort, SessionEvent } from "../src/protocol.ts";
 import { Sessions, modelArg, nextAttention, summarize } from "../src/sessions.ts";
 import { BridgeClient, CLI_NOT_LOGGED_IN, DESKTOP_BUSY, DESKTOP_WAITING, DesktopBlockedError } from "../src/bridge-client.ts";
@@ -118,7 +118,7 @@ function controlledQueries(readInputs = true, waitForExit = false) {
   return { queryFn, queries };
 }
 
-function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {}, extra: Partial<Pick<SessionsOptions, "handoff" | "log" | "queryFn" | "desktopProjects" | "desktopRegistry" | "desktopProcesses" | "bridgeClient" | "desktopSidebar" | "now" | "onSessions" | "environmentRoot" | "environmentWaitMs" | "environmentPollMs" | "environmentModeMs" | "modOfferMs" | "modResultMs">> = {}) {
+function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {}, extra: Partial<Pick<SessionsOptions, "handoff" | "log" | "queryFn" | "desktopProjects" | "desktopRegistry" | "desktopProcesses" | "bridgeClient" | "desktopSidebar" | "now" | "onSessions" | "onLoginProblem" | "environmentRoot" | "environmentWaitMs" | "environmentPollMs" | "environmentModeMs" | "modOfferMs" | "modResultMs">> = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-sessions-"));
   const cwd = path.join(dir, "project");
   fs.mkdirSync(cwd);
@@ -141,6 +141,115 @@ function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {
     sessions.create({ clientMsgId, cwd, model, effort, text: "ping" });
   return { dir, cwd, permissionsFile, permissions, fake, sessions, instances, events, create };
 }
+
+test("workActive counts a turn that ran in the last two minutes, then goes quiet", async t => {
+  let now = 1_000_000;
+  const f = fixture(t, {}, { now: () => now });
+  assert.equal(f.sessions.workActive(), false, "an untouched host is idle");
+  const id = await f.create();
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  assert.equal(f.sessions.workActive(), true, "a turn that just ran keeps the dead-man switch armed");
+  now += WATCH_IDLE_MS - 1;
+  assert.equal(f.sessions.workActive(), true, "still inside the idle tail");
+  now += 1;
+  assert.equal(f.sessions.workActive(), false, "two quiet minutes need no watch");
+});
+
+test("workActive stays true while background work a finished turn left runs", async t => {
+  let now = 1_000_000;
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn, now: () => now });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  launchBackground(query);
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  assert.equal(f.sessions.summaryOf(id)?.tasks, 1, "the async agent is still running");
+  now += WATCH_IDLE_MS;
+  assert.equal(f.sessions.workActive(), true, "the main turn ended, but this computer is still working");
+
+  // The agent's completion notice ends it; then the quiet host needs no watch.
+  query.emit({ type: "user", message: { content: [{ type: "text", text: "<task-notification><task-id>worker</task-id><status>completed</status></task-notification>" }] } });
+  await waitFor(() => f.sessions.summaryOf(id)?.tasks === 0);
+  now += WATCH_IDLE_MS;
+  assert.equal(f.sessions.workActive(), false);
+});
+
+test("the idle tail after background work starts when that work ends, not when the main turn did", async t => {
+  let now = 1_000_000;
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn, now: () => now });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  launchBackground(query);
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  assert.equal(f.sessions.summaryOf(id)?.tasks, 1);
+  // The agent outlives the window the finished turn alone would have left.
+  now += WATCH_IDLE_MS * 2;
+  assert.equal(f.sessions.workActive(), true, "a running agent is still work on this computer");
+  query.emit({ type: "user", message: { content: [{ type: "text", text: "<task-notification><task-id>worker</task-id><status>completed</status></task-notification>" }] } });
+  await waitFor(() => f.sessions.summaryOf(id)?.tasks === 0);
+  assert.equal(f.sessions.workActive(), true, "the two idle minutes start when the agent finishes");
+  now += WATCH_IDLE_MS;
+  assert.equal(f.sessions.workActive(), false, "and then the quiet host needs no watch");
+});
+
+test("a host-run turn refused for the CLI's login announces it once, and a later good turn clears it", async t => {
+  const boundary = controlledQueries();
+  const problems: (string | null)[] = [];
+  const f = fixture(t, {}, { queryFn: boundary.queryFn, onLoginProblem: (problem) => problems.push(problem) });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  query.emit({ type: "system", subtype: "init", session_id: "sdk-login" });
+  query.emit({ type: "result", subtype: "error", is_error: true, result: "Not logged in · Please run /login" });
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "error");
+  assert.deepEqual(problems, [CLI_NOT_LOGGED_IN], "the same host-level login notice the Claude app raises");
+
+  // Another refusal is the same occurrence, even in the CLI's other wording.
+  await f.sessions.send(id, "login-again", "again");
+  await waitFor(() => query.users.length === 2);
+  query.emit({ type: "result", subtype: "error", is_error: true, result: "OAuth token has expired. Please run /login to authenticate." });
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "error");
+  assert.deepEqual(problems, [CLI_NOT_LOGGED_IN]);
+
+  // A turn that works means the login is back.
+  await f.sessions.send(id, "login-ok", "hello");
+  await waitFor(() => query.users.length === 3);
+  query.emit({ type: "result", subtype: "success", is_error: false, duration_ms: 1, num_turns: 1 });
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  assert.deepEqual(problems, [CLI_NOT_LOGGED_IN, null]);
+});
+
+test("an unrelated failure leaves the CLI login notice in place, so the next refusal is not a second notice", async t => {
+  const problems: (string | null)[] = [];
+  const script: Parameters<typeof scriptedQuery>[0] = { failure: { text: "Not logged in · Please run /login", as: "throw" } };
+  const f = fixture(t, script, { onLoginProblem: (problem) => problems.push(problem) });
+  const id = await f.create();
+  const failures = () => f.sessions.log(id).readAfter(0).events.filter(e => e.kind === "result" && !e.ok).length;
+  await waitFor(() => failures() === 1);
+  assert.deepEqual(problems, [CLI_NOT_LOGGED_IN]);
+
+  // A dropped connection or an API error says nothing about the login, so it is neither a clear
+  // nor a new occurrence; the problem stays as it was.
+  script.failure = { text: "API Error: 500 internal error", as: "throw" };
+  await f.sessions.send(id, "other-failure", "again");
+  await waitFor(() => failures() === 2);
+  assert.deepEqual(problems, [CLI_NOT_LOGGED_IN], "an unrelated failure is not a clear");
+
+  // The refusal that follows is therefore still the one occurrence: no second notice.
+  script.failure = { text: "OAuth token has expired. Please run /login to authenticate.", as: "throw" };
+  await f.sessions.send(id, "login-again", "again");
+  await waitFor(() => failures() === 3);
+  assert.deepEqual(problems, [CLI_NOT_LOGGED_IN], "no second notice after an unrelated failure");
+
+  // Only a turn that works clears it.
+  delete script.failure;
+  await f.sessions.send(id, "login-ok", "hello");
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  assert.deepEqual(problems, [CLI_NOT_LOGGED_IN, null]);
+});
 
 test("clear after handoff retains the stored restrictive choice despite an unknown app mode", async t => {
   for (const mode of ["plan", "default"] as const) {

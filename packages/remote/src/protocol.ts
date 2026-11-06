@@ -53,12 +53,81 @@ export const RELAY_FRAME_CAP = FRAME_CAP + 1024;
  * The relay's own words (plain text frames; everything else it forwards untouched, encrypted):
  *   to the host's control socket: {"relay":"hello"} once accepted, {"relay":"connect","conn":id} per phone;
  *   to a phone: {"relay":"open"} once the host's data socket for it is there.
+ * `firedAt` on a separate `fired` frame says the room's dead-man switch alerted the phone while
+ * this host was away (epoch ms); the host sends the recovery notice and answers
+ * {"t":"cleared","firedAt"} on the same socket. It follows the hello, so the hello frame keeps its
+ * shape for hosts that predate the switch.
  * The host pings its control socket with the text "ping" and the relay answers "pong"; a phone may
  * do the same on its socket. `liveness` on the open frame says this relay answers that plain ping
  * itself (without waking the room). An older relay leaves it out, and a phone must not send one
  * then: that relay would forward it to the host, whose channel expects sealed bytes only.
  */
-export type RelayMsg = { relay: "hello" } | { relay: "connect"; conn: string } | { relay: "open"; liveness?: true };
+export type RelayMsg = { relay: "hello" } | { relay: "fired"; firedAt: number } | { relay: "connect"; conn: string } | { relay: "open"; liveness?: true };
+
+/**
+ * The host → relay control frames on the host's authenticated control socket, beside "ping".
+ * The room only ever reads these; the host sends no free text — `watch` carries Expo tokens and a
+ * language per device, and the copy is built at the relay from OUTAGE_COPY. Renewals keep the
+ * room's dead-man alarm moving; `unwatch` takes it away. See WATCH_* below.
+ */
+export type HostControlMsg =
+  | { t: "watch"; tokens: { token: string; lang: "ko" | "en" }[]; host: string }
+  | { t: "unwatch" }
+  /** The host has sent the recovery notice for this outage; the room forgets `firedAt`. */
+  | { t: "cleared"; firedAt: number };
+
+/**
+ * Dead-man switch between the host and its room while work is active (relay/room.ts, src/watch.ts).
+ * The host renews `watch` this often; `WATCH_IDLE_MS` without work sends `unwatch`; the room's alarm
+ * fires `WATCH_ALARM_MS` after the last renewal, far enough beyond both to survive a host restart
+ * (a new process clears a stale watch) or one late timer. Only native Expo devices are watched: web
+ * push needs VAPID signing on the sender, and the relay holds no key.
+ */
+export const WATCH_TICK_MS = 10_000;
+export const WATCH_RENEW_MS = 60_000;
+export const WATCH_IDLE_MS = 120_000;
+export const WATCH_ALARM_MS = 180_000;
+/** The room keeps at most this many Expo tokens per host. */
+export const WATCH_TOKENS_MAX = 10;
+/** The relay's own pushes live about an hour: the outage is long past by the time they are stale. */
+export const WATCH_TTL_S = 3600;
+/** Expo's push endpoint. The relay sends nowhere else. */
+export const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
+/** The one Expo token shape (shared by ExpoNotifier and the relay). */
+export const EXPO_TOKEN_RE = /^(ExponentPushToken|ExpoPushToken)\[[A-Za-z0-9_-]+\]$/;
+
+/**
+ * The fixed words of the host-wide pushes (no session; no conversation text). They live here so
+ * the host and the relay read one copy: the relay builds the disconnect notice itself from `lang`,
+ * and the host builds the recovery and login notices. `{n}` is whole minutes, at least one.
+ */
+export const OUTAGE_COPY = {
+  disconnected: {
+    ko: "PC와의 연결이 끊어졌습니다. 진행 중이던 작업이 중단되었을 수 있으니 PC의 네트워크와 전원 상태를 확인해 주세요.",
+    en: "The PC has disconnected. Work in progress may have stopped; check the PC’s network and power.",
+  },
+  recovered: {
+    ko: "PC가 다시 연결되었습니다. 약 {n}분 동안 연결이 끊어져 있었습니다.",
+    en: "The PC is connected again. It was disconnected for about {n} minute(s).",
+  },
+  loginExpired: {
+    ko: "PC의 Claude 로그인이 만료되어 작업을 계속 진행할 수 없습니다. PC에서 다시 로그인해 주세요.",
+    en: "The PC’s Claude login has expired, so the work cannot continue. Please sign in again on the PC.",
+  },
+} as const;
+
+/** Whole minutes of an outage, never below one. */
+export const outageMinutes = (ms: number): number => Math.max(1, Math.round(Math.max(0, ms) / 60_000));
+
+export function outageBody(kind: "disconnected" | "loginExpired", lang: "ko" | "en"): string {
+  return OUTAGE_COPY[kind][lang];
+}
+
+export function recoveredBody(lang: "ko" | "en", minutes: number): string {
+  return OUTAGE_COPY.recovered[lang]
+    .replace("{n}", String(minutes))
+    .replace("minute(s)", minutes === 1 ? "minute" : "minutes");
+}
 /** Close codes the relay uses. `stale`: the host's control socket sent no ping for HOST_SILENT_MS. */
 export const RELAY_CLOSE = { badRequest: 4400, badSecret: 4401, hostOffline: 4404, stale: 4408, replaced: 4409, peerGone: 4410, tooBig: 1009 } as const;
 /**

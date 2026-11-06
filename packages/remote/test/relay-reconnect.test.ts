@@ -122,6 +122,9 @@ class Net {
       now: () => this.clock.now,
       get: async () => undefined,
       put: async () => {},
+      setAlarm: async () => {},
+      deleteAlarm: async () => {},
+      postExpo: async () => {},
       newId: () => `conn-${String(++this.n).padStart(4, "0")}`,
       sha256: async (s) => s,
     };

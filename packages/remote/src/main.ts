@@ -28,6 +28,8 @@ import { Notifier, loadVapid, webPushSender } from "./push.ts";
 import { ExpoNotifier, expoSender } from "./expo-push.ts";
 import { RelayHost, loadHostKey } from "./relay.ts";
 import type { WsLike } from "./relay.ts";
+import { DesktopProblemAlert, RelayWatch } from "./watch.ts";
+import { OUTAGE_COPY, WATCH_TTL_S, recoveredBody } from "./protocol.ts";
 import { RouterClient } from "./router.ts";
 import { HostServer } from "./server.ts";
 import { LocalControl } from "./local-control.ts";
@@ -145,12 +147,45 @@ async function runHost(): Promise<void> {
     summary: (id) => sessions?.summaryOf(id),
     context: (id, event) => sessions?.pushContext(id, event) ?? {},
   });
+  const hostKey = toB64u(loadHostKey(dir, nacl).publicKey);
   const expoNotifier = new ExpoNotifier({ dir, send: expoSender(), log,
     seenRecently: (id) => server?.sessionSeenRecently(id) ?? false,
     context: (id, event) => sessions?.pushContext(id, event) ?? {},
     // The identity the phone paired with: a tap from a previous computer must not open a session
     // id on this one.
-    host: toB64u(loadHostKey(dir, nacl).publicKey),
+    host: hostKey,
+  });
+  // The Claude login problem is announced once per occurrence, the first moment it holds while this
+  // computer has work. The Claude app's bridge refusing and a host-run turn meeting the CLI's own
+  // missing login are the same computer's login: both feed this one alert, so the occurrence is
+  // counted once. onSessions re-asks each time the work state moves, so a problem that appeared
+  // while idle still notifies when work starts while it persists.
+  let desktopProblem: string | null = null;
+  let cliLoginProblem: string | null = null;
+  const loginAlert = new DesktopProblemAlert(
+    () => sessions?.workActive() ?? false,
+    async () => {
+      const copy = OUTAGE_COPY.loginExpired;
+      await Promise.all([
+        expoNotifier.system((lang) => copy[lang], 86_400),
+        notifier.system((lang) => copy[lang], "login-expired"),
+      ]);
+    },
+    log,
+  );
+  const reportLoginProblem = (): void => { loginAlert.update(desktopProblem ?? cliLoginProblem); };
+  /** The relay's control socket; the dead-man switch sends through it when it is open. */
+  let relayHost: RelayHost | null = null;
+  // While work is active this renews the room's alarm every minute and takes it away after two
+  // idle minutes; the room pushes "PC disconnected" only when a renewal never came (ARCHITECTURE §9).
+  const watch = new RelayWatch({
+    active: () => sessions?.workActive() ?? false,
+    targets: () => expoNotifier.targets(),
+    host: hostKey,
+    send: (msg) => relayHost?.control(msg) ?? false,
+    recover: (minutes) => expoNotifier.system((lang) => recoveredBody(lang, minutes), WATCH_TTL_S),
+    stateFile: path.join(dir, "watch.json"),
+    log,
   });
   // Mac sessions the host is not tailing push only while the Mac is away (screen locked or idle).
   const away = new MacAway({ log });
@@ -177,8 +212,9 @@ async function runHost(): Promise<void> {
     },
     away: () => away.away(),
     onAlert: (id, body) => { void notifier.onEvent(id, body); void expoNotifier.onEvent(id, body); },
-    onSessions: () => { server?.onSessions(); if (sessions) power.update(sessions.busy()); },
-    onDesktopProblem: (problem) => server?.setDesktopProblem(problem),
+    onSessions: () => { server?.onSessions(); if (sessions) power.update(sessions.busy()); reportLoginProblem(); },
+    onDesktopProblem: (problem) => { desktopProblem = problem; server?.setDesktopProblem(problem); reportLoginProblem(); },
+    onLoginProblem: (problem) => { cliLoginProblem = problem; reportLoginProblem(); },
   });
   const live = sessions;
   const host: HostServer = new HostServer({
@@ -212,14 +248,17 @@ async function runHost(): Promise<void> {
   try { permissions.open(); live.recover(); }
   catch (error) { await host.close(); throw error; }
   power.update(live.busy());
-  const relay = cfg.relay
-    ? new RelayHost({
+  if (cfg.relay) {
+    relayHost = new RelayHost({
       relay: cfg.relay, serverId: cfg.serverId, secret: cfg.relaySecret, hostKey: loadHostKey(dir, nacl), nacl, log,
       makeSocket: (url, headers) => new WebSocket(url, { headers, maxPayload: 2 * 1024 * 1024 }) as unknown as WsLike,
       onPeer: (peer) => host.connected(peer),
-    })
-    : null;
-  relay?.start();
+      // A fired dead-man alert is answered with the recovery notice and cleared (src/watch.ts).
+      onHello: (firedAt) => watch.hello(firedAt),
+    });
+    relayHost.start();
+    watch.start();
+  }
 
   out(`\nRipple Remote ${VERSION} — listening on ${where.listen}:${cfg.port}${cfg.relay ? `, relay ${cfg.relay}` : ""}\n`);
   if (claudePath) out(`Claude Code: ${claudePath}\n`);
@@ -229,7 +268,8 @@ async function runHost(): Promise<void> {
 
   const stop = (code = 0): void => {
     power.release();
-    relay?.stop();
+    watch.stop();
+    relayHost?.stop();
     live.shutdown();
     void host.close().then(() => process.exit(code));
     setTimeout(() => process.exit(code), 3000).unref();

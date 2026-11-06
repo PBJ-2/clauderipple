@@ -12,7 +12,7 @@
 // each hello and every ROUTE_CHECK_MS the host also walks the phone's path itself — a client socket
 // to its own room must come back "open" — and reconnects when it does not.
 import { BACKOFF_CAP_MS, FRAME_CAP, PING_MS, READY_MS, RELAY_CLOSE, RELAY_FRAME_CAP, STALE_MS } from "./protocol.ts";
-import type { RelayMsg } from "./protocol.ts";
+import type { HostControlMsg, RelayMsg } from "./protocol.ts";
 import path from "node:path";
 import { fromB64u, hostAccept, toB64u } from "./e2ee.ts";
 import type { Channel, KeyPair, Nacl } from "./e2ee.ts";
@@ -57,6 +57,10 @@ export interface RelayDeps {
   nacl: Nacl;
   makeSocket: (url: string, headers: Record<string, string>) => WsLike;
   onPeer: (peer: Peer) => void;
+  /** Called on every hello (undefined) and for the room's `fired` frame with the moment its
+   * dead-man switch alerted the phone while this host was away (src/watch.ts sends the recovery
+   * notice and clears it). */
+  onHello?: (firedAt: number | undefined) => void;
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (id: unknown) => void;
@@ -168,6 +172,16 @@ export class RelayHost {
 
   start(): void { this.stopped = false; this.connect(); }
 
+  /**
+   * One plain control frame on the host's control socket ({"t":"watch"|"unwatch"|"cleared"}).
+   * False while the socket is not open: the caller retries on its next tick.
+   */
+  control(msg: HostControlMsg): boolean {
+    const sock = this.sock;
+    if (!sock || this.state !== "open" || sock.readyState !== OPEN) return false;
+    try { sock.send(JSON.stringify(msg)); return true; } catch { return false; }
+  }
+
   stop(): void {
     this.stopped = true;
     this.clearAll();
@@ -227,6 +241,10 @@ export class RelayHost {
         this.armPing(sock);
         this.routeConfirmed = false;
         this.armRouteCheck(sock, ROUTE_FIRST_MS);
+        this.deps.onHello?.(undefined);
+      } else if (msg.relay === "fired" && typeof msg.firedAt === "number" && Number.isFinite(msg.firedAt)) {
+        // The room alerted the phone while this host was away: send the recovery notice (src/watch.ts).
+        this.deps.onHello?.(msg.firedAt);
       } else if (msg.relay === "connect" && typeof msg.conn === "string") this.openData(msg.conn);
     });
     sock.on("unexpected-response", (_req, res) => {

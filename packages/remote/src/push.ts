@@ -179,6 +179,25 @@ export class Notifier {
     }));
   }
 
+  /**
+   * A host-wide notice (the Claude login expired) to every web subscriber, whatever session a phone
+   * is looking at: SEEN_MS is about conversation alerts, not this. Fixed copy, no session id.
+   */
+  async system(body: (lang: "ko" | "en") => string, tag: string, ttl = 86_400): Promise<void> {
+    if (!Object.keys(this.subs).length) return;
+    await Promise.all(Object.entries(this.subs).map(async ([clientId, stored]) => {
+      const payload: PushPayload = { title: "Ripple Remote", body: body(stored.lang), session: "", tag };
+      try {
+        await this.opts.send(stored.sub, JSON.stringify(payload), { urgency: "normal", ttl, topic: tag.replace(/[^\w-]/g, "").slice(0, 32) });
+      } catch (e) {
+        if (isGone(e)) {
+          if (this.subs[clientId]?.sub.endpoint === stored.sub.endpoint) { delete this.subs[clientId]; this.save(); }
+          this.opts.log?.(`push: subscription for device ${clientId.slice(0, 8)} is gone; removed`);
+        } else this.opts.log?.(`push: send failed for device ${clientId.slice(0, 8)}: ${(e as Error).message}`);
+      }
+    }));
+  }
+
   private save(): void {
     writeFileAtomic(this.file, JSON.stringify(this.subs, null, 1));
   }

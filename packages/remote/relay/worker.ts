@@ -10,7 +10,8 @@
 //   GET /.well-known/assetlinks.json       Android App Links: the Play signing key's fingerprint
 //   anything else                          the PWA: static assets (./dist, by build-web.ts), not this worker
 import { Room } from "./room.ts";
-import type { RoomCtx } from "./room.ts";
+import type { OutagePush, RoomCtx } from "./room.ts";
+import { EXPO_PUSH_URL } from "../src/protocol.ts";
 
 // ---- the slice of the Workers runtime used here (no @cloudflare/workers-types dependency) ----
 
@@ -21,7 +22,13 @@ interface DoState {
   getTags(ws: CfSocket): string[];
   setWebSocketAutoResponse(pair: unknown): void;
   getWebSocketAutoResponseTimestamp(ws: CfSocket): Date | null;
-  storage: { get<T>(key: string): Promise<T | undefined>; put<T>(key: string, value: T): Promise<void> };
+  storage: {
+    get<T>(key: string): Promise<T | undefined>;
+    put<T>(key: string, value: T): Promise<void>;
+    /** One-shot alarms survive hibernation and eviction: the dead-man switch lives here. */
+    setAlarm(at: number): Promise<void>;
+    deleteAlarm(): Promise<void>;
+  };
 }
 interface DoStub { fetch(req: Request): Promise<Response> }
 interface DoNamespace { idFromName(name: string): unknown; get(id: unknown): DoStub }
@@ -96,6 +103,17 @@ export class RelayRoom {
       now: () => Date.now(),
       get: (k) => state.storage.get<string>(k),
       put: (k, v) => state.storage.put(k, v),
+      setAlarm: (at) => state.storage.setAlarm(at),
+      deleteAlarm: () => state.storage.deleteAlarm(),
+      // The room sends nowhere but Expo's push endpoint (EXPO_PUSH_URL): no host text, no session.
+      postExpo: async (messages: OutagePush[]) => {
+        const res = await fetch(EXPO_PUSH_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(messages),
+        });
+        if (!res.ok) throw new Error(`Expo push HTTP ${res.status}`);
+      },
       newId: () => crypto.randomUUID(),
       sha256: async (text) => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))), (b) => b.toString(16).padStart(2, "0")).join(""),
     };
@@ -105,10 +123,12 @@ export class RelayRoom {
   async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
     const secret = req.headers.get("x-ripple-host-secret");
+    const firedAt = url.pathname === "/ws/host" ? await this.room.alertedAt() : undefined;
     switch (url.pathname) {
       case "/ws/host":
         if (!(await this.room.hostAllowed(secret))) return new Response("forbidden", { status: 403 });
-        return upgrade((ws) => this.room.hostControl(ws));
+        // Read before accepting: a fired alert is said right after the hello, in the same handler.
+        return upgrade((ws) => this.room.hostControl(ws, firedAt));
       case "/ws/host-data": {
         const conn = url.searchParams.get("conn") ?? "";
         if (!(await this.room.hostAllowed(secret))) return new Response("forbidden", { status: 403 });
@@ -122,12 +142,14 @@ export class RelayRoom {
     }
   }
 
-  webSocketMessage(ws: CfSocket, data: string | ArrayBuffer): void { this.room.message(ws, data); }
+  async webSocketMessage(ws: CfSocket, data: string | ArrayBuffer): Promise<void> { await this.room.message(ws, data); }
   webSocketClose(ws: CfSocket, code: number): void {
     this.room.closed(ws);
     try { ws.close(code === 1005 || code === 1006 ? 1000 : code, "closed"); } catch { /* already closed */ }
   }
   webSocketError(ws: CfSocket): void { this.room.closed(ws); }
+  /** The dead-man alarm: the host has not renewed, so its phones are told (Room.alarm). */
+  async alarm(): Promise<void> { await this.room.alarm(); }
 }
 
 export default {

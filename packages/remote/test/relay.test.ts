@@ -105,6 +105,9 @@ function fakeRoom() {
     now: () => Date.now(),
     get: async (k) => store.get(k),
     put: async (k, v) => { store.set(k, v); },
+    setAlarm: async () => {},
+    deleteAlarm: async () => {},
+    postExpo: async () => {},
     newId: () => `conn-${String(++n).padStart(4, "0")}`,
     sha256: async (s) => `h(${s})`,
   };

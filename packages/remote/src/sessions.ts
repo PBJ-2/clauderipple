@@ -16,11 +16,11 @@ import { toolInput } from "./tool-details.ts";
 import type { PushContext } from "./push-content.ts";
 import type { PushEvent } from "./protocol.ts";
 import { attachmentContent, fileImages, messageContent, sessionFileTool, type InputBlock } from "./images.ts";
-import { ATTACHMENT_CAP, ATTACHMENT_COUNT, type Attachment, type ImagePart, type SessionFile, type SendBehavior } from "./protocol.ts";
+import { ATTACHMENT_CAP, ATTACHMENT_COUNT, WATCH_IDLE_MS, type Attachment, type ImagePart, type SessionFile, type SendBehavior } from "./protocol.ts";
 import { DesktopSessions, type DesktopProcess, type TurnWrapUp } from "./desktop.ts";
 import { firstSentence, STATUS_CAP } from "./wrap-up.ts";
 import { DesktopSidebar, PHONE_GROUP, type SidebarOptions } from "./sidebar.ts";
-import { BridgeAuthError, BridgeClient, bridgeCreateNotCreated, bridgeWriteUnknown, CLI_NOT_LOGGED_IN, DESKTOP_BLOCKED, DESKTOP_BUSY, DESKTOP_WAITING, DesktopBlockedError, DesktopBusyError, isCliNotLoggedIn, object, permissionSuppression, slashCommands, type BridgeFrame } from "./bridge-client.ts";
+import { BridgeAuthError, BridgeClient, bridgeCreateNotCreated, bridgeWriteUnknown, CLI_NOT_LOGGED_IN, DESKTOP_BLOCKED, DESKTOP_BUSY, DESKTOP_WAITING, DesktopBlockedError, DesktopBusyError, isLoginRefusal, object, permissionSuppression, slashCommands, type BridgeFrame } from "./bridge-client.ts";
 import type { HandoffRunner } from "./handoff.ts";
 import { isDirectory, macConsent, readableFolder } from "./folders.ts";
 import { readJson, writeFileAtomic } from "./fsutil.ts";
@@ -138,6 +138,9 @@ export interface SessionsOptions {
   away?: () => Promise<boolean>;
   /** Claude app sessions became unreachable for the whole host (the Mac's Claude login), or reachable again (null). */
   onDesktopProblem?: (problem: string | null) => void;
+  /** A host-run turn found the Claude Code CLI's own login missing or expired, or a later turn
+   * worked (null). The same computer's login as `onDesktopProblem`, so main shares one notice. */
+  onLoginProblem?: (problem: string | null) => void;
   now?: () => number;
   coalesceMs?: number;
   /** Enabled by main; tests can use an isolated synthetic projects directory. */
@@ -394,6 +397,13 @@ export class Sessions {
   /** The wrap_up whose blocked question the person was already told about, per session, so a later
    * poll that still finds the same question (or a phone that cleared it) raises it only once. */
   private askedWrapUps = new Map<string, string>();
+  /** Sessions whose newest Claude app turn ended on a blocked wrap_up question nobody answered yet.
+   * The question's own state — read from the transcript — not the attention flag, which a phone
+   * opening the session clears while the session still waits for the answer. */
+  private blockedQuestions = new Set<string>();
+  /** Last moment any session was seen working; `workActive` keeps its answer true for a short tail
+   * after a turn ends, so a fast turn between two polls still arms the relay's dead-man switch. */
+  private lastBusyAt: number | null = null;
 
   /** The registry says busy (it counts background work) while the main turn itself is not running. */
   private background(process: DesktopProcess): boolean {
@@ -441,10 +451,28 @@ export class Sessions {
 
   /** Why Claude app sessions cannot be reached at all right now (the Mac's Claude login), or null. */
   private bridgeProblem: string | null = null;
+  /** Claude Code's own login cannot be used: a host-run turn was refused with the CLI's "not
+   * logged in"/expired-login words. Kept beside the app's problem so main's one alert
+   * (DesktopProblemAlert) still tells phones once per occurrence whichever source saw it first. */
+  private cliLoginProblem: string | null = null;
   /** The last error logged per Remote Control session, so a poll that keeps failing logs once. */
   private bridgeErrors = new Map<string, string>();
 
   desktopProblem(): string | null { return this.bridgeProblem; }
+
+  /**
+   * A host-run turn met the CLI's missing or expired login (`true`), worked again (`false`), or
+   * ended some other way that says nothing about the login (`null`: a network error, an interrupt).
+   * Only a turn that worked clears the problem — any other failure leaves it as it was, so a
+   * refusal, a network error and another refusal are still one occurrence and one notice.
+   */
+  private noteCliLogin(problem: boolean | null): void {
+    if (problem === null) return;
+    const next = problem ? CLI_NOT_LOGGED_IN : null;
+    if (this.cliLoginProblem === next) return;
+    this.cliLoginProblem = next;
+    this.opts.onLoginProblem?.(next);
+  }
 
   /**
    * Record how a Remote Control request went. Every poll re-asks, so the log gets a line when
@@ -522,7 +550,12 @@ export class Sessions {
     this.sendQueue.retryFailures(DESKTOP_BLOCKED, DESKTOP_WAITING);
     for (const r of readJson<SessionRecord[]>(this.file) ?? []) this.records.set(r.id, r);
     const listState = readJson<ListState>(this.listFile);
-    for (const [id, attention] of Object.entries(listState?.attention ?? {})) if (attention?.reason) this.attention.set(id, attention);
+    for (const [id, attention] of Object.entries(listState?.attention ?? {})) if (attention?.reason) {
+      this.attention.set(id, attention);
+      // A question persisted here may still be waiting; the first transcript read in
+      // refreshStatuses confirms it or clears it, but the dead-man switch must not drop it before then.
+      if (attention.reason === "question") this.blockedQuestions.add(id);
+    }
     for (const id of listState?.archived ?? []) this.archived.add(id);
     for (const [id, at] of Object.entries(listState?.readAt ?? {})) if (typeof at === "number" && Number.isFinite(at)) this.readAt.set(id, at);
     // On a Mac the sidebar option carries no root (the app's default folder is meant): a null here
@@ -990,9 +1023,13 @@ export class Sessions {
       const wrap = this.desktop.wrapUp(s.id);
       const status = wrap ? firstSentence(wrap.recap, STATUS_CAP) : "";
       this.statuses.set(s.id, { size, status });
+      // A blocked question nobody has answered is still work the person owes, and a newer message
+      // (which resets the transcript read) or a wrap_up without an ask ends it.
+      if (wrap?.ask && wrap.blocked) this.blockedQuestions.add(s.id); else this.blockedQuestions.delete(s.id);
       if ((cached?.status ?? "") !== status) changed = true;
     }
     for (const id of this.statuses.keys()) if (!seen.has(id)) this.statuses.delete(id);
+    for (const id of this.blockedQuestions) if (!seen.has(id)) this.blockedQuestions.delete(id);
     if (changed) this.opts.onSessions();
   }
 
@@ -1014,6 +1051,7 @@ export class Sessions {
     const found = wrap === undefined ? this.desktopWrapUp(id) : wrap;
     if (!found?.ask || !found.blocked || this.askedWrapUps.get(id) === found.key) return null;
     this.askedWrapUps.set(id, found.key);
+    this.blockedQuestions.add(id);
     return { reason: "question", at: this.now() };
   }
 
@@ -1022,6 +1060,7 @@ export class Sessions {
    * transcript is not read again for a recap the person has already moved past. */
   private personMessage(id: string): void {
     this.askedWrapUps.delete(id);
+    this.blockedQuestions.delete(id);
     let changed = false;
     const cached = this.statuses.get(id);
     if (cached?.status) { this.statuses.set(id, { size: cached.size, status: "" }); changed = true; }
@@ -1059,6 +1098,7 @@ export class Sessions {
       if (s.origin !== "desktop" || this.records.has(s.id) || this.archived.has(s.id)) continue;
       seen.add(s.id);
       const permission = s.state === "waiting" || s.pending > 0;
+      if (permission || BUSY.has(s.state)) this.lastBusyAt = this.now();
       const previous = this.macStates.get(s.id);
       this.macStates.set(s.id, { state: s.state, permission });
       const current = this.attention.get(s.id) ?? null;
@@ -1183,6 +1223,56 @@ export class Sessions {
     return false;
   }
 
+  /**
+   * Whether Claude is working on this computer right now: a turn starting, running or waiting, an
+   * approval or blocked question waiting, background work a finished turn left running, a Claude
+   * app conversation the host tails, or one the list-only desktop path already alerts on. The
+   * relay's dead-man switch is armed only while this is true (src/watch.ts), so a quiet computer
+   * that sleeps never triggers a "disconnected" push.
+   */
+  workActive(): boolean {
+    // Whatever is seen working renews the idle tail, so the two quiet minutes start when the last
+    // of it ends (a long-pending question answered between polls included), not when a turn did.
+    if (this.workObserved()) {
+      this.lastBusyAt = this.now();
+      return true;
+    }
+    // A turn that ran within the last WATCH_IDLE_MS still counts: a fast turn can fall between two
+    // polls, and the dead-man switch must stay armed through the gap.
+    return this.lastBusyAt !== null && this.now() - this.lastBusyAt < WATCH_IDLE_MS;
+  }
+
+  /** Work seen right now (workActive without the idle tail). */
+  private workObserved(): boolean {
+    if (this.creating.size || this.sending.size || this.draining.size || this.handingOff.size) return true;
+    for (const r of this.records.values()) {
+      if (BUSY.has(r.state)) return true;
+      // A host-run turn that ended can leave an async Agent or a background shell running; the
+      // computer is still working then (background-activity.ts). Seeing it active renews the idle
+      // tail, so the two quiet minutes start when that background work finishes, not when the turn did.
+      if (!r.desktopBridge && this.hasBackgroundWork(r.id)) return true;
+      // A tailed or handed-off Claude app conversation keeps its state in the app's registry.
+      const process = this.desktop?.liveProcess(r.sdkSessionId ?? r.id);
+      if (process && process.status !== "idle") return true;
+      if (this.opts.permissions.pending(r.id).length > 0) return true;
+    }
+    // Claude app sessions the list only alerts on (pollMacAlerts): running, waiting for approval.
+    for (const state of this.macStates.values()) if (BUSY.has(state.state) || state.permission) return true;
+    // A question the Claude app's wrap_up left is a stopped turn that waits for the person (issue #82).
+    // Read from the question's own pending state: a phone opening the session clears the attention
+    // flag (markSeen), but the session still waits for that answer.
+    if (this.blockedQuestions.size > 0) return true;
+    for (const attention of this.attention.values()) if (attention.reason === "permission") return true;
+    return false;
+  }
+
+  /** A host-run session's confirmed running background work (BackgroundActivity.active). A
+   * scheduled cron job asks nothing of this computer now, so it does not count. */
+  private hasBackgroundWork(id: string): boolean {
+    // An unreadable log cannot confirm work, and must not take the dead-man switch down with it.
+    try { return this.taskState(id).activity.active.some((task) => task.kind !== "schedule"); } catch { return false; }
+  }
+
   /** Reserve idle synchronously; deferred desktop/queue callbacks may not start another turn. */
   prepareRefresh(): boolean {
     if (this.shuttingDown || this.busy()) return false;
@@ -1245,10 +1335,15 @@ export class Sessions {
     const appRun = !r.desktopBridge && this.canTailHandoff(r) ? this.desktop?.liveProcess(r.sdkSessionId!) : undefined;
     const appState: SessionState | undefined = appRun && appRun.status !== "idle" ? (appRun.status === "waiting" ? "waiting" : "running") : undefined;
     const state = r.environmentBridgeId && r.state === "error" ? r.state : process ? this.bridgeState(process, r.environmentBridgeId ?? process.bridgeSessionId) : r.environmentBridgeId ? this.environmentState(r) : r.desktopBridge ? "stopped" : appState ?? r.state;
+    // Remember the last sight of work for workActive's idle tail (called for every record each poll).
+    if (BUSY.has(state)) this.lastBusyAt = this.now();
     // Main-turn idleness does not finish background work. Keep transcript observations separate
     // from a complete engine inventory, which only the SDK Stop hook can confirm here.
     const working = process?.status === "busy" || process?.status === "shell";
     const activity = r.desktopBridge ? null : this.taskState(r.id).activity;
+    // Background work is work: seeing it active keeps the idle tail moving, so the two quiet
+    // minutes start when the background agent finishes (workActive's branch says the same).
+    if (activity?.active.some(task => task.kind !== "schedule")) this.lastBusyAt = this.now();
     const taskList = r.desktopBridge ? this.desktop?.backgroundTaskList(r.sdkSessionId ?? r.id) ?? [] : activity?.active ?? [];
     const taskHistory = r.desktopBridge ? this.desktop?.backgroundTaskHistory(r.sdkSessionId ?? r.id) ?? [] : activity?.history ?? [];
     const turnStartedAt = working ? this.desktop?.turnStartedAt(r.sdkSessionId ?? r.id) ?? null : null;
@@ -1379,6 +1474,7 @@ export class Sessions {
     if (r.state === state && !detail) return;
     const from = r.state;
     r.state = state;
+    if (BUSY.has(state)) this.lastBusyAt = this.now();
     // A bridged session's turn can end on a question the person must answer; that outranks "finished".
     const question = r.desktopBridge ? this.questionAttention(r.id, from, state) : null;
     this.setAttention(r.id, question ?? nextAttention(this.attention.get(r.id) ?? null, from, state, this.now()));
@@ -2848,6 +2944,7 @@ export class Sessions {
     this.opts.permissions.expireSession(r.id, "aborted");
     if (failure) {
       const text = this.failureText(r.id, failure);
+      this.noteCliLogin(isLoginRefusal(failure) ? true : null);
       this.append(r.id, { kind: "result", ok: false, error: text, ms: this.now() - live.turnStart, turns: 0 });
       this.setState(r, "error", text.slice(0, 300));
     } else if (r.state !== "idle" && r.state !== "error") this.setState(r, "stopped");
@@ -2858,7 +2955,7 @@ export class Sessions {
    * The raw text stays in the host's own log line, where the exact CLI wording belongs.
    */
   private failureText(id: string, raw: string): string {
-    if (!isCliNotLoggedIn(raw)) return raw;
+    if (!isLoginRefusal(raw)) return raw;
     (this.opts.log ?? console.error)(`[session ${id.slice(0, 8)}] Claude Code CLI: ${raw.trim()}`);
     return CLI_NOT_LOGGED_IN;
   }
@@ -3002,7 +3099,12 @@ export class Sessions {
         const win = Object.entries(usage ?? {}).find(([model]) => windowKey(model) === windowKey(this.effectiveSettings(r).model))?.[1].contextWindow;
         r.contextWindow = typeof win === "number" && Number.isFinite(win) && win > 0 ? win : null;
         for (const [model, u] of Object.entries(usage ?? {})) if (typeof u.contextWindow === "number") this.learnWindow(model, u.contextWindow);
-        const error = ok ? undefined : this.failureText(r.id, String(msg.result ?? (Array.isArray(msg.errors) ? msg.errors.join("; ") : msg.subtype ?? "error"))).slice(0, 500);
+        const raw = String(msg.result ?? (Array.isArray(msg.errors) ? msg.errors.join("; ") : msg.subtype ?? "error"));
+        const error = ok ? undefined : this.failureText(r.id, raw).slice(0, 500);
+        // A turn that got through means the CLI's login works again; a refusal is the host's
+        // login problem, told to main so phones hear it once per occurrence. Another failure
+        // (a network error, an API error) says nothing about the login and leaves it unchanged.
+        this.noteCliLogin(ok ? false : isLoginRefusal(raw) ? true : null);
         this.append(r.id, { kind: "result", ok, ...(error ? { error } : {}), ms: typeof msg.duration_ms === "number" ? msg.duration_ms : this.now() - live.turnStart, turns: typeof msg.num_turns === "number" ? msg.num_turns : 0 });
         if (live.restartAfterTurn) this.restartSettings(r, live);
         this.setState(r, live.pendingMessages.length > 0 ? "running" : ok ? "idle" : "error");

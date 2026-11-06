@@ -47,6 +47,14 @@ export const CLI_NOT_LOGGED_IN = "이 컴퓨터의 Claude Code에 로그인되�
 export function isCliNotLoggedIn(text: string): boolean {
   return /^\s*not\s+logged\s+in\b/i.test(text);
 }
+/**
+ * The CLI's words when its own login cannot be used, wherever they land in a longer message (a
+ * result's `errors` are joined): "Not logged in · Please run /login", and the expired-OAuth line,
+ * both of which tell the person to run /login.
+ */
+export function isLoginRefusal(text: string): boolean {
+  return isCliNotLoggedIn(text) || /please\s+run\s+\/login\b/i.test(text);
+}
 export interface BridgeAuth { accessToken: string; organizationUuid: string; accountUuid?: string; expiresAt: number }
 class BridgeNetworkError extends Error {}
 class BridgeHttpError extends Error {
