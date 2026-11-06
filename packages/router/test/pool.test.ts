@@ -431,6 +431,49 @@ test("an answer lifts a quarantine but does not cancel a live cooldown", () => {
   assert.equal(pool.report("p", all)[0]?.state, "ready", "a credential that answered is not rejected");
 });
 
+// OpenCode Go answered 429 `[prefill_cap_refused]` / `[overloaded]` for its own failing upstream
+// (2026-11-06, router.log 15:34:34): the same key answered 200 five seconds later, while the 429
+// cooled it for a minute as if the key were over its limit.
+test("a relay's 429 for a failed upstream is transient, not the key's rate limit", () => {
+  for (const body of [
+    '{"error":{"type":"server_error","message":"Upstream request failed: [prefill_cap_refused] the cell is at capacity; retry shortly (after 5 s)"}}',
+    '{"error":{"type":"server_error","message":"Upstream request failed: [overloaded] the server is overloaded; retry shortly"}}',
+  ]) {
+    assert.deepEqual(classify(429, undefined, body), { retryable: true, kind: "transient", cooldownMs: 0, quarantine: false }, body);
+  }
+  // A 429 about our own limit is still a rate limit, with its stated or default wait.
+  assert.equal((classify(429) as { kind: string }).kind, "rate-limit");
+  assert.equal((classify(429, 5_000) as { cooldownMs: number }).cooldownMs, 5_000);
+  assert.equal((classify(429, undefined, '{"error":{"message":"rate_limit_exceeded"}}') as { kind: string }).kind, "rate-limit");
+});
+
+// A Claude subscription's 5h/7d window belongs to the account, while its credential id carries a
+// token digest. A refresh during a rest used to hand the pool a fresh id with no cooldown and spend
+// an account whose window was still gone (2026-11-07). A quarantine is still the token generation's.
+test("a token refresh does not clear a resting account, and a fresh generation starts unquarantined", () => {
+  const c = clock();
+  const pool = new CredentialPool({ now: c.now });
+  const old: Credential = { id: "account-a:gen1", ownerId: "account-a", headers: {} };
+  const other: Credential = { id: "account-b:gen1", ownerId: "account-b", headers: {} };
+  assert.equal(pool.pick("claude", [old, other], "conv")?.id, old.id, "the pool has now seen the account");
+  assert.equal(pool.penalise("claude", old.id, 429, 5 * 60 * 60_000).retryable, true);
+
+  const fresh: Credential = { id: "account-a:gen2", ownerId: "account-a", headers: {} };
+  assert.equal(pool.hasUsable("claude", [fresh]), false, "the refreshed generation still rests");
+  assert.deepEqual(pool.report("claude", [fresh]).map((row) => row.state), ["cooling"]);
+  assert.equal(pool.report("claude", [fresh])[0]?.cooldownSeconds, 5 * 60 * 60);
+  c.advance(5 * 60 * 60_000);
+  assert.equal(pool.hasUsable("claude", [fresh]), true, "the rest ends at its stated reset");
+
+  // A 401 is the token generation being refused; a re-login must not inherit it (2026-09-20).
+  pool.penalise("claude", fresh.id, 401);
+  assert.equal(pool.hasUsable("claude", [fresh]), false);
+  const relogged: Credential = { id: "account-a:gen3", ownerId: "account-a", headers: {} };
+  assert.equal(pool.hasUsable("claude", [relogged]), true, "a fresh generation is not the refused one");
+  // The old generation stays parked even while its account is otherwise healthy.
+  assert.deepEqual(pool.report("claude", [fresh, relogged]).map((row) => row.state), ["quarantined", "ready"]);
+});
+
 // OpenCode Go answered 402 for minimax-m3.1-flash-free while that model's endpoint was down
 // (2026-10-22). Read as exhaustion it parked the whole account, DeepSeek included, for 30 minutes.
 test("a relay's 402 for a failed upstream is transient, not exhaustion", () => {
@@ -502,4 +545,20 @@ test("a quota scope combines with pause and preference: paused is never picked, 
   pool.penalise("claude", "owner:1", 429, 60_000, "", "3p");
   pool.clearOwner("claude", "owner");
   assert.deepEqual(pool.scopeCooldowns("claude", "owner:1"), {});
+});
+
+test("clearing one provider's login leaves another provider's rest on the same login to its own clear", () => {
+  const c = clock();
+  const pool = new CredentialPool({ now: c.now });
+  const login = { id: "gen1", headers: {}, ownerId: "current", healthKey: "login:abc" } as Credential;
+  for (const provider of ["claude", "claude-work"]) {
+    assert.equal(pool.pick(provider, [login])?.id, "gen1");
+    pool.penalise(provider, "gen1", 429, 3_600_000, "");
+    assert.equal(pool.hasUsable(provider, [login]), false);
+  }
+  pool.clearOwner("claude", "current");
+  assert.equal(pool.hasUsable("claude", [login]), true);
+  assert.equal(pool.hasUsable("claude-work", [login]), false, "the other provider still rests until it is cleared");
+  pool.clearOwner("claude-work", "current");
+  assert.equal(pool.hasUsable("claude-work", [login]), true, "its own clear still finds its login");
 });

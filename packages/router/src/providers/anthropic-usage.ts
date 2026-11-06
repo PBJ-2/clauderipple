@@ -79,6 +79,36 @@ export function claudeUsageFromHeaders(headers: Record<string, string | string[]
 }
 
 /**
+ * How long a rejected Claude answer says its account must rest, from the same unified limit headers
+ * (`anthropic-ratelimit-unified-status`, measured against CLI 2.1.317, 2026-11-05). A 429 without
+ * `retry-after` used to cool the account for a minute even when `-5h-utilization` read 100% and the
+ * reset was hours away (2026-11-07), so every turn of that window re-tried a spent subscription.
+ *
+ * Undefined unless the limiter itself says the account is rejected and names a future reset for a
+ * window that is actually spent: an ordinary per-minute 429, or a body simulator that echoes the
+ * status without the window, keeps the pool's ordinary rate-limit wait. The soonest spent window is
+ * returned — the first moment asking again can work — and the pool's 6 h clamp still bounds it.
+ * `used_percent`/`reset_at` stay display facts of `claudeUsageFromHeaders`; this is the wait.
+ */
+export function claudeLimitResetMs(headers: Record<string, string | string[] | undefined>, at = Date.now()): number | undefined {
+  const pick = (name: string): string | undefined => {
+    const value = headers[name];
+    return Array.isArray(value) ? value[0] : value;
+  };
+  if (pick("anthropic-ratelimit-unified-status") !== "rejected") return undefined;
+  let soonest: number | undefined;
+  for (const prefix of ["5h", "7d"] as const) {
+    const used = Number(pick(`anthropic-ratelimit-unified-${prefix}-utilization`));
+    const reset = Number(pick(`anthropic-ratelimit-unified-${prefix}-reset`));
+    if (!Number.isFinite(used) || used < 1 || !Number.isFinite(reset)) continue;
+    const wait = reset * 1000 - at;
+    if (wait <= 0) continue;
+    soonest = soonest === undefined ? wait : Math.min(soonest, wait);
+  }
+  return soonest;
+}
+
+/**
  * Per-model weekly windows from the same body: entries of `limits` with kind `weekly_scoped`
  * carry the model in `scope.model.display_name` (measured 2026-10-15:
  * `{"kind":"weekly_scoped","group":"weekly","percent":2,…,"scope":{"model":{"id":null,

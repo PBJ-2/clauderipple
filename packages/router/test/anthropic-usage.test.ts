@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ClaudeUsage, claudeUsageFromBody, claudeUsageFromHeaders } from "../src/providers/anthropic-usage.ts";
+import { ClaudeUsage, claudeLimitResetMs, claudeUsageFromBody, claudeUsageFromHeaders } from "../src/providers/anthropic-usage.ts";
 
 // Shape measured 2026-09-28 from GET /api/oauth/usage.
 const BODY = {
@@ -104,6 +104,30 @@ test("unified limit headers give the same windows in the snapshot shape", () => 
     "anthropic-ratelimit-unified-5h-reset": String(Math.floor(now / 1000) - 10),
   }, now) as { rate_limits: { primary: Record<string, number> } };
   assert.equal(ended.rate_limits.primary.reset_at, undefined, "a reset already behind us is not shown as the next one");
+});
+
+// A 429 without retry-after cooled a spent Claude subscription for a minute, so a 5h/7d window was
+// re-tried every minute until it reset (2026-11-07). The unified headers state the real reset.
+test("a rejected unified window states how long the account must rest", () => {
+  const now = Date.parse("2026-11-07T10:00:00Z");
+  const reset5h = Math.floor(now / 1000) + 1_200;
+  const reset7d = Math.floor(now / 1000) + 86_400;
+  const headers = {
+    "anthropic-ratelimit-unified-status": "rejected",
+    "anthropic-ratelimit-unified-5h-utilization": "1",
+    "anthropic-ratelimit-unified-5h-reset": String(reset5h),
+    "anthropic-ratelimit-unified-7d-utilization": "0.584",
+    "anthropic-ratelimit-unified-7d-reset": String(reset7d),
+  };
+  assert.equal(claudeLimitResetMs(headers, now), 1_200_000, "the spent 5h window's reset");
+  // Only a window that is actually spent names a wait; allowed, below 100%, or a reset already gone
+  // by is an ordinary 429 and keeps the pool's default.
+  assert.equal(claudeLimitResetMs({ ...headers, "anthropic-ratelimit-unified-status": "allowed" }, now), undefined);
+  assert.equal(claudeLimitResetMs({ ...headers, "anthropic-ratelimit-unified-5h-utilization": "0.99" }, now), undefined);
+  assert.equal(claudeLimitResetMs({ ...headers, "anthropic-ratelimit-unified-5h-reset": String(Math.floor(now / 1000) - 1) }, now), undefined);
+  assert.equal(claudeLimitResetMs({ "anthropic-ratelimit-unified-5h-reset": String(reset5h) }, now), undefined, "no limiter status, no claim");
+  // Both windows spent: the soonest reset is the first moment asking again can work.
+  assert.equal(claudeLimitResetMs({ ...headers, "anthropic-ratelimit-unified-7d-utilization": "1" }, now), 1_200_000);
 });
 
 // Issue #123 part 2: a refused usage lookup kept the last numbers and showed them as current.

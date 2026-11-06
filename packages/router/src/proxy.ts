@@ -55,7 +55,7 @@ import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
 import { nativeAnthropicHeaders, type ClaudeCodeCredentialReaders } from "./providers/anthropic.ts";
 import { ClaudeAccountAuthPool } from "./providers/anthropic-account-pool.ts";
 import { ClaudeModelCatalog } from "./providers/anthropic-models.ts";
-import { ClaudeUsage } from "./providers/anthropic-usage.ts";
+import { ClaudeUsage, claudeLimitResetMs } from "./providers/anthropic-usage.ts";
 import { ClaudeCurrentIdentity } from "./providers/anthropic-identity.ts";
 import { dropForeignThinking, ThinkingOrigins } from "./thinking.ts";
 
@@ -1838,12 +1838,22 @@ export class Proxy {
       });
 
       const onUpstreamJudged = (upRes: http.IncomingMessage, status: number, errBody: string): void => {
+        // A Claude subscription limit states its window in the unified headers rather than in
+        // `retry-after`. Reading that as an ordinary 429 rested the account for a minute, so a spent
+        // 5h/7d window was retried every minute until it reset (2026-11-06/07). A short `retry-after`
+        // beside a rejected window is the limiter's next refresh, not the end of the window, so the
+        // account rests until the later of the two. The same value is what the caller gets if no
+        // account can take the turn.
+        const statedRetryMs = retryAfterMs(upRes.headers);
+        const claudeLimitMs = status === 429 && isApiHost && (!route || cfg.providers[route.provider]?.type === "anthropic")
+          ? claudeLimitResetMs(upRes.headers) : undefined;
+        const restMs = claudeLimitMs !== undefined ? Math.max(statedRetryMs ?? 0, claudeLimitMs) : statedRetryMs;
         // Charge the answer to the credential that produced it. A rate limit parks this one until its
         // stated reset so the next request takes another; an answer clears whatever it was carrying.
         // A 400 is our own request and is charged to nobody (see `classify`).
         if (penalised) {
           if (status >= 400) {
-            this.pool.penalise(penalised.provider, penalised.id, status, retryAfterMs(upRes.headers), errBody);
+            this.pool.penalise(penalised.provider, penalised.id, status, restMs, errBody);
             if (status === 401 && cfg.providers[penalised.provider]?.type === "anthropic") this.claudeAccounts.reject(penalised.id);
           } else this.pool.succeed(penalised.provider, penalised.id);
           if (cfg.providers[penalised.provider]?.type === "anthropic") {
@@ -1875,6 +1885,9 @@ export class Proxy {
           tried.add(retry.id);
           usedCredentialHeaders = { ...usedCredentialHeaders, ...(chosen?.headers ?? {}), ...retry.headers };
           chosen = retry;
+          // The completion line names the account that finally answered, not the one the turn
+          // started on (2026-11-07: after an in-turn retry it kept saying the first account).
+          if (route && tag.startsWith("CLAUDE ")) tag = `CLAUDE ${route.tag} account=${retry.ownerId?.slice(0, 8) ?? "current"}`;
           penalised = { provider: route!.provider, id: retry.id };
           for (const secret of credentialHeaderValues(Object.entries(retry.headers))) errorSecrets.add(secret);
           upRes.resume();
@@ -1952,15 +1965,23 @@ export class Proxy {
         // A definite exhaustion (a spending cap, a used-up quota) is not worth asking again in the
         // same minute, and a worker that does retries the plain 429 for about two and a half minutes
         // before failing (#89, 2026-10-24). Its body was read ahead for 402/429, so the answer is
-        // known before the headers go out; a bare rate limit is left exactly as it was.
+        // known before the headers go out; a bare rate limit is left exactly as it was. A Claude
+        // subscription window that the unified headers say is spent gets the same rule: the caller
+        // must not spend its own retry ladder until a reset hours away (2026-11-07).
         if (headFilled) {
-          const exhaustion = providerExhaustion(status, errBody, retryAfterMs(upRes.headers));
-          if (exhaustion) {
+          const exhaustion = providerExhaustion(status, errBody, statedRetryMs);
+          if (exhaustion || claudeLimitMs !== undefined) {
             for (let i = outHeaders.length - 2; i >= 0; i -= 2) {
               const name = outHeaders[i]!.toLowerCase();
               if (name === "retry-after" || name === "x-should-retry") outHeaders.splice(i, 2);
             }
-            for (const [name, value] of Object.entries(exhaustionHeaders(exhaustion))) outHeaders.push(name, value);
+            if (exhaustion) {
+              for (const [name, value] of Object.entries(exhaustionHeaders(exhaustion))) outHeaders.push(name, value);
+            } else if (claudeLimitMs !== undefined && restMs !== undefined) {
+              // The stated reset itself. The pool clamps its own rest to 6 h and asks again then;
+              // the caller, told not to retry, is told the real reset (a weekly window can be days).
+              outHeaders.push("x-should-retry", "false", "retry-after", String(Math.max(1, Math.ceil(restMs / 1000))));
+            }
           }
           // The stream forward below cannot reach its own end handler when the body is already here.
           if (route && path.startsWith("/v1/messages") && !path.startsWith("/v1/messages/count_tokens")) {
@@ -2302,10 +2323,16 @@ export class Proxy {
     const configured = provider && "credentials" in provider ? provider.credentials : undefined;
     const credentials = configured?.length ? configured : available;
     const index = credentials.findIndex((candidate) => candidate.id === credential.id);
+    // A token refresh between the turn's first pick and its in-turn retry gives the same account a
+    // new runtime id, which the first pick's list does not contain. Match the durable owner so the
+    // log and requests.jsonl name the account that answered instead of `#0` (2026-11-07).
+    const owner = credential.ownerId;
+    const ordinal = index >= 0 ? index
+      : owner ? credentials.findIndex((candidate) => "ownerId" in candidate && candidate.ownerId === owner) : -1;
     const secrets = credentialHeaderValues(credentials.flatMap((candidate) => Object.entries(candidate.headers)));
     // OAuth labels are derived from account emails, not operator-supplied key labels.
     const label = !credential.ownerId && credential.label ? redactErrorText(credential.label, secrets, 80) : "";
-    return label || `#${index + 1}`;
+    return label || (ordinal >= 0 ? `#${ordinal + 1}` : owner?.slice(0, 8) ?? "-");
   }
 
   /** The conversation that produced the answer a `continue` names, when this router remembers it. */

@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { ClaudeAccountAuthPool } from "../src/providers/anthropic-account-pool.ts";
+import { CredentialPool } from "../src/pool.ts";
 import {
   listClaudeAccounts,
   readClaudeAccountsFile,
@@ -298,8 +299,94 @@ test("a 401 drops the observed current login and the same dead token is not read
   }
 });
 
-test("a 401 from an old runtime generation cannot quarantine a refreshed grant", () => {
+// The audit's defect 4 (2026-11-07): Claude ids carry a token-generation digest and the pool keyed
+// health by id, so a refresh during a 5h/7d rest produced a fresh id with no cooldown and spent an
+// account whose window was still gone. Health now counts a rest against the account; a quarantine
+// still belongs to the generation that earned it (2026-09-20).
+test("a token refresh keeps a resting account's cooldown, and a re-login starts unquarantined", () => {
   const dir = home();
+  try {
+    const HOUR = 3_600_000;
+    let time = 1_000_000;
+    const now = () => time;
+    const account = saveClaudeOAuthAccount(dir, { accessToken: "first-access", refreshToken: "first-refresh", expiresAt: 99_000_000, accountId: "same" });
+    const accounts = new ClaudeAccountAuthPool({ home: dir, now, current: noCurrent(dir, now), log: log().logger });
+    const pool = new CredentialPool({ now });
+
+    const first = pool.pick("claude", accounts.peekCredentials(), "conversation")!;
+    assert.match(first.id, new RegExp(`^${account.id}:`));
+    pool.penalise("claude", first.id, 429, 5 * HOUR);
+    assert.equal(pool.hasUsable("claude", accounts.peekCredentials()), false, "the 5 h window rest holds the account");
+
+    // A refresh is a new runtime generation of the same account, not a healthy credential.
+    assert.equal(replaceClaudeOAuthAccount(dir, account.id, "first-refresh", { accessToken: "second-access", refreshToken: "second-refresh", expiresAt: 99_000_000 }), true);
+    const refreshed = accounts.peekCredentials()[0]!;
+    assert.notEqual(refreshed.id, first.id);
+    assert.equal(pool.hasUsable("claude", accounts.peekCredentials()), false, "the rest survives the refresh");
+    assert.deepEqual(pool.report("claude", accounts.peekCredentials()).map((row) => row.state), ["cooling"]);
+    assert.equal(pool.report("claude", accounts.peekCredentials())[0]?.cooldownSeconds, 5 * 60 * 60);
+
+    // The rest ends at its reset, and only then is the refreshed generation in rotation.
+    time += 5 * HOUR;
+    assert.equal(pool.hasUsable("claude", accounts.peekCredentials()), true);
+
+    // A 401 parks the exact token generation; the next sign-in must not inherit it.
+    pool.penalise("claude", refreshed.id, 401);
+    assert.equal(pool.hasUsable("claude", accounts.peekCredentials()), false);
+    assert.equal(replaceClaudeOAuthAccount(dir, account.id, "second-refresh", { accessToken: "third-access", refreshToken: "third-refresh", expiresAt: 99_000_000 }), true);
+    const relogged = accounts.peekCredentials()[0]!;
+    assert.notEqual(relogged.id, refreshed.id);
+    assert.equal(pool.hasUsable("claude", accounts.peekCredentials()), true, "a fresh token is not the refused one");
+    assert.deepEqual(pool.report("claude", accounts.peekCredentials()).map((row) => row.state), ["ready"]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The audit's defect (2026-11-07): every generation of the app's own login is named `current`, so
+// the first account's spent window moved onto whoever signed in next. The rest now names the
+// login's own account (Claude Code's `oauthAccount` uuid, read locally), which a token refresh keeps
+// and an account switch changes.
+test("switching the app's own login does not carry the old account's rest onto the new one", () => {
+  const dir = home();
+  try {
+    const HOUR = 3_600_000;
+    const now = () => 1_000_000;
+    let login = "account-a";
+    const observed = new ObservedClaudeCodeAuth();
+    observed.observe(["authorization", "Bearer token-a"], now());
+    const current = new ClaudeCodeAuthStore(undefined, { observed, home: dir, env: {}, now });
+    const accounts = new ClaudeAccountAuthPool({ home: dir, now, current, loginKey: () => login, log: log().logger });
+    const pool = new CredentialPool({ now });
+
+    const a = pool.pick("claude", accounts.peekCredentials())!;
+    assert.equal(a.ownerId, "current", "the app login keeps its display owner");
+    pool.penalise("claude", a.id, 429, 5 * HOUR);
+    assert.equal(pool.hasUsable("claude", accounts.peekCredentials()), false, "the spent window rests the login");
+
+    // A token refresh is the same account: the rest stays.
+    observed.observe(["authorization", "Bearer token-a2"], now());
+    const refreshed = accounts.peekCredentials()[0]!;
+    assert.notEqual(refreshed.id, a.id);
+    assert.equal(pool.hasUsable("claude", accounts.peekCredentials()), false, "a refresh keeps the rest");
+
+    // Signing in as another account is not that account's rest.
+    login = "account-b";
+    observed.observe(["authorization", "Bearer token-b"], now());
+    const b = accounts.peekCredentials()[0]!;
+    assert.notEqual(b.id, refreshed.id);
+    assert.equal(pool.hasUsable("claude", accounts.peekCredentials()), true, "the new login is not cooling from the old one's rest");
+
+    // Going back to the first account finds its rest still there.
+    login = "account-a";
+    observed.observe(["authorization", "Bearer token-a3"], now());
+    assert.equal(pool.hasUsable("claude", accounts.peekCredentials()), false, "the first account is still resting");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a 401 from an old runtime generation cannot quarantine a refreshed grant", () => {  const dir = home();
   try {
     const now = () => 1_000_000;
     const account = saveClaudeOAuthAccount(dir, { accessToken: "old-access", refreshToken: "old-refresh", expiresAt: 9_000_000, accountId: "same" });

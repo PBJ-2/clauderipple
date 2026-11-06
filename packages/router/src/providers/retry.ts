@@ -13,7 +13,8 @@
 // It is not quite the same question, though, and the difference is the whole of `isWorthRetrying`.
 // `classify` answers it for a *pool*: a 401 is retryable because another credential could answer.
 // Here there is only the one credential the adapter already holds, so a 401 would be re-sent — nine
-// times — to the key that just refused it, and a 429 to the limit that just refused it. Those fail
+// times — to the key that just refused it, and a 429 from the vendor's own limiter to the limit that
+// just refused it. Those fail
 // identically on every attempt and only delay the error the user eventually sees. What is left is
 // `transient`: a connect failure, a 502/503/504, a relay with a broken upstream. Those are the ones
 // where the identical request genuinely succeeds a moment later.
@@ -106,10 +107,11 @@ export async function fetchWithRetry(
       continue;
     }
     if (res.ok) return res;
-    // A relay reports its own broken upstream in a 402/403 body; the status alone would mistake it
-    // for billing or auth failure. Clone it so the caller still gets the provider's own body when
-    // this attempt turns out to be the last one.
-    const inspect = res.status === 402 || res.status === 403 || (opts.stopOn !== undefined && res.status >= 500);
+    // A relay reports its own broken upstream in a 402/403/429 body; the status alone would mistake
+    // it for billing, auth or the key's rate limit (2026-11-06: a 429 `[prefill_cap_refused]` was
+    // answered 200 by the same key five seconds later). Clone it so the caller still gets the
+    // provider's own body when this attempt turns out to be the last one.
+    const inspect = res.status === 402 || res.status === 403 || res.status === 429 || (opts.stopOn !== undefined && res.status >= 500);
     const text = inspect ? await res.clone().text().catch(() => "") : "";
     if (opts.stopOn?.(res.status, text)) return res;
     if (!isWorthRetrying(res.status, text) || n === attempts) return res;

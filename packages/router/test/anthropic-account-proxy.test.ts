@@ -16,7 +16,7 @@ import { UpstreamHealth } from "../src/health.ts";
 import { Logger } from "../src/log.ts";
 import { ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
 import { ClaudeCodeAuthStore } from "../src/providers/anthropic.ts";
-import { readClaudeAccountsFile, removeClaudeAccount, saveClaudeOAuthAccount, updateClaudeAccount } from "../src/providers/anthropic-accounts.ts";
+import { readClaudeAccountsFile, removeClaudeAccount, replaceClaudeOAuthAccount, saveClaudeOAuthAccount, updateClaudeAccount } from "../src/providers/anthropic-accounts.ts";
 import { Proxy } from "../src/proxy.ts";
 import { RequestLog } from "../src/requestlog.ts";
 import { createCa, createLeaf } from "../src/x509.ts";
@@ -109,6 +109,7 @@ async function nativeRig(reply: (seen: Seen, attempt: number) => Reply, claude: 
   });
   await proxy.listen();
 
+  let lastHeaders: Record<string, string> = {};
   const send = async (conversation = "conversation-1", options: { content?: string; previous?: string; model?: string; auth?: string } = {}): Promise<number> => {
     const socket = net.connect(proxyPort, "127.0.0.1");
     await new Promise<void>((resolve) => socket.once("connect", resolve));
@@ -136,6 +137,13 @@ async function nativeRig(reply: (seen: Seen, attempt: number) => Reply, claude: 
     );
     const first = await new Promise<Buffer>((resolve) => secure.once("data", (chunk: Buffer) => setTimeout(() => resolve(chunk), 30)));
     secure.destroy();
+    const head = first.toString("latin1").split("\r\n\r\n")[0] ?? "";
+    const parsed: Record<string, string> = {};
+    for (const line of head.split("\r\n").slice(1)) {
+      const colon = line.indexOf(":");
+      if (colon > 0) parsed[line.slice(0, colon).toLowerCase()] = line.slice(colon + 1).trim();
+    }
+    lastHeaders = parsed;
     return Number(/^HTTP\/1\.1 (\d{3})/.exec(first.toString("latin1"))?.[1] ?? 0);
   };
 
@@ -148,6 +156,7 @@ async function nativeRig(reply: (seen: Seen, attempt: number) => Reply, claude: 
     requests,
     proxy,
     send,
+    lastHeaders: () => lastHeaders,
     stop: async () => {
       proxy.close();
       await new Promise<void>((resolve) => upstream.close(() => resolve()));
@@ -174,6 +183,96 @@ test("a native Claude turn survives 429, keeps the replacement account, and pres
     assert.doesNotMatch(logs, /current-token|stored-token|stored-refresh|stored-upstream-uuid|stored@example\.test/);
     const runtimeDigest = crypto.createHash("sha256").update("stored-refresh").digest("hex").slice(0, 12);
     assert.doesNotMatch(fs.readFileSync(path.join(rig.home, "router.log"), "utf8"), new RegExp(runtimeDigest));
+  } finally {
+    await rig.stop();
+  }
+});
+
+// A Claude 429 whose unified headers say the account's 5h window is spent used to cool it for 60 s
+// and re-try a spent subscription every minute (2026-11-07). It now rests until the stated reset,
+// and the caller is told not to spend its own retry ladder on it.
+test("a spent Claude window rests until its reset and answers x-should-retry: false", async () => {
+  const reset = Math.floor(Date.now() / 1000) + 3_600;
+  const headers = {
+    "anthropic-ratelimit-unified-status": "rejected",
+    "anthropic-ratelimit-unified-5h-utilization": "1",
+    "anthropic-ratelimit-unified-5h-reset": String(reset),
+    "anthropic-ratelimit-unified-7d-utilization": "0.584",
+    "anthropic-ratelimit-unified-7d-reset": String(reset + 86_400),
+  };
+  const rig = await nativeRig(() => ({ status: 429, headers, body: JSON.stringify({ type: "error", error: { type: "rate_limit_error" } }) }));
+  try {
+    assert.equal(await rig.send("spent-window"), 429);
+    assert.equal(rig.seen.length, 3, "every account was tried once before the caller was told");
+    assert.equal(rig.lastHeaders()["x-should-retry"], "false", "the CLI's own retry ladder must not run");
+    const wait = Number(rig.lastHeaders()["retry-after"]);
+    assert.ok(wait >= 3_500 && wait <= 3_600, `retry-after is the stated reset, not a minute: ${wait}s`);
+    const health = rig.proxy.credentialHealth()["claude"]!;
+    assert.equal(health.length, 3);
+    for (const row of health) {
+      assert.equal(row.state, "cooling");
+      assert.ok((row.cooldownSeconds ?? 0) >= 3_500, `${row.id} rests ${row.cooldownSeconds}s, not 60`);
+    }
+  } finally {
+    await rig.stop();
+  }
+});
+
+// A short `retry-after` beside a rejected window is the limiter's next refresh, not the end of the
+// window. The rest and the caller's retry-after both follow the later of the two, so they agree
+// (2026-11-07: the pool rested 60 s while the response said an hour).
+test("a short Retry-After does not shorten a spent Claude window's rest", async () => {
+  const reset = Math.floor(Date.now() / 1000) + 3_600;
+  const headers = {
+    "retry-after": "60",
+    "anthropic-ratelimit-unified-status": "rejected",
+    "anthropic-ratelimit-unified-5h-utilization": "1",
+    "anthropic-ratelimit-unified-5h-reset": String(reset),
+  };
+  const rig = await nativeRig(() => ({ status: 429, headers, body: JSON.stringify({ type: "error", error: { type: "rate_limit_error" } }) }));
+  try {
+    assert.equal(await rig.send("short-retry"), 429);
+    assert.equal(rig.seen.length, 3, "every account was tried once before the caller was told");
+    assert.equal(rig.lastHeaders()["x-should-retry"], "false", "the CLI's own retry ladder must not run");
+    const wait = Number(rig.lastHeaders()["retry-after"]);
+    assert.ok(wait >= 3_500 && wait <= 3_600, `retry-after follows the window reset, not the 60 s: ${wait}s`);
+    for (const row of rig.proxy.credentialHealth()["claude"]!) {
+      assert.equal(row.state, "cooling");
+      assert.ok((row.cooldownSeconds ?? 0) >= 3_500, `${row.id} rests ${row.cooldownSeconds}s, not 60`);
+    }
+  } finally {
+    await rig.stop();
+  }
+});
+
+// After an in-turn retry the completion line and requests.jsonl must name the account that answered.
+// The tag was built once from the first account, and a credential refreshed between the first pick
+// and the retry was not in that pick's list, so both reported the wrong account / `#0` (2026-11-07).
+test("an in-turn retry is logged and recorded against the credential that answered", async () => {
+  let rotate: (() => void) | undefined;
+  const rig = await nativeRig((_seen, attempt) => {
+    if (attempt === 1) {
+      rotate?.();
+      return { status: 429, headers: { "retry-after": "300" }, body: "{}" };
+    }
+    return { status: 200, body: JSON.stringify({ id: "msg_after_retry", type: "message", role: "assistant", model: "claude-opus-5", content: [], usage: {} }) };
+  });
+  try {
+    // A refresh lands between the first pick and the retry: the same account answers under a new
+    // runtime id that the first pick's credential list does not contain.
+    rotate = () => {
+      assert.equal(replaceClaudeOAuthAccount(rig.home, rig.stored.id, "stored-refresh", {
+        accessToken: "stored-refreshed", refreshToken: "stored-refreshed-refresh", expiresAt: Date.now() + 3_600_000,
+      }), true);
+    };
+    assert.equal(await rig.send("retry-naming"), 200);
+    assert.deepEqual(rig.seen.map((item) => item.authorization), ["Bearer current-token", "Bearer stored-refreshed"]);
+    const storedPin = rig.stored.id.slice(0, 8);
+    const log = fs.readFileSync(path.join(rig.home, "router.log"), "utf8");
+    assert.match(log, new RegExp(`CLAUDE .*account=${storedPin} .*-> 200`), "the completion line names the account that answered");
+    assert.doesNotMatch(log, /CLAUDE .*account=current .*-> 200/);
+    assert.match(log, /RETRY claude: .*trying #2/, "the retry line names the account, not #0");
+    assert.match(JSON.stringify(rig.requests.list(20)), /"credential":"#2"/);
   } finally {
     await rig.stop();
   }

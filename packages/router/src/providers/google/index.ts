@@ -211,6 +211,23 @@ export function googleValidationUrl(text: string): string | undefined {
   }
 }
 
+/**
+ * Google's own ban on the account: a 403 `PERMISSION_DENIED` whose ErrorInfo reason is
+ * `TOS_VIOLATION` (measured 2026-11-06, router.log.1: "This service has been disabled in this
+ * account for violation of Terms of Service. Please submit an appeal…"). Only the person appealing
+ * can clear it, so it is a dead credential: refreshing the token and replaying the turn changed
+ * nothing and kept the account in rotation (73 such 403s and 39 replays on one account in one night).
+ */
+export function googleTosViolation(status: number, text: string): boolean {
+  if (status !== 403) return false;
+  try {
+    const error = (JSON.parse(text) as { error?: { details?: { reason?: unknown }[] } } | null)?.error;
+    return Array.isArray(error?.details) && error.details.some((detail) => detail?.reason === "TOS_VIOLATION");
+  } catch {
+    return false;
+  }
+}
+
 export function mapHttpError(status: number, text: string): { status: number; body: string } {
   const message = `Google provider: ${vendorMessage(text)}`;
   if (status === 429) return anthropicError(429, "rate_limit_error", message);
@@ -915,6 +932,16 @@ export class GoogleAdapter {
       const text = await upstream.text().catch(() => "");
       const safeText = spec.redact(text);
       const status = upstream.status;
+      // A Terms of Service ban is not a token problem: no refresh, replay or wait changes it, and
+      // the account must leave rotation instead of answering 403 every night (2026-11-06). Park it
+      // like a dead credential, with the one line that says which account and why.
+      if (googleTosViolation(status, text)) {
+        this.pool.penalise(this.name, credential.id, 401);
+        this.log.warn(`google ${this.name}: account ${credential.ownerId.slice(0, 8)} parked: 403 TOS_VIOLATION (Google disabled this account for violating its Terms of Service); no refresh or replay`);
+        last = { kind: "refused", status, text: safeText };
+        tried.add(credential.ownerId);
+        continue;
+      }
       this.log.warn(`google ${this.name}: account ${credential.ownerId.slice(0, 8)} answered ${status}: ${safeText.slice(0, 400)}`);
       // The model, not the account, is out of capacity: resting the account refused every other turn
       // with "all accounts resting" for its ten seconds (10 times in 3 minutes, 2026-10-20), and

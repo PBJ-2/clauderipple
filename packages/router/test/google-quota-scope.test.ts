@@ -37,7 +37,7 @@ const groupsOf = (account: { quotaCooldowns?: Record<string, number> } | undefin
 const secondsOf = (account: { quotaCooldowns?: Record<string, number> } | undefined, group: string): number =>
   Object.entries(account?.quotaCooldowns ?? {}).find(([k]) => k.split("@")[0] === group)?.[1] ?? 0;
 
-async function rig(t: TestContext, reply: (seen: { token: string | undefined; model: string }) => Reply, accounts = 1) {
+async function rig(t: TestContext, reply: (seen: { token: string | undefined; model: string }) => Reply, accounts = 1, logger = new Logger(null, 1e6, 1, false)) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-quota-scope-"));
   const seen: { token: string | undefined; model: string }[] = [];
   const upstream = http.createServer(async (req, res) => {
@@ -53,7 +53,7 @@ async function rig(t: TestContext, reply: (seen: { token: string | undefined; mo
   for (let n = 1; n <= accounts; n++) saveGoogleAccount(home, {
     accessToken: `token-${n}`, projectId: `project-${n}`, email: `user-${n}@example.test`, expiresAt: Date.now() + 3_600_000,
   });
-  const adapter = new GoogleAdapter("google", { type: "google", auth: "antigravity", url }, home, new Logger(null, 1e6, 1, false));
+  const adapter = new GoogleAdapter("google", { type: "google", auth: "antigravity", url }, home, logger);
   const outcomes: GoogleOutcome[] = [];
   const front = http.createServer(async (req, res) => {
     let body = "";
@@ -152,6 +152,42 @@ test("a failure that is about the account still rests all of it", async t => {
   assert.equal(account!.state, "cooling");
   assert.equal(account!.quotaCooldowns, undefined);
   assert.equal(r.adapter.hasUsable(GEMINI), false);
+  assert.equal((await r.call(GEMINI)).status, 429);
+  assert.equal(r.seen.length, 1);
+});
+
+// Measured 2026-11-06 in router.log.1: Google disabled account 23c72a59 for a Terms of Service
+// violation. The 403 carries PERMISSION_DENIED, which the auth heuristic used to read as a stale
+// token: the adapter refreshed and replayed, then rested the account a minute and kept it in
+// rotation — 73 such 403s and 39 refresh+replays in one night. It is a dead credential.
+const TOS_403 = { error: {
+  code: 403,
+  message: "This service has been disabled in this account for violation of Terms of Service. Please submit an appeal to continue using this product.",
+  status: "PERMISSION_DENIED",
+  details: [{
+    "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "TOS_VIOLATION", domain: "cloudcode-pa.googleapis.com",
+    metadata: { uiMessage: "true", appeal_url: "https://cloudcode-pa.googleapis.com/v1internal:appeal" },
+  }],
+} };
+
+test("a 403 Terms of Service ban parks the account: no refresh, no replay, not ready", async t => {
+  const lines: string[] = [];
+  const logger = { info: (line: string) => lines.push(line), warn: (line: string) => lines.push(line) } as unknown as Logger;
+  const r = await rig(t, () => ({ status: 403, body: TOS_403 }), 1, logger);
+
+  const refused = await r.call(OPUS);
+  assert.equal(refused.status, 401, "the refusal is about the account, not the request");
+  const [account] = r.adapter.accountStatus();
+  assert.equal(account!.state, "quarantined", "the status screen shows it as not ready");
+  assert.equal(account!.cooldownSeconds, undefined, "a ban is not a rest that expires by itself");
+  assert.equal(r.adapter.hasUsable(), false);
+  assert.equal(r.seen.length, 1, "no replay after a refresh");
+  const parked = lines.filter(line => line.includes("TOS_VIOLATION"));
+  assert.equal(parked.length, 1, "one warn line names the reason");
+  assert.match(parked[0]!, new RegExp(`account ${account!.id.slice(0, 8)}`));
+  assert.doesNotMatch(lines.join("\n"), /refreshed after/);
+
+  // The account stays out of rotation: the next turn is refused without reaching Google.
   assert.equal((await r.call(GEMINI)).status, 429);
   assert.equal(r.seen.length, 1);
 });
