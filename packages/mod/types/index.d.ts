@@ -287,8 +287,11 @@ export type AgentRec = {
   /** The tool it is in now, in a few words. */
   now?: string
   toolSince?: number
+  /** When its current run started; a resumed agent's restarts. */
   startedAt: number
   endedAt?: number
+  /** Time its earlier runs took, set once a message resumed it; the card adds the current run's. */
+  ranMs?: number
   /** Weighted tokens (spec §5 stats weights). */
   cost: number
   /** The provider it runs on by config name (`anthropic` for Claude's own), for its card's dot. */

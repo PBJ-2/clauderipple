@@ -158,7 +158,7 @@ function fallbackLine(frame: Frame, agent: AgentRec): string {
 
 /** How long it ran, or has run so far. */
 function ranFor(agent: AgentRec, now: number, lang: Frame['lang']): string {
-  return elapsed((live(agent) ? now : agent.endedAt ?? agent.startedAt) - agent.startedAt, lang)
+  return elapsed((agent.ranMs ?? 0) + (live(agent) ? now : agent.endedAt ?? agent.startedAt) - agent.startedAt, lang)
 }
 
 /** What it is doing now, and for how long. */

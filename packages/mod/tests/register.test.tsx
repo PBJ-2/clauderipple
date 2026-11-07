@@ -762,6 +762,33 @@ test('a worker that ends before its spawn is recorded is listed as ended, not ru
   expect(rows.find(row => row.type === 'outcome')).toMatchObject({ pick: rows.find(row => row.type === 'pick').id, agent: 'worker-1', reason: 'error', ms: 72 })
 })
 
+// 2026-11-07: a SendMessage that woke a finished worker showed it running in the Claude app's
+// background list, while its card stayed under "done" with the first run's time.
+test('a finished worker a message resumes is running again, its earlier time kept and its pick counted once', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  judgeStub(on)
+  spawnStub(on)
+  const seen = agentWrites(on)
+  await start($)
+  await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: standard]]\nVerify one claim.' })
+  await b.clock.advance(4000)
+  await complete($, 'worker-1')
+  expect(seen.records().find(a => a.id === 'worker-1')).toMatchObject({ state: 'done' })
+  await b.clock.advance(60000)
+  const woke = NOW + 64000
+  await $.agent.spawn({ ...SPAWN, prompt: 'One more check.', resume: { agentId: 'worker-1' } } as AgentSpawnInput)
+  await b.clock.settle()
+  const resumed = seen.records().find(a => a.id === 'worker-1')!
+  expect(resumed).toMatchObject({ state: 'running', startedAt: woke, ranMs: 4000 })
+  expect(resumed.endedAt).toBeUndefined()
+  expect(seen.counts()?.live).toBe(1)
+  await b.clock.advance(2000)
+  await complete($, 'worker-1')
+  expect(seen.records().find(a => a.id === 'worker-1')).toMatchObject({ state: 'done', startedAt: woke, endedAt: woke + 2000, ranMs: 4000 })
+  expect(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim().split('\n').filter(line => line.includes('"outcome"')).length).toBe(1)
+})
+
 // 2026-10-25: a flat slice(-40) over every record dropped the oldest running worker the moment 41
 // ran at once: its card, the band's live count and every later step's tokens and effort vanished.
 test('workers all stay listed past forty, counted, and still take their steps during long tools', async ($, on) => {

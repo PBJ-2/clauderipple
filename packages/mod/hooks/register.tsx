@@ -1738,6 +1738,30 @@ function retainAgents(list: AgentRec[]): AgentRec[] {
   const drop = new Set(ended.slice().sort((a, b) => (a.endedAt ?? a.startedAt) - (b.endedAt ?? b.startedAt)).slice(0, over).map(a => a.id))
   return list.filter(a => !drop.has(a.id))
 }
+/** An ended agent running again: the clock restarts, the time its earlier runs took is kept. */
+export function wakeAgent(agent: AgentRec, now: number): AgentRec {
+  if (agent.state === 'running') return agent
+  const ran = Math.max(0, (agent.endedAt ?? agent.startedAt) - agent.startedAt)
+  const { endedAt: _ended, now: _now, toolSince: _since, ...rest } = agent
+  return { ...rest, state: 'running', startedAt: now, ranMs: (agent.ranMs ?? 0) + ran }
+}
+/** A message woke agent `id`: its card runs again, or one is made when the list no longer holds it. */
+async function resumeAgent($: EngineInterface, id: string, model: string | undefined): Promise<void> {
+  const now = await $.clock.now()
+  // Its run may already have ended before this record is written (as agent.spawn's endedEarly).
+  const early = endedEarly.get(id)
+  endedEarly.delete(id)
+  const ended = (a: AgentRec): AgentRec => early ? { ...a, state: early.state, endedAt: early.endedAt } : a
+  if ((await read($, agents)).some(a => a.id === id)) {
+    await update($, agents, list => retainAgents(list.map(a => a.id === id ? ended(wakeAgent(a, now)) : a)))
+  } else {
+    const info = (await $.agent.list()).find(a => a.id === id)
+    const provider = info && model ? await spawnProvider($, info.type, model) : undefined
+    const rec: AgentRec = { id, ...(info ? { description: info.description, type: info.type } : {}), ...(model ? { model } : {}), ...(provider ? { provider } : {}), state: 'running', startedAt: now, ranMs: 0, cost: 0 }
+    await update($, agents, list => retainAgents([...list.filter(a => a.id !== id), ended(rec)]))
+  }
+  await countAgents($)
+}
 async function dashboard($: EngineInterface, working: boolean): Promise<DashboardView> {
   const s = await currentSettings($)
   const p = await read($, pick)
@@ -2268,7 +2292,8 @@ export const register: Register = on => {
         if ((await read($, bgTasks)).some(task => task.agentId === e.agentId && task.state === 'running')) await update($, bgTasks, list => settleWithAgent(list, e.agentId!, now))
         // A picked worker's outcome, once, joined to its pick by id: whether the session's tier or
         // the named model was enough is read from these lines later (2026-10-24).
-        if (before?.pick?.id && before.state === 'running') {
+        // A resumed run's end is not a second outcome of the same pick.
+        if (before?.pick?.id && before.state === 'running' && before.ranMs === undefined) {
           await persistWorkerPick($, { ...outcome, pick: before.pick.id, model: before.model ?? null, cost: before.cost })
         }
       } else if (!forking) {
@@ -2281,8 +2306,14 @@ export const register: Register = on => {
     return next(e)
   })
   on('agent.spawn', async ($, e, next) => {
-    // A resumed run's content is pinned by the engine, including its model and title.
-    if (e.resume) return next(e)
+    // A resumed run's content is pinned by the engine, including its model and title. Its card goes
+    // back to running: a finished agent a message woke stayed under "done" while the Claude app's
+    // background list showed it running (2026-11-07).
+    if (e.resume) {
+      const result = await next(e)
+      try { if (result.agentId) await resumeAgent($, result.agentId, result.model) } catch (error) { await report($, 'agent.spawn resume', error) }
+      return result
+    }
     let input = e
     let chosen: WorkerPick | undefined
     // Forks, workflows, teammates, Claude Code's own agents and other plugins' agents are the
