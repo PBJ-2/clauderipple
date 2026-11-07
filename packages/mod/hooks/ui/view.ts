@@ -51,6 +51,8 @@ export type RouteView = {
   /** Prompt tokens read from cache, in percent. */
   cachePct?: number
   seconds: number
+  /** Output tokens a second over the whole request (outputRate), when it has one. */
+  rate?: number
   note?: string
 }
 
@@ -381,6 +383,8 @@ export function routeOf(record: StatusRequest): RouteView {
   const cache = cachePercent(record.usage)
   if (record.effort) route.effort = record.effort
   if (cache !== undefined) route.cachePct = cache
+  const rate = outputRate(record)
+  if (rate !== undefined) route.rate = rate
   if (record.note) route.note = record.note
   return route
 }

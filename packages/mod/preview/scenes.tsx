@@ -34,7 +34,7 @@ const DASH: DashboardView = {
   cache: { expiresAt: NOW + 41 * 60_000, ttlMs: 3_600_000 },
   warm: { on: false, pings: 0, cost: 0 },
   limit: null,
-  route: { model: 'gpt-6.1-sol', provider: 'chatgpt', ok: true, resent: false, status: '200', effort: 'high', cachePct: 96, seconds: 2.1 },
+  route: { model: 'gpt-6.1-sol', provider: 'chatgpt', ok: true, resent: false, status: '200', effort: 'high', cachePct: 96, seconds: 2.1, rate: 87.4 },
   notice: null,
   auto: true,
   agents: { live: 0, total: 0 },

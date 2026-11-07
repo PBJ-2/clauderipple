@@ -43,7 +43,7 @@ import type { Els } from './parts'
 import type { Face } from './ripple'
 import { cacheTone, chOf, clip, contextTone, displayWidth, limitTone, providerColor, textTone } from './theme'
 import type { BandActions, DashboardView, Frame, LimitGroup } from './view'
-import { EFFORTS, bandLimitGroups, compactNumber, effortIndex, effortLabel, effortName, isRich, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTip, limitName, minutesLeft, modelName, narrowLimitGroups, resetsLabel, seconds } from './view'
+import { EFFORTS, bandLimitGroups, compactNumber, effortIndex, effortLabel, effortName, isRich, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTip, limitName, minutesLeft, modelName, narrowLimitGroups, rateText, resetsLabel, seconds } from './view'
 
 /** Growing ripples: low → max. */
 const RIPPLE_CHAR = ['·', '∘', '○', '◎', '◉']
@@ -56,6 +56,8 @@ const CTRL_GAP = 1
 /** The least room a route is drawn in; on the desktop the host cuts the name to what is left. */
 const ROUTE_MIN = 14
 const RICH_ROUTE_MIN = 6
+/** Cells the route's model keeps before its output rate gives way. */
+const ROUTE_RATE_MODEL_MIN = 12
 /** Desktop: the slot of the live agents' count after its control. */
 const COUNT_CELLS = 2
 /** The cache's last stretch, when 리플이 grows drowsy: five minutes, or a fifth of a short life. */
@@ -265,17 +267,22 @@ export function routeFact(frame: Frame, view: DashboardView, room: number, onPre
   const glyph: Run = r.resent ? { text: '↻', dim: true } : r.ok ? { text: rich ? '→' : '↳', dim: true } : { text: '✕', color: BAD }
   // The desktop says what the figure is ("hit 100%"); a bare percentage beside a model name read as anything.
   const hit = r.cachePct !== undefined ? (rich ? t(frame.lang, 'band.hit', { percent: r.cachePct }) : r.cachePct + '%') : ''
-  const tail: Run[] = !r.ok
+  const base: Run[] = !r.ok
     ? [r.resent ? { text: t(frame.lang, 'band.resent', { status: r.status }), dim: true } : { text: r.status, color: BAD }]
     : r.cachePct !== undefined
       ? [cacheTone(r.cachePct) === 'ok' ? { text: hit, dim: true } : { text: hit, color: cacheTone(r.cachePct) === 'warn' ? WARN : BAD }]
       : []
-  const tailCells = tail.reduce((n, run) => n + 1 + cells(frame, run.text), 0)
-  const modelRoom = room - 2 - tailCells
+  // The answer's speed after the hit, as the log says it (2026-11-07), kept only while the model's
+  // name still has room beside it: the name is what the route is.
+  const rate = r.ok && r.rate !== undefined ? t(frame.lang, 'log.rate', { rate: rateText(r.rate) }) : ''
+  const cellsOf = (runs: readonly Run[]) => runs.reduce((n, run) => n + 1 + cells(frame, run.text), 0)
+  const withRate: Run[] = rate ? [...base, { text: rate, dim: true }] : base
+  const tail = room - 2 - cellsOf(withRate) >= ROUTE_RATE_MODEL_MIN ? withRate : base
+  const modelRoom = room - 2 - cellsOf(tail)
   if (!rich && modelRoom < 4) return null
   const secs = seconds(r.seconds, frame.lang)
   const card = [
-    t(frame.lang, 'band.routeAlt', { model: r.model, provider: r.provider, effort: r.effort ? ', ' + effortLabel(r.effort, frame.lang) : '', cache: r.cachePct !== undefined ? t(frame.lang, 'band.routeCache', { percent: r.cachePct }) : '', time: secs, status: r.ok ? '' : t(frame.lang, r.resent ? 'band.routeResent' : 'band.routeFailed', { status: r.status }) }),
+    t(frame.lang, 'band.routeAlt', { model: r.model, provider: r.provider, effort: r.effort ? ', ' + effortLabel(r.effort, frame.lang) : '', cache: r.cachePct !== undefined ? t(frame.lang, 'band.routeCache', { percent: r.cachePct }) : '', time: secs + (rate ? ', ' + rate : ''), status: r.ok ? '' : t(frame.lang, r.resent ? 'band.routeResent' : 'band.routeFailed', { status: r.status }) }),
     ...(r.note ? [r.note] : []),
     t(frame.lang, 'band.logHint'),
   ]
@@ -734,27 +741,48 @@ function routeDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandAct
   // when the row has less, and the blank press laid over it is that wide too: a press wider is cut
   // with an ellipsis (three dark dots on flat's light page), and a narrower one lights a smaller box
   // inside the route's own light (2026-10-16).
-  const width = Math.max(Math.min(ROUTE_ROOM, room), Math.ceil(1 + cells(frame, '•') + 0.5 + cells(frame, name) + (tail ? 0.5 + cells(frame, tail) : 0)))
+  const held = 1 + cells(frame, '•') + 0.5 + cells(frame, name) + (tail ? 0.5 + cells(frame, tail) : 0)
+  // The answer's speed after the hit, as the log says it (2026-11-07).
+  const rate = r.ok && r.rate !== undefined ? t(frame.lang, 'log.rate', { rate: rateText(r.rate) }) : ''
+  const width = Math.max(Math.min(ROUTE_ROOM, room), Math.ceil(held + (rate ? 0.5 + cells(frame, rate) : 0)))
   // The route is a button (it opens the log), so it lights under the pointer like the controls do.
   // It has no tip: the light says it is a button, and its card is what the log shows (asked 2026-10-14).
   return (
     // The slot keeps no width of the value's (what the band holds never depends on one); the light
     // inside it is as wide as the value.
     <Box key="fact-route" flexDirection="row" flexShrink={1} minWidth={Math.min(ROUTE_ROOM, room)} overflow="hidden">
-    <Box key="route-light" position="relative" flexDirection="row" alignItems="center" columnGap={0.5} paddingX={0.5} width={width} flexShrink={1} minWidth={0} overflow="hidden" {...hoverLight(frame)}>
+    {/* The air between the parts is each part's own left padding, not the row's gap: a gap stayed
+        before the rate's emptied box and cut the name's last letters (2026-11-07). */}
+    <Box key="route-light" position="relative" flexDirection="row" alignItems="center" paddingX={0.5} width={width} flexShrink={1} minWidth={0} overflow="hidden" {...hoverLight(frame)}>
       <Box flexShrink={0}>
         {r.ok ? <Text {...(r.resent ? k.mute : { color: providerColor(r.provider) })}>{r.resent ? '↻' : '•'}</Text> : <Text color={k.tone('red')}>✕</Text>}
       </Box>
-      <Box flexShrink={1} minWidth={0}>
+      <Box flexShrink={1} minWidth={0} paddingLeft={0.5}>
         <Text {...k.sub} wrap="truncate">{name}</Text>
       </Box>
-      <Box flexShrink={0}>
-        {!r.ok ? (
-          <Text {...(r.resent ? k.mute : { color: k.tone('red') })}>{r.resent ? t(frame.lang, 'band.resent', { status: r.status }) : r.status}</Text>
-        ) : r.cachePct !== undefined ? (
-          <Text {...(tone === 'ok' ? { color: k.tone('green') } : figure(frame, tone === 'warn' ? 'warn' : 'bad'))}>{r.cachePct + '%'}</Text>
-        ) : null}
-      </Box>
+      {tail ? (
+        <Box key="route-tail" flexShrink={0} paddingLeft={0.5}>
+          {!r.ok ? (
+            <Text {...(r.resent ? k.mute : { color: k.tone('red') })}>{tail}</Text>
+          ) : (
+            <Text {...(tone === 'ok' ? { color: k.tone('green') } : figure(frame, tone === 'warn' ? 'warn' : 'bad'))}>{tail}</Text>
+          )}
+        </Box>
+      ) : null}
+      {/* Where the row is short, the rate goes before the name gives a letter, and goes whole: its
+          box starts at nothing and takes only what the name and the hit leave (a shrink weighted
+          against the name still cut it by a fraction of a pixel, and an ellipsis with it), and once
+          that is less than the rate the rate (its air with it) wraps past an empty first item onto
+          a second line the box's one-row height hides. Cut, it read as a stray "8…", and the name
+          is what the route is. */}
+      {rate ? (
+        <Box key="route-rate" flexDirection="row" flexWrap="wrap" width={0} flexGrow={1} flexShrink={0} minWidth={0} height={1} overflow="hidden">
+          <Box key="hold" width={0} height={1} />
+          <Box key="said" flexShrink={0} paddingLeft={0.5}>
+            <Text {...k.mute}>{rate}</Text>
+          </Box>
+        </Box>
+      ) : null}
       {press(el, 'route', width * CELL_PX, actions.toggleLog)}
     </Box>
     </Box>
