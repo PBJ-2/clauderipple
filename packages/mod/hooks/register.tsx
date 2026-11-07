@@ -1745,22 +1745,37 @@ export function wakeAgent(agent: AgentRec, now: number): AgentRec {
   const { endedAt: _ended, now: _now, toolSince: _since, ...rest } = agent
   return { ...rest, state: 'running', startedAt: now, ranMs: (agent.ranMs ?? 0) + ran }
 }
-/** A message woke agent `id`: its card runs again, or one is made when the list no longer holds it. */
-async function resumeAgent($: EngineInterface, id: string, model: string | undefined): Promise<void> {
+/**
+ * A message is about to wake agent `id`: its card runs again before the run starts, or one is made
+ * when the list no longer holds it. Written first, so the run's own tool calls and its end, however
+ * soon they come, land on a running card and settle it. The answer undoes it, should the wake be refused.
+ */
+async function wakeCard($: EngineInterface, id: string): Promise<(() => Promise<void>) | undefined> {
   const now = await $.clock.now()
-  // Its run may already have ended before this record is written (as agent.spawn's endedEarly).
-  const early = endedEarly.get(id)
+  // A record of an earlier run's end, kept for a spawn not yet recorded, is not this run's.
   endedEarly.delete(id)
-  const ended = (a: AgentRec): AgentRec => early ? { ...a, state: early.state, endedAt: early.endedAt } : a
-  if ((await read($, agents)).some(a => a.id === id)) {
-    await update($, agents, list => retainAgents(list.map(a => a.id === id ? ended(wakeAgent(a, now)) : a)))
-  } else {
-    const info = (await $.agent.list()).find(a => a.id === id)
-    const provider = info && model ? await spawnProvider($, info.type, model) : undefined
-    const rec: AgentRec = { id, ...(info ? { description: info.description, type: info.type } : {}), ...(model ? { model } : {}), ...(provider ? { provider } : {}), state: 'running', startedAt: now, ranMs: 0, cost: 0 }
-    await update($, agents, list => retainAgents([...list.filter(a => a.id !== id), ended(rec)]))
-  }
+  const before = (await read($, agents)).find(a => a.id === id)
+  if (before?.state === 'running') return undefined
+  const info = before ? undefined : (await $.agent.list()).find(a => a.id === id)
+  const woken: AgentRec = before ? wakeAgent(before, now) : { id, ...(info ? { description: info.description, type: info.type } : {}), state: 'running', startedAt: now, ranMs: 0, cost: 0 }
+  await update($, agents, list => retainAgents([...list.filter(a => a.id !== id), woken]))
   await countAgents($)
+  // Only a card still as written goes back: nothing of a run ran on it.
+  return async () => {
+    await update($, agents, list => {
+      const current = list.find(a => a.id === id)
+      if (!current || current.state !== 'running' || current.startedAt !== now || (current.tools ?? 0) !== (woken.tools ?? 0)) return list
+      return before ? list.map(a => a.id === id ? before : a) : list.filter(a => a.id !== id)
+    })
+    await countAgents($)
+  }
+}
+/** A woken card made anew learns the model its run started on. */
+async function wokenModel($: EngineInterface, id: string, model: string | undefined): Promise<void> {
+  const card = (await read($, agents)).find(a => a.id === id)
+  if (!card || card.model || !model) return
+  const provider = card.type ? await spawnProvider($, card.type, model) : undefined
+  await update($, agents, list => list.map(a => a.id === id && !a.model ? { ...a, model, ...(provider && !a.provider ? { provider } : {}) } : a))
 }
 async function dashboard($: EngineInterface, working: boolean): Promise<DashboardView> {
   const s = await currentSettings($)
@@ -2310,8 +2325,13 @@ export const register: Register = on => {
     // back to running: a finished agent a message woke stayed under "done" while the Claude app's
     // background list showed it running (2026-11-07).
     if (e.resume) {
+      let undo: (() => Promise<void>) | undefined
+      try { undo = await wakeCard($, e.resume.agentId) } catch (error) { await report($, 'agent.spawn resume', error) }
       const result = await next(e)
-      try { if (result.agentId) await resumeAgent($, result.agentId, result.model) } catch (error) { await report($, 'agent.spawn resume', error) }
+      try {
+        if (result.agentId) await wokenModel($, result.agentId, result.model)
+        else await undo?.()
+      } catch (error) { await report($, 'agent.spawn resume', error) }
       return result
     }
     let input = e

@@ -789,6 +789,42 @@ test('a finished worker a message resumes is running again, its earlier time kep
   expect(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim().split('\n').filter(line => line.includes('"outcome"')).length).toBe(1)
 })
 
+test('a resumed run that ends or calls a tool before its spawn answers is settled once, and a refused wake leaves the card as it was', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  judgeStub(on)
+  const seen = agentWrites(on)
+  const engine = $
+  let mode: 'start' | 'fast' | 'deny' = 'start'
+  on('agent.spawn', async ($, e) => {
+    if (mode === 'deny') return { deny: 'parked' }
+    if (mode === 'fast') {
+      await engine.tool.call({ tool: 'Bash', command: 'date', agentId: 'worker-1' })
+      await engine.turn.complete({ turnId: 'turn-2', answer: 'Again.', reason: 'answer', durationMs: 50, isAborted: false, agentId: 'worker-1' })
+    }
+    return { model: 'gpt-6.1-sol@high', agentId: 'worker-1' }
+  })
+  on('tool.call', () => ({ result: 'ok' }))
+  await start($)
+  await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: standard]]\nVerify one claim.' })
+  await b.clock.advance(4000)
+  await complete($, 'worker-1')
+  mode = 'fast'
+  await b.clock.advance(60000)
+  await $.agent.spawn({ ...SPAWN, prompt: 'One more check.', resume: { agentId: 'worker-1' } } as AgentSpawnInput)
+  await b.clock.settle()
+  const settled = seen.records().find(a => a.id === 'worker-1')!
+  expect(settled).toMatchObject({ state: 'done', ranMs: 4000 })
+  expect(seen.counts()?.live).toBe(0)
+  expect(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim().split('\n').filter(line => line.includes('"outcome"')).length).toBe(1)
+  mode = 'deny'
+  await b.clock.advance(60000)
+  await $.agent.spawn({ ...SPAWN, prompt: 'Refused.', resume: { agentId: 'worker-1' } } as AgentSpawnInput)
+  await b.clock.settle()
+  expect(seen.records().find(a => a.id === 'worker-1')).toEqual(settled)
+  expect(seen.counts()?.live).toBe(0)
+})
+
 // 2026-10-25: a flat slice(-40) over every record dropped the oldest running worker the moment 41
 // ran at once: its card, the band's live count and every later step's tokens and effort vanished.
 test('workers all stay listed past forty, counted, and still take their steps during long tools', async ($, on) => {
