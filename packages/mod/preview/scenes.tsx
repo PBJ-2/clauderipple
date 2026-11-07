@@ -341,6 +341,9 @@ const SCENES: Scene[] = [
   // name; the band's row keeps to the Claude account in use, unnumbered.
   { name: 'limits-pane-accounts', columns: PANE, draw: (el, f) => renderLimits(el, f, { items: LIMITS_ACCOUNTS, saveUntil: Date.parse('2026-10-12T18:20:00') }, noop) },
   { name: 'limits-pane-accounts-narrow', columns: PANE_NARROW, draw: (el, f) => renderLimits(el, f, { items: LIMITS_ACCOUNTS, saveUntil: Date.parse('2026-10-12T18:20:00') }, noop) },
+  // A pane a phone's width (2026-11-07): every reset wraps, the time left on a line of its own, and
+  // the water must still reach the last tile.
+  { name: 'limits-pane-accounts-phone', columns: 36, draw: (el, f) => renderLimits(el, f, { items: LIMITS_ACCOUNTS }, noop) },
   { name: 'flat-limits-pane-accounts', columns: PANE, skin: 'flat', draw: (el, f) => renderLimits(el, f, { items: LIMITS_ACCOUNTS }, noop) },
   { name: 'band-limits-accounts-94', columns: 94, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 32, resetsAt: '2026-10-16T09:00:00', save: false }, extras: ['context', 'limits'], limits: LIMITS_ACCOUNTS }) },
   // Every readable provider (2026-10-15): Claude, GPT, Gemini and OpenCode Go in one row, at the

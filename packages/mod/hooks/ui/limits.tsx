@@ -222,8 +222,27 @@ function nameCells(group: LimitGroup, lang: Lang): number {
   return Math.max(NAME_MIN, ...group.items.map(item => Math.ceil(chOf(windowName(item, group, lang)))))
 }
 
+/** Lines `text` wraps to in `cells` of room. */
+function linesOf(text: string, cells: number): number {
+  return Math.max(1, Math.ceil(chOf(text) / Math.max(8, cells)))
+}
+
+/**
+ * Lines the reset takes under a window's bar, in `cells` (the tile's room less the name's). In a
+ * narrow pane the date wraps and the time left drops to a line of its own: counted as one line, the
+ * water stopped short of the last tiles and the page showed white beneath them (2026-11-07, four
+ * accounts in a pane a phone's width).
+ */
+function whenLines(reset: Reset, cells: number, lang: Lang, now: number): number {
+  if (reset.kind === 'none') return linesOf(t(lang, 'limits.noReset'), cells)
+  if (reset.kind === 'passed') return linesOf(t(lang, 'limits.passed', { date: resetMoment(reset.at, lang) }), cells) + linesOf(t(lang, 'limits.stale'), cells)
+  const on = t(lang, 'limits.resetsOn', { date: resetMoment(reset.at, lang) })
+  const left = t(lang, 'limits.left', { time: timeLeft(reset.at - now, lang) })
+  return chOf(on) + 2 + chOf(left) <= cells ? 1 : linesOf(on, cells) + linesOf(left, cells)
+}
+
 /** One window: its name, bar and figure on a line; when it resets and the time left under them. */
-function windowDrawn(el: Els, frame: Frame, group: LimitGroup, item: LimitItem, i: number, name: number, barPx: number): { node: RenderNode; rows: number } {
+function windowDrawn(el: Els, frame: Frame, group: LimitGroup, item: LimitItem, i: number, name: number, barPx: number, whenCells: number): { node: RenderNode; rows: number } {
   const { Box, Text } = el
   const k = lookOf(frame)
   const L = frame.lang
@@ -264,7 +283,7 @@ function windowDrawn(el: Els, frame: Frame, group: LimitGroup, item: LimitItem, 
         </Box>
       </Box>
     ),
-    rows: reset.kind === 'passed' ? 3.4 : 2.2,
+    rows: 1.2 + whenLines(reset, whenCells, L, frame.now) * 1.05,
   }
 }
 
@@ -279,7 +298,7 @@ function groupDrawn(el: Els, frame: Frame, view: LimitsView, group: LimitGroup, 
   const save = saveLine(view, group, saveGroup, frame.now, L)
   const account = limitGroupAccount(group, numbered, L)
   const tag = account.tag ? tagOf(frame, account.tag) : null
-  const windows = group.items.map((item, i) => windowDrawn(el, frame, group, item, i, name, barPx))
+  const windows = group.items.map((item, i) => windowDrawn(el, frame, group, item, i, name, barPx, room - name - 1))
   return {
     node: (
       <Box key={'limits-group-' + group.key} flexDirection="column" rowGap={1} width="100%" minWidth={0} paddingX={1.5} paddingY={0.5} {...k.tile}>
