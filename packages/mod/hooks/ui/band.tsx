@@ -56,8 +56,6 @@ const CTRL_GAP = 1
 /** The least room a route is drawn in; on the desktop the host cuts the name to what is left. */
 const ROUTE_MIN = 14
 const RICH_ROUTE_MIN = 6
-/** Cells the route's model keeps before its output rate gives way. */
-const ROUTE_RATE_MODEL_MIN = 12
 /** Desktop: the slot of the live agents' count after its control. */
 const COUNT_CELLS = 2
 /** The cache's last stretch, when 리플이 grows drowsy: five minutes, or a fifth of a short life. */
@@ -273,11 +271,11 @@ export function routeFact(frame: Frame, view: DashboardView, room: number, onPre
       ? [cacheTone(r.cachePct) === 'ok' ? { text: hit, dim: true } : { text: hit, color: cacheTone(r.cachePct) === 'warn' ? WARN : BAD }]
       : []
   // The answer's speed after the hit, as the log says it (2026-11-07), kept only while the model's
-  // name still has room beside it: the name is what the route is.
+  // whole name still fits beside it: the name is what the route is, and is never cut for the rate.
   const rate = r.ok && r.rate !== undefined ? t(frame.lang, 'log.rate', { rate: rateText(r.rate) }) : ''
   const cellsOf = (runs: readonly Run[]) => runs.reduce((n, run) => n + 1 + cells(frame, run.text), 0)
   const withRate: Run[] = rate ? [...base, { text: rate, dim: true }] : base
-  const tail = room - 2 - cellsOf(withRate) >= ROUTE_RATE_MODEL_MIN ? withRate : base
+  const tail = room - 2 - cellsOf(withRate) >= cells(frame, r.model) ? withRate : base
   const modelRoom = room - 2 - cellsOf(tail)
   if (!rich && modelRoom < 4) return null
   const secs = seconds(r.seconds, frame.lang)

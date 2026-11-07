@@ -16,7 +16,7 @@ import { DONE_SHOWN, cardRows, renderAgents, talkOf, timeCells } from '../hooks/
 import { chOf, displayWidth } from '../hooks/ui/theme'
 import { commandLine, editLines, runDiff, runSummary, shortPath, toolDetail } from '../hooks/ui/tools'
 import { renderAlert } from '../hooks/ui/alerts'
-import { BAND_RIPPLE, CREST_CELLS, bandMood, besideBand, modeLabel, renderBand, renderFooter } from '../hooks/ui/band'
+import { BAND_RIPPLE, CREST_CELLS, bandMood, besideBand, modeLabel, renderBand, renderFooter, routeFact } from '../hooks/ui/band'
 import { renderLimits } from '../hooks/ui/limits'
 import { renderPhoneQueue } from '../hooks/ui/queue'
 import { rippleSource } from '../hooks/ui/parts'
@@ -1691,6 +1691,20 @@ test('the limits pane lists every account, labelled and the one in use marked; t
 
 // 2026-10-25: the row itself is the way in. It lights under the pointer and says what pressing it
 // shows; the reset times are no longer written on it.
+// 2026-11-07: the route says the last answer's tok/s, but never cuts the model's name for it.
+test('the terminal route keeps its output rate only beside the whole model name', () => {
+  const route = { model: 'deepseek-v4.1-flash', provider: 'opencode-go', ok: true, resent: false, status: '200', seconds: 1, rate: 200 }
+  const view: DashboardView = { ...DASH, notice: null, route }
+  const texts = (room: number) => {
+    const fact = routeFact(frameOf('terminal', 100), view, room, () => {})
+    return fact ? [fact.value.text, ...(fact.tail ?? []).map(run => run.text)] : []
+  }
+  expect(texts(24)).toEqual(['deepseek-v4.1-flash'])
+  expect(texts(40)).toEqual(['deepseek-v4.1-flash', '200 tok/s'])
+  const failed = routeFact(frameOf('terminal', 100), { ...view, route: { ...route, ok: false, status: '529' } }, 40, () => {})
+  expect((failed?.tail ?? []).map(run => run.text)).not.toContain('200 tok/s')
+})
+
 test('the desktop limits row is a button that opens the limits pane', async ($, on) => {
   const { calls, fn } = recorder()
   const actions = { ...BAND_ACTIONS, toggleLimits: fn('limits') }
