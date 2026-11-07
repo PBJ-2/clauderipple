@@ -757,7 +757,8 @@ test('a worker that ends before its spawn is recorded is listed as ended, not ru
   await start($)
   await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: standard]]\nVerify one claim.' })
   await b.clock.settle()
-  expect(written.find(a => a.id === 'worker-1')).toMatchObject({ state: 'failed', endedAt: NOW })
+  // Its card keeps the time the run took, which a later resume adds to.
+  expect(written.find(a => a.id === 'worker-1')).toMatchObject({ state: 'failed', endedAt: NOW, startedAt: NOW - 72 })
   const rows = b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim().split('\n').map(line => JSON.parse(line))
   expect(rows.find(row => row.type === 'outcome')).toMatchObject({ pick: rows.find(row => row.type === 'pick').id, agent: 'worker-1', reason: 'error', ms: 72 })
 })

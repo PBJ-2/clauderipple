@@ -1752,8 +1752,7 @@ export function wakeAgent(agent: AgentRec, now: number): AgentRec {
  */
 async function wakeCard($: EngineInterface, id: string): Promise<(() => Promise<void>) | undefined> {
   const now = await $.clock.now()
-  // A record of an earlier run's end, kept for a spawn not yet recorded, is not this run's.
-  endedEarly.delete(id)
+  // An end kept in endedEarly belongs to a spawn not yet recorded; that spawn consumes it, not this.
   const before = (await read($, agents)).find(a => a.id === id)
   if (before?.state === 'running') return undefined
   const info = before ? undefined : (await $.agent.list()).find(a => a.id === id)
@@ -2437,7 +2436,7 @@ export const register: Register = on => {
         const now = await $.clock.now()
         const early = endedEarly.get(result.agentId)
         endedEarly.delete(result.agentId)
-        const rec: AgentRec = { id: result.agentId, description: input.description, type: input.subagentType, model: result.model, ...(chosen ? { pick: chosen } : {}), ...(provider ? { provider } : {}), ...(effort ? { effort } : {}), state: early?.state ?? 'running', startedAt: Math.min(now, early?.endedAt ?? now), ...(early ? { endedAt: early.endedAt } : {}), cost: 0 }
+        const rec: AgentRec = { id: result.agentId, description: input.description, type: input.subagentType, model: result.model, ...(chosen ? { pick: chosen } : {}), ...(provider ? { provider } : {}), ...(effort ? { effort } : {}), state: early?.state ?? 'running', startedAt: Math.min(now, early ? early.endedAt - (Number(early.outcome.ms) || 0) : now), ...(early ? { endedAt: early.endedAt } : {}), cost: 0 }
         await update($, agents, list => retainAgents([...list.filter(a => a.id !== rec.id), rec]))
         await countAgents($)
         if (early && chosen?.id) await persistWorkerPick($, { ...early.outcome, pick: chosen.id, model: result.model ?? null, cost: 0 })
