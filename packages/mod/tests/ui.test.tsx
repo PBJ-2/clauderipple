@@ -1681,7 +1681,11 @@ test('the limits pane lists every account, labelled and the one in use marked; t
   expect(shown).toContain('15%')
   expect(shown).not.toContain('81%')
   expect(shown).not.toContain('Claude 2')
-  expect(shown).toContain('GPT 2')
+  // Every provider keeps to its account in use, unnumbered as Claude is (e827192, 2026-11-05).
+  expect(shown).toContain('GPT')
+  expect(shown).toContain('64%')
+  expect(shown).not.toContain('23%')
+  expect(shown).not.toContain('GPT 2')
   await row.unmount()
 })
 
