@@ -1,8 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.12.33 — 2026-11-07
 
 ### Added
+
+- **Output speed (tok/s) for each request** (#130, thanks @csa906). The dashboard's request log and
+  the mod's log pane show a finished answer's output tokens per second over the whole request, and
+  Usage by model shows an approximate rate per model (`≈`). The band's last route shows it too,
+  after the cache hit, and drops it whole rather than cut the model's name when the row is short.
+  Failures, resends, refusals the router answered, web search, token counts and requests under
+  0.5 s have no rate.
 
 - **The phone is told when the computer loses its connection while Claude is working.** While a
   turn, an approval or a Claude app conversation is active, the host renews a watch on its relay
@@ -36,6 +43,11 @@
   inside the turn and no longer cools the key, and a Google account banned for a Terms of Service
   violation is parked instead of being refreshed and replayed. After an in-turn retry, the log line
   and `requests.jsonl` name the account that actually answered.
+- **A finished subagent that SendMessage wakes up is back on its Agents card.** It showed in the
+  Claude app's background tasks but stayed "done" in the mod; its card now runs again, keeping the
+  time it ran before.
+- **The limits pane's dark backdrop reaches its last tile in a narrow pane.** With every account
+  listed and each reset wrapping onto two or three lines, the bottom tiles stood on a white page.
 
 ## 0.12.32 — 2026-11-05
 
