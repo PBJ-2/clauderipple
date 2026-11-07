@@ -21,6 +21,12 @@ export type StatusRequest = {
   /** The service tier the request asked for ('priority' is Fast); the tier served often differs. */
   requestedTier?: string
   usage?: { input: number; cached: number; cacheWrite?: number; output: number }
+  /** 'messages' for a model call; the log polls only those. */
+  kind?: string
+  /** A side request, such as 'web-search', answered in one piece after the search. */
+  purpose?: string
+  /** False when the router answered the request itself without reaching a model. */
+  upstreamCalled?: false
   note?: string
   /** Not ok, but the client sent it again on its own: not a failure. */
   resent?: boolean

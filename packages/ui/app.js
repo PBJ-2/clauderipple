@@ -5732,6 +5732,7 @@ async function loadConfiguredProviders() {
 }
 function modelUsageRow(entry) {
   const total = totalInputOf(entry);
+  const rate = modelRateOf(entry);
   const model = el("div", { class: "request-models" }, [
     el("span", { class: "model", text: entry.model, title: entry.model }),
     // A WebSearch side request is counted apart from the model's own turns; the router marks it.
@@ -5744,7 +5745,10 @@ function modelUsageRow(entry) {
     el("td", { class: "c-count", "data-label": t("logs.th.count") }, [formatNumber(entry.count)]),
     el("td", { class: "c-in", "data-label": t("logs.th.input") }, [el("span", { class: "token-cell", text: formatNumber(total) }, [el("span", { class: "cache-pill", text: t("logs.cacheHit", { percent: entry.cacheHitPercent || 0 }) })])]),
     el("td", { class: "c-out", "data-label": t("logs.th.output") }, [formatNumber(entry.output)]),
-    el("td", { class: "c-dur", "data-label": t("logs.th.avg") }, [formatSeconds(entry.avgMs)]),
+    el("td", { class: "c-dur", "data-label": t("logs.th.avg"), title: rate === null ? undefined : t("logs.modelRateHelp") }, [
+      formatSeconds(entry.avgMs),
+      rate === null ? null : el("span", { class: "rate-pill", text: t("logs.rateApprox", { value: rateValue(rate) }) }),
+    ]),
   ]);
 }
 function renderModelUsage(summary) {
@@ -5756,6 +5760,42 @@ function renderModelUsage(summary) {
 /** Everything the model read: uncached, read from the cache, and written to it. */
 function totalInputOf(usage) {
   return (usage.input || 0) + (usage.cached || 0) + (usage.cacheWrite || 0);
+}
+// Below this a request is mostly fixed overhead, and a rate from it is noise.
+const OUTPUT_RATE_MIN_MS = 500;
+/**
+ * Output tokens per second over the request's whole recorded time: the router's `ms` runs from the
+ * body read to the response end, so the wait for the first token is in it and this is not the
+ * model's generation speed. Only a finished model answer with a real output count gets one: a
+ * failure, a resend, an answer refused before reaching a model, a web search (answered in one piece
+ * after the search) and an image have none, and neither has an output of 0, which a missing usage
+ * also reads as.
+ */
+function outputRateOf(record) {
+  if (!record || record.kind !== "messages" || record.purpose === "web-search" || !record.ok || record.resent || record.upstreamCalled === false) return null;
+  const output = record.usage ? record.usage.output : undefined;
+  if (typeof output !== "number" || !Number.isFinite(output) || output <= 0) return null;
+  if (typeof record.ms !== "number" || !Number.isFinite(record.ms) || record.ms < OUTPUT_RATE_MIN_MS) return null;
+  return (output * 1000) / record.ms;
+}
+/**
+ * A model row's output rate, approximated from the summary it already has: its output over all its
+ * requests' time (`avgMs × count`). That time also holds failed, resent and token-count requests,
+ * which bring no output, so a model with long failures reads lower than its answers ran. A web
+ * search row has none, as on the request list.
+ */
+function modelRateOf(entry) {
+  if (!entry || entry.purpose === "web-search") return null;
+  const { output, avgMs, count } = entry;
+  if (![output, avgMs, count].every((n) => typeof n === "number" && Number.isFinite(n) && n > 0)) return null;
+  if (avgMs < OUTPUT_RATE_MIN_MS) return null;
+  return (output * 1000) / (avgMs * count);
+}
+function rateValue(rate) {
+  return rate >= 100 ? Math.round(rate).toLocaleString() : rate.toFixed(1);
+}
+function formatRate(rate) {
+  return t("logs.rate", { value: rateValue(rate) });
 }
 function requestDetail(record) {
   const details = [
@@ -5790,6 +5830,7 @@ function requestRow(record) {
   // The whole input, not the uncached remainder: a fully cached Anthropic turn reports `input: 2`,
   // which read as a two-token request (2026-09-23). The split is in the detail row.
   const totalInput = record.usage ? totalInputOf(record.usage) : 0;
+  const rate = outputRateOf(record);
   const input = record.usage
     ? el("span", { class: "token-cell", text: formatNumber(totalInput) }, [el("span", { class: "cache-pill", text: t("logs.cacheHit", { percent: Math.round(record.usage.cached / Math.max(1, totalInput) * 100) }) })])
     : el("span", { class: "no-usage", text: t("common.notAvailable") });
@@ -5803,7 +5844,10 @@ function requestRow(record) {
     el("td", { class: "c-effort", text: record.effort || t("common.notAvailable") }),
     el("td", { class: "c-in" }, [input]),
     el("td", { class: record.usage ? "c-out" : "c-out no-usage", text: record.usage ? formatNumber(record.usage.output) : t("common.notAvailable") }),
-    el("td", { class: "c-dur", text: formatSeconds(record.ms) }),
+    el("td", { class: "c-dur", title: rate === null ? undefined : t("logs.rateHelp") }, [
+      formatSeconds(record.ms),
+      rate === null ? null : el("span", { class: "rate-pill", text: formatRate(rate) }),
+    ]),
     el("td", { class: "c-status" }, [status]),
   );
   return row;

@@ -11,7 +11,7 @@ import { GREET_SIZE, action, actions as actions_, speak } from './parts'
 import type { Els } from './parts'
 import { cacheTone, providerColor, textTone } from './theme'
 import type { Frame, LogActions, LogView } from './view'
-import { cachePercent, clockTime, effortLabel, modelOf, promptTokens, seconds } from './view'
+import { cachePercent, clockTime, effortLabel, modelOf, outputRate, promptTokens, rateText, seconds } from './view'
 
 /**
  * The router's answer to a thread continue on a model without server-side threads: answered here at
@@ -24,6 +24,7 @@ function entry(el: Els, frame: Frame, record: StatusRequest, mineOnly: boolean):
   const { Box, Text } = el
   const tone = textTone(frame.appearance)
   const cache = cachePercent(record.usage)
+  const rate = outputRate(record)
   if (record.resent && STATELESS_SWITCH.test(record.note ?? '')) {
     return (
       <Box key={record.at + '-' + displayText(record.target, DISPLAY.name)} flexDirection="row" flexWrap="wrap" columnGap={1}>
@@ -63,6 +64,7 @@ function entry(el: Els, frame: Frame, record: StatusRequest, mineOnly: boolean):
         {cache !== undefined ? <Text color={tone[cacheTone(cache)]}>{t(frame.lang, 'band.cachePercent', { percent: cache })}</Text> : null}
         {record.usage ? <Text dimColor>{t(frame.lang, 'log.output', { tokens: tokens(record.usage.output) })}</Text> : null}
         <Text dimColor>{seconds(record.ms / 1000, frame.lang)}</Text>
+        {rate !== undefined ? <Text dimColor>{t(frame.lang, 'log.rate', { rate: rateText(rate) })}</Text> : null}
       </Box>
       {!record.ok && record.note ? (
         <Text color={record.resent ? undefined : tone.bad} dimColor={record.resent} wrap="wrap">
