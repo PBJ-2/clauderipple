@@ -145,16 +145,17 @@ export const PRESETS: ProviderPreset[] = [
     vendorUrl: "https://www.minimax.io/",
     anthropicBaseUrl: "https://api.minimax.io/anthropic",
     authHeader: "x-api-key",
+    // The Anthropic interface serves only these two (docs, checked 2026-11-08); M2.7 is not on it.
     fallbackModels: [
+      { id: "MiniMax-M3.1-Flash", name: "MiniMax M3.1 Flash" },
       { id: "MiniMax-M3", name: "MiniMax M3" },
-      { id: "MiniMax-M2.7", name: "MiniMax M2.7" },
     ],
-    // https://platform.minimax.io/docs/api-reference/text-anthropic-api documents adaptive thinking,
-    // but not output_config.effort.
+    // output_config.effort (low…max, max when omitted) is documented for M3.1 Flash only, so the
+    // provider-wide ladder stays empty and saving the provider measures each model's own.
     effortLevels: [],
     thinking: "enabled",
     verified: true,
-    notes: "Uses the thinking parameter; M3 supports adaptive thinking.",
+    notes: "Uses the thinking parameter. M3.1 Flash always thinks (thinking disabled is a 400) and takes output_config.effort; M3 thinks only when asked.",
     docsUrl: "https://platform.minimax.io/docs/api-reference/text-anthropic-api",
   },
   // Docs: https://help.aliyun.com/en/model-studio/claude-code
