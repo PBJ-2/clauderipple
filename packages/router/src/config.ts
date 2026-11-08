@@ -911,10 +911,10 @@ export function validate(c: Config): string[] {
         const caps = p.caps;
         if (!caps || typeof caps !== "object" || Array.isArray(caps) ||
           (caps.effortLevels !== undefined && (!Array.isArray(caps.effortLevels) || caps.effortLevels.some((level) => typeof level !== "string"))) ||
-          (caps.thinking !== undefined && caps.thinking !== "enabled" && caps.thinking !== "none") ||
+          (caps.thinking !== undefined && caps.thinking !== "adaptive" && caps.thinking !== "enabled" && caps.thinking !== "none") ||
           (caps.betas !== undefined && typeof caps.betas !== "boolean") ||
           (caps.cacheControl !== undefined && typeof caps.cacheControl !== "boolean")) {
-          errors.push(`provider ${name}: caps must contain effortLevels?: string[], thinking?: "enabled"|"none", betas?: boolean, cacheControl?: boolean`);
+          errors.push(`provider ${name}: caps must contain effortLevels?: string[], thinking?: "adaptive"|"enabled"|"none", betas?: boolean, cacheControl?: boolean`);
         }
       }
     } else if (p.type === "chatgpt") {

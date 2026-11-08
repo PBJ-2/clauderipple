@@ -38,8 +38,11 @@ export type ProviderPreset = {
   fallbackModels: PresetModel[];
   /** Empty means output_config.effort is stripped for this provider. */
   effortLevels: string[];
-  /** Whether adaptive CLI thinking can safely become Anthropic enabled thinking. */
-  thinking: "enabled" | "none";
+  /**
+   * What becomes of the CLI's adaptive thinking: passed on as `adaptive` where the vendor documents
+   * it, turned into Anthropic's older `enabled` shape where only that is accepted, or dropped.
+   */
+  thinking: "adaptive" | "enabled" | "none";
   /**
    * Whether the vendor runs Anthropic server tools (`web_search`) itself. Only ever set from a
    * measured reply, never from a docs page: DeepSeek's docs do not mention it and it works.
@@ -153,9 +156,10 @@ export const PRESETS: ProviderPreset[] = [
     // output_config.effort (low…max, max when omitted) is documented for M3.1 Flash only, so the
     // provider-wide ladder stays empty and saving the provider measures each model's own.
     effortLevels: [],
-    thinking: "enabled",
+    // The docs give M3.1 Flash and M3 `thinking` omitted or `adaptive`, never `enabled` with a budget.
+    thinking: "adaptive",
     verified: true,
-    notes: "Uses the thinking parameter. M3.1 Flash always thinks (thinking disabled is a 400) and takes output_config.effort; M3 thinks only when asked.",
+    notes: "Takes adaptive thinking as sent. M3.1 Flash always thinks (thinking disabled is a 400) and takes output_config.effort; M3 thinks only when asked.",
     docsUrl: "https://platform.minimax.io/docs/api-reference/text-anthropic-api",
   },
   // Docs: https://help.aliyun.com/en/model-studio/claude-code

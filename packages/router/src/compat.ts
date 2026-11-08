@@ -10,8 +10,11 @@ export type EffortLevel = (typeof EFFORT_LEVELS)[number];
 export type CompatibleCaps = {
   /** Empty means the provider does not accept output_config.effort. */
   effortLevels?: string[];
-  /** Whether the provider accepts Anthropic's enabled thinking shape. */
-  thinking?: "enabled" | "none";
+  /**
+   * What the provider takes for Claude Code's `thinking: {type: "adaptive"}`: `adaptive` as sent
+   * (minus Claude-only fields), the older `enabled` shape with a fixed budget, or nothing.
+   */
+  thinking?: "adaptive" | "enabled" | "none";
   /** Whether the provider accepts Anthropic beta flags. Default false. */
   betas?: boolean;
   /** Whether cache_control blocks are accepted. Default true. */
@@ -31,7 +34,7 @@ export type CompatibleCaps = {
 
 export type ResolvedCompatibleCaps = {
   effortLevels: string[];
-  thinking: "enabled" | "none";
+  thinking: "adaptive" | "enabled" | "none";
   betas: boolean;
   cacheControl: boolean;
   serverTools: boolean;
@@ -238,7 +241,10 @@ export function sanitizeForCompatible(json: Record<string, unknown>, caps: Resol
 
   const thinking = record(out.thinking);
   if (thinking) {
-    if (thinking.type === "adaptive") {
+    // A provider that documents adaptive thinking itself keeps it, with only the Claude-only fields
+    // removed below: turning it into a fixed budget changes how long the model thinks (2026-11-08,
+    // MiniMax M3.1 Flash under `enabled` 8192 thought ~25× longer per step at high than at max).
+    if (thinking.type === "adaptive" && caps.thinking !== "adaptive") {
       if (caps.thinking === "enabled") {
         out.thinking = { type: "enabled", budget_tokens: 8192 };
         changes.push("thinking adaptive→enabled");

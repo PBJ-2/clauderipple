@@ -56,6 +56,22 @@ test("sanitizeForCompatible drops adaptive thinking and effort under strict defa
   assert.deepEqual(result.changes, ["thinking", "effort xhigh→removed"]);
 });
 
+test("a provider that takes adaptive thinking keeps it, without the Claude-only fields, and keeps its effort", () => {
+  const caps = { ...STRICT_COMPAT_CAPS, thinking: "adaptive" as const, effortLevels: ["low", "medium", "high", "xhigh", "max"] };
+  const result = sanitizeForCompatible({
+    thinking: { type: "adaptive", display: "omitted", block_binding: { type: "enabled" } },
+    output_config: { effort: "high" },
+  }, caps);
+  assert.deepEqual(result.json.thinking, { type: "adaptive" });
+  assert.deepEqual(result.json.output_config, { effort: "high" });
+  assert.deepEqual(result.changes, ["thinking"]);
+});
+
+test("the MiniMax preset passes adaptive thinking on", () => {
+  assert.equal(resolveCompatibleCaps({ thinking: "adaptive" }).thinking, "adaptive");
+  assert.equal(resolveCompatibleCaps({ thinking: "adaptive" }, { thinking: "enabled" }).thinking, "enabled", "a config override still wins");
+});
+
 test("sanitizeForCompatible strips non-adaptive thinking decorations and cache_control only when disabled", () => {
   const result = sanitizeForCompatible({
     thinking: { type: "enabled", budget_tokens: 100, display: "updates", block_binding: {} },
