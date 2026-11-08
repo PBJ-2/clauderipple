@@ -90,6 +90,36 @@ export function requestKind(json: unknown, pathname: string, method = "POST", re
   return "turn";
 }
 
+/**
+ * Whether this is one of Claude Code's own small side requests (a search, a page read, a session
+ * title, a classifier) rather than a conversation turn, so that it may take Claude as a last resort.
+ * Only the `smallFast` slot's model qualifies, and never a subagent's request or any turn of the
+ * main session, even when the main session runs on that same model.
+ *
+ * A search, a page read and a classifier are recognised by their own fingerprint (`kind`). A title
+ * and the like are plain turns, told apart by the CLI's class header (`auxiliary`, §3c); a CLI that
+ * sends none is told apart by shape instead: a main turn always declares tools and carries the
+ * conversation, a side request carries one message and no tools.
+ */
+export function isSmallFastSideRequest(
+  cfg: Config,
+  model: unknown,
+  json: Record<string, unknown> | null,
+  kind: RequestKind,
+  requestClass: string | undefined,
+  subagent: boolean,
+): boolean {
+  const slot = cfg.cli.models?.smallFast;
+  if (!slot || subagent || typeof model !== "string" || !json) return false;
+  if (model.split("@")[0] !== slot.split("@")[0]) return false;
+  if (kind === "compaction") return false;
+  if (kind !== "turn") return true;
+  if (requestClass !== undefined) return requestClass === "auxiliary";
+  const tools = json.tools;
+  const messages = json.messages;
+  return (!Array.isArray(tools) || tools.length === 0) && Array.isArray(messages) && messages.length <= 1;
+}
+
 export type Decision = { route: Resolved; refusal: null } | { route: null; refusal: string | null };
 
 /** How much of a stored account's local id a pinned model id names; enough to tell accounts apart. */

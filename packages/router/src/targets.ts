@@ -50,6 +50,24 @@ export function namedOnly(provider: Config["providers"][string] | undefined): bo
   return provider?.type === "anthropic" && provider.auth === "api-key";
 }
 
+/**
+ * The model Claude Code's own side requests (search, titles, classifiers) run on when nothing else
+ * answers them: Claude Code's small default, the one a session with no `smallFast` slot sends them
+ * to (Haiku 5.5, measured 2026-10-08; `claude-haiku-4-5` before it, ARCHITECTURE §4).
+ */
+export const CLAUDE_SMALL_MODEL = "claude-haiku-5-5";
+
+/**
+ * The configured native Claude providers a side request may fall back to as a last resort: signed-in
+ * subscription pools only. A per-token API key is `namedOnly` (above), so falling back to it would
+ * move traffic onto a bill nobody asked for.
+ */
+export function claudeLastResortProviders(cfg: Config): string[] {
+  return Object.entries(cfg.providers)
+    .filter(([, provider]) => provider.type === "anthropic" && isTargetProvider(provider) && !namedOnly(provider))
+    .map(([name]) => name);
+}
+
 /** Whether this configured provider serves the OpenAI ingress but cannot take routed requests. */
 export function ingressOnly(cfg: Config, name: string): boolean {
   const provider = cfg.providers[name];

@@ -1088,6 +1088,28 @@ must preserve **Data: Artificial Analysis (artificialanalysis.ai)** attribution.
       prose. This was found the hard way: a stale `ANTHROPIC_SMALL_FAST_MODEL` left in a running
       session kept sending searches to a provider that could not run them, and the session reported
       the search tool as unresponsive with nothing in any log to say why.
+    - **Claude is the last resort for Claude Code's own side requests (2026-11-08).** Observed on
+      the live router: `webSearch` and the `smallFast` slot both pointed at Luna on `chatgpt`, the
+      account's weekly quota ran out, the backend answered 429 `usage_limit_reached`, the route
+      resolved to the same provider, and the guard above refused the search — while a signed-in
+      Claude pool could have run Anthropic's own `web_search`. Now, in order:
+      1. A configured backend (or a route's own search) whose provider `targetUsable` already reports
+         spent is **not called**; one that is usable is tried as before.
+      2. If neither answered, the search goes to the first usable native Claude provider (`type:
+         "anthropic"`, a signed-in pool; a per-token API key is `namedOnly` and never used unasked)
+         with `CLAUDE_SMALL_MODEL` (`claude-haiku-5-5`, targets.ts). Body and `web_search` tool are
+         untouched; only `model` is rewritten. Only with no usable Claude is the search refused,
+         exactly as in the previous bullet.
+      3. Other `smallFast` side requests (`isSmallFastSideRequest`, routing.ts: the slot's model, never
+         a subagent, a compaction or a main-session turn; a title is recognised by class
+         `auxiliary`, or without the header by having no tools and one message) get the same
+         Claude providers appended as a last fallback, which `chooseTarget` takes only when the
+         primary is unusable. The route's own fallbacks (and a Google turn's unwritten fallback)
+         are not changed; the primary's effort is not carried to Claude.
+      4. `WebFetch`'s reader override (`cfg.webSearch`) whose provider is unusable goes to Claude the
+         same way instead of back to the slot's route.
+      Every such fallback logs a line and leaves the record note `fallback to Claude (<provider>
+      unusable|failed)`. Tests: `packages/router/test/proxy-claude-last-resort.test.ts`.
     - **The backend is chosen by how the provider is spoken to, not by vendor.**
       `anthropic-compatible` → server tool, `openai-compatible` → web plugin. Anything else refuses
       and leaves the request alone.

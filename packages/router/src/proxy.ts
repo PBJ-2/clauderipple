@@ -29,7 +29,7 @@ import { readWorkerLadder, type WorkerLadderRoute } from "../../mod/hooks/ladder
 import { routingSettings } from "../../mod/hooks/modes.ts";
 import { candidateKey, isAllowed } from "../../mod/hooks/settings.ts";
 import { readCompactModel, readModRoutingSettings } from "./mod-settings.ts";
-import { CompactPicks, THREAD_UNSUPPORTED, continuesTranslatedTurn, decide, effortOf, requestKind, resolve, rewriteBody, stripThreadFields, threadDecision, type RequestKind, type Resolved } from "./routing.ts";
+import { CompactPicks, THREAD_UNSUPPORTED, continuesTranslatedTurn, decide, effortOf, isSmallFastSideRequest, requestKind, resolve, rewriteBody, stripThreadFields, threadDecision, type RequestKind, type Resolved } from "./routing.ts";
 import { defaultAgentDir, imageLine, withAgentAliases } from "./agents.ts";
 import { forwardCompatibleHeader, resolveCompatibleCaps, sanitizeForCompatible } from "./compat.ts";
 import { applyIdentityToAnthropicBody, promptAdditions } from "./identity.ts";
@@ -49,7 +49,7 @@ import { adminPort, providerFor, searchProviderFor, terminateHosts } from "./con
 import type { CertStore } from "./certs.ts";
 import { chatPickerModels, injectPickerModels, isBootstrapPath } from "./picker.ts";
 import { effortLevelsForModel } from "./admin.ts";
-import { effortLevels, isTargetProvider, runsServerTools } from "./targets.ts";
+import { CLAUDE_SMALL_MODEL, claudeLastResortProviders, effortLevels, isTargetProvider, runsServerTools } from "./targets.ts";
 import { requestConversationKey, ResponseUsageTap, requestId, type RequestLog, type RequestRecord, type RequestUsage } from "./requestlog.ts";
 import { credentialHeaderValues, redactErrorText, redactHeaders } from "./redact.ts";
 import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
@@ -1023,11 +1023,21 @@ export class Proxy {
     const search = kind === "web-search" ? webSearchQuery(json!) : null;
     let searchAttempted = false;
     const markSearchAttempted = (): void => { searchAttempted = true; };
+    /** Why the configured search backend did not answer, for the note a Claude fallback leaves. */
+    let searchBackendWhy: string | undefined;
     if (search && cfg.webSearch) {
-      const served = await this.serveWebSearch(res, json!, search, cfg.webSearch, record, finish, markSearchAttempted);
-      if (served) return;
-      // Fall through on failure: the ordinary path still answers, and a search that quietly
-      // returns nothing is worse than one that costs what it always cost.
+      // A backend whose provider is already spent (a weekly quota, every key cooling) is not asked:
+      // the call would fail the same way, and the next option is what answers the search.
+      if (!this.targetUsable(cfg.webSearch, cfg)) {
+        searchBackendWhy = `${cfg.webSearch.provider} unusable`;
+        log.warn(`web search via ${cfg.webSearch.provider}: provider unusable; not asked`);
+      } else {
+        const served = await this.serveWebSearch(res, json!, search, cfg.webSearch, record, finish, markSearchAttempted);
+        if (served) return;
+        searchBackendWhy = `${cfg.webSearch.provider} failed`;
+        // Fall through on failure: the ordinary path still answers, and a search that quietly
+        // returns nothing is worse than one that costs what it always cost.
+      }
     }
 
     const webFetch = !!cfg.webSearch && kind === "web-fetch";
@@ -1045,8 +1055,24 @@ export class Proxy {
           asked: String(model),
         };
       } else {
-        unwrittenFallbackNote = `web fetch via ${settings.provider} unavailable; original destination fallback`;
-        log.warn(`web fetch via ${settings.provider}: provider unusable; leaving the request alone`);
+        // The configured reader is spent. Claude answers the page question when it can, rather than
+        // the request going back to the slot's own route, which is often that same spent provider.
+        const claude = this.claudeLastResort(cfg);
+        if (claude) {
+          fetchRoute = {
+            provider: claude.provider,
+            model: claude.model,
+            effort: undefined,
+            tag: `${String(model)}->${claude.model} (web fetch, Claude last resort)`,
+            kind: "web-fetch",
+            asked: String(model),
+          };
+          unwrittenFallbackNote = `fallback to Claude (${settings.provider} unusable)`;
+          log.warn(`web fetch via ${settings.provider}: provider unusable; falling back to Claude (${claude.provider}/${claude.model})`);
+        } else {
+          unwrittenFallbackNote = `web fetch via ${settings.provider} unavailable; original destination fallback`;
+          log.warn(`web fetch via ${settings.provider}: provider unusable; leaving the request alone`);
+        }
       }
     }
     let compactModel: string | undefined;
@@ -1154,9 +1180,34 @@ export class Proxy {
       // A slot with fallbacks picks its provider before anything is sent, so a primary that is rate
       // limited for the next hour is skipped rather than rediscovered once per request. A distinct
       // prompt refusal can also select one fallback below, but only before any response is written.
-      let route = resolved ? this.chooseTarget(resolved, cfg, log) : null;
+      // Claude is the last resort for Claude Code's own small side requests: a request for the
+      // `smallFast` slot's model (title, classifier, search, page read) that would go to a spent
+      // non-Claude provider is given the native Claude providers as a final fallback. Subagents,
+      // main-session turns and a route's own ladder are not touched.
+      // Only chooseTarget sees the extra fallbacks: a Google turn handed back unwritten still falls
+      // back along the route's own list (`unwrittenFallback`), never to Claude.
+      let placed = resolved;
+      let claudeLast = false;
+      if (resolved && !override && cfg.providers[resolved.provider]?.type !== "anthropic" &&
+          isSmallFastSideRequest(cfg, model, json, kind, requestClass, subagent)) {
+        const known = new Set((resolved.fallbacks ?? []).map(f => `${f.provider}/${f.model}`));
+        const added = claudeLastResortProviders(cfg).filter(provider => !known.has(`${provider}/${CLAUDE_SMALL_MODEL}`))
+          .map(provider => ({ provider, model: CLAUDE_SMALL_MODEL }));
+        if (added.length) {
+          placed = { ...resolved, fallbacks: [...(resolved.fallbacks ?? []), ...added] };
+          claudeLast = true;
+        }
+      }
+      let route = placed ? this.chooseTarget(placed, cfg, log) : null;
       if (resolved?.ladderPick && route && (route.provider !== resolved.provider || route.model !== resolved.model)) {
         unwrittenFallbackNote = `ladder pick=${resolved.ladderPick} fallback ${resolved.provider}/${resolved.model} → ${route.provider}/${route.model}: ${this.unavailableReason(resolved) ?? "provider_unusable"}`;
+      }
+      if (claudeLast && resolved && route && route.model === CLAUDE_SMALL_MODEL && route.provider !== resolved.provider &&
+          cfg.providers[route.provider]?.type === "anthropic") {
+        // The route carried the primary's effort, a word Claude's small model may not know.
+        route = { ...route, effort: undefined };
+        unwrittenFallbackNote = `fallback to Claude (${resolved.provider} unusable)`;
+        log.warn(`${kind}: ${resolved.provider}/${resolved.model} unusable; falling back to Claude (${route.provider}/${route.model})`);
       }
       /** The request before any target rewrote it, kept only when a Google target may hand the turn back. */
       let pristine: typeof json | undefined;
@@ -1197,7 +1248,25 @@ export class Proxy {
         // The same holds for a plan that searches on another of its endpoints (`anthropicSearch`).
         const own = (cfg.providers[route.provider]?.type === "chatgpt" || searchProviderFor(cfg.providers[route.provider], route.model) !== undefined) &&
           cfg.webSearch?.provider !== route.provider;
-        if (own && (await this.serveWebSearch(res, json, search, { provider: route.provider, model: route.model }, record, finish, markSearchAttempted))) return;
+        let ownWhy: string | undefined;
+        if (own) {
+          // A route whose provider is spent is not asked either; the call would fail the same way.
+          if (!this.targetUsable(route, cfg)) ownWhy = `${route.provider} unusable`;
+          else if (await this.serveWebSearch(res, json, search, { provider: route.provider, model: route.model }, record, finish, markSearchAttempted)) return;
+          else ownWhy = `${route.provider} failed`;
+        }
+        // Nothing of the configured providers could search. Claude runs Anthropic's own `web_search`
+        // server tool on its small model, so it is the last resort before refusing: the request keeps
+        // its tool and body, only the model changes. Refused as before only when no Claude is usable.
+        const claude = this.claudeLastResort(cfg);
+        if (claude) {
+          const why = [searchBackendWhy, ownWhy ?? (cfg.webSearch?.provider === route.provider ? undefined : `${route.provider} runs no server tools`)]
+            .filter(Boolean).join(", ");
+          unwrittenFallbackNote = `fallback to Claude (${why})`;
+          log.warn(`web search: ${why}; falling back to Claude (${claude.provider}/${claude.model})`);
+          route = { provider: claude.provider, model: claude.model, effort: undefined, tag: `${route.asked}->${claude.model} (web search, Claude last resort)`, kind: route.kind, asked: route.asked };
+          record = { ...record, purpose: "web-search" };
+        } else {
         const blocks = webSearchErrorBlocks(search, "unavailable");
         const model = typeof json.model === "string" ? json.model : "unknown";
         const wantStream = json.stream === true;
@@ -1209,6 +1278,7 @@ export class Proxy {
         record = { ...record, target: route.model, provider: route.provider, purpose: "web-search" };
         finish("200", Buffer.byteLength(payload), `web search refused: ${route.provider} runs no server tools`, false, { ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "web-search-unsupported" });
         return;
+        }
       }
 
       let compatCaps: ReturnType<typeof resolveCompatibleCaps> | undefined;
@@ -2280,6 +2350,17 @@ export class Proxy {
         tag: `${resolved.asked}->${f.model} (${why} fallback from ${attempted.provider})`,
         kind: resolved.kind, asked: resolved.asked,
       };
+    }
+    return null;
+  }
+
+  /**
+   * A native Claude provider that can answer now, with Claude Code's small model: the last resort
+   * for the side requests Claude Code makes for itself. Null when no signed-in Claude pool is usable.
+   */
+  private claudeLastResort(cfg: Config): { provider: string; model: string } | null {
+    for (const provider of claudeLastResortProviders(cfg)) {
+      if (this.targetUsable({ provider, model: CLAUDE_SMALL_MODEL }, cfg)) return { provider, model: CLAUDE_SMALL_MODEL };
     }
     return null;
   }
