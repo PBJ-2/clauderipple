@@ -227,6 +227,50 @@ test("a metered key's workers are its own, by name: a Claude API key always, the
   }
 });
 
+test("two providers' ids that sanitise alike each keep a worker; the later one is provider-suffixed", t => {
+  const dir = tmp(); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const manifest = path.join(dir, "generated-agents.json");
+  const warnings: string[] = [];
+  const cfg = cfgWith({ "opencode-go": p(["minimax-m3.1-flash"]), minimax: p(["MiniMax-M3.1-Flash", "MiniMax-M3"]) });
+  syncAgentFiles(cfg, dir, { warn: s => warnings.push(s) }, { manifestPath: manifest });
+
+  assert.match(fs.readFileSync(path.join(dir, "minimax-m3-1-flash.md"), "utf8"), /\nmodel: minimax-m3\.1-flash\n/);
+  assert.match(fs.readFileSync(path.join(dir, "minimax-m3-1-flash-minimax.md"), "utf8"), /\nmodel: minimax:MiniMax-M3\.1-Flash\n/);
+  assert.match(fs.readFileSync(path.join(dir, "minimax-m3.md"), "utf8"), /\nmodel: MiniMax-M3\n/, "an id no other provider shares keeps its bare name");
+  assert.deepEqual(warnings, []);
+  for (const [worker, provider] of [["minimax-m3-1-flash", "opencode-go"], ["minimax-m3-1-flash-minimax", "minimax"]] as const) {
+    assert.equal(resolve(agentAliases(dir)[worker]!, { messages: [{ role: "user", content: "hi" }] }, cfg)?.provider, provider, worker);
+  }
+});
+
+test("an exact duplicate's bare owner, beaten to the name by an id that sanitises alike, takes its suffix", t => {
+  const dir = tmp(); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const warnings: string[] = [];
+  const cfg = cfgWith({ a: p(["model.x"]), b: p(["Model-x"]), c: p(["Model-x"]) });
+  syncAgentFiles(cfg, dir, { warn: s => warnings.push(s) }, { manifestPath: path.join(dir, "m.json") });
+  assert.match(fs.readFileSync(path.join(dir, "model-x.md"), "utf8"), /\nmodel: model\.x\n/);
+  assert.match(fs.readFileSync(path.join(dir, "model-x-b.md"), "utf8"), /\nmodel: b:Model-x\n/);
+  assert.match(fs.readFileSync(path.join(dir, "model-x-c.md"), "utf8"), /\nmodel: c:Model-x\n/);
+  assert.deepEqual(warnings, []);
+});
+
+test("the fallback suffix never takes a name another declared model is called", t => {
+  const dir = tmp(); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const warnings: string[] = [];
+  syncAgentFiles(cfgWith({ a: p(["model.x"]), b: p(["Model-x", "Model-x-b"]) }), dir, { warn: s => warnings.push(s) }, { manifestPath: path.join(dir, "m.json") });
+  assert.match(fs.readFileSync(path.join(dir, "model-x-b.md"), "utf8"), /\nmodel: Model-x-b\n/, "the model called that keeps its worker");
+  assert.equal(warnings.length, 1, "Model-x is skipped with a warning, as before the fallback");
+});
+
+test("ids alike within one provider still clash: the second is skipped with a warning", t => {
+  const dir = tmp(); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const warnings: string[] = [];
+  syncAgentFiles(cfgWith({ a: p(["model.x", "model-x"]) }), dir, { warn: s => warnings.push(s) }, { manifestPath: path.join(dir, "m.json") });
+  assert.ok(fs.existsSync(path.join(dir, "model-x.md")));
+  assert.equal(fs.existsSync(path.join(dir, "model-x-a.md")), false);
+  assert.equal(warnings.length, 1);
+});
+
 test("duplicate workers keep manual-file and sanitised-name collision priority", t => {
   const dir = tmp(); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const manifest = path.join(dir, "manifest.json");

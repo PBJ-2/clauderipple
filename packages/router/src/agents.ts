@@ -216,6 +216,13 @@ function accountDisplayName(account: PinnedAccount): string {
  */
 function agentTargets(cfg: Config, log?: AgentLog, accountsFor: AccountsFor = () => [], handTaken: ReadonlySet<string> = new Set()): Map<string, AgentTarget> {
   const targets = new Map<string, AgentTarget>();
+  // Every declared model's own name: a fallback `<model>-<provider>` below must not take one, or a
+  // model that happens to be called that (`Model-x-b` on `b`) would lose its worker to `Model-x`.
+  const declaredNames = new Set<string>();
+  for (const provider of Object.values(cfg.providers)) {
+    if (!isTargetProvider(provider)) continue;
+    for (const model of provider.models ?? []) declaredNames.add(agentNameFor(model.id));
+  }
   for (const [providerName, provider] of Object.entries(cfg.providers)) {
     if (!isTargetProvider(provider)) continue;
     for (const model of provider.models ?? []) {
@@ -225,13 +232,31 @@ function agentTargets(cfg: Config, log?: AgentLog, accountsFor: AccountsFor = ()
       // a Claude API key, whose workers are always `<model>-<provider>` (targets.ts `bareOwners`).
       const first = bareOwners(model.id, cfg).find(name => isTargetProvider(cfg.providers[name]));
       const duplicate = owners.length > 1 || namedOnly(provider);
-      const { name, legacy } = workerNames(model.id, providerName, duplicate && first !== providerName);
-      const clash = targets.get(name);
+      let qualified = duplicate;
+      const suffixedAlready = duplicate && first !== providerName;
+      const names = workerNames(model.id, providerName, suffixedAlready);
+      const legacy = names.legacy;
+      let name = names.name;
+      let clash = targets.get(name);
+      // Two providers' ids that differ only in case or punctuation (OpenCode Go's
+      // `minimax-m3.1-flash`, MiniMax's own `MiniMax-M3.1-Flash`) are not one declaration, but they
+      // sanitise to one name. The later provider takes `<model>-<provider>` and a qualified model
+      // id, as a duplicate does, rather than losing its worker; ids alike within one provider
+      // still clash. Its legacy name stays the unsuffixed one: the 0.12.18 build kept case, so
+      // there the two never met and this worker had the bare name.
+      if (clash && clash.provider !== providerName && !suffixedAlready) {
+        const suffixed = workerNames(model.id, providerName, true).name;
+        if (!targets.has(suffixed) && !declaredNames.has(suffixed)) {
+          name = suffixed;
+          qualified = true;
+          clash = undefined;
+        }
+      }
       if (clash) {
         log?.warn(`agent files: "${model.id}" and "${clash.modelId}" both map to "${name}"; skipping "${model.id}"`);
         continue;
       }
-      targets.set(name, { modelId: duplicate ? `${providerName}:${model.id}` : model.id, title: shortName(model.name ?? model.id), provider: providerName, suffix: effortSuffix(provider, model.id), legacy });
+      targets.set(name, { modelId: qualified ? `${providerName}:${model.id}` : model.id, title: shortName(model.name ?? model.id), provider: providerName, suffix: effortSuffix(provider, model.id), legacy });
     }
   }
   for (const [name, target] of pinnedTargets(cfg, targets, accountsFor, handTaken, log)) targets.set(name, target);
