@@ -346,6 +346,7 @@ proxy
       claudeModels: () => proxy.claudeModels.list(),
       claudeIdentity: () => proxy.claudeIdentity.identify(),
       opencodeUsage: (name, credentialId) => proxy.opencodeLimits(name, credentialId),
+      minimaxUsage: (name, credentialId) => proxy.minimaxLimits(name, credentialId),
       grokUsage: (name: string) => proxy.grokLimits(name),
       image: (req, signal, meta) => proxy.generateImage(req, signal, meta),
       modelCatalog: () => loadModelCatalog(),

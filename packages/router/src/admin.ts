@@ -77,6 +77,8 @@ import { exhaustedForMs, IMAGE_ASPECTS, IMAGE_BACKGROUNDS, IMAGE_FORMATS, type C
 import type { GoogleAccountStatus } from "./providers/google/index.ts";
 import { googleWindowsFromGroups, type QuotaGroup } from "./providers/google/usage.ts";
 import { isOpenCodeGo, type OpenCodeWindow } from "./providers/opencode-usage.ts";
+import { isMiniMaxPlan, type MiniMaxWindow } from "./providers/minimax-usage.ts";
+import type { UsageWindow } from "./providers/usage-cache.ts";
 import type { GrokWindow } from "./providers/grok/usage.ts";
 import { ANTIGRAVITY_WARNING, staticAntigravityModels } from "./providers/google/antigravity.ts";
 import { readGoogleAccounts, removeGoogleAccount, summarize as summarizeGoogleAccount, updateGoogleAccount } from "./providers/google/accounts.ts";
@@ -231,6 +233,8 @@ export type AdminDeps = {
   claudeModels?: () => Promise<ClaudeModel[] | null>;
   /** An OpenCode Go provider's usage windows, for the status bar's limits row (`/api/limits`). Absent in tests. */
   opencodeUsage?: (name: string, credentialId?: string) => Promise<OpenCodeWindow[]>;
+  /** A MiniMax plan provider's usage windows, for the status bar's limits row (`/api/limits`). Absent in tests. */
+  minimaxUsage?: (name: string, credentialId?: string) => Promise<MiniMaxWindow[]>;
   /** A Grok provider's usage pool, for the status bar's limits row (`/api/limits`). Absent in tests. */
   grokUsage?: (name: string) => Promise<GrokWindow[]>;
   /**
@@ -484,6 +488,15 @@ async function buildLimits(deps: AdminDeps): Promise<{ providers: LimitsProvider
         at: Date.now(),
       })));
       if (rows.some((row) => row.windows.length)) providers.push({ provider: name, type: "opencode-go", title: "Go", accounts: rows });
+    } else if (p.type === "anthropic-compatible" && isMiniMaxPlan(p)) {
+      const credentials = p.credentials?.length ? p.credentials : [undefined];
+      const rows = await Promise.all(credentials.map(async (credential, account): Promise<LimitsAccount> => ({
+        account,
+        ...(credential?.label !== undefined ? { label: credential.label } : {}),
+        windows: ((await deps.minimaxUsage?.(name, credential?.id)) ?? []).map((w) => ({ ...w })),
+        at: Date.now(),
+      })));
+      if (rows.some((row) => row.windows.length)) providers.push({ provider: name, type: "minimax", title: "MiniMax", accounts: rows });
     } else if (p.type === "grok") {
       const windows = (await deps.grokUsage?.(name)) ?? [];
       if (windows.length) providers.push({ provider: name, type: "grok", title: "Grok", accounts: [{ account: 0, windows: windows.map((w) => ({ ...w })), at: Date.now() }] });
@@ -779,24 +792,24 @@ const MOD_EFFORTS: readonly string[] = ["low", "medium", "high", "xhigh", "max"]
 const modEfforts = (levels: readonly string[] | undefined): Effort[] => (levels ?? []).filter((level): level is Effort => MOD_EFFORTS.includes(level));
 
 /**
- * An OpenCode Go subscription's spent windows, from the same `/usage` read `/api/limits` shows.
- * One key is out once any of its windows (five-hour, weekly, monthly) reads 100%, because the plan
- * refuses every model on that key; it is back when the latest of its full windows resets. The
- * provider leaves the ladder only while every key is out, as rotation would otherwise find one to
- * use (#95). No reader, a failed read or an empty answer is not evidence: the answer stays today's.
+ * A plan subscription's spent windows, from the same read `/api/limits` shows (OpenCode Go's
+ * `/usage`, MiniMax M Plan's `coding_plan/remains`). One key is out once any of its windows reads
+ * 100%, because the plan refuses every model on that key; it is back when the latest of its full
+ * windows resets. The provider leaves the ladder only while every key is out, as rotation would
+ * otherwise find one to use (#95). No reader, a failed read or an empty answer is not evidence: the
+ * answer stays today's.
  */
-async function opencodeGoOut(
-  deps: AdminDeps,
+async function spentWindowsOut(
+  read: ((name: string, credentialId?: string) => Promise<UsageWindow[]>) | undefined,
   name: string,
   credentials: readonly ProviderCredential[] | undefined,
   now: number,
 ): Promise<{ reason: "quota_exhausted"; until: number } | undefined> {
-  const read = deps.opencodeUsage;
   if (!read) return undefined;
   const keys = credentials?.length ? credentials : [undefined];
   const backs: number[] = [];
   for (const credential of keys) {
-    let windows: OpenCodeWindow[];
+    let windows: UsageWindow[];
     try {
       windows = await read(name, credential?.id);
     } catch {
@@ -844,7 +857,10 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
       usable = p.auth === "api-key" ? !!(p.apiKey || process.env.ANTHROPIC_API_KEY)
         : claudeAuthStore(deps).describeSource() !== null || listClaudeAccounts(homeDir()).some(a => !a.needsReauth);
     } else if (p.type === "openai-compatible" && isOpenCodeGo(p)) {
-      usageOut = await opencodeGoOut(deps, name, p.credentials, now);
+      usageOut = await spentWindowsOut(deps.opencodeUsage, name, p.credentials, now);
+      if (usageOut) usable = false;
+    } else if (p.type === "anthropic-compatible" && isMiniMaxPlan(p)) {
+      usageOut = await spentWindowsOut(deps.minimaxUsage, name, p.credentials, now);
       if (usageOut) usable = false;
     }
     if (credentials[name]) usable = usable && credentials[name]!.some(c => c.state === "ready" && !c.paused);

@@ -41,6 +41,7 @@ import { OpenAiCompatibleAdapter } from "./providers/openai/index.ts";
 import { GoogleAdapter, googleKeyRejected, type GoogleAccountStatus } from "./providers/google/index.ts";
 import type { QuotaGroup } from "./providers/google/usage.ts";
 import { OpenCodeUsage, isOpenCodeGo, type OpenCodeWindow } from "./providers/opencode-usage.ts";
+import { MiniMaxUsage, isMiniMaxPlan, type MiniMaxWindow } from "./providers/minimax-usage.ts";
 import { GrokAdapter } from "./providers/grok/index.ts";
 import type { GrokWindow } from "./providers/grok/usage.ts";
 import { conversationKey, type AnthropicRequest } from "./providers/chatgpt/translate.ts";
@@ -285,6 +286,8 @@ export class Proxy {
   readonly claudeIdentity: ClaudeCurrentIdentity;
   /** Each OpenCode Go provider's usage windows, for the status bar's limits row (never a key). */
   private readonly opencodeUsage: OpenCodeUsage;
+  /** Each MiniMax plan provider's usage windows, for the status bar's limits row (never a key). */
+  private readonly minimaxUsage: MiniMaxUsage;
   private readonly deps: ProxyDeps;
   /**
    * Cooldowns, quarantines and conversation stickiness for provider credentials. In memory: a
@@ -521,6 +524,15 @@ export class Proxy {
     return this.opencodeUsage.windows(credential ? `${name}/${credential.id}` : name, cfg.url, credential?.headers ?? cfg.headers ?? {});
   }
 
+  /** A MiniMax plan provider's usage windows, for the status bar's limits row. Empty otherwise. */
+  minimaxLimits(name: string, credentialId?: string): Promise<MiniMaxWindow[]> {
+    const cfg = this.deps.config().providers[name];
+    if (!cfg || cfg.type !== "anthropic-compatible" || !isMiniMaxPlan(cfg)) return Promise.resolve([]);
+    const credential = credentialId === undefined ? undefined : cfg.credentials?.find((c) => c.id === credentialId);
+    if (credentialId !== undefined && !credential) return Promise.resolve([]);
+    return this.minimaxUsage.windows(credential ? `${name}/${credential.id}` : name, cfg.url, credential?.headers ?? cfg.headers ?? {});
+  }
+
   /** Dashboard action: put one resting Google account back into rotation now. */
   /** The pool scope a turn for `model` rests in on one antigravity provider (its quota group on its host). */
   googleQuotaScope(name: string, model: string): string | undefined {
@@ -597,6 +609,7 @@ export class Proxy {
       warn: (message) => deps.log.warn(message),
     });
     this.opencodeUsage = new OpenCodeUsage({ warn: (message) => deps.log.warn(message) });
+    this.minimaxUsage = new MiniMaxUsage({ warn: (message) => deps.log.warn(message) });
     this.httpServer = http.createServer({ maxHeaderSize: 64 * 1024 }, (req, res) => {
       void this.handle(req, res);
     });

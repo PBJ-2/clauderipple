@@ -1340,6 +1340,23 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
     written. One key stays in `headers`; several use complete `credentials` entries with `headers`
     mirroring the first, retaining id `default` when converting a single key. OpenCode Go usage is
     fetched and cached separately per credential and exposed in configured order, with optional labels.
+  - **MiniMax M Plan quota (2026-11-08).** A `minimax` preset provider (or any Anthropic-compatible
+    one on `api.minimax.io` / `api.minimaxi.com`) reads its plan's remaining quota from
+    `GET {provider origin}/v1/api/openplatform/coding_plan/remains` with the plan's own key as
+    `Authorization: Bearer <key>` — the same key the Anthropic wire sends as `x-api-key`, so the
+    endpoint is undocumented by MiniMax and the shape below is what it answered:
+    `{"model_remains":[{"model_name":"general","current_interval_remaining_percent":91,
+    "current_weekly_remaining_percent":99,"end_time":1794126007151,"weekly_end_time":1794712807151,
+    "current_interval_total_count":0,"current_weekly_total_count":0,...}],
+    "base_resp":{"status_code":0,"status_msg":"success"}}`. The plan counts **time, not calls**, so
+    the `*_count` fields are 0 and the share used is `100 - *_remaining_percent`; the resets are
+    `end_time` (the five-hour window) and `weekly_end_time` (the week) in epoch milliseconds, read as
+    seconds. The "general" entry answers for the plan; without one the first entry answers. A
+    `base_resp.status_code` other than 0, no `model_remains` or no finite share reads as null, so a
+    pay-as-you-go key that is on no plan shows no row at all. `GET /api/limits` lists it as its own
+    provider (`type: "minimax"`, title "MiniMax"), one account per credential, and a spent window
+    takes the provider out of the ladder until it resets (the #95 rule, as for OpenCode Go).
+    Source: `providers/minimax-usage.ts`, measured 2026-11-08 with a real M Plan key.
   - **Google api-key pools (2026-10-29, #112).** The `google` wire's `api-key` mode uses the same
     pool, stickiness and in-turn failover. Its keys are complete header sets like the compatible
     adapters', except each key goes out on `x-goog-api-key` (moved from `authorization`/`x-api-key`

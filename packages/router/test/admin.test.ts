@@ -55,6 +55,7 @@ async function withAdmin(
     chatgpt?: NonNullable<AdminDeps["chatgpt"]>;
     google?: NonNullable<AdminDeps["google"]>;
     opencodeUsage?: NonNullable<AdminDeps["opencodeUsage"]>;
+    minimaxUsage?: NonNullable<AdminDeps["minimaxUsage"]>;
     claudeUsage?: NonNullable<AdminDeps["claudeUsage"]>;
     claudeIdentity?: NonNullable<AdminDeps["claudeIdentity"]>;
     googleOAuthFetch?: (url: string, init?: RequestInit) => Promise<Response>;
@@ -350,6 +351,46 @@ test("mod options leave an OpenCode Go provider out only while every key's plan 
     windows = { "key-a": [weekly(100, soon)] };
     assert.equal((await go()).usable, true);
   }, { opencodeUsage: async (_name: string, credentialId?: string) => windows[credentialId ?? ""] ?? [], modelScoresFetch: async () => new Response("{}") });
+});
+
+test("mod options leave a MiniMax provider out while its plan's windows are spent", async () => {
+  const cfg = makeCfg({ providers: {
+    mini: {
+      type: "anthropic-compatible", preset: "minimax", url: "https://api.minimax.io/anthropic",
+      headers: { "x-api-key": "hidden-default-key" },
+      credentials: [
+        { id: "key-a", headers: { "x-api-key": "hidden-a" } },
+        { id: "key-b", headers: { "x-api-key": "hidden-b" } },
+      ],
+      models: [{ id: "MiniMax-M3.1-Flash" }],
+    },
+  } });
+  const weekly = (percent: number, resetAt: number): OpenCodeWindow => ({ kind: "seven_day", used_percent: percent, window_minutes: 10080, reset_at: resetAt });
+  const soon = Math.round((Date.now() + 3_600_000) / 1000);
+  const later = Math.round((Date.now() + 7_200_000) / 1000);
+  let windows: Record<string, OpenCodeWindow[]> = {};
+  await withAdmin(cfg, async ({ port }) => {
+    const mini = async () => ((await (await fetch(`${base()}:${port}/api/mod-options`)).json()) as ModOptions).providers.find((p) => p.name === "mini")!;
+    // One key still has room: rotation serves the work, so the provider stays in the ladder.
+    windows = { "key-a": [weekly(100, soon)], "key-b": [weekly(40, later)] };
+    assert.equal((await mini()).usable, true);
+    assert.equal((await mini()).reason, undefined);
+    // Every key is spent: the provider leaves the ladder until the first key's window resets.
+    windows = { "key-a": [weekly(100, soon)], "key-b": [weekly(100, later)] };
+    const out = await mini();
+    assert.equal(out.usable, false);
+    assert.equal(out.reason, "quota_exhausted");
+    const back = out.exhaustedUntil ?? 0;
+    assert.ok(back > Date.now() && back <= Date.now() + 3_600_000 + 5_000, `key-a's weekly reset lifts it first (${back - Date.now()} ms)`);
+    // A window whose reset already passed is no evidence: the next read will carry the new percent.
+    windows = { "key-a": [weekly(100, Math.round((Date.now() - 60_000) / 1000))], "key-b": [weekly(100, later)] };
+    assert.equal((await mini()).usable, true);
+    // Unknown usage — an empty answer, or one key's read missing — keeps today's answer.
+    windows = {};
+    assert.equal((await mini()).usable, true);
+    windows = { "key-a": [weekly(100, soon)] };
+    assert.equal((await mini()).usable, true);
+  }, { minimaxUsage: async (_name: string, credentialId?: string) => windows[credentialId ?? ""] ?? [], modelScoresFetch: async () => new Response("{}") });
 });
 
 test("mod options count a stored Claude account as signed in when Claude Code's own login is not seen", async () => {
@@ -3458,6 +3499,42 @@ test("GET /api/limits assembles every readable provider and honours limits:false
       { kind: "five_hour", used_percent: 3, window_minutes: 300, reset_at: future },
       { kind: "seven_day", used_percent: 52, window_minutes: 10080, reset_at: future },
       { kind: "window", used_percent: 92, window_minutes: 43200, reset_at: future },
+    ] : [],
+  });
+});
+
+test("GET /api/limits lists a MiniMax plan's five-hour and weekly windows", async () => {
+  const now = Date.now();
+  const future = Math.floor((now + 3_600_000) / 1000);
+  const cfg = makeCfg({ providers: {
+    mini: {
+      type: "anthropic-compatible", preset: "minimax", url: "https://api.minimax.io/anthropic",
+      headers: { "x-api-key": "hidden-key" },
+      credentials: [
+        { id: "key-a", label: "A", headers: { "x-api-key": "hidden-a" } },
+        { id: "key-b", headers: { "x-api-key": "hidden-b" } },
+      ],
+    },
+    // A MiniMax key that is on no plan answers nothing: no row at all.
+    payg: { type: "anthropic-compatible", url: "https://api.minimax.io/anthropic", headers: { "x-api-key": "hidden-key" } },
+    quiet: { type: "anthropic-compatible", preset: "minimax", url: "https://api.minimax.io/anthropic", limits: false },
+  } });
+  await withAdmin(cfg, async ({ port }) => {
+    const res = await fetch(`${base()}:${port}/api/limits`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { providers: LimitsProvider[] };
+    assert.deepEqual(body.providers.map((p) => [p.provider, p.type, p.title]), [["mini", "minimax", "MiniMax"]]);
+    // One account per key, in the configured order, each with its own plan windows.
+    assert.deepEqual(body.providers[0]!.accounts.map((a) => [a.account, a.label]), [[0, "A"], [1, undefined]]);
+    assert.deepEqual(body.providers[0]!.accounts[0]!.windows.map((w) => [w.kind, w.used_percent, w.window_minutes]), [
+      ["five_hour", 9, 300],
+      ["seven_day", 1, 10080],
+    ]);
+    assert.equal(body.providers[0]!.accounts[0]!.windows[0]!.reset_at, future);
+  }, {
+    minimaxUsage: async (name: string, credentialId?: string) => name === "mini" && credentialId === "key-a" ? [
+      { kind: "five_hour", used_percent: 9, window_minutes: 300, reset_at: future },
+      { kind: "seven_day", used_percent: 1, window_minutes: 10080, reset_at: future },
     ] : [],
   });
 });

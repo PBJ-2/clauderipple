@@ -14,6 +14,7 @@
 // `rolling` is the five-hour window, `weekly` the week, `monthly` roughly 30 days.
 
 import type { FetchLike } from "./google/antigravity.ts";
+import { UsageCache, type UsageWindow } from "./usage-cache.ts";
 
 /** The five-hour, weekly and ~monthly window lengths in minutes. */
 const FIVE_HOURS = 5 * 60;
@@ -21,7 +22,7 @@ const WEEK = 7 * 24 * 60;
 const MONTH = 30 * 24 * 60;
 
 /** One window the `/api/limits` endpoint reads. */
-export type OpenCodeWindow = { kind: "five_hour" | "seven_day" | "window"; used_percent: number; window_minutes?: number; reset_at?: number };
+export type OpenCodeWindow = UsageWindow;
 
 /** The window lengths and read order of the endpoint's three keys. */
 const KEYS: { key: string; kind: OpenCodeWindow["kind"]; window_minutes: number }[] = [
@@ -71,50 +72,14 @@ type UsageOptions = { fetch?: FetchLike; now?: () => number; ttlMs?: number; tim
  * the last good windows rather than blanking them, and only the status code is logged.
  */
 export class OpenCodeUsage {
-  private readonly last = new Map<string, OpenCodeWindow[]>();
-  private readonly at = new Map<string, number>();
-  private readonly inFlight = new Map<string, Promise<OpenCodeWindow[]>>();
-  private readonly opts: UsageOptions;
+  private readonly cache: UsageCache;
 
   constructor(opts: UsageOptions) {
-    this.opts = opts;
+    this.cache = new UsageCache({ ...opts, label: "opencode usage" });
   }
 
   /** The provider's windows, cached for `ttlMs`; the last good ones survive a failed lookup. */
   windows(name: string, url: string, headers: Record<string, string>): Promise<OpenCodeWindow[]> {
-    const now = (this.opts.now ?? Date.now)();
-    const ttl = this.opts.ttlMs ?? 5 * 60_000;
-    if (now - (this.at.get(name) ?? Number.NEGATIVE_INFINITY) < ttl) return Promise.resolve(this.last.get(name) ?? []);
-    const running = this.inFlight.get(name);
-    if (running) return running;
-    const task = this.fetchOne(name, url, headers).finally(() => {
-      this.at.set(name, (this.opts.now ?? Date.now)());
-      this.inFlight.delete(name);
-    });
-    this.inFlight.set(name, task);
-    return task;
-  }
-
-  private async fetchOne(name: string, url: string, headers: Record<string, string>): Promise<OpenCodeWindow[]> {
-    const keep = () => this.last.get(name) ?? [];
-    try {
-      const res = await (this.opts.fetch ?? fetch)(`${url.replace(/\/+$/, "")}/usage`, {
-        method: "GET",
-        headers: { accept: "application/json", ...headers },
-        signal: AbortSignal.timeout(this.opts.timeoutMs ?? 5000),
-      });
-      if (!res.ok) {
-        // The status alone: the body of an auth failure is not worth the risk of echoing.
-        this.opts.warn?.(`opencode usage ${name}: HTTP ${res.status}`);
-        return keep();
-      }
-      const windows = opencodeWindowsFromBody(await res.json());
-      if (!windows) return keep();
-      this.last.set(name, windows);
-      return windows;
-    } catch (e) {
-      this.opts.warn?.(`opencode usage ${name}: ${(e as Error).message}`);
-      return keep();
-    }
+    return this.cache.windows(name, `${url.replace(/\/+$/, "")}/usage`, headers, opencodeWindowsFromBody);
   }
 }

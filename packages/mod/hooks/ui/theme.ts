@@ -89,6 +89,8 @@ const KNOWN: Record<string, string> = {
   deepseek: '#4d6bfe',
   'opencode-go': '#9333ea',
   'opencode-zen': '#9333ea',
+  // MiniMax's red, so its row is told from the others by the vendor's own hue.
+  minimax: '#e5484d',
   // xAI's mark is black on white; silver reads on the band's dark capsule.
   grok: '#a8a29e',
 }
