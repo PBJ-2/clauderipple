@@ -13,12 +13,14 @@ import { UpstreamHealth } from "../src/health.ts";
 import { Logger } from "../src/log.ts";
 import { Proxy } from "../src/proxy.ts";
 import { ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
+import { saveChatGptAccount } from "../src/providers/chatgpt/accounts.ts";
+import { saveGoogleAccount } from "../src/providers/google/accounts.ts";
 import { RequestLog } from "../src/requestlog.ts";
 import { createCa, createLeaf } from "../src/x509.ts";
 
 const noClaudeCodeCredentialReaders = { keychain: () => null, credentialsFile: () => null };
 
-async function rig(options: { respond?: (res: http.ServerResponse) => void; healthLimit?: number } = {}) {
+async function rig(options: { respond?: (res: http.ServerResponse, req: http.IncomingMessage) => void; healthLimit?: number } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-log-metadata-"));
   const ca = createCa({ cn: "request log test" });
   const leaf = createLeaf({ host: "localhost", caCertPem: ca.certPem, caKeyPem: ca.keyPem });
@@ -36,7 +38,7 @@ async function rig(options: { respond?: (res: http.ServerResponse) => void; heal
       const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
       seen.push(body);
       seenAuth.push(req.headers.authorization);
-      if (options.respond) { options.respond(res); return; }
+      if (options.respond) { options.respond(res, req); return; }
       if ((body.tools as { type?: string }[] | undefined)?.some((tool) => tool.type === "image_generation")) {
         if (imageStatus !== 200) {
           res.writeHead(imageStatus, { "content-type": "application/json" }).end(JSON.stringify({ error: { message: "image backend failed" } }));
@@ -246,6 +248,64 @@ test("proxy finish correlates every translated message and records actual servic
   } finally { await r.stop(); }
 });
 
+test("a ChatGPT turn records the account that answered, not a token or workspace id", async () => {
+  const r = await rig();
+  try {
+    for (const stream of [true, false]) {
+      const { record } = await r.send("gpt-test", { stream });
+      assert.equal(record.ok, true);
+      assert.equal(record.account, "legacy");
+      assert.equal(record.credential, undefined);
+    }
+    const count = await r.send("gpt-test", {}, "/v1/messages/count_tokens");
+    assert.equal(count.record.account, undefined, "a local estimate uses no account");
+    assert.doesNotMatch(fs.readFileSync(path.join(r.home, "requests.jsonl"), "utf8"), /test-token|test-account/);
+  } finally { await r.stop(); }
+});
+
+for (const provider of ["chatgpt", "google"] as const) {
+  test(`a ${provider} retry records the account that answered the turn`, async () => {
+    let attempts = 0;
+    const r = await rig({ respond: (res, req) => {
+      if (++attempts === 1) {
+        res.writeHead(429, { "content-type": "application/json", "retry-after": "300" }).end('{"error":{"message":"rate limit"}}');
+        return;
+      }
+      const event = provider === "chatgpt"
+        ? { type: "response.completed", response: { usage: { input_tokens: 10, output_tokens: 2 } } }
+        : { response: { candidates: [{ content: { parts: [{ text: "answer" }] }, finishReason: "STOP" }], usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2 } } };
+      if (provider === "google" && !req.url?.includes("streamGenerateContent")) {
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(event));
+      } else res.writeHead(200, { "content-type": "text/event-stream" }).end(`data: ${JSON.stringify(event)}\n\n`);
+    } });
+    try {
+      const expiresAt = Date.now() + 3_600_000;
+      let owner: string;
+      if (provider === "chatgpt") {
+        owner = saveChatGptAccount(r.home, { accessToken: "second-token", accountId: "second-workspace", expiresAt }).id;
+      } else {
+        saveGoogleAccount(r.home, { accessToken: "first-google-token", projectId: "first-project", email: "first@example.test", expiresAt });
+        owner = saveGoogleAccount(r.home, { accessToken: "second-token", projectId: "second-project", email: "second@example.test", expiresAt }).id;
+        const google = r.cfg.providers.google;
+        assert.ok(google?.type === "google");
+        r.cfg.providers.google = { ...google, auth: "antigravity" };
+      }
+      const model = provider === "chatgpt" ? "gpt-test" : "gemini-test";
+      for (const stream of [true, false]) {
+        const { record } = await r.send(model, { stream });
+        assert.equal(record.ok, true, record.note);
+        assert.equal(record.account, owner);
+        assert.equal(record.credential, undefined);
+      }
+      assert.equal(attempts, 3, "the next turn stays on the account that answered");
+      assert.deepEqual(r.seenAuth, [provider === "chatgpt" ? "Bearer test-token" : "Bearer first-google-token", "Bearer second-token", "Bearer second-token"]);
+      assert.doesNotMatch(fs.readFileSync(path.join(r.home, "requests.jsonl"), "utf8"), /second-token|second-workspace|first-project|second-project|@example\.test/);
+      const count = await r.send(model, {}, "/v1/messages/count_tokens");
+      assert.equal(count.record.account, undefined);
+    } finally { await r.stop(); }
+  });
+}
+
 test("the agent header marks a subagent's turn, and the provider's Fast switch asks for the Codex tier", async () => {
   const r = await rig();
   try {
@@ -287,6 +347,27 @@ test("conversation identity separates agents in one session and survives model/p
   } finally { await r.stop(); }
 });
 
+test("a ChatGPT hosted search records the account that returned the results", async () => {
+  const r = await rig({ respond: (res) => {
+    const events = [
+      { type: "response.output_text.annotation.added", annotation: { type: "url_citation", title: "Result", url: "https://example.test/result" } },
+      { type: "response.completed", response: { tool_usage: { web_search: { num_requests: 1 } }, usage: { input_tokens: 10, output_tokens: 2 } } },
+    ];
+    res.writeHead(200, { "content-type": "text/event-stream" }).end(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""));
+  } });
+  try {
+    r.cfg.webSearch = { provider: "gpt", model: "gpt-test" };
+    const { record } = await r.send("claude-native", {
+      messages: [{ role: "user", content: "Perform a web search for the query: test" }],
+      tools: [{ name: "web_search", type: "web_search_20250305" }],
+    });
+    assert.equal(record.ok, true);
+    assert.equal(record.provider, "gpt");
+    assert.equal(record.purpose, "web-search");
+    assert.equal(record.account, "legacy");
+  } finally { await r.stop(); }
+});
+
 test("proxy generateImage records the image traffic, with usage on success and a failure record", async () => {
   const r = await rig();
   try {
@@ -299,6 +380,7 @@ test("proxy generateImage records the image traffic, with usage on success and a
       { kind: "image", source: "gpt-test", target: "image", provider: "gpt", stream: false, ok: true, status: 200, session: "session-1", note: "1536x1024 low png, 1 reference(s)" },
     );
     assert.deepEqual(record.usage, { input: 10, cached: 0, output: 2 });
+    assert.equal(record.account, "legacy");
     assert.match(record.at, /^\d{4}-\d\d-\d\dT/);
     assert.ok(record.ms >= 0);
 
@@ -337,6 +419,7 @@ test("proxy logs native request-id and classifier purpose without configuring cl
     r.observed.observe(["authorization", "Bearer test-native", "anthropic-version", "2023-06-01"]);
     const pooled = (await r.send("claude-pool")).record;
     assert.equal(pooled.provider, "claude");
+    assert.equal(pooled.account, "current");
     assert.equal(pooled.upstreamRequestId, "req_final");
     assert.equal(pooled.messageId, undefined);
     assert.equal(pooled.purpose, undefined);

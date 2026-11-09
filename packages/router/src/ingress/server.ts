@@ -100,7 +100,7 @@ export type IngressStats = {
   lastMessageEndedAt?: number;
 };
 
-type Outcome = { status: number; bytes: number; usage?: RequestUsage; stopReason?: string; note?: string };
+type Outcome = { status: number; bytes: number; account?: string; usage?: RequestUsage; stopReason?: string; note?: string };
 
 function openAiError(message: string, type = "invalid_request_error", code: string | null = null): Json {
   return { error: { message, type, param: null, code } };
@@ -284,6 +284,7 @@ export class OpenAiIngress {
       this.deps.log.info(`OPENAI ${tagged}`);
       if (isCall) {
         const entry: RequestRecord = { ...record, id: requestId(), at: new Date(started).toISOString(), ms, status, ok: status >= 200 && status < 400 };
+        if (extra.account) entry.account = extra.account;
         if (extra.usage) entry.usage = extra.usage;
         if (extra.stopReason) entry.stopReason = extra.stopReason;
         if (extra.note) entry.note = extra.note;
@@ -295,7 +296,7 @@ export class OpenAiIngress {
     let terminal: Outcome | null = null;
     res.once("close", () => {
       if (completed || res.writableEnded) return;
-      if (terminal) finish(terminal.status, terminal.bytes, { ...(terminal.usage ? { usage: terminal.usage } : {}), ...(terminal.stopReason ? { stopReason: terminal.stopReason } : {}), note: `${terminal.note ?? ""}; client closed after completion`.replace(/^; /, "") });
+      if (terminal) finish(terminal.status, terminal.bytes, { ...(terminal.account ? { account: terminal.account } : {}), ...(terminal.usage ? { usage: terminal.usage } : {}), ...(terminal.stopReason ? { stopReason: terminal.stopReason } : {}), note: `${terminal.note ?? ""}; client closed after completion`.replace(/^; /, "") });
       else finish(499, 0, { note: "client closed" });
     });
 
@@ -371,9 +372,9 @@ export class OpenAiIngress {
         record = { kind: "messages", source: requested, target: explicit?.model ?? requested, provider: adapter.name, stream: body.stream === true };
         const outcome = await adapter.passthrough(req, res, path.slice("/v1".length), payload, codexConversation(req, body), {
           bodyEncoded: !renamed,
-          onCompleted: (done) => { terminal = { status: done.status, bytes: done.bytes, ...(done.usage ? { usage: done.usage } : {}), ...(done.note ? { note: done.note } : {}) }; },
+          onCompleted: (done) => { terminal = { status: done.status, bytes: done.bytes, ...(done.account ? { account: done.account } : {}), ...(done.usage ? { usage: done.usage } : {}), ...(done.note ? { note: done.note } : {}) }; },
         });
-        finish(outcome.status, outcome.bytes, { ...(outcome.usage ? { usage: outcome.usage } : {}), ...(outcome.note ? { note: outcome.note } : {}) });
+        finish(outcome.status, outcome.bytes, { ...(outcome.account ? { account: outcome.account } : {}), ...(outcome.usage ? { usage: outcome.usage } : {}), ...(outcome.note ? { note: outcome.note } : {}) });
         return;
       }
       if (path === "/v1/responses/compact") {
@@ -424,7 +425,7 @@ export class OpenAiIngress {
       record = { kind: "messages", source: requested, target: route.model, provider: route.provider, ...(route.effort ? { effort: route.effort } : {}), stream };
       const kindNote = `openai-ingress ${path === "/v1/responses" ? "responses" : "chat"}`;
       const outcome = await this.forward(res, provider, wire, route.model, path === "/v1/chat/completions", stream, compaction, translation, (done) => { terminal = { ...done, note: kindNote }; });
-      finish(outcome.status, outcome.bytes, { ...(outcome.usage ? { usage: outcome.usage } : {}), ...(outcome.stopReason ? { stopReason: outcome.stopReason } : {}), note: `${kindNote}${outcome.note ? `; ${outcome.note}` : ""}` });
+      finish(outcome.status, outcome.bytes, { ...(outcome.account ? { account: outcome.account } : {}), ...(outcome.usage ? { usage: outcome.usage } : {}), ...(outcome.stopReason ? { stopReason: outcome.stopReason } : {}), note: `${kindNote}${outcome.note ? `; ${outcome.note}` : ""}` });
     } catch (error) {
       if (completed) return; // already recorded (e.g. client closed after the terminal event)
       this.deps.log.warn(`OPENAI ingress error: ${(error as Error).message}`);
@@ -486,7 +487,7 @@ export class OpenAiIngress {
       const safeText = redactErrorText(text, credentialHeaderValues(Object.entries(headers)));
       this.deps.log.warn(`OPENAI ingress upstream ${response.statusCode ?? 0} (${model}): ${safeText.slice(0, 400)}`);
       const mapped = httpStatusError(response.statusCode ?? 502, safeText);
-      return { status: mapped.status, bytes: sendJson(res, mapped.status, mapped.error), note: `upstream ${response.statusCode ?? 0}` };
+      return { status: mapped.status, bytes: sendJson(res, mapped.status, mapped.error), ...(poolCredential?.ownerId ? { account: poolCredential.ownerId } : {}), note: `upstream ${response.statusCode ?? 0}` };
     }
     const mapper = new ResponsesEventMapper(model, translation, compaction);
     let bytes = 0;
@@ -512,7 +513,7 @@ export class OpenAiIngress {
               if (stream) write(mapped);
               if (stream && mapped.some((e) => e.type === "response.completed")) {
                 if (chat) { bytes += Buffer.byteLength("data: [DONE]\n\n"); res.write("data: [DONE]\n\n"); }
-                onTerminal?.({ status: 200, bytes, usage: usage(mapper), stopReason: mapper.output.some((item) => item.type === "function_call" || item.type === "custom_tool_call") ? "tool_use" : "end_turn" });
+                onTerminal?.({ status: 200, bytes, ...(poolCredential?.ownerId ? { account: poolCredential.ownerId } : {}), usage: usage(mapper), stopReason: mapper.output.some((item) => item.type === "function_call" || item.type === "custom_tool_call") ? "tool_use" : "end_turn" });
               }
             }
           } catch (error) {
@@ -546,6 +547,6 @@ export class OpenAiIngress {
       const result = chat ? responsesToChatCompletion(mapper) : mapper.response("completed");
       bytes = sendJson(res, 200, result);
     }
-    return { status: 200, bytes, usage: usage(mapper), stopReason: mapper.output.some((item) => item.type === "function_call" || item.type === "custom_tool_call") ? "tool_use" : "end_turn" };
+    return { status: 200, bytes, ...(poolCredential?.ownerId ? { account: poolCredential.ownerId } : {}), usage: usage(mapper), stopReason: mapper.output.some((item) => item.type === "function_call" || item.type === "custom_tool_call") ? "tool_use" : "end_turn" };
   }
 }

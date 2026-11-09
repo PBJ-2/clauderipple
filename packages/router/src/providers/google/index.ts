@@ -41,7 +41,7 @@ const PING_MS = 15_000;
 /** How long the CCA model list is reused before asking again. */
 const MODELS_CACHE_MS = 60 * 60 * 1000;
 
-export type GoogleOutcome = { upstreamStatus?: number; retryAfterMs?: number | undefined; errorBody?: string; status: number; bytes: number; note?: string; usage?: RequestUsage; stopReason?: string; messageId?: string; upstreamCalled?: false; refusal?: "no-account" | "prompt-incompatible"; exhaustion?: ProviderExhaustion | undefined; modelUnavailable?: ModelUnavailable | undefined } & (
+export type GoogleOutcome = { account?: string; upstreamStatus?: number; retryAfterMs?: number | undefined; errorBody?: string; status: number; bytes: number; note?: string; usage?: RequestUsage; stopReason?: string; messageId?: string; upstreamCalled?: false; refusal?: "no-account" | "prompt-incompatible"; exhaustion?: ProviderExhaustion | undefined; modelUnavailable?: ModelUnavailable | undefined } & (
   | { kind?: "response" }
   // No status or bytes have reached the client; the proxy may try one route fallback.
   | { kind: "prompt-incompatible"; status: 400; bytes: 0; errorBody: string }
@@ -264,9 +264,9 @@ export type GoogleAccountStatus = GoogleAccountSummary & {
 /** How a send across the accounts ended. */
 type SendResult =
   | { kind: "ok"; upstream: Response; credential: GoogleCredential }
-  | { kind: "prompt-refused" }
-  | { kind: "no-capacity"; text: string; asks: number }
-  | { kind: "refused"; status: number; text: string; retryAfterSeconds?: number; verify?: { url: string; account: string }; group?: string }
+  | { kind: "prompt-refused"; account: string }
+  | { kind: "no-capacity"; text: string; asks: number; account: string }
+  | { kind: "refused"; status: number; text: string; account: string; retryAfterSeconds?: number; verify?: { url: string; account: string }; group?: string }
   /** `group`: only that quota group rests everywhere; the accounts still answer the other one. */
   | { kind: "all-resting"; backMs?: number; group?: string }
   | { kind: "no-account" }
@@ -707,13 +707,13 @@ export class GoogleAdapter {
       if (sent.kind === "aborted") return { status: 0, bytes: 0, note: "client closed" };
       if (sent.kind === "prompt-refused") {
         const err = anthropicError(400, "invalid_request_error", ANTIGRAVITY_PROMPT_REFUSAL_MESSAGE);
-        return { kind: "prompt-incompatible", status: 400, bytes: 0, errorBody: err.body,
+        return { kind: "prompt-incompatible", status: 400, bytes: 0, errorBody: err.body, account: sent.account,
           note: "upstream 429: suspected Antigravity SDK prompt refusal with remaining quota", refusal: "prompt-incompatible" };
       }
       if (sent.kind === "no-capacity") {
         // Overloaded, so Claude Code asks again on its own when no fallback takes the turn.
         const err = anthropicError(529, "overloaded_error", `Google provider: ${vendorMessage(sent.text)} — Google is out of capacity for this model (MODEL_CAPACITY_EXHAUSTED), asked ${sent.asks} times. This is Google's server capacity, not your account or its quota; try again shortly, or give the route a fallback.`);
-        return { kind: "model-capacity", status: 529, bytes: 0, errorBody: err.body,
+        return { kind: "model-capacity", status: 529, bytes: 0, errorBody: err.body, account: sent.account,
           note: `upstream 503 MODEL_CAPACITY_EXHAUSTED after ${sent.asks} asks; account not rested` };
       }
       if (sent.kind === "unreachable") {
@@ -755,11 +755,12 @@ export class GoogleAdapter {
       return { status: err.status, bytes: Buffer.byteLength(err.body), note,
         ...(sent.kind === "no-account" ? { upstreamCalled: false as const, refusal: "no-account" as const } : {}),
         ...(exhaustion ? { exhaustion } : {}),
-        ...(sent.kind === "refused" ? { modelUnavailable: modelDeprecation(sent.status, sent.text) } : {}),
+        ...(sent.kind === "refused" ? { account: sent.account, modelUnavailable: modelDeprecation(sent.status, sent.text) } : {}),
       };
     }
 
-    return this.streamBack(res, sent.upstream, transport, json, model, wantStream, key, startInput, controller, onClose, signatures, redact);
+    const outcome = await this.streamBack(res, sent.upstream, transport, json, model, wantStream, key, startInput, controller, onClose, signatures, redact);
+    return { ...outcome, account: sent.credential.ownerId };
   }
 
   /** Stream (or buffer) an already-ok upstream response back to the client as Anthropic SSE. */
@@ -940,7 +941,7 @@ export class GoogleAdapter {
       if (googleTosViolation(status, text)) {
         this.pool.penalise(this.name, credential.id, 401);
         this.log.warn(`google ${this.name}: account ${credential.ownerId.slice(0, 8)} parked: 403 TOS_VIOLATION (Google disabled this account for violating its Terms of Service); no refresh or replay`);
-        last = { kind: "refused", status, text: safeText };
+        last = { kind: "refused", status, text: safeText, account: credential.ownerId };
         tried.add(credential.ownerId);
         continue;
       }
@@ -951,7 +952,7 @@ export class GoogleAdapter {
       if (isModelCapacityExhausted(status, text)) {
         capacityAsks++;
         const delay = capacityRetry.delaysMs[capacityAsks - 1];
-        if (delay === undefined) return { kind: "no-capacity", text: safeText, asks: capacityAsks };
+        if (delay === undefined) return { kind: "no-capacity", text: safeText, asks: capacityAsks, account: credential.ownerId };
         this.log.info(`google ${this.name}: ${spec.model} out of capacity (ask ${capacityAsks}); asking again in ${delay}ms without resting the account`);
         try {
           await sleep(delay, undefined, { signal: spec.signal });
@@ -965,7 +966,7 @@ export class GoogleAdapter {
       // cooldown and account rotation. The proxy can still try a route fallback.
       if (isAntigravityPromptRefusal(spec.system, status, text, upstream.headers.get("retry-after")) &&
           this.usage.hasRemainingQuota(credential, spec.model, spec.host)) {
-        return { kind: "prompt-refused" };
+        return { kind: "prompt-refused", account: credential.ownerId };
       }
       // Not a rest and not a refresh: the account works again the moment its person finishes
       // Google's page, so it stays in rotation and the next turn finds out.
@@ -973,7 +974,7 @@ export class GoogleAdapter {
       if (verifyUrl) {
         this.verifyUrls.set(credential.ownerId, verifyUrl);
         const summary = this.accounts.summaries().find((s) => s.id === credential.ownerId);
-        last = { kind: "refused", status, text: safeText, verify: { url: verifyUrl, account: summary?.email ?? summary?.label ?? credential.ownerId.slice(0, 8) } };
+        last = { kind: "refused", status, text: safeText, account: credential.ownerId, verify: { url: verifyUrl, account: summary?.email ?? summary?.label ?? credential.ownerId.slice(0, 8) } };
         tried.add(credential.ownerId);
         continue;
       }
@@ -997,7 +998,7 @@ export class GoogleAdapter {
       const waitMs = retryHeader ? retryAfterMs({ "retry-after": retryHeader }) : googleRetryDelayMs(text);
       const spent = group && isGroupQuotaExhausted(status, text, group) ? group : undefined;
       const verdict = this.pool.penalise(this.name, credential.id, credentialRefused ? 403 : status, waitMs, text, spent ? scope : undefined);
-      last = { kind: "refused", status, text: safeText, ...(status === 429 && waitMs ? { retryAfterSeconds: Math.ceil(waitMs / 1000) } : {}), ...(spent ? { group: spent } : {}) };
+      last = { kind: "refused", status, text: safeText, account: credential.ownerId, ...(status === 429 && waitMs ? { retryAfterSeconds: Math.ceil(waitMs / 1000) } : {}), ...(spent ? { group: spent } : {}) };
       if (!verdict.retryable) return last;
       tried.add(credential.ownerId);
     }

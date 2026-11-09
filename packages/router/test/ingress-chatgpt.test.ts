@@ -54,8 +54,8 @@ const backend = http.createServer((req, res) => {
 await new Promise<void>((r) => backend.listen(0, "127.0.0.1", () => r()));
 const backendUrl = `http://127.0.0.1:${(backend.address() as net.AddressInfo).port}`;
 
-saveChatGptAccount(home, { accessToken: "tok-1", refreshToken: "rt-1", accountId: "ws-1", expiresAt: Date.now() + 3_600_000 });
-saveChatGptAccount(home, { accessToken: "tok-2", refreshToken: "rt-2", accountId: "ws-2", expiresAt: Date.now() + 3_600_000 });
+const firstAccount = saveChatGptAccount(home, { accessToken: "tok-1", refreshToken: "rt-1", accountId: "ws-1", expiresAt: Date.now() + 3_600_000 });
+const secondAccount = saveChatGptAccount(home, { accessToken: "tok-2", refreshToken: "rt-2", accountId: "ws-2", expiresAt: Date.now() + 3_600_000 });
 const config: Config = { ...DEFAULTS, providers: { chatgpt: { type: "chatgpt", auth: "own", url: backendUrl } }, listen: { host: "127.0.0.1", port: 0, openaiPort: 0 } };
 let adapter = new ChatGptAdapter("chatgpt", config.providers.chatgpt as never, home, log, new CredentialPool());
 const ingress = new OpenAiIngress({ config: () => config, log, requests, home, claudeCodeCredentialReaders: noClaudeCodeCredentialReaders, chatgpt: () => adapter });
@@ -107,6 +107,7 @@ test("a GPT turn from Codex goes out unchanged on a pool account, and comes back
   assert.equal(res.headers["set-cookie"], undefined, "only protocol headers are relayed");
   const record = requests.list(1)[0]!;
   assert.deepEqual(record.usage, { input: 20, cached: 100, output: 5 });
+  assert.equal(record.account, firstAccount.id);
 });
 
 test("account 1 at its limit: Codex's same turn is answered on account 2, no sign-out", async () => {
@@ -117,6 +118,7 @@ test("account 1 at its limit: Codex's same turn is answered on account 2, no sig
   const sent = hits.slice(before);
   assert.deepEqual(sent.map((h) => h.headers.authorization), ["Bearer tok-1", "Bearer tok-2"]);
   assert.equal(sent[1]!.headers["x-codex-turn-state"], undefined, "account 1's turn token is not shown to account 2");
+  assert.equal(requests.list(1)[0]!.account, secondAccount.id);
   const next = await codexCall("/v1/responses", turn, "sess-3");
   assert.equal(next.status, 200);
   assert.equal(hits.at(-1)!.headers.authorization, "Bearer tok-2", "account 1 rests until its window resets");
@@ -128,6 +130,7 @@ test("every pool account out: Codex's own login answers instead of a failure", a
   assert.equal(res.status, 200);
   assert.equal(hits.at(-1)!.headers.authorization, "Bearer caller-token");
   assert.equal(hits.at(-1)!.headers["chatgpt-account-id"], "ws-caller");
+  assert.equal(requests.list(1)[0]!.account, undefined, "the caller's workspace id is not a local owner id");
   behaviour.clear();
 });
 

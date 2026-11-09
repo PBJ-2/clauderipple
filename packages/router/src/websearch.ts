@@ -37,6 +37,7 @@ export type SearchHit = { title: string; url: string };
 
 export type SearchOutcome = {
   hits: SearchHit[];
+  account?: string;
   /** Optional prose to accompany the hits, for backends that produce one. */
   text?: string;
   /**

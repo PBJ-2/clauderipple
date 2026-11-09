@@ -49,7 +49,7 @@ import { CredentialPool } from "./pool.ts";
 import { ClaudeAccountAuthPool } from "./providers/anthropic-account-pool.ts";
 import type { ModelHealth, ProviderExhaustion } from "./health.ts";
 import type { Stats } from "./proxy.ts";
-import type { RequestLog } from "./requestlog.ts";
+import type { RequestLog, RequestRecord } from "./requestlog.ts";
 import { PRESETS, type ProviderPreset } from "./presets.ts";
 import { answersWebSearch, effortLevels, targetWarnings } from "./targets.ts";
 export { effortLevels } from "./targets.ts";
@@ -254,6 +254,30 @@ function previewAccounts<T extends { id: string; paused: boolean; preferred: boo
     .map((account) => ({ id: account.id, preferred: account.preferred, headers: {} }));
   const next = new CredentialPool().pick("preview", credentials)?.id;
   return accounts.map((account) => ({ ...account, state: account.paused ? "paused" : credentials.some((credential) => credential.id === account.id) ? "ready" : "needs-login", inUse: account.id === next }));
+}
+
+/** Account names are read alongside the log, never written into requests.jsonl. */
+async function requestAccountLabels(deps: AdminDeps, records: readonly RequestRecord[]): Promise<Map<string, string>> {
+  const labels = new Map<string, string>();
+  const providers = new Set(records.filter((record) => record.account).map((record) => record.provider));
+  if (providers.size === 0) return labels;
+  const cfg = deps.config();
+  const claude = listClaudeAccounts(homeDir());
+  const chatgpt = deps.chatgpt?.().accounts?.() ?? {};
+  const google = deps.google?.().accounts() ?? {};
+  const storedChatgpt = readChatGptAccounts(homeDir()).map(summarizeChatGptAccount);
+  const storedGoogle = readGoogleAccounts(homeDir()).map(summarizeGoogleAccount);
+  const identity = records.some((record) => record.account === "current")
+    ? await deps.claudeIdentity?.().catch(() => null) : null;
+  for (const name of providers) {
+    const type = cfg.providers[name]?.type;
+    const accounts = type === "chatgpt" ? chatgpt[name] ?? storedChatgpt
+      : type === "google" ? google[name] ?? storedGoogle
+      : type === "anthropic" || name === "anthropic" ? claude : [];
+    for (const account of accounts) labels.set(`${name}\0${account.id}`, account.label || account.email || account.id.slice(0, 8));
+    if (type === "anthropic" || name === "anthropic") labels.set(`${name}\0current`, identity?.email ?? "Current Claude login");
+  }
+  return labels;
 }
 
 /** Claude usage is looked up only where a Claude subscription provider is configured. */
@@ -3159,7 +3183,11 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         // A comma-separated list so one call can ask for several kinds; unknown entries are ignored
         // and a list with nothing valid left means no filter.
         const kinds = kindValue === null ? [] : kindValue.split(",").filter((k): k is "messages" | "count_tokens" | "other" | "image" => k === "messages" || k === "count_tokens" || k === "other" || k === "image");
-        sendJson(res, 200, { requests: deps.requests.list(n, { ...(provider ? { provider } : {}), ...(kinds.length ? { kind: kinds } : {}), ...(session ? { session } : {}) }) });
+        const records = deps.requests.list(n, { ...(provider ? { provider } : {}), ...(kinds.length ? { kind: kinds } : {}), ...(session ? { session } : {}) });
+        const labels = await requestAccountLabels(deps, records);
+        sendJson(res, 200, { requests: records.map((record) => record.account
+          ? { ...record, accountLabel: labels.get(`${record.provider}\0${record.account}`) ?? record.account.slice(0, 8) }
+          : record) });
         return;
       }
       if (pathname === "/api/requests/summary" && method === "GET") {

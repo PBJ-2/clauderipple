@@ -218,7 +218,7 @@ test("native ingress uses one added Claude account without enabling failover", a
     });
   });
   const nativePort = await listen(native);
-  saveClaudeOAuthAccount(home, { accessToken: "added-access", refreshToken: "added-refresh", expiresAt: Date.now() + 3_600_000, accountId: "added-account" });
+  const account = saveClaudeOAuthAccount(home, { accessToken: "added-access", refreshToken: "added-refresh", expiresAt: Date.now() + 3_600_000, accountId: "added-account" });
   const now = Date.now;
   const noCurrent = new ClaudeCodeAuthStore(new ClaudeCodeCredentialStore(() => null, now), { home, env: {}, now });
   const claudeAccounts = new ClaudeAccountAuthPool({ home, current: noCurrent, log });
@@ -234,6 +234,7 @@ test("native ingress uses one added Claude account without enabling failover", a
     assert.equal(response.status, 200);
     assert.equal(nativeSeen.length, 1);
     assert.equal(nativeSeen[0]!.authorization, "Bearer added-access");
+    assert.equal(requests.list(1)[0]!.account, account.id);
   } finally {
     await nativeIngress.drain(1);
     await new Promise<void>((resolve) => native.close(() => resolve()));

@@ -12,8 +12,8 @@ import { fileURLToPath } from "node:url";
 const uiDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "../../ui");
 
 type FakeNode = { tag: string; className: string; textContent: string; attrs: Record<string, string>; children: FakeNode[] };
-type Record_ = { id: string; at: string; ms: number; kind: string; source: string; target: string; provider: string; ok: boolean; status: number; requestedTier?: string; servedTier?: string; effort?: string };
-type Builders = { requestRow: (record: Record_) => FakeNode; requestDetail: (record: Record_) => FakeNode };
+type Record_ = { id: string; at: string; ms: number; kind: string; source: string; target: string; provider: string; ok: boolean; status: number; requestedTier?: string; servedTier?: string; effort?: string; account?: string; accountLabel?: string; credential?: string };
+type Builders = { requestRow: (record: Record_) => FakeNode; requestDetail: (record: Record_) => FakeNode; render: (records: Record_[], expanded?: string) => FakeNode[] };
 
 function sourceBetween(source: string, from: string, to: string): string {
   const start = source.indexOf(from);
@@ -30,12 +30,12 @@ function loadI18n(): Record<string, Record<string, string>> {
   return new Function(`${source.slice(start, end + 3)}; return I18N;`)() as Record<string, Record<string, string>>;
 }
 
-function load(): Builders {
+function load(configuredProviders: Record<string, unknown> = {}): Builders {
   const app = fs.readFileSync(path.join(uiDir, "app.js"), "utf8");
   const i18n = loadI18n();
   const code = [
     sourceBetween(app, "function el(", "// Inside the ClaudeRipple app"),
-    sourceBetween(app, "function totalInputOf", "function renderRequests"),
+    sourceBetween(app, "function totalInputOf", "async function refreshRequests"),
   ].join("\n");
   class Node_ {
     tag: string; className = ""; textContent = ""; attrs: Record<string, string> = {}; children: Node_[] = [];
@@ -47,13 +47,18 @@ function load(): Builders {
   }
   const document = { createElement: (tag: string) => new Node_(tag), createTextNode: (text: string) => Object.assign(new Node_("#text"), { textContent: text }) };
   const t = (key: string, vars?: Record<string, string | number>) => (i18n.en![key] ?? key).replace(/\{(\w+)\}/g, (_, name: string) => String(vars?.[name]));
+  let rows: FakeNode[] = [];
+  const scroll = { scrollLeft: 0, hidden: false };
+  const tbody = { replaceChildren: (...nodes: FakeNode[]) => { rows = nodes; } };
   const stubs = {
     t, document, Node: Node_,
+    $: (selector: string) => selector === "#requests-table tbody" ? tbody : { closest: () => scroll, hidden: false },
+    currentConfig: null, configuredProviders,
     timeOf: () => "12:00", formatSeconds: () => "1s", formatNumber: (n: number) => String(n),
     providerClass: () => "provider-chatgpt", providerLabel: (name: string) => name,
-    renderRequests: () => undefined, requestRows: [], expandedRequestId: null,
+    requestRows: [], expandedRequestId: null, rows: () => rows,
   };
-  return new Function(...Object.keys(stubs), `${code}; return { requestRow, requestDetail };`)(...Object.values(stubs)) as Builders;
+  return new Function(...Object.keys(stubs), `${code}; return { requestRow, requestDetail, render(records, expanded) { requestRows = records; expandedRequestId = expanded; renderRequests(records); return rows(); } };`)(...Object.values(stubs)) as Builders;
 }
 
 function walk(node: FakeNode, visit: (n: FakeNode) => void): void {
@@ -110,11 +115,54 @@ test("a request that reports no tier has no tier line in its detail", () => {
   assert.ok(!texts(requestDetail(BASE)).includes("Requested tier / Served tier"));
 });
 
+test("each request row names the account that answered in the provider badge", () => {
+  const { render } = load();
+  const first = { ...BASE, account: "first-account", accountLabel: "first@example.test" };
+  const second = { ...BASE, id: "req-2", account: "second-account", accountLabel: "second@example.test" };
+  const rows = render([first, second], first.id);
+  const models = rows[0]!.children.find((cell) => cell.className === "c-model")!.children[0]!;
+  assert.equal(models.children.at(-1)!.textContent, "first@example.test");
+  assert.equal(models.children.at(-1)!.attrs.title, "chatgpt", "the provider is named on hover");
+  assert.ok(texts(rows[1]!).includes("Account"));
+  assert.ok(texts(rows[1]!).includes("first@example.test"));
+  assert.ok(texts(rows[1]!).includes("Provider"), "the detail names the provider the badge no longer shows");
+  assert.ok(texts(rows[2]!).includes("second@example.test"));
+  assert.equal(rows[0]!.children.length, 7, "the narrow-width column layout is unchanged");
+  assert.equal(rows[1]!.children[0]!.attrs.colspan, "7");
+});
+
+test("a lone account is still named on its row and in its detail; old OAuth records stay unchanged", () => {
+  const { render, requestDetail } = load();
+  const known = { ...BASE, account: "current", accountLabel: "current@example.test" };
+  assert.ok(texts(render([known])[0]!).includes("current@example.test"), "one account in the log is still named, so it is never mistaken for the provider's name");
+  assert.ok(texts(requestDetail(known)).includes("current@example.test"));
+  assert.ok(!texts(requestDetail({ ...BASE, credential: "#2" })).includes("Account"));
+  assert.ok(!texts(requestDetail(BASE)).includes("Account"));
+  assert.ok(texts(requestDetail({ ...BASE, account: "removed-account" })).includes("removed-"));
+});
+
+test("current and stored Claude accounts, even with the same label, are distinct owners", () => {
+  const { render } = load();
+  const first = { ...BASE, provider: "claude", account: "current", accountLabel: "same@example.test" };
+  const second = { ...first, id: "req-2", account: "stored-account" };
+  assert.ok(texts(render([first, second])[0]!).includes("same@example.test"));
+});
+
+test("API-key pools show their existing credential labels without adding an account id", () => {
+  const { render, requestDetail } = load({ api: { credentials: [{ id: "a" }, { id: "b" }] } });
+  const first = { ...BASE, provider: "api", credential: "Work key" };
+  const second = { ...first, id: "req-2", credential: "Other key" };
+  assert.ok(texts(render([first, second])[0]!).includes("Work key"));
+  assert.ok(texts(requestDetail(first)).includes("Work key"));
+  assert.ok(texts(render([first])[0]!).includes("Work key"));
+});
+
 test("every dashboard language words the badge's tooltip and the tier line", () => {
   const i18n = loadI18n();
   for (const [lang, dict] of Object.entries(i18n)) {
     assert.ok(dict["logs.fastHelp"], `${lang}: logs.fastHelp`);
     assert.ok(dict["logs.detail.tier"], `${lang}: logs.detail.tier`);
+    assert.ok(dict["logs.detail.account"], `${lang}: logs.detail.account`);
   }
   assert.equal(i18n.ko!["logs.detail.tier"], "요청 등급 / 실제 등급");
 });

@@ -62,9 +62,9 @@ export type ImageRequest = {
   images?: { mediaType: string; data: string }[];
 };
 
-export type ImageResult = { data: Buffer; format: string; size?: string; quality?: string; revisedPrompt?: string; usage?: RequestUsage };
+export type ImageResult = { data: Buffer; format: string; account?: string; size?: string; quality?: string; revisedPrompt?: string; usage?: RequestUsage };
 
-export type ChatGptOutcome ={ status: number; bytes: number; note?: string; usage?: RequestUsage; stopReason?: string; messageId?: string; requestedTier?: string; servedTier?: string; upstreamCalled?: false; refusal?: "no-account"; exhaustion?: ProviderExhaustion | undefined };
+export type ChatGptOutcome ={ status: number; bytes: number; account?: string; note?: string; usage?: RequestUsage; stopReason?: string; messageId?: string; requestedTier?: string; servedTier?: string; upstreamCalled?: false; refusal?: "no-account"; exhaustion?: ProviderExhaustion | undefined };
 
 function anthropicError(status: number, type: string, message: string): { status: number; body: string } {
   return { status, body: JSON.stringify({ type: "error", error: { type, message } }) };
@@ -255,7 +255,7 @@ export function exhaustedForMs(snapshot: Record<string, unknown> | null | undefi
 export type SendResult =
   | { kind: "ok"; upstream: Response; credential: ChatGptCredential }
   /** The last account's refusal (or the first one that was the request's fault), body redacted. */
-  | { kind: "refused"; status: number; text: string; headers: Headers; retryAfterSeconds?: number }
+  | { kind: "refused"; status: number; text: string; headers: Headers; account: string; retryAfterSeconds?: number }
   | { kind: "all-resting"; backMs?: number }
   | { kind: "no-account" }
   | { kind: "unreachable"; error: Error }
@@ -494,6 +494,7 @@ export class ChatGptAdapter {
     const prose = text.trim();
     return {
       hits: selected,
+      account: tokens.ownerId,
       ...(prose ? { text: prose } : {}),
       ...(usage ? { usage } : {}),
     };
@@ -598,6 +599,7 @@ export class ChatGptAdapter {
     const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
     return {
       data: Buffer.from(image.result as string, "base64"),
+      account: tokens.ownerId,
       format: str(image.output_format) ?? req.format ?? "png",
       ...(str(image.size) ? { size: str(image.size)! } : {}),
       ...(str(image.quality) ? { quality: str(image.quality)! } : {}),
@@ -879,7 +881,7 @@ export class ChatGptAdapter {
       // A refusal here is a rest, never a pool quarantine: "sign in again" is the store's to say
       // (needsReauth, above), and a quarantine would outlive the new token a sign-in brings.
       const verdict = this.pool.penalise(this.name, credential.id, credentialRefused ? 403 : status, waitMs, text);
-      last = { kind: "refused", status, text: safeText, headers: upstream.headers, ...(status === 429 && waitMs ? { retryAfterSeconds: Math.ceil(waitMs / 1000) } : {}) };
+      last = { kind: "refused", status, text: safeText, headers: upstream.headers, account: credential.ownerId, ...(status === 429 && waitMs ? { retryAfterSeconds: Math.ceil(waitMs / 1000) } : {}) };
       if (!verdict.retryable) return last;
       tried.add(credential.ownerId);
     }
@@ -972,7 +974,7 @@ export class ChatGptAdapter {
         // A used-up quota (`usage_limit_reached` and its kin) is definite: the client is told so.
         const exhaustion = providerExhaustion(sent.status, sent.text, sent.retryAfterSeconds === undefined ? undefined : sent.retryAfterSeconds * 1000);
         res.writeHead(sent.status, { "content-type": sent.headers.get("content-type") ?? "application/json", ...(sent.retryAfterSeconds ? { "retry-after": String(sent.retryAfterSeconds) } : {}), ...(exhaustion ? exhaustionHeaders(exhaustion) : {}) }).end(text);
-        return { status: sent.status, bytes: Buffer.byteLength(text), note: `upstream ${sent.status}`, exhaustion };
+        return { status: sent.status, bytes: Buffer.byteLength(text), account: sent.account, note: `upstream ${sent.status}`, exhaustion };
       }
     }
 
@@ -1011,7 +1013,7 @@ export class ChatGptAdapter {
                 const cached = u.input_tokens_details?.cached_tokens ?? 0;
                 usage = { input: (u.input_tokens ?? 0) - cached, cached, output: u.output_tokens ?? 0 };
               }
-              opts.onCompleted?.({ status: upstream.status, bytes, ...(usage ? { usage } : {}), note: `codex passthrough account=${owner ? owner.slice(0, 8) : "caller"}` });
+              opts.onCompleted?.({ status: upstream.status, bytes, ...(usage ? { usage } : {}), ...(owner ? { account: owner } : {}), note: `codex passthrough account=${owner ? owner.slice(0, 8) : "caller"}` });
             }
           }
         }
@@ -1019,12 +1021,12 @@ export class ChatGptAdapter {
     } catch (e) {
       if (!ac.signal.aborted) this.log.warn(`chatgpt ${this.name}: codex passthrough interrupted: ${(e as Error).message}`);
       res.destroy();
-      return { status: upstream.status, bytes, note: "stream interrupted" };
+      return { status: upstream.status, bytes, ...(owner ? { account: owner } : {}), note: "stream interrupted" };
     } finally {
       res.off("close", onClose);
     }
     if (!res.writableEnded) res.end();
-    return { status: upstream.status, bytes, ...(usage ? { usage } : {}), note: `codex passthrough account=${owner ? owner.slice(0, 8) : "caller"}` };
+    return { status: upstream.status, bytes, ...(usage ? { usage } : {}), ...(owner ? { account: owner } : {}), note: `codex passthrough account=${owner ? owner.slice(0, 8) : "caller"}` };
   }
 
   /**
@@ -1151,6 +1153,7 @@ export class ChatGptAdapter {
       res.writeHead(err.status, { "content-type": "application/json", ...(retryAfterSeconds ? { "retry-after": String(retryAfterSeconds) } : {}), ...(exhaustion ? exhaustionHeaders(exhaustion) : {}) }).end(err.body);
       return { status: err.status, bytes: err.body.length, note,
         ...(sent.kind === "no-account" ? { upstreamCalled: false as const, refusal: "no-account" as const } : {}),
+        ...(sent.kind === "refused" ? { account: sent.account } : {}),
         ...(sent.kind === "refused" && upstreamReq.service_tier !== undefined ? { requestedTier: upstreamReq.service_tier } : {}),
         ...(exhaustion ? { exhaustion } : {}),
       };
@@ -1265,6 +1268,7 @@ export class ChatGptAdapter {
     return {
       // A stream has already sent 200; the record still says the turn failed.
       status: failure ? failedStatus : 200,
+      account: credential.ownerId,
       exhaustion,
       bytes,
       note: failure

@@ -30,6 +30,8 @@ export type RequestRecord = {
   provider: string;
   /** Actual responder's configured label or 1-based ordinal; never a credential id or token. */
   credential?: string;
+  /** Actual responder's durable owner id; never an email or token. */
+  account?: string;
   effort?: string;
   upstreamRequestId?: string;
   messageId?: string;

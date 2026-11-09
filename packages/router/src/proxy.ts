@@ -414,6 +414,7 @@ export class Proxy {
         ok: true,
         status: 200,
         ...(image.usage ? { usage: image.usage } : {}),
+        ...(image.account ? { account: image.account } : {}),
         note: `${image.size ?? "?"} ${image.quality ?? "?"} ${image.format}, ${req.images?.length ?? 0} reference(s)`,
         ...(meta?.session ? { session: meta.session } : {}),
       };
@@ -880,7 +881,7 @@ export class Proxy {
     let unwrittenSeen = false;
     // `failed` counts requests that did not get a proper response (vanished, upstream error,
     // provider error). A note alone is not a failure: adapters attach usage notes on success.
-    const finish = (status: string, bytes: number, note?: string, failed: boolean = note !== undefined, extra?: { usage?: RequestUsage; stopReason?: string; resent?: boolean; messageId?: string; requestedTier?: string; servedTier?: string; upstreamCalled?: false | undefined; refusal?: RequestRecord["refusal"] }): void => {
+    const finish = (status: string, bytes: number, note?: string, failed: boolean = note !== undefined, extra?: { usage?: RequestUsage; stopReason?: string; resent?: boolean; account?: string; messageId?: string; requestedTier?: string; servedTier?: string; upstreamCalled?: false | undefined; refusal?: RequestRecord["refusal"] }): void => {
       if (finished) return;
       finished = true;
       // A translated adapter may have sent 200 before the client left. That is not a
@@ -917,6 +918,7 @@ export class Proxy {
         if (stopReason && !cancelled) completed.stopReason = stopReason;
         if (note) completed.note = note;
         if (extra?.resent && !completed.ok) completed.resent = true;
+        if (extra?.account !== undefined) completed.account = extra.account;
         if (extra?.messageId !== undefined) completed.messageId = extra.messageId;
         if (extra?.requestedTier !== undefined) completed.requestedTier = extra.requestedTier;
         if (extra?.servedTier !== undefined) completed.servedTier = extra.servedTier;
@@ -1015,6 +1017,7 @@ export class Proxy {
       const type = cfg.providers[name]?.type;
       if (pathname === "/v1/messages/count_tokens" && (type === "openai-compatible" || type === "google")) return;
       record.credential = this.credentialLabel(name, using, credentials);
+      if (using.ownerId) record.account = using.ownerId;
       const first = this.pool.pick(name, credentials);
       const reason = pinned ? "account-pin" : retry ? "retry" : !first ? "all-unavailable" : first.id !== using.id ? "affinity" : "configured-order";
       const states = this.pool.report(name, credentials).map((row, i) => `${this.credentialLabel(name, credentials[i]!, credentials)}:${row.paused ? "paused" : row.state}`).join(", ");
@@ -1299,6 +1302,8 @@ export class Proxy {
         if (route && json) {
           record = { ...record, target: route.model, provider: route.provider };
           delete record.effort;
+          delete record.credential;
+          delete record.account;
           const configured = cfg.providers[route.provider];
           if (!configured) {
             finish("500", 0, `unknown provider ${route.provider}`, true, { ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "unknown-provider" });
@@ -1469,7 +1474,7 @@ export class Proxy {
                 // Neither is about the account or the provider (a refusal is request-specific, missing
                 // capacity is the model's on Google's side): neither cool nor mark success.
                 res.writeHead(o.status, { "content-type": "application/json" }).end(o.errorBody);
-                finish(String(o.status), Buffer.byteLength(o.errorBody), o.note, true, o.kind === "prompt-incompatible" ? { refusal: "prompt-incompatible" } : undefined);
+                finish(String(o.status), Buffer.byteLength(o.errorBody), o.note, true, { ...(o.account ? { account: o.account } : {}), ...(o.kind === "prompt-incompatible" ? { refusal: "prompt-incompatible" as const } : {}) });
                 return;
               }
               // The answer is charged to the key that actually produced it, which after a retry is a
@@ -1572,6 +1577,7 @@ export class Proxy {
             if (ownSignIn) {
               target = { protocol: "https:", host: cfg.upstream, port: this.deps.upstreamPort ?? 443, agent: this.deps.upstreamAgent ?? this.agentFor(route.provider, "https:"), extraHeaders: {} };
               ownLogin = true;
+              record.account = "current";
               const routeEffort = effortOf(json);
               if (routeEffort) record.effort = routeEffort;
               tag = `CLAUDE ${route.tag} account=app (no usable pool account)`;
@@ -1691,6 +1697,7 @@ export class Proxy {
           // An un-routed native Messages turn goes out on the app's own sign-in, and its answer is the
           // only statement of that login's unified limits when the usage endpoint refuses (2026-11-05).
           ownLogin = isMessages && typeof req.headers.authorization === "string";
+          if (ownLogin) record.account = "current";
           // Passthrough stays byte-exact unless another model's thinking would get the turn refused.
           if (json) {
             const removed = this.thinkingOrigins.dropKnownForeign(json, "anthropic");
@@ -2168,7 +2175,7 @@ export class Proxy {
     json: Record<string, unknown>,
     query: WebSearchQuery,
     settings: NonNullable<Config["webSearch"]>,
-    record: { source?: string; target?: string; provider?: string; purpose?: RequestRecord["purpose"] },
+    record: { source?: string; target?: string; provider?: string; account?: string; purpose?: RequestRecord["purpose"] },
     finish: (status: string, bytes: number, note?: string, failed?: boolean, extra?: { usage?: RequestUsage }) => void,
     markAttempted: () => void,
   ): Promise<boolean> {
@@ -2225,6 +2232,7 @@ export class Proxy {
       const outcome = await backend.search(query);
       blocks = webSearchBlocks(query, outcome).blocks;
       usage = outcome.usage;
+      if (outcome.account) record.account = outcome.account;
     } catch (e) {
       this.deps.log.warn(`web search via ${settings.provider}: ${(e as Error).message}`);
       return false;

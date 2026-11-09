@@ -48,6 +48,7 @@ function entry(el: Els, frame: Frame, record: StatusRequest, mineOnly: boolean):
           {modelOf(record)}
         </Text>
         <Text color={providerColor(record.provider)}>{record.provider}</Text>
+        {record.accountLabel ? <Text dimColor>{displayText(record.accountLabel, 80)}</Text> : null}
         {record.resent ? (
           <Text dimColor>{t(frame.lang, 'log.resent', { status: String(record.status) })}</Text>
         ) : (

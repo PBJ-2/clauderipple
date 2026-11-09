@@ -1884,6 +1884,68 @@ test("GET /api/requests filters newest records and returns a summary", async () 
   });
 });
 
+test("GET /api/requests resolves account names at read time without changing the stored records", async () => {
+  await withAdmin(makeCfg(), async ({ home }) => {
+    const chatgpt = await import("../src/providers/chatgpt/accounts.ts");
+    const google = await import("../src/providers/google/accounts.ts");
+    const expiresAt = Date.now() + 3_600_000;
+    const claude = saveClaudeOAuthAccount(home, { accessToken: "test-claude-token", refreshToken: "test-claude-refresh", expiresAt, email: "claude@example.test" });
+    const gpt = chatgpt.saveChatGptAccount(home, { accessToken: "test-gpt-token", accountId: "test-workspace", expiresAt });
+    chatgpt.updateChatGptAccount(home, gpt.id, { label: "Work ChatGPT" });
+    const gemini = google.saveGoogleAccount(home, { accessToken: "test-google-token", projectId: "test-project", email: "google@example.test", expiresAt });
+    const removed = chatgpt.saveChatGptAccount(home, { accessToken: "removed-token", accountId: "removed-workspace", expiresAt });
+    chatgpt.removeChatGptAccount(home, removed.id);
+    const requests = new RequestLog(path.join(home, "logs", "requests.jsonl"));
+    const old = { id: "old", at: new Date().toISOString(), ms: 100, status: 200, ok: true, kind: "messages" as const, source: "model", target: "model", provider: "claude", stream: true, credential: "#1" };
+    requests.add(old);
+    requests.add({ ...old, id: "borrowed", provider: "borrowed-gpt", account: "codex" });
+    requests.add({ ...old, id: "current-again", account: "current" });
+    for (const [provider, account] of [["claude", claude.id], ["claude", "current"], ["gpt", gpt.id], ["google", gemini.id], ["gpt", removed.id]] as const) {
+      requests.add({ ...old, id: account, provider, account });
+    }
+    const persisted = fs.readFileSync(path.join(home, "logs", "requests.jsonl"), "utf8");
+    const cfg = makeCfg({ providers: {
+      claude: { type: "anthropic", auth: "claude-code", accountPool: true },
+      gpt: { type: "chatgpt", auth: "own" },
+      "borrowed-gpt": { type: "chatgpt", auth: "borrow-codex" },
+      google: { type: "google", auth: "antigravity" },
+    } });
+    let known = true;
+    let lookups = 0;
+    const extra = await startAdmin({ config: () => cfg, configFile: path.join(home, "extra-config.json"), log: new Logger(null, 1_000_000, 1, false), stats: () => ({ inFlight: 0, messagesInFlight: 0, started: 0, completed: 0, failed: 0 }), health: () => 0, version: "test", requests,
+      claudeIdentity: async () => { lookups++; if (!known) throw new Error("identity unavailable"); return { email: "current@example.test", subjectHash: "test-subject" }; },
+      chatgpt: () => ({ quota: {}, auth: {}, accounts: () => ({ "borrowed-gpt": [
+        { id: "codex", label: "codex@example.test", email: "codex@example.test", source: "codex", expiresAt, needsReauth: false, paused: false, preferred: false, state: "ready", inUse: true, active: true, quota: null },
+      ] }) }),
+      google: () => ({ accounts: () => ({ google: [
+        { ...gemini, label: "Runtime Google", state: "ready", inUse: true, active: true },
+      ] }) }),
+    });
+    try {
+      const rows = async () => (await (await fetch(`${base()}:${extra.port}/api/requests`)).json() as { requests: { id: string; accountLabel?: string }[] }).requests;
+      let records = await rows();
+      const label = (id: string) => records.find((row) => row.id === id)?.accountLabel;
+      assert.equal(label(claude.id), "claude@example.test");
+      assert.equal(label("current"), "current@example.test");
+      assert.equal(label(gpt.id), "Work ChatGPT");
+      assert.equal(label(gemini.id), "Runtime Google", "the same live summary as the accounts tab");
+      assert.equal(label("borrowed"), "codex@example.test", "a borrowed login is not in the stored-account file");
+      assert.equal(label(removed.id), removed.id.slice(0, 8));
+      assert.deepEqual(records.find((row) => row.id === "old"), old, "an old record gains no fields");
+      assert.equal(lookups, 1, "identity is read once for the response, not per record");
+      chatgpt.updateChatGptAccount(home, gpt.id, { label: "Renamed ChatGPT" });
+      known = false;
+      records = await rows();
+      assert.equal(label(gpt.id), "Renamed ChatGPT");
+      assert.equal(label("current"), "Current Claude login");
+      assert.equal(lookups, 2);
+      assert.equal(requests.list(10).some((record) => "accountLabel" in record), false, "the in-memory records are not enriched in place");
+      assert.equal(fs.readFileSync(path.join(home, "logs", "requests.jsonl"), "utf8"), persisted);
+      assert.doesNotMatch(persisted, /@example\.test|test-claude-token|test-gpt-token|test-workspace|test-google-token|test-project/);
+    } finally { extra.close(); }
+  });
+});
+
 test("GET /api/requests takes a comma-separated kind list", async () => {
   await withAdmin(makeCfg(), async ({ home }) => {
     const requests = new RequestLog(path.join(home, "logs", "requests.jsonl"));
