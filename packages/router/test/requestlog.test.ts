@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { RequestLog, ResponseUsageTap, type RequestRecord } from "../src/requestlog.ts";
+import { RequestLog, ResponseUsageTap, openRequestLog, type RequestRecord } from "../src/requestlog.ts";
+import { setAaPriceDataset } from "../src/prices.ts";
 
 function record(id: string, overrides: Partial<RequestRecord> = {}): RequestRecord {
   return {
@@ -346,4 +347,26 @@ test("thinking provenance holds no oversized or unbounded fields while blocks ar
   tap.feed(sse({ type: "content_block_delta", index: 9, delta: { type: "signature_delta", signature: "small" } }));
   tap.feed(sse({ type: "content_block_stop", index: 9 }));
   assert.equal(seen.at(-1), "small");
+});
+
+test("a restart replays the unflushed hours priced from the AA cache on disk, not as unpriced", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-request-replay-"));
+  try {
+    fs.writeFileSync(path.join(home, "aa-models.json"), JSON.stringify({
+      source: "https://artificialanalysis.ai",
+      attribution: "Data: Artificial Analysis (artificialanalysis.ai)",
+      generatedAt: "2026-11-09T00:00:00.000Z",
+      models: [{ slug: "kimi-k3-0", base: "kimi-k3", name: "Kimi K3", creator: "x", releaseDate: "2026-10-01", effort: null, intelligence: null, costPerTask: null, priceIn: 1.5, priceOut: 6, intelligenceEstimated: null, checkedAt: null }],
+    }));
+    fs.mkdirSync(path.join(home, "logs"));
+    // No usage-hourly.jsonl yet, so the whole request log is replayed: one million input and one million output tokens.
+    fs.writeFileSync(path.join(home, "logs", "requests.jsonl"), JSON.stringify(record("r1", { provider: "opencode-go", target: "kimi-k3", usage: { input: 1_000_000, cached: 0, output: 1_000_000 } })) + "\n");
+    const requests = openRequestLog(home);
+    const total = requests.usage(0, Date.now() + 3_600_000).total;
+    assert.equal(total.costUsd, 7.5);
+    assert.equal(total.unpricedRequests, 0);
+  } finally {
+    setAaPriceDataset(null);
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });

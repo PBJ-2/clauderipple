@@ -11,7 +11,6 @@ import { codexEnabled, followCodexCache, writeCodexCatalog } from "../../cli/src
 import { ingressModels } from "./ingress/models.ts";
 import { ConfigStore, awakeSettings, configPath, homeDir, terminateHosts, tetherSettings } from "./config.ts";
 import { targetWarnings } from "./targets.ts";
-import { loadAaPricesFrom } from "./prices.ts";
 import { ensureInstallationId } from "./installation-id.ts";
 import { AwakeController, execRunner, type Activity } from "./awake.ts";
 import { TetherController } from "./tether.ts";
@@ -26,7 +25,7 @@ import { HoldGate } from "./hold.ts";
 import { Proxy } from "./proxy.ts";
 import { adoptNewClaudeModels, backfillContextWindows, measureUnsettledModels, startAdmin, type AdminDeps } from "./admin.ts";
 import { loadModelCatalog } from "./catalog.ts";
-import { RequestLog } from "./requestlog.ts";
+import { openRequestLog } from "./requestlog.ts";
 import { OpenAiIngress } from "./ingress/server.ts";
 import { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
 import { VERSION } from "./version.ts";
@@ -96,9 +95,8 @@ applyProcessPriority(cfg0.processPriority, { log: line => log!.info(line) });
 const T_CONFIG = Date.now();
 
 const certs = new CertStore(home);
-const requests = new RequestLog(path.join(home, "logs", "requests.jsonl"));
-// Price requests from the AA cache at once, not only once the scores page is opened.
-loadAaPricesFrom(path.join(home, "aa-models.json"));
+// Prices come from the AA cache before the log replays unflushed hours (openRequestLog), so those are priced too.
+const requests = openRequestLog(home);
 try {
   certs.register(cfg0.upstream, fs.readFileSync(path.join(home, "leaf.pem")), fs.readFileSync(path.join(home, "leaf.key")));
 } catch (e) {

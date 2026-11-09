@@ -3,6 +3,7 @@ import fs from "node:fs";
 import zlib from "node:zlib";
 import path from "node:path";
 import type { ThinkingBlock } from "./thinking.ts";
+import { loadAaPricesFrom } from "./prices.ts";
 import { UsageHistory, addConversations, emptyConversations, finishConversations, modelRowOf, recordConversations, addTotals, emptyTotals, finishTotals, recordTotals, sortByVolume, type BucketTotals, type SummaryBucket, type UsageSummary } from "./usage-history.ts";
 
 const DEFAULT_MAX_BYTES = 20 * 1024 * 1024;
@@ -204,6 +205,16 @@ export class RequestLog {
       return [];
     }
   }
+}
+
+/**
+ * The router's request log under `home`, with the AA prices loaded from their disk cache first. The
+ * constructor replays the hours the history has not written yet, and a replayed record is priced as it
+ * is added, so loading the prices after this would persist those non-Claude requests as unpriced.
+ */
+export function openRequestLog(home: string): RequestLog {
+  loadAaPricesFrom(path.join(home, "aa-models.json"));
+  return new RequestLog(path.join(home, "logs", "requests.jsonl"));
 }
 
 /** The hour of a file's last write, or null when it does not exist. */
