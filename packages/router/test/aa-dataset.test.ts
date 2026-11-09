@@ -1,52 +1,52 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { deriveEffort, extractPageRecords, meaningfulContent, mergeDataset, parseDataset, reusable, selectVariants, WINDOW_DAYS, type ApiRow } from "../../../scripts/aa-dataset-lib.mjs";
+import { buildDataset, deriveEffort, meaningfulContent, parseDataset, selectVariants, WINDOW_DAYS, type ApiRow } from "../../../scripts/aa-dataset-lib.mjs";
 import { runDataset } from "../../../scripts/aa-dataset.mjs";
 
 const NOW = Date.parse("2026-10-10T00:00:00Z");
 const DAY = 86_400_000;
 const PRO_URL = "https://artificialanalysis.ai/api/v2/language/models";
 const FREE_URL = "https://artificialanalysis.ai/api/v2/language/models/free";
-const html = fs.readFileSync(new URL("./fixtures/aa-flight.html", import.meta.url), "utf8");
 const rows: ApiRow[] = JSON.parse(fs.readFileSync(new URL("./fixtures/aa-api.json", import.meta.url), "utf8")).data;
 const variants = selectVariants(rows, NOW);
-const records = extractPageRecords(html);
 
-function row(slug: string, name: string, date: string, intelligence: number | null): ApiRow {
-  return { ...rows[0]!, slug, name, release_date: date, evaluations: { artificial_analysis_intelligence_index: intelligence } };
+/** A row for selection tests: the fixture's creator with its own slug, name, date and index. No cost, and no reasoning flag unless given. */
+function row(slug: string, name: string, date: string, intelligence: number | null, extra: Partial<ApiRow> = {}): ApiRow {
+  return { ...rows[0]!, slug, name, release_date: date, evaluations: { artificial_analysis_intelligence_index: intelligence }, artificial_analysis_intelligence_index_cost: null, ...extra };
 }
 
-test("AA flight extracts all records and matches slug rather than first position", () => {
-  assert.equal(records.length, 3);
-  assert.equal(records[0]?.slug, "gpt-6-1-sol");
-  const high = records.find(r => r.slug === "gpt-6-1-sol-high")!;
-  assert.equal(high.intelligenceIndex, 50.2377777519769);
-  assert.equal(high.intelligenceIndexCostPerTask?.cost?.total, 0.31914442375664703);
-});
+/** One page of a V2 list, with the pagination the docs describe. */
+function listPage(data: unknown[], page: number, total: number) {
+  return { intelligence_index_version: "v5.0.1", tier: "pro", pagination: { page, page_size: 200, total_pages: total, has_more: page < total }, data };
+}
 
-test("AA extraction respects nested braces, escaped quotes, backslashes and flight chunk boundaries", () => {
-  const record = { ...records[0], description: 'quoted "text" with {braces} and a \\ path' };
-  const text = JSON.stringify([record]);
-  const split = Math.floor(text.length / 2);
-  const page = [text.slice(0, split), text.slice(split)].map(chunk => `self.__next_f.push([1,${JSON.stringify(chunk)}])`).join("\n");
-  assert.deepEqual(extractPageRecords(page), [record]);
-  assert.equal(extractPageRecords(JSON.stringify(record)).length, 1);
-  assert.equal(extractPageRecords(JSON.stringify(records[0]).replaceAll('"', '\\"')).length, 1);
-});
+/** The runner's network: the one-page V2 Pro list. Anything else is recorded in `other`, which a run must leave empty. */
+function harness(data: unknown[] = rows) {
+  const other: string[] = [];
+  const logs: string[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    const text = String(url);
+    if (text !== PRO_URL) { other.push(text); return new Response(null, { status: 404 }); }
+    assert.equal(new Headers(init?.headers).get("x-api-key"), "fixture-key");
+    return Response.json(listPage(data, 1, 1));
+  };
+  return { other, logs, options: { apiKey: "fixture-key", fetchImpl, now: () => NOW, log: (line: string) => logs.push(line) } };
+}
 
-test("AA extraction refuses wrong cost/index shapes, keeps an unpriced model, never substitutes total cost", () => {
-  assert.deepEqual(extractPageRecords("<html>layout changed</html>"), []);
-  // A model AA runs but does not price (a-x-k2, 2026-10-10) is still a parsed record, with no cost.
-  assert.equal(extractPageRecords(JSON.stringify({ ...records[0], intelligenceIndexCostPerTask: undefined })).length, 1);
-  assert.deepEqual(extractPageRecords(JSON.stringify({ ...records[0], intelligenceIndexCostPerTask: { cost: { total: "0.3" } } })), []);
-  assert.deepEqual(extractPageRecords(JSON.stringify({ ...records[0], intelligenceIndex: "50" })), []);
-  assert.deepEqual(extractPageRecords('{"canonicalIntelligenceIndexTokenCount":null,broken}'), []);
-  const nullable = { ...records[0], intelligenceIndex: null, intelligenceIndexCostPerTask: { cost: { total: null } } };
-  assert.equal(extractPageRecords(JSON.stringify(nullable)).length, 1);
-});
+/** A V2 list served in pages (page n is `pages[n-1]`); `second` answers page 2 instead. Records the list calls only. */
+function listFetch(pages: unknown[][], second?: () => Response) {
+  const calls: string[] = [];
+  const fetchImpl: typeof fetch = async url => {
+    const text = String(url);
+    if (!text.startsWith("https://artificialanalysis.ai/api/v2/")) return new Response(null, { status: 404 });
+    calls.push(text);
+    const page = Number(new URL(text).searchParams.get("page") ?? 1);
+    if (page === 2 && second) return second();
+    return Response.json(listPage(pages[page - 1]!, page, pages.length));
+  };
+  return { calls, fetchImpl };
+}
 
 test("AA selection includes 365-day boundary and all old/null siblings, excludes future/old families", () => {
   const data = [
@@ -75,6 +75,13 @@ test("AA effort handles suffix priority, fallback labels, single variants and pr
   assert.equal(selected.some(v => v.row.slug === "beta"), false);
 });
 
+test("AA effort reads the reasoning flag when the name gives no level, and the name decides when the flag is absent", () => {
+  const effortOf = (extra: Partial<ApiRow>) => selectVariants([row("test", "Test", "2026-09-01", 20, extra), row("test-high", "Test (High)", "2026-09-01", 30)], NOW).find(v => v.row.slug === "test")?.effort;
+  assert.equal(effortOf({ reasoning_model: false }), "non-reasoning");
+  assert.equal(effortOf({ reasoning_model: true }), "max");
+  assert.equal(effortOf({}), "max");
+});
+
 test("AA selection groups irregular reasoning slugs by name and keeps creator boundaries", () => {
   const data = [row("gemini-flash-reasoning", "Gemini Flash Preview (Reasoning)", "2026-09-01", 40), row("gemini-flash", "Gemini Flash Preview (Non-reasoning)", "2020-01-01", null)];
   assert.deepEqual(selectVariants(data, NOW).map(v => [v.base, v.effort]), [["gemini-flash", "non-reasoning"], ["gemini-flash", "max"]]);
@@ -82,30 +89,25 @@ test("AA selection groups irregular reasoning slugs by name and keeps creator bo
   assert.equal(selectVariants([data[0]!, other], NOW).length, 1);
 });
 
-test("AA merge preserves stale failed values/timestamps; new failed entries get null cost and checkedAt", () => {
-  const previous = mergeDataset(variants, null, records, NOW - 8 * DAY);
-  const merged = mergeDataset(variants, previous, [], NOW);
-  assert.deepEqual(merged.models, previous.models);
-  const unseen = merged.models.find(m => m.slug.endsWith("non-reasoning"))!;
-  assert.equal(unseen.costPerTask, null);
-  assert.equal(unseen.checkedAt, null);
-  const high = mergeDataset(variants, previous, [records.find(r => r.slug.endsWith("-high"))!], NOW).models.find(m => m.slug.endsWith("-high"))!;
-  assert.equal(high.checkedAt, new Date(NOW).toISOString());
-  assert.equal(high.intelligence, 50.2377777519769);
-  assert.deepEqual(merged.models.map(m => m.slug), [...merged.models.map(m => m.slug)].sort());
-  assert.equal(JSON.stringify(merged).includes('"input"'), false);
+test("AA dataset fields come from the V2 list: names, dates, prices, index, cost per task and checkedAt", () => {
+  const d = buildDataset(variants, NOW);
+  assert.deepEqual(d.models.map(m => m.slug), ["deepseek-v4-1-flash", "deepseek-v4-1-flash-non-reasoning", "gpt-6-1-sol", "gpt-6-1-sol-high"]);
+  const model = d.models.find(m => m.slug === "deepseek-v4-1-flash")!;
+  assert.deepEqual(
+    { name: model.name, creator: model.creator, releaseDate: model.releaseDate, base: model.base, effort: model.effort, intelligence: model.intelligence, intelligenceEstimated: model.intelligenceEstimated, costPerTask: model.costPerTask, priceIn: model.priceIn, priceOut: model.priceOut, checkedAt: model.checkedAt },
+    { name: "DeepSeek V4.1 Flash (Max)", creator: "DeepSeek", releaseDate: "2026-09-10", base: "deepseek-v4-1-flash", effort: "max", intelligence: 39.5, intelligenceEstimated: null, costPerTask: 0.2652, priceIn: 0.3, priceOut: 1.2, checkedAt: new Date(NOW).toISOString() },
+  );
+  assert.equal(d.models.find(m => m.slug === "deepseek-v4-1-flash-non-reasoning")?.effort, "non-reasoning");
+  assert.equal(d.models.find(m => m.slug === "deepseek-v4-1-flash-non-reasoning")?.costPerTask, null);
+  assert.equal(d.models.find(m => m.slug === "gpt-6-1-sol-high")?.costPerTask, 0.3191);
+  assert.equal(d.generatedAt, new Date(NOW).toISOString());
+  assert.deepEqual(parseDataset(d), d);
 });
 
-test("AA seven-day reuse excludes exact expiry, missing/invalid and future timestamps", () => {
-  const model = mergeDataset(variants, null, records, NOW).models[0]!;
-  assert.equal(reusable({ ...model, checkedAt: new Date(NOW - 7 * DAY + 1).toISOString() }, NOW), true);
-  for (const checkedAt of [null, "bad", new Date(NOW - 7 * DAY).toISOString(), new Date(NOW + 1).toISOString()]) assert.equal(reusable({ ...model, checkedAt }, NOW), false);
-  assert.equal(reusable(undefined, NOW), false);
-});
-
-test("AA comparison ignores only refresh timestamps; validators reject corrupt previous data", () => {
-  const a = mergeDataset(variants, null, records, NOW);
-  const b = mergeDataset(variants, a, records, NOW + DAY);
+test("AA comparison ignores only refresh timestamps; validators reject corrupt data", () => {
+  const a = buildDataset(variants, NOW);
+  const b = buildDataset(variants, NOW + DAY);
+  assert.notEqual(a.generatedAt, b.generatedAt);
   assert.equal(meaningfulContent(a), meaningfulContent(b));
   b.models[0]!.costPerTask = 100;
   assert.notEqual(meaningfulContent(a), meaningfulContent(b));
@@ -114,108 +116,34 @@ test("AA comparison ignores only refresh timestamps; validators reject corrupt p
   assert.throws(() => parseDataset({ ...a, models: [{ ...a.models[0], costPerTask: "0.1" }] }), /invalid/);
 });
 
-function harness(pageFor: (slug: string, count: number) => Response, data = rows) {
-  let clock = NOW;
-  const pages: { slug: string; at: number }[] = [];
-  const logs: string[] = [];
-  const counts = new Map<string, number>();
-  const fetchImpl: typeof fetch = async (url, init) => {
-    if (String(url).startsWith("https://artificialanalysis.ai/api/v2/")) {
-      assert.ok(String(url) === PRO_URL || String(url) === FREE_URL, String(url));
-      assert.equal(new Headers(init?.headers).get("x-api-key"), "fixture-key");
-      return Response.json({ intelligence_index_version: "v5.0.1", tier: "pro", pagination: { page: 1, page_size: 200, total_pages: 1, has_more: false }, data });
-    }
-    if (String(url).includes("raw.githubusercontent")) return new Response(null, { status: 404 });
-    const slug = String(url).split("/").at(-1)!;
-    assert.match(new Headers(init?.headers).get("user-agent")!, /ClaudeRipple dataset \(github.com\/PBJ-2\/clauderipple\)/);
-    assert.ok(init?.signal);
-    pages.push({ slug, at: clock });
-    const count = (counts.get(slug) ?? 0) + 1;
-    counts.set(slug, count);
-    return pageFor(slug, count);
-  };
-  return { pages, logs, options: { apiKey: "fixture-key", fetchImpl, now: () => clock, wait: async (ms: number) => { clock += ms; }, log: (s: string) => logs.push(s) } };
-}
-
-test("AA runner caps actual pages, retries 429 once, spaces attempts and opportunistically reuses embedded defaults", async () => {
-  const h = harness((_slug, count) => count === 1 ? new Response(null, { status: 429 }) : new Response(html));
-  const d = await runDataset({ ...h.options, limit: 1 });
-  assert.equal(h.pages.length, 2);
-  assert.ok(h.pages[1]!.at - h.pages[0]!.at >= 5000);
-  assert.equal(d.models.find(m => m.slug === "gpt-6-1-sol-high")?.costPerTask, 0.31914442375664703);
-  const sequential = harness(() => new Response(html));
-  await runDataset(sequential.options);
-  assert.deepEqual(sequential.pages.map(p => p.slug), ["deepseek-v4-1-flash", "deepseek-v4-1-flash-non-reasoning"]);
-  assert.ok(sequential.pages[1]!.at - sequential.pages[0]!.at >= 1500);
+test("AA runner reads the V2 list only: no model page is requested, and the dataset is built from the list", async () => {
+  const h = harness();
+  const d = await runDataset(h.options);
+  assert.deepEqual(h.other, []);
+  assert.ok(h.logs.includes(`AA: data from ${PRO_URL}`));
+  assert.ok(h.logs.includes("AA: intelligence_index_version v5.0.1; 1 page"));
+  assert.ok(h.logs.includes("AA: 4 variants"));
+  assert.equal(meaningfulContent(d), meaningfulContent(buildDataset(variants, NOW)));
 });
 
-test("AA runner fails below 50% exact-slug parse, accepts exactly 50%, and fails API/missing key", async () => {
-  const failure = harness(() => new Response("layout changed"));
-  await assert.rejects(runDataset(failure.options), /below 50%/);
-  const half = harness(() => new Response(html));
-  const result = await runDataset(half.options);
-  assert.equal(result.models.find(m => m.slug.endsWith("non-reasoning"))?.costPerTask, null);
-  const httpFailure = harness(() => new Response(null, { status: 503 }));
-  await assert.rejects(runDataset({ ...httpFailure.options, limit: 1 }), /below 50%/);
-  assert.equal(httpFailure.pages.length, 2);
-  await assert.rejects(runDataset({ apiKey: "" }), /AA_API_KEY/);
+test("AA runner refuses a missing key, a failed key, and an answer with no models", async () => {
+  await assert.rejects(runDataset({ apiKey: "" }), /AA_API_KEY is not set/);
   await assert.rejects(runDataset({ apiKey: "fixture", fetchImpl: async () => new Response(null, { status: 401 }) }), /API failed/);
   await assert.rejects(runDataset({ apiKey: "fixture", fetchImpl: async () => Response.json({ pagination: { page: 1, page_size: 200, total_pages: 1, has_more: false }, data: [] }) }), /no model list/);
 });
 
-test("AA runner uses previous file for seven-day reuse and refetches only new/expired variants", async () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "aa-dataset-"));
-  try {
-    const previous = mergeDataset(variants, null, records, NOW - DAY);
-    previous.models = previous.models.map(m => ({ ...m, checkedAt: new Date(NOW - DAY).toISOString() }));
-    const file = path.join(home, "previous.json");
-    fs.writeFileSync(file, JSON.stringify(previous));
-    const h = harness(() => new Response(html));
-    await runDataset({ ...h.options, previous: file });
-    assert.equal(h.pages.length, 0);
-    previous.models.find(m => m.slug === "gpt-6-1-sol-high")!.checkedAt = new Date(NOW - 7 * DAY).toISOString();
-    fs.writeFileSync(file, JSON.stringify(previous));
-    await runDataset({ ...h.options, previous: file });
-    assert.deepEqual(h.pages.map(p => p.slug), ["gpt-6-1-sol-high"]);
-  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+test("AA V2 a non-numeric cost per task skips that row rather than publishing a wrong cost", async () => {
+  const bad = { ...rows[2]!, slug: "deepseek-v4-1-flash-bad", artificial_analysis_intelligence_index_cost: { cost_per_task: { total_cost: "0.2" } } } as unknown as ApiRow;
+  const h = harness([...rows, bad]);
+  const d = await runDataset(h.options);
+  assert.equal(d.models.some(m => m.slug === "deepseek-v4-1-flash-bad"), false);
+  assert.equal(d.models.length, 4);
 });
-
-test("AA V2 rows map documented names to the dataset without fetching pages", async () => {
-  const h = harness(() => new Response(html));
-  const d = await runDataset({ ...h.options, limit: 0 });
-  assert.equal(h.pages.length, 0);
-  assert.ok(h.logs.some(line => line.includes("intelligence_index_version v5.0.1")));
-  assert.ok(h.logs.includes(`AA: data from ${PRO_URL}`));
-  const model = d.models.find(m => m.slug === "deepseek-v4-1-flash")!;
-  assert.deepEqual(
-    { name: model.name, creator: model.creator, releaseDate: model.releaseDate, intelligence: model.intelligence, priceIn: model.priceIn, priceOut: model.priceOut, checkedAt: model.checkedAt },
-    { name: "DeepSeek V4.1 Flash (Max)", creator: "DeepSeek", releaseDate: "2026-09-10", intelligence: 39.5, priceIn: 0.3, priceOut: 1.2, checkedAt: null },
-  );
-});
-
-/** One page of a V2 list, with the pagination the docs describe. */
-function listPage(data: unknown[], page: number, total: number) {
-  return { intelligence_index_version: "v5.0.1", tier: "pro", pagination: { page, page_size: 200, total_pages: total, has_more: page < total }, data };
-}
-
-/** A V2 list served in pages (page n is `pages[n-1]`); `second` answers page 2 instead. Records the list calls only. */
-function listFetch(pages: unknown[][], second?: () => Response) {
-  const calls: string[] = [];
-  const fetchImpl: typeof fetch = async url => {
-    const text = String(url);
-    if (!text.startsWith("https://artificialanalysis.ai/api/v2/")) return new Response(null, { status: 404 });
-    calls.push(text);
-    const page = Number(new URL(text).searchParams.get("page") ?? 1);
-    if (page === 2 && second) return second();
-    return Response.json(listPage(pages[page - 1]!, page, pages.length));
-  };
-  return { calls, fetchImpl };
-}
 
 test("AA V2 reads every page of the Pro list and merges them in order", async () => {
   const list = listFetch([rows.slice(0, 2), rows.slice(2)]);
   const logs: string[] = [];
-  const d = await runDataset({ apiKey: "fixture-key", fetchImpl: list.fetchImpl, limit: 0, log: line => logs.push(line) });
+  const d = await runDataset({ apiKey: "fixture-key", fetchImpl: list.fetchImpl, log: line => logs.push(line) });
   assert.deepEqual(list.calls, [PRO_URL, `${PRO_URL}?page=2`]);
   assert.deepEqual(d.models.map(m => m.slug), ["deepseek-v4-1-flash", "deepseek-v4-1-flash-non-reasoning", "gpt-6-1-sol", "gpt-6-1-sol-high"]);
   assert.ok(logs.includes("AA: intelligence_index_version v5.0.1; 2 pages"));
@@ -235,34 +163,46 @@ test("AA V2 pages the free path after a Pro 403, with the same key on every page
     return Response.json(listPage(pages[page - 1]!, page, 2));
   };
   const logs: string[] = [];
-  const d = await runDataset({ apiKey: "fixture-key", fetchImpl, limit: 0, log: line => logs.push(line) });
+  const d = await runDataset({ apiKey: "fixture-key", fetchImpl, log: line => logs.push(line) });
   assert.deepEqual(calls, [PRO_URL, FREE_URL, `${FREE_URL}?page=2`]);
   assert.deepEqual(keys, ["fixture-key", "fixture-key", "fixture-key"]);
   assert.equal(d.models.length, 4);
   assert.ok(logs.includes(`AA: data from ${FREE_URL} (the Pro path answered 403 for this key)`));
 });
 
+test("AA V2 free shape has no reasoning flag: the name still decides effort, and cost per task still comes from the list", async () => {
+  const freeRows = rows.map(({ reasoning_model: _omitted, ...r }) => r) as ApiRow[];
+  const fetchImpl: typeof fetch = async url => {
+    if (String(url) === PRO_URL) return new Response(null, { status: 403 });
+    assert.equal(String(url), FREE_URL);
+    return Response.json(listPage(freeRows, 1, 1));
+  };
+  const d = await runDataset({ apiKey: "fixture-key", fetchImpl, log: () => {} });
+  assert.equal(d.models.find(m => m.slug === "deepseek-v4-1-flash-non-reasoning")?.effort, "non-reasoning");
+  assert.equal(d.models.find(m => m.slug === "gpt-6-1-sol-high")?.costPerTask, 0.3191);
+});
+
 test("AA V2 a failed later page fails the run, and so does a page that answers another page", async () => {
   const pages = [rows.slice(0, 2), rows.slice(2)];
   const failed = listFetch(pages, () => new Response(null, { status: 503 }));
-  await assert.rejects(runDataset({ apiKey: "fixture-key", fetchImpl: failed.fetchImpl, limit: 0 }), { message: "AA API failed: HTTP 503" });
+  await assert.rejects(runDataset({ apiKey: "fixture-key", fetchImpl: failed.fetchImpl }), { message: "AA API failed: HTTP 503" });
   assert.deepEqual(failed.calls, [PRO_URL, `${PRO_URL}?page=2`]);
   const wrong = listFetch(pages, () => Response.json(listPage(pages[1]!, 1, 2)));
-  await assert.rejects(runDataset({ apiKey: "fixture-key", fetchImpl: wrong.fetchImpl, limit: 0 }), { message: "AA API page 2 does not match the list's pagination" });
+  await assert.rejects(runDataset({ apiKey: "fixture-key", fetchImpl: wrong.fetchImpl }), { message: "AA API page 2 does not match the list's pagination" });
 });
 
 test("AA V2 refuses a list above the page cap before fetching it, and an inconsistent first page", async () => {
   const calls: string[] = [];
   const overFetch: typeof fetch = async url => { calls.push(String(url)); return Response.json(listPage(rows, 1, 21)); };
-  await assert.rejects(runDataset({ apiKey: "fixture-key", fetchImpl: overFetch, limit: 0 }), { message: "AA API list has 21 pages, above the cap of 20; refusing a partial list" });
+  await assert.rejects(runDataset({ apiKey: "fixture-key", fetchImpl: overFetch }), { message: "AA API list has 21 pages, above the cap of 20; refusing a partial list" });
   assert.deepEqual(calls, [PRO_URL]);
   const inconsistent: typeof fetch = async () => Response.json({ ...listPage(rows, 1, 1), pagination: { page: 1, page_size: 200, total_pages: 1, has_more: true } });
-  await assert.rejects(runDataset({ apiKey: "fixture-key", fetchImpl: inconsistent, limit: 0 }), { message: "AA API page 1 pagination is inconsistent" });
+  await assert.rejects(runDataset({ apiKey: "fixture-key", fetchImpl: inconsistent }), { message: "AA API page 1 pagination is inconsistent" });
 });
 
 test("AA V2 refuses the retired slug-only creator shape rather than publishing a list without families", async () => {
   const legacy = rows.map(r => ({ ...r, model_creator: { name: r.model_creator.name, slug: "legacy" } }));
-  await assert.rejects(runDataset({ apiKey: "fixture-key", fetchImpl: async () => Response.json({ pagination: { page: 1, page_size: 200, total_pages: 1, has_more: false }, data: legacy }), limit: 0 }), { message: "AA API model list changed shape" });
+  await assert.rejects(runDataset({ apiKey: "fixture-key", fetchImpl: async () => Response.json({ pagination: { page: 1, page_size: 200, total_pages: 1, has_more: false }, data: legacy }) }), { message: "AA API model list changed shape" });
 });
 
 test("AA V2 keeps a null or absent release_date (never tracked, published with an empty date) and skips a null free-tier creator", async () => {
@@ -271,13 +211,14 @@ test("AA V2 keeps a null or absent release_date (never tracked, published with a
   const nullDate = { ...dated, slug: "deepseek-v4-1-flash-low", name: "DeepSeek V4.1 Flash (Low)", release_date: null };
   const absentDate = { ...withoutDate, slug: "deepseek-v4-1-flash-high", name: "DeepSeek V4.1 Flash (High)" };
   const nullCreator = { ...dated, slug: "deepseek-v4-1-flash-free", model_creator: null };
-  const h = harness(() => new Response(html), [dated, nullDate, absentDate, nullCreator] as unknown as ApiRow[]);
-  const d = await runDataset({ ...h.options, limit: 0 });
+  const h = harness([dated, nullDate, absentDate, nullCreator] as unknown as ApiRow[]);
+  const d = await runDataset(h.options);
   // The dated sibling makes the family tracked; the undated siblings ride along, and the null creator is not a row.
+  const checkedAt = new Date(NOW).toISOString();
   assert.deepEqual(d.models.map(m => [m.slug, m.effort, m.releaseDate, m.checkedAt]), [
-    ["deepseek-v4-1-flash", "max", "2026-09-10", null],
-    ["deepseek-v4-1-flash-high", "high", "", null],
-    ["deepseek-v4-1-flash-low", "low", "", null],
+    ["deepseek-v4-1-flash", "max", "2026-09-10", checkedAt],
+    ["deepseek-v4-1-flash-high", "high", "", checkedAt],
+    ["deepseek-v4-1-flash-low", "low", "", checkedAt],
   ]);
   assert.deepEqual(parseDataset(d), d);
 });
@@ -299,7 +240,7 @@ test("AA V2 retries the free path once after a Pro 403, with the same key, and l
     if (String(url) === FREE_URL) return Response.json({ intelligence_index_version: "v5.0.1", tier: "free", pagination: { page: 1, page_size: 200, total_pages: 1, has_more: false }, data: rows });
     return new Response(null, { status: 404 });
   };
-  const d = await runDataset({ apiKey: "fixture-key", fetchImpl, limit: 0, log: line => logs.push(line) });
+  const d = await runDataset({ apiKey: "fixture-key", fetchImpl, log: line => logs.push(line) });
   assert.deepEqual(calls.slice(0, 2), [{ url: PRO_URL, key: "fixture-key" }, { url: FREE_URL, key: "fixture-key" }]);
   assert.equal(d.models.find(m => m.slug === "deepseek-v4-1-flash")?.intelligence, 39.5);
   assert.ok(logs.includes(`AA: data from ${FREE_URL} (the Pro path answered 403 for this key)`));
@@ -323,5 +264,5 @@ test("AA V2 only a Pro 403 retries: other Pro errors stop at once, and a free-pa
 });
 
 test("AA V2 refuses a list without pagination: it may be page 1 of more", async () => {
-  await assert.rejects(runDataset({ apiKey: "fixture-key", fetchImpl: async () => Response.json({ intelligence_index_version: "v5.0.1", tier: "pro", data: rows }), limit: 0 }), { message: "AA API list has no pagination; refusing what may be a partial list" });
+  await assert.rejects(runDataset({ apiKey: "fixture-key", fetchImpl: async () => Response.json({ intelligence_index_version: "v5.0.1", tier: "pro", data: rows }) }), { message: "AA API list has no pagination; refusing what may be a partial list" });
 });

@@ -35,10 +35,7 @@ jobs:
       - name: Build dataset
         env:
           AA_API_KEY: ${{ secrets.AA_API_KEY }}
-        run: |
-          args=()
-          if [ -f "$RUNNER_TEMP/aa-previous.json" ]; then args+=("$RUNNER_TEMP/aa-previous.json"); fi
-          node scripts/aa-dataset.mjs "${args[@]}" --output "$RUNNER_TEMP/aa-models.json"
+        run: node scripts/aa-dataset.mjs --output "$RUNNER_TEMP/aa-models.json"
 
       - name: Compare content or weekly refresh
         id: compare

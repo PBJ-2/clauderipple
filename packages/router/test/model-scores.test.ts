@@ -5,12 +5,12 @@ import os from "node:os";
 import path from "node:path";
 import { DEFAULTS, type Config } from "../src/config.ts";
 import { AA_DATA_URL, ModelScoreCatalog, buildModelScores, mapAaEffort, normalizeAaBase, parseScoreDataset } from "../src/model-scores.ts";
-import { extractPageRecords, mergeDataset, selectVariants, type ApiRow } from "../../../scripts/aa-dataset-lib.mjs";
+import { buildDataset, selectVariants, type ApiRow } from "../../../scripts/aa-dataset-lib.mjs";
 
 const NOW = Date.now();
 const HOUR = 60 * 60_000;
 const rows: ApiRow[] = JSON.parse(fs.readFileSync(new URL("./fixtures/aa-api.json", import.meta.url), "utf8")).data;
-const dataset = mergeDataset(selectVariants(rows, Date.parse("2026-10-10")), null, extractPageRecords(fs.readFileSync(new URL("./fixtures/aa-flight.html", import.meta.url), "utf8")), NOW);
+const dataset = buildDataset(selectVariants(rows, Date.parse("2026-10-10")), NOW);
 
 export function scoreConfig(): Config {
   return {
@@ -46,7 +46,7 @@ test("AA projection includes configured/alias-only targets and unmatched ids wit
   assert.equal(sol.aaBase, "gpt-6-1-sol");
   assert.equal(sol.matched, true);
   assert.deepEqual(sol.variants.map(v => v.effort), ["max", "high"]);
-  assert.equal(sol.variants[1]?.costPerTask, 0.31914442375664703);
+  assert.equal(sol.variants[1]?.costPerTask, 0.3191);
   assert.equal(result.models.filter(m => m.model === "gpt-6.1-sol").length, 1);
   assert.ok(result.models.some(m => m.model === "gpt-alias-only" && !m.matched));
   assert.ok(result.models.some(m => m.model === "unknown-model" && !m.matched && !m.variants.length));

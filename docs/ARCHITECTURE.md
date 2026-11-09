@@ -555,29 +555,23 @@ only for substantive changes or after a week. Source: [AA data API docs](https:/
 checked 2026-11-09 (`x-api-key`; `GET /api/v2/language/models`, and only on its 403 `GET /api/v2/language/models/free`
 with the same key). Limits are a fixed 24-hour window: Free 100, Pro 500 requests. The legacy
 `/api/v2/data/llms/models` returns HTTP 410 since 2026-11-04. `AA_API_KEY` stays in the environment.
-The API supplies slug/name/creator and `evaluations.artificial_analysis_intelligence_index`
-(the script also requires `release_date` and `model_creator.slug`, which the docs do not name)
-and input/output USD-per-million prices, **not** cost per task. The model page's Next.js
-flight record supplies `intelligenceIndex`, `intelligenceIndexIsEstimated` and
-`intelligenceIndexCostPerTask.cost.total` (USD, already including input/cache/output);
-`intelligenceIndexCost.total` is a different, whole-benchmark total and is never used.
-Measured [GPT-6.1 Sol High](https://artificialanalysis.ai/models/gpt-6-1-sol-high):
-index **50.2378** (≈50.24), **$0.319144 per task** (≈$0.3191), not estimated.
+Every published value comes from the list, all of its pages (OpenAPI, 2026-11-09): slug, name,
+`model_creator.name`, `release_date`, `evaluations.artificial_analysis_intelligence_index`,
+input/output USD-per-million prices, and `artificial_analysis_intelligence_index_cost.cost_per_task.total_cost`
+(USD per Intelligence Index task, rounded to 4 decimals, on both tiers; null when AA does not price the model).
+`reasoning_model` (Pro only; the free shape omits it) feeds effort. The script fetches **no model page**: on
+2026-11-09 the page no longer carried `intelligenceIndexIsEstimated`, which the old parser required, so every page was
+refused (0 of 132 parsed), and nothing the dataset publishes is only on the page. The list has no estimated flag
+either, so `intelligenceEstimated` is always null, and `checkedAt` is the time of the list read.
 
 Track families with at least one measured release in the last **365 days**, including
 all their older/unmeasured variants. Group by creator and model name with reasoning
 parentheses removed; retain unrelated Preview/Beta/date labels. Strip only recognized
-reasoning endings from slugs. Effort uses the page suffix/name parentheses, then slug:
+reasoning endings from slugs. Effort uses the name's parentheses, then slug:
 `max/xhigh/high/medium/low/minimal/non-reasoning`; Non-reasoning takes precedence over
 an accompanying High/Low label. Generic Reasoning or the unsuffixed default maps to
-max in a multi-variant family; a single-variant model has null effort. Successful
-`checkedAt` values under **7 days** are reused; failed pages retain prior values/time
-(or null cost/time), and embedded defaults are harvested opportunistically by exact
-slug. Page requests are sequential, ≥1.5 seconds apart with one backed-off 429/5xx
-retry. Fewer than half of attempted pages parsing their requested slug aborts publication.
-The extraction marker `canonicalIntelligenceIndexTokenCount` is a private page-format
-anchor, not an output metric: no token counts are stored. `--limit N` caps page fetches
-for a local smoke run; use `--output <path>` and never publish capped output.
+max in a multi-variant family; a single-variant model has null effort. Without the flag
+(free shape), the name and slug decide. A list that fails any page, or is refused for shape, publishes nothing.
 
 Auto routing and field rules were removed 2026-10-12 (along with `GET /api/model-scores`);
 routing is the four workers (docs/specs/2026-10-12-worker-tiers.md). `model-scores.ts`

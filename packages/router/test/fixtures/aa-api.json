@@ -9,7 +9,9 @@
       "name": "GPT-6.1 Sol (Max)",
       "release_date": "2026-09-29",
       "model_creator": { "id": "0c3f1a2e-6b1d-4c57-9a1e-2f7d5b8e4a10", "name": "OpenAI" },
+      "reasoning_model": true,
       "evaluations": { "artificial_analysis_intelligence_index": 51.8 },
+      "artificial_analysis_intelligence_index_cost": { "cost_per_task": { "total_cost": 0.7242 } },
       "pricing": { "price_1m_input_tokens": 2, "price_1m_output_tokens": 10 }
     },
     {
@@ -18,7 +20,9 @@
       "name": "GPT-6.1 Sol (High)",
       "release_date": "2026-09-29",
       "model_creator": { "id": "0c3f1a2e-6b1d-4c57-9a1e-2f7d5b8e4a10", "name": "OpenAI" },
+      "reasoning_model": true,
       "evaluations": { "artificial_analysis_intelligence_index": 50.2 },
+      "artificial_analysis_intelligence_index_cost": { "cost_per_task": { "total_cost": 0.3191 } },
       "pricing": { "price_1m_input_tokens": 2, "price_1m_output_tokens": 10 }
     },
     {
@@ -27,7 +31,9 @@
       "name": "DeepSeek V4.1 Flash (Max)",
       "release_date": "2026-09-10",
       "model_creator": { "id": "5e9a4d20-1f3b-4a8e-b6c2-7d1e9f0a3b55", "name": "DeepSeek" },
+      "reasoning_model": true,
       "evaluations": { "artificial_analysis_intelligence_index": 39.5 },
+      "artificial_analysis_intelligence_index_cost": { "cost_per_task": { "total_cost": 0.2652 } },
       "pricing": { "price_1m_input_tokens": 0.3, "price_1m_output_tokens": 1.2 }
     },
     {
@@ -36,7 +42,9 @@
       "name": "DeepSeek V4.1 Flash (Non-reasoning)",
       "release_date": "2026-09-10",
       "model_creator": { "id": "5e9a4d20-1f3b-4a8e-b6c2-7d1e9f0a3b55", "name": "DeepSeek" },
+      "reasoning_model": false,
       "evaluations": { "artificial_analysis_intelligence_index": 24.7 },
+      "artificial_analysis_intelligence_index_cost": null,
       "pricing": { "price_1m_input_tokens": 0.3, "price_1m_output_tokens": 1.2 }
     }
   ]
