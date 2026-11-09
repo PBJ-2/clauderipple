@@ -13,6 +13,8 @@ const API_HINTS = { 401: 'missing or invalid key', 403: 'the key tier does not c
 const USER_AGENT = 'Mozilla/5.0 (compatible; ClaudeRipple dataset (github.com/PBJ-2/clauderipple))';
 const PAGE_GAP_MS = 1_500;
 const BACKOFF_MS = 5_000;
+// Pages of the model list (200 rows each in V2). Far above the catalogue; more means the list changed.
+const MAX_LIST_PAGES = 20;
 
 /** @param {unknown} raw @returns {import('./aa-dataset-lib.mjs').ApiRow[]} */
 function apiRows(raw) {
@@ -43,16 +45,16 @@ async function apiError(response) {
 
 /**
  * Pro path first. Only its 403 retries the free path, once, with the same key. Any other failure
- * stays as it is; a 403 on both names both paths.
+ * stays as it is; a 403 on both names both paths. The chosen path's pages are all read (see listPages).
  * @param {string} apiKey @param {typeof fetch} fetchImpl
- * @returns {Promise<{body:unknown,path:string,afterProForbidden:boolean}>}
+ * @returns {Promise<{body:{intelligence_index_version?:unknown,data:unknown[]},path:string,afterProForbidden:boolean,pages:number}>}
  */
 async function fetchModelList(apiKey, fetchImpl) {
   const get = url => fetchImpl(url, { headers: { 'x-api-key': apiKey, 'user-agent': USER_AGENT }, signal: AbortSignal.timeout(30_000), redirect: 'error' });
   const pro = await get(PRO_URL);
   if (pro.status !== 403) {
     if (!pro.ok) throw await apiError(pro);
-    return { body: await pro.json(), path: PRO_URL, afterProForbidden: false };
+    return listPages(PRO_URL, await pro.json(), get, false);
   }
   await pro.body?.cancel();
   const free = await get(FREE_URL);
@@ -61,7 +63,40 @@ async function fetchModelList(apiKey, fetchImpl) {
     throw new Error(`AA API failed: HTTP 403 on both /api/v2/language/models and /api/v2/language/models/free (${detail})`);
   }
   if (!free.ok) throw await apiError(free);
-  return { body: await free.json(), path: FREE_URL, afterProForbidden: true };
+  return listPages(FREE_URL, await free.json(), get, true);
+}
+
+/** @param {unknown} body @param {number} page @returns {unknown[]} */
+function pageRows(body, page) {
+  if (!body || typeof body !== 'object' || !Array.isArray(body.data)) throw new Error(`AA API page ${page} has no model list`);
+  return body.data;
+}
+
+/**
+ * Every page of one list path, merged in order. Page 1 is the path itself; its `pagination` gives
+ * `total_pages`, and each later page is asked for as `?page=n` (1-indexed, per the V2 docs). A page
+ * that fails, answers another page, or disagrees on the total stops the run: a partial list would
+ * publish the missing models as gone. A response with no `pagination` is one whole list.
+ * @param {string} url @param {any} first @param {(url:string)=>Promise<Response>} get @param {boolean} afterProForbidden
+ * @returns {Promise<{body:{intelligence_index_version?:unknown,data:unknown[]},path:string,afterProForbidden:boolean,pages:number}>}
+ */
+async function listPages(url, first, get, afterProForbidden) {
+  const pagination = first?.pagination;
+  if (pagination === undefined) return { body: first, path: url, afterProForbidden, pages: 1 };
+  const total = pagination?.total_pages;
+  if (!Number.isInteger(total) || total < 1) throw new Error('AA API pagination changed shape');
+  if (total > MAX_LIST_PAGES) throw new Error(`AA API list has ${total} pages, above the cap of ${MAX_LIST_PAGES}; refusing a partial list`);
+  if (pagination.page !== 1 || pagination.has_more !== (total > 1)) throw new Error('AA API page 1 pagination is inconsistent');
+  const data = [...pageRows(first, 1)];
+  for (let page = 2; page <= total; page++) {
+    const res = await get(`${url}?page=${page}`);
+    if (!res.ok) throw await apiError(res);
+    const body = await res.json();
+    const more = page < total;
+    if (body?.pagination?.page !== page || body.pagination.total_pages !== total || body.pagination.has_more !== more) throw new Error(`AA API page ${page} does not match the list's pagination`);
+    data.push(...pageRows(body, page));
+  }
+  return { body: { ...first, data }, path: url, afterProForbidden, pages: total };
 }
 
 /** @param {string|undefined} file @param {typeof fetch} fetchImpl @param {(message:string)=>void} warn */
@@ -87,11 +122,9 @@ async function previousDataset(file, fetchImpl, warn) {
 export async function runDataset(options) {
   const { apiKey, fetchImpl = fetch, wait = sleep, now = Date.now, log = console.error } = options;
   if (!apiKey) throw new Error('AA_API_KEY is not set');
-  const { body, path, afterProForbidden } = await fetchModelList(apiKey, fetchImpl);
+  const { body, path, afterProForbidden, pages } = await fetchModelList(apiKey, fetchImpl);
   log(`AA: data from ${path}${afterProForbidden ? ' (the Pro path answered 403 for this key)' : ''}`);
-  // Envelope per the V2 docs: `tier`, `data`, `pagination` (list responses). The docs do not name the
-  // field that says more pages exist or how to request one, so only the first response is read and logged.
-  log(`AA: intelligence_index_version ${body?.intelligence_index_version ?? 'not reported'}${body?.pagination === undefined ? '' : `; pagination ${JSON.stringify(body.pagination).slice(0, 300)}`}`);
+  log(`AA: intelligence_index_version ${body?.intelligence_index_version ?? 'not reported'}; ${pages} page${pages === 1 ? '' : 's'}`);
   const rows = apiRows(body);
   const at = now();
   const variants = selectVariants(rows, at);

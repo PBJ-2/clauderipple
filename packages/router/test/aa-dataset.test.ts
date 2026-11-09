@@ -193,6 +193,73 @@ test("AA V2 rows map documented names to the dataset without fetching pages", as
   );
 });
 
+/** One page of a V2 list, with the pagination the docs describe. */
+function listPage(data: unknown[], page: number, total: number) {
+  return { intelligence_index_version: "v5.0.1", tier: "pro", pagination: { page, page_size: 200, total_pages: total, has_more: page < total }, data };
+}
+
+/** A V2 list served in pages (page n is `pages[n-1]`); `second` answers page 2 instead. Records the list calls only. */
+function listFetch(pages: unknown[][], second?: () => Response) {
+  const calls: string[] = [];
+  const fetchImpl: typeof fetch = async url => {
+    const text = String(url);
+    if (!text.startsWith("https://artificialanalysis.ai/api/v2/")) return new Response(null, { status: 404 });
+    calls.push(text);
+    const page = Number(new URL(text).searchParams.get("page") ?? 1);
+    if (page === 2 && second) return second();
+    return Response.json(listPage(pages[page - 1]!, page, pages.length));
+  };
+  return { calls, fetchImpl };
+}
+
+test("AA V2 reads every page of the Pro list and merges them in order", async () => {
+  const list = listFetch([rows.slice(0, 2), rows.slice(2)]);
+  const logs: string[] = [];
+  const d = await runDataset({ apiKey: "fixture-key", fetchImpl: list.fetchImpl, limit: 0, log: line => logs.push(line) });
+  assert.deepEqual(list.calls, [PRO_URL, `${PRO_URL}?page=2`]);
+  assert.deepEqual(d.models.map(m => m.slug), ["deepseek-v4-1-flash", "deepseek-v4-1-flash-non-reasoning", "gpt-6-1-sol", "gpt-6-1-sol-high"]);
+  assert.ok(logs.includes("AA: intelligence_index_version v5.0.1; 2 pages"));
+});
+
+test("AA V2 pages the free path after a Pro 403, with the same key on every page", async () => {
+  const pages = [rows.slice(0, 2), rows.slice(2)];
+  const keys: (string | null)[] = [];
+  const calls: string[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    const text = String(url);
+    if (!text.startsWith("https://artificialanalysis.ai/api/v2/")) return new Response(null, { status: 404 });
+    calls.push(text);
+    keys.push(new Headers(init?.headers).get("x-api-key"));
+    if (text === PRO_URL) return new Response(null, { status: 403 });
+    const page = Number(new URL(text).searchParams.get("page") ?? 1);
+    return Response.json(listPage(pages[page - 1]!, page, 2));
+  };
+  const logs: string[] = [];
+  const d = await runDataset({ apiKey: "fixture-key", fetchImpl, limit: 0, log: line => logs.push(line) });
+  assert.deepEqual(calls, [PRO_URL, FREE_URL, `${FREE_URL}?page=2`]);
+  assert.deepEqual(keys, ["fixture-key", "fixture-key", "fixture-key"]);
+  assert.equal(d.models.length, 4);
+  assert.ok(logs.includes(`AA: data from ${FREE_URL} (the Pro path answered 403 for this key)`));
+});
+
+test("AA V2 a failed later page fails the run, and so does a page that answers another page", async () => {
+  const pages = [rows.slice(0, 2), rows.slice(2)];
+  const failed = listFetch(pages, () => new Response(null, { status: 503 }));
+  await assert.rejects(runDataset({ apiKey: "fixture-key", fetchImpl: failed.fetchImpl, limit: 0 }), { message: "AA API failed: HTTP 503" });
+  assert.deepEqual(failed.calls, [PRO_URL, `${PRO_URL}?page=2`]);
+  const wrong = listFetch(pages, () => Response.json(listPage(pages[1]!, 1, 2)));
+  await assert.rejects(runDataset({ apiKey: "fixture-key", fetchImpl: wrong.fetchImpl, limit: 0 }), { message: "AA API page 2 does not match the list's pagination" });
+});
+
+test("AA V2 refuses a list above the page cap before fetching it, and an inconsistent first page", async () => {
+  const calls: string[] = [];
+  const overFetch: typeof fetch = async url => { calls.push(String(url)); return Response.json(listPage(rows, 1, 21)); };
+  await assert.rejects(runDataset({ apiKey: "fixture-key", fetchImpl: overFetch, limit: 0 }), { message: "AA API list has 21 pages, above the cap of 20; refusing a partial list" });
+  assert.deepEqual(calls, [PRO_URL]);
+  const inconsistent: typeof fetch = async () => Response.json({ ...listPage(rows, 1, 1), pagination: { page: 1, page_size: 200, total_pages: 1, has_more: true } });
+  await assert.rejects(runDataset({ apiKey: "fixture-key", fetchImpl: inconsistent, limit: 0 }), { message: "AA API page 1 pagination is inconsistent" });
+});
+
 test("AA V2 refuses the retired slug-only creator shape rather than publishing a list without families", async () => {
   const legacy = rows.map(r => ({ ...r, model_creator: { name: r.model_creator.name, slug: "legacy" } }));
   await assert.rejects(runDataset({ apiKey: "fixture-key", fetchImpl: async () => Response.json({ data: legacy }), limit: 0 }), { message: "AA API model list changed shape" });
