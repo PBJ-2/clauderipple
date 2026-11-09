@@ -62,6 +62,25 @@ export function claudeAccountsPath(home: string): string {
   return path.join(home, "claude-accounts.json");
 }
 
+/**
+ * The current Claude login's pause. A file of its own rather than a field of claude-accounts.json:
+ * that login is Claude Code's or Claude Desktop's, never written here, and may not be stored at all.
+ */
+function currentPausedPath(home: string): string {
+  return path.join(home, "claude-current-paused");
+}
+
+export function isCurrentClaudeAccountPaused(home: string): boolean {
+  return fs.existsSync(currentPausedPath(home));
+}
+
+export function setCurrentClaudeAccountPaused(home: string, paused: boolean): void {
+  withAccountLock(home, () => {
+    if (paused) fs.writeFileSync(currentPausedPath(home), "", { mode: 0o600 });
+    else fs.rmSync(currentPausedPath(home), { force: true });
+  });
+}
+
 function validAccount(value: unknown): value is ClaudeOAuthAccount {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const a = value as Partial<ClaudeOAuthAccount>;

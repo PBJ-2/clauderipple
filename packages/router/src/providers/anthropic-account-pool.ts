@@ -10,6 +10,7 @@ import type { Logger } from "../log.ts";
 import type { Credential } from "../pool.ts";
 import { redactErrorText } from "../redact.ts";
 import {
+  isCurrentClaudeAccountPaused,
   markClaudeAccountNeedsReauth,
   readClaudeOAuthAccounts,
   replaceClaudeOAuthAccount,
@@ -163,6 +164,11 @@ export class ClaudeAccountAuthPool {
     return this.peekCredentials();
   }
 
+  /** The client's own Bearer is the current login, so a caller falling back on it asks this first. */
+  currentPaused(): boolean {
+    return isCurrentClaudeAccountPaused(this.home);
+  }
+
   /** Current projection without network I/O, used by status and pre-routing health checks. */
   peekCredentials(): Credential[] {
     const out: Credential[] = [];
@@ -202,7 +208,7 @@ export class ClaudeAccountAuthPool {
       }
     }
     const currentAccount = accounts.find((account) => account.token === currentToken);
-    if (currentAccount?.paused) out.length = 0;
+    if (this.currentPaused() || currentAccount?.paused) out.length = 0;
     else if (currentAccount && out[0]) out[0].preferred = currentAccount.preferred === true;
     for (const account of accounts) {
       if (account.paused || account.needsReauth || this.now() >= account.expiresAt) continue;

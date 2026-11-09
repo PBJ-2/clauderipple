@@ -70,7 +70,7 @@ import { desktopClaudeCodeDirs } from "../../cli/src/claude-auth.ts";
 import { statusModEnabled, syncModelSlots } from "../../cli/src/settings.ts";
 import { ClaudeOAuthSession, type ClaudeOAuthState } from "./providers/claude-oauth.ts";
 import { readClaudeAuthFile } from "./providers/anthropic-token-file.ts";
-import { listClaudeAccounts, listClaudeAccountsWithSubject, removeClaudeAccount, updateClaudeAccount, setPreferredClaudeAccount } from "./providers/anthropic-accounts.ts";
+import { isCurrentClaudeAccountPaused, listClaudeAccounts, listClaudeAccountsWithSubject, removeClaudeAccount, updateClaudeAccount, setCurrentClaudeAccountPaused, setPreferredClaudeAccount } from "./providers/anthropic-accounts.ts";
 import { storedAccountsFor } from "./pinned-accounts.ts";
 import { readChatGptAccounts, removeChatGptAccount, summarize as summarizeChatGptAccount, updateChatGptAccount } from "./providers/chatgpt/accounts.ts";
 import { exhaustedForMs, IMAGE_ASPECTS, IMAGE_BACKGROUNDS, IMAGE_FORMATS, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
@@ -278,7 +278,7 @@ function claudePoolReports(deps: AdminDeps, name: string | undefined): Credentia
  */
 function claudeInUseId(deps: AdminDeps, name: string | undefined): string | undefined {
   const provider = name ? deps.config().providers[name] : undefined;
-  if (provider?.type === "anthropic" && provider.accountPool !== true) return "current";
+  if (provider?.type === "anthropic" && provider.accountPool !== true) return isCurrentClaudeAccountPaused(homeDir()) ? undefined : "current";
   try {
     return claudePoolReports(deps, name).find((row) => row.inUse === true)?.id;
   } catch {
@@ -312,7 +312,7 @@ async function claudeAccountUsage(deps: AdminDeps): Promise<{ id: string; label:
   const rows: { id: string; label: string; quota: Record<string, unknown>; inUse?: boolean }[] = [];
   // The account in use is listed even while its usage is unknown, with no windows, so no reader
   // takes another account's figures for the one that is actually spending.
-  if (usage.current || inUse === "current") rows.push({ id: "current", label: "Current Claude login", quota: usage.current ?? {}, ...(inUse === "current" ? { inUse: true } : {}) });
+  if (!isCurrentClaudeAccountPaused(homeDir()) && (usage.current || inUse === "current")) rows.push({ id: "current", label: "Current Claude login", quota: usage.current ?? {}, ...(inUse === "current" ? { inUse: true } : {}) });
   for (const account of listClaudeAccounts(homeDir())) {
     const quota = usage[account.id];
     if (quota || inUse === account.id) rows.push({ id: account.id, label: account.label, quota: quota ?? {}, ...(inUse === account.id ? { inUse: true } : {}) });
@@ -385,7 +385,7 @@ function claudeLimitWindows(quota: Record<string, unknown>): LimitsWindow[] {
  */
 function claudeNumberedAccounts(): { id: string; label?: string; email?: string }[] {
   const stored = listClaudeAccounts(homeDir()).filter((a) => !a.paused && !a.needsReauth && a.expiresAt > Date.now());
-  return [{ id: "current" }, ...stored.map((a) => ({ id: a.id, label: a.label, ...(a.email ? { email: a.email } : {}) }))];
+  return [...(isCurrentClaudeAccountPaused(homeDir()) ? [] : [{ id: "current" }]), ...stored.map((a) => ({ id: a.id, label: a.label, ...(a.email ? { email: a.email } : {}) }))];
 }
 
 /** A ChatGPT or Google provider's accounts as the limits number them: paused and needs-login left out. */
@@ -746,7 +746,7 @@ async function numberPinnedAccounts(deps: AdminDeps, cfg: Config, agents: ModOpt
       numbered = claudeNumberedAccounts();
       // The app login's own email, for the first tab's title; the lookup is cached for minutes.
       const identity = await deps.claudeIdentity?.().catch(() => null);
-      if (identity) numbered[0] = { id: "current", email: identity.email };
+      if (identity && numbered[0]?.id === "current") numbered[0] = { id: "current", email: identity.email };
     } else if (provider.type === "chatgpt") numbered = numberedAccounts(chatgpt[name] ?? []);
     else if (provider.type === "google") numbered = numberedAccounts(google[name] ?? []);
     const ids = new Set(numbered.map((a) => a.id));
@@ -853,9 +853,9 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
         : !!(p.apiKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
     } else if (p.type === "anthropic") {
       // Stored accounts serve the turn when Claude Code's own login is not seen; the pool refreshes a
-      // due token before each turn, so only an account that must sign in again is out.
+      // due token before each turn, so only an account that must sign in again, or is paused, is out.
       usable = p.auth === "api-key" ? !!(p.apiKey || process.env.ANTHROPIC_API_KEY)
-        : claudeAuthStore(deps).describeSource() !== null || listClaudeAccounts(homeDir()).some(a => !a.needsReauth);
+        : (claudeAuthStore(deps).describeSource() !== null && !isCurrentClaudeAccountPaused(homeDir())) || listClaudeAccounts(homeDir()).some(a => !a.paused && !a.needsReauth);
     } else if (p.type === "openai-compatible" && isOpenCodeGo(p)) {
       usageOut = await spentWindowsOut(deps.opencodeUsage, name, p.credentials, now);
       if (usageOut) usable = false;
@@ -1287,9 +1287,10 @@ async function probeClaudeCodeAuth(deps: AdminDeps): Promise<{ ok: boolean; auth
   // Our own accounts are reported separately: a Claude Desktop session can outrank them, and without
   // this the screen would answer a finished sign-in with the source it was already showing.
   const accounts = listClaudeAccounts(homeDir());
-  const hasUsableAccount = accounts.some((account) => !account.needsReauth && account.expiresAt > Date.now());
+  const hasUsableAccount = accounts.some((account) => !account.paused && !account.needsReauth && account.expiresAt > Date.now());
+  const currentUsable = source !== null && !isCurrentClaudeAccountPaused(homeDir());
   const signedIn = accounts.length > 0 ? "oauth" : readClaudeAuthFile(homeDir())?.source ?? null;
-  return { ok: source !== null || hasUsableAccount, auth: source !== null || hasUsableAccount ? "ok" : "missing", source, signedIn, accountCount: accounts.length, models: await claudeModelList(deps) };
+  return { ok: currentUsable || hasUsableAccount, auth: currentUsable || hasUsableAccount ? "ok" : "missing", source, signedIn, accountCount: accounts.length, models: await claudeModelList(deps) };
 }
 
 /** The reasoning levels a `GET /v1beta/models` entry says the model takes, or none to offer. */
@@ -2702,16 +2703,17 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           };
         });
         const currentReport = reports.find((row) => row.id === "current");
+        const currentPaused = isCurrentClaudeAccountPaused(homeDir());
         sendJson(res, 200, {
           current: source ? {
             id: "current",
             label: "Current Claude login",
             source,
             external: true,
-            paused: false,
+            paused: currentPaused,
             preferred: false,
-            state: currentReport?.state ?? "needs-login",
-            inUse: currentReport?.inUse === true,
+            state: currentPaused ? "paused" : currentReport?.state ?? "needs-login",
+            inUse: !currentPaused && currentReport?.inUse === true,
             ...(currentReport?.cooldownSeconds !== undefined ? { cooldownSeconds: currentReport.cooldownSeconds } : {}),
             ...(identity ? { email: identity.email } : {}),
             ...(usage.current ? { quota: usage.current } : {}),
@@ -2748,6 +2750,27 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           id = decodeURIComponent(pathname.slice("/api/claude-accounts/".length));
         } catch {
           sendJson(res, 400, { error: "invalid account id" });
+          return;
+        }
+        if (id === "current" && method === "PATCH") {
+          let change: unknown;
+          try {
+            change = JSON.parse((await readBody(req)).toString("utf8"));
+          } catch {
+            sendJson(res, 400, { error: "invalid JSON" });
+            return;
+          }
+          if (change && typeof change === "object" && !Array.isArray(change) && Object.keys(change).some((key) => key !== "paused")) {
+            sendJson(res, 409, { error: "the current Claude login is managed by Claude Code or Claude Desktop" });
+            return;
+          }
+          if (!change || typeof change !== "object" || Array.isArray(change) || !("paused" in change) || typeof change.paused !== "boolean") {
+            sendJson(res, 400, { error: "expected {paused: boolean}" });
+            return;
+          }
+          setCurrentClaudeAccountPaused(homeDir(), change.paused);
+          deps.log.info(`admin: current Claude login ${change.paused ? "paused" : "resumed"}`);
+          sendJson(res, 200, { ok: true });
           return;
         }
         const validId = id === "legacy" || /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);

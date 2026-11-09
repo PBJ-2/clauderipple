@@ -1411,8 +1411,9 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
     to the in-use Claude account (the first when none is marked).
     Login account PATCH bodies accept boolean `preferred`/`paused` and `clearCooldown: true`;
     Claude's existing PUT preference API remains supported. External Codex/current-Claude logins
-    retain their existing ownership restrictions. Compatible credentials persist boolean flags on
-    their `config.json` entries via PUT `/api/config` (validated, at most one preferred per provider);
+    still cannot be renamed or removed; the current Claude login also accepts a pause.
+    Compatible credentials persist boolean flags on their `config.json` entries via PUT `/api/config`
+    (validated, at most one preferred per provider);
     `/api/status.credentials[name]` reports each entry's flags and selection, including a declared
     single key. POST `/api/credentials/clear-cooldown` with `{provider, id}` clears one key's runtime
     health. Cooldown clearing also works while an entry is paused, without resuming it.
@@ -1603,9 +1604,12 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
   router logs it when it reads the config (`targetWarnings`). With the pool, Claude
   Desktop/Code Messages requests stay unmodified except for the routed model and
   selected identity. The runtime pool is ordered current observed/env/Claude Code
-  login first, then ClaudeRipple-owned accounts. When none of them is usable, a
-  turn that carries the client's own `Bearer` goes out on it unchanged, as a
-  passthrough would; only a turn without one is refused with 401 (#88,
+  login first, then ClaudeRipple-owned accounts. Pausing the current login writes
+  `<home>/claude-current-paused` (0600), independently of the external credential and the
+  account file, and excludes it from the pool until resumed, across restarts.
+  When none of them is usable, a turn that carries the client's own `Bearer` goes out
+  on it unchanged, as a passthrough would; a paused current login also rules out this
+  fallback, so it is refused with 401 just like a turn without a Bearer (#88,
   2026-10-24: the observed login aged out unseen behind the pool, and one revoked
   stored account stopped every main-chat turn). A conversation is sticky to the
   account that answered so its prompt-cache prefix survives, including across that

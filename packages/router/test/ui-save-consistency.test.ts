@@ -396,6 +396,44 @@ test('Escape during composition does not close the modal; ordinary Escape does',
   view.key(keyEvent(view.input, 'Escape')); assert.equal(view.nodes['modal-backdrop']!.hidden, true);
 });
 
+test('the current Claude card uses the pool pause controls without rename, remove or a paused preference', async () => {
+  const writes: { url: string; method: string; body: string }[] = [];
+  let refreshed = 0;
+  const render = new Function('document', 'Node', 'api', 'refreshClaudeAccountPanel', `
+    const t = key => key, providerDetailGeneration = 1;
+    const toast = () => {}, anthropicSourceText = source => source, chatgptQuotaText = () => '';
+    const hint = text => el('span', {text});
+    ${block('function $(', '// Inside the ClaudeRipple app')}
+    ${block('function claudeAccountLabel(', 'const accountRowsDrawn =')}
+    ${block('function durationText(', 'async function patchChatgptAccount(')}
+    return renderClaudeAccountRows;
+  `)(
+    { createElement: (tag: string) => new DomNode(tag.toUpperCase()), querySelector: () => null }, DomNode,
+    async (url: string, options: { method: string; body: string }) => { writes.push({ url, ...options }); },
+    async () => { refreshed++; },
+  ) as (target: DomNode, data: unknown, name: string, generation: number) => void;
+  const stored = { id: 'stored', label: 'Personal', preferred: true, state: 'ready', expiresAt: Date.now() + 3_600_000 };
+  for (const paused of [false, true]) {
+    const target = new DomNode('DIV');
+    render(target, { current: { id: 'current', external: true, paused, state: paused ? 'paused' : 'ready' }, accounts: [stored] }, 'claude', 1);
+    const current = target.children.find(node => node.matches('.current'))!;
+    assert.ok(current);
+    const buttons = current.querySelectorAll('button');
+    const pause = buttons.find(node => node.textContent === (paused ? 'providers.chatgptResume' : 'providers.chatgptPause'))!;
+    assert.ok(pause, 'the current login always offers pause or resume');
+    assert.deepEqual(buttons.map(node => node.textContent), paused ? ['providers.chatgptResume'] : ['providers.preferAction', 'providers.chatgptPause']);
+    assert.equal(current.descendants().some(node => node.textContent === 'providers.chatgptPaused'), paused);
+    assert.equal(current.descendants().some(node => node.textContent === 'providers.preferBadge'), false);
+    assert.ok(current.descendants().some(node => node.textContent === 'providers.currentAccountHelp'));
+    await pause.listeners.get('click')![0]!(keyEvent(pause));
+    assert.deepEqual(writes.at(-1), { url: '/api/claude-accounts/current', method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ paused: !paused }) });
+    assert.equal(pause.disabled, false);
+    const own = target.children.find(node => node !== current)!;
+    assert.deepEqual(own.querySelectorAll('button').map(node => node.textContent), ['providers.preferClear', 'providers.chatgptPause', 'common.edit', 'common.remove']);
+  }
+  assert.equal(refreshed, 2);
+});
+
 test('the dashboard recognises Ollama so an empty ladder there is measured, not a decision', () => {
   const isOllama = new Function(`${block('function isOllamaProvider', 'async function startMeasurement')}\nreturn isOllamaProvider;`)() as (provider: unknown) => boolean;
   for (const provider of [{ preset: 'ollama' }, { url: 'https://ollama.com/v1' }, { url: 'https://ollama.com' }, { url: 'http://127.0.0.1:11434/v1' }, { url: 'http://localhost:11434' }]) {

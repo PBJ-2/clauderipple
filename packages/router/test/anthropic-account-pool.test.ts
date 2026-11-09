@@ -13,7 +13,9 @@ import {
   readClaudeAccountsFile,
   replaceClaudeOAuthAccount,
   saveClaudeOAuthAccount,
+  setCurrentClaudeAccountPaused,
   setPreferredClaudeAccount,
+  updateClaudeAccount,
 } from "../src/providers/anthropic-accounts.ts";
 import { ClaudeCodeAuthStore, ClaudeCodeCredentialStore } from "../src/providers/anthropic.ts";
 import { ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
@@ -51,6 +53,62 @@ test("the current Claude login is first and stored accounts follow without expos
     assert.equal(credentials[0]!.headers.authorization, "Bearer current-access");
     assert.equal(credentials[1]!.headers.authorization, "Bearer stored-access");
     assert.doesNotMatch(JSON.stringify(credentials), /stored-refresh/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the current login's pause survives a new pool and account writes, and resuming projects it again", () => {
+  const dir = home();
+  try {
+    const now = () => 1_000_000;
+    const current = new ClaudeCodeAuthStore(
+      new ClaudeCodeCredentialStore(() => JSON.stringify({ claudeAiOauth: { accessToken: "current-access", expiresAt: 9_000_000 } }), now),
+      { home: dir, env: {}, now },
+    );
+    const options = { home: dir, now, current, log: log().logger };
+    const pool = new ClaudeAccountAuthPool(options);
+    assert.equal(pool.currentPaused(), false);
+    setCurrentClaudeAccountPaused(dir, true);
+    assert.equal(pool.currentPaused(), true);
+    assert.deepEqual(pool.peekCredentials(), []);
+    if (process.platform !== "win32") assert.equal(fs.statSync(path.join(dir, "claude-current-paused")).mode & 0o777, 0o600);
+    assert.equal(fs.existsSync(path.join(dir, "claude-accounts.json")), false, "pausing needs no stored copy of the login");
+
+    const stored = saveClaudeOAuthAccount(dir, { accessToken: "stored-access", refreshToken: "stored-refresh", expiresAt: 9_000_000, accountId: "stored-id" });
+    const restarted = new ClaudeAccountAuthPool(options);
+    assert.equal(restarted.currentPaused(), true);
+    assert.deepEqual(restarted.peekCredentials().map((c) => c.ownerId), [stored.id]);
+    assert.equal(current.describeSource(), "keychain", "the external credential is left alone");
+
+    setCurrentClaudeAccountPaused(dir, false);
+    assert.equal(restarted.currentPaused(), false);
+    assert.deepEqual(restarted.peekCredentials().map((c) => c.ownerId), ["current", stored.id]);
+    setCurrentClaudeAccountPaused(dir, false);
+    assert.equal(fs.existsSync(path.join(dir, "claude-current-paused")), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resuming the current login does not bypass a paused stored copy of the same token", () => {
+  const dir = home();
+  try {
+    const now = () => 1_000_000;
+    const stored = saveClaudeOAuthAccount(dir, { accessToken: "same-access", refreshToken: "stored-refresh", expiresAt: 9_000_000 });
+    const current = new ClaudeCodeAuthStore(
+      new ClaudeCodeCredentialStore(() => JSON.stringify({ claudeAiOauth: { accessToken: "same-access", expiresAt: 9_000_000 } }), now),
+      { home: dir, env: {}, now },
+    );
+    const pool = new ClaudeAccountAuthPool({ home: dir, now, current, log: log().logger });
+    assert.deepEqual(pool.peekCredentials().map((c) => c.ownerId), ["current"]);
+    setCurrentClaudeAccountPaused(dir, true);
+    assert.deepEqual(pool.peekCredentials(), [], "an unpaused stored copy cannot re-project the paused current token");
+    updateClaudeAccount(dir, stored.id, { paused: true });
+    setCurrentClaudeAccountPaused(dir, false);
+    assert.deepEqual(pool.peekCredentials(), [], "the stored pause still drops the current login");
+    updateClaudeAccount(dir, stored.id, { paused: false });
+    assert.deepEqual(pool.peekCredentials().map((c) => c.ownerId), ["current"]);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
