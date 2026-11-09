@@ -2,7 +2,7 @@
 // Timers own background work; hooks only admit/rewrite a request and record its result.
 import { atom, read, update } from 'claude-code'
 import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, Register, RenderElement, RenderInput, RenderNode, SessionCompactResult, SessionContextBreakdown, SessionContextUsage, SessionRateLimit, ToolCallInput, ToolCallResult, TurnStepInput, TurnUsage } from 'claude-code'
-import type { AgentRec, CacheMemory, Effort, JudgeInput, JudgeKind, JudgeRun, LimitItem, ModSettingsSnapshot, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
+import type { AgentRec, CacheMemory, CostSummary, Effort, JudgeInput, JudgeKind, JudgeRun, LimitItem, ModSettingsSnapshot, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
 import { MOD_SETTINGS_SCHEMA_VERSION, RUNG_EFFORT, applySettingsChanges, normalizeSettings, settingsChanges } from './settings'
 import { rungOf, workerLadderLine } from './ladder'
 import { debugText, langFrom, t } from './i18n'
@@ -14,7 +14,7 @@ import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom,
 import type { QuotaWindow } from './modes'
 import type { Spawn, WorkerFix } from './worker'
 import { afterPing, cacheMemoryKey, CACHE_MEMORY_PREFIX, laterMemo, liveContextTokens, nextMemo, restoreFromResume, savedMemory, shouldPing, staleMemory } from './cache'
-import { HEAVY_PERCENT, bandPriority, claudeLimitsFrom, claudeScopedFrom, coldAlert, contextWindow, countsPrecisely, modelCompactWindow, hotAlert, hottest, hotWindowMoved, keptAlert, routerLimitItems, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
+import { HEAVY_PERCENT, bandPriority, claudeLimitsFrom, claudeScopedFrom, coldAlert, contextWindow, countsPrecisely, modelCompactWindow, hotAlert, hottest, hotWindowMoved, keptAlert, costFromSummary, localMidnight, routerLimitItems, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
 import type { ScopedLimit } from './session'
 import { QUICK_PROMPT, wrapForNewChat } from './handoff'
 import { addTask, endTasks, endWithAgent, settleTasks, settleWithAgent, stillRunning, stopTask, taskEnds, taskStarted } from './tasks'
@@ -69,6 +69,8 @@ const compactAt = atom({ plugin: 'ripple', key: 'compactAt' } as const, null as 
 const hot = atom({ plugin: 'ripple', key: 'hot' } as const, null)
 const limit = atom({ plugin: 'ripple', key: 'limit' } as const, null)
 const limits = atom({ plugin: 'ripple', key: 'limits' } as const, null)
+/** What requests cost at API prices, today and over the last seven days, as the router last answered (refreshCost). */
+const cost = atom({ plugin: 'ripple', key: 'cost' } as const, null as { today: CostSummary | null; week: CostSummary | null } | null)
 const hotHidden = atom({ plugin: 'ripple', key: 'hotHidden' } as const, null)
 const hotHiddenFor = atom({ plugin: 'ripple', key: 'hotHiddenFor' } as const, null)
 const saveUntil = atom({ plugin: 'ripple', key: 'saveUntil' } as const, null)
@@ -508,7 +510,9 @@ function limitsActions($: EngineInterface): LimitsActions {
  * redraws it on time: the windows themselves are read once a minute and only a change is written.
  */
 function scheduleLimitsRedraw($: EngineInterface, items: readonly LimitItem[], now: number): void {
-  const turns = items.map(item => nextMinuteChange(item.resetsAt ? Date.parse(item.resetsAt) : NaN, now)).filter((at): at is number => at !== null && Number.isFinite(at))
+  // The minute a reset is counted in, and the minute a pace forecast is: the sentence under a
+  // window ("2시간 10분 뒤") turns over with it, as does the band's tone once the hour is near.
+  const turns = items.flatMap(item => [item.resetsAt ? Date.parse(item.resetsAt) : NaN, item.exhaustsAt ?? NaN].map(at => nextMinuteChange(at, now))).filter((at): at is number => at !== null && Number.isFinite(at))
   const at = turns.length ? Math.min(...turns) : null
   if (limitsTimer?.at === at) return
   limitsTimer?.cancel()
@@ -526,7 +530,7 @@ async function toggleLimits($: EngineInterface): Promise<void> {
   const language = await read($, lang)
   if ((await $.ui.panes()).some(p => p.id === LIMITS_PANE)) await $.ui.close({ id: LIMITS_PANE })
   else {
-    await refreshLimits($)
+    await Promise.all([refreshLimits($), refreshCost($, true)])
     await $.ui.open({ id: LIMITS_PANE, title: t(language, 'commands.limitsTitle') })
   }
 }
@@ -1363,6 +1367,37 @@ async function refreshLimits($: EngineInterface): Promise<void> {
     if (!same(items, await read($, limits))) await update($, limits, () => items)
   } catch (error) { await report($, 'limits', error) }
 }
+/**
+ * What requests cost at API prices, for the limits pane's cost tile (2026-11-09): today since the
+ * local midnight and the seven days from the midnight six days ago, each from the router's
+ * `GET /api/requests/summary?from=&to=`. Only while the pane is open (or opening: `opening`), and
+ * after a good read at most once a minute, as refreshLimits. A part that fails (a router that sends
+ * no cost, a connection that drops) keeps the last good one of the same period, never a $0 in its
+ * place; a part of an earlier day is dropped, since it would read as today's. Written only when it
+ * moved.
+ */
+let costAt = 0
+async function refreshCost($: EngineInterface, opening = false): Promise<void> {
+  if (!opening && !(await $.ui.panes()).some(p => p.id === LIMITS_PANE)) return
+  const now = await $.clock.now()
+  const days = { today: localMidnight(now), week: localMidnight(now, 6) }
+  const held = await read($, cost)
+  const kept = (part: 'today' | 'week'): CostSummary | null => held?.[part]?.from === days[part] ? held[part] : null
+  if (now - costAt < 60_000 && kept('today') && kept('week')) return
+  try {
+    const admin = await adminUrl($)
+    const fetchPart = async (from: number): Promise<CostSummary | null> => {
+      try {
+        const response = await $.http.fetch(`${admin}/api/requests/summary?from=${from}&to=${now}`)
+        return response.ok ? costFromSummary(JSON.parse(response.text), from) : null
+      } catch (error) { await report($, 'cost', error); return null }
+    }
+    const [today, week] = await Promise.all([fetchPart(days.today), fetchPart(days.week)])
+    if (today && week) costAt = now
+    const next = { today: today ?? kept('today'), week: week ?? kept('week') }
+    if (!same(next, held)) await update($, cost, () => next)
+  } catch (error) { await report($, 'cost', error) }
+}
 /** The estimate the band's share was last worked out from, and what it was worked out at. */
 let shareMemo: { key: string; breakdown: SessionContextBreakdown | null } | null = null
 /**
@@ -1468,6 +1503,7 @@ async function tick($: EngineInterface): Promise<void> {
   try {
     await refreshUsage($)
     await refreshLimits($)
+    await refreshCost($)
     await countAgents($)
     await scheduleCountdown($)
     if (await read($, handoff)) await driveHandoff($)
@@ -2686,8 +2722,12 @@ export const register: Register = on => {
       // The row the band gauges: the same reading, every provider account's windows.
       const items = await read($, limits) ?? []
       const save = await read($, saveUntil)
+      // The cost tile: a part only while it is of today's (or the week ending today's) period.
+      const held = await read($, cost)
+      const today = held?.today?.from === localMidnight(frame.now) ? held.today : null
+      const week = held?.week?.from === localMidnight(frame.now, 6) ? held.week : null
       scheduleLimitsRedraw($, items, frame.now)
-      return renderLimits($.ui.resolve(e), frame, { items, ...(save !== null && save > frame.now ? { saveUntil: save } : {}) }, limitsActions($)) as RenderElement
+      return renderLimits($.ui.resolve(e), frame, { items, cost: { ...(today ? { today } : {}), ...(week ? { week } : {}) }, ...(save !== null && save > frame.now ? { saveUntil: save } : {}) }, limitsActions($)) as RenderElement
     } catch (error) { return limitsRenderFailure($, e, error, frame) }
   }).catch(($, e, next) => limitsRenderFailure($, e, next.error.message ?? next.error.kind))
 }

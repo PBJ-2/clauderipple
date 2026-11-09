@@ -411,6 +411,34 @@ export type LimitItem = {
   windowMinutes?: number
   percent: number
   resetsAt?: string
+  /**
+   * When, at the pace it is being used (epoch ms), the window reaches 100% before it resets: the
+   * router's `exhaust_at`. Absent for a window that is no risk or has too little data to tell.
+   */
+  exhaustsAt?: number
+}
+
+/** What a stretch of requests cost at public API prices, from one bucket of `GET /api/requests/summary`. */
+export type CostBucket = {
+  costUsd: number
+  /** Requests with no known price: not in `costUsd`. */
+  unpricedRequests: number
+  /** Requests priced with an estimated cache rate: in `costUsd`, as an estimate. */
+  estimatedRequests: number
+}
+
+/** One provider's or model's line of a cost summary. */
+export type CostLine = CostBucket & { name: string }
+
+/**
+ * The cost of the requests from `from` (epoch ms, a local midnight) until the summary was read:
+ * the total, each provider, and the models that cost most.
+ */
+export type CostSummary = {
+  from: number
+  total: CostBucket
+  providers: CostLine[]
+  models: CostLine[]
 }
 
 export type Stats = {
@@ -534,6 +562,8 @@ declare module 'claude-code' {
       limit: Hot | null
       /** Every provider's plan windows for the limits row, from `GET /api/limits`. Null until read. */
       limits: LimitItem[] | null
+      /** What requests cost at API prices, today and over the last seven days, for the limits pane. Null until read. */
+      cost: { today: CostSummary | null; week: CostSummary | null } | null
       demo: 'cold' | 'swamp' | 'hot' | 'down' | 'kept' | null
     }
   }

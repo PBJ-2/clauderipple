@@ -2,10 +2,11 @@
 // callbacks it hands in. Every renderer in ./ is a pure function of (elements, view, actions);
 // none of them calls the engine, so they can be drawn and tested anywhere.
 
-import type { AgentRec, BgTask, Effort, JudgeKind, JudgeRun, LadderOptions, LimitItem, Pick as EffortPick, Settings, Skin, StatusRequest, TierTarget } from '../../types'
+import type { AgentRec, BgTask, CostBucket, CostSummary, Effort, JudgeKind, JudgeRun, LadderOptions, LimitItem, Pick as EffortPick, Settings, Skin, StatusRequest, TierTarget } from '../../types'
 import type { Appearance } from './theme'
 import { t } from '../i18n'
 import { DISPLAY, displayText } from './display'
+import { limitTone } from './theme'
 import type { Lang } from '../i18n'
 
 export type Surface = 'terminal' | 'desktop' | 'vscode' | 'mobile'
@@ -263,6 +264,8 @@ export type LogActions = {
 /** The limits pane: every plan window the router answered, grouped by provider account. */
 export type LimitsView = {
   items: readonly LimitItem[]
+  /** What requests cost at API prices, today and over the last seven days; a part absent while it is not known. */
+  cost?: { today?: CostSummary; week?: CostSummary }
   /** Save mode holds Auto down until then (epoch ms); absent while it is off. */
   saveUntil?: number
 }
@@ -635,6 +638,17 @@ function groupTitle(group: Pick<LimitGroup, 'provider' | 'type' | 'title'>): str
   return group.provider
 }
 
+/**
+ * A provider's config name as the limits pane names its group ("anthropic" → "Claude", "chatgpt" →
+ * "GPT", "opencode-go" → "Go"): the title the router gave its plan windows, else the name its
+ * type or id implies, else the id itself. The cost tile names its providers by it.
+ */
+export function providerDisplayName(provider: string, items: readonly LimitItem[]): string {
+  const item = items.find(i => i.provider === provider)
+  const named = item ? groupTitle(item) : provider === 'anthropic' ? 'Claude' : groupTitle({ provider })
+  return displayText(named, DISPLAY.name)
+}
+
 /** A group's head: "Claude", "GPT", "Gemini", or its config name; "GPT 1"/"GPT 2" when numbered. */
 export function limitGroupName(group: Pick<LimitGroup, 'provider' | 'type' | 'title' | 'account'>, numbered: boolean): string {
   const title = displayText(groupTitle(group), DISPLAY.name)
@@ -683,5 +697,71 @@ export function narrowLimitGroups(groups: readonly LimitGroup[], budget: number,
 /** A window's hover tip: "Claude 주간 88% · 4시간 뒤 초기화". */
 export function limitItemTip(item: LimitItem, group: string, lang: Lang, now: number): string {
   const reset = resetsLabel(item.resetsAt, now, lang)
-  return t(lang, 'band.limitsTip', { provider: group, window: limitItemName(item, lang), value: Math.round(item.percent) + '%', reset: reset ? ' · ' + reset : '' })
+  const tip = t(lang, 'band.limitsTip', { provider: group, window: limitItemName(item, lang), value: Math.round(item.percent) + '%', reset: reset ? ' · ' + reset : '' })
+  const out = exhaustSentence(item, now, lang)
+  return out ? tip + ' · ' + out : tip
 }
+
+// ---- Pace forecast -------------------------------------------------------------------------------
+//
+// A window the router says will reach 100% before it resets (`exhaust_at`, parsed into `exhaustsAt`)
+// is at risk whatever its share is now: its figure goes amber, red once the end is an hour off, and
+// the band's row says how long is left after the figure. A window without a forecast is as it was.
+
+/** From this close, the forecast is red. */
+export const EXHAUST_URGENT_MS = 60 * 60_000
+
+/** Milliseconds until the window runs out at its pace, or null: no forecast, or its moment has passed. */
+export function exhaustLeft(item: Pick<LimitItem, 'exhaustsAt'>, now: number): number | null {
+  const at = item.exhaustsAt
+  return typeof at === 'number' && Number.isFinite(at) && at > now ? at - now : null
+}
+
+/** A window's tone: its share's (limitTone), at least amber when it runs out ahead of its reset, red within the hour. */
+export function limitItemTone(item: Pick<LimitItem, 'percent' | 'exhaustsAt'>, now: number): 'ink' | 'warn' | 'bad' {
+  const share = limitTone(item.percent)
+  const left = exhaustLeft(item, now)
+  if (left === null || share === 'bad') return share
+  return left <= EXHAUST_URGENT_MS ? 'bad' : 'warn'
+}
+
+/** The time left as the band's row shortens it: "~45분", "~2시간", "~3일" ("~45m", "~2h", "~3d"). */
+export function exhaustShort(ms: number, lang: Lang): string {
+  const minutes = Math.max(1, Math.ceil(ms / 60_000))
+  if (minutes < 60) return '~' + t(lang, 'units.minutes', { n: minutes })
+  const hours = Math.round(minutes / 60)
+  return '~' + (hours < 48 ? t(lang, 'units.hours', { n: hours }) : t(lang, 'units.days', { n: Math.round(hours / 24) }))
+}
+
+/** The widest forms exhaustShort takes in a language, for the row to keep a slot as wide as any of them. */
+export function exhaustShortWidest(lang: Lang): string[] {
+  return [exhaustShort(59 * 60_000, lang), exhaustShort(47 * 3_600_000, lang), exhaustShort(7 * 86_400_000, lang)]
+}
+
+/** "At this pace it runs out in 2h 10m", or '' for a window with no forecast. */
+export function exhaustSentence(item: Pick<LimitItem, 'exhaustsAt'>, now: number, lang: Lang): string {
+  const left = exhaustLeft(item, now)
+  return left === null ? '' : t(lang, 'limits.exhaust', { time: timeLeft(left, lang) })
+}
+
+// ---- Cost ----------------------------------------------------------------------------------------
+
+/**
+ * An amount in US dollars as the limits pane writes it: "$12.34", "$1,234.56", "<$0.01" for less
+ * than a cent, "$0.00" for none. API prices are in dollars whatever the language.
+ */
+export function costText(usd: number): string {
+  if (!Number.isFinite(usd) || usd <= 0) return '$0.00'
+  if (usd < 0.005) return '<$0.01'
+  return '$' + usd.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
+/**
+ * A line's amount: "—" when nothing was priced (its requests have no known price: a $0.00 would say
+ * they were free), "≈" before it when part of it is an estimate.
+ */
+export function costFigure(line: Pick<CostBucket, 'costUsd' | 'unpricedRequests' | 'estimatedRequests'>): string {
+  if (line.costUsd <= 0 && line.unpricedRequests > 0) return '—'
+  return (line.estimatedRequests > 0 ? '≈' : '') + costText(line.costUsd)
+}
+

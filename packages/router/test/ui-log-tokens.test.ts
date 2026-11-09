@@ -64,15 +64,16 @@ test("a record that reports no cache write still counts all it read", () => {
 // prompt's own total and the output on their own beside it.
 test("the summary displays conversation tokens, not the sum of every prompt, including a provider filter", () => {
   const body = slice("app.js", "function renderSummary(", "function fitSummaryValues(");
-  const render = new Function("summary", "requestProvider", "EMPTY_BUCKET", "t", "formatNumber", "summaryChip", "$", "totalInputOf", "formatSeconds", "fitSummaryValues", `${body}; renderSummary(summary);`);
+  // The cost chip and note (ui-cost.test.ts) are not what this test is about: no cost, no note.
+  const render = new Function("summary", "requestProvider", "EMPTY_BUCKET", "t", "formatNumber", "summaryChip", "$", "totalInputOf", "formatSeconds", "fitSummaryValues", "costFigureOf", "renderCostNote", `${body}; renderSummary(summary);`);
   const total = { count: 3, ok: 3, failed: 0, input: 2000, cached: 8000, output: 100, conversationTokens: 4100 };
   const provider = { ...total, conversationTokens: 2100 };
   for (const filter of ["", "chatgpt"]) {
     let chips: { label: string; value: unknown }[] = [];
     render({ total, providers: { chatgpt: provider } }, filter, {}, (key: string) => key,
       (n: number) => n, (label: string, value: unknown) => ({ label, value }),
-      () => ({ replaceChildren: (...values: typeof chips) => { chips = values; } }),
-      loadTokenBlock().totalInputOf, (n: number) => n, () => {});
+      () => ({ classList: { toggle: () => {} }, replaceChildren: (...values: typeof chips) => { chips = values; } }),
+      loadTokenBlock().totalInputOf, (n: number) => n, () => {}, () => null, () => {});
     assert.equal(chips[2]!.label, "logs.th.tokens");
     assert.equal(chips[2]!.value, filter ? 2100 : 4100);
     assert.equal(chips[3]!.value, 10000, "the independent input counter must not change");

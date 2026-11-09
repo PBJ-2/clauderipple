@@ -4,7 +4,7 @@
 import { test } from 'claude-code/testing'
 import type { ContextGridSquare, RenderElement, RenderPropsOf, SessionContextBreakdown } from 'claude-code'
 
-import type { AgentRec, BgTask, LimitItem, Settings, Skin } from '../types'
+import type { AgentRec, BgTask, CostSummary, LimitItem, Settings, Skin } from '../types'
 import { normalizeSettings } from '../hooks/settings'
 import { renderAgents, talkOf } from '../hooks/ui/agents'
 import { renderAlert } from '../hooks/ui/alerts'
@@ -76,6 +76,37 @@ const LIMITS_ALL: LimitItem[] = [
   { provider: 'opencode-go', type: 'opencode-go', title: 'Go', account: 0, kind: 'seven_day', label: '', windowMinutes: 10080, percent: 52, resetsAt: '2026-10-19T00:00:00Z' },
   { provider: 'opencode-go', type: 'opencode-go', title: 'Go', account: 0, kind: 'window', label: '', windowMinutes: 43200, percent: 92, resetsAt: '2026-10-18T05:43:30Z' },
 ]
+/**
+ * The windows of LIMITS_ALL with a pace forecast on three of them (2026-11-09): Claude's weekly (88%)
+ * runs out in 2h 10m and GPT's weekly (23%, nowhere near its cap) in 45 minutes, both before their
+ * resets; OpenCode Go's monthly window in 3 days. Everything else has none.
+ */
+const LIMITS_RISK: LimitItem[] = LIMITS_ALL.map(item => {
+  if (item.provider === 'anthropic' && item.kind === 'seven_day') return { ...item, exhaustsAt: NOW + 130 * 60_000 }
+  if (item.provider === 'chatgpt' && item.kind === 'seven_day') return { ...item, exhaustsAt: NOW + 45 * 60_000 }
+  if (item.provider === 'opencode-go' && item.kind === 'seven_day') return { ...item, exhaustsAt: NOW + 3 * 86_400_000 }
+  return item
+})
+/** Claude's and GPT's windows of LIMITS_RISK alone: the row fits gauges, or figures. */
+const LIMITS_RISK_FEW: LimitItem[] = LIMITS_RISK.filter(item => item.provider === 'anthropic' || item.provider === 'chatgpt')
+/** What requests cost today and over a week, at API prices: an estimate in the total, a provider and a model with no price. */
+const COST_TODAY: CostSummary = {
+  from: Date.parse('2026-10-12T00:00:00'),
+  total: { costUsd: 15.678, unpricedRequests: 3, estimatedRequests: 12 },
+  providers: [
+    { name: 'anthropic', costUsd: 12.3, unpricedRequests: 0, estimatedRequests: 12 },
+    { name: 'chatgpt', costUsd: 3.378, unpricedRequests: 0, estimatedRequests: 0 },
+    { name: 'opencode-go', costUsd: 0, unpricedRequests: 3, estimatedRequests: 0 },
+  ],
+  models: [
+    { name: 'claude-opus-5-5', costUsd: 9.9, unpricedRequests: 0, estimatedRequests: 12 },
+    { name: 'gpt-6.1-sol', costUsd: 3.378, unpricedRequests: 0, estimatedRequests: 0 },
+    { name: 'claude-sonnet-5-5', costUsd: 2.4, unpricedRequests: 0, estimatedRequests: 0 },
+    { name: 'claude-haiku-5-5', costUsd: 0.004, unpricedRequests: 0, estimatedRequests: 0 },
+    { name: 'deepseek-v4.1-flash', costUsd: 0, unpricedRequests: 3, estimatedRequests: 0 },
+  ],
+}
+const COST_WEEK: CostSummary = { from: Date.parse('2026-10-06T00:00:00'), total: { costUsd: 234.5, unpricedRequests: 9, estimatedRequests: 40 }, providers: [], models: [] }
 /**
  * Every account the owner added (2026-11-04): the Claude app login and a stored account the router
  * serves turns with now, then two GPT accounts, the second in use and named with a long email.
@@ -351,6 +382,22 @@ const SCENES: Scene[] = [
   { name: 'band-limits-all-100', columns: 100, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS_ALL }) },
   { name: 'band-limits-all-140', columns: 140, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS_ALL }) },
   { name: 'band-limits-all-94', columns: 94, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS_ALL }) },
+  // The pace forecast (2026-11-09): a window the router expects to run out before its reset gets at
+  // least amber, red within the hour, and "~2시간" after its figure; compact has the tone only.
+  { name: 'band-limits-forecast-140', columns: 140, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS_RISK }) },
+  { name: 'band-limits-forecast-100', columns: 100, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS_RISK }) },
+  { name: 'band-limits-forecast-94', columns: 94, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS_RISK }) },
+  { name: 'flat-band-limits-forecast-140', columns: 140, skin: 'flat', draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS_RISK }) },
+  // Fewer providers, so the row has room for gauges and for figures: the forecast after the figure.
+  { name: 'band-limits-forecast-gauge-140', columns: 140, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS_RISK_FEW }) },
+  { name: 'flat-band-limits-forecast-gauge-140', columns: 140, skin: 'flat', draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS_RISK_FEW }) },
+  { name: 'band-limits-forecast-figures-100', columns: 100, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS_RISK_FEW }) },
+  // The pane's cost section (2026-11-09): today, each provider, the models that cost most, the last
+  // seven days, and the notes; a window with a forecast says it under its reset, in its tone.
+  { name: 'limits-pane-cost', columns: PANE, draw: (el, f) => renderLimits(el, f, { items: LIMITS_RISK, cost: { today: COST_TODAY, week: COST_WEEK }, saveUntil: Date.parse('2026-10-12T18:20:00') }, noop) },
+  { name: 'flat-limits-pane-cost', columns: PANE, skin: 'flat', draw: (el, f) => renderLimits(el, f, { items: LIMITS_RISK, cost: { today: COST_TODAY, week: COST_WEEK } }, noop) },
+  { name: 'limits-pane-cost-narrow', columns: PANE_NARROW, draw: (el, f) => renderLimits(el, f, { items: LIMITS_RISK, cost: { today: COST_TODAY, week: COST_WEEK } }, noop) },
+  { name: 'limits-pane-cost-none', columns: PANE, draw: (el, f) => renderLimits(el, f, { items: LIMITS, cost: {} }, noop) },
   { name: 'settings', draw: (el, f) => renderSettings(el, f, SETTINGS_VIEW, noop) },
   { name: 'settings-off', draw: (el, f) => renderSettings(el, f, { ...SETTINGS_VIEW, settings: { ...SETTINGS, effortAuto: false, judge: 'haiku', keepWarm: true, activeMode: undefined } }, noop) },
   { name: 'settings-key', draw: (el, f) => renderSettings(el, f, { settings: { ...SETTINGS, jevSource: 'typesafe', judge: 'jev' }, jev: { source: null, test: { state: 'fail', message: 'key rejected (401)' } } }, noop) },

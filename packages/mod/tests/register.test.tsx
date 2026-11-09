@@ -1099,6 +1099,76 @@ test('the limits row opens the limits pane, which says when each window resets',
   await ui.unmount()
 })
 
+// 2026-11-09: the pane's cost tile reads the router's request summary for today (from the local
+// midnight) and the last seven days (from the midnight six days before), only while the pane is open,
+// at most once a minute, and a failed read keeps the last good figure rather than showing a $0.
+test('the limits pane reads the day and week cost while it is open, once a minute, and keeps the last good answer', async ($, on) => {
+  const b = boundaries(on, { extras: ['limits'] })
+  const limits = { providers: [{ provider: 'claude', type: 'anthropic', title: 'Claude', accounts: [{ account: 0, at: NOW, windows: [
+    { kind: 'five_hour', used_percent: 28, window_minutes: 300, reset_at: (NOW + 2 * 3_600_000) / 1000 },
+  ] }] }] }
+  const bucket = (costUsd: number) => ({ count: 4, ok: 4, failed: 0, input: 1, cached: 0, cacheWrite: 0, output: 1, avgMs: 10, cacheHitPercent: 0, conversationTokens: 2, costUsd, unpricedRequests: 0, estimatedRequests: 0 })
+  const summaries: string[] = []
+  let failing = false
+  const midnight = (at: number, back = 0) => { const d = new Date(at); return new Date(d.getFullYear(), d.getMonth(), d.getDate() - back).getTime() }
+  on('http.fetch', ($, e, next) => {
+    if (e.url.endsWith('/api/mod-settings')) return next(e)
+    if (e.url.includes('/api/requests/summary')) {
+      summaries.push(e.url)
+      if (failing) return { value: { ok: false, status: 503, headers: {}, text: '' } }
+      // The week starts earlier than the day: its total is the larger.
+      const from = Number(/from=(-?\d+)/.exec(e.url)![1])
+      const total = bucket(from === midnight(Number(/to=(\d+)/.exec(e.url)![1])) ? 12.5 : 99)
+      return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify({ total, providers: { anthropic: total }, models: [{ provider: 'anthropic', model: 'claude-opus-5-5', ...total }], earliest: null }) } }
+    }
+    return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify(e.url.endsWith('/api/limits') ? limits : { requests: [] }) } }
+  })
+  const paneText = async () => {
+    const pane = await $.ui.mount({ plugin: 'ripple', component: 'Pane', requestId: 'ripple-limits', surface: 'terminal', props: { title: 'Limits', isFocused: true, bodyColumns: 100, placement: 'inline', scroll: { offset: 0, bodyRows: 30 }, view: {} } })
+    const said = (await pane.findAll({ type: 'Text' })).map(text => String(text.text)).join('\n')
+    await pane.unmount()
+    return said
+  }
+  await start($)
+  await b.clock.advance(15000)
+  // Closed: nothing is asked.
+  expect(summaries).toEqual([])
+  const ui = await band($, 'desktop')
+  await ui.press({ key: 'limits-open' })
+  expect(b.panes.has('ripple-limits')).toBe(true)
+  expect(summaries.length).toBe(2)
+  const asked = summaries.map(url => ({ from: Number(/from=(-?\d+)/.exec(url)![1]), to: Number(/to=(\d+)/.exec(url)![1]) }))
+  expect(asked[0]!.from).toBe(midnight(asked[0]!.to))
+  expect(asked[1]!.from).toBe(midnight(asked[1]!.to, 6))
+  expect(asked[0]!.to).toBe(asked[1]!.to)
+  const first = await paneText()
+  expect(first).toContain('$12.50')
+  expect(first).toContain('$99.00')
+  expect(first).toContain('claude-opus-5-5')
+  // Within the minute the next ticks ask nothing more.
+  await b.clock.advance(30000)
+  expect(summaries.length).toBe(2)
+  // A minute after a good read it asks again; failing, the last good figures stay and nothing reads $0.
+  failing = true
+  await b.clock.advance(30000)
+  expect(summaries.length).toBe(4)
+  const kept = await paneText()
+  expect(kept).toContain('$12.50')
+  expect(kept).toContain('$99.00')
+  expect(kept).not.toContain('$0.00')
+  expect(kept).not.toContain('비용을 아직 불러오지 못했습니다.')
+  expect(kept).not.toContain('Cost is not available yet.')
+  // A failed read is tried again at the next tick, not a minute later.
+  await b.clock.advance(15000)
+  expect(summaries.length).toBe(6)
+  // Closed again: nothing is asked however long it stays closed.
+  await ui.press({ key: 'limits-open' })
+  expect(b.panes.has('ripple-limits')).toBe(false)
+  await b.clock.advance(180000)
+  expect(summaries.length).toBe(6)
+  await ui.unmount()
+})
+
 for (const subagentType of ['Explore', 'Plan', 'statusline-setup', 'claude-code-guide']) test(`${subagentType} stays native in all mode, including its prompt and model`, async ($, on) => {
   boundaries(on, { agentAuto: 'all' })
   http(on)

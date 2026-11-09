@@ -9,14 +9,14 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On, RenderElement, RenderPropsOf } from 'claude-code'
 
-import type { AgentRec, BgTask, Settings, Skin, StatusRequest } from '../types'
+import type { AgentRec, BgTask, CostSummary, LimitItem, Settings, Skin, StatusRequest } from '../types'
 import { STRINGS } from '../hooks/i18n'
 import { normalizeSettings } from '../hooks/settings'
 import { DONE_SHOWN, cardRows, renderAgents, talkOf, timeCells } from '../hooks/ui/agents'
 import { chOf, displayWidth } from '../hooks/ui/theme'
 import { commandLine, editLines, runDiff, runSummary, shortPath, toolDetail } from '../hooks/ui/tools'
 import { renderAlert } from '../hooks/ui/alerts'
-import { BAND_RIPPLE, CREST_CELLS, bandMood, besideBand, modeLabel, renderBand, renderFooter, routeFact } from '../hooks/ui/band'
+import { BAND_RIPPLE, CREST_CELLS, bandMood, besideBand, limitItemCells, modeLabel, renderBand, renderFooter, routeFact } from '../hooks/ui/band'
 import { renderLimits } from '../hooks/ui/limits'
 import { renderPhoneQueue } from '../hooks/ui/queue'
 import { rippleSource } from '../hooks/ui/parts'
@@ -1722,6 +1722,223 @@ test('the desktop limits row is a button that opens the limits pane', async ($, 
   await ui.press({ key: 'limits-open' })
   expect(calls).toEqual(['limits'])
   await ui.unmount()
+})
+
+// 2026-11-09: a window the router expects to run out before its reset (`exhaustsAt`) is drawn at
+// risk: its figure at least amber (red within the hour) and, after the figure, the time left
+// ("~2시간"). The forecast takes a slot of its own, so the row's width includes it; compact has the
+// tone only; every other window is drawn as it was.
+const FORECAST: NonNullable<DashboardView['limits']> = [
+  { provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: 'five_hour', label: '', percent: 40, resetsAt: new Date(NOW + 250 * 60_000).toISOString(), exhaustsAt: NOW + 130 * 60_000 },
+  { provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: 'seven_day', label: '', percent: 20, resetsAt: new Date(NOW + 3 * 86_400_000).toISOString(), exhaustsAt: NOW + 45 * 60_000 },
+  { provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: 'scoped', label: 'Fable', percent: 3, resetsAt: new Date(NOW + 3 * 86_400_000).toISOString() },
+]
+const withoutForecast = (items: NonNullable<DashboardView['limits']>) => items.map(({ exhaustsAt: _, ...item }) => item)
+
+test('the limits row shows a pace forecast after the figure, in its tone, and only for the window that has one', async ($, on) => {
+  for (const skin of SKINS) {
+    drawPane(on, 'forecast-' + skin, el => renderBand(el, { ...frameOf('desktop', 200, 12, skin), lang: 'ko' }, { ...DASH, extras: ['limits'], limits: FORECAST }, BAND_ACTIONS))
+    drawPane(on, 'plain-' + skin, el => renderBand(el, { ...frameOf('desktop', 200, 12, skin), lang: 'ko' }, { ...DASH, extras: ['limits'], limits: withoutForecast(FORECAST) }, BAND_ACTIONS))
+  }
+  drawPane(on, 'forecast-en', el => renderBand(el, { ...frameOf('desktop', 200), lang: 'en' }, { ...DASH, extras: ['limits'], limits: FORECAST }, BAND_ACTIONS))
+  for (const skin of SKINS) {
+    const risky = await mount($, 'forecast-' + skin, 'desktop', 200)
+    const texts = await risky.findAll({ type: 'Text' })
+    const colour = (text: string) => texts.find(x => x.text === text)?.props.color
+    // Two forecasts, two suffixes; the Fable window has none.
+    expect(texts.filter(x => /^~/.test(String(x.text))).map(x => x.text), skin).toEqual(['~2시간', '~45분'])
+    // Each suffix is in its figure's tone: amber for two hours off, red inside the hour; the quiet
+    // window keeps the skin's ink.
+    expect(colour('~2시간'), skin).toBe(colour('40%'))
+    expect(colour('~45분'), skin).toBe(colour('20%'))
+    expect(colour('40%'), skin).toBeDefined()
+    expect(colour('20%'), skin).toBeDefined()
+    expect(colour('40%'), skin).not.toBe(colour('20%'))
+    expect(colour('3%'), skin).not.toBe(colour('40%'))
+    expect(colour('3%'), skin).not.toBe(colour('20%'))
+    await risky.unmount()
+    // Without a forecast the same shares are drawn in the share's tone: 40% and 20% are ink.
+    const plain = await mount($, 'plain-' + skin, 'desktop', 200)
+    const quiet = await plain.findAll({ type: 'Text' })
+    expect(quiet.filter(x => /^~/.test(String(x.text))), skin).toEqual([])
+    expect(quiet.find(x => x.text === '40%')?.props.color, skin).toBe(quiet.find(x => x.text === '3%')?.props.color)
+    await plain.unmount()
+  }
+  const en = await mount($, 'forecast-en', 'desktop', 200)
+  expect((await en.findAll({ type: 'Text' })).filter(x => /^~/.test(String(x.text))).map(x => x.text)).toEqual(['~2h', '~45m'])
+  await en.unmount()
+})
+
+test('a pace forecast takes its own slot in the row\'s width, in gauge and figures but not compact, and only while it stands', () => {
+  const [five, week, fable] = FORECAST.map(item => item) as [LimitItem, LimitItem, LimitItem]
+  const plain = withoutForecast([five])[0]!
+  for (const lang of ['ko', 'en', 'ja', 'es'] as const) for (const density of ['gauge', 'figures'] as const) {
+    expect(limitItemCells(five, density, lang, NOW), lang + density).toBeGreaterThan(limitItemCells(plain, density, lang, NOW))
+    // Hours and minutes take the same slot: the widest form, so its value never moves a neighbour.
+    expect(limitItemCells(five, density, lang, NOW)).toBe(limitItemCells({ ...five, exhaustsAt: NOW + 5 * 60_000 }, density, lang, NOW))
+    // Its moment past, the window is drawn as it was.
+    expect(limitItemCells(five, density, lang, NOW + 131 * 60_000), lang + density).toBe(limitItemCells(plain, density, lang, NOW + 131 * 60_000))
+  }
+  for (const lang of ['ko', 'en'] as const) expect(limitItemCells(five, 'compact', lang, NOW)).toBe(limitItemCells(plain, 'compact', lang, NOW))
+  expect(limitItemCells(fable, 'gauge', 'ko', NOW)).toBe(limitItemCells(withoutForecast([fable])[0]!, 'gauge', 'ko', NOW))
+  expect(limitItemCells(week, 'figures', 'ko', NOW)).toBeGreaterThan(limitItemCells(withoutForecast([week])[0]!, 'figures', 'ko', NOW))
+})
+
+test('the row\'s facts are as wide as they were measured, forecast included, so narrowing keeps counting right', async ($, on) => {
+  drawPane(on, 'width-forecast', el => renderBand(el, { ...frameOf('desktop', 200), lang: 'ko' }, { ...DASH, extras: ['limits'], limits: FORECAST }, BAND_ACTIONS))
+  drawPane(on, 'width-plain', el => renderBand(el, { ...frameOf('desktop', 200), lang: 'ko' }, { ...DASH, extras: ['limits'], limits: withoutForecast(FORECAST) }, BAND_ACTIONS))
+  const widths = async (id: string) => {
+    const ui = await mount($, id, 'desktop', 200)
+    const found = new Map<string, number>()
+    walk(await ui.drawn(), n => { if (typeof n.props?.key === 'string' && n.props.key.startsWith('fact-limits-')) found.set(n.props.key, Number(n.props.width)) })
+    await ui.unmount()
+    return found
+  }
+  const risky = await widths('width-forecast')
+  const quiet = await widths('width-plain')
+  expect([...risky.keys()]).toEqual([...quiet.keys()])
+  const keys = [...risky.keys()]
+  expect(keys.length).toBe(3)
+  FORECAST.forEach((item, i) => {
+    expect(risky.get(keys[i]!), keys[i]).toBe(limitItemCells(item, 'gauge', 'ko', NOW))
+    expect(quiet.get(keys[i]!), keys[i]).toBe(limitItemCells(withoutForecast([item])[0]!, 'gauge', 'ko', NOW))
+  })
+  // The two forecasts are wider than before; the Fable window is not.
+  expect(risky.get(keys[0]!)!).toBeGreaterThan(quiet.get(keys[0]!)!)
+  expect(risky.get(keys[1]!)!).toBeGreaterThan(quiet.get(keys[1]!)!)
+  expect(risky.get(keys[2]!)).toBe(quiet.get(keys[2]!))
+})
+
+test('compact draws the forecast as a tone alone, with the whole sentence in the tip', async ($, on) => {
+  // Four providers at 94 columns fit only as compact figures.
+  const many: NonNullable<DashboardView['limits']> = [
+    ...FORECAST,
+    { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 0, kind: 'five_hour', label: '', windowMinutes: 300, percent: 12, resetsAt: new Date(NOW + 60 * 60_000).toISOString() },
+    { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 0, kind: 'seven_day', label: '', windowMinutes: 10080, percent: 30, resetsAt: new Date(NOW + 3 * 86_400_000).toISOString() },
+    { provider: 'google-gemini', type: 'google', title: 'Gemini', account: 0, kind: 'five_hour', label: '', windowMinutes: 300, percent: 0 },
+    { provider: 'google-gemini', type: 'google', title: 'Gemini', account: 0, kind: 'seven_day', label: '', windowMinutes: 10080, percent: 2 },
+    { provider: 'opencode-go', type: 'opencode-go', title: 'Go', account: 0, kind: 'five_hour', label: '', percent: 3 },
+    { provider: 'opencode-go', type: 'opencode-go', title: 'Go', account: 0, kind: 'seven_day', label: '', percent: 52 },
+  ]
+  drawPane(on, 'compact-forecast', el => renderBand(el, { ...frameOf('desktop', 80), lang: 'ko' }, { ...DASH, extras: ['limits'], limits: many }, { ...BAND_ACTIONS, toggleLimits: undefined as never }))
+  const ui = await mount($, 'compact-forecast', 'desktop', 80)
+  const texts = await ui.findAll({ type: 'Text' })
+  // Figures only: no "~…" anywhere on the row.
+  expect(texts.filter(x => /^~/.test(String(x.text)))).toEqual([])
+  // The tip names the window and how long until it runs out.
+  const said = texts.map(x => String(x.text)).join('\n')
+  expect(said).toContain('이 속도라면 2시간 10분 뒤 한도가 소진됩니다')
+  expect(said).toContain('이 속도라면 45분 뒤 한도가 소진됩니다')
+  await ui.unmount()
+})
+
+test('the pressable row\'s one tip names the forecasts too, and is unchanged without one', async ($, on) => {
+  drawPane(on, 'tip-forecast', el => renderBand(el, { ...frameOf('desktop', 200), lang: 'ko' }, { ...DASH, extras: ['limits'], limits: FORECAST }, { ...BAND_ACTIONS, toggleLimits: () => undefined }))
+  drawPane(on, 'tip-plain', el => renderBand(el, { ...frameOf('desktop', 200), lang: 'ko' }, { ...DASH, extras: ['limits'], limits: withoutForecast(FORECAST) }, { ...BAND_ACTIONS, toggleLimits: () => undefined }))
+  const risky = await mount($, 'tip-forecast', 'desktop', 200)
+  const said = (await risky.findAll({ type: 'Text' })).map(x => String(x.text))
+  expect(said).toContain(STRINGS.ko['band.limitsOpen'] + ' · Claude 5시간: 이 속도라면 2시간 10분 뒤 한도가 소진됩니다 · Claude 주간: 이 속도라면 45분 뒤 한도가 소진됩니다')
+  await risky.unmount()
+  const plain = await mount($, 'tip-plain', 'desktop', 200)
+  expect((await plain.findAll({ type: 'Text' })).map(x => String(x.text))).toContain(STRINGS.ko['band.limitsOpen'])
+  await plain.unmount()
+})
+
+// 2026-11-09: under the plan windows the pane says what requests cost at API prices — today since
+// the local midnight with each provider and the models that cost most, then the last seven days —
+// with the notes that say what the figures are and what they leave out. A part not answered is not
+// drawn, and with none the tile says so; no figure is ever a placeholder.
+const BUCKET = (costUsd: number, unpricedRequests = 0, estimatedRequests = 0) => ({ costUsd, unpricedRequests, estimatedRequests })
+const COST_TODAY: CostSummary = {
+  from: Date.parse('2026-10-10T00:00:00'),
+  total: BUCKET(15.678, 3, 12),
+  providers: [{ name: 'anthropic', ...BUCKET(12.3, 0, 12) }, { name: 'chatgpt', ...BUCKET(3.378) }, { name: 'opencode-go', ...BUCKET(0, 3) }],
+  models: [
+    { name: 'claude-opus-5-5', ...BUCKET(9.9, 0, 12) }, { name: 'gpt-5.5', ...BUCKET(3.378) }, { name: 'claude-sonnet-5-5', ...BUCKET(2.4) },
+    { name: 'claude-fable', ...BUCKET(0.004) }, { name: 'deepseek-v4.1-flash', ...BUCKET(0, 3) },
+  ],
+}
+const COST_WEEK: CostSummary = { from: Date.parse('2026-10-04T00:00:00'), total: BUCKET(1234.5, 9, 40), providers: [], models: [] }
+
+test('the limits pane draws the cost under the windows: today, providers, models, the week, and the notes', async ($, on) => {
+  const limits = [
+    { provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: 'five_hour' as const, label: '', percent: 40, resetsAt: new Date(NOW + 250 * 60_000).toISOString(), exhaustsAt: NOW + 130 * 60_000 },
+    { provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: 'seven_day' as const, label: '', percent: 20, resetsAt: new Date(NOW + 3 * 86_400_000).toISOString() },
+  ]
+  const view = { items: limits, cost: { today: COST_TODAY, week: COST_WEEK } }
+  for (const skin of SKINS) for (const surface of SURFACES) {
+    drawPane(on, 'cost-' + surface + skin, el => renderLimits(el, { ...frameOf(surface, 80, 12, skin), lang: 'ko' }, view, { close: () => undefined }))
+  }
+  drawPane(on, 'cost-en', el => renderLimits(el, frameOf('desktop', 80), view, { close: () => undefined }))
+  for (const skin of SKINS) for (const surface of SURFACES) {
+    const ui = await mount($, 'cost-' + surface + skin, surface, 80)
+    const texts = (await ui.findAll({ type: 'Text' })).map(x => String(x.text).replace(/^[•● ]+/, ''))
+    const said = texts.join('\n')
+    for (const text of [
+      'API 가격 기준 비용', '오늘', '프로바이더별', '비용이 큰 모델', '최근 7일',
+      // Today's total includes an estimate; a provider and a model with only unpriced requests say "—".
+      '≈$15.68', '≈$12.30', '$3.38', '—', '≈$9.90', '$2.40', '<$0.01', '≈$1,234.50',
+      // Providers by the names the limits pane gives them; an id with no known name stays as it is.
+      'GPT', 'opencode-go', 'claude-opus-5-5', 'gpt-5.5', 'deepseek-v4.1-flash',
+      '금액은 공개된 API 가격 기준 환산액입니다. 구독으로 처리된 요청도 API로 이용했을 때의 비용으로 표시합니다.',
+      '가격을 알 수 없는 요청 9건은 금액에 포함되지 않았습니다.',
+      '≈ 표시가 붙은 금액은 대략적인 값입니다. 캐시 비율을 추정해 계산한 요청이 40건 포함되어 있습니다.',
+      // The window that runs out ahead of its reset says so under its reset, in its tone.
+      '이 속도라면 2시간 10분 뒤 한도가 소진됩니다',
+    ]) expect(said, surface + skin + ' ' + text).toContain(text)
+    // The cost is under the windows, in the order today, providers, models, week.
+    const order = ['오늘', '프로바이더별', '비용이 큰 모델', '최근 7일'].map(x => texts.indexOf(x))
+    expect(order.every((at, i) => at >= 0 && (i === 0 || at > order[i - 1]!)), surface + skin + ' ' + order.join()).toBe(true)
+    expect(texts.indexOf('오늘') > texts.findIndex(x => x.startsWith('Claude')), surface + skin).toBe(true)
+    // The raw ids of the two known providers are not shown as providers (model names keep theirs).
+    expect(texts.includes('anthropic') || texts.includes('chatgpt'), surface + skin).toBe(false)
+    expect(texts.filter(x => x === 'Claude').length, surface + skin).toBeGreaterThanOrEqual(2)
+    // Only one forecast sentence: the weekly window has none.
+    expect(said.split('이 속도라면').length - 1, surface + skin).toBe(1)
+    await ui.unmount()
+  }
+  const en = await mount($, 'cost-en', 'desktop', 80)
+  const english = (await en.findAll({ type: 'Text' })).map(x => String(x.text)).join('\n')
+  for (const text of ['Cost at API prices', 'Today', 'By provider', 'Models that cost most', 'Last 7 days', 'At this pace it runs out in 2h 10m',
+    'Amounts are what these requests would cost at public API prices. Subscription use is shown the same way.']) expect(english, text).toContain(text)
+  await en.unmount()
+})
+
+test('the limits pane draws no cost without one, says so when none has been answered, and draws the part it has', async ($, on) => {
+  const items = [{ provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: 'five_hour' as const, label: '', percent: 40 }]
+  const draw = (id: string, cost: { today?: CostSummary; week?: CostSummary } | undefined) => {
+    for (const surface of SURFACES) drawPane(on, id + surface, el => renderLimits(el, { ...frameOf(surface, 80), lang: 'ko' }, { items, ...(cost ? { cost } : {}) }, { close: () => undefined }))
+  }
+  draw('cost-absent', undefined)
+  draw('cost-nothing', {})
+  draw('cost-week-only', { week: { ...COST_WEEK, total: BUCKET(5) } })
+  draw('cost-clean', { today: { from: COST_TODAY.from, total: BUCKET(0), providers: [], models: [] } })
+  for (const surface of SURFACES) {
+    const said = async (id: string) => {
+      const ui = await mount($, id + surface, surface, 80)
+      const text = (await ui.findAll({ type: 'Text' })).map(x => String(x.text)).join('\n')
+      await ui.unmount()
+      return text
+    }
+    // An older caller: the pane is what it was.
+    expect(await said('cost-absent'), surface).not.toContain('비용')
+    // No answer yet: said plainly, with no figure.
+    const none = await said('cost-nothing')
+    expect(none, surface).toContain('비용을 아직 불러오지 못했습니다.')
+    expect(none, surface).not.toContain('$')
+    // Only the week answered: its line stands, today's does not.
+    const week = await said('cost-week-only')
+    expect(week, surface).toContain('최근 7일')
+    expect(week, surface).toContain('$5.00')
+    expect(week, surface).not.toContain('오늘')
+    expect(week, surface).not.toContain('가격을 알 수 없는')
+    // Priced and nothing spent: a real $0.00, with the note and no caveats.
+    const clean = await said('cost-clean')
+    expect(clean, surface).toContain('$0.00')
+    expect(clean, surface).toContain('금액은 공개된 API 가격 기준 환산액입니다.')
+    expect(clean, surface).not.toContain('가격을 알 수 없는')
+    expect(clean, surface).not.toContain('≈')
+  }
 })
 
 // 2026-10-29: the row's light sat in an empty absolute Box laid over it, which the app never drew:

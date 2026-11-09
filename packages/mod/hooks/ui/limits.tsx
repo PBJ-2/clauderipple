@@ -17,6 +17,10 @@
 // mode, while on, says until when under Claude's tile (the one in use, of several). The terminal
 // draws the same in lines of text, the badge as "(사용 중)" and the label after a "·".
 //
+// A window the router expects to run out before its reset (`exhaustsAt`, 2026-11-09) is at least
+// amber, red within the hour, and says under its reset how long until it runs out at its pace.
+// After the windows a cost tile says what the requests cost at public API prices (see costDrawn).
+//
 // The pane redraws when the limits are read again (once a minute at most) and as the minute
 // changes, so the water holds still: no ripples to start over.
 
@@ -24,7 +28,7 @@ import { t } from '../i18n'
 import type { Lang } from '../i18n'
 import type { RenderNode } from 'claude-code'
 
-import type { LimitItem } from '../../types'
+import type { CostSummary, LimitItem } from '../../types'
 import { CELL_PX, INK, ROW_PX, TONE, barArt, esc, labelPx, r, svg } from './art'
 import type { Tone } from './art'
 import { capsule, closeButton, pic } from './kit'
@@ -34,7 +38,7 @@ import type { Look } from './look'
 import { canDraw, textButton } from './parts'
 import type { Els } from './parts'
 import { chOf, displayWidth, limitTone, providerColor, svgDoc, textTone } from './theme'
-import { limitGroupAccount, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, resetMoment, timeLeft } from './view'
+import { costFigure, exhaustSentence, providerDisplayName, limitGroupAccount, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTone, resetMoment, timeLeft } from './view'
 import type { Frame, LimitGroup, LimitsActions, LimitsView } from './view'
 
 // ---- What each window says -----------------------------------------------------------------------
@@ -246,9 +250,11 @@ function windowDrawn(el: Els, frame: Frame, group: LimitGroup, item: LimitItem, 
   const { Box, Text } = el
   const k = lookOf(frame)
   const L = frame.lang
-  const tone = limitTone(item.percent)
+  // A forecast that the window runs out before it resets makes the line at least amber (view.ts).
+  const tone = limitItemTone(item, frame.now)
   const reset = resetOf(item, frame.now)
   const label = windowName(item, group, L)
+  const exhaust = exhaustSentence(item, frame.now, L)
   // A passed reset leaves a share that may be the old window's, so its figure is quiet.
   const figure = reset.kind === 'passed' ? k.sub : figureWord(k, tone)
   const when: RenderNode[] = reset.kind === 'ahead'
@@ -281,9 +287,14 @@ function windowDrawn(el: Els, frame: Frame, group: LimitGroup, item: LimitItem, 
         <Box key="when" flexDirection="row" flexWrap="wrap" justifyContent="space-between" columnGap={2} paddingLeft={name + 1} width="100%" minWidth={0}>
           {when}
         </Box>
+        {exhaust ? (
+          <Box key="exhaust" paddingLeft={name + 1} width="100%" minWidth={0}>
+            <Text {...figureWord(k, tone)} wrap="wrap">{exhaust}</Text>
+          </Box>
+        ) : null}
       </Box>
     ),
-    rows: 1.2 + whenLines(reset, whenCells, L, frame.now) * 1.05,
+    rows: 1.2 + whenLines(reset, whenCells, L, frame.now) * 1.05 + (exhaust ? linesOf(exhaust, whenCells) * 1.05 : 0),
   }
 }
 
@@ -319,11 +330,97 @@ function groupDrawn(el: Els, frame: Frame, view: LimitsView, group: LimitGroup, 
   }
 }
 
+// ---- Cost ----------------------------------------------------------------------------------------
+//
+// Under the plan windows, what the requests cost at public API prices (2026-11-09): today since the
+// local midnight, each provider's share and the models that cost most, then the last seven days. A
+// subscription's requests are shown at what the API would have charged, which the note under the
+// figures says, with what the figures leave out: requests with no known price ("—" on a line that
+// has nothing but those) and the "≈" of a total that includes an estimated cache rate. A part the
+// router has not answered is left out, and with none the tile says so; a failed read keeps the last
+// good one (register.tsx refreshCost), so no figure here is ever a placeholder.
+
+/** A cost line: a name (a provider's with its dot) and its amount at the right. */
+type CostRow = { key: string; name: string; dot?: string; figure: string; bold?: boolean }
+
+function costRows(summary: CostSummary, items: readonly LimitItem[]): { providers: CostRow[]; models: CostRow[] } {
+  return {
+    providers: summary.providers.map((line, i) => ({ key: 'provider-' + i, name: providerDisplayName(line.name, items), dot: providerColor(line.name), figure: costFigure(line) })),
+    models: summary.models.map((line, i) => ({ key: 'model-' + i, name: displayText(line.name, DISPLAY.name), figure: costFigure(line) })),
+  }
+}
+
+/**
+ * The notes under the figures: how the amounts are worked out, then what they leave out. The
+ * counts are the largest of the totals shown (the week holds the day), since the note is for all.
+ */
+function costNotes(cost: NonNullable<LimitsView['cost']>, lang: Lang): { text: string; warn: boolean }[] {
+  const periods = [cost.today, cost.week].filter((p): p is CostSummary => !!p)
+  if (!periods.length) return []
+  const unpriced = Math.max(...periods.map(p => p.total.unpricedRequests))
+  const estimated = Math.max(...periods.map(p => p.total.estimatedRequests))
+  return [
+    { text: t(lang, 'cost.note'), warn: false },
+    ...(unpriced > 0 ? [{ text: t(lang, 'cost.unpriced', { count: unpriced }), warn: true }] : []),
+    ...(estimated > 0 ? [{ text: t(lang, 'cost.estimated', { count: estimated }), warn: false }] : []),
+  ]
+}
+
+/** One line of the cost tile: the name gives way (cut) before the amount does. */
+function costLine(el: Els, k: Look, row: CostRow): RenderNode {
+  const { Box, Text } = el
+  return (
+    <Box key={row.key} flexDirection="row" alignItems="center" columnGap={1} width="100%" minWidth={0}>
+      {row.dot ? <Text color={row.dot}>●</Text> : null}
+      <Box key="name" flexGrow={1} flexShrink={1} minWidth={0}>
+        <Text {...(row.bold ? k.ink : k.sub)} wrap="truncate">{row.name}</Text>
+      </Box>
+      <Box key="figure" flexShrink={0}>
+        <Text bold={row.bold} {...k.ink}>{row.figure}</Text>
+      </Box>
+    </Box>
+  )
+}
+
+/** The cost tile, or null when the view carries no cost at all (an older caller). */
+function costDrawn(el: Els, frame: Frame, cost: LimitsView['cost'], items: readonly LimitItem[], room: number): { node: RenderNode; rows: number } | null {
+  if (!cost) return null
+  const { Box, Text } = el
+  const k = lookOf(frame)
+  const L = frame.lang
+  const today = cost.today
+  const week = cost.week
+  const lists = today ? costRows(today, items) : { providers: [], models: [] }
+  const notes = costNotes(cost, L)
+  const sections: { node: RenderNode; lines: number }[] = []
+  const section = (key: string, children: RenderNode[], lines: number) => sections.push({ node: <Box key={key} flexDirection="column" width="100%" minWidth={0}>{children}</Box>, lines })
+  const total = (key: string, label: string, summary: CostSummary) => costLine(el, k, { key, name: label, figure: costFigure(summary.total), bold: true })
+  if (!today && !week) section('none', [<Text key="none" {...k.sub} wrap="wrap">{t(L, 'cost.unavailable')}</Text>], linesOf(t(L, 'cost.unavailable'), room))
+  if (today) section('today', [total('today-total', t(L, 'cost.today'), today)], 1)
+  if (lists.providers.length) section('providers', [<Text key="head" {...k.mute}>{t(L, 'cost.providers')}</Text>, ...lists.providers.map(row => costLine(el, k, row))], 1 + lists.providers.length)
+  if (lists.models.length) section('models', [<Text key="head" {...k.mute}>{t(L, 'cost.models')}</Text>, ...lists.models.map(row => costLine(el, k, row))], 1 + lists.models.length)
+  if (week) section('week', [total('week-total', t(L, 'cost.week'), week)], 1)
+  if (notes.length) {
+    section('notes', notes.map((note, i) => <Text key={'note-' + i} {...(note.warn ? { color: k.tone('amber') } : k.mute)} wrap="wrap">{note.text}</Text>), notes.reduce((n, note) => n + linesOf(note.text, room), 0))
+  }
+  return {
+    node: (
+      <Box key="limits-cost" flexDirection="column" rowGap={1} width="100%" minWidth={0} paddingX={1.5} paddingY={0.5} {...k.tile}>
+        <Text key="title" bold {...k.ink}>{t(L, 'cost.title')}</Text>
+        {sections.map(s => s.node)}
+      </Box>
+    ),
+    rows: 1 + sections.reduce((n, s) => n + s.lines * 1.05 + 0.5, 0) + 0.6,
+  }
+}
+
 function limitsDrawn(el: Els, frame: Frame, view: LimitsView, actions: LimitsActions): RenderNode {
   const groups = limitGroups(view.items)
   const numbered = limitGroupNumbered(groups)
   const saveGroup = saveGroupOf(groups)
   const tiles = groups.map(group => groupDrawn(el, frame, view, group, numbered(group), saveGroup))
+  const cost = costDrawn(el, frame, view.cost, view.items, innerCells(frame) - 4)
+  if (cost) tiles.push(cost)
   const top = topOf(groups)
   // Taken generously: a capsule taller than its water would show the page beneath (kit.tsx).
   const rows = (top ? 4 : 3) + tiles.reduce((n, tile) => n + tile.rows + 0.5, 0) + 2
@@ -343,6 +440,42 @@ function limitsDrawn(el: Els, frame: Frame, view: LimitsView, actions: LimitsAct
 /** Cells of the terminal's bar. */
 const TEXT_BAR = 10
 
+/** The cost as lines of text (the same sections as the cost tile), or '' when the view carries none. */
+function costLines(el: Els, frame: Frame, cost: LimitsView['cost'], items: readonly LimitItem[]): RenderNode {
+  if (!cost) return ''
+  const { Box, Text } = el
+  const L = frame.lang
+  const tone = textTone(frame.appearance)
+  const today = cost.today
+  const lists = today ? costRows(today, items) : { providers: [], models: [] }
+  const rows = [...lists.providers, ...lists.models]
+  const name = Math.min(32, Math.max(NAME_MIN, displayWidth(t(L, 'cost.today')), displayWidth(t(L, 'cost.week')), ...rows.map(row => displayWidth(row.name) + (row.dot ? 2 : 0))))
+  const line = (row: CostRow, indent: number) => (
+    <Box key={row.key} flexDirection="row" columnGap={2} paddingLeft={indent}>
+      <Box width={name} flexShrink={0}><Text wrap="truncate">{row.dot ? <Text color={row.dot}>•</Text> : null}{row.dot ? ' ' : ''}{row.name}</Text></Box>
+      <Text>{row.figure}</Text>
+    </Box>
+  )
+  const total = (key: string, label: string, summary: CostSummary) => (
+    <Box key={key} flexDirection="row" columnGap={2} paddingLeft={2}>
+      <Box width={name} flexShrink={0}><Text wrap="truncate">{label}</Text></Box>
+      <Text bold>{costFigure(summary.total)}</Text>
+    </Box>
+  )
+  const notes = costNotes(cost, L)
+  return (
+    <Box key="limit-cost" flexDirection="column">
+      <Text bold>{t(L, 'cost.title')}</Text>
+      {!today && !cost.week ? <Box paddingLeft={2}><Text dimColor wrap="wrap">{t(L, 'cost.unavailable')}</Text></Box> : null}
+      {today ? total('today', t(L, 'cost.today'), today) : null}
+      {lists.providers.length ? <Box key="providers" flexDirection="column"><Box paddingLeft={2}><Text dimColor>{t(L, 'cost.providers')}</Text></Box>{lists.providers.map(row => line(row, 4))}</Box> : null}
+      {lists.models.length ? <Box key="models" flexDirection="column"><Box paddingLeft={2}><Text dimColor>{t(L, 'cost.models')}</Text></Box>{lists.models.map(row => line(row, 4))}</Box> : null}
+      {cost.week ? total('week', t(L, 'cost.week'), cost.week) : null}
+      {notes.map((note, i) => <Box key={'note-' + i} paddingLeft={2}><Text color={note.warn ? tone.warn : undefined} dimColor={!note.warn} wrap="wrap">{note.text}</Text></Box>)}
+    </Box>
+  )
+}
+
 function limitsText(el: Els, frame: Frame, view: LimitsView, actions: LimitsActions): RenderNode {
   const { Box, Text } = el
   const L = frame.lang
@@ -358,7 +491,7 @@ function limitsText(el: Els, frame: Frame, view: LimitsView, actions: LimitsActi
       <Text dimColor wrap="wrap">{groups.length ? nearLine(view.items, L) : t(L, 'limits.empty')}</Text>
     </Box>
   )
-  if (!groups.length) return <Box flexDirection="column" rowGap={1} width="100%">{head}</Box>
+  if (!groups.length) return <Box flexDirection="column" rowGap={1} width="100%">{head}{costLines(el, frame, view.cost, view.items)}</Box>
   const numbered = limitGroupNumbered(groups)
   const saveGroup = saveGroupOf(groups)
   const name = Math.max(NAME_MIN, ...groups.flatMap(group => group.items.map(item => displayWidth(windowName(item, group, L)))))
@@ -379,7 +512,8 @@ function limitsText(el: Els, frame: Frame, view: LimitsView, actions: LimitsActi
             </Box>
             {save ? <Box key="save" paddingLeft={2}><Text dimColor wrap="wrap">{save}</Text></Box> : null}
             {group.items.map((item, i) => {
-              const level = limitTone(item.percent)
+              const level = limitItemTone(item, frame.now)
+              const exhaust = exhaustSentence(item, frame.now, L)
               const reset = resetOf(item, frame.now)
               const filled = Math.round((Math.max(0, Math.min(100, item.percent)) / 100) * TEXT_BAR)
               const when = reset.kind === 'ahead'
@@ -402,12 +536,18 @@ function limitsText(el: Els, frame: Frame, view: LimitsView, actions: LimitsActi
                   <Box key="when" paddingLeft={name + 2}>
                     <Text color={reset.kind === 'passed' ? tone.warn : undefined} dimColor={reset.kind !== 'passed'} wrap="wrap">{when}</Text>
                   </Box>
+                  {exhaust ? (
+                    <Box key="exhaust" paddingLeft={name + 2}>
+                      <Text color={colorOf(level)} wrap="wrap">{exhaust}</Text>
+                    </Box>
+                  ) : null}
                 </Box>
               )
             })}
           </Box>
         )
       })}
+      {costLines(el, frame, view.cost, view.items)}
     </Box>
   )
 }
