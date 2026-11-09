@@ -118,9 +118,10 @@ function harness(pageFor: (slug: string, count: number) => Response, data = rows
   const logs: string[] = [];
   const counts = new Map<string, number>();
   const fetchImpl: typeof fetch = async (url, init) => {
-    if (String(url).includes("/api/v2/")) {
+    if (String(url).startsWith("https://artificialanalysis.ai/api/v2/")) {
+      assert.equal(String(url), "https://artificialanalysis.ai/api/v2/language/models");
       assert.equal(new Headers(init?.headers).get("x-api-key"), "fixture-key");
-      return Response.json({ data });
+      return Response.json({ intelligence_index_version: "v5.0.1", tier: "pro", data });
     }
     if (String(url).includes("raw.githubusercontent")) return new Response(null, { status: 404 });
     const slug = String(url).split("/").at(-1)!;
@@ -175,4 +176,25 @@ test("AA runner uses previous file for seven-day reuse and refetches only new/ex
     await runDataset({ ...h.options, previous: file });
     assert.deepEqual(h.pages.map(p => p.slug), ["gpt-6-1-sol-high"]);
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test("AA V2 rows map documented names to the dataset without fetching pages", async () => {
+  const h = harness(() => new Response(html));
+  const d = await runDataset({ ...h.options, limit: 0 });
+  assert.equal(h.pages.length, 0);
+  assert.ok(h.logs.some(line => line.includes("intelligence_index_version v5.0.1")));
+  const model = d.models.find(m => m.slug === "deepseek-v4-1-flash")!;
+  assert.deepEqual(
+    { name: model.name, creator: model.creator, releaseDate: model.releaseDate, intelligence: model.intelligence, priceIn: model.priceIn, priceOut: model.priceOut, checkedAt: model.checkedAt },
+    { name: "DeepSeek V4.1 Flash (Max)", creator: "DeepSeek", releaseDate: "2026-09-10", intelligence: 39.5, priceIn: 0.3, priceOut: 1.2, checkedAt: null },
+  );
+});
+
+test("AA V2 non-2xx answers name the status, its documented meaning and the body's error", async () => {
+  const failWith = (response: () => Response) => runDataset({ apiKey: "fixture", fetchImpl: async () => response() });
+  await assert.rejects(failWith(() => Response.json({ error: "Unauthorized" }, { status: 401 })), { message: "AA API failed: HTTP 401 (missing or invalid key; Unauthorized)" });
+  await assert.rejects(failWith(() => Response.json({ error: "Forbidden" }, { status: 403 })), { message: "AA API failed: HTTP 403 (the key tier does not cover this endpoint; Forbidden)" });
+  await assert.rejects(failWith(() => new Response(null, { status: 429 })), { message: "AA API failed: HTTP 429 (daily quota exhausted)" });
+  await assert.rejects(failWith(() => Response.json({ error: "Gone", message: "The legacy /api/v2/data/* endpoints were retired" }, { status: 410 })), { message: "AA API failed: HTTP 410 (Gone; The legacy /api/v2/data/* endpoints were retired)" });
+  await assert.rejects(failWith(() => new Response("<html>bad gateway</html>", { status: 502 })), { message: "AA API failed: HTTP 502" });
 });

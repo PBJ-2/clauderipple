@@ -4,7 +4,11 @@ import fs from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { DATA_URL, extractPageRecords, mergeDataset, parseDataset, reusable, selectVariants } from './aa-dataset-lib.mjs';
-const API_URL = 'https://artificialanalysis.ai/api/v2/data/llms/models';
+// Documented V2 endpoint (the legacy /api/v2/data/* paths were retired 2026-11-04, HTTP 410).
+// A free-tier key needs /api/v2/language/models/free instead; the docs answer a tier mismatch with HTTP 403.
+const API_URL = 'https://artificialanalysis.ai/api/v2/language/models';
+// Meanings the V2 docs give for error statuses; the response body's `error` and `message` are added as well.
+const API_HINTS = { 401: 'missing or invalid key', 403: 'the key tier does not cover this endpoint', 429: 'daily quota exhausted' };
 const USER_AGENT = 'Mozilla/5.0 (compatible; ClaudeRipple dataset (github.com/PBJ-2/clauderipple))';
 const PAGE_GAP_MS = 1_500;
 const BACKOFF_MS = 5_000;
@@ -19,6 +23,13 @@ function apiRows(raw) {
   const rows = data.filter(r => r && typeof r.slug === 'string' && /^[a-z0-9-]+$/.test(r.slug) && typeof r.name === 'string' && typeof r.release_date === 'string' && typeof r.model_creator?.name === 'string' && typeof r.model_creator?.slug === 'string' && numeric(r.evaluations?.artificial_analysis_intelligence_index) && numeric(r.pricing?.price_1m_input_tokens) && numeric(r.pricing?.price_1m_output_tokens));
   if (rows.length < data.length / 2) throw new Error('AA API model list changed shape');
   return rows;
+}
+
+/** @param {Response} response @returns {Promise<Error>} */
+async function apiError(response) {
+  const body = await response.json().catch(() => null);
+  const detail = [API_HINTS[response.status], body?.error, body?.message].filter(value => typeof value === 'string' && value).join('; ').slice(0, 300);
+  return new Error(`AA API failed: HTTP ${response.status}${detail ? ` (${detail})` : ''}`);
 }
 
 /** @param {string|undefined} file @param {typeof fetch} fetchImpl @param {(message:string)=>void} warn */
@@ -45,8 +56,12 @@ export async function runDataset(options) {
   const { apiKey, fetchImpl = fetch, wait = sleep, now = Date.now, log = console.error } = options;
   if (!apiKey) throw new Error('AA_API_KEY is not set');
   const response = await fetchImpl(API_URL, { headers: { 'x-api-key': apiKey, 'user-agent': USER_AGENT }, signal: AbortSignal.timeout(30_000), redirect: 'error' });
-  if (!response.ok) throw new Error(`AA API failed: HTTP ${response.status}`);
-  const rows = apiRows(await response.json());
+  if (!response.ok) throw await apiError(response);
+  const body = await response.json();
+  // Envelope per the V2 docs: `tier`, `data`, `pagination` (list responses). Pagination parameters are
+  // not documented, so only the first page is read; the log shows whether the API reports more.
+  log(`AA: intelligence_index_version ${body?.intelligence_index_version ?? 'not reported'}${body?.pagination === undefined ? '' : `; pagination ${JSON.stringify(body.pagination).slice(0, 300)}`}`);
+  const rows = apiRows(body);
   const at = now();
   const variants = selectVariants(rows, at);
   const previous = await previousDataset(options.previous, fetchImpl, log);
