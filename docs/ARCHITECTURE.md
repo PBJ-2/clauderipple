@@ -551,9 +551,12 @@ Tests: `packages/router/test/compaction.test.ts` and the mod's engine tests.
 
 `scripts/aa-dataset.mjs` builds `aa-models.json` on the orphan GitHub `data` branch;
 `.github/workflows/aa-data.yml` checks daily at 03:37 UTC, replacing its single commit
-only for substantive changes or after a week. Source: [AA API v2](https://artificialanalysis.ai/api/v2/data/llms/models)
-(`x-api-key`, free limit 1,000 requests/day; `AA_API_KEY` stays in the environment).
-The API supplies slug/name/creator/release date, `evaluations.artificial_analysis_intelligence_index`
+only for substantive changes or after a week. Source: [AA data API docs](https://artificialanalysis.ai/data-api/docs),
+checked 2026-11-09 (`x-api-key`; `GET /api/v2/language/models`, and only on its 403 `GET /api/v2/language/models/free`
+with the same key). Limits are a fixed 24-hour window: Free 100, Pro 500 requests. The legacy
+`/api/v2/data/llms/models` returns HTTP 410 since 2026-11-04. `AA_API_KEY` stays in the environment.
+The API supplies slug/name/creator and `evaluations.artificial_analysis_intelligence_index`
+(the script also requires `release_date` and `model_creator.slug`, which the docs do not name)
 and input/output USD-per-million prices, **not** cost per task. The model page's Next.js
 flight record supplies `intelligenceIndex`, `intelligenceIndexIsEstimated` and
 `intelligenceIndexCostPerTask.cost.total` (USD, already including input/cache/output);

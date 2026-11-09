@@ -4,9 +4,10 @@ import fs from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { DATA_URL, extractPageRecords, mergeDataset, parseDataset, reusable, selectVariants } from './aa-dataset-lib.mjs';
-// Documented V2 endpoint (the legacy /api/v2/data/* paths were retired 2026-11-04, HTTP 410).
-// A free-tier key needs /api/v2/language/models/free instead; the docs answer a tier mismatch with HTTP 403.
-const API_URL = 'https://artificialanalysis.ai/api/v2/language/models';
+// Documented V2 list endpoints; the legacy /api/v2/data/* paths returned HTTP 410 from 2026-11-04.
+// The key's tier is unknown, so Pro is tried first; only its 403 (the tier does not cover it) retries the free path.
+const PRO_URL = 'https://artificialanalysis.ai/api/v2/language/models';
+const FREE_URL = 'https://artificialanalysis.ai/api/v2/language/models/free';
 // Meanings the V2 docs give for error statuses; the response body's `error` and `message` are added as well.
 const API_HINTS = { 401: 'missing or invalid key', 403: 'the key tier does not cover this endpoint', 429: 'daily quota exhausted' };
 const USER_AGENT = 'Mozilla/5.0 (compatible; ClaudeRipple dataset (github.com/PBJ-2/clauderipple))';
@@ -25,11 +26,39 @@ function apiRows(raw) {
   return rows;
 }
 
+/** @param {Response} response @returns {Promise<string[]>} the body's `error` and `message` strings, when present */
+async function bodyStrings(response) {
+  const body = await response.json().catch(() => null);
+  return [body?.error, body?.message].filter(value => typeof value === 'string' && value);
+}
+
 /** @param {Response} response @returns {Promise<Error>} */
 async function apiError(response) {
-  const body = await response.json().catch(() => null);
-  const detail = [API_HINTS[response.status], body?.error, body?.message].filter(value => typeof value === 'string' && value).join('; ').slice(0, 300);
+  const detail = [API_HINTS[response.status], ...(await bodyStrings(response))].filter(Boolean).join('; ').slice(0, 300);
   return new Error(`AA API failed: HTTP ${response.status}${detail ? ` (${detail})` : ''}`);
+}
+
+/**
+ * Pro path first. Only its 403 retries the free path, once, with the same key. Any other failure
+ * stays as it is; a 403 on both names both paths.
+ * @param {string} apiKey @param {typeof fetch} fetchImpl
+ * @returns {Promise<{body:unknown,path:string,afterProForbidden:boolean}>}
+ */
+async function fetchModelList(apiKey, fetchImpl) {
+  const get = url => fetchImpl(url, { headers: { 'x-api-key': apiKey, 'user-agent': USER_AGENT }, signal: AbortSignal.timeout(30_000), redirect: 'error' });
+  const pro = await get(PRO_URL);
+  if (pro.status !== 403) {
+    if (!pro.ok) throw await apiError(pro);
+    return { body: await pro.json(), path: PRO_URL, afterProForbidden: false };
+  }
+  await pro.body?.cancel();
+  const free = await get(FREE_URL);
+  if (free.status === 403) {
+    const detail = ['the key tier covers neither endpoint', ...(await bodyStrings(free))].join('; ');
+    throw new Error(`AA API failed: HTTP 403 on both /api/v2/language/models and /api/v2/language/models/free (${detail})`);
+  }
+  if (!free.ok) throw await apiError(free);
+  return { body: await free.json(), path: FREE_URL, afterProForbidden: true };
 }
 
 /** @param {string|undefined} file @param {typeof fetch} fetchImpl @param {(message:string)=>void} warn */
@@ -55,11 +84,10 @@ async function previousDataset(file, fetchImpl, warn) {
 export async function runDataset(options) {
   const { apiKey, fetchImpl = fetch, wait = sleep, now = Date.now, log = console.error } = options;
   if (!apiKey) throw new Error('AA_API_KEY is not set');
-  const response = await fetchImpl(API_URL, { headers: { 'x-api-key': apiKey, 'user-agent': USER_AGENT }, signal: AbortSignal.timeout(30_000), redirect: 'error' });
-  if (!response.ok) throw await apiError(response);
-  const body = await response.json();
-  // Envelope per the V2 docs: `tier`, `data`, `pagination` (list responses). Pagination parameters are
-  // not documented, so only the first page is read; the log shows whether the API reports more.
+  const { body, path, afterProForbidden } = await fetchModelList(apiKey, fetchImpl);
+  log(`AA: data from ${path}${afterProForbidden ? ' (the Pro path answered 403 for this key)' : ''}`);
+  // Envelope per the V2 docs: `tier`, `data`, `pagination` (list responses). The docs do not name the
+  // field that says more pages exist or how to request one, so only the first response is read and logged.
   log(`AA: intelligence_index_version ${body?.intelligence_index_version ?? 'not reported'}${body?.pagination === undefined ? '' : `; pagination ${JSON.stringify(body.pagination).slice(0, 300)}`}`);
   const rows = apiRows(body);
   const at = now();

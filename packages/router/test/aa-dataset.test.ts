@@ -8,6 +8,8 @@ import { runDataset } from "../../../scripts/aa-dataset.mjs";
 
 const NOW = Date.parse("2026-10-10T00:00:00Z");
 const DAY = 86_400_000;
+const PRO_URL = "https://artificialanalysis.ai/api/v2/language/models";
+const FREE_URL = "https://artificialanalysis.ai/api/v2/language/models/free";
 const html = fs.readFileSync(new URL("./fixtures/aa-flight.html", import.meta.url), "utf8");
 const rows: ApiRow[] = JSON.parse(fs.readFileSync(new URL("./fixtures/aa-api.json", import.meta.url), "utf8")).data;
 const variants = selectVariants(rows, NOW);
@@ -119,7 +121,7 @@ function harness(pageFor: (slug: string, count: number) => Response, data = rows
   const counts = new Map<string, number>();
   const fetchImpl: typeof fetch = async (url, init) => {
     if (String(url).startsWith("https://artificialanalysis.ai/api/v2/")) {
-      assert.equal(String(url), "https://artificialanalysis.ai/api/v2/language/models");
+      assert.ok(String(url) === PRO_URL || String(url) === FREE_URL, String(url));
       assert.equal(new Headers(init?.headers).get("x-api-key"), "fixture-key");
       return Response.json({ intelligence_index_version: "v5.0.1", tier: "pro", data });
     }
@@ -183,6 +185,7 @@ test("AA V2 rows map documented names to the dataset without fetching pages", as
   const d = await runDataset({ ...h.options, limit: 0 });
   assert.equal(h.pages.length, 0);
   assert.ok(h.logs.some(line => line.includes("intelligence_index_version v5.0.1")));
+  assert.ok(h.logs.includes(`AA: data from ${PRO_URL}`));
   const model = d.models.find(m => m.slug === "deepseek-v4-1-flash")!;
   assert.deepEqual(
     { name: model.name, creator: model.creator, releaseDate: model.releaseDate, intelligence: model.intelligence, priceIn: model.priceIn, priceOut: model.priceOut, checkedAt: model.checkedAt },
@@ -193,8 +196,39 @@ test("AA V2 rows map documented names to the dataset without fetching pages", as
 test("AA V2 non-2xx answers name the status, its documented meaning and the body's error", async () => {
   const failWith = (response: () => Response) => runDataset({ apiKey: "fixture", fetchImpl: async () => response() });
   await assert.rejects(failWith(() => Response.json({ error: "Unauthorized" }, { status: 401 })), { message: "AA API failed: HTTP 401 (missing or invalid key; Unauthorized)" });
-  await assert.rejects(failWith(() => Response.json({ error: "Forbidden" }, { status: 403 })), { message: "AA API failed: HTTP 403 (the key tier does not cover this endpoint; Forbidden)" });
   await assert.rejects(failWith(() => new Response(null, { status: 429 })), { message: "AA API failed: HTTP 429 (daily quota exhausted)" });
   await assert.rejects(failWith(() => Response.json({ error: "Gone", message: "The legacy /api/v2/data/* endpoints were retired" }, { status: 410 })), { message: "AA API failed: HTTP 410 (Gone; The legacy /api/v2/data/* endpoints were retired)" });
   await assert.rejects(failWith(() => new Response("<html>bad gateway</html>", { status: 502 })), { message: "AA API failed: HTTP 502" });
+});
+
+test("AA V2 retries the free path once after a Pro 403, with the same key, and logs the path that served", async () => {
+  const calls: { url: string; key: string | null }[] = [];
+  const logs: string[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), key: new Headers(init?.headers).get("x-api-key") });
+    if (String(url) === PRO_URL) return new Response(null, { status: 403 });
+    if (String(url) === FREE_URL) return Response.json({ intelligence_index_version: "v5.0.1", tier: "free", data: rows });
+    return new Response(null, { status: 404 });
+  };
+  const d = await runDataset({ apiKey: "fixture-key", fetchImpl, limit: 0, log: line => logs.push(line) });
+  assert.deepEqual(calls.slice(0, 2), [{ url: PRO_URL, key: "fixture-key" }, { url: FREE_URL, key: "fixture-key" }]);
+  assert.equal(d.models.find(m => m.slug === "deepseek-v4-1-flash")?.intelligence, 39.5);
+  assert.ok(logs.includes(`AA: data from ${FREE_URL} (the Pro path answered 403 for this key)`));
+  assert.ok(!logs.includes(`AA: data from ${PRO_URL}`));
+});
+
+test("AA V2 403 on both paths fails and names both paths", async () => {
+  const calls: string[] = [];
+  const fetchImpl: typeof fetch = async url => { calls.push(String(url)); return Response.json({ error: "Forbidden" }, { status: 403 }); };
+  await assert.rejects(runDataset({ apiKey: "fixture-key", fetchImpl }), { message: "AA API failed: HTTP 403 on both /api/v2/language/models and /api/v2/language/models/free (the key tier covers neither endpoint; Forbidden)" });
+  assert.deepEqual(calls, [PRO_URL, FREE_URL]);
+});
+
+test("AA V2 only a Pro 403 retries: other Pro errors stop at once, and a free-path error is reported as is", async () => {
+  const proCalls: string[] = [];
+  await assert.rejects(runDataset({ apiKey: "fixture-key", fetchImpl: async url => { proCalls.push(String(url)); return Response.json({ error: "Unauthorized" }, { status: 401 }); } }), { message: "AA API failed: HTTP 401 (missing or invalid key; Unauthorized)" });
+  assert.deepEqual(proCalls, [PRO_URL]);
+  const freeCalls: string[] = [];
+  await assert.rejects(runDataset({ apiKey: "fixture-key", fetchImpl: async url => { freeCalls.push(String(url)); return String(url) === PRO_URL ? new Response(null, { status: 403 }) : new Response(null, { status: 429 }); } }), { message: "AA API failed: HTTP 429 (daily quota exhausted)" });
+  assert.deepEqual(freeCalls, [PRO_URL, FREE_URL]);
 });
