@@ -12,7 +12,8 @@ const ATTRIBUTION = "Data: Artificial Analysis (artificialanalysis.ai)";
 const TTL_MS = 24 * 60 * 60_000;
 const RETRY_MS = 60 * 60_000;
 export type RouterEffort = "low" | "medium" | "high" | "xhigh" | "max";
-type ScoreModel = Pick<Model, "slug" | "base" | "effort" | "intelligence" | "costPerTask">;
+/** `priceIn`/`priceOut` are AA's USD per MTok list prices; null when AA gives none or the cache predates them. */
+type ScoreModel = Pick<Model, "slug" | "base" | "effort" | "intelligence" | "costPerTask" | "priceIn" | "priceOut">;
 export type ScoreDataset = Pick<Dataset, "generatedAt" | "attribution"> & { models: ScoreModel[] };
 export type ModelScores = {
   attribution: string;
@@ -43,7 +44,9 @@ export function parseScoreDataset(raw: unknown): ScoreDataset {
     const validNumber = (n: unknown): boolean => n === null || (typeof n === "number" && Number.isFinite(n));
     if (typeof m.slug !== "string" || !m.slug || slugs.has(m.slug) || typeof m.base !== "string" || !m.base || ![null, "low", "medium", "high", "xhigh", "max", "minimal", "non-reasoning"].includes(m.effort) || !validNumber(m.intelligence) || !validNumber(m.costPerTask)) throw new Error("invalid AA model score");
     slugs.add(m.slug);
-    models.push({ slug: m.slug, base: m.base, effort: m.effort, intelligence: m.intelligence, costPerTask: m.costPerTask });
+    // A cache written before prices existed has none: that is null, not an invalid record.
+    const price = (n: unknown): number | null => (typeof n === "number" && Number.isFinite(n) ? n : null);
+    models.push({ slug: m.slug, base: m.base, effort: m.effort, intelligence: m.intelligence, costPerTask: m.costPerTask, priceIn: price(m.priceIn), priceOut: price(m.priceOut) });
   }
   return { attribution: ATTRIBUTION, generatedAt: d.generatedAt, models };
 }

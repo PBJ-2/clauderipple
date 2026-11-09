@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { RequestRecord } from "./requestlog.ts";
+import { costUsd, priceOf } from "./prices.ts";
 
 const HOUR_MS = 3_600_000;
 
@@ -15,6 +16,12 @@ export type SummaryBucket = {
   output: number;
   cacheHitPercent: number;
   avgMs: number;
+  /** What these requests cost at API-price equivalents (see prices.ts), in USD, full precision. */
+  costUsd: number;
+  /** Requests that had tokens but no price (the model is in neither the Claude table nor the AA dataset). */
+  unpricedRequests: number;
+  /** Requests priced from an estimate (see `priceOf`), not from an official figure. */
+  estimatedRequests: number;
 };
 
 export type ModelUsageBucket = SummaryBucket & { provider: string; model: string; purpose?: "web-search" };
@@ -29,6 +36,10 @@ export type BucketTotals = {
   cacheWrite: number;
   output: number;
   ms: number;
+  /** USD at API-price equivalents. */
+  cost: number;
+  unpriced: number;
+  estimated: number;
 };
 
 export type ConversationTokens = {
@@ -59,8 +70,9 @@ export type UsageSummary = {
  * One persisted line: a partial bucket for (hour, provider, model). Lines are additive.
  * `purpose` splits a model's web searches out of its own turns; lines from before it existed keep
  * the old shape (see `modelRowOf`).
+ * A line from before costs existed has no `cost`: it is kept in memory as `legacy` and priced when a summary is read.
  */
-type HourBucket = BucketTotals & { h: number; p: string; m: string; purpose?: "web-search"; conversations?: ConversationTotals };
+type HourBucket = BucketTotals & { h: number; p: string; m: string; purpose?: "web-search"; conversations?: ConversationTotals; legacy?: true };
 
 /** What the dashboard's model table reads a record as. */
 export type ModelRow = { model: string; purpose?: "web-search" };
@@ -137,7 +149,40 @@ function conversationsOf(bucket: HourBucket): ConversationTotals {
 }
 
 export function emptyTotals(): BucketTotals {
-  return { count: 0, ok: 0, failed: 0, input: 0, cached: 0, cacheWrite: 0, output: 0, ms: 0 };
+  return { count: 0, ok: 0, failed: 0, input: 0, cached: 0, cacheWrite: 0, output: 0, ms: 0, cost: 0, unpriced: 0, estimated: 0 };
+}
+
+type Priced = Pick<BucketTotals, "cost" | "unpriced" | "estimated">;
+const NOTHING: Priced = { cost: 0, unpriced: 0, estimated: 0 };
+
+/**
+ * One record's cost. A count_tokens call and a record without tokens cost nothing and are not
+ * unpriced; a record with tokens is priced by its model, and is unpriced when no price is known.
+ */
+function recordCost(record: RequestRecord): Priced {
+  const usage = record.usage;
+  if (!usage || record.kind === "count_tokens" || !accounted(usage)) return NOTHING;
+  const cacheWrite = usage.cacheWrite ?? 0;
+  const price = priceOf(record.provider, modelRowOf(record).model, usage.input + usage.cached + cacheWrite, record.servedTier);
+  if (!price) return { cost: 0, unpriced: 1, estimated: 0 };
+  return { cost: costUsd(price, { input: usage.input, cached: usage.cached, cacheWrite, output: usage.output }), unpriced: 0, estimated: price.estimated ? 1 : 0 };
+}
+
+/**
+ * A legacy hour's cost, priced now from its token totals at the base tier (the hour does not keep
+ * per-request prompt sizes). The hour does not say how many of its requests carried tokens, so every
+ * request in it counts as estimated, or as unpriced, when the hour has tokens at all.
+ */
+function legacyCost(bucket: HourBucket): Priced {
+  if (!accounted(bucket)) return NOTHING;
+  const price = priceOf(bucket.p, bucket.m, 0);
+  if (!price) return { cost: 0, unpriced: bucket.count, estimated: 0 };
+  return { cost: costUsd(price, { input: bucket.input, cached: bucket.cached, cacheWrite: bucket.cacheWrite, output: bucket.output }), unpriced: 0, estimated: bucket.count };
+}
+
+/** The totals a bucket contributes to a summary: a legacy line is priced here, a stored one is read as stored. */
+function totalsOf(bucket: HourBucket): BucketTotals {
+  return bucket.legacy ? { ...bucket, ...legacyCost(bucket) } : bucket;
 }
 
 /** The same counting rules as `RequestLog.summary`, for one record. */
@@ -153,6 +198,7 @@ export function recordTotals(record: RequestRecord): BucketTotals {
     totals.cacheWrite = record.usage.cacheWrite ?? 0;
     totals.output = record.usage.output;
   }
+  Object.assign(totals, recordCost(record));
   return totals;
 }
 
@@ -165,6 +211,9 @@ export function addTotals(target: BucketTotals, source: BucketTotals): void {
   target.cacheWrite += source.cacheWrite;
   target.output += source.output;
   target.ms += source.ms;
+  target.cost += source.cost;
+  target.unpriced += source.unpriced;
+  target.estimated += source.estimated;
 }
 
 /** Derives the rate columns from summed totals. A cache write is input the model read fresh, so it
@@ -182,6 +231,9 @@ export function finishTotals(totals: BucketTotals): SummaryBucket {
     output: totals.output,
     cacheHitPercent: base > 0 ? Math.round((totals.cached / base) * 1000) / 10 : 0,
     avgMs: totals.count > 0 ? Math.round(totals.ms / totals.count) : 0,
+    costUsd: totals.cost,
+    unpricedRequests: totals.unpriced,
+    estimatedRequests: totals.estimated,
   };
 }
 
@@ -220,6 +272,11 @@ function isHourBucket(value: unknown): value is HourBucket {
     ["count", "ok", "failed", "input", "cached", "cacheWrite", "output", "ms"].every((key) => {
       const n = (b as unknown as Record<string, unknown>)[key];
       return typeof n === "number" && Number.isFinite(n);
+    }) &&
+    // Cost fields are absent on a line from before prices existed; when present they must be numbers.
+    ["cost", "unpriced", "estimated"].every((key) => {
+      const n = (b as unknown as Record<string, unknown>)[key];
+      return n === undefined || (typeof n === "number" && Number.isFinite(n));
     });
 }
 
@@ -237,6 +294,9 @@ function toLine(bucket: HourBucket): string {
     cacheWrite: bucket.cacheWrite,
     output: bucket.output,
     ms: bucket.ms,
+    cost: bucket.cost,
+    unpriced: bucket.unpriced,
+    estimated: bucket.estimated,
     conversations: bucket.conversations,
   }) + "\n";
 }
@@ -312,21 +372,22 @@ export class UsageHistory {
     const models = new Map<string, { totals: BucketTotals; provider: string; model: string; purpose?: "web-search" }>();
     for (const bucket of [...this.buckets.values(), ...this.open.values()]) {
       if (bucket.h < fromHour || bucket.h * HOUR_MS >= toMs) continue;
-      addTotals(total, bucket);
+      const totals = totalsOf(bucket);
+      addTotals(total, totals);
       const accounting = conversationsOf(bucket);
       addConversations(conversations, accounting);
       const perProvider = providerConversations.get(bucket.p) ?? emptyConversations();
       addConversations(perProvider, accounting);
       providerConversations.set(bucket.p, perProvider);
       const provider = providers.get(bucket.p) ?? providers.set(bucket.p, emptyTotals()).get(bucket.p)!;
-      addTotals(provider, bucket);
+      addTotals(provider, totals);
       const row = modelRowOf({
         provider: bucket.p, target: bucket.m, ...(bucket.purpose ? { purpose: bucket.purpose } : {}),
         usage: { input: bucket.input, cached: bucket.cached, cacheWrite: bucket.cacheWrite, output: bucket.output },
       });
       const key = modelKey(bucket.p, row.model, row.purpose);
       const model = models.get(key) ?? (models.set(key, { totals: emptyTotals(), provider: bucket.p, model: row.model, ...(row.purpose ? { purpose: row.purpose } : {}) }).get(key)!);
-      addTotals(model.totals, bucket);
+      addTotals(model.totals, totals);
     }
     const modelList = [...models.values()].map(({ totals, provider, model, purpose }) => ({ ...finishTotals(totals), provider, model, ...(purpose ? { purpose } : {}) }));
     sortByVolume(modelList);
@@ -343,7 +404,8 @@ export class UsageHistory {
   }
 
   private merge(target: Map<string, HourBucket>, bucket: HourBucket): void {
-    const key = bucketKey(bucket.h, bucket.p, bucket.m, bucket.purpose);
+    // A legacy line is kept apart from a priced one for the same hour: only the former is priced at read time.
+    const key = bucketKey(bucket.h, bucket.p, bucket.m, bucket.purpose) + (bucket.legacy ? "\u0001legacy" : "");
     const existing = target.get(key);
     if (existing) {
       const conversations = conversationsOf(existing);
@@ -385,7 +447,10 @@ export class UsageHistory {
         const parsed: unknown = JSON.parse(line);
         if (isHourBucket(parsed)) {
           this.observe(parsed.h);
-          this.merge(this.buckets, parsed);
+          // A line with no `cost` predates prices: keep it as legacy, to be priced when a summary reads it.
+          const stored = parsed as Partial<Priced>;
+          const legacy = stored.cost === undefined;
+          this.merge(this.buckets, { ...parsed, cost: stored.cost ?? 0, unpriced: stored.unpriced ?? 0, estimated: stored.estimated ?? 0, ...(legacy ? { legacy: true as const } : {}) });
         }
       } catch {
         // A torn write stays behind; the neighbouring lines still count.

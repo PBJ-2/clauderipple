@@ -83,10 +83,11 @@ test("RequestLog computes success, usage, cache and latency summaries", () => {
     log.add(record("c", { at: "2026-09-13T10:02:00.000Z", ms: 200, provider: "anthropic", usage: { input: 2, cached: 98, cacheWrite: 100, output: 1 } }));
     log.add(record("old", { at: "2026-09-13T09:00:00.000Z", usage: { input: 999, cached: 0, output: 999 } }));
     const summary = log.summary(Date.parse("2026-09-13T09:59:00.000Z"));
-    assert.deepEqual(summary.total, { count: 3, ok: 2, failed: 1, input: 72, cached: 178, cacheWrite: 100, output: 10, cacheHitPercent: 50.9, avgMs: 200, conversationTokens: 360, ungroupedRequests: 3 });
-    assert.deepEqual(summary.providers.chatgpt, { count: 1, ok: 1, failed: 0, input: 20, cached: 80, cacheWrite: 0, output: 9, cacheHitPercent: 80, avgMs: 100, conversationTokens: 109, ungroupedRequests: 1 });
-    assert.deepEqual(summary.providers.moonshot, { count: 1, ok: 0, failed: 1, input: 50, cached: 0, cacheWrite: 0, output: 0, cacheHitPercent: 0, avgMs: 300, conversationTokens: 50, ungroupedRequests: 1 });
-    assert.deepEqual(summary.providers.anthropic, { count: 1, ok: 1, failed: 0, input: 2, cached: 98, cacheWrite: 100, output: 1, cacheHitPercent: 49, avgMs: 200, conversationTokens: 201, ungroupedRequests: 1 });
+    // No AA prices are loaded here, so every request with tokens is unpriced and costs nothing.
+    assert.deepEqual(summary.total, { count: 3, ok: 2, failed: 1, input: 72, cached: 178, cacheWrite: 100, output: 10, cacheHitPercent: 50.9, avgMs: 200, conversationTokens: 360, ungroupedRequests: 3, costUsd: 0, unpricedRequests: 3, estimatedRequests: 0 });
+    assert.deepEqual(summary.providers.chatgpt, { count: 1, ok: 1, failed: 0, input: 20, cached: 80, cacheWrite: 0, output: 9, cacheHitPercent: 80, avgMs: 100, conversationTokens: 109, ungroupedRequests: 1, costUsd: 0, unpricedRequests: 1, estimatedRequests: 0 });
+    assert.deepEqual(summary.providers.moonshot, { count: 1, ok: 0, failed: 1, input: 50, cached: 0, cacheWrite: 0, output: 0, cacheHitPercent: 0, avgMs: 300, conversationTokens: 50, ungroupedRequests: 1, costUsd: 0, unpricedRequests: 1, estimatedRequests: 0 });
+    assert.deepEqual(summary.providers.anthropic, { count: 1, ok: 1, failed: 0, input: 2, cached: 98, cacheWrite: 100, output: 1, cacheHitPercent: 49, avgMs: 200, conversationTokens: 201, ungroupedRequests: 1, costUsd: 0, unpricedRequests: 1, estimatedRequests: 0 });
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
