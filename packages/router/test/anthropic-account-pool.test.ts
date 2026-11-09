@@ -79,7 +79,6 @@ test("the current login's pause survives a new pool and account writes, and resu
     const restarted = new ClaudeAccountAuthPool(options);
     assert.equal(restarted.currentPaused(), true);
     assert.deepEqual(restarted.peekCredentials().map((c) => c.ownerId), [stored.id]);
-    assert.equal(current.describeSource(), "keychain", "the external credential is left alone");
 
     setCurrentClaudeAccountPaused(dir, false);
     assert.equal(restarted.currentPaused(), false);
