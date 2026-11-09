@@ -11,6 +11,7 @@ import { codexEnabled, followCodexCache, writeCodexCatalog } from "../../cli/src
 import { ingressModels } from "./ingress/models.ts";
 import { ConfigStore, awakeSettings, configPath, homeDir, terminateHosts, tetherSettings } from "./config.ts";
 import { targetWarnings } from "./targets.ts";
+import { loadAaPricesFrom } from "./prices.ts";
 import { ensureInstallationId } from "./installation-id.ts";
 import { AwakeController, execRunner, type Activity } from "./awake.ts";
 import { TetherController } from "./tether.ts";
@@ -96,6 +97,8 @@ const T_CONFIG = Date.now();
 
 const certs = new CertStore(home);
 const requests = new RequestLog(path.join(home, "logs", "requests.jsonl"));
+// Price requests from the AA cache at once, not only once the scores page is opened.
+loadAaPricesFrom(path.join(home, "aa-models.json"));
 try {
   certs.register(cfg0.upstream, fs.readFileSync(path.join(home, "leaf.pem")), fs.readFileSync(path.join(home, "leaf.key")));
 } catch (e) {

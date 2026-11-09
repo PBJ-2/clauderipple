@@ -59,6 +59,8 @@ import { contextWindowSnapshot, syncContextWindows } from "./context-windows.ts"
 import { measureModel, ollamaApiBase, ollamaModelFacts, refusedByPlan, type Measured, type WireCandidate } from "./capabilities.ts";
 import { catalogEntry, catalogueWindow } from "./catalog.ts";
 import { ModelScoreCatalog, buildModelScores } from "./model-scores.ts";
+import { setAaPriceDataset } from "./prices.ts";
+import { LimitForecaster, forecastLimits } from "./limit-forecast.ts";
 import { ClaudeCodeAuthStore, nativeAnthropicHeaders, type ClaudeCodeCredentialReaders } from "./providers/anthropic.ts";
 import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
 import { fetchClaudeModels, newClaudeReleases, type ClaudeModel } from "./providers/anthropic-models.ts";
@@ -331,7 +333,11 @@ async function claudeAccountUsage(deps: AdminDeps): Promise<{ id: string; label:
 // first and otherwise follows this order.
 
 /** One window the limits row reads. `reset_at` is epoch seconds, as the other readers use. */
-export type LimitsWindow = { kind: "five_hour" | "seven_day" | "scoped" | "window"; label?: string; used_percent: number; window_minutes?: number; reset_at?: number };
+/**
+ * `exhaust_at` (epoch seconds) is present only when the window's recent rate of use reaches 100% before
+ * its reset; see limit-forecast.ts for the rule.
+ */
+export type LimitsWindow = { kind: "five_hour" | "seven_day" | "scoped" | "window"; label?: string; used_percent: number; window_minutes?: number; reset_at?: number; exhaust_at?: number };
 /**
  * One account's windows. `account` is the account's own index, stable while others come and go, so
  * the mod's "Claude 1"/"Claude 2" do not swap. `label` is the name the owner gave it (absent for the
@@ -463,6 +469,9 @@ async function googleLimitAccounts(deps: AdminDeps, name: string): Promise<Limit
   return out;
 }
 
+/** Each `/api/limits` read is a sample of every window; in memory only, so a restart starts fresh. */
+const limitForecasts = new LimitForecaster();
+
 /** Every provider whose quota can be read, in one shape, for `GET /api/limits`. */
 async function buildLimits(deps: AdminDeps): Promise<{ providers: LimitsProvider[] }> {
   const providers: LimitsProvider[] = [];
@@ -502,6 +511,7 @@ async function buildLimits(deps: AdminDeps): Promise<{ providers: LimitsProvider
       if (windows.length) providers.push({ provider: name, type: "grok", title: "Grok", accounts: [{ account: 0, windows: windows.map((w) => ({ ...w })), at: Date.now() }] });
     }
   }
+  forecastLimits(limitForecasts, providers);
   return { providers };
 }
 
@@ -2052,7 +2062,8 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
     runCli: deps.runCli ?? runCli, startCliDetached: deps.startCliDetached ?? startCliDetached,
   });
   deps = { ...deps, autoUpdater: updater };
-  const scores = new ModelScoreCatalog({ home: homeDir(), warn: message => deps.log.warn(message), ...(deps.modelScoresFetch ? { fetch: deps.modelScoresFetch } : {}) });
+  // Every dataset the catalog loads or fetches also prices the requests from then on (prices.ts).
+  const scores = new ModelScoreCatalog({ home: homeDir(), warn: message => deps.log.warn(message), onDataset: setAaPriceDataset, ...(deps.modelScoresFetch ? { fetch: deps.modelScoresFetch } : {}) });
   // Set again once the socket is bound (port 0 in tests); the Origin check below compares against it.
   let boundPort = adminPort(deps.config());
   /** The dashboard's `awake setup` run in progress (or the last one), for GET /api/power/setup. */
