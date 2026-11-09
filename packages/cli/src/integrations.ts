@@ -59,8 +59,8 @@ function listenPort(home: string): number | undefined {
 
 /**
  * Flip `picker.enabled` in config.json. The router and the GUI change the same file, so this is one
- * read-modify-write under the file's own lock, written atomically: every other key and the file's
- * permissions survive, and a crash never leaves half a config behind (G-D04, 2026-10-25).
+ * read-modify-write under the file's own lock, written atomically: every other key survives, and a
+ * crash never leaves half a config behind (G-D04, 2026-10-25).
  */
 export function setPickerEnabled(enabled: boolean, file = configPath()): void {
   withFileLock(file, () => {
@@ -68,20 +68,7 @@ export function setPickerEnabled(enabled: boolean, file = configPath()): void {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${file} is not a JSON object; left untouched`);
     const next = { ...(raw as Record<string, unknown>) };
     next.picker = { ...((next.picker as Record<string, unknown> | undefined) ?? {}), enabled };
-    let mode: number | null = null;
-    try {
-      mode = fs.statSync(file).mode & 0o777;
-    } catch {
-      /* a new file: writeJsonAtomic's 0600 applies */
-    }
     writeJsonAtomic(file, next);
-    if (mode !== null) {
-      try {
-        fs.chmodSync(file, mode);
-      } catch {
-        /* a filesystem without POSIX modes (Windows) */
-      }
-    }
   });
 }
 

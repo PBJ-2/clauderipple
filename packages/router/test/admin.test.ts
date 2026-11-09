@@ -230,6 +230,19 @@ function accountLabel(home: string, id: string): string | undefined {
   return account.email && account.email !== account.label ? `${account.label} · ${account.email}` : account.label;
 }
 
+for (const existing of [false, true]) {
+  test(`PUT /api/config writes ${existing ? "an existing 0644" : "a fresh"} config owner-only`, { skip: process.platform === "win32" }, async () => {
+    const cfg = makeCfg();
+    await withAdmin(cfg, async ({ port, configFile }) => {
+      if (existing) fs.chmodSync(configFile, 0o644);
+      else fs.unlinkSync(configFile);
+      const res = await fetch(`${base()}:${port}/api/config`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(cfg) });
+      assert.equal(res.status, 200);
+      assert.equal(fs.statSync(configFile).mode & 0o777, 0o600);
+    });
+  });
+}
+
 test("PUT /api/config persists credential control flags and refuses invalid or duplicate preferences", async () => {
   const cfg = makeCfg({ providers: { p: { type: "anthropic-compatible", url: "http://127.0.0.1:1", credentials: [{ id: "a", headers: {}, preferred: true, paused: true }] } } });
   await withAdmin(cfg, async ({ port, configFile }) => {

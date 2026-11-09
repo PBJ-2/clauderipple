@@ -227,7 +227,7 @@ async function install(): Promise<void> {
   } else console.log("✓ certificates already present");
 
   if (!fs.existsSync(configPath())) {
-    fs.writeFileSync(configPath(), starterConfig(port));
+    fs.writeFileSync(configPath(), starterConfig(port), { mode: 0o600 });
     console.log(`✓ starter config written: ${configPath()}`);
   } else console.log(`✓ config kept: ${configPath()}`);
 
