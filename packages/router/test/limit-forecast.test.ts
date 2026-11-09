@@ -96,7 +96,7 @@ test("forecastLimits sets exhaust_at on the windows that have one, and leaves th
   const readAt = (ms: number, fiveHourUsed: number): ForecastProviders => [{
     provider: "claude",
     accounts: [{
-      account: 0,
+      id: "acct-0",
       at: ms,
       windows: [
         { kind: "five_hour", used_percent: fiveHourUsed, reset_at: FAR_RESET },
@@ -128,7 +128,7 @@ test("windows that differ only in window_minutes keep separate series", () => {
   const readAt = (ms: number, fiveHourUsed: number): ForecastProviders => [{
     provider: "claude",
     accounts: [{
-      account: 0,
+      id: "acct-0",
       at: ms,
       windows: [
         { kind: "window", window_minutes: 300, used_percent: fiveHourUsed, reset_at: FAR_RESET },
@@ -144,4 +144,30 @@ test("windows that differ only in window_minutes keep separate series", () => {
   // Had the weekly readings shared the five-hour series, every rise would look like a reset and no forecast would follow.
   assert.equal(fiveHour!.exhaust_at, Math.round((BASE + 180 * MIN) / 1000));
   assert.equal("exhaust_at" in weekly!, false);
+});
+
+test("the series follows the account's id, so removing the first of two accounts leaves the second with its own samples only", () => {
+  const withRemoval = clocked();
+  const alone = clocked();
+  // "a" is listed first and rises slowly; "b" rises steadily from 30%. From minute 35 "a" is gone and "b" is the first account.
+  const readings = (ms: number, accounts: { id: string; used: number }[]): ForecastProviders => [{
+    provider: "claude",
+    accounts: accounts.map(({ id, used }) => ({ id, at: ms, windows: [{ kind: "five_hour", used_percent: used, reset_at: FAR_RESET }] })),
+  }];
+  let afterRemoval: ForecastProviders = [];
+  let bAlone: ForecastProviders = [];
+  for (let m = 0; m <= 60; m += 5) {
+    const ms = BASE + m * MIN;
+    const a = { id: "a", used: 5 + 0.2 * m };
+    const b = { id: "b", used: 30 + 0.5 * m };
+    withRemoval.at(ms);
+    alone.at(ms);
+    afterRemoval = readings(ms, m <= 30 ? [a, b] : [b]);
+    forecastLimits(withRemoval.forecaster, afterRemoval);
+    bAlone = readings(ms, [b]);
+    forecastLimits(alone.forecaster, bAlone);
+  }
+  const exhaustOf = (providers: ForecastProviders) => providers[0]!.accounts[0]!.windows[0]!.exhaust_at;
+  assert.notEqual(exhaustOf(bAlone), undefined);
+  assert.equal(exhaustOf(afterRemoval), exhaustOf(bAlone));
 });

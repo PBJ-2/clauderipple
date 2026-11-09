@@ -3531,6 +3531,8 @@ test("GET /api/limits lists a MiniMax plan's five-hour and weekly windows", asyn
       ["seven_day", 1, 10080],
     ]);
     assert.equal(body.providers[0]!.accounts[0]!.windows[0]!.reset_at, future);
+    // The forecast's series key is internal: no account row carries a credential id.
+    assert.equal(body.providers[0]!.accounts.some((a) => "id" in a), false);
   }, {
     minimaxUsage: async (name: string, credentialId?: string) => name === "mini" && credentialId === "key-a" ? [
       { kind: "five_hour", used_percent: 9, window_minutes: 300, reset_at: future },

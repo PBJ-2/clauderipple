@@ -345,6 +345,14 @@ export type LimitsWindow = { kind: "five_hour" | "seven_day" | "scoped" | "windo
  */
 export type LimitsAccount = { account: number; label?: string; inUse?: true; windows: LimitsWindow[]; at: number };
 export type LimitsProvider = { provider: string; type: string; title: string; accounts: LimitsAccount[] };
+/** A row with its account's stable id (the credential or account id), the forecast's series key. The response never carries it. */
+type IdentifiedAccount = LimitsAccount & { id: string };
+type IdentifiedProvider = Omit<LimitsProvider, "accounts"> & { accounts: IdentifiedAccount[] };
+
+/** The response shape of a provider: the id only keys the forecast, and the index shifts when an account goes. */
+function withoutIdentity(provider: IdentifiedProvider): LimitsProvider {
+  return { ...provider, accounts: provider.accounts.map(({ id: _id, ...account }) => account) };
+}
 
 /** A `{used_percent, window_minutes, reset_at}` snapshot window as `/api/limits` reads it, or null. */
 function limitWindowFrom(w: unknown): { used_percent: number; window_minutes?: number; reset_at?: number } | null {
@@ -406,7 +414,7 @@ function numberedAccounts<T extends { state: string }>(accounts: readonly T[]): 
  * one's usage is not known yet no entry is marked, so no reader takes another account's figures
  * for the one that is actually spending.
  */
-async function anthropicLimitAccounts(deps: AdminDeps, name: string): Promise<LimitsAccount[]> {
+async function anthropicLimitAccounts(deps: AdminDeps, name: string): Promise<IdentifiedAccount[]> {
   let usage: Record<string, Record<string, unknown>>;
   try {
     usage = (await deps.claudeUsage?.()) ?? {};
@@ -415,22 +423,22 @@ async function anthropicLimitAccounts(deps: AdminDeps, name: string): Promise<Li
   }
   const inUse = claudeInUseId(deps, name);
   const owners = claudeNumberedAccounts();
-  const out: LimitsAccount[] = [];
+  const out: IdentifiedAccount[] = [];
   owners.forEach((owner, account) => {
     const quota = usage[owner.id];
     if (!quota) return;
     const windows = claudeLimitWindows(quota);
     if (!windows.length) return;
     const at = typeof quota.at === "number" ? quota.at : Date.now();
-    out.push({ account, ...(owner.label ? { label: owner.label } : {}), ...(owner.id === inUse ? { inUse: true as const } : {}), windows, at });
+    out.push({ id: owner.id, account, ...(owner.label ? { label: owner.label } : {}), ...(owner.id === inUse ? { inUse: true as const } : {}), windows, at });
   });
   return out;
 }
 
 /** Every ChatGPT account's windows, paused and needs-login accounts left out and unnumbered. */
-function chatgptLimitAccounts(accounts: ChatGptAccountStatus[]): LimitsAccount[] {
+function chatgptLimitAccounts(accounts: ChatGptAccountStatus[]): IdentifiedAccount[] {
   const kept = numberedAccounts(accounts);
-  const out: LimitsAccount[] = [];
+  const out: IdentifiedAccount[] = [];
   kept.forEach((account, index) => {
     const quota = account.quota;
     if (!quota || typeof quota.at !== "number") return;
@@ -440,13 +448,13 @@ function chatgptLimitAccounts(accounts: ChatGptAccountStatus[]): LimitsAccount[]
       const win = limitWindowFrom(w);
       if (win) windows.push({ kind: windowKind(win.window_minutes), used_percent: win.used_percent, ...(win.window_minutes !== undefined ? { window_minutes: win.window_minutes } : {}), ...(win.reset_at !== undefined ? { reset_at: win.reset_at } : {}) });
     }
-    if (windows.length) out.push({ account: index, ...(account.label ? { label: account.label } : {}), ...(account.inUse ? { inUse: true as const } : {}), windows, at: quota.at });
+    if (windows.length) out.push({ id: account.id, account: index, ...(account.label ? { label: account.label } : {}), ...(account.inUse ? { inUse: true as const } : {}), windows, at: quota.at });
   });
   return out;
 }
 
 /** Every Antigravity account's windows (Gemini, Argon and selected third-party ones), paused left out. */
-async function googleLimitAccounts(deps: AdminDeps, name: string): Promise<LimitsAccount[]> {
+async function googleLimitAccounts(deps: AdminDeps, name: string): Promise<IdentifiedAccount[]> {
   const google = deps.google?.();
   if (!google) return [];
   const statuses = google.accounts()[name] ?? [];
@@ -458,13 +466,13 @@ async function googleLimitAccounts(deps: AdminDeps, name: string): Promise<Limit
   const provider = deps.config().providers[name];
   const models = provider && "models" in provider && Array.isArray(provider.models) ? provider.models : [];
   const thirdParty = models.some((m) => /^(claude-|gpt-oss(-|$))/i.test(typeof m === "string" ? m : m.id));
-  const out: LimitsAccount[] = [];
+  const out: IdentifiedAccount[] = [];
   kept.forEach((account, index) => {
     const quotient = groups[account.id];
     if (!quotient || !quotient.length) return;
     // Scoped is a display kind, not a third-party marker: Argon's own weekly quota is scoped too.
     const windows: LimitsWindow[] = googleWindowsFromGroups(quotient).filter((w) => thirdParty || w.kind !== "scoped" || w.label !== "3P");
-    if (windows.length) out.push({ account: index, ...(account.label ? { label: account.label } : {}), ...(account.inUse ? { inUse: true as const } : {}), windows, at });
+    if (windows.length) out.push({ id: account.id, account: index, ...(account.label ? { label: account.label } : {}), ...(account.inUse ? { inUse: true as const } : {}), windows, at });
   });
   return out;
 }
@@ -474,7 +482,7 @@ const limitForecasts = new LimitForecaster();
 
 /** Every provider whose quota can be read, in one shape, for `GET /api/limits`. */
 async function buildLimits(deps: AdminDeps): Promise<{ providers: LimitsProvider[] }> {
-  const providers: LimitsProvider[] = [];
+  const providers: IdentifiedProvider[] = [];
   const chatgpt = deps.chatgpt?.();
   const accounts = chatgpt?.accounts?.() ?? {};
   for (const [name, p] of Object.entries(deps.config().providers)) {
@@ -490,7 +498,8 @@ async function buildLimits(deps: AdminDeps): Promise<{ providers: LimitsProvider
       if (rows.length) providers.push({ provider: name, type: "google", title: "Gemini", accounts: rows });
     } else if (p.type === "openai-compatible" && isOpenCodeGo(p)) {
       const credentials = p.credentials?.length ? p.credentials : [undefined];
-      const rows = await Promise.all(credentials.map(async (credential, account): Promise<LimitsAccount> => ({
+      const rows = await Promise.all(credentials.map(async (credential, account): Promise<IdentifiedAccount> => ({
+        id: credential?.id ?? name,
         account,
         ...(credential?.label !== undefined ? { label: credential.label } : {}),
         windows: ((await deps.opencodeUsage?.(name, credential?.id)) ?? []).map((w) => ({ ...w })),
@@ -499,7 +508,8 @@ async function buildLimits(deps: AdminDeps): Promise<{ providers: LimitsProvider
       if (rows.some((row) => row.windows.length)) providers.push({ provider: name, type: "opencode-go", title: "Go", accounts: rows });
     } else if (p.type === "anthropic-compatible" && isMiniMaxPlan(p)) {
       const credentials = p.credentials?.length ? p.credentials : [undefined];
-      const rows = await Promise.all(credentials.map(async (credential, account): Promise<LimitsAccount> => ({
+      const rows = await Promise.all(credentials.map(async (credential, account): Promise<IdentifiedAccount> => ({
+        id: credential?.id ?? name,
         account,
         ...(credential?.label !== undefined ? { label: credential.label } : {}),
         windows: ((await deps.minimaxUsage?.(name, credential?.id)) ?? []).map((w) => ({ ...w })),
@@ -508,11 +518,11 @@ async function buildLimits(deps: AdminDeps): Promise<{ providers: LimitsProvider
       if (rows.some((row) => row.windows.length)) providers.push({ provider: name, type: "minimax", title: "MiniMax", accounts: rows });
     } else if (p.type === "grok") {
       const windows = (await deps.grokUsage?.(name)) ?? [];
-      if (windows.length) providers.push({ provider: name, type: "grok", title: "Grok", accounts: [{ account: 0, windows: windows.map((w) => ({ ...w })), at: Date.now() }] });
+      if (windows.length) providers.push({ provider: name, type: "grok", title: "Grok", accounts: [{ id: name, account: 0, windows: windows.map((w) => ({ ...w })), at: Date.now() }] });
     }
   }
   forecastLimits(limitForecasts, providers);
-  return { providers };
+  return { providers: providers.map(withoutIdentity) };
 }
 
 /** One discovered/offered model. Exactly the config shape, so a preset's per-model override

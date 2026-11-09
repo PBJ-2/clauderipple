@@ -97,23 +97,26 @@ export class LimitForecaster {
   }
 }
 
-/** The shape `buildLimits` returns: only what the forecast reads and writes. */
+/**
+ * The windows `buildLimits` reads, with each account's stable id (its credential or account id). The
+ * id is only the series key: an account's list position changes when another account is removed.
+ */
 export type ForecastProviders = {
   provider: string;
-  accounts: { account: number; at: number; windows: { kind: string; label?: string; window_minutes?: number; used_percent: number; reset_at?: number; exhaust_at?: number }[] }[];
+  accounts: { id: string; at: number; windows: { kind: string; label?: string; window_minutes?: number; used_percent: number; reset_at?: number; exhaust_at?: number }[] }[];
 }[];
 
 /**
  * Record every window's reading and set `exhaust_at` on each window that has a forecast. A window with
  * no forecast gets no `exhaust_at` at all, so readers that predate the field see the same shape. The
- * series key is (provider, account, kind, label, window_minutes), so two windows that differ only in
- * length do not share samples.
+ * series key is (provider, account id, kind, label, window_minutes), so two windows that differ only in
+ * length do not share samples, and removing an account does not hand its samples to the account behind it.
  */
 export function forecastLimits(forecaster: LimitForecaster, providers: ForecastProviders): void {
   for (const provider of providers) {
     for (const account of provider.accounts) {
       for (const window of account.windows) {
-        const key = JSON.stringify([provider.provider, account.account, window.kind, window.label ?? null, window.window_minutes ?? null]);
+        const key = JSON.stringify([provider.provider, account.id, window.kind, window.label ?? null, window.window_minutes ?? null]);
         forecaster.observe(key, { at: account.at, used_percent: window.used_percent, ...(window.reset_at !== undefined ? { reset_at: window.reset_at } : {}) });
         const exhaust = forecaster.exhaustAt(key, window);
         if (exhaust !== undefined) window.exhaust_at = exhaust;
