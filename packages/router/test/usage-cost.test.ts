@@ -54,13 +54,13 @@ test("each request is priced when it is added, and the cost survives a restart",
     log.add(record("b", "2026-10-20T10:10:00.000Z", { provider: "chatgpt", target: "mystery-model", usage: usage(10, 0, 5) }));
     // count_tokens costs nothing and is not unpriced, even though it names a model.
     log.add(record("c", "2026-10-20T10:15:00.000Z", { kind: "count_tokens", provider: "chatgpt", target: "mystery-model" }));
-    // A non-Claude priced model: 1,000 x 5 + 100 x 30 = 8,000 per MTok, estimated because its cache-write price is AA's input price.
+    // GPT-5.5 with no cache tokens: 1,000 x 5 + 100 x 30 = 8,000 per MTok, and not estimated (no cache used).
     log.add(record("d", "2026-10-20T10:20:00.000Z", { provider: "openai", target: "gpt-5.5", usage: usage(1_000, 0, 100) }));
 
     const before = log.usage(FROM, TO);
     near(before.total.costUsd, 0.0003325 + 0.008);
     assert.equal(before.total.unpricedRequests, 1);
-    assert.equal(before.total.estimatedRequests, 1);
+    assert.equal(before.total.estimatedRequests, 0);
     near(before.providers["anthropic"]!.costUsd, 0.0003325);
     assert.equal(before.providers["anthropic"]!.estimatedRequests, 0);
     assert.equal(before.providers["chatgpt"]!.unpricedRequests, 1);
@@ -128,5 +128,51 @@ test("a legacy line is priced again when the AA dataset arrives, because prices 
     near(priced.costUsd, 0.008);
     assert.equal(priced.unpricedRequests, 0);
     assert.equal(priced.estimatedRequests, 1);
+  });
+});
+
+test("an image is billed per image: it costs nothing and is neither unpriced nor estimated", () => {
+  withDir((dir) => {
+    const hour = Math.floor(Date.parse("2026-10-20T10:00:00.000Z") / HOUR);
+    // A legacy image hour (target `image`) with tokens, written before costs existed.
+    fs.writeFileSync(path.join(dir, "usage-hourly.jsonl"), JSON.stringify({ h: hour, p: "chatgpt", m: "image", count: 3, ok: 3, failed: 0, input: 30, cached: 0, cacheWrite: 0, output: 300, ms: 900 }) + "\n");
+    const log = new RequestLog(path.join(dir, "requests.jsonl"));
+    log.add(record("img", "2026-10-20T10:30:00.000Z", { kind: "image", provider: "chatgpt", target: "image", usage: usage(10, 0, 5) }));
+    const hourly = log.usage(FROM, TO);
+    assert.equal(hourly.providers["chatgpt"]!.count, 4);
+    assert.equal(hourly.providers["chatgpt"]!.costUsd, 0);
+    assert.equal(hourly.providers["chatgpt"]!.unpricedRequests, 0);
+    assert.equal(hourly.providers["chatgpt"]!.estimatedRequests, 0);
+    // The in-memory ring holds only the new image record, and it costs nothing there too.
+    const memory = log.summary(FROM).total;
+    assert.equal(memory.count, 1);
+    assert.equal(memory.costUsd, 0);
+    assert.equal(memory.unpricedRequests, 0);
+    assert.equal(memory.estimatedRequests, 0);
+  });
+});
+
+test("a request is estimated only when a cache component it used is not official", () => {
+  withDir((dir) => {
+    setAaPriceDataset(aa([{ base: "kimi-k3", priceIn: 1.5, priceOut: 6 }, { base: "gpt-5-5", priceIn: 5, priceOut: 30 }]));
+    const log = new RequestLog(path.join(dir, "requests.jsonl"));
+    // Kimi, no cache tokens: not estimated.
+    log.add(record("k1", "2026-10-20T10:00:00.000Z", { provider: "opencode-go", target: "kimi-k3", usage: usage(1_000, 0, 100) }));
+    // Kimi, cache reads: the read price is AA's input price, so estimated.
+    log.add(record("k2", "2026-10-20T10:01:00.000Z", { provider: "opencode-go", target: "kimi-k3", usage: usage(1_000, 500, 100) }));
+    // GPT-5.5, cache reads only: the read price is official, so not estimated.
+    log.add(record("g1", "2026-10-20T10:02:00.000Z", { provider: "openai", target: "gpt-5.5", usage: usage(1_000, 500, 100) }));
+    // GPT-5.5 with a cache write: its write price is not official, so estimated.
+    log.add(record("g2", "2026-10-20T10:03:00.000Z", { provider: "openai", target: "gpt-5.5", usage: usage(1_000, 500, 100, 10) }));
+    // Haiku with a cache write: Claude's prices are official, so not estimated.
+    log.add(record("h1", "2026-10-20T10:04:00.000Z", { usage: usage(1_000, 500, 100, 10) }));
+
+    const total = log.usage(FROM, TO).total;
+    assert.equal(total.count, 5);
+    assert.equal(total.estimatedRequests, 2);
+    assert.equal(total.unpricedRequests, 0);
+    assert.equal(log.usage(FROM, TO).providers["anthropic"]!.estimatedRequests, 0);
+    assert.equal(log.usage(FROM, TO).providers["openai"]!.estimatedRequests, 1);
+    assert.equal(log.usage(FROM, TO).providers["opencode-go"]!.estimatedRequests, 1);
   });
 });

@@ -51,14 +51,23 @@ export function parseScoreDataset(raw: unknown): ScoreDataset {
   return { attribution: ATTRIBUTION, generatedAt: d.generatedAt, models };
 }
 
+type CatalogOptions = {
+  home?: string;
+  fetch?: typeof fetch;
+  now?: () => number;
+  warn?: (message: string) => void;
+  /** Called with every dataset the catalog loads from disk or fetches, so the request prices follow it. */
+  onDataset?: (dataset: ScoreDataset | null) => void;
+};
+
 /** Fetch at most daily, single-flight; offline keeps the last good disk/memory copy and retries hourly. */
 export class ModelScoreCatalog {
   private dataset: ScoreDataset | null = null;
   private until = 0;
   private loaded = false;
   private pending: Promise<ScoreDataset | null> | null = null;
-  private readonly options: { home?: string; fetch?: typeof fetch; now?: () => number; warn?: (message: string) => void };
-  constructor(options: { home?: string; fetch?: typeof fetch; now?: () => number; warn?: (message: string) => void } = {}) { this.options = options; }
+  private readonly options: CatalogOptions;
+  constructor(options: CatalogOptions = {}) { this.options = options; }
 
   async get(): Promise<ScoreDataset | null> {
     if (this.pending) return this.pending;
@@ -69,6 +78,10 @@ export class ModelScoreCatalog {
   }
 
   private now(): number { return (this.options.now ?? Date.now)(); }
+  private publish(dataset: ScoreDataset): void {
+    this.dataset = dataset;
+    this.options.onDataset?.(dataset);
+  }
   private warn(message: string): void { (this.options.warn ?? console.warn)(`AA model scores: ${message}`); }
 
   private async refresh(): Promise<ScoreDataset | null> {
@@ -76,7 +89,7 @@ export class ModelScoreCatalog {
     if (!this.loaded) {
       this.loaded = true;
       try {
-        this.dataset = parseScoreDataset(JSON.parse(await fs.readFile(file, "utf8")));
+        this.publish(parseScoreDataset(JSON.parse(await fs.readFile(file, "utf8"))));
         // Disk mtime records retrieval, not AA's measurement/publication time. Honour TTL on restart.
         const fetched = (await fs.stat(file)).mtimeMs;
         if (fetched <= this.now()) this.until = fetched + TTL_MS;
@@ -90,7 +103,7 @@ export class ModelScoreCatalog {
       const response = await (this.options.fetch ?? fetch)(AA_DATA_URL, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(5_000) });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       raw = await response.json();
-      this.dataset = parseScoreDataset(raw);
+      this.publish(parseScoreDataset(raw));
       this.until = this.now() + TTL_MS;
     } catch (e) {
       this.until = this.now() + RETRY_MS;

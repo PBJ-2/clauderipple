@@ -1250,18 +1250,30 @@ its prompt tokens (`input + cached + cacheWrite`) and output: a Claude model (pr
 official table in `prices.ts`, where Haiku 5.5 switches to its long-prompt rate above 100K
 prompt tokens. Every other model takes input and output from the Artificial Analysis dataset
 (`priceIn`/`priceOut`, matched by `normalizeAaBase` as the score table is). Its cache-read price
-is the provider's own pricing page where the page gives one, and its cache-write price is the AA
-input price; no provider page here shows a separate cache-write price, so every non-Claude price
-is `estimated`. A request with tokens and no price is `unpricedRequests`; a `count_tokens` call
-and a record without tokens cost nothing and are neither. Hourly lines written before this carry
-no `cost`: they are priced at read time from their token totals at the base tier, counting every
-request in the hour as estimated (an hour does not keep per-request prompt sizes). The AA
-dataset is loaded from the disk cache at startup (`loadAaPricesFrom`) and refreshed whenever the
-scores are read, so a price added to the cache reaches later costs without a restart.
+is the provider's own pricing page where the page gives one (`cacheReadOfficial`), and otherwise
+the AA input price. Its cache-write price is the AA input price and is official (`cacheWriteOfficial`)
+only where the provider's page says writes are billed as normal input. None does so far: OpenAI's
+page prices cache writes at a model-dependent rate, Google's implicit-caching page does not say how
+writes are billed, the xAI page could not be read, and MiniMax and Z.AI show no cache-write price.
+So a non-Claude request is `estimated` only when it had cache reads without an official read price,
+or cache writes at all. A request with no cache tokens priced from AA input and output alone is not
+estimated.
+
+An image (`kind: "image"`, target `image`) is billed per image, not per token: it costs nothing and
+is neither unpriced nor estimated. A `count_tokens` call and a record without tokens cost nothing
+too, and are not unpriced. A request with tokens and no price is `unpricedRequests`. Hourly lines
+written before this carry no `cost`: they are priced at read time from their token totals at the
+base tier, and every request in such an hour counts as estimated (an hour does not keep
+per-request prompt sizes, so the tier is a guess). An image hour costs nothing. The AA dataset is
+loaded from the disk cache at startup (`loadAaPricesFrom`), and every dataset the score catalog
+loads or fetches is pushed to the price registry (`onDataset`), so a refreshed price reaches later
+costs without a restart.
 
 **Limit forecast (`limit-forecast.ts`, 2026-11-09).** Each `GET /api/limits` read records one
-sample per window (`at` is the account snapshot's time). A window whose `used_percent` fell, or
-whose `reset_at` changed, starts a new series. The rate is the least-squares slope of
+sample per window (`at` is the account snapshot's time), keyed by (provider, account, kind, label,
+window_minutes). A reading less than a minute after the window's last stored sample is skipped, so
+frequent polling does not multiply the samples. A window whose `used_percent` fell, or whose
+`reset_at` changed, starts a new series. The rate is the least-squares slope of
 `used_percent` over the samples of the last 60 minutes; a forecast needs those samples to span
 at least 15 minutes and to rise at least 2 points, and the rate to be positive. Then
 `exhaust_at = latest sample + (100 − used_percent) / rate` (epoch seconds), emitted only while the

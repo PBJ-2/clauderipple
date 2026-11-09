@@ -112,3 +112,36 @@ test("forecastLimits sets exhaust_at on the windows that have one, and leaves th
   assert.equal(fiveHour!.exhaust_at, Math.round((BASE + 180 * MIN) / 1000));
   assert.equal("exhaust_at" in scoped!, false, "a flat window has no forecast field at all");
 });
+
+test("a reading less than a minute after the window's last stored sample is skipped", () => {
+  const { forecaster } = clocked();
+  forecaster.observe("t", { at: BASE, used_percent: 0 });
+  forecaster.observe("t", { at: BASE + 30_000, used_percent: 5 });
+  forecaster.observe("t", { at: BASE + 59_000, used_percent: 6 });
+  forecaster.observe("t", { at: BASE + 60_000, used_percent: 10 });
+  assert.deepEqual(forecaster.samples("t").map((s) => [s.at, s.used_percent]), [[BASE, 0], [BASE + 60_000, 10]]);
+});
+
+test("windows that differ only in window_minutes keep separate series", () => {
+  const { forecaster, at } = clocked();
+  // Two windows of one kind and no label on one account: a five-hour one that rises and a weekly one that stays at 90%.
+  const readAt = (ms: number, fiveHourUsed: number): ForecastProviders => [{
+    provider: "claude",
+    accounts: [{
+      account: 0,
+      at: ms,
+      windows: [
+        { kind: "window", window_minutes: 300, used_percent: fiveHourUsed, reset_at: FAR_RESET },
+        { kind: "window", window_minutes: 10080, used_percent: 90, reset_at: FAR_RESET + 1 },
+      ],
+    }],
+  }];
+  for (let m = 0; m <= 30; m += 5) forecastLimits(forecaster, readAt(BASE + m * MIN, 10 + 0.5 * m));
+  at(BASE + 30 * MIN);
+  const last = readAt(BASE + 30 * MIN, 25);
+  forecastLimits(forecaster, last);
+  const [fiveHour, weekly] = last[0]!.accounts[0]!.windows;
+  // Had the weekly readings shared the five-hour series, every rise would look like a reset and no forecast would follow.
+  assert.equal(fiveHour!.exhaust_at, Math.round((BASE + 180 * MIN) / 1000));
+  assert.equal("exhaust_at" in weekly!, false);
+});

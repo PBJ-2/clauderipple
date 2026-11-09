@@ -907,10 +907,7 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
     return url.hostname === "opencode.ai" && /^\/zen\/v1(?:\/|$)/.test(url.pathname);
   });
   const model = zen?.models?.find(m => isJudgeOnlyModel(m.id))?.id ?? null;
-  // The same dataset prices the requests from now on: a fresher fetch reaches the cost figures with it.
-  const dataset = await scores.get();
-  setAaPriceDataset(dataset);
-  const scored = buildModelScores(cfg, dataset);
+  const scored = buildModelScores(cfg, await scores.get());
   const claudeEfforts = modEfforts(catalog.anthropic?.default);
   return { agents, models, providers, zen: { configured: model !== null, model }, scores: scored, claudeEfforts };
 }
@@ -2065,7 +2062,8 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
     runCli: deps.runCli ?? runCli, startCliDetached: deps.startCliDetached ?? startCliDetached,
   });
   deps = { ...deps, autoUpdater: updater };
-  const scores = new ModelScoreCatalog({ home: homeDir(), warn: message => deps.log.warn(message), ...(deps.modelScoresFetch ? { fetch: deps.modelScoresFetch } : {}) });
+  // Every dataset the catalog loads or fetches also prices the requests from then on (prices.ts).
+  const scores = new ModelScoreCatalog({ home: homeDir(), warn: message => deps.log.warn(message), onDataset: setAaPriceDataset, ...(deps.modelScoresFetch ? { fetch: deps.modelScoresFetch } : {}) });
   // Set again once the socket is bound (port 0 in tests); the Origin check below compares against it.
   let boundPort = adminPort(deps.config());
   /** The dashboard's `awake setup` run in progress (or the last one), for GET /api/power/setup. */

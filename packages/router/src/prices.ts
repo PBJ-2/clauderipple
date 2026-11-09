@@ -4,8 +4,11 @@
 import fs from "node:fs";
 import { normalizeAaBase, parseScoreDataset, type ScoreDataset } from "./model-scores.ts";
 
-/** `estimated` is true when any part of the price is not an official figure (see `priceOf`). */
-export type ModelPrice = { input: number; output: number; cacheRead: number; cacheWrite: number; estimated: boolean };
+/**
+ * Which rates are official is kept per component. A request is estimated only when it uses a
+ * component that is not official (see `chargeOf`), so a request with no cache tokens is not.
+ */
+export type ModelPrice = { input: number; output: number; cacheRead: number; cacheWrite: number; cacheReadOfficial: boolean; cacheWriteOfficial: boolean };
 export type TokenCounts = { input: number; cached: number; cacheWrite: number; output: number };
 
 type ClaudeRate = { input: number; output: number; cacheWrite: number; cacheRead: number };
@@ -129,7 +132,7 @@ function claudePrice(model: string, promptTokens: number): ModelPrice | null {
   const entry = CLAUDE_PRICES[claudeBase(model)];
   if (!entry) return null;
   const rate = entry.long && promptTokens > LONG_PROMPT_TOKENS ? entry.long : entry.rate;
-  return { input: rate.input, output: rate.output, cacheRead: rate.cacheRead, cacheWrite: rate.cacheWrite, estimated: false };
+  return { input: rate.input, output: rate.output, cacheRead: rate.cacheRead, cacheWrite: rate.cacheWrite, cacheReadOfficial: true, cacheWriteOfficial: true };
 }
 
 function cacheReadOf(model: string, promptTokens: number): number | null {
@@ -141,13 +144,21 @@ function cacheReadOf(model: string, promptTokens: number): number | null {
 }
 
 /**
+ * Models whose provider's page says a cache write is billed as normal input, so the write is official
+ * too. Empty on purpose: OpenAI's page prices cache writes at a model-dependent rate, Google's implicit
+ * caching page does not say how writes are billed, and the xAI page could not be read (404), while
+ * MiniMax and Z.AI show no cache-write price. Add a normalised base here only with a page that says so.
+ */
+const WRITE_BILLED_AS_INPUT = new Set<string>();
+
+/**
  * The USD per MTok price of one request, or null when the model is unpriced.
  *
  * Claude models (provider `anthropic`, or a model id whose base is one of the table's Claude ids) use
- * the official table and are not estimated. Every other model takes its input and output from the AA
- * dataset. Its cache-read price is the provider's own page's figure where one exists, and its
- * cache-write price is the AA input price. No provider page here shows a separate cache-write price,
- * so every non-Claude price is `estimated: true`.
+ * the official table. Every other model takes input and output from the AA dataset. Its cache-read
+ * price is the provider's page figure where the table has one (`cacheReadOfficial`), otherwise the AA
+ * input price. Its cache-write price is the AA input price, official only for a model in
+ * WRITE_BILLED_AS_INPUT.
  *
  * `servedTier` is accepted so a tier-specific price can be added once a record carries one; no
  * current field says a request ran in a fast or priority tier, so it does not change the price.
@@ -160,11 +171,21 @@ export function priceOf(provider: string, model: string, promptTokens: number, s
   if (claude) return claude;
   const aa = aaPrices.get(normalizeAaBase(model));
   if (!aa) return null;
-  const read = cacheReadOf(model, promptTokens) ?? aa.priceIn;
-  return { input: aa.priceIn, output: aa.priceOut, cacheRead: read, cacheWrite: aa.priceIn, estimated: true };
+  const key = normalizeAaBase(model);
+  const read = cacheReadOf(model, promptTokens);
+  return {
+    input: aa.priceIn, output: aa.priceOut,
+    cacheRead: read ?? aa.priceIn, cacheWrite: aa.priceIn,
+    cacheReadOfficial: read !== null, cacheWriteOfficial: WRITE_BILLED_AS_INPUT.has(key),
+  };
 }
 
-/** USD for one request's counts at a price. Counts are tokens, not MTok. */
-export function costUsd(price: ModelPrice, tokens: TokenCounts): number {
-  return (tokens.input * price.input + tokens.cached * price.cacheRead + tokens.cacheWrite * price.cacheWrite + tokens.output * price.output) / 1_000_000;
+/**
+ * One request's USD cost at a price, and whether it is estimated: true only when a component the
+ * request actually uses (cache reads, cache writes) is not official. Counts are tokens, not MTok.
+ */
+export function chargeOf(price: ModelPrice, tokens: TokenCounts): { usd: number; estimated: boolean } {
+  const usd = (tokens.input * price.input + tokens.cached * price.cacheRead + tokens.cacheWrite * price.cacheWrite + tokens.output * price.output) / 1_000_000;
+  const estimated = (tokens.cached > 0 && !price.cacheReadOfficial) || (tokens.cacheWrite > 0 && !price.cacheWriteOfficial);
+  return { usd, estimated };
 }

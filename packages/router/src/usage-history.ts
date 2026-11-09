@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { RequestRecord } from "./requestlog.ts";
-import { costUsd, priceOf } from "./prices.ts";
+import { chargeOf, priceOf } from "./prices.ts";
 
 const HOUR_MS = 3_600_000;
 
@@ -157,27 +157,31 @@ const NOTHING: Priced = { cost: 0, unpriced: 0, estimated: 0 };
 
 /**
  * One record's cost. A count_tokens call and a record without tokens cost nothing and are not
- * unpriced; a record with tokens is priced by its model, and is unpriced when no price is known.
+ * unpriced. An image is billed per image, not per token, so it costs nothing here and is neither
+ * unpriced nor estimated. Any other record with tokens is priced by its model, and is unpriced when
+ * no price is known; it is estimated when a component it used is not official.
  */
 function recordCost(record: RequestRecord): Priced {
   const usage = record.usage;
-  if (!usage || record.kind === "count_tokens" || !accounted(usage)) return NOTHING;
+  if (!usage || record.kind === "count_tokens" || record.kind === "image" || !accounted(usage)) return NOTHING;
   const cacheWrite = usage.cacheWrite ?? 0;
   const price = priceOf(record.provider, modelRowOf(record).model, usage.input + usage.cached + cacheWrite, record.servedTier);
   if (!price) return { cost: 0, unpriced: 1, estimated: 0 };
-  return { cost: costUsd(price, { input: usage.input, cached: usage.cached, cacheWrite, output: usage.output }), unpriced: 0, estimated: price.estimated ? 1 : 0 };
+  const charge = chargeOf(price, { input: usage.input, cached: usage.cached, cacheWrite, output: usage.output });
+  return { cost: charge.usd, unpriced: 0, estimated: charge.estimated ? 1 : 0 };
 }
 
 /**
- * A legacy hour's cost, priced now from its token totals at the base tier (the hour does not keep
- * per-request prompt sizes). The hour does not say how many of its requests carried tokens, so every
- * request in it counts as estimated, or as unpriced, when the hour has tokens at all.
+ * A legacy hour's cost, priced now from its token totals at the base tier. The hour does not keep
+ * per-request prompt sizes, so the tier is a guess, and every request in it counts as estimated (or as
+ * unpriced, when the model has no price). An image hour (target `image`) costs nothing, as in recordCost.
  */
 function legacyCost(bucket: HourBucket): Priced {
-  if (!accounted(bucket)) return NOTHING;
+  if (bucket.m === "image" || !accounted(bucket)) return NOTHING;
   const price = priceOf(bucket.p, bucket.m, 0);
   if (!price) return { cost: 0, unpriced: bucket.count, estimated: 0 };
-  return { cost: costUsd(price, { input: bucket.input, cached: bucket.cached, cacheWrite: bucket.cacheWrite, output: bucket.output }), unpriced: 0, estimated: bucket.count };
+  const charge = chargeOf(price, { input: bucket.input, cached: bucket.cached, cacheWrite: bucket.cacheWrite, output: bucket.output });
+  return { cost: charge.usd, unpriced: 0, estimated: bucket.count };
 }
 
 /** The totals a bucket contributes to a summary: a legacy line is priced here, a stored one is read as stored. */
