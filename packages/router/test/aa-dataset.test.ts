@@ -123,7 +123,7 @@ function harness(pageFor: (slug: string, count: number) => Response, data = rows
     if (String(url).startsWith("https://artificialanalysis.ai/api/v2/")) {
       assert.ok(String(url) === PRO_URL || String(url) === FREE_URL, String(url));
       assert.equal(new Headers(init?.headers).get("x-api-key"), "fixture-key");
-      return Response.json({ intelligence_index_version: "v5.0.1", tier: "pro", data });
+      return Response.json({ intelligence_index_version: "v5.0.1", tier: "pro", pagination: { page: 1, page_size: 200, total_pages: 1, has_more: false }, data });
     }
     if (String(url).includes("raw.githubusercontent")) return new Response(null, { status: 404 });
     const slug = String(url).split("/").at(-1)!;
@@ -160,7 +160,7 @@ test("AA runner fails below 50% exact-slug parse, accepts exactly 50%, and fails
   assert.equal(httpFailure.pages.length, 2);
   await assert.rejects(runDataset({ apiKey: "" }), /AA_API_KEY/);
   await assert.rejects(runDataset({ apiKey: "fixture", fetchImpl: async () => new Response(null, { status: 401 }) }), /API failed/);
-  await assert.rejects(runDataset({ apiKey: "fixture", fetchImpl: async () => Response.json({ data: [] }) }), /no model list/);
+  await assert.rejects(runDataset({ apiKey: "fixture", fetchImpl: async () => Response.json({ pagination: { page: 1, page_size: 200, total_pages: 1, has_more: false }, data: [] }) }), /no model list/);
 });
 
 test("AA runner uses previous file for seven-day reuse and refetches only new/expired variants", async () => {
@@ -262,7 +262,7 @@ test("AA V2 refuses a list above the page cap before fetching it, and an inconsi
 
 test("AA V2 refuses the retired slug-only creator shape rather than publishing a list without families", async () => {
   const legacy = rows.map(r => ({ ...r, model_creator: { name: r.model_creator.name, slug: "legacy" } }));
-  await assert.rejects(runDataset({ apiKey: "fixture-key", fetchImpl: async () => Response.json({ data: legacy }), limit: 0 }), { message: "AA API model list changed shape" });
+  await assert.rejects(runDataset({ apiKey: "fixture-key", fetchImpl: async () => Response.json({ pagination: { page: 1, page_size: 200, total_pages: 1, has_more: false }, data: legacy }), limit: 0 }), { message: "AA API model list changed shape" });
 });
 
 test("AA V2 keeps a null or absent release_date (never tracked, published with an empty date) and skips a null free-tier creator", async () => {
@@ -296,7 +296,7 @@ test("AA V2 retries the free path once after a Pro 403, with the same key, and l
   const fetchImpl: typeof fetch = async (url, init) => {
     calls.push({ url: String(url), key: new Headers(init?.headers).get("x-api-key") });
     if (String(url) === PRO_URL) return new Response(null, { status: 403 });
-    if (String(url) === FREE_URL) return Response.json({ intelligence_index_version: "v5.0.1", tier: "free", data: rows });
+    if (String(url) === FREE_URL) return Response.json({ intelligence_index_version: "v5.0.1", tier: "free", pagination: { page: 1, page_size: 200, total_pages: 1, has_more: false }, data: rows });
     return new Response(null, { status: 404 });
   };
   const d = await runDataset({ apiKey: "fixture-key", fetchImpl, limit: 0, log: line => logs.push(line) });
@@ -320,4 +320,8 @@ test("AA V2 only a Pro 403 retries: other Pro errors stop at once, and a free-pa
   const freeCalls: string[] = [];
   await assert.rejects(runDataset({ apiKey: "fixture-key", fetchImpl: async url => { freeCalls.push(String(url)); return String(url) === PRO_URL ? new Response(null, { status: 403 }) : new Response(null, { status: 429 }); } }), { message: "AA API failed: HTTP 429 (daily quota exhausted)" });
   assert.deepEqual(freeCalls, [PRO_URL, FREE_URL]);
+});
+
+test("AA V2 refuses a list without pagination: it may be page 1 of more", async () => {
+  await assert.rejects(runDataset({ apiKey: "fixture-key", fetchImpl: async () => Response.json({ intelligence_index_version: "v5.0.1", tier: "pro", data: rows }), limit: 0 }), { message: "AA API list has no pagination; refusing what may be a partial list" });
 });

@@ -76,13 +76,14 @@ function pageRows(body, page) {
  * Every page of one list path, merged in order. Page 1 is the path itself; its `pagination` gives
  * `total_pages`, and each later page is asked for as `?page=n` (1-indexed, per the V2 docs). A page
  * that fails, answers another page, or disagrees on the total stops the run: a partial list would
- * publish the missing models as gone. A response with no `pagination` is one whole list.
+ * publish the missing models as gone. The V2 schemas require `pagination`, so a response without it
+ * is refused too: it may be page 1 of a longer list.
  * @param {string} url @param {any} first @param {(url:string)=>Promise<Response>} get @param {boolean} afterProForbidden
  * @returns {Promise<{body:{intelligence_index_version?:unknown,data:unknown[]},path:string,afterProForbidden:boolean,pages:number}>}
  */
 async function listPages(url, first, get, afterProForbidden) {
   const pagination = first?.pagination;
-  if (pagination === undefined) return { body: first, path: url, afterProForbidden, pages: 1 };
+  if (pagination === undefined) throw new Error('AA API list has no pagination; refusing what may be a partial list');
   const total = pagination?.total_pages;
   if (!Number.isInteger(total) || total < 1) throw new Error('AA API pagination changed shape');
   if (total > MAX_LIST_PAGES) throw new Error(`AA API list has ${total} pages, above the cap of ${MAX_LIST_PAGES}; refusing a partial list`);
