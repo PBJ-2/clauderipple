@@ -1827,8 +1827,8 @@ test('compact draws the forecast as a tone alone, with the whole sentence in the
   expect(texts.filter(x => /^~/.test(String(x.text)))).toEqual([])
   // The tip names the window and how long until it runs out.
   const said = texts.map(x => String(x.text)).join('\n')
-  expect(said).toContain('이 속도라면 2시간 10분 뒤 한도가 소진됩니다')
-  expect(said).toContain('이 속도라면 45분 뒤 한도가 소진됩니다')
+  expect(said).toContain('이 속도라면 2시간 10분 후 한도가 소진됩니다')
+  expect(said).toContain('이 속도라면 45분 후 한도가 소진됩니다')
   await ui.unmount()
 })
 
@@ -1837,7 +1837,7 @@ test('the pressable row\'s one tip names the forecasts too, and is unchanged wit
   drawPane(on, 'tip-plain', el => renderBand(el, { ...frameOf('desktop', 200), lang: 'ko' }, { ...DASH, extras: ['limits'], limits: withoutForecast(FORECAST) }, { ...BAND_ACTIONS, toggleLimits: () => undefined }))
   const risky = await mount($, 'tip-forecast', 'desktop', 200)
   const said = (await risky.findAll({ type: 'Text' })).map(x => String(x.text))
-  expect(said).toContain(STRINGS.ko['band.limitsOpen'] + ' · Claude 5시간: 이 속도라면 2시간 10분 뒤 한도가 소진됩니다 · Claude 주간: 이 속도라면 45분 뒤 한도가 소진됩니다')
+  expect(said).toContain(STRINGS.ko['band.limitsOpen'] + ' · Claude 5시간: 이 속도라면 2시간 10분 후 한도가 소진됩니다 · Claude 주간: 이 속도라면 45분 후 한도가 소진됩니다')
   await risky.unmount()
   const plain = await mount($, 'tip-plain', 'desktop', 200)
   expect((await plain.findAll({ type: 'Text' })).map(x => String(x.text))).toContain(STRINGS.ko['band.limitsOpen'])
@@ -1875,19 +1875,19 @@ test('the limits pane draws the cost under the windows: today, providers, models
     const texts = (await ui.findAll({ type: 'Text' })).map(x => String(x.text).replace(/^[•● ]+/, ''))
     const said = texts.join('\n')
     for (const text of [
-      'API 가격 기준 비용', '오늘', '프로바이더별', '비용이 큰 모델', '최근 7일',
+      'API 가격 기준 비용', '오늘', '프로바이더별', '비용 상위 모델', '최근 7일',
       // Today's total includes an estimate; a provider and a model with only unpriced requests say "—".
       '≈$15.68', '≈$12.30', '$3.38', '—', '≈$9.90', '$2.40', '<$0.01', '≈$1,234.50',
       // Providers by the names the limits pane gives them; an id with no known name stays as it is.
       'GPT', 'opencode-go', 'claude-opus-5-5', 'gpt-5.5', 'deepseek-v4.1-flash',
-      '금액은 공개된 API 가격 기준 환산액입니다. 구독으로 처리된 요청도 API로 이용했을 때의 비용으로 표시합니다.',
+      '금액은 공개된 API 가격을 기준으로 환산한 값입니다. 구독으로 처리된 요청도 API로 이용했을 때 드는 비용으로 표시합니다.',
       '가격을 알 수 없는 요청 9건은 금액에 포함되지 않았습니다.',
-      '≈ 표시가 붙은 금액은 대략적인 값입니다. 캐시 비율을 추정해 계산한 요청이 40건 포함되어 있습니다.',
+      '≈ 표시가 붙은 금액은 추정치입니다. 캐시 비율을 추정해 계산한 요청이 40건 포함되어 있습니다.',
       // The window that runs out ahead of its reset says so under its reset, in its tone.
-      '이 속도라면 2시간 10분 뒤 한도가 소진됩니다',
+      '이 속도라면 2시간 10분 후 한도가 소진됩니다',
     ]) expect(said, surface + skin + ' ' + text).toContain(text)
     // The cost is under the windows, in the order today, providers, models, week.
-    const order = ['오늘', '프로바이더별', '비용이 큰 모델', '최근 7일'].map(x => texts.indexOf(x))
+    const order = ['오늘', '프로바이더별', '비용 상위 모델', '최근 7일'].map(x => texts.indexOf(x))
     expect(order.every((at, i) => at >= 0 && (i === 0 || at > order[i - 1]!)), surface + skin + ' ' + order.join()).toBe(true)
     expect(texts.indexOf('오늘') > texts.findIndex(x => x.startsWith('Claude')), surface + skin).toBe(true)
     // The raw ids of the two known providers are not shown as providers (model names keep theirs).
@@ -1935,7 +1935,7 @@ test('the limits pane draws no cost without one, says so when none has been answ
     // Priced and nothing spent: a real $0.00, with the note and no caveats.
     const clean = await said('cost-clean')
     expect(clean, surface).toContain('$0.00')
-    expect(clean, surface).toContain('금액은 공개된 API 가격 기준 환산액입니다.')
+    expect(clean, surface).toContain('금액은 공개된 API 가격을 기준으로 환산한 값입니다.')
     expect(clean, surface).not.toContain('가격을 알 수 없는')
     expect(clean, surface).not.toContain('≈')
   }

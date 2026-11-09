@@ -439,7 +439,7 @@ test('the tip says how long until the window runs out at its pace; without a for
   const risky = { ...base, exhaustsAt: NOW + (2 * 60 + 10) * 60_000 }
   assert.equal(limitItemTip(base, 'Claude', 'en', NOW), 'Claude Weekly 62% · resets in 3d')
   assert.equal(limitItemTip(risky, 'Claude', 'en', NOW), 'Claude Weekly 62% · resets in 3d · At this pace it runs out in 2h 10m')
-  assert.equal(limitItemTip(risky, 'Claude', 'ko', NOW), 'Claude 주간 62% · 3일 뒤 초기화 · 이 속도라면 2시간 10분 뒤 한도가 소진됩니다')
+  assert.equal(limitItemTip(risky, 'Claude', 'ko', NOW), 'Claude 주간 62% · 3일 뒤 초기화 · 이 속도라면 2시간 10분 후 한도가 소진됩니다')
   assert.equal(exhaustSentence(risky, NOW, 'en'), 'At this pace it runs out in 2h 10m')
   assert.equal(exhaustSentence(base, NOW, 'en'), '')
   assert.equal(exhaustSentence({ exhaustsAt: NOW - 1 }, NOW, 'en'), '')
