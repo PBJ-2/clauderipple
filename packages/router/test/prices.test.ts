@@ -113,7 +113,8 @@ test("the AA dataset a ModelScoreCatalog loads or refreshes is the one prices fo
     // A fresh catalog reads the disk cache the fetch wrote, and the prices follow that load too.
     fs.writeFileSync(path.join(home, "aa-models.json"), JSON.stringify(envelope(2.5)));
     setAaPriceDataset(null);
-    const fromDisk = new ModelScoreCatalog({ home, onDataset: setAaPriceDataset, warn: () => {} });
+    // No network: without its own fetch the catalog reached the published dataset, whose real price won.
+    const fromDisk = new ModelScoreCatalog({ home, fetch: (async () => { throw new Error("offline"); }) as unknown as typeof fetch, onDataset: setAaPriceDataset, warn: () => {} });
     assert.ok(await fromDisk.get());
     assert.equal(priceOf("opencode-go", "kimi-k3", 10)?.input, 2.5);
   } finally {
