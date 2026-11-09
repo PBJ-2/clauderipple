@@ -342,9 +342,92 @@ async function loadCatalogs() {
 
 // ---- Status -------------------------------------------------------------------------
 
+let limitsSnapshot = null;
+
+function limitsReset(window, weekly, now) {
+  if (!window || !Number.isFinite(window.resetAt)) return t("limits.resetUnknown");
+  const reset = new Date(window.resetAt);
+  if (weekly) return t("limits.resetsAt", { time: reset.toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false }) });
+  const minutes = Math.max(0, Math.ceil((window.resetAt - now) / 60_000));
+  return t("limits.resetsIn", { hours: Math.floor(minutes / 60), minutes: minutes % 60 });
+}
+
+function limitsWindowRow(label, window, weekly, now) {
+  const known = window && Number.isFinite(window.usedPercent);
+  const percent = known ? `${Math.round(window.usedPercent * 10) / 10}%` : t("limits.unknown");
+  const reset = limitsReset(window, weekly, now);
+  const track = el("div", {
+    class: `limits-track${known ? "" : " unknown"}`, role: "progressbar", tabindex: "0",
+    "aria-label": label, "aria-valuemin": "0", "aria-valuemax": "100",
+    ...(known ? { "aria-valuenow": Math.max(0, Math.min(100, window.usedPercent)) } : {}),
+    "aria-valuetext": `${percent} · ${reset}`, title: `${label} · ${percent} · ${reset}`,
+  });
+  if (known) {
+    const fill = el("span", { class: "limits-fill", "aria-hidden": "true" });
+    fill.style.width = `${Math.max(0, Math.min(100, window.usedPercent))}%`;
+    track.appendChild(fill);
+  }
+  return el("div", { class: "limits-window" }, [
+    el("div", { class: "limits-window-head" }, [el("span", { text: label }), el("span", { text: percent })]),
+    track,
+    el("div", { class: "limits-window-foot", text: reset }),
+  ]);
+}
+
+/** The API's reset is in epoch seconds; the date helpers read milliseconds. */
+function limitsUsageWindow(account, kind) {
+  const window = (account.windows || []).find((candidate) => candidate.kind === kind);
+  return window && { usedPercent: window.used_percent, ...(Number.isFinite(window.reset_at) ? { resetAt: window.reset_at * 1000 } : {}) };
+}
+
+function limitsAccountName(entry, account) {
+  return account.label || account.email || (entry.type === "anthropic" && account.account === 0 ? t("providers.anthropicCurrentLogin") : `${entry.title} ${account.account + 1}`);
+}
+
+function limitsAccountRow(entry, account, now) {
+  const badges = [];
+  if (account.inUse) badges.push(badge("first", t("limits.active")));
+  if (account.paused || (account.state && account.state !== "ready")) badges.push(chatgptStateBadge(account));
+  if (entry.stale || (account.quota && account.quota.stale)) badges.push(badge("warn", t("limits.stale")));
+  const fetched = Number.isFinite(account.at) && account.at > 0 ? t("limits.fetchedAt", { time: new Date(account.at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: false }) }) : t("limits.notFetched");
+  return el("div", { class: "limits-account" }, [
+    el("div", { class: "limits-account-head" }, [
+      el("strong", { text: limitsAccountName(entry, account) }),
+      el("div", { class: "limits-badges" }, [...badges, el("span", { class: "limits-fetched", text: fetched })]),
+    ]),
+    el("div", { class: "limits-windows" }, [
+      limitsWindowRow(t("limits.fiveHour"), limitsUsageWindow(account, "five_hour"), false, now),
+      limitsWindowRow(t("limits.weekly"), limitsUsageWindow(account, "seven_day"), true, now),
+    ]),
+  ]);
+}
+
+/** Claude rows come from limits. ChatGPT keeps all status accounts; only those in rotation are numbered. */
+function providerLimits(name) {
+  if (!limitsSnapshot || !Array.isArray(limitsSnapshot.providers)) return null;
+  const provider = (currentConfig && currentConfig.providers && currentConfig.providers[name]) || (status && status.providers && status.providers[name]);
+  if (!provider || provider.limits === false || (provider.type !== "anthropic" && provider.type !== "chatgpt")) return null;
+  if (provider.type === "anthropic" && provider.auth !== "claude-code" && !provider.authSource) return null;
+  const entry = { ...(limitsSnapshot.providers.find((item) => item.provider === name) || { type: provider.type, title: provider.type === "anthropic" ? "Claude" : "GPT", accounts: [] }),
+    stale: provider.type === "chatgpt" && Boolean(status && status.chatgpt && status.chatgpt.staleReason && status.chatgpt.staleReason[name]),
+  };
+  const accounts = provider.type === "chatgpt" && status && status.chatgpt && status.chatgpt.accounts && status.chatgpt.accounts[name];
+  if (!accounts) return entry.accounts.length ? entry : null;
+  let number = 0;
+  const rows = accounts.map((account) => {
+    const index = account.state !== "paused" && account.state !== "needs-login" ? number++ : null;
+    const figures = index === null ? null : entry.accounts.find((item) => item.account === index);
+    return { ...account, account: index, windows: [], at: 0, ...figures };
+  });
+  return rows.length ? { ...entry, accounts: rows } : null;
+}
+
 async function refreshHealth() {
   try {
-    status = await api("/api/status");
+    const [fresh, limits] = await Promise.allSettled([api("/api/status"), api("/api/limits")]);
+    limitsSnapshot = limits.status === "fulfilled" ? limits.value : null;
+    if (fresh.status === "rejected") throw fresh.reason;
+    status = fresh.value;
   } catch (error) {
     $("#health-desktop").replaceChildren(cell(t("health.connection"), badge("bad", t("health.disconnected"))));
     // Inside the app a router that does not answer is a state with a way out, not an error.
@@ -970,19 +1053,21 @@ function renderHealthProviders() {
   box.replaceChildren(...providers.map(([name, provider]) => {
     const live = status && status.providers && status.providers[name];
     const lines = [];
-    const quota = quotaLine(name);
+    const limits = providerLimits(name);
+    // Older routers and failed limit reads keep the text lines instead of an empty set of gauges.
+    const quota = limits ? null : quotaLine(name);
     if (quota) lines.push(el("span", { class: "cell-sub", text: quota }));
     // Claude subscription accounts, one line each: the current login and every account added here.
     // Before the config has loaded the rows come from the status, which names the sign-in source
-    // rather than the auth mode.
-    if (provider.type === "anthropic" && (provider.auth === "claude-code" || (live && live.authSource))) {
+    // rather than the auth mode. The gauges replace these lines when limits are available.
+    if (!limits && provider.type === "anthropic" && (provider.auth === "claude-code" || (live && live.authSource))) {
       const usage = ((status && status.claude && status.claude.accounts) || [])
         .map((account) => ({ account, text: chatgptQuotaText(account.quota) }))
         .filter(({ text }) => text)
         .map(({ account, text }) => el("div", { text: `${claudeAccountLabel(account)} · ${text}` }));
       if (usage.length) lines.push(el("div", { class: "cell-sub account-usage" }, usage));
     }
-    const pool = credentialLine(name);
+    const pool = limits ? null : credentialLine(name);
     if (pool) lines.push(pool);
     if (live && live.needsLogin && provider.type === "chatgpt") {
       lines.push(el("div", { class: "cell-actions" }, [
@@ -996,7 +1081,10 @@ function renderHealthProviders() {
     const open = (event) => { if (!event.target.closest("button, a")) openProvider(name, provider); };
     row.addEventListener("click", open);
     row.addEventListener("keydown", (event) => { if (event.key === "Enter" && event.target === row) open(event); });
-    return row;
+    // Only the header opens the provider; the accounts below take the card's full width.
+    if (!limits) return row;
+    const now = Date.now();
+    return el("div", { class: "provider-block" }, [row, el("div", { class: "provider-limits" }, limits.accounts.map((account) => limitsAccountRow(limits, account, now)))]);
   }));
 }
 
