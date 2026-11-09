@@ -38,7 +38,7 @@ import type { Look } from './look'
 import { canDraw, textButton } from './parts'
 import type { Els } from './parts'
 import { chOf, displayWidth, limitTone, providerColor, svgDoc, textTone } from './theme'
-import { costFigure, exhaustSentence, limitGroupAccount, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTone, resetMoment, timeLeft } from './view'
+import { costFigure, exhaustSentence, providerDisplayName, limitGroupAccount, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTone, resetMoment, timeLeft } from './view'
 import type { Frame, LimitGroup, LimitsActions, LimitsView } from './view'
 
 // ---- What each window says -----------------------------------------------------------------------
@@ -343,9 +343,9 @@ function groupDrawn(el: Els, frame: Frame, view: LimitsView, group: LimitGroup, 
 /** A cost line: a name (a provider's with its dot) and its amount at the right. */
 type CostRow = { key: string; name: string; dot?: string; figure: string; bold?: boolean }
 
-function costRows(summary: CostSummary): { providers: CostRow[]; models: CostRow[] } {
+function costRows(summary: CostSummary, items: readonly LimitItem[]): { providers: CostRow[]; models: CostRow[] } {
   return {
-    providers: summary.providers.map((line, i) => ({ key: 'provider-' + i, name: displayText(line.name, DISPLAY.name), dot: providerColor(line.name), figure: costFigure(line) })),
+    providers: summary.providers.map((line, i) => ({ key: 'provider-' + i, name: providerDisplayName(line.name, items), dot: providerColor(line.name), figure: costFigure(line) })),
     models: summary.models.map((line, i) => ({ key: 'model-' + i, name: displayText(line.name, DISPLAY.name), figure: costFigure(line) })),
   }
 }
@@ -383,14 +383,14 @@ function costLine(el: Els, k: Look, row: CostRow): RenderNode {
 }
 
 /** The cost tile, or null when the view carries no cost at all (an older caller). */
-function costDrawn(el: Els, frame: Frame, cost: LimitsView['cost'], room: number): { node: RenderNode; rows: number } | null {
+function costDrawn(el: Els, frame: Frame, cost: LimitsView['cost'], items: readonly LimitItem[], room: number): { node: RenderNode; rows: number } | null {
   if (!cost) return null
   const { Box, Text } = el
   const k = lookOf(frame)
   const L = frame.lang
   const today = cost.today
   const week = cost.week
-  const lists = today ? costRows(today) : { providers: [], models: [] }
+  const lists = today ? costRows(today, items) : { providers: [], models: [] }
   const notes = costNotes(cost, L)
   const sections: { node: RenderNode; lines: number }[] = []
   const section = (key: string, children: RenderNode[], lines: number) => sections.push({ node: <Box key={key} flexDirection="column" width="100%" minWidth={0}>{children}</Box>, lines })
@@ -419,7 +419,7 @@ function limitsDrawn(el: Els, frame: Frame, view: LimitsView, actions: LimitsAct
   const numbered = limitGroupNumbered(groups)
   const saveGroup = saveGroupOf(groups)
   const tiles = groups.map(group => groupDrawn(el, frame, view, group, numbered(group), saveGroup))
-  const cost = costDrawn(el, frame, view.cost, innerCells(frame) - 4)
+  const cost = costDrawn(el, frame, view.cost, view.items, innerCells(frame) - 4)
   if (cost) tiles.push(cost)
   const top = topOf(groups)
   // Taken generously: a capsule taller than its water would show the page beneath (kit.tsx).
@@ -441,13 +441,13 @@ function limitsDrawn(el: Els, frame: Frame, view: LimitsView, actions: LimitsAct
 const TEXT_BAR = 10
 
 /** The cost as lines of text (the same sections as the cost tile), or '' when the view carries none. */
-function costLines(el: Els, frame: Frame, cost: LimitsView['cost']): RenderNode {
+function costLines(el: Els, frame: Frame, cost: LimitsView['cost'], items: readonly LimitItem[]): RenderNode {
   if (!cost) return ''
   const { Box, Text } = el
   const L = frame.lang
   const tone = textTone(frame.appearance)
   const today = cost.today
-  const lists = today ? costRows(today) : { providers: [], models: [] }
+  const lists = today ? costRows(today, items) : { providers: [], models: [] }
   const rows = [...lists.providers, ...lists.models]
   const name = Math.min(32, Math.max(NAME_MIN, displayWidth(t(L, 'cost.today')), displayWidth(t(L, 'cost.week')), ...rows.map(row => displayWidth(row.name) + (row.dot ? 2 : 0))))
   const line = (row: CostRow, indent: number) => (
@@ -491,7 +491,7 @@ function limitsText(el: Els, frame: Frame, view: LimitsView, actions: LimitsActi
       <Text dimColor wrap="wrap">{groups.length ? nearLine(view.items, L) : t(L, 'limits.empty')}</Text>
     </Box>
   )
-  if (!groups.length) return <Box flexDirection="column" rowGap={1} width="100%">{head}{costLines(el, frame, view.cost)}</Box>
+  if (!groups.length) return <Box flexDirection="column" rowGap={1} width="100%">{head}{costLines(el, frame, view.cost, view.items)}</Box>
   const numbered = limitGroupNumbered(groups)
   const saveGroup = saveGroupOf(groups)
   const name = Math.max(NAME_MIN, ...groups.flatMap(group => group.items.map(item => displayWidth(windowName(item, group, L)))))
@@ -547,7 +547,7 @@ function limitsText(el: Els, frame: Frame, view: LimitsView, actions: LimitsActi
           </Box>
         )
       })}
-      {costLines(el, frame, view.cost)}
+      {costLines(el, frame, view.cost, view.items)}
     </Box>
   )
 }

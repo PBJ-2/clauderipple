@@ -10,7 +10,7 @@ registerHooks({ resolve(specifier, context, next) {
 const { claudeScopedFrom, CLAUDE_USAGE_STALE_MS, COST_MODELS, costFromSummary, localMidnight, routerLimitItems } = await import('../../packages/mod/hooks/session.ts')
 const { t } = await import('../../packages/mod/hooks/i18n.ts')
 const { chatgptProviders, gptLimitsFrom } = await import('../../packages/mod/hooks/modes.ts')
-const { costFigure, costText, exhaustLeft, exhaustSentence, exhaustShort, exhaustShortWidest, limitItemTone, bandLimitGroups, limitAccountLabel, limitGroupAccount, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTip, narrowLimitGroups, resetMoment, resetShort, timeLeft } = await import('../../packages/mod/hooks/ui/view.ts')
+const { providerDisplayName, costFigure, costText, exhaustLeft, exhaustSentence, exhaustShort, exhaustShortWidest, limitItemTone, bandLimitGroups, limitAccountLabel, limitGroupAccount, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTip, narrowLimitGroups, resetMoment, resetShort, timeLeft } = await import('../../packages/mod/hooks/ui/view.ts')
 const { barArt } = await import('../../packages/mod/hooks/ui/art.ts')
 
 const NOW = Date.parse('2026-10-15T00:00:00Z')
@@ -517,6 +517,18 @@ test('the cost is asked from the local midnight, and the week from the midnight 
   // Across a month's turn.
   assert.equal(localMidnight(new Date(2026, 10, 2, 8).getTime(), 6), new Date(2026, 9, 27).getTime())
   assert.equal(localMidnight(new Date(2026, 9, 15, 0, 0, 0).getTime()), new Date(2026, 9, 15).getTime())
+})
+
+test('the cost tile names a provider as the limits pane does, and keeps the id when no name is known', () => {
+  const items = [
+    { provider: 'anthropic', type: 'anthropic', title: 'Claude', account: 0, kind: 'five_hour' as const, label: '', percent: 1 },
+    { provider: 'opencode-go', type: 'opencode-go', title: 'Go', account: 0, kind: 'five_hour' as const, label: '', percent: 1 },
+    { provider: 'google-gemini', type: 'google', account: 0, kind: 'five_hour' as const, label: '', percent: 1 },
+    { provider: 'minimax', type: 'minimax', title: 'MiniMax', account: 0, kind: 'five_hour' as const, label: '', percent: 1 },
+  ]
+  assert.deepEqual(['anthropic', 'chatgpt', 'opencode-go', 'google-gemini', 'minimax'].map(p => providerDisplayName(p, items)), ['Claude', 'GPT', 'Go', 'Gemini', 'MiniMax'])
+  // No limits read yet: the ids that imply a name give it, any other stays.
+  assert.deepEqual(['anthropic', 'chatgpt', 'claude', 'deepseek', 'opencode-go'].map(p => providerDisplayName(p, [])), ['Claude', 'GPT', 'Claude', 'deepseek', 'opencode-go'])
 })
 
 test('every language says the forecast and the cost, with the placeholders the code fills', () => {

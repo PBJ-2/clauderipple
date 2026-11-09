@@ -1878,7 +1878,8 @@ test('the limits pane draws the cost under the windows: today, providers, models
       'API 가격 기준 비용', '오늘', '프로바이더별', '비용이 큰 모델', '최근 7일',
       // Today's total includes an estimate; a provider and a model with only unpriced requests say "—".
       '≈$15.68', '≈$12.30', '$3.38', '—', '≈$9.90', '$2.40', '<$0.01', '≈$1,234.50',
-      'anthropic', 'chatgpt', 'opencode-go', 'claude-opus-5-5', 'gpt-5.5', 'deepseek-v4.1-flash',
+      // Providers by the names the limits pane gives them; an id with no known name stays as it is.
+      'GPT', 'opencode-go', 'claude-opus-5-5', 'gpt-5.5', 'deepseek-v4.1-flash',
       '금액은 공개된 API 가격 기준 환산액입니다. 구독으로 처리된 요청도 API로 이용했을 때의 비용으로 표시합니다.',
       '가격을 알 수 없는 요청 9건은 금액에 포함되지 않았습니다.',
       '≈ 표시가 붙은 금액은 대략적인 값입니다. 캐시 비율을 추정해 계산한 요청이 40건 포함되어 있습니다.',
@@ -1889,6 +1890,9 @@ test('the limits pane draws the cost under the windows: today, providers, models
     const order = ['오늘', '프로바이더별', '비용이 큰 모델', '최근 7일'].map(x => texts.indexOf(x))
     expect(order.every((at, i) => at >= 0 && (i === 0 || at > order[i - 1]!)), surface + skin + ' ' + order.join()).toBe(true)
     expect(texts.indexOf('오늘') > texts.findIndex(x => x.startsWith('Claude')), surface + skin).toBe(true)
+    // The raw ids of the two known providers are not shown as providers (model names keep theirs).
+    expect(texts.includes('anthropic') || texts.includes('chatgpt'), surface + skin).toBe(false)
+    expect(texts.filter(x => x === 'Claude').length, surface + skin).toBeGreaterThanOrEqual(2)
     // Only one forecast sentence: the weekly window has none.
     expect(said.split('이 속도라면').length - 1, surface + skin).toBe(1)
     await ui.unmount()

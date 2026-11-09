@@ -638,6 +638,17 @@ function groupTitle(group: Pick<LimitGroup, 'provider' | 'type' | 'title'>): str
   return group.provider
 }
 
+/**
+ * A provider's config name as the limits pane names its group ("anthropic" → "Claude", "chatgpt" →
+ * "GPT", "opencode-go" → "Go"): the title the router gave its plan windows, else the name its
+ * type or id implies, else the id itself. The cost tile names its providers by it.
+ */
+export function providerDisplayName(provider: string, items: readonly LimitItem[]): string {
+  const item = items.find(i => i.provider === provider)
+  const named = item ? groupTitle(item) : provider === 'anthropic' ? 'Claude' : groupTitle({ provider })
+  return displayText(named, DISPLAY.name)
+}
+
 /** A group's head: "Claude", "GPT", "Gemini", or its config name; "GPT 1"/"GPT 2" when numbered. */
 export function limitGroupName(group: Pick<LimitGroup, 'provider' | 'type' | 'title' | 'account'>, numbered: boolean): string {
   const title = displayText(groupTitle(group), DISPLAY.name)
