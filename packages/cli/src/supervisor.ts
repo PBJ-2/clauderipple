@@ -203,6 +203,10 @@ export type WindowsRouterOps = {
   /** POST /api/shutdown on this installation's admin port. */
   shutdown(): boolean;
   stopTask(): StopResult;
+  /** This home's launcher PowerShell, the one process the #131 bridge may end; null if not proven. */
+  launcherPid(): number | null;
+  /** Ends that one launcher process; false when it no longer matches or cannot be ended. */
+  stopLauncher(pid: number): boolean;
   start(): StartResult;
   now(): number;
   sleep(ms: number): void;
@@ -297,8 +301,23 @@ export function restartWindowsRouter(ops: WindowsRouterOps, opts: { waitMs?: num
     if (answer.state === "other") return "other-installation";
     return answer.pid !== targetPid && answer.state === "ours" ? "drained" : "identity-unknown";
   }
-  if (!waitForTask(ops)) return "identity-unknown";
+  // #131: a launcher written before the fix waits for its child, the installer, and the installer
+  // waits for this task to end. The router is drained, so ending only that launcher lets the task
+  // leave Running; the start below then runs it again, with the current launcher.
+  if (!waitForTask(ops) && !(endStuckLauncher(ops) && waitForTask(ops))) return "identity-unknown";
   return restartResult(ops.start());
+}
+
+/**
+ * Ends this home's launcher after the router has drained, when nothing answers this installation's
+ * admin port and the task is still Running (#131). Ownership is read again here, and `identity(null)`
+ * is "absent" only when nothing answers at all. False whenever any of that is not proven.
+ */
+function endStuckLauncher(ops: Pick<WindowsRouterOps, "owner" | "identity" | "launcherPid" | "stopLauncher">): boolean {
+  if (ops.owner().state !== "ours") return false;
+  if (ops.identity(null) !== "absent") return false;
+  const pid = ops.launcherPid();
+  return pid !== null && ops.stopLauncher(pid);
 }
 
 function windowsOps(home: string): WindowsRouterOps {
@@ -311,6 +330,8 @@ function windowsOps(home: string): WindowsRouterOps {
     running: () => schtasks.agentState(schtasks.taskName()) === "running",
     shutdown: () => askShutdown(home),
     stopTask: () => schtasks.stopAgent(schtasks.taskName(), { home }),
+    launcherPid: () => schtasks.launcherProcessPid(home),
+    stopLauncher: pid => schtasks.stopLauncherProcess(pid, home),
     start: () => startAgent({ home }),
     now: () => Date.now(),
     sleep: sleepSync,

@@ -348,6 +348,8 @@ test("Windows stop and restart act only on the instance under this task's own la
         running: () => running,
         shutdown: () => { calls.push("shutdown"); if (o.drained) running = false; return o.shutdown ? o.shutdown() : true; },
         stopTask: () => (calls.push("stopTask"), (running = false), "stopped" as const),
+        launcherPid: () => null,
+        stopLauncher: () => false,
         start: () => (calls.push("start"), "started" as const),
         now: () => Date.now(),
         sleep: () => {},
@@ -432,6 +434,8 @@ test("a Windows restart waits for its replacement to answer before judging it", 
       running: () => true,
       shutdown: () => ((drained = true), true),
       stopTask: () => "stopped",
+      launcherPid: () => null,
+      stopLauncher: () => false,
       start: () => "started",
       now: () => clock,
       sleep: (ms) => { clock += ms; },
@@ -446,6 +450,75 @@ test("a Windows restart waits for its replacement to answer before judging it", 
   const restarted = scenario(["absent", "ours"], [6161, 6262]);
   assert.equal(restarted.result, "drained");
   assert.ok(restarted.asked.includes(6262));
+});
+
+// #131: a launcher written before the fix outlives its drained router while it waits for the
+// installer, and the installer waits for the task to end. Only this home's launcher may be ended.
+test("a Windows restart ends only this home's stuck launcher, then starts the task as usual (#131)", () => {
+  const LAUNCHER = 7777;
+  type Owner = "ours" | "other" | "unknown";
+  const restartWith = (o: { owners?: Owner[]; nothingAnswers?: "absent" | "other"; launcher?: number | null; stopped?: boolean; endsTask?: boolean } = {}) => {
+    const calls: string[] = [];
+    const owners: Owner[] = [...(o.owners ?? ["ours"])];
+    let running = true;
+    let drained = false;
+    let clock = 0;
+    const ops: import("../src/supervisor.ts").WindowsRouterOps = {
+      owner: () => {
+        const state = owners.length > 1 ? owners.shift()! : owners[0]!;
+        return { state, home: state === "other" ? winB : winA };
+      },
+      targetPid: () => (drained ? null : 5150),
+      identity: (expectedPid) => {
+        // Nothing answers the port after the drain; before it, the drained router is ours.
+        if (expectedPid === null) return o.nothingAnswers ?? "absent";
+        return drained ? "absent" : "ours";
+      },
+      running: () => running,
+      shutdown: () => ((calls.push("shutdown"), (drained = true)), true),
+      stopTask: () => (calls.push("stopTask"), "stopped" as const),
+      launcherPid: () => (calls.push("launcherPid"), o.launcher === undefined ? LAUNCHER : o.launcher),
+      stopLauncher: pid => {
+        calls.push(`stopLauncher ${pid}`);
+        if (o.stopped === false) return false;
+        if (o.endsTask !== false) running = false;
+        return true;
+      },
+      start: () => (calls.push("start"), "started" as const),
+      now: () => clock,
+      sleep: ms => { clock += ms; },
+    };
+    return { result: restartWindowsRouter(ops), calls };
+  };
+
+  // The task stays Running after the drain: only this home's launcher ends, then the start runs as usual.
+  const stuck = restartWith();
+  assert.equal(stuck.result, "drained");
+  assert.deepEqual(stuck.calls, ["shutdown", "launcherPid", `stopLauncher ${LAUNCHER}`, "start"]);
+  assert.ok(!stuck.calls.includes("stopTask"), "the task itself is never ended");
+
+  // No matching launcher: the answer stays as it was, and nothing is ended or started.
+  const none = restartWith({ launcher: null });
+  assert.equal(none.result, "identity-unknown");
+  assert.deepEqual(none.calls, ["shutdown", "launcherPid"]);
+
+  // The stop is refused, or the task is still Running after it: unknown, never a start beside it.
+  const refusedStop = restartWith({ stopped: false });
+  assert.equal(refusedStop.result, "identity-unknown");
+  assert.deepEqual(refusedStop.calls, ["shutdown", "launcherPid", `stopLauncher ${LAUNCHER}`]);
+  const stillRunning = restartWith({ endsTask: false });
+  assert.equal(stillRunning.result, "identity-unknown");
+  assert.ok(!stillRunning.calls.includes("start"));
+
+  // Something other than nothing answers the admin port: this home's launcher is not touched.
+  const answered = restartWith({ nothingAnswers: "other" });
+  assert.equal(answered.result, "identity-unknown");
+  assert.deepEqual(answered.calls, ["shutdown"]);
+
+  // The registration changed hands while we drained: re-read before the stop, and not touched.
+  const swapped = restartWith({ owners: ["ours", "ours", "other"] });
+  assert.equal(swapped.result, "identity-unknown");
+  assert.deepEqual(swapped.calls, ["shutdown"]);
 });
 
 test("a Windows pid is ambiguous when two homes share one runtime, so control never uses it", () => {
@@ -467,6 +540,8 @@ test("a Windows pid is ambiguous when two homes share one runtime, so control ne
     running: () => true,
     shutdown: () => (calls.push("shutdown"), true),
     stopTask: () => (calls.push("stopTask"), "stopped"),
+    launcherPid: () => null,
+    stopLauncher: () => false,
     start: () => (calls.push("start"), "started"),
     now: () => 0,
     sleep: () => {},

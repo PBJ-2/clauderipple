@@ -179,7 +179,14 @@ export function renderLauncher(opts: { program: string; args: string[]; home: st
     "} catch {}",
     "while ($true) {",
     "  $startedAt = Get-Date",
-    `  $p = Start-Process -FilePath ${ps(opts.program)} -ArgumentList $routerArgs -WindowStyle Hidden -PassThru -Wait -RedirectStandardOutput $out -RedirectStandardError $err`,
+    // Never `Start-Process -Wait` here (#131). On Windows PowerShell 5.1 -Wait also waits for every
+    // descendant of the router, including the detached auto-update installer, and that installer waits
+    // for this task to end (restartWindowsRouter): each side waited on the other, so the router was not
+    // restarted until the next logon. Waiting on the process handle alone returns when the router exits.
+    // The handle must be held before WaitForExit so ExitCode stays readable after the process ends.
+    `  $p = Start-Process -FilePath ${ps(opts.program)} -ArgumentList $routerArgs -WindowStyle Hidden -PassThru -RedirectStandardOutput $out -RedirectStandardError $err`,
+    "  $null = $p.Handle",
+    "  $p.WaitForExit()",
     "  if ($p.ExitCode -eq 0) { break }",
     "  if (((Get-Date) - $startedAt).TotalSeconds -lt 10) { $quickFailures++ } else { $quickFailures = 0 }",
     "  Start-Sleep -Seconds $(if ($quickFailures -ge 5) { 60 } else { 2 })",
@@ -434,7 +441,7 @@ export function taskRouterPid(name = taskName(), opts: { home?: string; deps?: T
   const home = opts.home ?? homeDir();
   if (taskOwnership(home, { ...deps, name }).state !== "ours") return null;
   if (deps.routerPid) return deps.routerPid();
-  const launcher = path.join(home, "clauderipple-router.ps1");
+  const launcher = launcherScriptPath(home);
   const listed = invoke(
     `Get-CimInstance Win32_Process -ErrorAction Stop | Select-Object ProcessId, ParentProcessId, CommandLine | ConvertTo-Json -Compress`,
     deps,
@@ -480,6 +487,62 @@ export function taskRouterPid(name = taskName(), opts: { home?: string; deps?: T
     }
   }
   return null;
+}
+
+/** The launcher script this home's task runs. Every reference to it goes through this function. */
+export function launcherScriptPath(home: string): string {
+  return path.join(home, "clauderipple-router.ps1");
+}
+
+/**
+ * The PowerShell predicate for this home's launcher process: a powershell.exe whose command line
+ * carries `-File "<this home's launcher>"`, exactly as the task starts it. An ordinal, case-insensitive
+ * IndexOf is used rather than -like, so a wildcard character in a path cannot widen the match. The
+ * query's own PowerShell also carries that text, so `$PID` excludes it.
+ */
+function launcherProcessPredicate(home: string): string {
+  const launcher = launcherScriptPath(home);
+  // conhost --headless starts PowerShell with the path's quotes dropped when it has no space
+  // (measured on Windows 11, PowerShell 5.1, 2026-11-09: `-File C:\…\clauderipple-router.ps1`), so
+  // both forms are matched. Unquoted, `-File` is the last argument, so the line must end with it:
+  // a longer path under this home cannot match.
+  const quoted = `-File "${launcher}"`;
+  const bare = `-File ${launcher}`;
+  return `$_.Name -eq 'powershell.exe' -and $_.ProcessId -ne $PID -and $_.CommandLine -and ($_.CommandLine.IndexOf(${ps(quoted)}, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or $_.CommandLine.TrimEnd().EndsWith(${ps(bare)}, [System.StringComparison]::OrdinalIgnoreCase))`;
+}
+
+/**
+ * This home's launcher PowerShell, for the restart bridge in supervisor.ts (#131). Null unless the
+ * task is this home's and exactly one such process exists: an ambiguous match is never acted on.
+ */
+export function launcherProcessPid(home: string, deps: TaskDeps = {}): number | null {
+  if (taskOwnership(home, deps).state !== "ours") return null;
+  const r = invoke(
+    `$p = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { ${launcherProcessPredicate(home)} }); if ($p.Count -eq 0) { 'null' } elseif ($p.Count -eq 1) { [string]$p[0].ProcessId } else { throw 'ambiguous launcher' }`,
+    deps,
+  );
+  if (!r.ok) return null;
+  const text = r.out.trim();
+  if (!/^\d+$/.test(text)) return null;
+  const pid = Number(text);
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+}
+
+/**
+ * Ends one launcher PowerShell by pid (#131): that process only, not its tree, and never through
+ * Stop-ScheduledTask, which can end the installer running inside the task's job. The same predicate
+ * is checked again in the same step, so a pid reused since the lookup is left alone. True only when
+ * exactly that process was stopped.
+ */
+export function stopLauncherProcess(pid: number, home: string, deps: TaskDeps = {}): boolean {
+  // The process doing the stop (the installer, or a restart) is never a launcher, whatever it matches.
+  if (!Number.isSafeInteger(pid) || pid <= 0 || pid === process.pid) return false;
+  if (taskOwnership(home, deps).state !== "ours") return false;
+  const r = invoke(
+    `$p = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $_.ProcessId -eq ${pid} -and ${launcherProcessPredicate(home)} }); if ($p.Count -ne 1) { 'absent' } else { Stop-Process -Id ${pid} -ErrorAction Stop; 'stopped' }`,
+    deps,
+  );
+  return r.ok && r.out.trim() === "stopped";
 }
 
 /**

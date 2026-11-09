@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { installAgent, renderLauncher, renderTaskRegistration, taskDefinitionMatches, taskRouterPid, taskUser, type TaskDeps } from "../src/schtasks.ts";
+import { installAgent, launcherProcessPid, launcherScriptPath, renderLauncher, renderTaskRegistration, stopLauncherProcess, taskDefinitionMatches, taskRouterPid, taskUser, type TaskDeps } from "../src/schtasks.ts";
 
 const expected = { execute: "conhost.exe", arguments: '--headless powershell.exe -NoProfile -File "C:\\Users\\me\\.clauderipple\\router.ps1"', userId: "me" };
 const valid = {
@@ -67,6 +67,26 @@ test("registration and launcher keep router children at Normal priority", () => 
   assert.doesNotMatch(launcher.replace(/\r\n/g, ""), /[\r\n]/);
 });
 
+// #131: `-Wait` on Windows PowerShell 5.1 also waits for the router's detached children (the update
+// installer), which waits for this task to end. The launcher must wait on its own process only.
+test("launcher waits on the router process alone, never with -Wait (#131)", () => {
+  const launcher = renderLauncher({ program: "C:\\node.exe", args: ["C:\\router.js"], home: "C:\\home" });
+  const lines = launcher.split("\r\n");
+  const start = lines.findIndex(line => line.includes("Start-Process -FilePath"));
+  assert.ok(start >= 0);
+  assert.doesNotMatch(launcher, /-Wait\b/);
+  assert.match(lines[start]!, /-PassThru -RedirectStandardOutput \$out -RedirectStandardError \$err$/);
+  assert.equal(lines[start + 1]!.trim(), "$null = $p.Handle");
+  assert.equal(lines[start + 2]!.trim(), "$p.WaitForExit()");
+  // Exit-code handling is unchanged: 0 ends the loop, anything else relaunches after the backoff.
+  assert.equal(lines[start + 3]!.trim(), "if ($p.ExitCode -eq 0) { break }");
+  assert.ok(lines.slice(start + 4, start + 8).some(line => line.includes("$quickFailures++")));
+  assert.ok(lines.some(line => line.trim() === "Start-Sleep -Seconds $(if ($quickFailures -ge 5) { 60 } else { 2 })"));
+  // Redirection to the same log files as before.
+  assert.ok(lines.includes(`$out = '${path.join("C:\\home", "logs", "launcher.log")}'`));
+  assert.ok(lines.includes(`$err = '${path.join("C:\\home", "logs", "launcher.err.log")}'`));
+});
+
 test("registration failure retains only a task whose sole mismatch is priority", t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cr-task-priority-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -117,6 +137,65 @@ test("the task user is domain-qualified, and either spelling of it matches", () 
   assert.equal(taskDefinitionMatches({ ...valid, userId: "x", triggerUserId: "x" }, qualified), true);
   assert.equal(taskDefinitionMatches({ ...valid, userId: "Y\\x", triggerUserId: "X\\x" }, qualified), false);
   assert.equal(taskDefinitionMatches({ ...valid, userId: "x", triggerUserId: "X\\other" }, qualified), false);
+});
+
+// #131: the launcher lookup and stop may only ever name this home's launcher, by its exact quoted path.
+test("the stuck-launcher lookup and stop match only this home's launcher under powershell.exe", () => {
+  const home = path.resolve("launcher-stop-fixture");
+  const other = path.resolve("launcher-stop-other");
+  const needle = `-File "${launcherScriptPath(home)}"`;
+  const definitionOf = (dir: string) => ({ arguments: `--headless powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "${launcherScriptPath(dir)}"` });
+  const scripts: string[] = [];
+  const deps = (out: string, dir = home): TaskDeps => ({
+    definition: () => definitionOf(dir),
+    run: script => {
+      scripts.push(script);
+      return { ok: true, out };
+    },
+  });
+
+  // The lookup: the exact needle, PowerShell only, the query's own process excluded, nothing broader.
+  assert.equal(launcherProcessPid(home, deps("4242")), 4242);
+  const lookup = scripts.at(-1)!;
+  assert.ok(lookup.includes(`$_.CommandLine.IndexOf('${needle}', [System.StringComparison]::OrdinalIgnoreCase) -ge 0`));
+  // conhost drops the quotes (measured 2026-11-09), so the bare form must end the command line.
+  const bare = `-File ${launcherScriptPath(home)}`;
+  assert.ok(lookup.includes(`$_.CommandLine.TrimEnd().EndsWith('${bare}', [System.StringComparison]::OrdinalIgnoreCase)`));
+  assert.equal(`powershell.exe -File ${launcherScriptPath(path.join(home, "nested"))}`.endsWith(bare), false);
+  assert.equal(`powershell.exe -File ${launcherScriptPath(other)}`.endsWith(bare), false);
+  assert.ok(lookup.includes("$_.Name -eq 'powershell.exe'"));
+  assert.ok(lookup.includes("$_.ProcessId -ne $PID"));
+  assert.doesNotMatch(lookup, /node\.exe|ClaudeRipple\.exe|conhost|-like|\*|Stop-Process|Stop-ScheduledTask|schtasks/);
+  // Another home's launcher, or one nested under this home, never contains this home's needle.
+  assert.equal(`-File "${launcherScriptPath(other)}"`.includes(needle), false);
+  assert.equal(`-File "${launcherScriptPath(path.join(home, "nested"))}"`.includes(needle), false);
+
+  // Null, ambiguous or unreadable results are never a pid.
+  assert.equal(launcherProcessPid(home, deps("null")), null);
+  assert.equal(launcherProcessPid(home, deps("ambiguous")), null);
+  assert.equal(launcherProcessPid(home, { ...deps(""), run: () => ({ ok: false, out: "denied" }) }), null);
+  // Another installation's task: the lookup does not run at all.
+  const beforeForeign = scripts.length;
+  assert.equal(launcherProcessPid(home, deps("4242", other)), null);
+  assert.equal(scripts.length, beforeForeign, "a task that belongs to another home is never inspected");
+
+  // The stop: that pid only, re-checked against the same predicate in the same step, one Stop-Process.
+  assert.equal(stopLauncherProcess(4242, home, deps("stopped")), true);
+  const stop = scripts.at(-1)!;
+  assert.ok(stop.includes("$_.ProcessId -eq 4242"));
+  assert.ok(stop.includes(`IndexOf('${needle}', [System.StringComparison]::OrdinalIgnoreCase) -ge 0`));
+  assert.equal(stop.match(/Stop-Process/g)?.length, 1);
+  assert.ok(stop.includes("Stop-Process -Id 4242 "));
+  assert.doesNotMatch(stop, /Stop-ScheduledTask|schtasks|\/End|taskkill|node\.exe|ClaudeRipple\.exe|-like/);
+  assert.equal(stopLauncherProcess(4242, home, deps("absent")), false, "a pid that no longer matches is left alone");
+  assert.equal(stopLauncherProcess(0, home, deps("stopped")), false);
+  assert.equal(stopLauncherProcess(Number.NaN, home, deps("stopped")), false);
+  const selfBefore = scripts.length;
+  assert.equal(stopLauncherProcess(process.pid, home, deps("stopped")), false, "the installer's own process is never stopped");
+  assert.equal(scripts.length, selfBefore);
+  const stopsBefore = scripts.length;
+  assert.equal(stopLauncherProcess(4242, home, deps("stopped", other)), false);
+  assert.equal(scripts.length, stopsBefore, "another home's task is never stopped through");
 });
 
 const home = path.resolve("task-pid-fixture");

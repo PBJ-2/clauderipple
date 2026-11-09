@@ -243,6 +243,8 @@ test("Windows drain never stops or starts over a replacement PID", () => {
       running: () => true,
       shutdown: () => { draining = true; return true; },
       stopTask: () => { controls++; return "stopped"; },
+      launcherPid: () => null,
+      stopLauncher: () => false,
       start: () => { controls++; return "started"; },
       now: () => 0,
       sleep: () => { throw new Error("unexpected wait"); },
