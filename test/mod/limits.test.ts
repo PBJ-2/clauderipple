@@ -282,6 +282,10 @@ test('narrowing drops scoped windows, then secondary accounts, then trailing gro
   const stored = [group('anthropic', 1, ['five_hour']), group('chatgpt', 0, ['seven_day']), group('chatgpt', 1, ['seven_day'])]
   assert.deepEqual(narrowLimitGroups(stored, 4, measure)?.map(g => g.key), ['anthropic#1', 'chatgpt#0'])
   assert.deepEqual(narrowLimitGroups(stored, 2, measure)?.map(g => g.key), ['anthropic#1'])
+  // A provider's only group is never a secondary account, whatever its number: Gemini's account in
+  // use (account 1) outlasts MiniMax after it (2026-11-09).
+  const band = [group('anthropic', 0, ['seven_day']), group('google-gemini', 1, ['five_hour', 'seven_day']), group('minimax', 0, ['five_hour', 'seven_day'])]
+  assert.deepEqual(narrowLimitGroups(band, 6, measure)?.map(g => g.key), ['anthropic#0', 'google-gemini#1'])
 })
 
 /** Several Claude accounts as `GET /api/limits` lists them (2026-11-04), and two GPT accounts. */

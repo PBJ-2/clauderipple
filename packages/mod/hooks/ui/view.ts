@@ -667,7 +667,10 @@ export function narrowLimitGroups(groups: readonly LimitGroup[], budget: number,
     if (!out[i]!.items.some(item => item.kind === 'scoped')) continue
     out = out.map((g, j) => j === i ? { ...g, items: g.items.filter(item => item.kind !== 'scoped') } : g).filter(g => g.items.length > 0)
   }
-  const secondary = (g: LimitGroup, i: number) => i > 0 && g.account > 0
+  // A secondary account is one whose provider already shows an earlier group, not any account
+  // numbered past 0: the band keeps one group a provider (bandLimitGroups), and Gemini's account in
+  // use being account 1 hid Gemini whenever the row was short while MiniMax, after it, stayed (2026-11-09).
+  const secondary = (g: LimitGroup, i: number) => out.some((o, j) => j < i && o.provider === g.provider)
   while (width(out) > budget && out.some(secondary)) {
     const at = out.map(secondary).lastIndexOf(true)
     out = out.filter((_, i) => i !== at)
