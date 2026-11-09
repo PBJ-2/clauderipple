@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { PRESETS } from "../src/presets.ts";
+import { PRESETS, presetUserAgent, withDefaultUserAgent } from "../src/presets.ts";
 
 test("provider presets have documented essentials and unique ids", () => {
   const ids = new Set<string>();
@@ -151,4 +151,23 @@ test("every OpenCode Zen model carries the wire its published endpoint says, Cha
   // Gemini is served at /zen/v1/models/<id> and jev at /systemone — shapes this router does not
   // speak, so offering them would only produce a model that cannot answer.
   assert.equal(zen.fallbackModels.some((model) => model.id.startsWith("gemini") || model.id.startsWith("jev")), false);
+});
+
+// Cloudflare in front of OpenCode answers `error code: 1010` to a request with no browser-like
+// User-Agent (issue #132). Only OpenCode Go declares one; no other preset's requests change.
+test("OpenCode Go declares the User-Agent it is let through with, and no other preset does", () => {
+  assert.equal(presetUserAgent("opencode-go"), "opencode/2.2.6");
+  assert.equal(presetUserAgent(undefined), undefined);
+  assert.equal(presetUserAgent("deepseek"), undefined);
+  for (const preset of PRESETS) {
+    if (preset.id !== "opencode-go") assert.equal(preset.userAgent, undefined, preset.id);
+  }
+});
+
+test("a default User-Agent is added only where no spelling of the header is already set", () => {
+  assert.deepEqual(withDefaultUserAgent({ accept: "x" }, "opencode/2.2.6"), { accept: "x", "user-agent": "opencode/2.2.6" });
+  assert.deepEqual(withDefaultUserAgent({ "User-Agent": "mine/1" }, "opencode/2.2.6"), { "User-Agent": "mine/1" });
+  assert.deepEqual(withDefaultUserAgent({ "user-agent": "mine/1" }, "opencode/2.2.6"), { "user-agent": "mine/1" });
+  const untouched = { accept: "x" };
+  assert.equal(withDefaultUserAgent(untouched, undefined), untouched);
 });

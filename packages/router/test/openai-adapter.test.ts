@@ -2,14 +2,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import http from "node:http";
-import { mapHttpError, OpenAiCompatibleAdapter, type OpenAiCredential } from "../src/providers/openai/index.ts";
+import { isCloudflareFingerprintBlock, mapHttpError, OpenAiCompatibleAdapter, type OpenAiCredential } from "../src/providers/openai/index.ts";
 import { Logger } from "../src/log.ts";
 import { decodeEnvelope, encodeEnvelope } from "../src/reasoning.ts";
 import type { AnthropicRequest } from "../src/providers/chatgpt/translate.ts";
 import { requestKind } from "../src/routing.ts";
 
 const seen: { path: string; headers: http.IncomingHttpHeaders; body: Record<string, unknown> }[] = [];
-let mode: "chat" | "responses" | "error" | "cut-responses" | "cut-chat" | "done-chat" | "refuse-reasoning" | "refuse-chat" | "sealed" | "sealed-chat" | "missing-thinking" = "chat";
+let mode: "chat" | "responses" | "error" | "cloudflare" | "cut-responses" | "cut-chat" | "done-chat" | "refuse-reasoning" | "refuse-chat" | "sealed" | "sealed-chat" | "missing-thinking" = "chat";
 const sse = (records: Record<string, unknown>[]) => records.map((record) => `data: ${JSON.stringify(record)}\n\n`).join("");
 
 const upstream = http.createServer((req, res) => {
@@ -27,6 +27,11 @@ const upstream = http.createServer((req, res) => {
     }
     if (mode === "error") {
       res.writeHead(401, { "content-type": "application/json" }).end(JSON.stringify({ error: { message: "missing key" } }));
+      return;
+    }
+    // Cloudflare refusing the request's fingerprint before the provider reads the key (issue #132).
+    if (mode === "cloudflare") {
+      res.writeHead(403, { "content-type": "text/plain" }).end("error code: 1010");
       return;
     }
     // A vendor that refuses the reasoning carried back in the request it was given.
@@ -264,6 +269,56 @@ test("no session header is sent unless the provider asks for one", async () => {
   }, log);
   await call(request);
   assert.equal(seen.at(-1)!.headers["x-opencode-session"], undefined);
+});
+
+// OpenCode's edge answers Cloudflare `error code: 1010` to a request whose User-Agent is missing or
+// Node's default `node` (issue #132). The preset declares the User-Agent it is let through with.
+test("the OpenCode Go preset sends its User-Agent on Chat and Responses, and a configured one wins", async () => {
+  for (const wire of ["chat", "responses"] as const) {
+    mode = wire;
+    adapter = new OpenAiCompatibleAdapter("fake", { type: "openai-compatible", url: `http://127.0.0.1:${upstreamPort}/v1`, wire, headers: { authorization: "Bearer secret" }, sessionHeader: "x-opencode-session", preset: "opencode-go" }, log);
+    const response = await call(request);
+    assert.equal(response.status, 200);
+    assert.equal(seen.at(-1)!.headers["user-agent"], "opencode/2.2.6", `${wire}: the preset's User-Agent went out, and only one value`);
+  }
+
+  mode = "chat";
+  adapter = new OpenAiCompatibleAdapter("fake", { type: "openai-compatible", url: `http://127.0.0.1:${upstreamPort}/v1`, headers: { authorization: "Bearer secret", "User-Agent": "my-client/1" }, preset: "opencode-go" }, log);
+  await call(request);
+  assert.equal(seen.at(-1)!.headers["user-agent"], "my-client/1", "a User-Agent the provider configures wins, in any case, and is not joined to the default");
+});
+
+test("another OpenAI-compatible preset does not send the OpenCode Go User-Agent", async () => {
+  mode = "chat";
+  adapter = new OpenAiCompatibleAdapter("fake", { type: "openai-compatible", url: `http://127.0.0.1:${upstreamPort}/v1`, headers: { authorization: "Bearer secret" }, preset: "groq" }, log);
+  const response = await call(request);
+  assert.equal(response.status, 200);
+  assert.notEqual(seen.at(-1)!.headers["user-agent"], "opencode/2.2.6");
+});
+
+test("a Cloudflare 1010 refusal reaches the client as a fingerprint block, not a credential refusal", async () => {
+  mode = "cloudflare";
+  adapter = new OpenAiCompatibleAdapter("fake", { type: "openai-compatible", url: `http://127.0.0.1:${upstreamPort}/v1`, headers: { authorization: "Bearer secret" }, preset: "opencode-go" }, log);
+  const before = seen.length;
+  const response = await call({ ...request, stream: false });
+  assert.equal(response.status, 403);
+  const body = JSON.parse(response.text) as { error: { type: string; message: string } };
+  assert.equal(body.error.type, "permission_error");
+  assert.match(body.error.message, /1010/);
+  assert.match(body.error.message, /not your API key/, "the key is named as not the cause");
+  assert.equal(seen.length - before, 1, "not asked again: the same fingerprint would be refused again");
+  mode = "chat";
+});
+
+test("a Cloudflare 1010 body is recognised on its own and only on 403", () => {
+  assert.equal(isCloudflareFingerprintBlock("error code: 1010"), true);
+  assert.equal(isCloudflareFingerprintBlock("<title>Access denied</title> Error 1010"), true);
+  assert.equal(isCloudflareFingerprintBlock("error code: 1020"), false);
+  assert.equal(isCloudflareFingerprintBlock('{"error":{"message":"Invalid API key 1010"}}'), false);
+  assert.match(mapHttpError(403, "error code: 1010").body, /1010/);
+  // Anything else on a 403 keeps its existing reading.
+  assert.match(mapHttpError(403, JSON.stringify({ error: { message: "Invalid API key" } })).body, /authentication_error/);
+  assert.equal(mapHttpError(401, "error code: 1010").status, 401, "a 401 is not a fingerprint block");
 });
 
 // A stream that closes before the vendor says it is done was cut off. Finishing it as end_turn gave

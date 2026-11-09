@@ -7,14 +7,14 @@ import type { OpenAiCompatibleProvider } from "../../config.ts";
 import type { Logger } from "../../log.ts";
 import type { RequestUsage } from "../../requestlog.ts";
 import { exhaustionHeaders, modelDeprecation, providerExhaustion, type ModelUnavailable, type ProviderExhaustion } from "../../health.ts";
-import { retryAfterMs } from "../../pool.ts";
+import { CLOUDFLARE_FINGERPRINT_BLOCK, retryAfterMs } from "../../pool.ts";
 import { credentialHeaderValues, redactErrorText } from "../../redact.ts";
 import { SseParser } from "../chatgpt/sse.ts";
 import { fetchWithRetry } from "../retry.ts";
 import { StartInputs } from "../start-input.ts";
 import { estimateTokens, formatSse, OpenAiStreamMapper, toOpenAiRequest, type ChatRequest, type ResponsesRequest } from "./translate.ts";
 import { refusesReplayedReasoning, requiresThinkingReplay } from "../../reasoning.ts";
-import { PRESETS } from "../../presets.ts";
+import { PRESETS, presetUserAgent, withDefaultUserAgent } from "../../presets.ts";
 import { conversationKey, serverToolNames, toolNameRestoreMap } from "../chatgpt/translate.ts";
 import type { AnthropicRequest } from "../chatgpt/translate.ts";
 import { promptAdditions } from "../../identity.ts";
@@ -54,11 +54,24 @@ export function looksLikeAuth(text: string): boolean {
 }
 
 /**
+ * Cloudflare's own refusal of a request before the provider reads its key: `error code: 1010` in the
+ * body (issue #132). Cloudflare decides it from the request's fingerprint, so it says nothing about the key.
+ */
+export function isCloudflareFingerprintBlock(text: string): boolean {
+  return CLOUDFLARE_FINGERPRINT_BLOCK.test(text);
+}
+
+/** What the user reads for a fingerprint block. Says what it is not (the key) before what to check. */
+export const FINGERPRINT_BLOCK_HINT = "Cloudflare blocked the request before authentication (error 1010). This is about the request's fingerprint, not your API key. Check the User-Agent in this provider's headers.";
+
+/**
  * `label` names the provider in the message the user reads; `authHint`, when given, is appended to an
  * authentication error to say what to do about it — a credential the user can fix in another tool is
  * only fixable if the error names the tool.
  */
 export function mapHttpError(status: number, text: string, label = "OpenAI-compatible provider", authHint?: string, redact: (message: string) => string = (message) => message): { status: number; body: string } {
+  // Checked first: a Cloudflare block names no key, so nothing below may read it as a credential refusal.
+  if (status === 403 && isCloudflareFingerprintBlock(text)) return anthropicError(403, "permission_error", `${label}: ${FINGERPRINT_BLOCK_HINT}`);
   // Cleaned after decoding: a credential escaped inside the JSON (`\u0074ok…`) only reads as itself
   // once the string is parsed.
   const message = `${label}: ${redact(vendorMessage(text))}`;
@@ -194,13 +207,14 @@ export class OpenAiCompatibleAdapter {
       : {};
     const label = this.hooks.label ?? "OpenAI-compatible provider";
     let credentialHeaders = credential?.headers;
-    const headersNow = async (): Promise<Record<string, string>> => ({
+    // The preset's User-Agent is only a default: any User-Agent already set, configured or resolved, wins.
+    const headersNow = async (): Promise<Record<string, string>> => withDefaultUserAgent({
       "content-type": "application/json",
       accept: "text/event-stream",
       ...sessionHeader,
       ...(credentialHeaders ?? this.cfg.headers ?? {}),
       ...(this.hooks.headers ? await this.hooks.headers(model) : {}),
-    });
+    }, presetUserAgent(this.cfg.preset));
     let upstreamHeaders: Record<string, string> = {};
     // Every credential sent on any attempt: after a 401 retry the vendor's error may still echo the
     // first one.

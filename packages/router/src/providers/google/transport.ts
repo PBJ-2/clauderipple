@@ -14,6 +14,7 @@
 import type { GeminiRequest } from "./translate.ts";
 import { antigravityRequestId, antigravitySessionId, antigravityUserAgentFor, GOOGLE_OAUTH, resolveAntigravityWireModel } from "./antigravity.ts";
 import { VERSION } from "../../version.ts";
+import { withDefaultUserAgent } from "../../presets.ts";
 
 export type GoogleTransportRequest = { url: string; headers: Record<string, string>; body: string };
 
@@ -178,15 +179,15 @@ export function createTransport(mode: "api-key" | "antigravity", opts: { apiKey?
       const query = o.stream ? "?alt=sse" : "";
       return {
         url: `${base}/v1beta/models/${encodeURIComponent(o.model)}:${method}${query}`,
-        headers: {
+        // A User-Agent the provider configures, in any case, wins over the relay default (issue #132).
+        headers: withDefaultUserAgent({
           "content-type": "application/json",
           accept: o.stream ? "text/event-stream" : "application/json",
-          ...(userAgent ? { "user-agent": userAgent } : {}),
           ...(sessionHeader && o.conversationKey ? { [opts.pooled ? sessionHeader.toLowerCase() : sessionHeader]: o.conversationKey } : {}),
           ...(opts.headers ?? {}),
           // Kept after the vendor's own headers so nothing can shadow the credential on this wire.
           "x-goog-api-key": apiKey,
-        },
+        }, userAgent),
         body: JSON.stringify(req),
       };
     },

@@ -24,6 +24,7 @@ import { CredentialPool, pinnedCredential, retryAfterMs } from "../../pool.ts";
 import { credentialHeaderValues, redactErrorText } from "../../redact.ts";
 import { SseParser } from "../chatgpt/sse.ts";
 import { fetchWithRetry } from "../retry.ts";
+import { FINGERPRINT_BLOCK_HINT, isCloudflareFingerprintBlock } from "../openai/index.ts";
 import { StartInputs } from "../start-input.ts";
 import { estimateTokens, formatSse, GoogleStreamMapper, toGeminiRequest, type GeminiRequest } from "./translate.ts";
 import { antigravityBaseUrl, createTransport, credentialParts, googleBaseUrl, resolveApiKey, type GoogleTransport } from "./transport.ts";
@@ -230,6 +231,7 @@ export function googleTosViolation(status: number, text: string): boolean {
 
 export function mapHttpError(status: number, text: string): { status: number; body: string } {
   const message = `Google provider: ${vendorMessage(text)}`;
+  if (status === 403 && isCloudflareFingerprintBlock(text)) return anthropicError(403, "permission_error", `Google provider: ${FINGERPRINT_BLOCK_HINT}`);
   if (status === 429) return anthropicError(429, "rate_limit_error", message);
   if (googleLooksLikeAuth(status, text)) return anthropicError(401, "authentication_error", message);
   if (status === 403) return anthropicError(403, "permission_error", message);

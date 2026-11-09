@@ -47,6 +47,8 @@ const TRANSIENT_MS = 10_000;
 const EXHAUSTED_MS = 30 * 60_000;
 /** A relay passing on its upstream's failure; whatever status it chose, the credential did nothing. */
 export const RELAY_UPSTREAM_FAILED = /upstream (request )?failed/i;
+/** Cloudflare refusing a request by its fingerprint before the vendor reads the key (#132). */
+export const CLOUDFLARE_FINGERPRINT_BLOCK = /\berror (?:code:\s*)?1010\b/i;
 /** A `Retry-After` beyond this is treated as "not within this session"; the credential is parked. */
 const MAX_COOLDOWN_MS = 6 * 60 * 60_000;
 
@@ -72,6 +74,12 @@ export function classify(status: number, retryAfterMs?: number, body = ""): Verd
   // not use, or an edge refusing what it took for a bot — none of which mean the key is dead.
   // Parking a working credential until someone notices is the worse mistake, so this waits instead.
   if (status === 403) {
+    // Cloudflare's `error code: 1010` refuses the request's fingerprint before any key is read
+    // (#132). Every credential sends the same fingerprint, so trying the next one, or cooling this
+    // one, only moves the conversation off its cache to be refused again.
+    if (CLOUDFLARE_FINGERPRINT_BLOCK.test(body)) {
+      return { retryable: false, reason: "Cloudflare refused the request's fingerprint (error 1010), not the credential" };
+    }
     // Except when the vendor says the refusal was not about us. A relay passing on a broken upstream
     // answers 403, and that is not a statement about the credential at all: charging it a minute of
     // cooldown made every turn in that minute come back to the user as an authentication error

@@ -35,6 +35,12 @@ export type ProviderPreset = {
    * some of them key their prompt cache on it and charge full price without it.
    */
   sessionHeader?: string;
+  /**
+   * The `User-Agent` this vendor's edge expects from the router. Sent on the vendor's OpenAI-style
+   * requests unless the provider's own headers already set one (any case). Absent, the router sends
+   * no User-Agent of its own and Node's fetch sends `node`.
+   */
+  userAgent?: string;
   fallbackModels: PresetModel[];
   /** Empty means output_config.effort is stripped for this provider. */
   effortLevels: string[];
@@ -294,6 +300,11 @@ export const PRESETS: ProviderPreset[] = [
     authHeader: "authorization-bearer",
     wire: "responses",
     sessionHeader: "x-opencode-session",
+    // Cloudflare in front of OpenCode answered `error code: 1010` (403, before auth) to a request with
+    // no User-Agent (issue #132). Node's fetch sends `node` rather than none, and whether `node` is
+    // refused is not measured here: the usage poll was accepted with it (opencode-usage.ts, 2026-10-15).
+    // The value is the one the reporter measured with a working key on 2026-11-08 (`opencode/2.2.6`).
+    userAgent: "opencode/2.2.6",
     // Measured 2026-10-14 on muse-spark-1.3-contributor: `include` and `summary` are accepted, the
     // sealed item comes back on a tool-bearing turn, and replaying it in place answers 200.
     sealedReasoning: true,
@@ -548,3 +559,18 @@ export const PRESETS: ProviderPreset[] = [
     docsUrl: "https://lmstudio.ai/docs/developer/openai-compat/models",
   },
 ];
+
+/** The User-Agent a preset declares, for a provider built from it (`provider.preset`). */
+export function presetUserAgent(presetId: string | undefined): string | undefined {
+  return presetId ? PRESETS.find((entry) => entry.id === presetId)?.userAgent : undefined;
+}
+
+/**
+ * `headers` with a default `user-agent` added. A User-Agent the headers already carry, in any case,
+ * wins: two spellings of one header name would reach the vendor as one header with both values
+ * joined, so the default is added only when no spelling is present.
+ */
+export function withDefaultUserAgent(headers: Record<string, string>, userAgent: string | undefined): Record<string, string> {
+  if (!userAgent || Object.keys(headers).some((name) => name.toLowerCase() === "user-agent")) return headers;
+  return { ...headers, "user-agent": userAgent };
+}

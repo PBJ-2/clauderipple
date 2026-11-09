@@ -35,7 +35,7 @@ import { forwardCompatibleHeader, resolveCompatibleCaps, sanitizeForCompatible }
 import { applyIdentityToAnthropicBody, promptAdditions } from "./identity.ts";
 import { anthropicServerToolBackend, webPluginBackend, webSearchBlocks, webSearchErrorBlocks, webSearchMessage, webSearchQuery, webSearchSse, type WebSearchQuery } from "./websearch.ts";
 import { classify, CredentialPool, pinnedCredential, retryAfterMs, ThreadAffinity, type Credential } from "./pool.ts";
-import { PRESETS } from "./presets.ts";
+import { PRESETS, presetUserAgent, withDefaultUserAgent } from "./presets.ts";
 import { ChatGptAdapter, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
 import { OpenAiCompatibleAdapter } from "./providers/openai/index.ts";
 import { GoogleAdapter, googleKeyRejected, type GoogleAccountStatus } from "./providers/google/index.ts";
@@ -1662,16 +1662,19 @@ export class Proxy {
           credentialCandidates = credentials;
           recordCredential(route.provider, using, credentials);
           penalised = { provider: route.provider, id: using.id };
+          // The credential wins over the session header: they are different names in practice, but a
+          // vendor that reused one would mean the request going out unauthenticated.
+          const keyedHeaders = provider.sessionHeader
+            ? { [provider.sessionHeader]: conversationKey(json as AnthropicRequest), ...using.headers }
+            : using.headers;
           target = {
             protocol,
             host: u.hostname,
             port: Number(u.port) || (protocol === "https:" ? 443 : 80),
             agent: this.agentFor(route.provider, protocol),
-            // The credential wins over the session header: they are different names in practice, but a
-            // vendor that reused one would mean the request going out unauthenticated.
-            extraHeaders: provider.sessionHeader
-              ? { [provider.sessionHeader]: conversationKey(json as AnthropicRequest), ...using.headers }
-              : using.headers,
+            // The caller's own User-Agent is forwarded as it is. Only a caller that sends none gets the
+            // preset's default (issue #132); a User-Agent the provider's headers set wins over both.
+            extraHeaders: req.headers["user-agent"] === undefined ? withDefaultUserAgent(keyedHeaders, presetUserAgent(provider.preset)) : keyedHeaders,
             dropClientAuth: true,
             // Providers mount their Anthropic-compatible API under a path (DeepSeek /anthropic, OpenRouter /api,
             // Qwen /apps/anthropic): the CLI's /v1/messages is appended to it. Dropping it sent requests to the
@@ -1708,13 +1711,15 @@ export class Proxy {
       const isBootstrap = isCliBootstrap || isPickerBootstrap;
       const headers: string[] = [];
       const raw = req.rawHeaders;
+      // A User-Agent the target sets under any spelling replaces the caller's; `in` below matches only the exact spelling.
+      const targetSetsUserAgent = Object.keys(target.extraHeaders).some((name) => name.toLowerCase() === "user-agent");
       for (let i = 0; i < raw.length; i += 2) {
         const k = raw[i]!;
         const lk = k.toLowerCase();
         if (HOP_BY_HOP.has(lk)) continue;
         // Bootstrap responses are edited: keep the client's accept-encoding as-is (some edges misbehave without it)
         // and decompress whatever comes back before editing.
-        if (lk in target.extraHeaders || target.dropHeaders?.has(lk) || target.dropHeaderPrefixes?.some((prefix) => lk.startsWith(prefix))) continue;
+        if (lk in target.extraHeaders || (lk === "user-agent" && targetSetsUserAgent) || target.dropHeaders?.has(lk) || target.dropHeaderPrefixes?.some((prefix) => lk.startsWith(prefix))) continue;
         if (target.dropClientAuth && CLIENT_AUTH.has(lk)) continue;
         // Anthropic beta flags opt into features most compatible providers have not implemented.
         if (compatCaps && !forwardCompatibleHeader(lk, compatCaps)) {

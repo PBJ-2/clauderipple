@@ -48,7 +48,7 @@ async function forwardedHeaders(providerHeaders: Record<string, string>): Promis
 async function roundTrip(
   providerHeaders: Record<string, string>,
   reply: ProviderReply,
-  options: { provider?: Partial<Provider>; system?: unknown; body?: Record<string, unknown>; exhausted?: boolean } = {},
+  options: { provider?: Partial<Provider>; system?: unknown; body?: Record<string, unknown>; exhausted?: boolean; userAgent?: string } = {},
 ): Promise<{ seen: http.IncomingHttpHeaders; seenBody: Record<string, unknown>; records: RequestRecord[]; clientStatus: number; clientBody: string; clientHeaders: http.IncomingHttpHeaders; providerCalls: number; health: Record<string, ProviderExhaustion>; models: Record<string, Record<string, { reason: string }>> }> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-proxy-headers-"));
   const ca = createCa({ cn: "clauderipple test" });
@@ -109,6 +109,7 @@ async function roundTrip(
       `x-api-key: ${CLIENT_KEY}\r\n` +
       "anthropic-version: 2023-06-01\r\n" +
       "x-claude-code-session-id: 11111111-2222-4333-8444-555555555555\r\n" +
+      (options.userAgent === undefined ? "" : `user-agent: ${options.userAgent}\r\n`) +
       `content-length: ${Buffer.byteLength(body)}\r\n\r\n` +
       body,
   );
@@ -326,4 +327,20 @@ test("a thread create still reaches an anthropic-compatible provider, without th
   assert.equal("thread" in r.seenBody, false);
   assert.equal("diagnostics" in r.seenBody, false);
   assert.deepEqual(r.seenBody.messages, [{ role: "user", content: "hi" }]);
+});
+
+// OpenCode Go's Anthropic wire sits behind the same Cloudflare edge as its chat wires (issue #132).
+// A caller that sends no User-Agent gets the preset's; one it sends is forwarded; a configured one wins.
+test("an OpenCode Go anthropic-wire request gets the preset's User-Agent only when the caller sent none", async () => {
+  const none = await roundTrip({ "x-api-key": "provider-key" }, OK_REPLY, { provider: { preset: "opencode-go" } as never });
+  assert.equal(none.seen["user-agent"], "opencode/2.2.6");
+
+  const forwarded = await roundTrip({ "x-api-key": "provider-key" }, OK_REPLY, { provider: { preset: "opencode-go" } as never, userAgent: "claude-cli/2.1.0 (external, cli)" });
+  assert.equal(forwarded.seen["user-agent"], "claude-cli/2.1.0 (external, cli)", "the caller's own User-Agent is forwarded as it is");
+
+  const configured = await roundTrip({ "x-api-key": "provider-key", "User-Agent": "mine/1" }, OK_REPLY, { provider: { preset: "opencode-go" } as never, userAgent: "claude-cli/2.1.0 (external, cli)" });
+  assert.equal(configured.seen["user-agent"], "mine/1", "the provider's configured User-Agent wins over the caller's");
+
+  const other = await roundTrip({ "x-api-key": "provider-key" }, OK_REPLY, { provider: { preset: "deepseek" } as never });
+  assert.equal(other.seen["user-agent"], undefined, "a preset without a declared User-Agent sends none");
 });

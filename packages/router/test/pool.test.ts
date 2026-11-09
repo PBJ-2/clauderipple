@@ -88,6 +88,9 @@ test("only failures another credential could answer are retryable", () => {
 
   // A bad request is bad everywhere. Retrying it burns every credential and still fails.
   assert.equal(classify(400).retryable, false);
+  // Cloudflare 1010 refuses the request's fingerprint, which every credential shares (#132).
+  assert.equal(classify(403, undefined, "error code: 1010").retryable, false);
+  assert.equal(classify(403, undefined, "forbidden").retryable, true, "any other 403 still waits and retries");
   assert.equal(classify(404).retryable, false);
   assert.equal(classify(413).retryable, false);
   assert.equal(classify(422).retryable, false);
