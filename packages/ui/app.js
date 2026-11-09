@@ -5670,11 +5670,42 @@ for (const selector of ["#logs-from", "#logs-to"]) {
 renderPeriodControl();
 fillCustomDates();
 
+// ---- Cost: what a period's requests would cost at public API prices (2026-11-09). A subscription's
+// requests are shown at what the API would have charged. A row with no known price says "—", never
+// $0.00 (free); a total that includes an estimated cache rate is marked "≈"; a bucket the router
+// sent no cost for (one that does not price requests yet) shows no cost at all.
+function costUsdText(usd) {
+  if (!(usd > 0)) return "$0.00";
+  if (usd < 0.005) return "<$0.01";
+  return `$${usd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+/** A bucket's amount, "—" for one nothing of which was priced, or null when it carries no cost. */
+function costFigureOf(bucket) {
+  if (!bucket || typeof bucket.costUsd !== "number" || !Number.isFinite(bucket.costUsd)) return null;
+  if (bucket.costUsd <= 0 && bucket.unpricedRequests > 0) return "—";
+  return `${bucket.estimatedRequests > 0 ? "≈" : ""}${costUsdText(bucket.costUsd)}`;
+}
+/** What a bucket's amount leaves out or estimates, as the sentences the note carries; for a row's hover. */
+function costCaveatsOf(bucket) {
+  const lines = [];
+  if (bucket && bucket.unpricedRequests > 0) lines.push(t("logs.cost.unpriced", { count: formatNumber(bucket.unpricedRequests) }));
+  if (bucket && bucket.estimatedRequests > 0) lines.push(t("logs.cost.estimated", { count: formatNumber(bucket.estimatedRequests) }));
+  return lines;
+}
+/** The note under the summary: how the amounts are worked out, then what they leave out. */
+function renderCostNote(total) {
+  const note = $("#logs-cost-note");
+  const shown = costFigureOf(total) !== null;
+  note.hidden = !shown;
+  note.replaceChildren(...(shown ? [t("logs.cost.note"), ...costCaveatsOf(total)] : []).map((line) => el("div", { text: line })));
+}
+
 const EMPTY_BUCKET = { count: 0, ok: 0, failed: 0, input: 0, cached: 0, cacheWrite: 0, output: 0, avgMs: 0, cacheHitPercent: 0, conversationTokens: 0 };
 function renderSummary(summary) {
   const providers = (summary && summary.providers) || {};
   const total = (requestProvider ? providers[requestProvider] : summary && summary.total) || EMPTY_BUCKET;
-  $("#logs-summary").replaceChildren(
+  const cost = costFigureOf(total);
+  const chips = [
     summaryChip(t("logs.summary.requests"), formatNumber(total.count)),
     summaryChip(t("logs.summary.success"), `${formatNumber(total.ok)} / ${formatNumber(total.failed)}`),
     // The router groups conversations: last whole prompt + every output, as on the Agents card.
@@ -5684,8 +5715,12 @@ function renderSummary(summary) {
     // ellipsis on one line cut the cache rate off entirely.
     summaryChip(t("logs.summary.input"), formatNumber(totalInputOf(total)), t("logs.cacheHit", { percent: total.cacheHitPercent || 0 })),
     summaryChip(t("logs.summary.output"), formatNumber(total.output)),
-    summaryChip(t("logs.summary.duration"), formatSeconds(total.avgMs)),
-  );
+  ];
+  if (cost !== null) chips.push(summaryChip(t("logs.summary.cost"), cost, t("logs.cost.basis")));
+  chips.push(summaryChip(t("logs.summary.duration"), formatSeconds(total.avgMs)));
+  $("#logs-summary").classList.toggle("with-cost", cost !== null);
+  $("#logs-summary").replaceChildren(...chips);
+  renderCostNote(total);
   fitSummaryValues();
 }
 // A long period runs the input to ten digits and the requests to "52,939 / 310", wider than a chip
@@ -5730,6 +5765,12 @@ async function loadConfiguredProviders() {
   if (configuredProviders || currentConfig) return;
   try { configuredProviders = (await api("/api/config")).providers || {}; } catch { /* the usage and requests still name their providers */ }
 }
+/** A model row's cost: its amount (or "—"), what it leaves out or estimates on hover; "—" from a router that sends none. */
+function modelCostCell(entry) {
+  const figure = costFigureOf(entry);
+  const caveats = costCaveatsOf(entry);
+  return el("td", { class: "c-cost", "data-label": t("logs.th.cost"), title: caveats.length ? caveats.join(" ") : undefined }, [figure === null ? "—" : figure]);
+}
 function modelUsageRow(entry) {
   const total = totalInputOf(entry);
   const rate = modelRateOf(entry);
@@ -5745,6 +5786,7 @@ function modelUsageRow(entry) {
     el("td", { class: "c-count", "data-label": t("logs.th.count") }, [formatNumber(entry.count)]),
     el("td", { class: "c-in", "data-label": t("logs.th.input") }, [el("span", { class: "token-cell", text: formatNumber(total) }, [el("span", { class: "cache-pill", text: t("logs.cacheHit", { percent: entry.cacheHitPercent || 0 }) })])]),
     el("td", { class: "c-out", "data-label": t("logs.th.output") }, [formatNumber(entry.output)]),
+    modelCostCell(entry),
     el("td", { class: "c-dur", "data-label": t("logs.th.avg"), title: rate === null ? undefined : t("logs.modelRateHelp") }, [
       formatSeconds(entry.avgMs),
       rate === null ? null : el("span", { class: "rate-pill", text: t("logs.rateApprox", { value: rateValue(rate) }) }),

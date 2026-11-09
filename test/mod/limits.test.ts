@@ -7,9 +7,10 @@ registerHooks({ resolve(specifier, context, next) {
   const source = context.parentURL?.includes('/packages/mod/hooks/')
   return next(source && /^\.\.?\//.test(specifier) && !/\.[a-z]+$/.test(specifier) ? `${specifier}.ts` : specifier, context)
 } })
-const { claudeScopedFrom, CLAUDE_USAGE_STALE_MS, routerLimitItems } = await import('../../packages/mod/hooks/session.ts')
+const { claudeScopedFrom, CLAUDE_USAGE_STALE_MS, COST_MODELS, costFromSummary, localMidnight, routerLimitItems } = await import('../../packages/mod/hooks/session.ts')
+const { t } = await import('../../packages/mod/hooks/i18n.ts')
 const { chatgptProviders, gptLimitsFrom } = await import('../../packages/mod/hooks/modes.ts')
-const { bandLimitGroups, limitAccountLabel, limitGroupAccount, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTip, narrowLimitGroups, resetMoment, resetShort, timeLeft } = await import('../../packages/mod/hooks/ui/view.ts')
+const { costFigure, costText, exhaustLeft, exhaustSentence, exhaustShort, exhaustShortWidest, limitItemTone, bandLimitGroups, limitAccountLabel, limitGroupAccount, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTip, narrowLimitGroups, resetMoment, resetShort, timeLeft } = await import('../../packages/mod/hooks/ui/view.ts')
 const { barArt } = await import('../../packages/mod/hooks/ui/art.ts')
 
 const NOW = Date.parse('2026-10-15T00:00:00Z')
@@ -362,4 +363,168 @@ test('the band keeps one account per provider, the one in use, unnumbered', () =
   // A single Claude account and the fallback path's 'claude' provider pass unchanged.
   const fallback = limitGroups([{ provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: 'five_hour', label: '', percent: 3 }])
   assert.deepEqual(bandLimitGroups(fallback), fallback)
+})
+
+// 2026-11-09: the router forecasts a window that will reach 100% before it resets (`exhaust_at`).
+// It is parsed into the item (epoch ms), colours the window's figure (amber, red within the hour),
+// and says in the tip how long is left; a window without a forecast is exactly what it was.
+const forecastBody = (windows: unknown[]) => ({ providers: [{ provider: 'anthropic', type: 'anthropic', title: 'Claude', accounts: [{ account: 0, windows }] }] })
+
+test('exhaust_at is read in seconds or ms into exhaustsAt; a stale, late or unreadable one is no forecast', () => {
+  const at = NOW / 1000
+  const reset = at + 5 * 3600
+  const win = (extra: Record<string, unknown>) => ({ kind: 'five_hour', used_percent: 70, window_minutes: 300, reset_at: reset, ...extra })
+  const items = routerLimitItems(forecastBody([
+    win({ exhaust_at: at + 7800 }),
+    win({ exhaust_at: (at + 600) * 1000 }),
+    win({ exhaust_at: at - 60 }),
+    win({ exhaust_at: reset }),
+    win({ exhaust_at: reset + 3600 }),
+    win({ exhaust_at: 'soon' }),
+    win({}),
+    { kind: 'seven_day', used_percent: 40, window_minutes: 10080, exhaust_at: at + 3600 },
+  ]), NOW)
+  assert.deepEqual(items.map(i => i.exhaustsAt), [NOW + 7_800_000, NOW + 600_000, undefined, undefined, undefined, undefined, undefined, NOW + 3_600_000])
+  // A window with no forecast has no key at all: it is the item it was.
+  assert.equal('exhaustsAt' in items[2]!, false)
+  assert.deepEqual(items[6], { provider: 'anthropic', type: 'anthropic', title: 'Claude', account: 0, kind: 'five_hour', label: '', windowMinutes: 300, percent: 70, resetsAt: new Date(reset * 1000).toISOString() })
+  // A window whose reset has passed restarts at 0%: its old forecast goes with it.
+  const passed = routerLimitItems(forecastBody([win({ reset_at: at - 60, exhaust_at: at + 600 })]), NOW)
+  assert.deepEqual(passed.map(i => [i.percent, i.exhaustsAt]), [[0, undefined]])
+})
+
+test('a forecast makes the tone at least amber, red within the hour; no forecast keeps the share\'s tone', () => {
+  const win = (percent: number, minutes?: number) => ({ percent, ...(minutes !== undefined ? { exhaustsAt: NOW + minutes * 60_000 } : {}) })
+  assert.equal(limitItemTone(win(10), NOW), 'ink')
+  assert.equal(limitItemTone(win(85), NOW), 'warn')
+  assert.equal(limitItemTone(win(97), NOW), 'bad')
+  assert.equal(limitItemTone(win(10, 130), NOW), 'warn')
+  assert.equal(limitItemTone(win(10, 61), NOW), 'warn')
+  assert.equal(limitItemTone(win(10, 60), NOW), 'bad')
+  assert.equal(limitItemTone(win(10, 5), NOW), 'bad')
+  assert.equal(limitItemTone(win(85, 45), NOW), 'bad')
+  assert.equal(limitItemTone(win(97, 300), NOW), 'bad')
+  // Its moment past, the forecast is gone.
+  assert.equal(limitItemTone(win(10, -1), NOW), 'ink')
+  assert.equal(exhaustLeft(win(10, -1), NOW), null)
+  assert.equal(exhaustLeft(win(10), NOW), null)
+  assert.equal(exhaustLeft(win(10, 2), NOW), 120_000)
+})
+
+test('the band shortens the time left to ~45m, ~2h, ~3d in each language', () => {
+  const min = 60_000
+  assert.equal(exhaustShort(45 * min, 'en'), '~45m')
+  assert.equal(exhaustShort(45 * min, 'ko'), '~45분')
+  assert.equal(exhaustShort(130 * min, 'en'), '~2h')
+  assert.equal(exhaustShort(130 * min, 'ko'), '~2시간')
+  assert.equal(exhaustShort(130 * min, 'ja'), '~2時間')
+  assert.equal(exhaustShort(130 * min, 'zh'), '~2小时')
+  assert.equal(exhaustShort(130 * min, 'es'), '~2 h')
+  assert.equal(exhaustShort(130 * min, 'pt'), '~2 h')
+  assert.equal(exhaustShort(3 * 86_400_000, 'en'), '~3d')
+  assert.equal(exhaustShort(3 * 86_400_000, 'ko'), '~3일')
+  // Under a minute still reads one; the hour is rounded to the nearest, and a day and a half stays in hours.
+  assert.equal(exhaustShort(20_000, 'en'), '~1m')
+  assert.equal(exhaustShort(59 * min + 10_000, 'en'), '~1h')
+  assert.equal(exhaustShort(90 * min, 'en'), '~2h')
+  assert.equal(exhaustShort(36 * 60 * min, 'en'), '~36h')
+  assert.equal(exhaustShort(48 * 60 * min, 'en'), '~2d')
+  // The widest forms (for the band's fixed slot) are the three kinds.
+  assert.deepEqual(exhaustShortWidest('en'), ['~59m', '~47h', '~7d'])
+  assert.deepEqual(exhaustShortWidest('ko'), ['~59분', '~47시간', '~7일'])
+})
+
+test('the tip says how long until the window runs out at its pace; without a forecast it is as before', () => {
+  const base = { provider: 'claude', account: 0, kind: 'seven_day' as const, label: '', percent: 62, resetsAt: new Date(NOW + 3 * 86_400_000).toISOString() }
+  const risky = { ...base, exhaustsAt: NOW + (2 * 60 + 10) * 60_000 }
+  assert.equal(limitItemTip(base, 'Claude', 'en', NOW), 'Claude Weekly 62% · resets in 3d')
+  assert.equal(limitItemTip(risky, 'Claude', 'en', NOW), 'Claude Weekly 62% · resets in 3d · At this pace it runs out in 2h 10m')
+  assert.equal(limitItemTip(risky, 'Claude', 'ko', NOW), 'Claude 주간 62% · 3일 뒤 초기화 · 이 속도라면 2시간 10분 뒤 한도가 소진됩니다')
+  assert.equal(exhaustSentence(risky, NOW, 'en'), 'At this pace it runs out in 2h 10m')
+  assert.equal(exhaustSentence(base, NOW, 'en'), '')
+  assert.equal(exhaustSentence({ exhaustsAt: NOW - 1 }, NOW, 'en'), '')
+  assert.equal(exhaustSentence({ exhaustsAt: NOW + 45 * 60_000 }, NOW, 'en'), 'At this pace it runs out in 45m')
+})
+
+// The limits pane's cost tile reads GET /api/requests/summary?from=&to=: every bucket carries
+// `costUsd`, `unpricedRequests` and `estimatedRequests` (the router worker's contract).
+const bucket = (costUsd: number, unpricedRequests = 0, estimatedRequests = 0) => ({ count: 10, ok: 10, failed: 0, input: 1, cached: 0, cacheWrite: 0, output: 1, avgMs: 100, cacheHitPercent: 0, conversationTokens: 2, costUsd, unpricedRequests, estimatedRequests })
+const SUMMARY = {
+  total: bucket(15.678, 3, 12),
+  providers: { anthropic: bucket(12.3, 0, 12), chatgpt: bucket(3.378), 'opencode-go': bucket(0, 3), idle: bucket(0) },
+  models: [
+    { provider: 'anthropic', model: 'claude-opus-5-5', ...bucket(9.9, 0, 12) },
+    { provider: 'anthropic', model: 'claude-sonnet-5-5', ...bucket(2.4) },
+    { provider: 'chatgpt', model: 'gpt-5.5', ...bucket(3.378) },
+    { provider: 'opencode-go', model: 'deepseek-v4.1-flash', ...bucket(0, 3) },
+    { provider: 'anthropic', model: 'claude-haiku-5-5', ...bucket(0.004) },
+    { provider: 'anthropic', model: 'claude-fable', ...bucket(1.1) },
+    { provider: 'anthropic', model: 'claude-mythos', ...bucket(0.5) },
+    { provider: 'anthropic', model: 'unused', ...bucket(0) },
+  ],
+  earliest: null,
+}
+
+test('a cost summary keeps the total, each provider, and the five models that cost most', () => {
+  const from = Date.parse('2026-10-15T00:00:00')
+  const cost = costFromSummary(SUMMARY, from)!
+  assert.equal(cost.from, from)
+  assert.deepEqual(cost.total, { costUsd: 15.678, unpricedRequests: 3, estimatedRequests: 12 })
+  // Most cost first; a provider with only unpriced requests after the priced; one with nothing is left out.
+  assert.deepEqual(cost.providers.map(p => p.name), ['anthropic', 'chatgpt', 'opencode-go'])
+  assert.deepEqual(cost.models.map(m => m.name), ['claude-opus-5-5', 'gpt-5.5', 'claude-sonnet-5-5', 'claude-fable', 'claude-mythos'])
+  assert.equal(cost.models.length, COST_MODELS)
+  // Fewer than five: the tiny and the unpriced-only follow, a model with nothing is left out.
+  assert.deepEqual(costFromSummary({ ...SUMMARY, models: SUMMARY.models.slice(3) }, from)!.models.map(m => m.name), ['claude-fable', 'claude-mythos', 'claude-haiku-5-5', 'deepseek-v4.1-flash'])
+})
+
+test('a summary with no cost is nothing to show, never a $0', () => {
+  const from = Date.parse('2026-10-15T00:00:00')
+  // A router that does not price requests yet: buckets without the fields.
+  const { costUsd: _c, unpricedRequests: _u, estimatedRequests: _e, ...plain } = bucket(1)
+  assert.equal(costFromSummary({ total: plain, providers: {}, models: [] }, from), null)
+  assert.equal(costFromSummary({}, from), null)
+  assert.equal(costFromSummary(null, from), null)
+  assert.equal(costFromSummary({ total: { costUsd: 'free' } }, from), null)
+  assert.equal(costFromSummary({ total: { costUsd: -1 } }, from), null)
+  // A real zero: priced, and nothing spent.
+  assert.deepEqual(costFromSummary({ total: bucket(0), providers: {}, models: [] }, from)!.total, { costUsd: 0, unpricedRequests: 0, estimatedRequests: 0 })
+  // A line without a cost is left out; the rest stands.
+  assert.deepEqual(costFromSummary({ total: bucket(2), providers: { a: plain, b: bucket(2) }, models: [{ model: 'm', ...plain }, { provider: 'b' }] }, from)!.providers.map(p => p.name), ['b'])
+  assert.deepEqual(costFromSummary({ total: bucket(2), providers: {}, models: [{ model: 'm', ...plain }, { provider: 'b' }] }, from)!.models, [])
+})
+
+test('an amount reads in dollars; a line nothing of which was priced says "—", an estimate says "≈"', () => {
+  assert.equal(costText(15.678), '$15.68')
+  assert.equal(costText(1234.5), '$1,234.50')
+  assert.equal(costText(0.004), '<$0.01')
+  assert.equal(costText(0.005), '$0.01')
+  assert.equal(costText(0), '$0.00')
+  assert.equal(costText(Number.NaN), '$0.00')
+  assert.equal(costFigure(bucket(12.3)), '$12.30')
+  assert.equal(costFigure(bucket(12.3, 0, 4)), '≈$12.30')
+  // Priced in part: the amount stands, though some requests are not in it.
+  assert.equal(costFigure(bucket(12.3, 2)), '$12.30')
+  // Nothing priced: not free.
+  assert.equal(costFigure(bucket(0, 5)), '—')
+  assert.equal(costFigure(bucket(0)), '$0.00')
+})
+
+test('the cost is asked from the local midnight, and the week from the midnight six days before', () => {
+  const now = new Date(2026, 9, 15, 13, 20, 5).getTime()
+  assert.equal(localMidnight(now), new Date(2026, 9, 15).getTime())
+  assert.equal(localMidnight(now, 6), new Date(2026, 9, 9).getTime())
+  // Across a month's turn.
+  assert.equal(localMidnight(new Date(2026, 10, 2, 8).getTime(), 6), new Date(2026, 9, 27).getTime())
+  assert.equal(localMidnight(new Date(2026, 9, 15, 0, 0, 0).getTime()), new Date(2026, 9, 15).getTime())
+})
+
+test('every language says the forecast and the cost, with the placeholders the code fills', () => {
+  for (const lang of ['en', 'ko', 'zh', 'ja', 'es', 'pt'] as const) {
+    assert.match(t(lang, 'limits.exhaust', { time: 'T' }), /T/, lang)
+    for (const key of ['cost.title', 'cost.today', 'cost.week', 'cost.providers', 'cost.models', 'cost.note', 'cost.unavailable']) assert.notEqual(t(lang, key), key, lang + ' ' + key)
+    assert.match(t(lang, 'cost.unpriced', { count: 7 }), /7/, lang)
+    assert.match(t(lang, 'cost.estimated', { count: 7 }), /7/, lang)
+    assert.ok(t(lang, 'cost.estimated', { count: 7 }).includes('≈'), lang)
+  }
 })

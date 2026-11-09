@@ -43,7 +43,7 @@ import type { Els } from './parts'
 import type { Face } from './ripple'
 import { cacheTone, chOf, clip, contextTone, displayWidth, limitTone, providerColor, textTone } from './theme'
 import type { BandActions, DashboardView, Frame, LimitGroup } from './view'
-import { EFFORTS, bandLimitGroups, compactNumber, effortIndex, effortLabel, effortName, isRich, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTip, limitName, minutesLeft, modelName, narrowLimitGroups, rateText, resetsLabel, seconds } from './view'
+import { EFFORTS, bandLimitGroups, compactNumber, effortIndex, effortLabel, effortName, exhaustLeft, exhaustSentence, exhaustShort, exhaustShortWidest, isRich, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTip, limitItemTone, limitName, minutesLeft, modelName, narrowLimitGroups, rateText, resetsLabel, seconds } from './view'
 
 /** Growing ripples: low → max. */
 const RIPPLE_CHAR = ['·', '∘', '○', '◎', '◉']
@@ -551,6 +551,12 @@ function modeDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | null
 // it takes (a changing figure never moves a neighbour). Narrow, the GPT accounts go first (the
 // last one first), then the per-model windows; what is left not fitting means no second row, and
 // the first row keeps its limit fact as before.
+//
+// A window the router expects to run out before it resets (`exhaustsAt`) is the one exception to
+// "the share alone": its tone is at least amber, red within the hour, and after its figure the row
+// says how long is left ("~2시간"). The forecast takes a slot of its own as wide as any form it can
+// read as, so its value never moves a neighbour, and only while the window has one: every other
+// window is drawn as it always was. Compact keeps to the tone, and the tip has the whole sentence.
 
 /** A limit window's bar, px: beside each window's name and figure, in the row's own line. */
 const BAR_W = 36
@@ -577,27 +583,41 @@ function figureCells(): number {
 type LimitDensity = 'gauge' | 'figures' | 'compact'
 const DENSITIES: readonly LimitDensity[] = ['gauge', 'figures', 'compact']
 
-/** Cells one window takes at a density (compact: its number's slot and the separator after it). */
-function limitItemCells(item: LimitItem, density: LimitDensity, lang: Lang): number {
+/**
+ * The slot a window's pace forecast takes after its figure ("~2시간"): the widest it can read as
+ * (minutes, hours or days) and the air before it, so the forecast's value never moves a neighbour.
+ */
+function exhaustCells(lang: Lang): number {
+  return Math.ceil(Math.max(...exhaustShortWidest(lang).map(textPx)) / CELL_PX) + 1
+}
+
+/**
+ * Cells one window takes at a density (compact: its number's slot and the separator after it). A
+ * window with a pace forecast takes the forecast's slot too (gauge and figures; compact has only
+ * its tone), which is why the clock is asked for: the forecast ends when its moment passes.
+ */
+export function limitItemCells(item: LimitItem, density: LimitDensity, lang: Lang, now: number): number {
   // A figure's slot and the " / " after it, in fractions of a cell: summed per group, then rounded up.
   // Two digits: a window at 100% is spent and runs into the air after its group, which is wider.
   if (density === 'compact') return textPx('00 / ') / CELL_PX
   const name = Math.ceil(textPx(limitItemName(item, lang)) / CELL_PX) + 1
-  return name + (density === 'gauge' ? Math.ceil(BAR_W / CELL_PX) + 1 : 0) + figureCells()
+  return name + (density === 'gauge' ? Math.ceil(BAR_W / CELL_PX) + 1 : 0) + figureCells() + (exhaustLeft(item, now) === null ? 0 : exhaustCells(lang))
 }
 
 function limitItemDrawn(el: Els, frame: Frame, item: LimitItem, key: string, tip: string, density: Exclude<LimitDensity, 'compact'>): DrawnFact {
   const { Text } = el
-  const tone = limitTone(item.percent)
+  const tone = limitItemTone(item, frame.now)
   const name = limitItemName(item, frame.lang)
+  const left = exhaustLeft(item, frame.now)
   return drawnFact(
     el,
     key,
-    limitItemCells(item, density, frame.lang),
+    limitItemCells(item, density, frame.lang, frame.now),
     [
       <Text key="limit-name" {...lookOf(frame).mute}>{name}</Text>,
       density === 'gauge' ? pic(el, key + '-bar', barArt(item.percent, tone === 'ink' ? 'ink' : tone === 'warn' ? 'amber' : 'red'), name, BAR_W, BAR_H) : '',
       <Text key="limit-value" {...figure(frame, tone)}>{Math.round(item.percent) + '%'}</Text>,
+      left === null ? '' : <Text key="limit-exhaust" {...figure(frame, tone)}>{exhaustShort(left, frame.lang)}</Text>,
     ],
     tip,
   )
@@ -608,10 +628,10 @@ function compactDrawn(el: Els, frame: Frame, group: LimitGroup, key: string, tip
   const { Text } = el
   const runs: RenderNode[] = []
   group.items.forEach((item, i) => {
-    runs.push(<Text key={'n' + i} {...figure(frame, limitTone(item.percent))}>{String(Math.round(item.percent))}</Text>)
+    runs.push(<Text key={'n' + i} {...figure(frame, limitItemTone(item, frame.now))}>{String(Math.round(item.percent))}</Text>)
     runs.push(<Text key={'s' + i} {...lookOf(frame).mute}>{i < group.items.length - 1 ? ' / ' : '%'}</Text>)
   })
-  const cells = Math.ceil(group.items.reduce((n, item) => n + limitItemCells(item, 'compact', lang), 0))
+  const cells = Math.ceil(group.items.reduce((n, item) => n + limitItemCells(item, 'compact', lang, frame.now), 0))
   return drawnFact(el, key, cells, [<Text key="limit-figures">{runs}</Text>], tip)
 }
 
@@ -621,9 +641,9 @@ function saveWord(group: LimitGroup, save: boolean, lang: Lang): string {
 }
 
 /** Cells a group takes at a density: its head (the provider's dot and short name), its windows, save's word. */
-function limitGroupCells(group: LimitGroup, name: string, lang: Lang, density: LimitDensity, save = false): number {
+function limitGroupCells(group: LimitGroup, name: string, lang: Lang, now: number, density: LimitDensity, save = false): number {
   const head = Math.ceil(textPx('•') / CELL_PX) + 1 + Math.ceil(textPx(name) / CELL_PX)
-  const items = Math.ceil(group.items.reduce((n, item) => n + limitItemCells(item, density, lang), 0))
+  const items = Math.ceil(group.items.reduce((n, item) => n + limitItemCells(item, density, lang, now), 0))
   const gaps = density === 'compact' ? 0 : Math.max(0, group.items.length - 1)
   const word = saveWord(group, save, lang)
   return head + 1 + items + gaps + (word ? 1 + Math.ceil(textPx(word) / CELL_PX) : 0)
@@ -652,6 +672,18 @@ function limitGroupDrawn(el: Els, frame: Frame, group: LimitGroup, name: string,
 }
 
 /**
+ * The pace forecasts of the windows drawn, one phrase each ("Claude 주간: 이 속도라면 2시간 10분 뒤
+ * 한도가 소진됩니다"): the pressable row's one tip gives way for the pane's, which would otherwise
+ * leave a window's forecast no place to be read in full.
+ */
+function forecastTips(groups: readonly LimitGroup[], numbered: (g: LimitGroup) => boolean, frame: Frame): string[] {
+  return groups.flatMap(g => g.items.flatMap(item => {
+    const sentence = exhaustSentence(item, frame.now, frame.lang)
+    return sentence ? [limitGroupName(g, numbered(g)) + ' ' + limitItemName(item, frame.lang) + ': ' + sentence] : []
+  }))
+}
+
+/**
  * The second row, or null: no `limits` extra, no windows at all, or not even Claude's own windows
  * fitting. Narrow, the scoped windows (Fable, 3P, …) go first, then a later provider's secondary
  * accounts (the last one first), then a later provider's whole group — Claude's own group stays to
@@ -670,7 +702,7 @@ function limitsRowDrawn(el: Els, frame: Frame, view: DashboardView, budget: numb
   const numbered = limitGroupNumbered(all)
   // Save mode's word sat beside the first row's limit; with this row drawn it follows Claude's windows.
   const save = !!view.limit?.save
-  const width = (density: LimitDensity) => (gs: readonly LimitGroup[]) => gs.reduce((n, g) => n + limitGroupCells(g, limitGroupName(g, numbered(g)), frame.lang, density, save), 0) + RULE_CELLS * Math.max(0, gs.length - 1) + LIMITS_GAP * Math.max(0, 2 * gs.length - 2)
+  const width = (density: LimitDensity) => (gs: readonly LimitGroup[]) => gs.reduce((n, g) => n + limitGroupCells(g, limitGroupName(g, numbered(g)), frame.lang, frame.now, density, save), 0) + RULE_CELLS * Math.max(0, gs.length - 1) + LIMITS_GAP * Math.max(0, 2 * gs.length - 2)
   // Pressable, the row's light keeps a fact's air either side of the figures, which the row takes
   // from its budget.
   const room = onPress ? budget - PRESS_PAD * 2 : budget
@@ -704,7 +736,7 @@ function limitsRowDrawn(el: Els, frame: Frame, view: DashboardView, budget: numb
       </Box>
     ),
     tips: onPress
-      ? [{ key: 'limits-open', text: t(frame.lang, 'band.limitsOpen') }]
+      ? [{ key: 'limits-open', text: [t(frame.lang, 'band.limitsOpen'), ...forecastTips(groups, numbered, frame)].join(' · ') }]
       : drawn.flatMap(d => d.tips),
   }
 }

@@ -1,5 +1,5 @@
 import type { SessionContextUsage, SessionRateLimit } from 'claude-code'
-import type { CacheMemo, Hot, LimitItem } from '../types'
+import type { CacheMemo, CostBucket, CostLine, CostSummary, Hot, LimitItem } from '../types'
 
 export function hottest(rateLimits: readonly SessionRateLimit[]): Hot | null {
   const eligible = rateLimits.filter(limit => ['five_hour', 'seven_day'].includes(limit.kind) && limit.percentUsed >= 80)
@@ -85,6 +85,10 @@ function limitItemFromWindow(w: unknown, owner: LimitOwner, now: number): LimitI
   if (Number.isFinite(reset) && reset <= now) {
     return { ...owner, kind: kind as LimitKind, label: typeof o.label === 'string' ? o.label : '', ...(minutes !== undefined ? { windowMinutes: minutes } : {}), percent: 0 }
   }
+  // The pace forecast (2026-11-09): when the window reaches 100% before it resets. A moment already
+  // past, or not before the reset, is no forecast: the router's reading is older than the clock.
+  const exhaust = typeof o.exhaust_at === 'number' && Number.isFinite(o.exhaust_at) ? o.exhaust_at * (o.exhaust_at < 1e12 ? 1000 : 1) : NaN
+  const exhausts = Number.isFinite(exhaust) && exhaust > now && !(Number.isFinite(reset) && exhaust >= reset)
   return {
     ...owner,
     kind: kind as LimitKind,
@@ -92,7 +96,55 @@ function limitItemFromWindow(w: unknown, owner: LimitOwner, now: number): LimitI
     ...(minutes !== undefined ? { windowMinutes: minutes } : {}),
     percent: Math.round(used * 10) / 10,
     ...(Number.isFinite(reset) ? { resetsAt: new Date(reset).toISOString() } : {}),
+    ...(exhausts ? { exhaustsAt: exhaust } : {}),
   }
+}
+
+// ---- Cost ----------------------------------------------------------------------------------------
+
+/** How many models the limits pane lists, the ones that cost most. */
+export const COST_MODELS = 5
+
+/** A local midnight `back` days before the one `now` falls in, epoch ms (the dashboard's daysAgo). */
+export function localMidnight(now: number, back = 0): number {
+  const d = new Date(now)
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() - back).getTime()
+}
+
+/** A summary bucket's cost figures, or null when the router sent none (one before it priced requests). */
+function costBucket(value: unknown): CostBucket | null {
+  const o = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+  if (typeof o.costUsd !== 'number' || !Number.isFinite(o.costUsd) || o.costUsd < 0) return null
+  const count = (n: unknown) => typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.floor(n) : 0
+  return { costUsd: o.costUsd, unpricedRequests: count(o.unpricedRequests), estimatedRequests: count(o.estimatedRequests) }
+}
+
+/** Most cost first; a line with only unpriced requests after every priced one. */
+const byCost = (a: CostLine, b: CostLine): number => b.costUsd - a.costUsd || b.unpricedRequests - a.unpricedRequests || a.name.localeCompare(b.name)
+
+/**
+ * The cost of the requests since `from`, from the router's `GET /api/requests/summary?from=&to=`:
+ * the total, each provider, and the `COST_MODELS` models that cost most. Null when the body carries
+ * no cost for the total (a router that does not price requests yet): the pane then has nothing to
+ * say, never a $0 the data did not give. A provider or model line without a cost is left out; one
+ * with neither a cost nor an unpriced request has nothing to show.
+ */
+export function costFromSummary(body: unknown, from: number): CostSummary | null {
+  const object = (v: unknown): Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {}
+  const root = object(body)
+  const total = costBucket(root.total)
+  if (!total) return null
+  const shown = (line: CostLine | null): line is CostLine => line !== null && (line.costUsd > 0 || line.unpricedRequests > 0)
+  const providers = Object.entries(object(root.providers)).map(([name, v]): CostLine | null => {
+    const bucket = costBucket(v)
+    return bucket && name ? { name, ...bucket } : null
+  }).filter(shown).sort(byCost)
+  const models = (Array.isArray(root.models) ? root.models : []).map((v): CostLine | null => {
+    const name = object(v).model
+    const bucket = costBucket(v)
+    return bucket && typeof name === 'string' && name ? { name, ...bucket } : null
+  }).filter(shown).sort(byCost).slice(0, COST_MODELS)
+  return { from, total, providers, models }
 }
 
 /**
