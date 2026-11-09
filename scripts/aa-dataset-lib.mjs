@@ -1,6 +1,6 @@
 // Pure AA dataset transformations. No network, filesystem, or token-count output.
 /** @typedef {'max'|'xhigh'|'high'|'medium'|'low'|'minimal'|'non-reasoning'|null} Effort */
-/** @typedef {{slug:string,name:string,release_date:string,model_creator:{name:string,slug:string},evaluations:{artificial_analysis_intelligence_index:number|null},pricing:{price_1m_input_tokens:number|null,price_1m_output_tokens:number|null}}} ApiRow */
+/** @typedef {{slug:string,name:string,release_date:string|null|undefined,model_creator:{id:string,name:string},evaluations:{artificial_analysis_intelligence_index:number|null},pricing:{price_1m_input_tokens:number|null,price_1m_output_tokens:number|null}}} ApiRow */
 /** @typedef {{slug:string,name:string,suffix:string|null,isReasoning:boolean,intelligenceIndex:number|null,intelligenceIndexIsEstimated:boolean,price1mInputTokens:number|null,price1mOutputTokens:number|null,intelligenceIndexCostPerTask?:{cost?:{total:number|null}}|null}} PageRecord */
 /** @typedef {{slug:string,base:string,effort:Effort,name:string,creator:string,releaseDate:string,intelligence:number|null,intelligenceEstimated:boolean|null,costPerTask:number|null,priceIn:number|null,priceOut:number|null,checkedAt:string|null}} Model */
 /** @typedef {{source:string,attribution:string,generatedAt:string,models:Model[]}} Dataset */
@@ -43,7 +43,7 @@ export function selectVariants(rows, now = Date.now()) {
     const suffix = r.name.match(/\(([^()]*)\)$/)?.[1] ?? '';
     return LEVEL.test(suffix) || /^reasoning(?:,|$)/i.test(suffix);
   };
-  const familyKey = (/** @type {ApiRow} */ r) => `${r.model_creator.slug}:${(reasoningSuffix(r) ? r.name.replace(/\s*\([^()]*\)$/, '') : r.name).toLowerCase()}`;
+  const familyKey = (/** @type {ApiRow} */ r) => `${r.model_creator.id}:${(reasoningSuffix(r) ? r.name.replace(/\s*\([^()]*\)$/, '') : r.name).toLowerCase()}`;
   const groups = new Map();
   for (const row of rows) {
     const key = familyKey(row);
@@ -134,7 +134,7 @@ export function mergeDataset(variants, previous, records, now = Date.now()) {
     const prev = old.get(row.slug);
     const page = fresh.get(row.slug);
     return {
-      slug: row.slug, base, effort: page ? deriveEffort(page, effort !== null) : effort, name: row.name, creator: row.model_creator.name, releaseDate: row.release_date,
+      slug: row.slug, base, effort: page ? deriveEffort(page, effort !== null) : effort, name: row.name, creator: row.model_creator.name, releaseDate: row.release_date ?? '',
       intelligence: page ? page.intelligenceIndex : prev ? prev.intelligence : row.evaluations.artificial_analysis_intelligence_index,
       intelligenceEstimated: page ? page.intelligenceIndexIsEstimated : prev?.intelligenceEstimated ?? null,
       costPerTask: (page ? costOf(page) : null) ?? prev?.costPerTask ?? null,

@@ -1,1 +1,43 @@
-{"intelligence_index_version":"v5.0.1","tier":"pro","data":[{"slug":"gpt-6-1-sol","name":"GPT-6.1 Sol (Max)","release_date":"2026-09-29","model_creator":{"name":"OpenAI","slug":"openai"},"evaluations":{"artificial_analysis_intelligence_index":51.8},"pricing":{"price_1m_input_tokens":2,"price_1m_output_tokens":10}},{"slug":"gpt-6-1-sol-high","name":"GPT-6.1 Sol (High)","release_date":"2026-09-29","model_creator":{"name":"OpenAI","slug":"openai"},"evaluations":{"artificial_analysis_intelligence_index":50.2},"pricing":{"price_1m_input_tokens":2,"price_1m_output_tokens":10}},{"slug":"deepseek-v4-1-flash","name":"DeepSeek V4.1 Flash (Max)","release_date":"2026-09-10","model_creator":{"name":"DeepSeek","slug":"deepseek"},"evaluations":{"artificial_analysis_intelligence_index":39.5},"pricing":{"price_1m_input_tokens":0.3,"price_1m_output_tokens":1.2}},{"slug":"deepseek-v4-1-flash-non-reasoning","name":"DeepSeek V4.1 Flash (Non-reasoning)","release_date":"2026-09-10","model_creator":{"name":"DeepSeek","slug":"deepseek"},"evaluations":{"artificial_analysis_intelligence_index":24.7},"pricing":{"price_1m_input_tokens":0.3,"price_1m_output_tokens":1.2}}]}
+{
+  "intelligence_index_version": "v5.0.1",
+  "tier": "pro",
+  "pagination": { "page": 1, "page_size": 200, "total_pages": 1, "has_more": false },
+  "data": [
+    {
+      "id": "7d2e4a10-3b6f-4c1d-9e85-1a0f2b6c9d31",
+      "slug": "gpt-6-1-sol",
+      "name": "GPT-6.1 Sol (Max)",
+      "release_date": "2026-09-29",
+      "model_creator": { "id": "0c3f1a2e-6b1d-4c57-9a1e-2f7d5b8e4a10", "name": "OpenAI" },
+      "evaluations": { "artificial_analysis_intelligence_index": 51.8 },
+      "pricing": { "price_1m_input_tokens": 2, "price_1m_output_tokens": 10 }
+    },
+    {
+      "id": "b81c5f93-0d2a-4e7b-8f16-3c9a6e2d7b48",
+      "slug": "gpt-6-1-sol-high",
+      "name": "GPT-6.1 Sol (High)",
+      "release_date": "2026-09-29",
+      "model_creator": { "id": "0c3f1a2e-6b1d-4c57-9a1e-2f7d5b8e4a10", "name": "OpenAI" },
+      "evaluations": { "artificial_analysis_intelligence_index": 50.2 },
+      "pricing": { "price_1m_input_tokens": 2, "price_1m_output_tokens": 10 }
+    },
+    {
+      "id": "e4a97c20-5f8b-4d13-a2e6-9b0c1d7f3e25",
+      "slug": "deepseek-v4-1-flash",
+      "name": "DeepSeek V4.1 Flash (Max)",
+      "release_date": "2026-09-10",
+      "model_creator": { "id": "5e9a4d20-1f3b-4a8e-b6c2-7d1e9f0a3b55", "name": "DeepSeek" },
+      "evaluations": { "artificial_analysis_intelligence_index": 39.5 },
+      "pricing": { "price_1m_input_tokens": 0.3, "price_1m_output_tokens": 1.2 }
+    },
+    {
+      "id": "2f6d8b41-7c9e-4a05-b3d2-6e8f1a4c0b97",
+      "slug": "deepseek-v4-1-flash-non-reasoning",
+      "name": "DeepSeek V4.1 Flash (Non-reasoning)",
+      "release_date": "2026-09-10",
+      "model_creator": { "id": "5e9a4d20-1f3b-4a8e-b6c2-7d1e9f0a3b55", "name": "DeepSeek" },
+      "evaluations": { "artificial_analysis_intelligence_index": 24.7 },
+      "pricing": { "price_1m_input_tokens": 0.3, "price_1m_output_tokens": 1.2 }
+    }
+  ]
+}

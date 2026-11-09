@@ -1,7 +1,7 @@
 export type Effort = 'max' | 'xhigh' | 'high' | 'medium' | 'low' | 'minimal' | 'non-reasoning' | null;
 export type ApiRow = {
-  slug: string; name: string; release_date: string;
-  model_creator: { name: string; slug: string };
+  slug: string; name: string; release_date: string | null | undefined;
+  model_creator: { id: string; name: string };
   evaluations: { artificial_analysis_intelligence_index: number | null };
   pricing: { price_1m_input_tokens: number | null; price_1m_output_tokens: number | null };
 };

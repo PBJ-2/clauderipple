@@ -19,9 +19,12 @@ function apiRows(raw) {
   const data = raw && typeof raw === 'object' ? raw.data : undefined;
   if (!Array.isArray(data) || !data.length) throw new Error('AA API returned no model list');
   const numeric = value => value === null || (typeof value === 'number' && Number.isFinite(value));
-  // A few old rows carry slugs like "glm-4.5" or "QwQ-32B-Preview" (seen 2026-10-10): they are
-  // skipped, not fatal. Only a list where most rows look wrong means AA changed its format.
-  const rows = data.filter(r => r && typeof r.slug === 'string' && /^[a-z0-9-]+$/.test(r.slug) && typeof r.name === 'string' && typeof r.release_date === 'string' && typeof r.model_creator?.name === 'string' && typeof r.model_creator?.slug === 'string' && numeric(r.evaluations?.artificial_analysis_intelligence_index) && numeric(r.pricing?.price_1m_input_tokens) && numeric(r.pricing?.price_1m_output_tokens));
+  // The V2 creator is `{ id, name }` (Pro adds `country`); the family key uses its id and the dataset
+  // names it by `name`. `release_date` is documented as an ISO date or null, and a row without a date
+  // is kept (it is never tracked as recent). A free-tier row can carry a null creator; it cannot be
+  // grouped, so it is skipped. A few old rows carry slugs like "glm-4.5" or "QwQ-32B-Preview" (seen
+  // 2026-10-10): they are skipped, not fatal. Only a list where most rows look wrong means AA changed its format.
+  const rows = data.filter(r => r && typeof r.slug === 'string' && /^[a-z0-9-]+$/.test(r.slug) && typeof r.name === 'string' && (r.release_date === undefined || r.release_date === null || typeof r.release_date === 'string') && typeof r.model_creator?.id === 'string' && typeof r.model_creator?.name === 'string' && numeric(r.evaluations?.artificial_analysis_intelligence_index) && numeric(r.pricing?.price_1m_input_tokens) && numeric(r.pricing?.price_1m_output_tokens));
   if (rows.length < data.length / 2) throw new Error('AA API model list changed shape');
   return rows;
 }

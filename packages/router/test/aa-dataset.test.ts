@@ -78,7 +78,7 @@ test("AA effort handles suffix priority, fallback labels, single variants and pr
 test("AA selection groups irregular reasoning slugs by name and keeps creator boundaries", () => {
   const data = [row("gemini-flash-reasoning", "Gemini Flash Preview (Reasoning)", "2026-09-01", 40), row("gemini-flash", "Gemini Flash Preview (Non-reasoning)", "2020-01-01", null)];
   assert.deepEqual(selectVariants(data, NOW).map(v => [v.base, v.effort]), [["gemini-flash", "non-reasoning"], ["gemini-flash", "max"]]);
-  const other = { ...data[1]!, slug: "other-flash", model_creator: { name: "Other", slug: "other" } };
+  const other = { ...data[1]!, slug: "other-flash", model_creator: { id: "other-creator", name: "Other" } };
   assert.equal(selectVariants([data[0]!, other], NOW).length, 1);
 });
 
@@ -191,6 +191,28 @@ test("AA V2 rows map documented names to the dataset without fetching pages", as
     { name: model.name, creator: model.creator, releaseDate: model.releaseDate, intelligence: model.intelligence, priceIn: model.priceIn, priceOut: model.priceOut, checkedAt: model.checkedAt },
     { name: "DeepSeek V4.1 Flash (Max)", creator: "DeepSeek", releaseDate: "2026-09-10", intelligence: 39.5, priceIn: 0.3, priceOut: 1.2, checkedAt: null },
   );
+});
+
+test("AA V2 refuses the retired slug-only creator shape rather than publishing a list without families", async () => {
+  const legacy = rows.map(r => ({ ...r, model_creator: { name: r.model_creator.name, slug: "legacy" } }));
+  await assert.rejects(runDataset({ apiKey: "fixture-key", fetchImpl: async () => Response.json({ data: legacy }), limit: 0 }), { message: "AA API model list changed shape" });
+});
+
+test("AA V2 keeps a null or absent release_date (never tracked, published with an empty date) and skips a null free-tier creator", async () => {
+  const dated = rows[2]!;
+  const { release_date: _removed, ...withoutDate } = dated;
+  const nullDate = { ...dated, slug: "deepseek-v4-1-flash-low", name: "DeepSeek V4.1 Flash (Low)", release_date: null };
+  const absentDate = { ...withoutDate, slug: "deepseek-v4-1-flash-high", name: "DeepSeek V4.1 Flash (High)" };
+  const nullCreator = { ...dated, slug: "deepseek-v4-1-flash-free", model_creator: null };
+  const h = harness(() => new Response(html), [dated, nullDate, absentDate, nullCreator] as unknown as ApiRow[]);
+  const d = await runDataset({ ...h.options, limit: 0 });
+  // The dated sibling makes the family tracked; the undated siblings ride along, and the null creator is not a row.
+  assert.deepEqual(d.models.map(m => [m.slug, m.effort, m.releaseDate, m.checkedAt]), [
+    ["deepseek-v4-1-flash", "max", "2026-09-10", null],
+    ["deepseek-v4-1-flash-high", "high", "", null],
+    ["deepseek-v4-1-flash-low", "low", "", null],
+  ]);
+  assert.deepEqual(parseDataset(d), d);
 });
 
 test("AA V2 non-2xx answers name the status, its documented meaning and the body's error", async () => {
