@@ -21,7 +21,7 @@ export const AUTO_DESCRIPTION = 'Delegate tasks here. Put the tier, and a domain
   '[[ripple: light]], [[ripple: standard]], [[ripple: hard]] or [[ripple: max]]; light = lookups, mechanical edits, one small fix; ' +
   'standard = carry out a designed change (even across several files), research, summarize, read-only review; ' +
   'hard = subtle debugging, security review, or work where a wrong call is costly; max = planning or architecture where the deliverable is the decision itself. ' +
-  'Size, file count or the brief\'s warnings do not by themselves make a task hard. Add ui only for design a person judges by eye: how a screen, page, illustration or graphic looks. ' +
+  'Size, file count or the brief\'s warnings do not by themselves make a task hard. Add ui only for visual design, work a person weighs by eye: how a screen, page, illustration or graphic looks. ' +
   'Within ui, standard = follow an existing concept or design closely, or a simple visual change, as in [[ripple: standard ui]]; hard = design from scratch, or a key screen whose look matters, as in [[ripple: hard ui]]. ' +
   'Work beside the visuals that needs no visual judgment takes no domain word: installing or wiring finished art, filling an existing template with content, restoring, porting or translating existing UI code, UI bug fixes, running or capturing the app. Add backend for server, API or database work. ' +
   'Add review when the task is a read-only adversarial review (red team) of finished work that reports defects, as in [[ripple: hard review]]. ' +
