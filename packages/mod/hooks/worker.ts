@@ -223,10 +223,29 @@ export function rivalProviders(model: string, sources: readonly { model: string;
 export type Spawn = { subagentType: string; prompt: string; model?: string }
 export type WorkerFix = { prompt: string; model: string; dropped?: string }
 
-/** The `model:` line of an agent file's frontmatter. */
+/**
+ * The `model:` line of an agent file's frontmatter. A file written by hand may have CRLF line ends
+ * (Windows editors) or a quoted value; the generated ones have neither.
+ */
 export function agentModel(file: string): string | undefined {
-  const head = /^---\n([\s\S]*?)\n---/.exec(file)?.[1]
-  return head ? /^model:\s*(\S+)\s*$/m.exec(head)?.[1] : undefined
+  const head = /^---\r?\n([\s\S]*?)\r?\n---/.exec(file)?.[1]
+  return head ? /^model:\s*["']?([^\s"']+)["']?\s*$/m.exec(head)?.[1] : undefined
+}
+
+/**
+ * Where Claude Code reads the definition of a named agent, nearest first: the project's
+ * `.claude/agents`, then the user's. A plugin agent (`plugin:name`) has no file in either.
+ */
+export function agentFilePaths(subagentType: string, claudeHome: string, cwd?: string): string[] {
+  if (!/^[A-Za-z0-9_.-]+$/.test(subagentType)) return []
+  const project = cwd?.replace(/[\\/]+$/, '')
+  return [...(project ? [`${project}/.claude/agents/${subagentType}.md`] : []), `${claudeHome}/agents/${subagentType}.md`]
+}
+
+/** The model a definition starts its agent on, for a title: `inherit` is the parent's, so none. */
+export function definedModel(file: string): string | undefined {
+  const model = agentModel(file)
+  return model && model.toLowerCase() !== 'inherit' ? model : undefined
 }
 
 /**
