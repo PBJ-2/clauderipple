@@ -113,6 +113,24 @@ test("parallel syncs keep their own staging through another sync's cleanup", { t
   assert.equal(fs.statSync(file).mtimeMs, 0, "unchanged files must not be rewritten");
 });
 
+test("a symlink destination stages beside its real directory", { timeout: 15_000, skip: process.platform === "win32" }, async t => {
+  const f = fixture(t);
+  const root = f.repo("repo", "committed through symlink\n");
+  const target = path.join(f.dir, "volume", "mod");
+  fs.mkdirSync(target, { recursive: true });
+  fs.rmdirSync(f.dest);
+  fs.symlinkSync(target, f.dest, "dir");
+  const child = f.start(root);
+  const staged = await child.staged;
+  const result = await child.release();
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(path.dirname(path.dirname(staged)), fs.realpathSync(path.dirname(target)), "staging must use the target's filesystem, not the symlink's lexical parent");
+  assert.equal(fs.lstatSync(f.dest).isSymbolicLink(), true);
+  assert.equal(fs.readFileSync(path.join(target, "nested/mod.js"), "utf8"), "committed through symlink\n");
+  assert.deepEqual(fs.readdirSync(path.dirname(target)), ["mod"]);
+  assert.deepEqual(fs.readdirSync(path.dirname(f.dest)), ["mod"]);
+});
+
 test("a failed rename cleans only that invocation's staging", { timeout: 15_000 }, async t => {
   const f = fixture(t);
   const root = f.repo("repo", "committed\n");

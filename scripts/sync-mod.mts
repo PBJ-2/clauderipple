@@ -80,8 +80,8 @@ const force = args.has("--force") || args.has("--install");
 if (!force && git("rev-parse", "--abbrev-ref", "HEAD").trim() !== "main") process.exit(0);
 fs.mkdirSync(dest, { recursive: true });
 const files = committed();
-// A sibling stays outside the watched tree and another sync's obsolete-file cleanup.
-const staging = fs.mkdtempSync(`${dest}.next-`);
+// A real sibling stays on the target filesystem, outside the watched tree and other syncs' cleanup.
+const staging = fs.mkdtempSync(`${fs.realpathSync(dest)}.next-`);
 try {
   const changed = sync(files, staging);
   console.log(`sync-mod: ${changed} file(s) updated in ${dest}`);
