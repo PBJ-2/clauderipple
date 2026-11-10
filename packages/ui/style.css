@@ -412,6 +412,33 @@ label.check input { margin-top: 2px; }
 .provider-status .cell-text strong { font-weight: 500; }
 .provider-status .account-usage { display: grid; gap: 1px; }
 
+/* The provider's header opens its settings; each account below has one 0–100% scale per window. */
+.provider-block { position: relative; }
+.group > * + .provider-block::before { content: ""; position: absolute; top: 0; left: 16px; right: 0; height: 1px; background: var(--separator); }
+.provider-block:first-child > .cell { border-radius: var(--radius) var(--radius) 0 0; }
+.provider-limits { padding: 0 16px 14px; }
+.limits-account { padding: 12px 14px 14px; min-width: 0; border-radius: 10px; background: var(--fill); }
+.limits-account + .limits-account { margin-top: 8px; }
+.limits-account-head { display: flex; justify-content: space-between; align-items: baseline; gap: 6px 16px; flex-wrap: wrap; }
+.limits-account-head strong { font-size: var(--fs-sub); font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
+.limits-badges { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; min-width: 0; }
+.limits-badges .badge { font-size: var(--fs-cap); white-space: normal; overflow-wrap: anywhere; }
+.limits-windows { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 24px; }
+@media (max-width: 480px) { .limits-windows { grid-template-columns: minmax(0, 1fr); } }
+.limits-window { margin-top: 12px; }
+.limits-window-head { display: flex; justify-content: space-between; gap: 4px 12px; flex-wrap: wrap; margin-bottom: 5px; }
+.limits-window-head, .limits-window-foot { font-size: var(--fs-foot); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.limits-window-foot { margin-top: 5px; color: var(--label-2); }
+.limits-window-note { margin-top: 4px; font-size: var(--fs-foot); overflow-wrap: anywhere; }
+.limits-track { position: relative; height: 8px; border-radius: 4px; background: var(--fill-press); }
+.limits-fill { display: block; height: 100%; border-radius: 0 4px 4px 0; background: var(--accent-fill); }
+.limits-track.unknown { background: repeating-linear-gradient(135deg, var(--fill-press) 0 4px, transparent 4px 8px); }
+.limits-fetched { color: var(--label-2); font-size: var(--fs-cap); }
+@media (forced-colors: active) {
+  .limits-track { border: 1px solid CanvasText; }
+  .limits-fill { background: Highlight; forced-color-adjust: none; }
+}
+
 /* ---- Model mapping ------------------------------------------------------------------- */
 
 .map-head, .map-row {

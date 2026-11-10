@@ -1043,6 +1043,49 @@ test("the current Claude login can be paused and resumed, but no other account f
   }, { observedClaudeCodeAuth: observed });
 });
 
+// The paused flag is the live pool state. The usage cache keeps a paused account's last figures for a while,
+// so the flag must not wait for that cache to change.
+test("a paused Claude login or stored account is flagged in status at once, even while the usage cache still holds its figures", async () => {
+  const observed = new ObservedClaudeCodeAuth();
+  observed.observe(["authorization", "Bearer current-login-token"]);
+  const cfg = makeCfg({ providers: { anthropic: { type: "anthropic", auth: "claude-code", accountPool: true } } });
+  const now = Date.now();
+  const quota = { at: now, rate_limits: { primary: { used_percent: 81, window_minutes: 300 } } };
+  let usage: Record<string, Record<string, unknown>> = {};
+  await withAdmin(cfg, async ({ port, home }) => {
+    const stored = saveClaudeOAuthAccount(home, { accessToken: "stored-access", refreshToken: "stored-refresh", expiresAt: now + 3_600_000, accountId: "stored-account" });
+    usage = { current: quota, [stored.id]: quota };
+    const status = async () => (await (await fetch(`${base()}:${port}/api/status`)).json()) as { claude: { accounts: { id: string; label?: string; quota: Record<string, unknown>; paused?: boolean; inUse?: boolean }[] } };
+    const patch = (paused: boolean) => fetch(`${base()}:${port}/api/claude-accounts/${stored.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ paused }) });
+    assert.deepEqual((await status()).claude.accounts.map((a) => [a.id, a.paused ?? false]), [["current", false], [stored.id, false]]);
+
+    setCurrentClaudeAccountPaused(home, true);
+    assert.equal((await patch(true)).status, 200);
+    assert.ok(usage.current && usage[stored.id], "the usage cache still holds both accounts' figures");
+    assert.deepEqual((await status()).claude.accounts, [
+      { id: "current", label: "Current Claude login", quota: {}, paused: true },
+      { id: stored.id, label: listClaudeAccounts(home)[0]!.label, quota: {}, paused: true },
+    ]);
+
+    setCurrentClaudeAccountPaused(home, false);
+    assert.equal((await patch(false)).status, 200);
+    const resumed = (await status()).claude.accounts;
+    assert.deepEqual(resumed.map((a) => [a.id, a.paused ?? false]), [["current", false], [stored.id, false]]);
+    assert.deepEqual(resumed[0]!.quota, quota, "resumed, the figures come back from the usage");
+  }, { observedClaudeCodeAuth: observed, claudeUsage: async () => usage, modelScoresFetch: async () => new Response("{}") });
+});
+
+test("a paused machine with no Claude login lists no current login, not even the cache's figures for it", async () => {
+  const now = Date.now();
+  const cfg = makeCfg({ providers: { anthropic: { type: "anthropic", auth: "claude-code", accountPool: true } } });
+  const quota = { at: now, rate_limits: { primary: { used_percent: 81, window_minutes: 300 } } };
+  await withAdmin(cfg, async ({ port, home }) => {
+    setCurrentClaudeAccountPaused(home, true);
+    const status = await (await fetch(`${base()}:${port}/api/status`)).json() as { claude: { accounts: { id: string }[] } };
+    assert.deepEqual(status.claude.accounts, []);
+  }, { claudeUsage: async () => ({ current: quota }), modelScoresFetch: async () => new Response("{}") });
+});
+
 // A shared machine's login need not be stored to exclude it from workers, probes and plan figures.
 test("a paused current Claude login is unavailable to workers and probes and leaves the limits' numbering", async () => {
   const observed = new ObservedClaudeCodeAuth();
@@ -1066,7 +1109,7 @@ test("a paused current Claude login is unavailable to workers and probes and lea
     assert.equal(missing.auth, "missing");
     assert.deepEqual(await limits(), []);
     const paused = await status();
-    assert.deepEqual(paused.claude.accounts, [], "the band must not fall back to cached usage of the paused login");
+    assert.deepEqual(paused.claude.accounts, [{ id: "current", label: "Current Claude login", quota: {}, paused: true }], "the paused login is flagged, and the band gets no cached usage of it");
     const own = saveClaudeOAuthAccount(home, { accessToken: "own-access", refreshToken: "own-refresh", expiresAt: Date.now() + 3_600_000, accountId: "own" });
     usage = { current: quota, [own.id]: { ...quota, rate_limits: { primary: { used_percent: 15, window_minutes: 300 } } } };
     assert.equal(await usable(), true);
@@ -3914,8 +3957,43 @@ test("GET /api/limits lists every Claude account with usage, in a stable order, 
   });
 });
 
+test("GET /api/limits names each account by the id /api/status lists it under, and marks a refused Claude reading stale", async () => {
+  const now = Date.now();
+  const cfg = makeCfg({ providers: {
+    anthropic: { type: "anthropic", auth: "claude-code", accountPool: true },
+    chatgpt: { type: "chatgpt" },
+  } });
+  const quota = (used: number, extra: Record<string, unknown> = {}) => ({ at: now, rate_limits: { primary: { used_percent: used, window_minutes: 300 } }, ...extra });
+  let usage: Awaited<ReturnType<NonNullable<AdminDeps["claudeUsage"]>>> = {};
+  await withAdmin(cfg, async ({ port, home }) => {
+    const work = saveClaudeOAuthAccount(home, { accessToken: "work-access", refreshToken: "work-refresh", expiresAt: now + 3_600_000, accountId: "work", email: "work@example.com" });
+    usage = { current: quota(81), [work.id]: quota(15, { stale: true, failed_at: now, failed_status: 429 }) };
+    const limits = await (await fetch(`${base()}:${port}/api/limits`)).json() as { providers: LimitsProvider[] };
+    const claude = limits.providers.find((p) => p.type === "anthropic")!;
+    // The refused refresh keeps its last reading, marked stale; the login's reading is current.
+    assert.deepEqual(claude.accounts.map((a) => [a.id, a.stale ?? false]), [["current", false], [work.id, true]]);
+    assert.deepEqual(limits.providers.find((p) => p.type === "chatgpt")!.accounts.map((a) => a.id), ["a", "b"]);
+    const status = await (await fetch(`${base()}:${port}/api/status`)).json() as { claude: { accounts: { id: string }[] } };
+    assert.ok(claude.accounts.every((a) => status.claude.accounts.some((s) => s.id === a.id)), "every id is one /api/status lists");
+  }, {
+    credentials: () => ({}),
+    claudeUsage: async () => usage,
+    chatgpt: () => ({
+      quota: {}, auth: {},
+      accounts: () => ({
+        chatgpt: [
+          { id: "a", label: "A", paused: false, state: "ready", quota: { at: now, rate_limits: { primary: { used_percent: 23, window_minutes: 300 } } }, active: false, inUse: false },
+          { id: "b", label: "B", paused: false, state: "ready", quota: { at: now, rate_limits: { primary: { used_percent: 7, window_minutes: 300 } } }, active: true, inUse: true },
+        ] as never,
+      }),
+    }),
+  });
+});
+
 test("a Claude login without an account pool reports the app login's limits, whatever a stored account prefers", async () => {
   const now = Date.now();
+  const observed = new ObservedClaudeCodeAuth();
+  observed.observe(["authorization", "Bearer current-login-token"]);
   const cfg = makeCfg({ providers: { anthropic: { type: "anthropic", auth: "claude-code" } } });
   const quota = (used: number) => ({ at: now, rate_limits: { primary: { used_percent: used, window_minutes: 300 } } });
   let usage: Awaited<ReturnType<NonNullable<AdminDeps["claudeUsage"]>>> = {};
@@ -3928,9 +4006,9 @@ test("a Claude login without an account pool reports the app login's limits, wha
     const status = await (await fetch(`${base()}:${port}/api/status`)).json() as { claude: { accounts: { id: string; inUse?: boolean }[] } };
     assert.equal(status.claude.accounts.find((a) => a.inUse === true)?.id, "current");
     setCurrentClaudeAccountPaused(home, true);
-    const paused = await (await fetch(`${base()}:${port}/api/status`)).json() as typeof status;
-    assert.equal(paused.claude.accounts.some((a) => a.id === "current" || a.inUse), false);
+    const paused = await (await fetch(`${base()}:${port}/api/status`)).json() as { claude: { accounts: { id: string; inUse?: boolean; paused?: boolean }[] } };
+    assert.deepEqual(paused.claude.accounts.filter((a) => a.id === "current" || a.inUse).map((a) => [a.id, a.paused ?? false, a.inUse ?? false]), [["current", true, false]], "the paused login is flagged and not in use");
     const pausedLimits = await (await fetch(`${base()}:${port}/api/limits`)).json() as typeof limits;
     assert.deepEqual(pausedLimits.providers[0]!.accounts.map((a) => [a.account, a.inUse]), [[0, undefined]]);
-  }, { claudeUsage: async () => usage });
+  }, { claudeUsage: async () => usage, observedClaudeCodeAuth: observed });
 });

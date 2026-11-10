@@ -127,6 +127,15 @@ test("computeFigures also reports the latest request's tokens, the window it is 
   assert.deepEqual(f.workers, [{ model: "deepseek-v4.1-flash", provider: "opencode-go", requests: 1 }]);
 });
 
+test("the five-hour figure is never a paused account's, even when that account is listed first", () => {
+  // The router lists a paused login with no figures; with no account in use the figure is the next account's.
+  const status = { claude: { accounts: [
+    { id: "current", paused: true, quota: {} },
+    { id: "stored", quota: { rate_limits: { primary: { used_percent: 15, window_minutes: 300 } } } },
+  ] } };
+  assert.equal(computeFigures([], "m", null, status, NOW).fiveHourPct, 15);
+});
+
 test("without a known window the tokens are still reported and the window and percent are null", () => {
   const f = computeFigures([{ source: "m", target: "m", provider: "p", ok: true, at: "2026-10-19T03:00:00Z", usage: { input: 5, cached: 5 } }], "m", null, {}, NOW);
   assert.deepEqual([f.contextTokens, f.contextWindow, f.contextPct], [10, null, null]);
