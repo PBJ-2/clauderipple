@@ -33,7 +33,7 @@ import { AutoUpdater } from "./autoupdate.ts";
 export { parseUpdateCheck, type UpdateCheck } from "./cli-control.ts";
 import { fileURLToPath } from "node:url";
 import type { Config, Provider, ProviderCredential, ProviderModel } from "./config.ts";
-import { withFileLock } from "./locked-file.ts";
+import { withFileLock, writeJsonAtomic } from "./locked-file.ts";
 import { adminPort, headerValueProblem, homeDir, searchProviderFor, ssidProblem, validate } from "./config.ts";
 export { adminPort } from "./config.ts";
 import { agentRenames, generatedAgents } from "./agents.ts";
@@ -1225,10 +1225,7 @@ function writeConfigFile(configFile: string, config: Config): void {
 }
 
 function writeConfigFileLocked(configFile: string, config: Config): void {
-  const tmp = `${configFile}.tmp-${process.pid}-${Date.now()}`;
-  fs.mkdirSync(path.dirname(configFile), { recursive: true });
-  fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + "\n");
-  fs.renameSync(tmp, configFile);
+  writeJsonAtomic(configFile, config);
 }
 
 /** The disk fingerprint also detects CLI edits and background measurements, without persisting API metadata. */
