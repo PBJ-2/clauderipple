@@ -56,7 +56,7 @@ function load(configuredProviders: Record<string, unknown> = {}): Builders {
     currentConfig: null, configuredProviders,
     timeOf: () => "12:00", formatSeconds: () => "1s", formatNumber: (n: number) => String(n),
     // The row names a provider as Status does, with its vendor's dot.
-    providerClass: () => "provider-chatgpt", providerLabel: (name: string) => name, providerTitle: (name: string) => name, providerHue: () => "#10a37f",
+    providerClass: () => "provider-chatgpt", providerLabel: (name: string) => name, providerTitle: (name: string) => name, providerDisplayName: (name: string) => name, providerEntry: () => undefined, providerHue: () => "#10a37f",
     requestRows: [], expandedRequestId: null, rows: () => rows,
   };
   return new Function(...Object.keys(stubs), `${code}; return { requestRow, requestDetail, render(records, expanded) { requestRows = records; expandedRequestId = expanded; renderRequests(records); return rows(); } };`)(...Object.values(stubs)) as Builders;

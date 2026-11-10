@@ -179,15 +179,25 @@ function applyProviderLabel(provider, key, typedName) {
   else delete provider.label;
   return provider;
 }
+/** A provider's entry as the pages read it: the config this page holds, else the one the Logs view read, else what the live status names. */
+function providerEntry(name) {
+  const config = (currentConfig && currentConfig.providers) || configuredProviders || {};
+  return config[name] || (status && status.providers && status.providers[name]) || undefined;
+}
+/** Every provider the pages can name: the keys of the config and of the live status. */
+function knownProviderNames() {
+  const config = (currentConfig && currentConfig.providers) || configuredProviders || {};
+  return [...new Set([...Object.keys(config), ...Object.keys((status && status.providers) || {})])];
+}
 /**
- * A provider's name on the Providers, Model mapping and Clients pages: the name people know it by
- * (providerTitle), with its key after it only when another provider would read the same ("ChatGPT
- * (chatgpt-2)"), so two of a kind stay apart in a list or a menu.
+ * A provider's name wherever a person reads one (Status, Logs, Providers, Model mapping, Clients, the mod):
+ * the name people know it by (providerTitle), with its key after it only when another provider would read the
+ * same ("ChatGPT (work)" beside "ChatGPT (personal)"), so two of a kind stay apart in a list or a menu.
  */
-function providerDisplayName(name, provider = currentConfig && currentConfig.providers && currentConfig.providers[name]) {
+function providerDisplayName(name, provider = providerEntry(name)) {
   const title = providerTitle(name, provider);
-  const others = Object.entries((currentConfig && currentConfig.providers) || {}).filter(([key]) => key !== name);
-  return title !== name && others.some(([key, other]) => providerTitle(key, other) === title) ? `${title} (${name})` : title;
+  const clash = knownProviderNames().some((key) => key !== name && providerTitle(key, providerEntry(key)) === title);
+  return title !== name && clash ? `${title} (${name})` : title;
 }
 /**
  * A saved provider's name field: the name it was given, else the name the pages show for it (its
@@ -1390,7 +1400,7 @@ function renderHealthProviders() {
     // The row opens the provider's own page; a button inside it keeps its own click. The dot is the vendor's hue, as on the mod's band.
     const dot = el("span", { class: "vendor-dot", "aria-hidden": "true" });
     dot.style.color = providerHue(name, provider);
-    const title = el("span", { class: "cell-label provider-title" }, [dot, el("span", { text: providerTitle(name, provider) })]);
+    const title = el("span", { class: "cell-label provider-title" }, [dot, el("span", { text: providerDisplayName(name, provider) })]);
     const row = cell(title, [providerState(name, provider), chevronIcon()], lines, "provider-status link");
     row.tabIndex = 0;
     const open = (event) => { if (!event.target.closest("button, a")) openProvider(name, provider); };
@@ -1721,7 +1731,7 @@ function renderWebSearchSlot() {
   // A backend the config names but no provider can run any more must not read as "follows the
   // small, fast model" — that would silently change where the search goes.
   if (saved && !found) {
-    const orphan = el("option", { value: webSearchChoice(saved.provider, saved.model), text: `${saved.provider} / ${saved.model} (?)` });
+    const orphan = el("option", { value: webSearchChoice(saved.provider, saved.model), text: `${providerDisplayName(saved.provider)} / ${saved.model} (?)` });
     orphan.selected = true;
     select.appendChild(orphan);
   }
@@ -1842,7 +1852,7 @@ function classifierRow(stage, saved, groups) {
   }
   // A target the config names but no provider offers any more must not read as Claude Code's own:
   // saving the row unchanged would then quietly hand the check back.
-  if (saved && !found) target.appendChild(selectOption(JSON.stringify([saved.provider, saved.model]), `${saved.provider} / ${saved.model} (?)`));
+  if (saved && !found) target.appendChild(selectOption(JSON.stringify([saved.provider, saved.model]), `${providerDisplayName(saved.provider)} / ${saved.model} (?)`));
   target.value = saved ? JSON.stringify([saved.provider, saved.model]) : "";
 
   const effort = el("select", { class: "classifier-effort" });
@@ -2697,7 +2707,7 @@ function targetSelect(route) {
   }
   const value = route ? JSON.stringify([route.provider, route.model]) : "";
   // Do not make an unavailable saved target look like passthrough; it must remain removable.
-  if (route && !$all("option", select).some((option) => option.value === value)) select.appendChild(selectOption(value, `${route.provider} / ${route.model} (?)`));
+  if (route && !$all("option", select).some((option) => option.value === value)) select.appendChild(selectOption(value, `${providerDisplayName(route.provider)} / ${route.model} (?)`));
   select.value = value;
   return select;
 }
@@ -5831,9 +5841,9 @@ async function modLoadResets() {
   const claude = providers.some((provider) => provider.type === "anthropic") && modQuotaKnown(status && status.claude && status.claude.accounts, true);
   modResetProviders = [...chatgpt.flat(), ...(claude ? ["anthropic"] : [])];
 }
-/** The name a reset provider goes by: Claude, ChatGPT, or another ChatGPT provider's own name. */
+/** The name a reset provider goes by: Claude for the Claude login ("anthropic"), else the provider's name as Status shows it. */
 function modResetLabel(provider) {
-  return provider === "anthropic" ? "Claude" : provider === "chatgpt" ? "ChatGPT" : provider;
+  return provider === "anthropic" ? "Claude" : providerDisplayName(provider);
 }
 /** Choosing reset starts on a known provider the mode's workers use, else the first known one. */
 function modResetDefault(rungs) {
@@ -5969,7 +5979,7 @@ function modJudgeCard() {
     }
   }
   if (s.judge === "model") {
-    const models = modModels().map((model) => ({ value: model.model, label: `${model.name || model.model} · ${model.provider}` }));
+    const models = modModels().map((model) => ({ value: model.model, label: `${model.name || model.model} · ${providerDisplayName(model.provider)}` }));
     rows.push(cell(t("mod.model"), models.length || s.judgeModel
       ? modSelect("judge-model", models, s.judgeModel, t("mod.model"), (judgeModel) => modPatch({ judgeModel }))
       : el("span", { text: modCap(t("mod.noModels")) }), modCap(t("mod.haikuFallback"))));
@@ -6003,7 +6013,7 @@ function modCompactModelItems() {
   return [
     { value: "session", label: t("mod.compactSession") },
     { group: "Claude", items: claude },
-    ...[...groups].map(([provider, items]) => ({ group: provider, items })),
+    ...[...groups].map(([provider, items]) => ({ group: providerDisplayName(provider), items })),
   ];
 }
 
@@ -6308,15 +6318,14 @@ function renderProviderFilter(summary, records) {
   for (const record of records) if (record.provider) knownRequestProviders.add(record.provider);
   if (requestProvider) knownRequestProviders.add(requestProvider);
   // Listed by the names people know them by, as the rows below name them.
-  const names = [...knownRequestProviders].map((name) => [name, logsProviderTitle(name)]).sort((a, b) => a[1].localeCompare(b[1]) || a[0].localeCompare(b[0]));
+  // The names are providerDisplayName's, so two of a kind ("ChatGPT (work)", "ChatGPT (personal)") stay apart here too.
+  const names = [...knownRequestProviders].map((name) => [name, providerDisplayName(name)]).sort((a, b) => a[1].localeCompare(b[1]) || a[0].localeCompare(b[0]));
   // Rebuilt only when the list changes, so the 3-second refresh does not close an open menu.
   const key = names.map(([name, title]) => `${name}\t${title}`).join("\n");
   const select = $("#logs-provider");
   if (key !== renderedProviderNames) {
     renderedProviderNames = key;
-    // Two providers of one kind would read the same ("ChatGPT"): their keys tell them apart.
-    const twice = new Set(names.map(([, title]) => title).filter((title, index, all) => all.indexOf(title) !== index));
-    select.replaceChildren(el("option", { value: "", text: t("logs.all") }), ...names.map(([name, title]) => el("option", { value: name, text: twice.has(title) && title !== name ? `${title} (${name})` : title })));
+    select.replaceChildren(el("option", { value: "", text: t("logs.all") }), ...names.map(([name, title]) => el("option", { value: name, text: title })));
   }
   if (select.value !== requestProvider) select.value = requestProvider;
 }
@@ -6337,7 +6346,7 @@ function modelUsageRow(entry) {
     el("span", { class: "model", text: entry.model, title: entry.model }),
     // A WebSearch side request is counted apart from the model's own turns; the router marks it.
     entry.purpose === "web-search" ? el("span", { class: "purpose-tag", text: t("logs.webSearch"), title: t("logs.webSearchHelp") }) : null,
-    providerBadge(entry.provider, logsProviderTitle(entry.provider)),
+    providerBadge(entry.provider, providerDisplayName(entry.provider)),
   ]);
   // The labels show only where a narrow window drops the header row.
   return el("tr", {}, [
@@ -6399,16 +6408,10 @@ function rateValue(rate) {
 function formatRate(rate) {
   return t("logs.rate", { value: rateValue(rate) });
 }
-/** A provider as people know it ("Claude", "OpenCode Go"), as Status names it: the config this page holds, else the one the Logs view read. */
-function logsProviderEntry(name) {
-  const providers = (currentConfig && currentConfig.providers) || configuredProviders || {};
-  return providers[name];
-}
-function logsProviderTitle(name) { return providerTitle(name, logsProviderEntry(name)); }
 /** A provider's mark on a row: its vendor's hue as a dot, then a name (the provider's, or the account's). */
 function providerBadge(name, text, title) {
   const dot = el("span", { class: "vendor-dot", "aria-hidden": "true" });
-  dot.style.color = providerHue(name, logsProviderEntry(name));
+  dot.style.color = providerHue(name, providerEntry(name));
   return el("span", { class: `provider-badge ${providerClass(name)}`, ...(title ? { title } : {}) }, [dot, el("span", { class: "provider-badge-name", text })]);
 }
 function requestAccount(record) {
@@ -6429,7 +6432,7 @@ function requestDetail(record) {
     [t("logs.detail.cacheWrite"), record.usage && record.usage.cacheWrite ? formatNumber(record.usage.cacheWrite) : t("logs.none")],
   ];
   const account = requestAccount(record);
-  if (account) details.push([t("logs.provider"), logsProviderTitle(record.provider)], [t("logs.detail.account"), account]);
+  if (account) details.push([t("logs.provider"), providerDisplayName(record.provider)], [t("logs.detail.account"), account]);
   // Both tiers side by side: the ChatGPT sign-in often serves `default` for a request made on
   // `priority` (#54), so the served tier cannot be the FAST badge's basis; the requested one is.
   if (record.requestedTier || record.servedTier) details.push([t("logs.detail.tier"), `${record.requestedTier || t("logs.none")} / ${record.servedTier || t("logs.none")}`]);
@@ -6450,7 +6453,7 @@ function requestRow(record) {
     record.purpose === "web-search" ? el("span", { class: "purpose-tag", text: t("logs.webSearch"), title: t("logs.webSearchHelp") }) : null,
     // The account says more than the provider's name, which the dot's hue already carries: the
     // badge names the provider on hover and in the detail.
-    providerBadge(record.provider, account || logsProviderTitle(record.provider), account ? logsProviderTitle(record.provider) : undefined),
+    providerBadge(record.provider, account || providerDisplayName(record.provider), account ? providerDisplayName(record.provider) : undefined),
     // The requested tier, not the served one: the ChatGPT sign-in answers `default` to a Fast request (#54).
     record.requestedTier === "priority" ? el("span", { class: "fast-tag", text: "FAST", title: t("logs.fastHelp") }) : null,
   ].filter(Boolean));

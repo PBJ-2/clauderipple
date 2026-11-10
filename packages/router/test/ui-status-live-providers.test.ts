@@ -88,6 +88,7 @@ function harness() {
     const limitsSnapshot = null;
     const providerTitle = (name, provider) => (provider && provider.label) || name;
     const providerHue = () => "#000";
+    const providerDisplayName = (name, provider) => providerTitle(name, provider);
     const providerState = () => el("span", null);
     const providerLimits = () => null;
     const quotaLine = () => null;

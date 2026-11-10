@@ -489,6 +489,8 @@ function providerSaveHarness(initial = saveFixture(), probe: Promise<ProbeResult
   const make = new Function('h', 'el', `
     let currentConfig = clone(h.initial), selectedProviderName, providerDetailTab, slotsLoaded, providersLoaded, clientsLoaded;
     const t = key => key, hint = text => el('small', {text}), selectOption = (value, text) => el('option', {value, text});
+    // The removal prompt names a provider as the pages do (providerDisplayName reads the live status and the config it holds).
+    let status = null, configuredProviders = null;
     const CHATGPT_MODELS = [], presetById = () => undefined;
     const claudeModels = [{ id: 'one' }, { id: 'two' }], startGoogleLogin = async () => false;
     ${dashboardBlock('function modelsOf(', 'function presetById(')}
