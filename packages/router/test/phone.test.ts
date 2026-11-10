@@ -10,6 +10,7 @@ import { Logger } from "../src/log.ts";
 import { RequestLog } from "../src/requestlog.ts";
 import { phoneRequest } from "../src/phone.ts";
 import type { PhoneDeps } from "../src/phone.ts";
+import { APPROVAL_WAIT_MS } from "../../remote/src/mod-approval.ts";
 
 async function admin(t: import("node:test").TestContext, phone: PhoneDeps) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-phone-admin-"));
@@ -226,4 +227,130 @@ test("restart targets only the Mac host job or installs the Windows/Linux host s
   }
   const failed = await phoneRequest("restart", "POST", undefined, { platform: "darwin", uid: 501, exec: async () => { throw new Error("job not installed"); } });
   assert.equal(failed.status, 502);
+});
+
+test("mod approval and move routes forward through the authenticated host boundary and relay the host's status", async t => {
+  const calls: { url: string; method: string; body?: string }[] = [];
+  const f = await admin(t, { fetch: async (url, init) => {
+    assert.equal(new Headers(init?.headers).get("x-ripple-local"), "s".repeat(43));
+    assert.equal(init?.redirect, "error");
+    calls.push({ url: String(url), method: init?.method ?? "GET", ...(typeof init?.body === "string" ? { body: init.body } : {}) });
+    const pathname = new URL(String(url)).pathname;
+    if (pathname === "/local/mod/moved") return Response.json({ error: "move unavailable" }, { status: 409 });
+    if (pathname === "/local/mod/approval" && init?.method === "POST") return Response.json({ state: "hold" });
+    if (pathname === "/local/mod/approval") return Response.json({ state: "pending" });
+    return Response.json({ ok: true });
+  } });
+  const poll = await fetch(`${f.base}/api/mod/approval?askId=ask-1_A`);
+  assert.equal(poll.status, 200);
+  assert.equal(poll.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await poll.json(), { state: "pending" });
+  const startBody = '{"askId":"ask-1_A","session":"sess","tool":"Bash","input":{"command":"ls"},"suggestions":[],"title":""}';
+  const start = await fetch(`${f.base}/api/mod/approval`, { method: "POST", body: startBody });
+  assert.equal(start.status, 200);
+  assert.deepEqual(await start.json(), { state: "hold" });
+  const done = await fetch(`${f.base}/api/mod/approval/done`, { method: "POST", body: '{"askId":"ask-1_A"}' });
+  assert.equal(done.status, 200);
+  assert.deepEqual(await done.json(), { ok: true });
+  // The mod's move probe sends an empty `to`; the host's 409 must reach the mod unchanged, not as a 502.
+  const probe = await fetch(`${f.base}/api/mod/moved`, { method: "POST", body: '{"itemId":"item-1","from":"sess","to":""}' });
+  assert.equal(probe.status, 409);
+  assert.deepEqual(await probe.json(), { error: "move unavailable" });
+  const move = await fetch(`${f.base}/api/mod/moved`, { method: "POST", body: '{"itemId":"item-1","from":"sess","to":"sess-2"}' });
+  assert.equal(move.status, 409);
+  assert.deepEqual(calls, [
+    { url: "http://127.0.0.1:18797/local/mod/approval?askId=ask-1_A", method: "GET" },
+    { url: "http://127.0.0.1:18797/local/mod/approval", method: "POST", body: startBody },
+    { url: "http://127.0.0.1:18797/local/mod/approval/done", method: "POST", body: '{"askId":"ask-1_A"}' },
+    { url: "http://127.0.0.1:18797/local/mod/moved", method: "POST", body: '{"itemId":"item-1","from":"sess","to":""}' },
+    { url: "http://127.0.0.1:18797/local/mod/moved", method: "POST", body: '{"itemId":"item-1","from":"sess","to":"sess-2"}' },
+  ]);
+});
+
+test("the mod poll's send time is forwarded to the host as sentAt, and a malformed one is refused before forwarding", async t => {
+  const urls: string[] = [];
+  const f = await admin(t, { fetch: async url => { urls.push(String(url)); return Response.json({ state: "pending" }); } });
+  assert.equal((await fetch(`${f.base}/api/mod/approval?askId=ask-1&sentAt=1700000000000`)).status, 200);
+  assert.equal((await fetch(`${f.base}/api/mod/approval?askId=ask-1`)).status, 200, "a mod that sends no send time is forwarded as before");
+  for (const query of ["sentAt=", "sentAt=-1", "sentAt=1.5", "sentAt=soon", "sentAt=1&sentAt=2", `sentAt=${"9".repeat(16)}`]) {
+    assert.equal((await fetch(`${f.base}/api/mod/approval?askId=ask-1&${query}`)).status, 400, query);
+  }
+  assert.deepEqual(urls, ["http://127.0.0.1:18797/local/mod/approval?askId=ask-1&sentAt=1700000000000", "http://127.0.0.1:18797/local/mod/approval?askId=ask-1"]);
+  // The phone bridge itself takes a send time only on the approval poll, and only as a whole number of milliseconds.
+  assert.equal((await phoneRequest("mod/approval", "GET", undefined, {}, "ask-1", "soon")).status, 404);
+  assert.equal((await phoneRequest("inbox", "GET", undefined, {}, "sess", "1700000000000")).status, 404);
+});
+
+test("the mod approval poll is not cut before the host's long-poll answers", { timeout: 20_000 }, async t => {
+  const f = await admin(t, { fetch: async (_url, init) => new Promise<Response>((resolve, reject) => {
+    // The host answers at its full 3 s long-poll: the router's own timeout must not abort it first.
+    const timer = setTimeout(() => resolve(Response.json({ state: "pending" })), APPROVAL_WAIT_MS + 500);
+    init?.signal?.addEventListener("abort", () => { clearTimeout(timer); reject(new Error("aborted")); });
+  }) });
+  const started = Date.now();
+  const poll = await fetch(`${f.base}/api/mod/approval?askId=ask-1`);
+  assert.equal(poll.status, 200);
+  assert.ok(Date.now() - started >= APPROVAL_WAIT_MS);
+  assert.deepEqual(await poll.json(), { state: "pending" });
+});
+
+test("mod routes refuse other methods, cross-site callers and malformed input before forwarding", async t => {
+  const calls: string[] = [];
+  const f = await admin(t, { fetch: async url => { calls.push(String(url)); return Response.json({ ok: true }); } });
+  const post = (route: string, body: string, headers?: Record<string, string>) => fetch(`${f.base}/api/mod/${route}`, { method: "POST", body, ...(headers ? { headers } : {}) });
+  // Poll: askId is required, exactly once, and at most 100 safe characters.
+  for (const query of ["", "?askId=", "?askId=a/b", "?askId=a&askId=b", `?askId=${"x".repeat(101)}`]) assert.equal((await fetch(`${f.base}/api/mod/approval${query}`)).status, 400);
+  // Start: a JSON object whose askId is safe.
+  for (const body of ["{", "[]", "null", "{}", '{"askId":"a/b"}']) assert.equal((await post("approval", body)).status, 400);
+  // Answer: askId only.
+  for (const body of ["{}", '{"askId":"a","extra":1}', '{"askId":"a/b"}']) assert.equal((await post("approval/done", body)).status, 400);
+  // Move: a safe itemId, two strings (an empty `to` is the probe), and no other fields.
+  for (const body of ['{"from":"s","to":"t"}', '{"itemId":"a/b","from":"s","to":"t"}', '{"itemId":"a","from":5,"to":"t"}', '{"itemId":"a","from":"s","to":null}', '{"itemId":"a","from":"s","to":"t","extra":1}', `{"itemId":"a","from":"${"s".repeat(201)}","to":"t"}`, `{"itemId":"a","from":"s","to":"t","pad":"${"x".repeat(4096)}"}`]) {
+    assert.equal((await post("moved", body)).status, 400);
+  }
+  // Methods: the poll is GET only; the answer and the move are POST only.
+  assert.equal((await fetch(`${f.base}/api/mod/approval/done`)).status, 404);
+  assert.equal((await fetch(`${f.base}/api/mod/moved`)).status, 404);
+  assert.equal((await fetch(`${f.base}/api/mod/approval`, { method: "PUT", body: '{"askId":"a"}' })).status, 404);
+  // Cross-site callers are refused on every route.
+  assert.equal((await fetch(`${f.base}/api/mod/approval?askId=a`, { headers: { origin: "https://evil.example" } })).status, 403);
+  assert.equal((await post("approval", '{"askId":"a"}', { origin: "https://evil.example" })).status, 403);
+  assert.equal((await post("approval/done", '{"askId":"a"}', { origin: "https://evil.example" })).status, 403);
+  assert.equal((await post("moved", '{"itemId":"a","from":"s","to":"t"}', { origin: "https://evil.example" })).status, 403);
+  assert.equal((await fetch(`${f.base}/api/mod/approval?askId=a`, { headers: { "sec-fetch-site": "cross-site" } })).status, 403);
+  assert.equal(calls.length, 0);
+});
+
+test("the approval start cap admits the mod's 480 KB and refuses more", async t => {
+  const forwarded: number[] = [];
+  const f = await admin(t, { fetch: async (_url, init) => { forwarded.push(String(init?.body ?? "").length); return Response.json({ state: "local" }); } });
+  const body = (padding: number) => JSON.stringify({ askId: "ask-big", input: { content: "x".repeat(padding) } });
+  // The mod sends at most 480 KB (its APPROVAL_BODY_CAP); this route accepts up to the host's 512 KB.
+  assert.equal((await fetch(`${f.base}/api/mod/approval`, { method: "POST", body: body(480 * 1024 - 64) })).status, 200);
+  assert.equal((await fetch(`${f.base}/api/mod/approval`, { method: "POST", body: body(512 * 1024) })).status, 400);
+  assert.equal(forwarded.length, 1);
+  assert.ok((forwarded[0] ?? 0) > 480 * 1024 - 64);
+});
+
+test("every mod route reports an unreachable host without exposing its error", async t => {
+  const f = await admin(t, { fetch: async () => { throw new Error("private"); } });
+  const responses = [
+    await fetch(`${f.base}/api/mod/approval?askId=a`),
+    await fetch(`${f.base}/api/mod/approval`, { method: "POST", body: '{"askId":"a"}' }),
+    await fetch(`${f.base}/api/mod/approval/done`, { method: "POST", body: '{"askId":"a"}' }),
+    await fetch(`${f.base}/api/mod/moved`, { method: "POST", body: '{"itemId":"a","from":"s","to":""}' }),
+  ];
+  for (const response of responses) {
+    assert.equal(response.status, 503);
+    const text = await response.text();
+    assert.equal(text.includes("private"), false);
+    assert.ok(text.includes("phone host unavailable"));
+  }
+});
+
+test("an older host without the mod routes answers with its own status, so the mod falls back", async t => {
+  const f = await admin(t, { fetch: async () => Response.json({ error: "unknown local control endpoint or method" }, { status: 404 }) });
+  assert.equal((await fetch(`${f.base}/api/mod/approval?askId=a`)).status, 404);
+  assert.equal((await fetch(`${f.base}/api/mod/approval`, { method: "POST", body: '{"askId":"a"}' })).status, 404);
+  assert.equal((await fetch(`${f.base}/api/mod/moved`, { method: "POST", body: '{"itemId":"a","from":"s","to":""}' })).status, 404);
 });

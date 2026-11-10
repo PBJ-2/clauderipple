@@ -2227,6 +2227,49 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         sendJson(res, result.status, result.body);
         return;
       }
+      if (pathname === "/api/mod/approval" || pathname === "/api/mod/approval/done" || pathname === "/api/mod/moved") {
+        // The Claude app sessions' mod: its permission holds (the phone answers them) and its own /clear moves.
+        res.setHeader("cache-control", "no-store");
+        if (crossSiteOrigin(req) || req.headers["sec-fetch-site"] === "cross-site") {
+          sendJson(res, 403, { error: "same-origin phone control required" }); return;
+        }
+        const modRoute = pathname.slice("/api/".length);
+        const poll = modRoute === "mod/approval" && method === "GET";
+        if (!poll && method !== "POST") { sendJson(res, 404, { error: "unknown phone endpoint or method" }); return; }
+        const askIdOk = (value: unknown): value is string => typeof value === "string" && /^[\w-]{1,100}$/.test(value);
+        let body: string | undefined;
+        let query: string | undefined;
+        let sentAt: string | undefined;
+        if (poll) {
+          const params = new URL(url, "http://127.0.0.1").searchParams;
+          query = params.get("askId") ?? undefined;
+          if (!askIdOk(query) || params.getAll("askId").length !== 1) { sendJson(res, 400, { error: "invalid approval" }); return; }
+          // The time the hook sent this poll (its clock, whole milliseconds): the host dates the poll by it. An older mod sends none.
+          const sent = params.getAll("sentAt");
+          if (sent.length > 1 || sent.length === 1 && !/^\d{1,15}$/.test(sent[0]!)) { sendJson(res, 400, { error: "invalid approval" }); return; }
+          sentAt = sent[0];
+        } else {
+          // An approval carries the tool's whole input (up to the mod's 480 KB cap, so 512 KB here, as the host);
+          // the approval's answer and a move are small.
+          const cap = modRoute === "mod/approval" ? 512 * 1024 : 4096;
+          try { body = (await readBody(req, cap, new Error("mod body too large"))).toString("utf8"); }
+          catch { sendJson(res, 400, { error: "invalid mod request" }); return; }
+          let raw: unknown;
+          try { raw = JSON.parse(body); } catch { sendJson(res, 400, { error: "invalid mod request" }); return; }
+          if (!raw || typeof raw !== "object" || Array.isArray(raw)) { sendJson(res, 400, { error: "invalid mod request" }); return; }
+          const value = raw as Record<string, unknown>;
+          const keys = Object.keys(value);
+          // The host validates an approval's fields in full; here only its id is checked, as the host does too.
+          const valid = modRoute === "mod/approval" ? askIdOk(value.askId)
+            : modRoute === "mod/approval/done" ? askIdOk(value.askId) && keys.length === 1
+            : askIdOk(value.itemId) && typeof value.from === "string" && value.from.length <= 200 && typeof value.to === "string" && value.to.length <= 200 && keys.every(key => key === "itemId" || key === "from" || key === "to");
+          if (!valid) { sendJson(res, 400, { error: "invalid mod request" }); return; }
+        }
+        // The host's status is relayed as is: the mod reads 409 from a move probe and any non-200 as "use the Mac's dialog".
+        const result = await phoneRequest(modRoute, method, body, deps.phone, query, sentAt);
+        sendJson(res, result.status, result.body);
+        return;
+      }
       if (pathname.startsWith("/api/phone/")) {
         res.setHeader("cache-control", "no-store");
         // Pairing is a credential read: guard cross-site GETs too. Host is checked above.
