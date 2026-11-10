@@ -56,7 +56,9 @@ test("live provider exhaustion beats a green connection probe and disappears aft
   const make = new Function('status', 'stateFor', 'probeIsStale', 't', `${source.slice(start, end)}; return providerConnection;`) as (status: unknown, state: () => unknown, stale: () => boolean, t: (s: string) => string) => (name: string) => { level: string; text: string };
   const connection = make(status, () => ({ ok: true }), () => false, key => key);
   assert.equal(connection('p').level, 'warn');
-  assert.match(connection('p').text, /insufficient balance/);
+  // The reason goes through the dashboard's t(): the identity t here shows the key, not the router's "insufficient_balance".
+  assert.match(connection('p').text, /providerStatus\.insufficientBalance/);
+  assert.doesNotMatch(connection('p').text, /insufficient_balance/);
   delete status.providers.p!.exhaustion;
   assert.equal(connection('p').level, 'ok');
 });

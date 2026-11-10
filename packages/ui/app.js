@@ -1158,7 +1158,8 @@ function credentialLine(name) {
   const pool = (status && status.credentials && status.credentials[name]) || [];
   if (!pool.length) return null;
   const parts = pool.map((c) => {
-    const who = c.label || c.id;
+    // The router names the Claude login in English ("Current Claude session") and an account nobody named "Claude account"; the screen says them in its language.
+    const who = c.id === "current" ? t("providers.anthropicCurrentLogin") : c.label === "Claude account" ? t("providers.claudeAccountDefault") : c.label || c.id;
     if (c.state === "quarantined") return `${who}: ${t("pool.quarantined")}`;
     if (c.state === "cooling") return `${who}: ${t("pool.cooling", { seconds: c.cooldownSeconds ?? 0 })}`;
     return `${who}: ${t("pool.ready")}`;
@@ -1175,7 +1176,11 @@ function credentialLine(name) {
 function providerConnection(name) {
   const live = status && status.providers && status.providers[name];
   // A successful TCP probe (or an older model probe) cannot undo a real billing refusal.
-  if (live && live.exhaustion) return { level: "warn", text: `${live.exhaustion.reason.replace(/_/g, " ")} · ${new Date(live.exhaustion.until).toLocaleTimeString()}` };
+  if (live && live.exhaustion) {
+    // The router's reason is its own English word; the dashboard says it in its language, with the mod's wording (workers.ts unavailableReason).
+    const reasons = { insufficient_balance: "providerStatus.insufficientBalance", billing_exhausted: "providerStatus.billingExhausted", quota_exhausted: "providerStatus.quotaExhausted" };
+    return { level: "warn", text: `${t(reasons[live.exhaustion.reason] || "providerStatus.unavailable")} · ${new Date(live.exhaustion.until).toLocaleTimeString()}` };
+  }
   // Reaching the host is not the same as being able to use it. A ChatGPT provider with no
   // credentials would otherwise read "Connected" and send the user off believing it works.
   if (live && live.needsLogin) return { level: "warn", text: t("providerStatus.loginNeeded") };

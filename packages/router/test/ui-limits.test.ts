@@ -555,3 +555,38 @@ test("the 5-hour and weekly window names are the mod's, verbatim in every langua
     }
   }
 });
+
+test("the pool line names the Claude login and an unnamed Claude account in the dashboard's language", async () => {
+  const ui = limitsUi(async () => ({}), {
+    providers: connected,
+    credentials: { claude: [{ id: "current", label: "Current Claude session", state: "ready", failures: 0 }, { id: "stored", label: "Claude account", state: "ready", failures: 0 }] },
+  });
+  await ui.refresh();
+  assert.ok(text(ui.card.children[0]!).includes(`${t("providers.anthropicCurrentLogin")}: ${t("pool.ready")}`));
+  assert.ok(text(ui.card.children[0]!).includes(`${t("providers.claudeAccountDefault")}: ${t("pool.ready")}`));
+  assert.doesNotMatch(text(ui.card), /Current Claude session/, "the router's login label is not shown");
+});
+
+test("a provider's exhaustion names its reason in the dashboard's language, not the router's word", async () => {
+  const ui = limitsUi(async () => ({}), { providers: { ...connected, gpt: { reachable: true, exhaustion: { reason: "billing_exhausted", until: now + 3_600_000 } } } });
+  await ui.refresh();
+  assert.ok(text(ui.card.children[1]!).includes(t("providerStatus.billingExhausted")));
+  assert.doesNotMatch(text(ui.card), /billing_exhausted/);
+});
+
+test("the exhaustion reasons are the mod's words: Korean and English verbatim, the other languages keep the mod's English", () => {
+  const modSource = fs.readFileSync(path.join(uiDir, "../mod/hooks/workers.ts"), "utf8");
+  const reasons = [...modSource.matchAll(/insufficient_balance: '([^']*)', billing_exhausted: '([^']*)', quota_exhausted: '([^']*)'/g)];
+  assert.equal(reasons.length, 2, "the mod's reason labels are Korean, then English");
+  const [ko, en] = reasons.map((match) => match.slice(1));
+  const keys = ["providerStatus.insufficientBalance", "providerStatus.billingExhausted", "providerStatus.quotaExhausted"];
+  keys.forEach((key, index) => {
+    assert.equal(dictionaries.ko![key], ko![index], `ko ${key}`);
+    // The mod words these in Korean and English only; the other languages carry the mod's English, as the mod's pane does.
+    for (const lang of ["en", "zh", "ja", "es", "pt"]) assert.equal(dictionaries[lang]![key], en![index], `${lang} ${key}`);
+  });
+  const fallback = modSource.match(/'(현재 사용 불가)' : '(currently unavailable)'/);
+  assert.ok(fallback, "the mod's unavailable wording");
+  assert.equal(dictionaries.ko!["providerStatus.unavailable"], fallback[1]);
+  assert.equal(dictionaries.en!["providerStatus.unavailable"], fallback[2]);
+});
