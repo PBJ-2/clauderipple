@@ -191,10 +191,7 @@
     </header>
     <div id="logs-requests-panel" role="tabpanel" aria-labelledby="logs-requests-tab">
       <section class="section">
-        <div class="logs-header-row">
-          <div><h2 class="section-title" data-i18n="logs.usage">Usage</h2><span class="small" id="logs-range-caption"></span></div>
-          <label class="logs-filter"><span data-i18n="logs.provider">Provider</span><select id="logs-provider"><option value="" data-i18n="logs.all">All</option></select></label>
-        </div>
+        <!-- One toolbar for what the numbers and the list below cover: the period, then the provider. -->
         <div class="logs-period-row">
           <div class="segmented logs-period" id="logs-period" role="radiogroup" data-i18n-title="logs.period"></div>
           <div class="logs-custom" id="logs-custom" hidden>
@@ -202,9 +199,13 @@
             <span class="logs-custom-dash" aria-hidden="true">–</span>
             <input type="date" id="logs-to" data-i18n-title="logs.customTo" />
           </div>
+          <label class="logs-filter"><span data-i18n="logs.provider">Provider</span><select id="logs-provider"><option value="" data-i18n="logs.all">All</option></select></label>
+        </div>
+        <div class="logs-header-row">
+          <div><h2 class="section-title" data-i18n="logs.usage">Usage</h2><span class="small" id="logs-range-caption"></span></div>
         </div>
         <div class="group logs-summary" id="logs-summary"></div>
-        <div class="small logs-cost-note" id="logs-cost-note" hidden></div>
+        <div class="logs-cost-note" id="logs-cost-note" hidden></div>
       </section>
       <section class="section">
         <div class="logs-header-row"><h2 class="section-title" data-i18n="logs.byModel">Usage by model</h2></div>

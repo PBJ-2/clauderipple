@@ -702,9 +702,11 @@ label.check input { margin-top: 2px; }
 
 /* ---- Logs ---------------------------------------------------------------------------- */
 
-.logs-header-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 0 4px 8px; }
+/* The mod's pane in table form: figures in tabular numerals lined up on the right, graphite text,
+   a provider named with its vendor's dot, and colour only where a request failed. */
+.logs-header-row { display: flex; align-items: baseline; justify-content: space-between; gap: 4px 12px; flex-wrap: wrap; margin: 0 4px 8px; }
 .logs-header-row .section-title { display: inline; }
-.logs-header-row .small { margin-left: 8px; }
+.logs-header-row .small { margin-left: 8px; font-size: var(--fs-cap); }
 .logs-summary { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); }
 /* The cost chip is a seventh when the router prices requests; its note stands under the chips. Seven
    in a row only in a wide window (the labels would be cut), else four and three. */
@@ -719,69 +721,102 @@ label.check input { margin-top: 2px; }
   .logs-summary.with-cost .logs-chip:nth-child(5)::before { display: block; }
   .logs-summary.with-cost .logs-chip:nth-child(n + 5) { border-top: 0; }
 }
-.logs-cost-note { margin: 8px 4px 0; }
-.logs-cost-note > div + div { margin-top: 2px; }
-.logs-chip { position: relative; min-width: 0; padding: 14px 16px; }
+.logs-cost-note { margin: 8px 16px 0; color: var(--label-2); font-size: var(--fs-cap); line-height: 1.5; }
+.logs-cost-note > div + div { margin-top: 1px; }
+/* The figures read as Status's tiles: a small grey label over a figure, a quieter line under it. */
+.logs-chip { position: relative; min-width: 0; padding: 12px 16px 13px; }
 .logs-chip + .logs-chip::before { content: ""; position: absolute; left: 0; top: 14px; bottom: 14px; width: 1px; background: var(--separator); }
-.logs-chip .label { display: block; color: var(--label-2); font-size: var(--fs-foot); margin-bottom: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.logs-chip .value { display: block; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.logs-chip .sub { display: block; margin-top: 1px; color: var(--label-2); font-size: var(--fs-cap); white-space: nowrap; }
-.logs-filter { display: inline-flex; align-items: center; gap: 8px; color: var(--label-2); font-size: var(--fs-foot); }
-.logs-filter select { width: auto; min-width: 130px; min-height: 28px; }
+.logs-chip .label { display: block; margin-bottom: 4px; color: var(--label-2); font-size: var(--fs-cap); font-weight: 500; letter-spacing: 0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.logs-chip .value { display: block; color: var(--label); font-size: 19px; font-weight: 600; line-height: 1.25; letter-spacing: -0.015em; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.logs-chip .sub { display: block; margin-top: 2px; color: var(--label-2); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* A compacted figure ("78.9억") carries the whole number on hover. */
+.logs-chip .value[title] { cursor: help; }
+.logs-filter { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; color: var(--label-2); font-size: var(--fs-foot); }
+.logs-filter select { width: auto; min-width: 140px; max-width: 220px; min-height: 28px; }
 .logs-table-card { overflow-x: auto; }
-.logs-table-card table { min-width: 860px; }
-/* The usage period: a segmented control, and two date fields beside it for a custom range. */
-.logs-period-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0 0 10px; }
+.logs-table-card table { min-width: 880px; }
+/* What the page covers: the period as a segmented control (two date fields beside it for a custom
+   range), the provider at the row's end. */
+.logs-period-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0 0 22px; }
 .logs-custom { display: inline-flex; align-items: center; gap: 6px; }
 .logs-custom input { width: auto; min-height: 28px; padding: 3px 8px; font-size: var(--fs-foot); font-variant-numeric: tabular-nums; }
 .logs-custom-dash { color: var(--label-3); }
-#models-table { min-width: 660px; }
+#models-table { min-width: 700px; }
 
-table { width: 100%; border-collapse: collapse; font-size: var(--fs-sub); }
-th { padding: 10px 12px 8px; color: var(--label-2); font-size: var(--fs-foot); font-weight: 500; text-align: left; white-space: nowrap; border-bottom: 1px solid var(--separator); }
+table { width: 100%; border-collapse: collapse; font-size: var(--fs-foot); }
+th { padding: 9px 12px 7px; color: var(--label-2); font-size: var(--fs-cap); font-weight: 500; text-align: left; white-space: nowrap; border-bottom: 1px solid var(--separator); }
 th:first-child, td:first-child { padding-left: 16px; }
-td { padding: 9px 12px; vertical-align: middle; border-bottom: 1px solid var(--separator); font-variant-numeric: tabular-nums; }
+th:last-child, td:last-child { padding-right: 16px; }
+td { padding: 8px 12px; vertical-align: middle; border-bottom: 1px solid var(--separator); font-variant-numeric: tabular-nums; }
 tr:last-child td { border-bottom: 0; }
+/* Figures line up on the right, under their heading. */
+#models-table th:nth-child(n + 2), #requests-table th:nth-child(n + 4):not(:last-child),
+td.c-count, td.c-in, td.c-out, td.c-cost, td.c-dur { text-align: right; white-space: nowrap; }
+td.c-count, td.c-out, td.c-cost { color: var(--label); }
+/* A heading over a figure with a pill after it stands over the figure, not over the pill. */
+#models-table th:nth-child(3), #requests-table th:nth-child(4) { padding-right: calc(18px + 6.4 * 11px); }
+#models-table th:nth-child(6), #requests-table th:nth-child(6) { padding-right: calc(18px + 7.6 * 11px); }
+/* A cost with caveats on hover is underlined in dots; the rate explains itself on hover too. */
+td.c-cost[title] { cursor: help; text-decoration: underline dotted var(--label-3); text-underline-offset: 3px; }
+td.c-dur[title] { cursor: help; }
 #requests-table tbody tr.request-row { cursor: pointer; }
-#requests-table tbody tr.request-row:hover td { background: var(--fill); background: color-mix(in srgb, var(--fill) 55%, transparent); }
+#requests-table tbody tr.request-row:hover td, #models-table tbody tr:hover td { background: var(--fill); background: color-mix(in srgb, var(--fill) 50%, transparent); }
 #requests-table td.c-time { color: var(--label-2); white-space: nowrap; }
-.request-models { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.request-models .model { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
-.request-models .small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-/* The provider is read as a name, not a colour: one quiet label for every provider. */
-.provider-badge { flex: 0 0 auto; padding: 1px 7px; border-radius: 5px; background: var(--fill); color: var(--label-2); font-size: var(--fs-cap); font-weight: 500; white-space: nowrap; }
-/* Says what kind of side request a row is; the provider badge beside it stays the plain one. */
-.purpose-tag { flex: 0 0 auto; padding: 1px 7px; border-radius: 5px; border: 1px solid var(--separator); color: var(--label-2); font-size: var(--fs-cap); font-weight: 500; white-space: nowrap; }
-/* A request made on the Fast tier: the accent as an outline and ink only, never a fill. */
-.fast-tag { flex: 0 0 auto; padding: 1px 7px; border-radius: 5px; border: 1px solid var(--accent); color: var(--accent); font-size: var(--fs-cap); font-weight: 600; letter-spacing: 0.02em; white-space: nowrap; }
+#requests-table td.c-effort { color: var(--label-2); }
+.request-models { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.request-models .model { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--label); font-weight: 500; }
+.request-models .small { font-size: var(--fs-cap); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* The provider as Status names it: its vendor's hue as a dot, then the provider's or the account's name. */
+.provider-badge { display: inline-flex; align-items: center; gap: 5px; flex: 0 1 auto; min-width: 0; max-width: 220px; color: var(--label-2); font-size: var(--fs-cap); white-space: nowrap; }
+.provider-badge .vendor-dot { width: 6px; height: 6px; }
+.provider-badge-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.provider-badge[title] { cursor: default; }
+/* What kind of side request a row is, as a plain tag; a Fast request is the one point of violet. */
+.purpose-tag, .fast-tag { flex: 0 0 auto; padding: 0 7px; border-radius: 999px; font-size: 11px; font-weight: 500; line-height: 16px; white-space: nowrap; }
+.purpose-tag { background: var(--fill); color: var(--label-2); }
+.fast-tag { box-shadow: inset 0 0 0 1px var(--accent-line); color: var(--accent); font-weight: 600; letter-spacing: 0.03em; }
 .token-cell { white-space: nowrap; }
-.cache-pill { margin-left: 6px; color: var(--label-2); font-size: var(--fs-cap); }
+/* The cache's share and the rate ride after their figure at a set width, so the figures stay in line. */
+.cache-pill, .rate-pill { display: inline-block; margin-left: 6px; color: var(--label-2); font-size: 11px; text-align: left; white-space: nowrap; }
+.cache-pill { min-width: 6.4em; }
+.rate-pill { min-width: 7.6em; }
 #requests-table td.c-dur, #models-table td.c-dur, #models-table td.c-cost { white-space: nowrap; }
-.rate-pill { margin-left: 6px; color: var(--label-2); font-size: var(--fs-cap); }
 .no-usage { color: var(--label-3); }
-.status-text { font-weight: 500; white-space: nowrap; }
-.status-text.ok { color: var(--ok); }
-.status-text.bad { color: var(--bad); }
-.status-text.resent { color: var(--label-2); font-weight: 400; }
-.request-detail td { padding: 0; background: var(--fill); background: color-mix(in srgb, var(--fill) 45%, transparent); }
-.request-detail-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px 16px; padding: 14px 16px; }
-.request-detail-grid .detail-label { display: block; margin-bottom: 2px; color: var(--label-2); font-size: var(--fs-cap); }
-.request-detail-grid .detail-value { font-family: var(--mono); font-size: var(--fs-foot); word-break: break-word; }
+/* A request that went through reads as quietly as the rest of its row; a failure is the one in red. */
+.status-text { white-space: nowrap; }
+.status-text.ok { color: var(--label-2); }
+.status-text.bad { color: var(--bad); font-weight: 600; }
+.status-text.resent { color: var(--label-3); }
+.request-detail td { padding: 0; background: var(--fill); background: color-mix(in srgb, var(--fill) 40%, transparent); }
+.request-detail-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px 20px; padding: 12px 16px 14px; }
+.request-detail-grid .detail-label { display: block; margin-bottom: 2px; color: var(--label-2); font-size: 11px; font-weight: 500; }
+.request-detail-grid .detail-value { color: var(--label); font-family: var(--mono); font-size: var(--fs-cap); word-break: break-word; }
 .request-note { grid-column: 1 / -1; }
 
 .raw-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 0 4px 8px; }
+.raw-toolbar .small { font-size: var(--fs-cap); }
+.raw-toolbar label.check { font-size: var(--fs-foot); color: var(--label-2); }
 pre#logbox {
   margin: 0;
-  height: 62vh;
-  padding: 14px 16px;
+  height: 64vh;
+  padding: 12px 16px;
   overflow: auto;
-  font: 12.5px/1.6 var(--mono);
+  font: 12px/1.65 var(--mono);
   white-space: pre-wrap;
   word-break: break-all;
 }
 .tag-PASS { color: var(--label-2); }
 .tag-ERR { color: var(--bad); }
 .tag-WARN { color: var(--warn); }
+
+/* A phone: the figures, the period and the provider each take the width; the dates share a line. */
+@media (max-width: 720px) {
+  .logs-filter { flex: 1 1 100%; margin-left: 0; }
+  .logs-filter select { flex: 1 1 auto; max-width: none; }
+  .logs-period-row { margin-bottom: 18px; }
+  .logs-chip { padding: 11px 14px 12px; }
+  .logs-chip .value { font-size: 17px; }
+}
 
 /* ---- ClaudeRipple mod ---------------------------------------------------------------- */
 
@@ -1219,8 +1254,14 @@ a.cell { color: inherit; text-decoration: none; }
   #requests-table td.c-model { order: 1; flex: 1 1 calc(100% - 110px); min-width: 0; padding-right: 10px; }
   #requests-table td.c-status { order: 2; margin-left: auto; font-size: var(--fs-foot); }
   #requests-table td.c-time, #requests-table td.c-effort, #requests-table td.c-in, #requests-table td.c-out, #requests-table td.c-dur { order: 3; color: var(--label-2); font-size: var(--fs-cap); white-space: nowrap; }
-  #requests-table td.c-time::after, #requests-table td.c-effort::after, #requests-table td.c-in::after, #requests-table td.c-out::after { content: "·"; margin: 0 6px; color: var(--label-3); }  #requests-table .request-models .model { max-width: 60vw; }
+  #requests-table td.c-time::after, #requests-table td.c-effort::after, #requests-table td.c-in::after, #requests-table td.c-out::after { content: "·"; margin: 0 6px; color: var(--label-3); }
+  #requests-table .request-models .model { max-width: 60vw; }
   #requests-table .request-models > .small { display: none; }
+  /* In a list line the figures follow one another: their pills keep no set width, an empty one takes none. */
+  #view-logs .cache-pill, #view-logs .rate-pill { min-width: 0; margin-left: 4px; }
+  #view-logs .cache-pill:empty, #view-logs .rate-pill:empty { display: none; }
+  #requests-table .request-models { flex-wrap: wrap; row-gap: 3px; }
+  #requests-table .provider-badge { max-width: 100%; }
   #requests-table tr.request-detail { position: relative; display: block; }
   #requests-table tr.request-detail td { display: block; }
   .request-detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

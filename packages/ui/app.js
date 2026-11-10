@@ -6104,13 +6104,16 @@ function renderProviderFilter(summary, records) {
   for (const model of (summary && Array.isArray(summary.models) ? summary.models : [])) if (model.provider) knownRequestProviders.add(model.provider);
   for (const record of records) if (record.provider) knownRequestProviders.add(record.provider);
   if (requestProvider) knownRequestProviders.add(requestProvider);
-  const names = [...knownRequestProviders].sort();
+  // Listed by the names people know them by, as the rows below name them.
+  const names = [...knownRequestProviders].map((name) => [name, logsProviderTitle(name)]).sort((a, b) => a[1].localeCompare(b[1]) || a[0].localeCompare(b[0]));
   // Rebuilt only when the list changes, so the 3-second refresh does not close an open menu.
-  const key = names.map((name) => `${name}\t${providerLabel(name)}`).join("\n");
+  const key = names.map(([name, title]) => `${name}\t${title}`).join("\n");
   const select = $("#logs-provider");
   if (key !== renderedProviderNames) {
     renderedProviderNames = key;
-    select.replaceChildren(el("option", { value: "", text: t("logs.all") }), ...names.map((name) => el("option", { value: name, text: providerLabel(name) })));
+    // Two providers of one kind would read the same ("ChatGPT"): their keys tell them apart.
+    const twice = new Set(names.map(([, title]) => title).filter((title, index, all) => all.indexOf(title) !== index));
+    select.replaceChildren(el("option", { value: "", text: t("logs.all") }), ...names.map(([name, title]) => el("option", { value: name, text: twice.has(title) && title !== name ? `${title} (${name})` : title })));
   }
   if (select.value !== requestProvider) select.value = requestProvider;
 }
@@ -6131,7 +6134,7 @@ function modelUsageRow(entry) {
     el("span", { class: "model", text: entry.model, title: entry.model }),
     // A WebSearch side request is counted apart from the model's own turns; the router marks it.
     entry.purpose === "web-search" ? el("span", { class: "purpose-tag", text: t("logs.webSearch"), title: t("logs.webSearchHelp") }) : null,
-    el("span", { class: `provider-badge ${providerClass(entry.provider)}`, text: providerLabel(entry.provider) }),
+    providerBadge(entry.provider, logsProviderTitle(entry.provider)),
   ]);
   // The labels show only where a narrow window drops the header row.
   return el("tr", {}, [
@@ -6142,7 +6145,8 @@ function modelUsageRow(entry) {
     modelCostCell(entry),
     el("td", { class: "c-dur", "data-label": t("logs.th.avg"), title: rate === null ? undefined : t("logs.modelRateHelp") }, [
       formatSeconds(entry.avgMs),
-      rate === null ? null : el("span", { class: "rate-pill", text: t("logs.rateApprox", { value: rateValue(rate) }) }),
+      // An empty pill keeps the column's figures lined up where a row has no rate.
+      el("span", { class: "rate-pill", ...(rate === null ? { "aria-hidden": "true" } : { text: t("logs.rateApprox", { value: rateValue(rate) }) }) }),
     ]),
   ]);
 }
@@ -6192,6 +6196,18 @@ function rateValue(rate) {
 function formatRate(rate) {
   return t("logs.rate", { value: rateValue(rate) });
 }
+/** A provider as people know it ("Claude", "OpenCode Go"), as Status names it: the config this page holds, else the one the Logs view read. */
+function logsProviderEntry(name) {
+  const providers = (currentConfig && currentConfig.providers) || configuredProviders || {};
+  return providers[name];
+}
+function logsProviderTitle(name) { return providerTitle(name, logsProviderEntry(name)); }
+/** A provider's mark on a row: its vendor's hue as a dot, then a name (the provider's, or the account's). */
+function providerBadge(name, text, title) {
+  const dot = el("span", { class: "vendor-dot", "aria-hidden": "true" });
+  dot.style.color = providerHue(name, logsProviderEntry(name));
+  return el("span", { class: `provider-badge ${providerClass(name)}`, ...(title ? { title } : {}) }, [dot, el("span", { class: "provider-badge-name", text })]);
+}
 function requestAccount(record) {
   // The current login has a name only when its row snapshotted the email; an older row says just that it was the login.
   if (record.account === "current") return record.accountLabel || t("providers.anthropicCurrent");
@@ -6210,7 +6226,7 @@ function requestDetail(record) {
     [t("logs.detail.cacheWrite"), record.usage && record.usage.cacheWrite ? formatNumber(record.usage.cacheWrite) : t("logs.none")],
   ];
   const account = requestAccount(record);
-  if (account) details.push([t("logs.provider"), providerLabel(record.provider)], [t("logs.detail.account"), account]);
+  if (account) details.push([t("logs.provider"), logsProviderTitle(record.provider)], [t("logs.detail.account"), account]);
   // Both tiers side by side: the ChatGPT sign-in often serves `default` for a request made on
   // `priority` (#54), so the served tier cannot be the FAST badge's basis; the requested one is.
   if (record.requestedTier || record.servedTier) details.push([t("logs.detail.tier"), `${record.requestedTier || t("logs.none")} / ${record.servedTier || t("logs.none")}`]);
@@ -6229,9 +6245,9 @@ function requestRow(record) {
     el("span", { class: "model", text: record.target }),
     source && source !== record.target ? el("span", { class: "small", text: `(${source})` }) : null,
     record.purpose === "web-search" ? el("span", { class: "purpose-tag", text: t("logs.webSearch"), title: t("logs.webSearchHelp") }) : null,
-    // The account says more than the provider's id, which is often an address of its own: the
-    // badge keeps the provider's colour and names it on hover and in the detail.
-    el("span", { class: `provider-badge ${providerClass(record.provider)}`, text: account || providerLabel(record.provider), ...(account ? { title: providerLabel(record.provider) } : {}) }),
+    // The account says more than the provider's name, which the dot's hue already carries: the
+    // badge names the provider on hover and in the detail.
+    providerBadge(record.provider, account || logsProviderTitle(record.provider), account ? logsProviderTitle(record.provider) : undefined),
     // The requested tier, not the served one: the ChatGPT sign-in answers `default` to a Fast request (#54).
     record.requestedTier === "priority" ? el("span", { class: "fast-tag", text: "FAST", title: t("logs.fastHelp") }) : null,
   ].filter(Boolean));
@@ -6239,9 +6255,10 @@ function requestRow(record) {
   // which read as a two-token request (2026-09-23). The split is in the detail row.
   const totalInput = record.usage ? totalInputOf(record.usage) : 0;
   const rate = outputRateOf(record);
+  // A row without usage keeps an empty pill, so its dash lines up with the figures above it.
   const input = record.usage
     ? el("span", { class: "token-cell", text: formatNumber(totalInput) }, [el("span", { class: "cache-pill", text: t("logs.cacheHit", { percent: Math.round(record.usage.cached / Math.max(1, totalInput) * 100) }) })])
-    : el("span", { class: "no-usage", text: t("common.notAvailable") });
+    : el("span", { class: "no-usage", text: t("common.notAvailable") }, [el("span", { class: "cache-pill", "aria-hidden": "true" })]);
   const status = record.resent
     ? el("span", { class: "status-text resent", text: `${t("logs.status.resent")} ${record.status}`, title: t("logs.status.resentHelp") })
     : el("span", { class: `status-text ${record.ok ? "ok" : "bad"}`, text: `${record.ok ? t("logs.status.ok") : t("logs.status.error")} ${record.status}` });
@@ -6254,7 +6271,7 @@ function requestRow(record) {
     el("td", { class: record.usage ? "c-out" : "c-out no-usage", text: record.usage ? formatNumber(record.usage.output) : t("common.notAvailable") }),
     el("td", { class: "c-dur", title: rate === null ? undefined : t("logs.rateHelp") }, [
       formatSeconds(record.ms),
-      rate === null ? null : el("span", { class: "rate-pill", text: formatRate(rate) }),
+      el("span", { class: "rate-pill", ...(rate === null ? { "aria-hidden": "true" } : { text: formatRate(rate) }) }),
     ]),
     el("td", { class: "c-status" }, [status]),
   );
