@@ -437,6 +437,13 @@ function limitsReset(window, weekly, now) {
   // Under an hour the countdown is minutes alone ("34분 후 초기화", not "0시간 34분 후 초기화"): the
   // sentence's hour figure and its unit are dropped, its own minutes unit and wording kept.
   if (hours === 0) return t("limits.resetsIn").replace(/\{hours\}[^{]*?(?=\{minutes\})/, "").split("{minutes}").join(String(minutes));
+  // An exact hour is hours alone ("2시간 후 초기화", not "2시간 0분 후 초기화"): the minutes figure goes with
+  // its unit, the one units.minutes spells, and the sentence's hours and wording stay.
+  if (minutes % 60 === 0) {
+    const unit = t("units.minutes").replace("{n}", "").trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const whole = t("limits.resetsIn").replace(new RegExp(`\\s*\\{minutes\\}\\s*${unit}`), "");
+    if (unit && !whole.includes("{minutes}")) return whole.split("{hours}").join(String(hours));
+  }
   return t("limits.resetsIn", { hours, minutes: minutes % 60 });
 }
 

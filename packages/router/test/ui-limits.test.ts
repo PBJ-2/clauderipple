@@ -310,6 +310,21 @@ test("a countdown under an hour is minutes alone, in every language's own minute
   }
 });
 
+test("a countdown of whole hours is hours alone, its zero minutes dropped with their unit in every language", () => {
+  const ui = limitsUi(async () => ({}));
+  const exact = text(ui.limitsWindowRow("5-hour", { usedPercent: 10, resetAt: now + 2 * 3600_000 - 1 }, now));
+  assert.ok(exact.includes("resets in 2h"), exact);
+  assert.doesNotMatch(exact, /0m/);
+  assert.ok(text(ui.limitsWindowRow("5-hour", { usedPercent: 10, resetAt: now + 121 * 60_000 }, now)).includes("resets in 2h 1m"));
+  const expected: Record<string, string> = { ko: "2시간 후 초기화", en: "resets in 2h", zh: "2 小时后重置", ja: "2時間後にリセット", es: "se reinicia en 2 h", pt: "redefine em 2 h" };
+  for (const [lang, dict] of Object.entries(dictionaries)) {
+    const unit = dict["units.minutes"]!.replace("{n}", "").trim();
+    const whole = dict["limits.resetsIn"]!.replace(new RegExp(`\\s*\\{minutes\\}\\s*${unit}`), "");
+    assert.ok(!whole.includes("{minutes}") && whole.includes("{hours}"), `${lang} drops the minutes part cleanly`);
+    if (expected[lang]) assert.equal(whole.split("{hours}").join("2"), expected[lang], lang);
+  }
+});
+
 test("a provider's only account keeps its own label as its name; several unnamed accounts stay numbered", () => {
   const ui = limitsUi(async () => ({}));
   const one = (account: Record<string, unknown>) => ui.limitsAccountRow({ type: "minimax", title: "MiniMax", accounts: [account] }, account, now);
