@@ -2607,7 +2607,7 @@ function targetSelect(route) {
   const select = el("select", {});
   select.appendChild(selectOption("", t("slots.passthrough")));
   for (const group of groupedModels(currentConfig)) {
-    const optgroup = el("optgroup", { label: providerLabel(group.name, group.provider) });
+    const optgroup = el("optgroup", { label: providerName(group.name, group.provider) });
     for (const model of group.models) optgroup.appendChild(selectOption(JSON.stringify([group.name, model.id]), labelOf(model)));
     select.appendChild(optgroup);
   }
@@ -2643,8 +2643,13 @@ function slotRow(id, route) {
   effort.setAttribute("aria-label", t("slots.th.effort"));
   const effortCell = el("div", { class: "map-col map-effort" }, [el("span", { class: "map-label", text: t("slots.th.effort") }), effort]);
   const remove = el("button", { class: "icon-btn remove", type: "button", title: t("common.remove"), "aria-label": t("common.remove"), onclick: () => { row.remove(); updateSlotSummary(); scheduleSlotsSave(); } }, [svgIcon("0 0 20 20", ["M10 2.8a7.2 7.2 0 1 0 0 14.4 7.2 7.2 0 0 0 0-14.4z", "M6.6 10h6.8"])]);
+  // Who answers, in its vendor's hue: Claude's own when the row passes through, else the provider picked.
+  const dot = vendorDot("anthropic", { type: "anthropic" });
   function sync() {
     const selected = routeFromTarget(target.value);
+    dot.style.color = selected ? providerHue(selected.provider, currentConfig.providers[selected.provider]) : providerHue("anthropic", { type: "anthropic" });
+    // A row that passes through reads quieter, so the rows that send a model elsewhere stand out.
+    row.classList.toggle("passthrough", !selected);
     const levels = selected ? effortLevelsFor(selected.provider, selected.model) : [];
     const supported = levels.length > 0;
     const prior = effort.value;
@@ -2667,7 +2672,7 @@ function slotRow(id, route) {
   row.append(
     el("div", { class: "map-col map-source" }, [el("span", { class: "map-label", text: t("slots.th.claude") }), source]),
     el("span", { class: "map-arrow", "aria-hidden": "true", text: "→" }),
-    el("div", { class: "map-col map-target" }, [el("span", { class: "map-label", text: t("slots.th.target") }), target]),
+    el("div", { class: "map-col map-target" }, [el("span", { class: "map-label", text: t("slots.th.target") }), el("div", { class: "map-target-control" }, [dot, target])]),
     effortCell,
     el("div", { class: "map-remove" }, [remove]),
   );
@@ -2694,8 +2699,12 @@ async function loadSlots() {
 }
 $("#slots-add").addEventListener("click", () => {
   if (!currentConfig) return;
-  $("#slots-list").appendChild(slotRow(claudeModels[0].id, null));
+  const row = slotRow(claudeModels[0].id, null);
+  $("#slots-list").appendChild(row);
   updateSlotSummary();
+  // The new row lands at the end of a long list: bring it into view and put the focus on its Claude model, so the press visibly did something.
+  row.scrollIntoView({ block: "center", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+  row.querySelector("select").focus({ preventScroll: true });
 });
 function allKnownModelIds(config) { return new Set(groupedModels(config).flatMap((group) => group.models.map((model) => model.id))); }
 // Which providers carry this exact id. One is what lets the router route it with no rule at all;

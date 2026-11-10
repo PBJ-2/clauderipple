@@ -23,6 +23,8 @@ class DomNode {
   disabled = false;
   checked = false;
   isContentEditable = false;
+  // A mapping row colours its vendor dot through the style object, as the page's CSP requires.
+  style: Record<string, string> = {};
   textContent = '';
   private selectedValue: string | undefined;
   readonly classes = new Set<string>();

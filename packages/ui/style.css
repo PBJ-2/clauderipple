@@ -541,24 +541,45 @@ label.check input { margin-top: 2px; }
 
 /* ---- Model mapping ------------------------------------------------------------------- */
 
+/* One dense row per Claude model: the model as a label (a menu that shows itself only on hover or
+   focus), an arrow, who answers it behind its vendor's dot, and the effort. A row that passes through
+   to Claude reads quieter, so the rows that send a model elsewhere are what the eye finds. */
 .map-head, .map-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 18px minmax(0, 1.25fr) 112px 30px;
+  grid-template-columns: minmax(0, 0.9fr) 16px minmax(0, 1.35fr) 104px 30px;
   gap: 10px;
   align-items: center;
 }
-.map-head { padding: 0 16px 8px; color: var(--label-2); font-size: var(--fs-foot); font-weight: 500; }
-.map-row { position: relative; padding: 9px 12px 9px 16px; }
+.map-head { padding: 0 16px 7px; color: var(--label-2); font-size: var(--fs-cap); font-weight: 500; }
+.map-row { position: relative; min-height: 46px; padding: 7px 10px 7px 16px; }
 .map-list > .map-row + .map-row::before { content: ""; position: absolute; top: 0; left: 16px; right: 0; height: 1px; background: var(--separator); }
-.map-arrow { color: var(--label-3); text-align: center; }
+.map-arrow { color: var(--label-3); text-align: center; font-size: var(--fs-foot); }
 .map-label { display: none; }
 .map-col { min-width: 0; }
 .map-col select { width: 100%; }
+.map-source select { margin-left: -9px; width: calc(100% + 9px); padding-left: 8px; border-color: transparent; background-color: transparent; background-image: none; color: var(--label); font-weight: 500; }
+.map-source select:hover { background-color: var(--fill); background-image: var(--chevron); }
+.map-source select:focus { border-color: var(--accent); background-color: var(--field); background-image: var(--chevron); }
+.map-target-control { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.map-target-control > select { flex: 1 1 auto; min-width: 0; }
+.map-row.passthrough .map-target select { border-color: transparent; background-color: transparent; color: var(--label-2); }
+.map-row.passthrough .map-target select:hover { background-color: var(--fill); }
+.map-row.passthrough .map-target select:focus { border-color: var(--accent); background-color: var(--field); }
+.map-row.passthrough .map-target .vendor-dot { opacity: 0.55; }
+.map-effort select { font-variant-numeric: tabular-nums; }
 .map-empty { padding: 14px 16px; color: var(--label-2); font-size: var(--fs-sub); }
 .slots-status { color: var(--label-2); font-size: var(--fs-foot); }
+#slots-status:empty { display: none; }
 .muted-cell { position: relative; }
 .muted-cell::after { content: attr(data-empty); position: absolute; inset: 0; display: grid; place-items: center; color: var(--label-3); pointer-events: none; }
 .muted-cell select:disabled { opacity: 0; }
+#slots-summary { color: var(--label); }
+/* On a phone each row is a small card: the Claude model as its title, who answers and the effort under it. */
+@media (max-width: 860px) {
+  .map-source select { font-size: var(--fs-body); font-weight: 600; }
+  .map-source .map-label { display: none; }
+  .map-row { padding-top: 10px; }
+}
 
 /* ---- Clients ------------------------------------------------------------------------- */
 
