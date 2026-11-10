@@ -607,28 +607,62 @@ label.check input { margin-top: 2px; }
 
 /* ---- Phone --------------------------------------------------------------------------- */
 
-.phone-choice { cursor: pointer; }
-.phone-choice input { flex: 0 0 auto; }
-.phone-qr:not(:empty) { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 12px; padding: 16px; }
-.phone-qr-image { display: block; flex: 0 0 240px; width: 240px; height: 240px; padding: 8px; background: #fff; border-radius: 8px; }
+/* The host's state as Status's tiles; a phone as one dense row; the access choice as radio rows whose
+   Save wakes only when the choice differs from what is saved. */
+.phone-tiles .stat-value { font-weight: 500; }
+.phone-tiles .stat-sub { font-size: var(--fs-cap); font-variant-numeric: tabular-nums; }
+.phone-row .cell-label { font-size: var(--fs-sub); }
+.phone-row .cell-sub { font-size: var(--fs-cap); }
+.phone-row .cell-value .tag { font-size: var(--fs-cap); line-height: 18px; }
+.phone-row .cell-value .badge { font-size: var(--fs-foot); color: var(--label); }
+.phone-choice { cursor: pointer; align-items: flex-start; }
+.phone-choice input { flex: 0 0 auto; margin-top: 4px; }
+.phone-choice .cell-label { font-size: var(--fs-sub); }
+.phone-choice .cell-sub { font-size: var(--fs-cap); }
+.phone-choice:has(input:checked) .cell-label { font-weight: 600; }
+/* The QR on white, its two buttons stacked beside it; on a phone they go under it. */
+.phone-qr:not(:empty) { position: relative; display: grid; grid-template-columns: 240px auto; grid-template-rows: auto auto 1fr; justify-content: center; align-items: start; gap: 8px 16px; padding: 16px; }
+.phone-qr:not(:empty)::before { content: ""; position: absolute; top: 0; left: 16px; right: 0; height: 1px; background: var(--separator); }
+.phone-qr-image { display: block; grid-row: 1 / span 3; width: 240px; height: 240px; padding: 8px; background: #fff; border-radius: 10px; box-shadow: 0 0 0 1px var(--group-edge); }
+.phone-qr .btn { justify-self: stretch; }
 #phone-content .cell-value input { width: 280px; max-width: 100%; }
 #phone-content code { display: block; margin-top: 6px; overflow-wrap: anywhere; }
+#phone-content code.phone-install { padding: 6px 8px; border-radius: 6px; background: var(--fill); color: var(--label); font-size: var(--fs-cap); }
 #phone-content > .section:first-child { margin-top: 0; }
+#phone-content .cell-button.destructive { font-size: var(--fs-sub); }
+@media (max-width: 720px) {
+  /* Stacked tiles are divided by a hairline across, not the side-by-side rule. */
+  .phone-tiles .stat-tile + .stat-tile::before { top: 0; bottom: auto; left: 16px; right: 0; width: auto; height: 1px; }
+  .phone-tiles .stat-tile { padding: 11px 16px 12px; }
+  /* A row's buttons go under its words rather than over them. */
+  #phone-content .cell:has(.btn) { flex-wrap: wrap; row-gap: 8px; }
+  #phone-content .cell:has(.btn) > .cell-value { flex: 1 1 100%; max-width: none; justify-content: flex-start; }
+}
+@media (max-width: 520px) {
+  .phone-qr:not(:empty) { grid-template-columns: minmax(0, 240px); grid-template-rows: none; }
+  .phone-qr-image { grid-row: auto; }
+}
 
 /* Ripple Remote, until a phone is paired: the connection card's shape in the accent, like the
    laptop setup card. The QR below pairs from inside the app, so the store has its own button here. */
-.conn-card.remote-promo { --tone: var(--accent-fill); --tint: var(--accent-soft); margin-bottom: 12px; padding-bottom: 20px; }
+/* The violet is the icon and the eyebrow only: the card is the plain surface, its ticks graphite, and
+   the store buttons read as store badges in ink rather than two violet slabs. */
+.conn-card.remote-promo { --tone: var(--accent-fill); --tint: transparent; margin-bottom: 28px; padding-bottom: 20px; }
 .remote-promo:lang(ko) { word-break: keep-all; overflow-wrap: anywhere; }
-.remote-promo .conn-icon svg { stroke-width: 1.9; }
-.remote-eyebrow { margin: 0 0 3px; color: var(--accent); font-size: var(--fs-foot); font-weight: 600; }
-.remote-points { display: grid; gap: 8px; margin: 18px 0 0; padding: 0 0 0 60px; list-style: none; }
-.remote-points li { position: relative; padding-left: 22px; color: var(--label-2); font-size: var(--fs-sub); line-height: 1.45; }
-.remote-points li::before { content: ""; position: absolute; left: 2px; top: 0.42em; width: 9px; height: 5px; border-left: 2px solid var(--accent); border-bottom: 2px solid var(--accent); transform: rotate(-45deg); }
+.remote-promo .conn-icon { width: 40px; height: 40px; box-shadow: 0 0 0 4px var(--accent-soft); }
+.remote-promo .conn-icon svg { width: 20px; height: 20px; stroke-width: 1.9; }
+.remote-promo .conn-title { font-size: 18px; }
+.remote-promo .conn-lead { color: var(--label-2); font-size: var(--fs-sub); }
+.remote-eyebrow { margin: 0 0 3px; color: var(--accent); font-size: var(--fs-cap); font-weight: 600; letter-spacing: 0.01em; }
+.remote-points { display: grid; gap: 7px; margin: 16px 0 0; padding: 0 0 0 56px; list-style: none; }
+.remote-points li { position: relative; padding-left: 22px; color: var(--label-2); font-size: var(--fs-foot); line-height: 1.5; }
+.remote-points li::before { content: ""; position: absolute; left: 2px; top: 0.45em; width: 8px; height: 4px; border-left: 1.8px solid var(--label); border-bottom: 1.8px solid var(--label); transform: rotate(-45deg); }
 .remote-points strong { color: var(--label); font-weight: 600; }
-.remote-get { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin: 20px 0 0 60px; }
-.btn.large.remote-store { width: auto; gap: 8px; }
+.remote-get { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 18px 0 0 56px; }
+.btn.large.remote-store { width: auto; gap: 8px; min-height: 36px; padding: 6px 16px; background: var(--label); color: var(--bg); font-size: var(--fs-sub); }
+.btn.large.remote-store:hover { filter: none; opacity: 0.88; }
 .remote-store-icon { width: 18px; height: 18px; stroke-width: 2; }
-.remote-next { margin: 16px 0 0 60px; padding-top: 14px; border-top: 1px solid var(--separator); color: var(--label-2); font-size: var(--fs-foot); line-height: 1.45; }
+.remote-next { margin: 16px 0 0 56px; padding-top: 12px; border-top: 1px solid var(--separator); color: var(--label-2); font-size: var(--fs-foot); line-height: 1.45; }
 
 /* ---- Providers ----------------------------------------------------------------------- */
 

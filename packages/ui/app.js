@@ -2088,19 +2088,40 @@ function remoteGetApp() {
     externalLink(remotePlayUrl(), "btn secondary compact", [t("phone.promo.googlePlayShort")]),
   ])]);
 }
+/** One figure of the phone host's state, as Status draws its tiles: a small label over the value. */
+function phoneTile(label, value, sub) {
+  return el("div", { class: "stat-tile" }, [
+    el("div", { class: "stat-label", text: label }),
+    el("div", { class: "stat-value" }, [value]),
+    ...(Array.isArray(sub) ? sub : [sub]).filter(Boolean).map((line) => typeof line === "string" ? el("p", { class: "stat-sub", text: line }) : line),
+  ]);
+}
 function renderPhoneStatus(data) {
-  const rows = [cell(t("phone.host"), badge(data.hostRunning ? "ok" : "warn", t(data.hostRunning ? "phone.running" : "phone.stopped")))];
-  if (data.hostRunning) rows.push(cell(t("phone.mode"), el("span", { text: t(data.mode === "relay" ? "phone.relayStatus" : data.mode === "direct" ? "phone.directStatus" : "phone.localStatus") }), `${data.bind}:${data.port} · ${data.version}`),
-    cell(t("phone.notifications"), badge(data.pushReady ? "ok" : "warn", t(data.pushReady ? "phone.ready" : "phone.needsRelay"))));
-  else rows.push(el("div", { class: "cell-note" }, [hint(t("phone.install")), el("code", { text: data.hint })]));
-  $("#phone-status").replaceChildren(...rows);
+  const host = phoneTile(t("phone.host"), badge(data.hostRunning ? "ok" : "warn", t(data.hostRunning ? "phone.running" : "phone.stopped")),
+    data.hostRunning ? null : [el("p", { class: "stat-sub", text: t("phone.install") }), el("code", { class: "phone-install", text: data.hint })]);
+  const tiles = [host];
+  if (data.hostRunning) tiles.push(
+    phoneTile(t("phone.mode"), el("span", { text: t(data.mode === "relay" ? "phone.relayStatus" : data.mode === "direct" ? "phone.directStatus" : "phone.localStatus") }), `${data.bind}:${data.port} · ${data.version}`),
+    phoneTile(t("phone.notifications"), badge(data.pushReady ? "ok" : "warn", t(data.pushReady ? "phone.ready" : "phone.needsRelay"))),
+  );
+  $("#phone-status").replaceChildren(...tiles);
   if (!data.hostRunning) return;
+  // A phone is one line: its id, when it was last seen and whether it gets notifications, its state on the right.
   $("#phone-phones").replaceChildren(...(data.phones.length ? data.phones.map(phone => cell(
-    el("span", { class: "cell-label mono", text: phone.clientId.length > 12 ? `${phone.clientId.slice(0, 12)}…` : phone.clientId, title: phone.clientId }),
-    badge(phone.connected ? "ok" : "", t(phone.connected ? "phone.connected" : "phone.offline")),
-    [phone.lastSeen ? t("phone.lastSeen", { time: new Date(phone.lastSeen).toLocaleString(CURRENT_LANG) }) : t("phone.unknownSeen"), t(phone.push ? "phone.pushOn" : "phone.pushOff")],
+    el("span", { class: "cell-label mono phone-id", text: phone.clientId.length > 12 ? `${phone.clientId.slice(0, 12)}…` : phone.clientId, title: phone.clientId }),
+    phone.connected ? badge("ok", t("phone.connected")) : el("span", { class: "tag", text: t("phone.offline") }),
+    `${phone.lastSeen ? t("phone.lastSeen", { time: new Date(phone.lastSeen).toLocaleString(CURRENT_LANG) }) : t("phone.unknownSeen")} · ${t(phone.push ? "phone.pushOn" : "phone.pushOff")}`,
+    "phone-row",
   )) : [el("div", { class: "cell-note", text: t("phone.empty") })]));
   $("#phone-restart").hidden = !data.restartRequired;
+  phoneSyncSave();
+}
+/** The access choice saved now; Save stays off until a different one is picked, so pressing it always changes something. */
+function phoneSavedMode() { return phoneSnapshot && phoneSnapshot.settings && phoneSnapshot.settings.relay ? "relay" : "local"; }
+function phoneSyncSave() {
+  const save = $("#phone-save");
+  const picked = $('#phone-content input[name="phone-mode"]:checked');
+  if (save && picked && !phoneBusy) save.disabled = picked.value === phoneSavedMode();
 }
 function phoneSettings(data) {
   // The phone app pairs through the Relay only, so phone access is on (Relay) or off. A custom
@@ -2109,9 +2130,10 @@ function phoneSettings(data) {
   const selected = saved.relay ? "relay" : "local";
   const choices = ["relay", "local"].map(value => {
     const radio = el("input", { type: "radio", name: "phone-mode", value, checked: value === selected });
+    radio.addEventListener("change", phoneSyncSave);
     return el("label", { class: "cell phone-choice" }, [radio, el("span", { class: "cell-text" }, [el("span", { class: "cell-label", text: t(`phone.choice.${value}`) }), el("span", { class: "cell-sub", text: t(`phone.help.${value}`) })])]);
   });
-  const save = el("button", { class: "btn", type: "button", text: t("common.save") });
+  const save = el("button", { class: "btn", type: "button", id: "phone-save", text: t("common.save"), disabled: "" });
   save.addEventListener("click", async () => {
     if (phoneBusy) return;
     const mode = $('#phone-content input[name="phone-mode"]:checked').value;
@@ -2122,7 +2144,7 @@ function phoneSettings(data) {
       toast(t(result.restartRequired ? "phone.restartRequired" : "common.saved"));
       await refreshPhone();
     } catch (error) { toast(t("common.saveFailed"), true, error.message); }
-    finally { phoneBusy = false; save.disabled = false; }
+    finally { phoneBusy = false; phoneSyncSave(); }
   });
   return section(t("phone.settings"), [...choices, cell(t("phone.apply"), save)]);
 }
@@ -2155,8 +2177,10 @@ function phoneControls(data) {
   });
   const phones = section(t("phone.phones"), []);
   $(".group", phones).id = "phone-phones";
-  return [section(t("phone.pairing"), [cell(t("phone.scan"), qr, t("phone.scanHelp")), el("div", { id: "phone-qr", class: "phone-qr" })], [t("phone.qrWarning"), !data.reachableFromPhone ? t("phone.unreachable") : null]),
-    phoneSettings(data), phoneRestart(), phones, phonePaired(data) ? remoteGetApp() : null, section(null, [rotate], t("phone.sharedKey"))].filter(Boolean);
+  // What is paired first, then how to pair another and get the app for it; the access setting, the
+  // restart it may need and the key reset come last, as the rarer things to change.
+  return [phones, section(t("phone.pairing"), [cell(t("phone.scan"), qr, t("phone.scanHelp")), el("div", { id: "phone-qr", class: "phone-qr" })], [t("phone.qrWarning"), !data.reachableFromPhone ? t("phone.unreachable") : null]),
+    phonePaired(data) ? remoteGetApp() : null, phoneSettings(data), phoneRestart(), section(null, [rotate], t("phone.sharedKey"))].filter(Boolean);
 }
 async function refreshPhone(rebuild = false) {
   if (!phoneActive() || offline()) return;
@@ -2167,8 +2191,9 @@ async function refreshPhone(rebuild = false) {
     // Pairing the first phone (or unpairing the last) swaps the pitch for its one-row form, so it rebuilds too.
     if (rebuild || !phoneSnapshot || phoneSnapshot.hostRunning !== data.hostRunning || phonePaired(phoneSnapshot) !== phonePaired(data)) {
       hidePhoneQr();
+      // The host, how phones reach it and whether notifications go out: three tiles in one surface.
       const state = section(t("phone.status"), []);
-      $(".group", state).id = "phone-status";
+      Object.assign($(".group", state), { id: "phone-status", className: "group stat-tiles phone-tiles" });
       $("#phone-content").replaceChildren(...(phonePaired(data) ? [] : [remotePromo(data)]), state, ...(data.hostRunning ? phoneControls(data) : []));
     }
     phoneSnapshot = data;
