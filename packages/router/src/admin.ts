@@ -335,9 +335,11 @@ async function claudeAccountUsage(deps: AdminDeps): Promise<{ id: string; label:
 /** One window the limits row reads. `reset_at` is epoch seconds, as the other readers use. */
 /**
  * `exhaust_at` (epoch seconds) is present only when the window's average pace since it started reaches
- * 100% before its reset; see limit-forecast.ts for the rule.
+ * 100% before its reset. `projected_percent` (an integer, may exceed 100) is the used percent the window
+ * reaches at its reset at that pace; present only when used_percent is above 0 and the pace is trusted
+ * (the same preconditions as `exhaust_at`). See limit-forecast.ts for the rule.
  */
-export type LimitsWindow = { kind: "five_hour" | "seven_day" | "scoped" | "window"; label?: string; used_percent: number; window_minutes?: number; reset_at?: number; exhaust_at?: number };
+export type LimitsWindow = { kind: "five_hour" | "seven_day" | "scoped" | "window"; label?: string; used_percent: number; window_minutes?: number; reset_at?: number; exhaust_at?: number; projected_percent?: number };
 /**
  * One account's windows. `account` is the account's own index, stable while others come and go, so
  * the mod's "Claude 1"/"Claude 2" do not swap. `label` is the name the owner gave it (absent for the

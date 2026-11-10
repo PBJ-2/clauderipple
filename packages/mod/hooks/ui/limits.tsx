@@ -19,6 +19,8 @@
 //
 // A window the router expects to run out before its reset (`exhaustsAt`, 2026-11-09) is at least
 // amber, red within the hour, and says under its reset how long until it runs out at its pace.
+// Any other window with a projection (`projectedPercent`, 2026-11-10) says under its reset where its
+// pace takes it at the reset: comfortable in the muted tone, tight (80 to 100%) in amber.
 // After the windows a cost tile says what the requests cost at public API prices (see costDrawn).
 //
 // The pane redraws when the limits are read again (once a minute at most) and as the minute
@@ -38,7 +40,7 @@ import type { Look } from './look'
 import { canDraw, textButton } from './parts'
 import type { Els } from './parts'
 import { chOf, displayWidth, limitTone, providerColor, svgDoc, textTone } from './theme'
-import { costFigure, exhaustSentence, providerDisplayName, limitGroupAccount, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTone, resetMoment, timeLeft } from './view'
+import { costFigure, exhaustSentence, paceLevel, paceSentence, providerDisplayName, limitGroupAccount, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTone, resetMoment, timeLeft } from './view'
 import type { Frame, LimitGroup, LimitsActions, LimitsView } from './view'
 
 // ---- What each window says -----------------------------------------------------------------------
@@ -255,6 +257,10 @@ function windowDrawn(el: Els, frame: Frame, group: LimitGroup, item: LimitItem, 
   const reset = resetOf(item, frame.now)
   const label = windowName(item, group, L)
   const exhaust = exhaustSentence(item, frame.now, L)
+  // With no exhaust forecast, the pace says where the window lands at its reset: muted when comfortable, amber when tight.
+  const pace = exhaust ? null : paceLevel(item, frame.now)
+  const note = exhaust || paceSentence(item, frame.now, L)
+  const noteStyle = exhaust ? figureWord(k, tone) : pace === 'tight' ? figureWord(k, 'warn') : k.mute
   // A passed reset leaves a share that may be the old window's, so its figure is quiet.
   const figure = reset.kind === 'passed' ? k.sub : figureWord(k, tone)
   const when: RenderNode[] = reset.kind === 'ahead'
@@ -287,14 +293,14 @@ function windowDrawn(el: Els, frame: Frame, group: LimitGroup, item: LimitItem, 
         <Box key="when" flexDirection="row" flexWrap="wrap" justifyContent="space-between" columnGap={2} paddingLeft={name + 1} width="100%" minWidth={0}>
           {when}
         </Box>
-        {exhaust ? (
-          <Box key="exhaust" paddingLeft={name + 1} width="100%" minWidth={0}>
-            <Text {...figureWord(k, tone)} wrap="wrap">{exhaust}</Text>
+        {note ? (
+          <Box key="note" paddingLeft={name + 1} width="100%" minWidth={0}>
+            <Text {...noteStyle} wrap="wrap">{note}</Text>
           </Box>
         ) : null}
       </Box>
     ),
-    rows: 1.2 + whenLines(reset, whenCells, L, frame.now) * 1.05 + (exhaust ? linesOf(exhaust, whenCells) * 1.05 : 0),
+    rows: 1.2 + whenLines(reset, whenCells, L, frame.now) * 1.05 + (note ? linesOf(note, whenCells) * 1.05 : 0),
   }
 }
 
@@ -514,6 +520,9 @@ function limitsText(el: Els, frame: Frame, view: LimitsView, actions: LimitsActi
             {group.items.map((item, i) => {
               const level = limitItemTone(item, frame.now)
               const exhaust = exhaustSentence(item, frame.now, L)
+              // With no exhaust forecast, the pace says where the window lands at its reset: muted when comfortable, amber when tight.
+              const pace = exhaust ? null : paceLevel(item, frame.now)
+              const note = exhaust || paceSentence(item, frame.now, L)
               const reset = resetOf(item, frame.now)
               const filled = Math.round((Math.max(0, Math.min(100, item.percent)) / 100) * TEXT_BAR)
               const when = reset.kind === 'ahead'
@@ -536,9 +545,9 @@ function limitsText(el: Els, frame: Frame, view: LimitsView, actions: LimitsActi
                   <Box key="when" paddingLeft={name + 2}>
                     <Text color={reset.kind === 'passed' ? tone.warn : undefined} dimColor={reset.kind !== 'passed'} wrap="wrap">{when}</Text>
                   </Box>
-                  {exhaust ? (
-                    <Box key="exhaust" paddingLeft={name + 2}>
-                      <Text color={colorOf(level)} wrap="wrap">{exhaust}</Text>
+                  {note ? (
+                    <Box key="note" paddingLeft={name + 2}>
+                      <Text color={exhaust ? colorOf(level) : pace === 'tight' ? tone.warn : undefined} dimColor={!exhaust && pace !== 'tight'} wrap="wrap">{note}</Text>
                     </Box>
                   ) : null}
                 </Box>

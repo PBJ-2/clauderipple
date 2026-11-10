@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { paceExhaustAt, forecastLimits, type ForecastAccount, type ForecastWindow } from "../src/limit-forecast.ts";
+import { paceExhaustAt, paceProjectedPercent, forecastLimits, type ForecastAccount, type ForecastWindow } from "../src/limit-forecast.ts";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -99,4 +99,55 @@ test("forecastLimits sets exhaust_at only on the windows with a forecast, and no
   assert.equal(a!.exhaust_at, Math.round(NOW_S + 40 * 60));
   assert.equal("exhaust_at" in b!, false, "the weekly at 54% has no field at all");
   assert.equal("exhaust_at" in c!, false, "a stale field is removed");
+});
+
+test("the projection: a weekly window at 54% after 110.4 h of 168 is projected at 82% for its reset", () => {
+  // 54% over 110.4 h is 0.489 points an hour; 168 h at that pace is 82.2%.
+  assert.equal(paceProjectedPercent(win(54, WEEK_MINUTES, 57.6 * HOUR), NOW), 82);
+});
+
+test("the projection: a five-hour window at 60% after one hour is projected at 300%, with an exhaust moment", () => {
+  const window = win(60, FIVE_HOUR_MINUTES, 4 * HOUR);
+  assert.equal(paceProjectedPercent(window, NOW), 300);
+  assert.equal(paceExhaustAt(window, NOW), Math.round(NOW_S + 40 * 60));
+});
+
+test("the projection is too early at 29 min of a five-hour window, and has one at 31 min", () => {
+  assert.equal(paceProjectedPercent(win(60, FIVE_HOUR_MINUTES, (300 - 29) * MIN), NOW), undefined, "29 min into the window");
+  // 60% over 31 min of 300 is 60/1860 a second, so 18000 s at that pace is 580.6%.
+  assert.equal(paceProjectedPercent(win(60, FIVE_HOUR_MINUTES, (300 - 31) * MIN), NOW), 581, "31 min into the window");
+});
+
+test("the projection is absent at 0% and without reset_at or window_minutes", () => {
+  assert.equal(paceProjectedPercent(win(0, WEEK_MINUTES, 57.6 * HOUR), NOW), undefined);
+  assert.equal(paceProjectedPercent({ used_percent: 60, window_minutes: FIVE_HOUR_MINUTES }, NOW), undefined);
+  assert.equal(paceProjectedPercent({ used_percent: 60, reset_at: NOW_S + 4 * 3600 }, NOW), undefined);
+});
+
+test("the projection is absent once the reset has passed", () => {
+  assert.equal(paceProjectedPercent(win(80, WEEK_MINUTES, 0), NOW), undefined, "reset at the reading");
+});
+
+test("the projection may exceed 100, and the exhaust moment is set with it", () => {
+  // 80% after 72 h of 168: 186.7% at the reset, and 100% in 18 h.
+  const window = win(80, WEEK_MINUTES, 96 * HOUR);
+  assert.equal(paceProjectedPercent(window, NOW), 187);
+  assert.equal(paceExhaustAt(window, NOW), Math.round(NOW_S + 18 * 3600));
+});
+
+test("forecastLimits sets projected_percent with exhaust_at, and removes a stale one", () => {
+  const fast = win(60, FIVE_HOUR_MINUTES, 4 * HOUR);
+  const weekly = win(54, WEEK_MINUTES, 57.6 * HOUR);
+  // A window that carries a stale projection from an earlier reading loses it, and gets the one now due.
+  const stale: ForecastWindow = { ...win(2, WEEK_MINUTES, 57.6 * HOUR), projected_percent: 999 };
+  const early: ForecastWindow = { ...win(60, FIVE_HOUR_MINUTES, 4.9 * HOUR), exhaust_at: NOW_S + 60, projected_percent: 999 };
+  const providers = [{ accounts: [{ at: NOW, windows: [fast, weekly, stale, early] }] }];
+  forecastLimits(providers);
+  const [a, b, c, d] = providers[0]!.accounts[0]!.windows;
+  assert.equal(a!.projected_percent, 300);
+  assert.equal(b!.projected_percent, 82);
+  assert.equal(c!.projected_percent, 3, "2% over 110.4 h of a week");
+  assert.equal("exhaust_at" in c!, false, "a stale exhaust_at is removed");
+  assert.equal("projected_percent" in d!, false, "too early for a pace: no field at all");
+  assert.equal("exhaust_at" in d!, false, "too early for a pace: no field at all");
 });

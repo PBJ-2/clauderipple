@@ -10,7 +10,7 @@ registerHooks({ resolve(specifier, context, next) {
 const { claudeScopedFrom, CLAUDE_USAGE_STALE_MS, COST_MODELS, costFromSummary, localMidnight, routerLimitItems } = await import('../../packages/mod/hooks/session.ts')
 const { t } = await import('../../packages/mod/hooks/i18n.ts')
 const { chatgptProviders, gptLimitsFrom } = await import('../../packages/mod/hooks/modes.ts')
-const { providerDisplayName, costFigure, costText, exhaustLeft, exhaustSentence, exhaustShort, exhaustShortWidest, limitItemTone, bandLimitGroups, limitAccountLabel, limitGroupAccount, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTip, narrowLimitGroups, resetMoment, resetShort, timeLeft } = await import('../../packages/mod/hooks/ui/view.ts')
+const { providerDisplayName, costFigure, costText, exhaustLeft, exhaustSentence, exhaustShort, exhaustShortWidest, limitItemTone, bandLimitGroups, limitAccountLabel, limitGroupAccount, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTip, narrowLimitGroups, paceLevel, paceSentence, resetMoment, resetShort, timeLeft } = await import('../../packages/mod/hooks/ui/view.ts')
 const { barArt } = await import('../../packages/mod/hooks/ui/art.ts')
 
 const NOW = Date.parse('2026-10-15T00:00:00Z')
@@ -478,6 +478,67 @@ test('exhaust_at is read in seconds or ms into exhaustsAt; a stale, late or unre
   assert.deepEqual(passed.map(i => [i.percent, i.exhaustsAt]), [[0, undefined]])
 })
 
+// 2026-11-10: the router projects a window's share at its reset at its average pace (`projected_percent`).
+test('projected_percent is read into projectedPercent; unreadable or passed-reset windows have none', () => {
+  const at = NOW / 1000
+  const reset = at + 5 * 3600
+  const win = (extra: Record<string, unknown>) => ({ kind: 'seven_day', used_percent: 54, window_minutes: 10080, reset_at: reset, ...extra })
+  const items = routerLimitItems(forecastBody([
+    win({ projected_percent: 82 }),
+    win({ projected_percent: 'lots' }),
+    win({ projected_percent: Number.NaN }),
+    win({ projected_percent: Number.POSITIVE_INFINITY }),
+    win({}),
+  ]), NOW)
+  assert.deepEqual(items.map(i => i.projectedPercent), [82, undefined, undefined, undefined, undefined])
+  assert.equal('projectedPercent' in items[1]!, false, 'a non-number is no projection at all')
+  // A window whose reset has passed restarts at 0%: its old projection goes with it.
+  const passed = routerLimitItems(forecastBody([win({ reset_at: at - 60, projected_percent: 82 })]), NOW)
+  assert.deepEqual(passed.map(i => [i.percent, i.projectedPercent]), [[0, undefined]])
+  assert.equal('projectedPercent' in passed[0]!, false)
+})
+
+test('the pace sentence: an exhaust forecast wins; under 80 comfortable, 80 to 99 tight, otherwise none', () => {
+  const base = { provider: 'claude', account: 0, kind: 'seven_day' as const, label: '', percent: 54, resetsAt: new Date(NOW + 3 * 86_400_000).toISOString() }
+  const at = (projectedPercent?: number, exhaustMinutes?: number) => ({
+    ...base,
+    ...(projectedPercent !== undefined ? { projectedPercent } : {}),
+    ...(exhaustMinutes !== undefined ? { exhaustsAt: NOW + exhaustMinutes * 60_000 } : {}),
+  })
+  // The exhaust sentence keeps its place; the pace is not said beside it.
+  assert.equal(paceLevel(at(190, 130), NOW), null)
+  assert.equal(paceSentence(at(190, 130), NOW, 'en'), '')
+  assert.equal(exhaustSentence(at(190, 130), NOW, 'en'), 'At this pace it runs out in 2h 10m')
+  // Under 80 projected: comfortable.
+  assert.equal(paceLevel(at(54), NOW), 'comfortable')
+  assert.equal(paceSentence(at(54), NOW, 'en'), 'On track. At this pace usage will reach about 54% before it resets')
+  assert.equal(paceSentence(at(79.4), NOW, 'en'), 'On track. At this pace usage will reach about 79% before it resets')
+  // 80 to 99: tight, the figure rounded.
+  assert.equal(paceLevel(at(80), NOW), 'tight')
+  assert.equal(paceSentence(at(81.6), NOW, 'en'), 'Tight. At this pace usage will reach about 82% before it resets')
+  assert.equal(paceSentence(at(99), NOW, 'en'), 'Tight. At this pace usage will reach about 99% before it resets')
+  // Rounded to 100 without an exhaust moment (it lands right at the reset): still tight.
+  assert.equal(paceLevel(at(100), NOW), 'tight')
+  // Past 100 with no exhaust moment (an old reading) says nothing; no projection says nothing.
+  assert.equal(paceSentence(at(187), NOW, 'en'), '')
+  assert.equal(paceSentence(at(), NOW, 'en'), '')
+  // A passed exhaust moment is no exhaust forecast, so the pace speaks again.
+  assert.equal(paceSentence(at(54, -1), NOW, 'en'), 'On track. At this pace usage will reach about 54% before it resets')
+})
+
+test('a pace sentence goes quiet once its window has reset, before the limits are read again', () => {
+  const item = (resetMinutes: number) => ({ provider: 'claude', account: 0, kind: 'five_hour' as const, label: '', percent: 54, projectedPercent: 54, resetsAt: new Date(NOW + resetMinutes * 60_000).toISOString() })
+  assert.equal(paceLevel(item(1), NOW), 'comfortable')
+  assert.equal(paceLevel(item(0), NOW), null)
+  assert.equal(paceSentence(item(-1), NOW, 'en'), '')
+})
+
+test('the pace sentence reads in Korean as reviewed (2026-11-10)', () => {
+  const item = (projectedPercent: number) => ({ provider: 'claude', account: 0, kind: 'seven_day' as const, label: '', percent: 54, projectedPercent })
+  assert.equal(paceSentence(item(82), NOW, 'ko'), '빠듯합니다. 이 속도라면 초기화 전까지 사용률이 약 82%에 이를 것으로 예상됩니다')
+  assert.equal(paceSentence(item(6), NOW, 'ko'), '여유 있습니다. 이 속도라면 초기화 전까지 사용률이 약 6%에 이를 것으로 예상됩니다')
+})
+
 test('a forecast makes the tone at least amber, red within the hour; no forecast keeps the share\'s tone', () => {
   const win = (percent: number, minutes?: number) => ({ percent, ...(minutes !== undefined ? { exhaustsAt: NOW + minutes * 60_000 } : {}) })
   assert.equal(limitItemTone(win(10), NOW), 'ink')
@@ -619,6 +680,7 @@ test('the cost tile names a provider as the limits pane does, and keeps the id w
 test('every language says the forecast and the cost, with the placeholders the code fills', () => {
   for (const lang of ['en', 'ko', 'zh', 'ja', 'es', 'pt'] as const) {
     assert.match(t(lang, 'limits.exhaust', { time: 'T' }), /T/, lang)
+    for (const key of ['limits.paceComfortable', 'limits.paceTight']) assert.match(t(lang, key, { percent: 'P' }), /P/, lang + ' ' + key)
     for (const key of ['cost.title', 'cost.today', 'cost.week', 'cost.providers', 'cost.models', 'cost.note', 'cost.unavailable']) assert.notEqual(t(lang, key), key, lang + ' ' + key)
     assert.match(t(lang, 'cost.unpriced', { count: 7 }), /7/, lang)
     assert.match(t(lang, 'cost.estimated', { count: 7 }), /7/, lang)

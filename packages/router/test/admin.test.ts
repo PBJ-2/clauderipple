@@ -3553,8 +3553,12 @@ test("GET /api/limits forecasts a window whose average pace reaches 100% before 
     const [fiveHour, weekly] = body.providers[0]!.accounts[0]!.windows;
     // 60% after one hour of a five-hour window: 40 more minutes to 100%, well before its reset.
     assert.ok(Math.abs(fiveHour!.exhaust_at! - (nowS + 2400)) <= 5, `five-hour exhaust_at ${fiveHour!.exhaust_at}`);
+    // The projection is the share at the reset at the average pace: 60% after an hour of five is 300%.
+    assert.equal(fiveHour!.projected_percent, 300);
     // 54% with 57.6 h to the reset of a week: the average pace never reaches 100% in time, so no field.
     assert.equal("exhaust_at" in weekly!, false);
+    // ...but it is 54% after 110.4 h of 168, so the week is projected at 82% for its reset.
+    assert.equal(weekly!.projected_percent, 82);
   }, {
     minimaxUsage: async (name: string, credentialId?: string) => name === "mini" && credentialId === "key-a" ? [
       { kind: "five_hour", used_percent: 60, window_minutes: 300, reset_at: nowS + 4 * 3600 },

@@ -1284,6 +1284,14 @@ The 10% floor keeps the average from being read before it holds a full day and n
 extrapolated around the clock overstated weekly windows (a 52% → 54% hour projected 35+ hours of
 use), and integer percents doubled small rises (a real ~1 point rise read as 2).
 
+The same pace gives a window's **projection** (`projected_percent`, 2026-11-10): the used percent it
+reaches at its reset, `used_percent × window_minutes·60 / elapsed` (that is, rate × window length),
+rounded to an integer. It has the same preconditions as `exhaust_at` (reset and length present, reset
+after `now`, `elapsed` at least min(24 h, 10% of the window)) and needs `used_percent` above 0. It may
+exceed 100, and then `exhaust_at` is set too. The field is absent when none of this holds. The mod
+reads it as a pace sentence only where there is no exhaust forecast: under 80 comfortable, 80 to 99
+tight, and nothing at 100 or more.
+
 - **Server-side threads ("tether").** The first request of a session carries
   `thread: {type:"create"}` and the full history; later turns carry
   `thread: {type:"continue", previous_message_id: <our last assistant msg id>}` and
