@@ -835,13 +835,44 @@ if (APP) {
   void APP.state().then((next) => { shellState = next; renderConnection(); applyOffline(); });
 }
 
+const QUOTA_VIEW_STORE = "clauderipple_quota_remaining";
+let quotaRemaining = false;
+try { quotaRemaining = localStorage.getItem(QUOTA_VIEW_STORE) === "true"; } catch { /* unavailable */ }
+
 function quotaLine(name) {
   const quota = status && status.chatgpt && status.chatgpt.quota && status.chatgpt.quota[name];
-  const primary = quota && quota.rate_limits && quota.rate_limits.primary;
-  if (!primary) return null;
-  // The usage figure is what anyone acts on. The reset countdown was a second number beside it
-  // that nobody does anything with, so it is left out.
-  return t("health.quota", { percent: primary.used_percent, reset: "" });
+  return chatgptQuotaText(quota) || null;
+}
+
+function setQuotaRemaining(remaining) {
+  quotaRemaining = remaining;
+  try { localStorage.setItem(QUOTA_VIEW_STORE, String(remaining)); } catch { /* unavailable */ }
+  for (const node of $all("[data-quota-windows]")) {
+    node.textContent = quotaWindowsText(JSON.parse(node.dataset.quotaWindows));
+  }
+  for (const button of $all(".quota-view-toggle")) {
+    const label = t(quotaRemaining ? "quota.showUsed" : "quota.showRemaining");
+    button.setAttribute("aria-pressed", String(quotaRemaining));
+    button.setAttribute("aria-label", label);
+    button.title = label;
+  }
+  if ($("#health-providers")) renderHealthProviders();
+}
+
+/** One preference for every quota readout; toggling never changes the backend's used percentage. */
+function accountQuotaNode(quota) {
+  const limits = quota && quota.rate_limits;
+  const windows = limits ? [limits.primary, limits.secondary] : [];
+  const text = quotaWindowsText(windows);
+  if (!text) return null;
+  const label = t(quotaRemaining ? "quota.showUsed" : "quota.showRemaining");
+  const button = el("button", { class: "quota-view-toggle", type: "button", title: label, "aria-label": label, "aria-pressed": String(quotaRemaining) }, [
+    svgIcon("0 0 24 24", ["M4 7h16m-4-4 4 4-4 4", "M20 17H4m4-4-4 4 4 4"]),
+  ]);
+  button.addEventListener("click", () => setQuotaRemaining(!quotaRemaining));
+  return el("div", { class: "small account-quota" }, [
+    el("span", { "data-quota-windows": JSON.stringify(windows), text }), button,
+  ]);
 }
 /**
  * One line a person can read. Vendors answer with a JSON body and sometimes an escaped one inside
@@ -2518,6 +2549,8 @@ async function probeProvider(name, provider, onComplete) {
       ? { type: "anthropic", auth: provider.auth, ...(provider.auth === "api-key" && provider.apiKey ? { apiKey: provider.apiKey } : {}) }
       : provider.type === "google"
       ? { type: "google", auth: provider.auth, ...(provider.apiKey ? { apiKey: provider.apiKey } : {}), ...(provider.url ? { url: provider.url } : {}) }
+      : provider.type === "chatgpt"
+      ? { type: "chatgpt", auth: provider.auth, ...(provider.account ? { account: provider.account } : {}) }
       : provider.type === "grok"
       ? { type: "grok", ...Object.fromEntries(["home", "cli", "url", "clientVersion"].filter((key) => provider[key]).map((key) => [key, provider[key]])) }
       : {
@@ -2881,8 +2914,7 @@ function claudeAccountLabel(account) {
 
 /** "5h 14% · weekly 10%" under a Claude account, or nothing while its usage is unknown. */
 function claudeQuotaNode(account) {
-  const text = chatgptQuotaText(account && account.quota);
-  return text ? el("p", { class: "small account-quota", text }) : null;
+  return accountQuotaNode(account && account.quota);
 }
 
 /** "Use first" for an account the pool does not lead with; `null` hands first place back to the current login. */
@@ -3099,8 +3131,9 @@ function quotaWindowsText(windows) {
     if (minutes === 300) return t("quota.window5h");
     return t("quota.windowHours", { hours: Math.round(minutes / 60) });
   };
-  return (windows || []).filter((w) => w && typeof w.used_percent === "number").map((w) => {
-    const line = t("quota.line", { window: windowName(w), percent: Math.round(w.used_percent) }).trim();
+  return (windows || []).filter((w) => w && Number.isFinite(w.used_percent)).map((w) => {
+    const percent = quotaRemaining ? Math.max(0, Math.min(100, 100 - w.used_percent)) : w.used_percent;
+    const line = t(quotaRemaining ? "quota.remainingLine" : "quota.usedLine", { window: windowName(w), percent: Math.round(percent) }).trim();
     if (w.used_percent < 100) return line;
     const at = typeof w.reset_after_seconds === "number" ? Date.now() + w.reset_after_seconds * 1000 : typeof w.reset_at === "number" ? w.reset_at * 1000 : null;
     return at ? `${line} · ${t("quota.resetAt", { time: new Date(at).toLocaleString([], { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) })}` : line;
@@ -3130,9 +3163,46 @@ async function patchChatgptAccount(name, id, change) {
   } catch (error) { toast(t("common.actionFailed"), true, error.message); }
 }
 
+async function saveChatgptBinding(name, account, select) {
+  const previous = currentConfig && currentConfig.providers && currentConfig.providers[name];
+  const previousAccount = (previous && previous.account) || "";
+  select.disabled = true;
+  try {
+    const next = clone(await api("/api/config"));
+    const provider = next.providers && next.providers[name];
+    if (!provider || provider.type !== "chatgpt") throw new Error(t("providers.noSelection"));
+    if (account) provider.account = account;
+    else delete provider.account;
+    const out = await configRequest(next);
+    currentConfig = next;
+    slotsLoaded = false;
+    clientsLoaded = false;
+    configSaved(out, t("common.saved"));
+    await refreshHealth();
+    if (selectedProviderName === name && providerDetailTab === "accounts") renderProviderWorkspace();
+  } catch (error) {
+    select.value = previousAccount;
+    toast(t("common.saveFailed"), true, error.message);
+  } finally { select.disabled = false; }
+}
+
+function renderChatgptBinding(accounts, name) {
+  const target = $("#chatgpt-account-binding");
+  if (!target || target.contains(document.activeElement)) return;
+  const provider = currentConfig && currentConfig.providers && currentConfig.providers[name];
+  const selected = (provider && provider.account) || "";
+  const items = [{ value: "", label: t("providers.chatgptAccountAuto") }, ...accounts.map((account) => ({ value: account.id, label: account.label }))];
+  if (selected && !accounts.some((account) => account.id === selected)) {
+    items.push({ value: selected, label: t("providers.chatgptAccountMissing", { id: selected }) });
+  }
+  const select = modSelect("chatgpt-account-selection", items, selected, t("providers.chatgptAccountBinding"), (value) => void saveChatgptBinding(name, value, select));
+  target.replaceChildren(cell(t("providers.chatgptAccountBinding"), select, [t("providers.chatgptAccountBindingHelp")]));
+}
+
 function renderChatgptAccountRows(target, data, name, generation) {
   if (generation !== providerDetailGeneration) return;
   const accounts = Array.isArray(data.accounts) ? data.accounts : [];
+  renderChatgptBinding(accounts, name);
   const rows = accounts.map((account) => {
     const own = account.source !== "codex";
     const actions = [];
@@ -3162,14 +3232,14 @@ function renderChatgptAccountRows(target, data, name, generation) {
       });
       actions.push(rename, remove);
     }
-    const quota = chatgptQuotaText(account.quota);
+    const quota = accountQuotaNode(account.quota);
     const detail = [account.email && account.email !== account.label ? account.email : null, account.planType || null].filter(Boolean).join(" · ");
     const help = account.state === "needs-login" || account.state === "quarantined" ? t("providers.chatgptReauthHelp") : own ? t("providers.chatgptOwnHelp") : t("providers.chatgptCodexHelp");
     return el("article", { class: `cell account-card${account.inUse ? " current" : ""}` }, [
       el("div", { class: "cell-text account-card-copy" }, [
         el("strong", { text: account.label }),
         detail ? el("span", { class: "small", text: detail }) : null,
-        quota ? el("p", { class: "small account-quota", text: quota }) : null,
+        quota,
         hint(help),
         actions.length ? el("div", { class: "account-card-actions" }, actions) : null,
       ]),
@@ -3333,12 +3403,13 @@ function chatgptAccountsPanel(name) {
   add.addEventListener("click", () => void startChatgptLogin(() => { renderProviderDetail(); void refreshChatgptAccountPanel(name); }, true));
   const rows = el("div", { id: "chatgpt-account-rows", class: "group account-card-list" }, [el("div", { class: "small", text: t("providers.checking") })]);
   const panel = el("div", { class: "provider-panel" }, [
+    el("section", { class: "section" }, [el("div", { id: "chatgpt-account-binding", class: "group" })]),
     el("section", { class: "section" }, [
       el("div", { class: "section-head" }, [el("h3", { class: "section-title", text: t("providers.chatgptAccountsTitle") }), el("span", { id: "chatgpt-account-count", class: "small", text: t("providers.chatgptAccountCount", { count: 0 }) })]),
       rows,
       el("div", { class: "group stacked-add" }, [add]),
       waiting,
-      el("p", { class: "group-footer", text: t("providers.chatgptAccountsSubtitle") }),
+      currentConfig.providers[name].account ? null : el("p", { class: "group-footer", text: t("providers.chatgptAccountsSubtitle") }),
     ]),
   ]);
   queueMicrotask(() => void refreshChatgptAccountPanel(name));

@@ -74,7 +74,7 @@ import { ClaudeOAuthSession, type ClaudeOAuthState } from "./providers/claude-oa
 import { readClaudeAuthFile } from "./providers/anthropic-token-file.ts";
 import { listClaudeAccounts, listClaudeAccountsWithSubject, removeClaudeAccount, updateClaudeAccount, setPreferredClaudeAccount } from "./providers/anthropic-accounts.ts";
 import { storedAccountsFor } from "./pinned-accounts.ts";
-import { readChatGptAccounts, removeChatGptAccount, summarize as summarizeChatGptAccount, updateChatGptAccount } from "./providers/chatgpt/accounts.ts";
+import { ChatGptAccountPool, readChatGptAccounts, removeChatGptAccount, updateChatGptAccount } from "./providers/chatgpt/accounts.ts";
 import { exhaustedForMs, IMAGE_ASPECTS, IMAGE_BACKGROUNDS, IMAGE_FORMATS, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
 import type { GoogleAccountStatus } from "./providers/google/index.ts";
 import { googleWindowsFromGroups, type QuotaGroup } from "./providers/google/usage.ts";
@@ -663,10 +663,11 @@ function tcpReachable(hostname: string, port: number, timeoutMs = 2000): Promise
  * Whether a chatgpt provider has usable credentials, from the files, so the answer is right before
  * the first request is ever made. "auto" accepts either our own login or a Codex CLI one.
  */
-export function chatgptSignedIn(mode: string | undefined): boolean {
-  const own = readChatGptAccounts(homeDir()).length > 0;
-  const borrowed = fs.existsSync(path.join(os.homedir(), ".codex", "auth.json"));
-  return mode === "own" ? own : mode === "borrow-codex" ? borrowed : own || borrowed;
+export function chatgptSignedIn(mode: string | undefined, account?: string): boolean {
+  return new ChatGptAccountPool({
+    home: homeDir(), mode: mode === "own" || mode === "borrow-codex" ? mode : "auto",
+    ...(account !== undefined ? { account } : {}), log: { info() {}, warn() {} },
+  }).signedIn();
 }
 
 /**
@@ -712,7 +713,7 @@ async function chatgptStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}):
   }
   const signedIn: Record<string, boolean> = {};
   for (const [name, p] of Object.entries(deps.config().providers)) {
-    if (p.type === "chatgpt") signedIn[name] = chatgptSignedIn(p.auth);
+    if (p.type === "chatgpt") signedIn[name] = chatgptSignedIn(p.auth, p.account);
   }
   return {
     quota: chatgpt.quota, auth: chatgpt.auth, signedIn, accounts: chatgpt.accounts?.() ?? {},
@@ -1035,7 +1036,10 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
         })(),
         // Reaching the host says nothing about being able to use it: a chatgpt provider with no
         // credentials is not "connected", and calling it that sends the user off believing it works.
-        ...(p.type === "chatgpt" ? { needsLogin: !chatgptSignedIn(p.auth) } : {}),
+        ...(p.type === "chatgpt" ? {
+          needsLogin: !chatgptSignedIn(p.auth, p.account),
+          usable: reachable && !health[name] && (deps.chatgpt?.().accounts?.()[name]?.some((a) => a.state === "ready") ?? chatgptSignedIn(p.auth, p.account)),
+        } : {}),
         ...(p.type === "grok" ? { needsLogin: !grokSignedIn(p) } : {}),
         ...(p.type === "google" && p.auth === "antigravity" ? googleHealth(deps.google?.().accounts?.()[name] ?? []) : {}),
         ...(p.type === "anthropic"
@@ -2382,7 +2386,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           sendJson(res, 400, { error: "expected provider probe object" });
           return;
         }
-        const probe = parsed as { type?: unknown; name?: unknown; auth?: unknown; apiKey?: unknown; url?: unknown; headers?: unknown; modelsUrl?: unknown; modelsAuthHeader?: unknown; probeModel?: unknown; sessionHeader?: unknown; preset?: unknown; wire?: unknown; home?: unknown; cli?: unknown; clientVersion?: unknown };
+        const probe = parsed as { type?: unknown; name?: unknown; account?: unknown; auth?: unknown; apiKey?: unknown; url?: unknown; headers?: unknown; modelsUrl?: unknown; modelsAuthHeader?: unknown; probeModel?: unknown; sessionHeader?: unknown; preset?: unknown; wire?: unknown; home?: unknown; cli?: unknown; clientVersion?: unknown };
         if (probe.type === "anthropic") {
           if (probe.auth === "claude-code") {
             sendJson(res, 200, await probeClaudeCodeAuth(deps));
@@ -2399,19 +2403,31 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           return;
         }
         if (probe.type === "chatgpt") {
-          const statuses = Object.values(deps.chatgpt?.().auth ?? {});
-          const signed = chatgptSignedIn(typeof probe.auth === "string" ? probe.auth : undefined);
-          // Which provider to ask: the form knows the one it is editing, and a provider merely
-          // configured by hand is the only other candidate. Unknown name → ask nobody, show the
-          // measured fallback, which is also what an unreachable catalogue yields.
+          if (probe.account !== undefined && (typeof probe.account !== "string" || !probe.account.trim() || probe.account !== probe.account.trim())) {
+            sendJson(res, 400, { error: "account must be a non-empty local account id without surrounding whitespace" });
+            return;
+          }
+          if (probe.auth !== undefined && probe.auth !== "own" && probe.auth !== "borrow-codex" && probe.auth !== "auto") {
+            sendJson(res, 400, { error: "auth must be own, borrow-codex or auto" });
+            return;
+          }
+          // Older callers send only a provider name. Keep its auth mode, while an omitted account
+          // still means automatic selection (the editor omits it when clearing a binding).
           const providers = deps.config().providers;
           const named = typeof probe.name === "string" && providers[probe.name]?.type === "chatgpt" ? probe.name : undefined;
-          const providerName = named ?? Object.entries(providers).find(([, p]) => p.type === "chatgpt")?.[0];
+          const saved = named ? providers[named] : undefined;
+          const mode = probe.auth ?? (saved?.type === "chatgpt" ? saved.auth : undefined);
+          const account = probe.account as string | undefined;
+          // A draft selection must never probe another binding's account or reuse its catalogue.
+          const matches = (p: Provider | undefined): boolean => p?.type === "chatgpt" && (p.auth ?? "auto") === (mode ?? "auto") && p.account === account;
+          const providerName = named ? (matches(providers[named]) ? named : undefined)
+            : probe.name === undefined ? Object.entries(providers).find(([, p]) => matches(p))?.[0] : undefined;
           const live = providerName ? await deps.chatgpt?.().models?.(providerName) : undefined;
+          const signed = chatgptSignedIn(mode, account);
           const models = live?.length ? live : CHATGPT_FALLBACK_MODELS;
           sendJson(res, 200, {
             ok: signed,
-            auth: signed ? (statuses[0] ?? "ok") : "missing",
+            auth: signed ? (providerName ? deps.chatgpt?.().auth[providerName] ?? "ok" : "ok") : "missing",
             ...(signed ? {} : { error: "no ChatGPT credentials: sign in from the tray menu, or install and sign in to the Codex CLI" }),
             models,
             modelsSource: live?.length ? "catalog" : "fallback",
@@ -2578,7 +2594,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
       }
       if (pathname === "/api/chatgpt-login" && method === "GET") {
         const provider = Object.values(deps.config().providers).find((candidate) => candidate.type === "chatgpt");
-        sendJson(res, 200, { ...chatgptLogin, signedIn: chatgptSignedIn(provider?.auth), accountCount: readChatGptAccounts(homeDir()).length });
+        sendJson(res, 200, { ...chatgptLogin, signedIn: chatgptSignedIn(provider?.auth, provider?.account), accountCount: readChatGptAccounts(homeDir()).length });
         return;
       }
       // Safe account metadata only: labels, emails, plan, rotation state and quota. Tokens and the
@@ -2611,8 +2627,18 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
       if (pathname === "/api/chatgpt-accounts" && method === "GET") {
         const all = deps.chatgpt?.().accounts?.() ?? {};
         const wanted = new URL(url, "http://127.0.0.1").searchParams.get("provider");
-        const name = wanted && all[wanted] ? wanted : Object.keys(all)[0];
-        const accounts = name ? all[name]! : previewAccounts(readChatGptAccounts(homeDir()).map(summarizeChatGptAccount));
+        const providers = deps.config().providers;
+        const name = wanted && providers[wanted]?.type === "chatgpt" ? wanted
+          : wanted && all[wanted] ? wanted : Object.keys(all)[0] ?? Object.keys(providers).find((key) => providers[key]?.type === "chatgpt");
+        const provider = name ? providers[name] : undefined;
+        // Discovery remains unbound so the form can switch accounts. Runtime status/limits above
+        // stay restricted; an unselected discovery row must never claim to be in use.
+        const discovered = previewAccounts(new ChatGptAccountPool({ home: homeDir(), mode: provider?.type === "chatgpt" ? provider.auth ?? "auto" : "auto", log: deps.log }).summaries());
+        const live = name ? all[name] ?? [] : [];
+        const accounts = [...live, ...discovered.filter((account) => !live.some((row) => row.id === account.id)).map((account) => ({
+          ...account, inUse: provider?.type === "chatgpt" && provider.account !== undefined ? false : account.inUse,
+          active: false, quota: null,
+        }))];
         sendJson(res, 200, { provider: name ?? null, accounts });
         return;
       }

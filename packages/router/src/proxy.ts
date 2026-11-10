@@ -312,7 +312,9 @@ export class Proxy {
   /** Latest rate-limit snapshot reported by any chatgpt provider (for the admin GUI). */
   get chatgptRateLimits(): Record<string, Record<string, unknown> | null> {
     const out: Record<string, Record<string, unknown> | null> = {};
-    for (const [name, a] of this.chatgptAdapters) out[name] = a.adapter.lastRateLimits;
+    for (const [name, p] of Object.entries(this.deps.config().providers)) {
+      if (p.type === "chatgpt") out[name] = this.chatgpt(name, p).lastRateLimits;
+    }
     return out;
   }
 
@@ -360,7 +362,9 @@ export class Proxy {
 
   chatgptAuthStatus(): Record<string, string> {
     const out: Record<string, string> = {};
-    for (const [name, a] of this.chatgptAdapters) out[name] = a.adapter.describeAuth();
+    for (const [name, p] of Object.entries(this.deps.config().providers)) {
+      if (p.type === "chatgpt") out[name] = this.chatgpt(name, p).describeAuth();
+    }
     return out;
   }
 
@@ -561,7 +565,7 @@ export class Proxy {
     const digest = (value: unknown): string => crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
     for (const [name, provider] of Object.entries(cfg.providers)) {
       const authentication = Object.entries(provider).filter(([field]) =>
-        ["type", "auth", "headers", "credentials", "apiKey", "accountPool", "home"].includes(field));
+        ["type", "auth", "account", "headers", "credentials", "apiKey", "accountPool", "home"].includes(field));
       const credentials = digest(authentication);
       const config = digest([...authentication, ...Object.entries(provider).filter(([field]) =>
         ["url", "models", "wire"].includes(field))]);

@@ -558,7 +558,12 @@ label.check input { margin-top: 2px; }
 .account-card { align-items: flex-start; }
 .account-card .cell-text strong { font-weight: 500; font-size: var(--fs-body); overflow-wrap: anywhere; }
 .account-card .hint { margin-top: 2px; }
-.account-card .account-quota { margin: 0; color: var(--label); font-variant-numeric: tabular-nums; }
+.account-card .account-quota { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 0; color: var(--label); font-variant-numeric: tabular-nums; }
+.quota-view-toggle { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 28px; height: 28px; padding: 5px; border: 0; border-radius: 6px; background: transparent; color: var(--label-2); cursor: pointer; }
+.quota-view-toggle:hover, .quota-view-toggle[aria-pressed="true"] { background: var(--fill); color: var(--label); }
+.quota-view-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.quota-view-toggle svg { width: 16px; height: 16px; }
+@media (pointer: coarse) { .quota-view-toggle { width: 44px; height: 44px; } }
 .account-card-badges { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex: 0 0 auto; padding-top: 2px; }
 .account-card-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .account-empty { padding: 16px; color: var(--label-2); font-size: var(--fs-sub); }

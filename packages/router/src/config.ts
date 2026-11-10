@@ -109,6 +109,8 @@ export type ChatGptProvider = ProviderLabel & {
   type: "chatgpt";
   /** "borrow-codex" reads ~/.codex/auth.json (never refreshed by us); "own" uses `clauderipple login` tokens. Default: own if present, else borrow. */
   auth?: "own" | "borrow-codex" | "auto";
+  /** Bind to this exact local account summary id (not a workspace id). Absent keeps automatic rotation. */
+  account?: string;
   /** Override the backend origin (default https://chatgpt.com/backend-api). */
   url?: string;
   /** Prefix the system prompt with a one-line identity so the model knows what it is. Default true. */
@@ -918,6 +920,10 @@ export function validate(c: Config): string[] {
         }
       }
     } else if (p.type === "chatgpt") {
+      if (p.auth !== undefined && p.auth !== "own" && p.auth !== "borrow-codex" && p.auth !== "auto") errors.push(`provider ${name}: auth must be "own", "borrow-codex" or "auto"`);
+      if (p.account !== undefined && (typeof p.account !== "string" || !p.account.trim() || p.account !== p.account.trim())) {
+        errors.push(`provider ${name}: account must be a non-empty local account id without surrounding whitespace`);
+      }
       if (p.models !== undefined && !validModels(p.models)) {
         errors.push(`provider ${name}: ${MODELS_SHAPE}`);
       }

@@ -27,7 +27,7 @@ function accountsOf(provider: Provider | undefined, home: string): readonly Pinn
   if (provider.type === "anthropic") return provider.auth === "claude-code" && provider.accountPool === true ? readClaudeOAuthAccounts(home) : [];
   // A provider borrowing the Codex CLI's login uses no store of ours; in every other mode its own
   // accounts are what it rotates through, and the Codex login stays out (it is the main account).
-  if (provider.type === "chatgpt") return provider.auth === "borrow-codex" ? [] : readChatGptAccounts(home);
+  if (provider.type === "chatgpt") return provider.auth === "borrow-codex" ? [] : readChatGptAccounts(home).filter((account) => provider.account === undefined || account.id === provider.account);
   if (provider.type === "google") return provider.auth === "antigravity" ? readGoogleAccounts(home) : [];
   return [];
 }

@@ -287,7 +287,7 @@ export class ChatGptAdapter {
     this.cfg = cfg;
     this.log = log;
     this.pool = pool;
-    this.accounts = new ChatGptAccountPool({ home, mode: cfg.auth ?? "auto", log, ...(fetchImpl ? { fetch: fetchImpl } : {}) });
+    this.accounts = new ChatGptAccountPool({ home, mode: cfg.auth ?? "auto", ...(cfg.account !== undefined ? { account: cfg.account } : {}), log, ...(fetchImpl ? { fetch: fetchImpl } : {}) });
   }
 
   /**
@@ -895,7 +895,7 @@ export class ChatGptAdapter {
    * That is what lets Codex keep working on account 2 when account 1 runs out, without signing out.
    *
    * With no account of ours signed in, or every one of them resting, the caller's own login — the
-   * one Codex sent — is used as it is, so pointing Codex here never leaves it worse off.
+   * one Codex sent — is used as it is, unless this provider explicitly binds an account.
    */
   async passthrough(
     req: http.IncomingMessage,
@@ -941,7 +941,7 @@ export class ChatGptAdapter {
       const callerAuth = typeof req.headers.authorization === "string" && typeof req.headers["chatgpt-account-id"] === "string";
       // Out of accounts — none signed in, all resting, or the last one just ran out on this turn.
       const outOfAccounts = sent.kind === "no-account" || sent.kind === "all-resting" || (sent.kind === "refused" && (sent.status === 429 || sent.status === 402));
-      if (outOfAccounts && callerAuth) {
+      if (outOfAccounts && callerAuth && this.cfg.account === undefined) {
         // Codex's own login, exactly as it sent it. Not refreshed or stored: it is Codex's. A turn
         // token one of our accounts issued means nothing to it.
         const callerHeaders = { ...forwarded };
