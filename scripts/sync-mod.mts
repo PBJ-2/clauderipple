@@ -47,7 +47,8 @@ function committed(): Map<string, Buffer> {
 }
 
 /** Writes only what differs and removes what HEAD no longer has, in place: the watcher keeps its folder. */
-function sync(files: Map<string, Buffer>): number {
+function sync(files: Map<string, Buffer>, staging: string): number {
+  const next = path.join(staging, "next");
   let changed = 0;
   for (const [rel, body] of files) {
     const file = path.join(dest, rel);
@@ -55,8 +56,8 @@ function sync(files: Map<string, Buffer>): number {
     try { same = fs.readFileSync(file).equals(body); } catch { /* new file */ }
     if (same) continue;
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(`${file}.next`, body);
-    fs.renameSync(`${file}.next`, file);
+    fs.writeFileSync(next, body);
+    fs.renameSync(next, file);
     changed++;
   }
   const walk = (dir: string): void => {
@@ -78,5 +79,12 @@ const force = args.has("--force") || args.has("--install");
 // A merge or rebase may bring several commits at once; comparing with the copy itself never misses one.
 if (!force && git("rev-parse", "--abbrev-ref", "HEAD").trim() !== "main") process.exit(0);
 fs.mkdirSync(dest, { recursive: true });
-const changed = sync(committed());
-console.log(`sync-mod: ${changed} file(s) updated in ${dest}`);
+const files = committed();
+// A sibling stays outside the watched tree and another sync's obsolete-file cleanup.
+const staging = fs.mkdtempSync(`${dest}.next-`);
+try {
+  const changed = sync(files, staging);
+  console.log(`sync-mod: ${changed} file(s) updated in ${dest}`);
+} finally {
+  fs.rmSync(staging, { recursive: true, force: true });
+}
