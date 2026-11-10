@@ -419,7 +419,7 @@ export type LimitItem = {
   /**
    * The used percent the window reaches at its reset at its average pace since it started: the router's
    * `projected_percent` (may exceed 100). Absent for a window too early in it to tell, or at 0%, and for a
-   * window whose reset has passed. Read by the pace sentence only when there is no exhaust forecast.
+   * window whose reset has passed. Read by the pace label only when there is no exhaust forecast and the reset is still ahead.
    */
   projectedPercent?: number
 }

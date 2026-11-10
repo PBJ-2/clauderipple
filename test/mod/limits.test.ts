@@ -10,7 +10,7 @@ registerHooks({ resolve(specifier, context, next) {
 const { claudeScopedFrom, CLAUDE_USAGE_STALE_MS, COST_MODELS, costFromSummary, localMidnight, routerLimitItems } = await import('../../packages/mod/hooks/session.ts')
 const { t } = await import('../../packages/mod/hooks/i18n.ts')
 const { chatgptProviders, gptLimitsFrom } = await import('../../packages/mod/hooks/modes.ts')
-const { providerDisplayName, costFigure, costText, exhaustLeft, exhaustSentence, exhaustShort, exhaustShortWidest, limitItemTone, bandLimitGroups, limitAccountLabel, limitGroupAccount, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTip, narrowLimitGroups, paceLevel, paceSentence, resetMoment, resetShort, timeLeft } = await import('../../packages/mod/hooks/ui/view.ts')
+const { providerDisplayName, costFigure, costText, exhaustLeft, exhaustSentence, exhaustShort, exhaustShortWidest, limitItemTone, bandLimitGroups, limitAccountLabel, limitGroupAccount, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTip, narrowLimitGroups, paceLabel, paceLevel, resetMoment, resetShort, timeLeft } = await import('../../packages/mod/hooks/ui/view.ts')
 const { barArt } = await import('../../packages/mod/hooks/ui/art.ts')
 
 const NOW = Date.parse('2026-10-15T00:00:00Z')
@@ -498,45 +498,55 @@ test('projected_percent is read into projectedPercent; unreadable or passed-rese
   assert.equal('projectedPercent' in passed[0]!, false)
 })
 
-test('the pace sentence: an exhaust forecast wins; under 80 comfortable, 80 to 99 tight, otherwise none', () => {
+test('the pace label: an exhaust forecast wins; under 95 comfortable, 95 to 100 tight, otherwise none', () => {
   const base = { provider: 'claude', account: 0, kind: 'seven_day' as const, label: '', percent: 54, resetsAt: new Date(NOW + 3 * 86_400_000).toISOString() }
   const at = (projectedPercent?: number, exhaustMinutes?: number) => ({
     ...base,
     ...(projectedPercent !== undefined ? { projectedPercent } : {}),
     ...(exhaustMinutes !== undefined ? { exhaustsAt: NOW + exhaustMinutes * 60_000 } : {}),
   })
-  // The exhaust sentence keeps its place; the pace is not said beside it.
+  // The exhaust sentence keeps its own line; the pace label is not said beside it.
   assert.equal(paceLevel(at(190, 130), NOW), null)
-  assert.equal(paceSentence(at(190, 130), NOW, 'en'), '')
+  assert.equal(paceLabel(at(190, 130), NOW, 'en'), '')
   assert.equal(exhaustSentence(at(190, 130), NOW, 'en'), 'At this pace it runs out in 2h 10m')
-  // Under 80 projected: comfortable.
+  // Under 95 projected: comfortable.
   assert.equal(paceLevel(at(54), NOW), 'comfortable')
-  assert.equal(paceSentence(at(54), NOW, 'en'), 'On track. At this pace usage will reach about 54% before it resets')
-  assert.equal(paceSentence(at(79.4), NOW, 'en'), 'On track. At this pace usage will reach about 79% before it resets')
-  // 80 to 99: tight, the figure rounded.
-  assert.equal(paceLevel(at(80), NOW), 'tight')
-  assert.equal(paceSentence(at(81.6), NOW, 'en'), 'Tight. At this pace usage will reach about 82% before it resets')
-  assert.equal(paceSentence(at(99), NOW, 'en'), 'Tight. At this pace usage will reach about 99% before it resets')
+  assert.equal(paceLabel(at(54), NOW, 'en'), 'projected 54%')
+  assert.equal(paceLevel(at(94), NOW), 'comfortable')
+  assert.equal(paceLabel(at(94.4), NOW, 'en'), 'projected 94%')
+  // 95 to 100: tight, the figure rounded.
+  assert.equal(paceLevel(at(95), NOW), 'tight')
+  assert.equal(paceLabel(at(95.4), NOW, 'en'), 'projected 95%')
+  assert.equal(paceLabel(at(99.4), NOW, 'en'), 'projected 99%')
   // Rounded to 100 without an exhaust moment (it lands right at the reset): still tight.
   assert.equal(paceLevel(at(100), NOW), 'tight')
+  assert.equal(paceLabel(at(100), NOW, 'en'), 'projected 100%')
   // Past 100 with no exhaust moment (an old reading) says nothing; no projection says nothing.
-  assert.equal(paceSentence(at(187), NOW, 'en'), '')
-  assert.equal(paceSentence(at(), NOW, 'en'), '')
+  assert.equal(paceLevel(at(101), NOW), null)
+  assert.equal(paceLabel(at(101), NOW, 'en'), '')
+  assert.equal(paceLabel(at(187), NOW, 'en'), '')
+  assert.equal(paceLabel(at(), NOW, 'en'), '')
   // A passed exhaust moment is no exhaust forecast, so the pace speaks again.
-  assert.equal(paceSentence(at(54, -1), NOW, 'en'), 'On track. At this pace usage will reach about 54% before it resets')
+  assert.equal(paceLabel(at(54, -1), NOW, 'en'), 'projected 54%')
 })
 
-test('a pace sentence goes quiet once its window has reset, before the limits are read again', () => {
+test('a pace label goes quiet once its window has reset or when no reset is given, since no time left sits beside it', () => {
   const item = (resetMinutes: number) => ({ provider: 'claude', account: 0, kind: 'five_hour' as const, label: '', percent: 54, projectedPercent: 54, resetsAt: new Date(NOW + resetMinutes * 60_000).toISOString() })
   assert.equal(paceLevel(item(1), NOW), 'comfortable')
+  assert.equal(paceLabel(item(1), NOW, 'en'), 'projected 54%')
   assert.equal(paceLevel(item(0), NOW), null)
-  assert.equal(paceSentence(item(-1), NOW, 'en'), '')
+  assert.equal(paceLabel(item(-1), NOW, 'en'), '')
+  const noReset = { provider: 'claude', account: 0, kind: 'five_hour' as const, label: '', percent: 54, projectedPercent: 54 }
+  assert.equal(paceLevel(noReset, NOW), null)
+  assert.equal(paceLabel(noReset, NOW, 'en'), '')
 })
 
-test('the pace sentence reads in Korean as reviewed (2026-11-10)', () => {
-  const item = (projectedPercent: number) => ({ provider: 'claude', account: 0, kind: 'seven_day' as const, label: '', percent: 54, projectedPercent })
-  assert.equal(paceSentence(item(82), NOW, 'ko'), '빠듯합니다. 이 속도라면 초기화 전까지 사용률이 약 82%에 이를 것으로 예상됩니다')
-  assert.equal(paceSentence(item(6), NOW, 'ko'), '여유 있습니다. 이 속도라면 초기화 전까지 사용률이 약 6%에 이를 것으로 예상됩니다')
+test('the pace label reads in Korean as the owner set it (2026-11-10)', () => {
+  const item = (projectedPercent: number) => ({ provider: 'claude', account: 0, kind: 'seven_day' as const, label: '', percent: 56, projectedPercent, resetsAt: new Date(NOW + 2 * 86_400_000 + 9 * 3_600_000).toISOString() })
+  assert.equal(paceLabel(item(84), NOW, 'ko'), '예상 사용률 84%')
+  assert.equal(paceLabel(item(97), NOW, 'ko'), '예상 사용률 97%')
+  // The line the pane draws after the reset: the time left, then the label after " · ".
+  assert.equal(t('ko', 'limits.left', { time: timeLeft(2 * 86_400_000 + 9 * 3_600_000, 'ko') }) + ' · ' + paceLabel(item(84), NOW, 'ko'), '2일 9시간 남음 · 예상 사용률 84%')
 })
 
 test('a forecast makes the tone at least amber, red within the hour; no forecast keeps the share\'s tone', () => {
@@ -680,7 +690,7 @@ test('the cost tile names a provider as the limits pane does, and keeps the id w
 test('every language says the forecast and the cost, with the placeholders the code fills', () => {
   for (const lang of ['en', 'ko', 'zh', 'ja', 'es', 'pt'] as const) {
     assert.match(t(lang, 'limits.exhaust', { time: 'T' }), /T/, lang)
-    for (const key of ['limits.paceComfortable', 'limits.paceTight']) assert.match(t(lang, key, { percent: 'P' }), /P/, lang + ' ' + key)
+    assert.match(t(lang, 'limits.paceProjected', { percent: 'P' }), /P/, lang)
     for (const key of ['cost.title', 'cost.today', 'cost.week', 'cost.providers', 'cost.models', 'cost.note', 'cost.unavailable']) assert.notEqual(t(lang, key), key, lang + ' ' + key)
     assert.match(t(lang, 'cost.unpriced', { count: 7 }), /7/, lang)
     assert.match(t(lang, 'cost.estimated', { count: 7 }), /7/, lang)

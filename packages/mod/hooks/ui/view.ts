@@ -776,35 +776,36 @@ export function exhaustSentence(item: Pick<LimitItem, 'exhaustsAt'>, now: number
 
 // ---- Pace ----------------------------------------------------------------------------------------
 //
-// Every window with enough data says how it is going (2026-11-10). A window with no exhaust forecast
-// says where its pace takes it at the reset: under 80% is comfortable, 80 to 100 tight (amber in the
-// pane). Above 100 the pace says nothing here, since a window that reaches 100% has its exhaust forecast.
+// Every window with a reset still ahead says how its pace is going (2026-11-10). A window with no exhaust
+// forecast says where its pace takes it at the reset: under 95% is comfortable, 95 to 100 tight (amber
+// in the pane). Above 100 the pace says nothing here, since a window that reaches 100% has its exhaust
+// forecast. The pane puts the pace as a short label after the time left, not as a line of its own.
 
-/** A window's pace when no exhaust forecast applies: comfortable under 80% projected at its reset, tight from 80 to 100. */
+/** A window's pace when no exhaust forecast applies: comfortable under 95% projected at its reset, tight from 95 to 100. */
 export type PaceLevel = 'comfortable' | 'tight'
 
 /**
- * The pace of a window with no exhaust forecast, or null: an exhaust forecast applies, no projection,
- * more than 100, or the reset has passed (the pane redraws across a reset before the limits are read
- * again, and the old window's projection says nothing about the new one).
+ * The pace of a window, or null: an exhaust forecast applies, no projection, more than 100, or no reset
+ * still ahead. A passed or missing reset has no time left to put the pace beside; the pane redraws
+ * across a reset before the limits are read again, and the old window's projection says nothing about
+ * the new one.
  */
 export function paceLevel(item: Pick<LimitItem, 'exhaustsAt' | 'projectedPercent' | 'resetsAt'>, now: number): PaceLevel | null {
   if (exhaustLeft(item, now) !== null) return null
   const reset = item.resetsAt ? Date.parse(item.resetsAt) : NaN
-  if (Number.isFinite(reset) && reset <= now) return null
+  if (!Number.isFinite(reset) || reset <= now) return null
   const projected = item.projectedPercent
   if (typeof projected !== 'number' || !Number.isFinite(projected)) return null
-  if (projected < 80) return 'comfortable'
+  if (projected < 95) return 'comfortable'
   // A projection that rounds to 100 without an exhaust moment (it lands right at the reset) is tight
   // too; past 100 the exhaust moment has passed (an old reading), and the pace says nothing.
   return projected <= 100 ? 'tight' : null
 }
 
-/** "Tight. At this pace usage will reach about 82% before it resets", or '' when the pace says nothing. */
-export function paceSentence(item: Pick<LimitItem, 'exhaustsAt' | 'projectedPercent' | 'resetsAt'>, now: number, lang: Lang): string {
-  const level = paceLevel(item, now)
-  if (level === null) return ''
-  return t(lang, level === 'tight' ? 'limits.paceTight' : 'limits.paceComfortable', { percent: Math.round(item.projectedPercent!) })
+/** The pace as a label after the time left: "projected 84%", or '' when the pace says nothing. */
+export function paceLabel(item: Pick<LimitItem, 'exhaustsAt' | 'projectedPercent' | 'resetsAt'>, now: number, lang: Lang): string {
+  if (paceLevel(item, now) === null) return ''
+  return t(lang, 'limits.paceProjected', { percent: Math.round(item.projectedPercent!) })
 }
 
 // ---- Cost ----------------------------------------------------------------------------------------
