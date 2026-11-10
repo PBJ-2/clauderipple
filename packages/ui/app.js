@@ -2522,9 +2522,10 @@ function macTetherCard(tt, setupOk) {
   const rename = el("button", { class: "btn secondary compact", type: "button", "data-key": "mac-rename", text: t(name ? "mac.ssid.change" : "mac.ssid.set") });
   rename.disabled = macSetup.running || !setupOk;
   rename.addEventListener("click", () => openMacRename(name));
+  // What is true now first, as on the card above it; then the switch and the hotspot's name.
   const rows = [
-    cell(el("label", { class: "cell-label", text: t("mac.tether.switch") }), enabled, t("mac.tether.switchHelp")),
     macStateRow(tone, t(`mac.net.${network}`), I18N.en[`mac.tstate.${tt.state}`] ? t(`mac.tstate.${tt.state}`) : tt.state, side),
+    cell(el("label", { class: "cell-label", text: t("mac.tether.switch") }), enabled, t("mac.tether.switchHelp")),
     // No "keep this network" pin here: beside the switch above it read as the same thing twice
     // (2026-10-20). The API keeps `pin` for the CLI.
     cell(t("mac.ssid.label"), [el("span", { class: name ? "mac-ssid" : "mac-ssid empty", text: name || t("mac.ssid.none") }), rename]),
