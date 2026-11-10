@@ -14,7 +14,8 @@ import { fileURLToPath } from "node:url";
 type ReadState = (drawnKey: string | null, failedKey: string | null, key: string) => string;
 
 const uiDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "../../ui");
-const appSource = fs.readFileSync(path.join(uiDir, "app.js"), "utf8");
+// readState's end marker spans lines, and a Windows checkout (core.autocrlf) ends lines with CRLF.
+const appSource = fs.readFileSync(path.join(uiDir, "app.js"), "utf8").replaceAll("\r\n", "\n");
 const indexSource = fs.readFileSync(path.join(uiDir, "index.html"), "utf8");
 
 function loadReadState(): ReadState {
