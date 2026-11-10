@@ -273,6 +273,7 @@ test("an in-turn retry is logged and recorded against the credential that answer
     assert.doesNotMatch(log, /CLAUDE .*account=current .*-> 200/);
     assert.match(log, /RETRY claude: .*trying #2/, "the retry line names the account, not #0");
     assert.match(JSON.stringify(rig.requests.list(20)), /"credential":"#2"/);
+    assert.equal(rig.requests.list(1)[0]!.account, rig.stored.id);
   } finally {
     await rig.stop();
   }

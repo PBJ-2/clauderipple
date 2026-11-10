@@ -1984,6 +1984,91 @@ test("GET /api/requests filters newest records and returns a summary", async () 
   });
 });
 
+test("GET /api/requests resolves account names at read time without changing the stored records", async () => {
+  await withAdmin(makeCfg(), async ({ home }) => {
+    const chatgpt = await import("../src/providers/chatgpt/accounts.ts");
+    const google = await import("../src/providers/google/accounts.ts");
+    const expiresAt = Date.now() + 3_600_000;
+    const claude = saveClaudeOAuthAccount(home, { accessToken: "test-claude-token", refreshToken: "test-claude-refresh", expiresAt, email: "claude@example.test" });
+    const gpt = chatgpt.saveChatGptAccount(home, { accessToken: "test-gpt-token", accountId: "test-workspace", expiresAt });
+    chatgpt.updateChatGptAccount(home, gpt.id, { label: "Work ChatGPT" });
+    const gemini = google.saveGoogleAccount(home, { accessToken: "test-google-token", projectId: "test-project", email: "google@example.test", expiresAt });
+    const removed = chatgpt.saveChatGptAccount(home, { accessToken: "removed-token", accountId: "removed-workspace", expiresAt });
+    chatgpt.removeChatGptAccount(home, removed.id);
+    const requests = new RequestLog(path.join(home, "logs", "requests.jsonl"));
+    const old = { id: "old", at: new Date().toISOString(), ms: 100, status: 200, ok: true, kind: "messages" as const, source: "model", target: "model", provider: "claude", stream: true, credential: "#1" };
+    requests.add(old);
+    requests.add({ ...old, id: "borrowed", provider: "borrowed-gpt", account: "codex" });
+    requests.add({ ...old, id: "current-again", account: "current" });
+    requests.add({ ...old, id: "snapshot", provider: "claude", account: "current", accountEmail: "was@example.test" });
+    requests.add({ ...old, id: "codex-only", provider: "codex-login", account: "codex" });
+    requests.add({ ...old, id: "codex-snapshot", provider: "borrowed-gpt", account: "codex", borrowedLabel: "earlier@example.test" });
+    for (const [provider, account] of [["claude", claude.id], ["claude", "current"], ["gpt", gpt.id], ["google", gemini.id], ["gpt", removed.id]] as const) {
+      requests.add({ ...old, id: account, provider, account });
+    }
+    const persisted = fs.readFileSync(path.join(home, "logs", "requests.jsonl"), "utf8");
+    const cfg = makeCfg({ providers: {
+      claude: { type: "anthropic", auth: "claude-code", accountPool: true },
+      gpt: { type: "chatgpt", auth: "own" },
+      "borrowed-gpt": { type: "chatgpt", auth: "borrow-codex" },
+      google: { type: "google", auth: "antigravity" },
+    } });
+    const extra = await startAdmin({ config: () => cfg, configFile: path.join(home, "extra-config.json"), log: new Logger(null, 1_000_000, 1, false), stats: () => ({ inFlight: 0, messagesInFlight: 0, started: 0, completed: 0, failed: 0 }), health: () => 0, version: "test", requests,
+      // Today's login is another person: the rows that were written before the switch must not take its name.
+      claudeIdentity: async () => ({ email: "today@example.test", subjectHash: "test-subject" }),
+      chatgpt: () => ({ quota: {}, auth: {}, accounts: () => ({ "borrowed-gpt": [
+        { id: "codex", label: "codex@example.test", email: "codex@example.test", source: "codex", expiresAt, needsReauth: false, paused: false, preferred: false, state: "ready", inUse: true, active: true, quota: null },
+      ] }) }),
+      google: () => ({ accounts: () => ({ google: [
+        { ...gemini, label: "Runtime Google", state: "ready", inUse: true, active: true },
+      ] }) }),
+    });
+    try {
+      const rows = async () => (await (await fetch(`${base()}:${extra.port}/api/requests`)).json() as { requests: { id: string; accountLabel?: string }[] }).requests;
+      let records = await rows();
+      const label = (id: string) => records.find((row) => row.id === id)?.accountLabel;
+      assert.equal(label(claude.id), "claude@example.test");
+      // A row written before the snapshot existed names nobody, and never today's login.
+      assert.equal(label("current"), undefined);
+      assert.equal(label("current-again"), undefined);
+      assert.equal(label("snapshot"), "was@example.test", "the email that answered is the one kept");
+      assert.equal(label(gpt.id), "Work ChatGPT");
+      assert.equal(label(gemini.id), "Runtime Google", "the same live summary as the accounts tab");
+      // A borrowed Codex row is named by the login it answered as (`borrowedLabel`), never by today's login
+      // (codex@example.test here). A row written before that was kept shows only the owner id.
+      assert.equal(label("codex-snapshot"), "earlier@example.test", "the login that answered keeps its name after a switch");
+      assert.equal(label("borrowed"), "codex", "a borrowed row without a snapshot names no person");
+      assert.equal(label("codex-only"), "codex", "a borrowed row without a snapshot names no person, whatever the provider");
+      assert.equal(label(removed.id), removed.id.slice(0, 8));
+      assert.deepEqual(records.find((row) => row.id === "old"), old, "an old record gains no fields");
+      chatgpt.updateChatGptAccount(home, gpt.id, { label: "Renamed ChatGPT" });
+      records = await rows();
+      assert.equal(label(gpt.id), "Renamed ChatGPT");
+      assert.equal(label("snapshot"), "was@example.test", "a later login does not move the row");
+      assert.equal(requests.list(10).some((record) => "accountLabel" in record), false, "the in-memory records are not enriched in place");
+      assert.equal(fs.readFileSync(path.join(home, "logs", "requests.jsonl"), "utf8"), persisted);
+      assert.doesNotMatch(persisted, /claude@example\.test|google@example\.test|codex@example\.test|today@example\.test|test-claude-token|test-gpt-token|test-workspace|test-google-token|test-project/);
+    } finally { extra.close(); }
+  });
+});
+
+test("GET /api/requests names a borrowed Codex row by the login it answered as, and never by a login later signed in", async () => {
+  await withAdmin(makeCfg({ providers: { claude: { type: "anthropic", auth: "claude-code", accountPool: true } } }), async ({ home }) => {
+    const requests = new RequestLog(path.join(home, "logs", "requests.jsonl"));
+    const old = { id: "codex-row", at: new Date().toISOString(), ms: 100, status: 200, ok: true, kind: "messages" as const, source: "gpt", target: "gpt", provider: "codex-login", stream: true, account: "codex" };
+    requests.add({ ...old, borrowedLabel: "answered@example.test" });
+    requests.add({ ...old, id: "codex-before-snapshot" });
+    // Nothing here reads today's Codex login: the snapshot is the only name a Codex row can have.
+    const extra = await startAdmin({ config: () => makeCfg({ providers: { claude: { type: "anthropic", auth: "claude-code", accountPool: true } } }), configFile: path.join(home, "extra-config.json"), log: new Logger(null, 1_000_000, 1, false), stats: () => ({ inFlight: 0, messagesInFlight: 0, started: 0, completed: 0, failed: 0 }), health: () => 0, version: "test", requests,
+      chatgpt: () => ({ quota: {}, auth: {}, accounts: () => ({}) }) });
+    try {
+      const response = await (await fetch(`${base()}:${extra.port}/api/requests`)).json() as { requests: { id: string; accountLabel?: string }[] };
+      assert.equal(response.requests.find((row) => row.id === "codex-row")?.accountLabel, "answered@example.test");
+      assert.equal(response.requests.find((row) => row.id === "codex-before-snapshot")?.accountLabel, "codex", "only the owner id, never a person");
+    } finally { extra.close(); }
+  });
+});
+
 test("GET /api/requests takes a comma-separated kind list", async () => {
   await withAdmin(makeCfg(), async ({ home }) => {
     const requests = new RequestLog(path.join(home, "logs", "requests.jsonl"));

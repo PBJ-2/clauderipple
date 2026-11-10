@@ -5843,6 +5843,14 @@ function rateValue(rate) {
 function formatRate(rate) {
   return t("logs.rate", { value: rateValue(rate) });
 }
+function requestAccount(record) {
+  // The current login has a name only when its row snapshotted the email; an older row says just that it was the login.
+  if (record.account === "current") return record.accountLabel || t("providers.anthropicCurrent");
+  // The same naming as the accounts list (claudeAccountLabel): the router's generic default name is translated.
+  if (record.account) return record.accountLabel === "Claude account" ? t("providers.claudeAccountDefault") : record.accountLabel || record.account.slice(0, 8);
+  // An API key's label is kept on its row when the request runs; the keys configured now do not decide it.
+  return record.credential || "";
+}
 function requestDetail(record) {
   const details = [
     [t("logs.detail.id"), record.id],
@@ -5852,6 +5860,8 @@ function requestDetail(record) {
     [t("logs.detail.cacheRead"), record.usage && record.usage.cached ? formatNumber(record.usage.cached) : t("logs.none")],
     [t("logs.detail.cacheWrite"), record.usage && record.usage.cacheWrite ? formatNumber(record.usage.cacheWrite) : t("logs.none")],
   ];
+  const account = requestAccount(record);
+  if (account) details.push([t("logs.provider"), providerLabel(record.provider)], [t("logs.detail.account"), account]);
   // Both tiers side by side: the ChatGPT sign-in often serves `default` for a request made on
   // `priority` (#54), so the served tier cannot be the FAST badge's basis; the requested one is.
   if (record.requestedTier || record.servedTier) details.push([t("logs.detail.tier"), `${record.requestedTier || t("logs.none")} / ${record.servedTier || t("logs.none")}`]);
@@ -5865,11 +5875,14 @@ function requestRow(record) {
   // override it, and `gpt-6-sol@medium` beside an effort of high read as a contradiction
   // (2026-09-23). The effort column is the sent value, so the source is shown without it.
   const source = record.source ? record.source.replace(/@[^@]*$/, "") : "";
+  const account = requestAccount(record);
   const model = el("div", { class: "request-models" }, [
     el("span", { class: "model", text: record.target }),
     source && source !== record.target ? el("span", { class: "small", text: `(${source})` }) : null,
     record.purpose === "web-search" ? el("span", { class: "purpose-tag", text: t("logs.webSearch"), title: t("logs.webSearchHelp") }) : null,
-    el("span", { class: `provider-badge ${providerClass(record.provider)}`, text: providerLabel(record.provider) }),
+    // The account says more than the provider's id, which is often an address of its own: the
+    // badge keeps the provider's colour and names it on hover and in the detail.
+    el("span", { class: `provider-badge ${providerClass(record.provider)}`, text: account || providerLabel(record.provider), ...(account ? { title: providerLabel(record.provider) } : {}) }),
     // The requested tier, not the served one: the ChatGPT sign-in answers `default` to a Fast request (#54).
     record.requestedTier === "priority" ? el("span", { class: "fast-tag", text: "FAST", title: t("logs.fastHelp") }) : null,
   ].filter(Boolean));

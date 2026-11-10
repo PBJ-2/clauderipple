@@ -30,7 +30,7 @@ test("the profile body reduces to the email and the pool's own subject hash", ()
   assert.equal(claudeIdentityFromBody(null), null);
 });
 
-test("the lookup asks once, caches for ten minutes, and asks again for a new token", async () => {
+test("the lookup asks once per token, keeps a success for the token's life, and asks again for a new token", async () => {
   let token = "token-one";
   let calls = 0;
   const urls: string[] = [];
@@ -59,9 +59,14 @@ test("the lookup asks once, caches for ten minutes, and asks again for a new tok
   assert.deepEqual(await identity.identify(), expected);
   assert.equal(calls, 2, "a new login token asks again immediately");
 
+  // An identity does not change with time: a success outlives the ten-minute failure window.
   now += 10 * 60_000;
   assert.deepEqual(await identity.identify(), expected);
-  assert.equal(calls, 3, "the same token re-asks once the cache expires");
+  assert.equal(calls, 2, "a success is still kept after ten minutes");
+
+  now += 24 * 60 * 60_000;
+  assert.deepEqual(await identity.identify(), expected);
+  assert.equal(calls, 3, "the same token re-asks once a day has passed");
 });
 
 test("a failed profile returns null, is cached, and is retried after the cache time", async () => {
@@ -128,4 +133,21 @@ test("no current login means no request at all", async () => {
 
   const broken = new ClaudeCurrentIdentity({ credentials: async () => { throw new Error("unreadable"); } }, { upstream: () => "api.example.test" });
   assert.equal(await broken.identify(), null);
+});
+
+test("a request's own login and the pool's copy each stay cached, so alternating between them asks once each", async () => {
+  let calls = 0;
+  const identity = new ClaudeCurrentIdentity(currentLogin(() => "pool-token"), {
+    upstream: () => "api.example.test",
+    now: () => 1_000_000,
+    fetch: async () => {
+      calls += 1;
+      return new Response(JSON.stringify(PROFILE), { status: 200 });
+    },
+  });
+  for (let turn = 0; turn < 4; turn += 1) {
+    assert.equal((await identity.identifyWith({ authorization: "Bearer client-token" }))?.email, "Person@example.test");
+    assert.equal((await identity.identify())?.email, "Person@example.test");
+  }
+  assert.equal(calls, 2, "one lookup per token, not one per turn");
 });

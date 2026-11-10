@@ -1086,6 +1086,21 @@ test('the log pane keeps its content', async ($, on) => {
   expect(calls).toEqual(['scope', 'scope'])
 })
 
+test('a log row names its account by the local part of the email, as the limits pane does', async ($, on) => {
+  const rows: StatusRequest[] = [
+    { at: '2026-11-10T09:00:00', source: 'claude-opus-5-5', target: 'claude-opus-5-5', provider: 'anthropic', status: 200, ok: true, ms: 1200, accountLabel: 'work@example.com', mine: true },
+    { at: '2026-11-10T08:59:00', source: 'claude-opus-5-5', target: 'claude-opus-5-5', provider: 'anthropic', status: 200, ok: true, ms: 1200, accountLabel: 'Claude account 2', mine: true },
+  ]
+  drawPane(on, 'log-accounts', (el, surface) => renderLog(el, frameOf(surface, 80), { rows, mineOnly: true }, { toggleScope: () => undefined }))
+  for (const surface of SURFACES) {
+    const ui = await mount($, 'log-accounts', surface, 80)
+    expect(await ui.find({ type: 'Text', text: 'work' }), surface).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'work@example.com' }), surface).toBeUndefined()
+    // The generic name the router gives an unnamed account says nothing, so the row leaves it out.
+    expect(await ui.find({ type: 'Text', text: 'Claude account 2' }), surface).toBeUndefined()
+  }
+})
+
 test('a request made on the Fast tier shows FAST beside its effort, and no other request does (#97)', async ($, on) => {
   const base = { source: 'gpt-6-1-sol@high', target: 'gpt-6.1-sol', provider: 'chatgpt', status: 200, ok: true, ms: 2140, effort: 'high', mine: true }
   const rows: StatusRequest[] = [

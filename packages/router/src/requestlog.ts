@@ -30,6 +30,19 @@ export type RequestRecord = {
   provider: string;
   /** Actual responder's configured label or 1-based ordinal; never a credential id or token. */
   credential?: string;
+  /** Actual responder's durable owner id; never a token. `current` is the app or terminal login. */
+  account?: string;
+  /**
+   * The email of the `current` login as it was when this request ran. Snapshotted at request time
+   * because the login can be switched later; a row that has none names no person.
+   */
+  accountEmail?: string;
+  /**
+   * The name of the borrowed Codex login (owner `codex`) as it was when it answered. That owner id is
+   * fixed while the login behind it changes with the Codex CLI's sign-in, so the name is kept here like
+   * `accountEmail`; a `codex` row without it names nobody.
+   */
+  borrowedLabel?: string;
   effort?: string;
   upstreamRequestId?: string;
   messageId?: string;

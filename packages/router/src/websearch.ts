@@ -37,6 +37,9 @@ export type SearchHit = { title: string; url: string };
 
 export type SearchOutcome = {
   hits: SearchHit[];
+  account?: string;
+  /** The borrowed Codex login's name when it answered (see RequestRecord.borrowedLabel). */
+  borrowedLabel?: string;
   /** Optional prose to accompany the hits, for backends that produce one. */
   text?: string;
   /**

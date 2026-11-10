@@ -57,10 +57,20 @@ import { nativeAnthropicHeaders, type ClaudeCodeCredentialReaders } from "./prov
 import { ClaudeAccountAuthPool } from "./providers/anthropic-account-pool.ts";
 import { ClaudeModelCatalog } from "./providers/anthropic-models.ts";
 import { ClaudeUsage, claudeLimitResetMs } from "./providers/anthropic-usage.ts";
-import { ClaudeCurrentIdentity } from "./providers/anthropic-identity.ts";
+import { ClaudeCurrentIdentity, LoginEmailWatch, PendingRowWrites } from "./providers/anthropic-identity.ts";
 import { dropForeignThinking, ThinkingOrigins } from "./thinking.ts";
 
 const MAX_BODY = 64 * 1024 * 1024;
+
+/** The headers a client sent that identify its login, for the profile lookup that names it. */
+function loginHeaders(headers: http.IncomingHttpHeaders): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const name of ["authorization", "anthropic-version", "anthropic-beta"]) {
+    const value = headers[name];
+    if (typeof value === "string") out[name] = value;
+  }
+  return out;
+}
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "host", "content-length"]);
 // The caller's own Anthropic credentials. A routed request authenticates as the provider, so these
 // are dropped rather than forwarded: the provider header replaces only the one it happens to share
@@ -239,6 +249,10 @@ export type ProxyDeps = {
   observedClaudeCodeAuth?: ObservedClaudeCodeAuth;
   /** Test seam for Claude Code's keychain and credential-file readers. */
   claudeCodeCredentialReaders?: ClaudeCodeCredentialReaders;
+  /** Test seam for the current login's profile lookup (`/api/oauth/profile`), which names its email. */
+  claudeProfileFetch?: (url: string, init: RequestInit) => Promise<Response>;
+  /** Test seam for the durable key of the local Claude login (`ClaudeAccountAuthPool`), read from `~/.claude.json` by default. */
+  claudeLoginKey?: () => string | undefined;
   /** Where agent definitions are read from. Defaults to `~/.claude/agents`; tests inject a tmp dir. */
   agentDir?: string;
   /** TLS dialer for absolute-form proxy requests. Production uses node:tls; integration tests inject a local CA. */
@@ -269,6 +283,10 @@ export class Proxy {
   private draining = false;
   /** Model calls waiting at the hold gate (not yet in `stats`): drain() waits for them too. */
   private held = 0;
+  /** Rows still waiting for their login's email; drain() waits for them, so an exit cannot lose one. */
+  readonly rows = new PendingRowWrites();
+  /** Images being generated (`/api/image`): not on this server's sockets, but drain() waits for them. */
+  private imagesInFlight = 0;
   private readonly server: net.Server;
   private readonly httpServer: http.Server;
   private readonly upstreamAgent = new https.Agent({ keepAlive: true, maxSockets: 64 });
@@ -394,6 +412,16 @@ export class Proxy {
    * the dashboard's usage and request list show the subscription's image traffic.
    */
   async generateImage(req: ImageRequest, signal?: AbortSignal, meta?: { session?: string }): Promise<ImageResult> {
+    // Counted for drain(): the image's row is written when its answer arrives, so the exit waits for it.
+    this.imagesInFlight++;
+    try {
+      return await this.recordedImage(req, signal, meta);
+    } finally {
+      this.imagesInFlight--;
+    }
+  }
+
+  private async recordedImage(req: ImageRequest, signal?: AbortSignal, meta?: { session?: string }): Promise<ImageResult> {
     const first = Object.entries(this.deps.config().providers).find(([, p]) => p.type === "chatgpt");
     if (!first || first[1].type !== "chatgpt") throw new Error("image generation needs a ChatGPT provider; add one in the dashboard");
     const model = first[1].models?.[0]?.id;
@@ -414,12 +442,17 @@ export class Proxy {
         ok: true,
         status: 200,
         ...(image.usage ? { usage: image.usage } : {}),
+        ...(image.account ? { account: image.account } : {}),
+        ...(image.borrowedLabel ? { borrowedLabel: image.borrowedLabel } : {}),
         note: `${image.size ?? "?"} ${image.quality ?? "?"} ${image.format}, ${req.images?.length ?? 0} reference(s)`,
         ...(meta?.session ? { session: meta.session } : {}),
       };
       this.deps.requests.add(record);
       return image;
     } catch (e) {
+      // Set by the adapter once an account was tried, so a failed image still names it.
+      const failedOn = (e as { account?: unknown } | null)?.account;
+      const failedLabel = (e as { borrowedLabel?: unknown } | null)?.borrowedLabel;
       const record: RequestRecord = {
         kind: "image",
         source: model,
@@ -432,6 +465,8 @@ export class Proxy {
         ok: false,
         status: signal?.aborted ? "aborted" : 502,
         note: (e as Error).message.slice(0, 300),
+        ...(typeof failedOn === "string" ? { account: failedOn } : {}),
+        ...(typeof failedLabel === "string" ? { borrowedLabel: failedLabel } : {}),
         ...(meta?.session ? { session: meta.session } : {}),
       };
       this.deps.requests.add(record);
@@ -595,6 +630,7 @@ export class Proxy {
       log: deps.log,
       ...(deps.observedClaudeCodeAuth ? { observed: deps.observedClaudeCodeAuth } : {}),
       ...(deps.claudeCodeCredentialReaders ? { credentialReaders: deps.claudeCodeCredentialReaders } : {}),
+      ...(deps.claudeLoginKey ? { loginKey: deps.claudeLoginKey } : {}),
     });
     this.claudeUsage = new ClaudeUsage(this.claudeAccounts, {
       upstream: () => this.deps.config().upstream,
@@ -606,6 +642,7 @@ export class Proxy {
     });
     this.claudeIdentity = new ClaudeCurrentIdentity(this.claudeAccounts, {
       upstream: () => this.deps.config().upstream,
+      ...(deps.claudeProfileFetch ? { fetch: deps.claudeProfileFetch } : {}),
       warn: (message) => deps.log.warn(message),
     });
     this.opencodeUsage = new OpenCodeUsage({ warn: (message) => deps.log.warn(message) });
@@ -660,10 +697,12 @@ export class Proxy {
     if (released) this.deps.log.info(`drain: released ${released} model call(s) held for a network switch`);
     this.server.close();
     const t0 = Date.now();
-    while ((this.stats.messagesInFlight > 0 || this.held > 0) && Date.now() - t0 < maxMs) {
+    while ((this.stats.messagesInFlight > 0 || this.held > 0 || this.imagesInFlight > 0) && Date.now() - t0 < maxMs) {
       onProgress?.(this.stats.messagesInFlight);
       await new Promise((r) => setTimeout(r, 250));
     }
+    // A finished call's row may still wait for its login's email (at most FINAL_WAIT_MS): it is written first.
+    await this.rows.settled();
     this.close();
   }
 
@@ -852,6 +891,11 @@ export class Proxy {
     let finished = false;
     let clientClosed = false;
     res.once("close", () => { clientClosed = !res.writableEnded; });
+    // The background lookup of the current login's email, when the login answers this request. Nothing
+    // waits on it; the row takes the email when it is written (writeLoginRow).
+    let loginWatch: LoginEmailWatch | undefined;
+    /** The pool credential (its id) the watch above was started for; undefined when it was not for one. */
+    let loginWatchFor: string | undefined;
     let record: Omit<RequestRecord, "at" | "id" | "ms" | "status" | "ok" | "usage" | "stopReason" | "note"> = {
       kind: pathname === "/v1/messages/count_tokens" ? "count_tokens" : pathname === "/v1/messages" ? "messages" : "other",
       source: "-",
@@ -880,7 +924,7 @@ export class Proxy {
     let unwrittenSeen = false;
     // `failed` counts requests that did not get a proper response (vanished, upstream error,
     // provider error). A note alone is not a failure: adapters attach usage notes on success.
-    const finish = (status: string, bytes: number, note?: string, failed: boolean = note !== undefined, extra?: { usage?: RequestUsage; stopReason?: string; resent?: boolean; messageId?: string; requestedTier?: string; servedTier?: string; upstreamCalled?: false | undefined; refusal?: RequestRecord["refusal"] }): void => {
+    const finish = (status: string, bytes: number, note?: string, failed: boolean = note !== undefined, extra?: { usage?: RequestUsage; stopReason?: string; resent?: boolean; account?: string; borrowedLabel?: string; messageId?: string; requestedTier?: string; servedTier?: string; upstreamCalled?: false | undefined; refusal?: RequestRecord["refusal"] }): void => {
       if (finished) return;
       finished = true;
       // A translated adapter may have sent 200 before the client left. That is not a
@@ -917,6 +961,8 @@ export class Proxy {
         if (stopReason && !cancelled) completed.stopReason = stopReason;
         if (note) completed.note = note;
         if (extra?.resent && !completed.ok) completed.resent = true;
+        if (extra?.account !== undefined) completed.account = extra.account;
+        if (extra?.borrowedLabel !== undefined) completed.borrowedLabel = extra.borrowedLabel;
         if (extra?.messageId !== undefined) completed.messageId = extra.messageId;
         if (extra?.requestedTier !== undefined) completed.requestedTier = extra.requestedTier;
         if (extra?.servedTier !== undefined) completed.servedTier = extra.servedTier;
@@ -936,7 +982,7 @@ export class Proxy {
         if (completed.ok && completed.kind === "messages" && numericStatus >= 200 && numericStatus < 300 && extra?.upstreamCalled !== false && !ownKey) {
           this.modelHealth.success(completed.provider, completed.target);
         }
-        this.deps.requests.add(completed);
+        this.rows.write((row) => this.deps.requests.add(row), completed, loginWatch);
       }
     };
 
@@ -1010,15 +1056,39 @@ export class Proxy {
     // stays on the account that holds the server-side thread; an unknown id keeps the old key.
     const continued = cacheRequest ? this.continuedConversation(json!) : undefined;
     const affinity = cacheRequest ? (continued ?? (!sideRequest ? requestConversationKey(json!, record.session, subagent ? agentId : undefined) : undefined)) ?? conversationKey(cacheRequest) : undefined;
+    /** Names the account that answers. The current login's email is not set here: the row takes it when written. */
+    const setRecordAccount = (ownerId: string): void => {
+      record.account = ownerId;
+      delete record.accountEmail;
+      delete record.borrowedLabel;
+    };
     const recordCredential = (name: string, using: Credential, credentials: readonly Credential[], retry = false, pinned = false): void => {
       // count_tokens is answered locally by the translated adapters: no key was actually sent.
       const type = cfg.providers[name]?.type;
       if (pathname === "/v1/messages/count_tokens" && (type === "openai-compatible" || type === "google")) return;
-      record.credential = this.credentialLabel(name, using, credentials);
+      const label = this.credentialLabel(name, using, credentials);
+      // The label of the credential that answered is kept as a snapshot, so the dashboard shows it after
+      // the keys are renamed or removed. A lone unnamed key would read `#1` on every row, so it is not kept.
+      const named = cfg.providers[name];
+      const keyed = !!named && "credentials" in named && (named.credentials?.length ?? 0) > 0;
+      if (keyed || credentials.length > 1) record.credential = label;
+      else delete record.credential;
+      if (using.ownerId) setRecordAccount(using.ownerId);
+      // Picked, not awaited: the lookup runs while the turn goes upstream.
+      // The email is looked up for the credential that answers, the one whose token this is. A retry onto
+      // another credential replaces the watch its refused predecessor started, and a credential that is not
+      // the login drops it, so the row names the login that finally answered.
+      if (using.ownerId !== "current") {
+        loginWatch = undefined;
+        loginWatchFor = undefined;
+      } else if (loginWatchFor !== using.id) {
+        loginWatch = new LoginEmailWatch(() => this.claudeIdentity.identifyWith(using.headers));
+        loginWatchFor = using.id;
+      }
       const first = this.pool.pick(name, credentials);
       const reason = pinned ? "account-pin" : retry ? "retry" : !first ? "all-unavailable" : first.id !== using.id ? "affinity" : "configured-order";
       const states = this.pool.report(name, credentials).map((row, i) => `${this.credentialLabel(name, credentials[i]!, credentials)}:${row.paused ? "paused" : row.state}`).join(", ");
-      log.info(`KEY ${name} credential=${record.credential} conversation=${affinity ?? "-"} reason=${reason} candidates=[${states}]`);
+      log.info(`KEY ${name} credential=${label} conversation=${affinity ?? "-"} reason=${reason} candidates=[${states}]`);
     };
     const search = kind === "web-search" ? webSearchQuery(json!) : null;
     let searchAttempted = false;
@@ -1108,8 +1178,9 @@ export class Proxy {
           const failure = `${override.label}: ${note ?? status}`;
           log.warn(`${failure}; falling back to original destination`);
           if (override.purpose === "compaction") {
-            this.deps.requests.add({ ...record, id: crypto.randomUUID(), at: new Date(t0).toISOString(), ms: Date.now() - t0,
-              status: Number.isFinite(Number(status)) ? Number(status) : status, ok: false, note: `${failure}; fallback` });
+            // The failed attempt's own row: written like every row, so a login that answered it keeps its email.
+            this.rows.write((row) => this.deps.requests.add(row), { ...record, id: crypto.randomUUID(), at: new Date(t0).toISOString(), ms: Date.now() - t0,
+              status: Number.isFinite(Number(status)) ? Number(status) : status, ok: false, note: `${failure}; fallback` }, loginWatch);
           }
           body = originalBody;
           json = structuredClone(originalJson);
@@ -1299,6 +1370,13 @@ export class Proxy {
         if (route && json) {
           record = { ...record, target: route.model, provider: route.provider };
           delete record.effort;
+          delete record.credential;
+          delete record.account;
+          delete record.accountEmail;
+          delete record.borrowedLabel;
+          // The email watch belongs to the attempt that answers: a new route starts without the last one's.
+          loginWatch = undefined;
+          loginWatchFor = undefined;
           const configured = cfg.providers[route.provider];
           if (!configured) {
             finish("500", 0, `unknown provider ${route.provider}`, true, { ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "unknown-provider" });
@@ -1469,7 +1547,7 @@ export class Proxy {
                 // Neither is about the account or the provider (a refusal is request-specific, missing
                 // capacity is the model's on Google's side): neither cool nor mark success.
                 res.writeHead(o.status, { "content-type": "application/json" }).end(o.errorBody);
-                finish(String(o.status), Buffer.byteLength(o.errorBody), o.note, true, o.kind === "prompt-incompatible" ? { refusal: "prompt-incompatible" } : undefined);
+                finish(String(o.status), Buffer.byteLength(o.errorBody), o.note, true, { ...(o.account ? { account: o.account } : {}), ...(o.kind === "prompt-incompatible" ? { refusal: "prompt-incompatible" as const } : {}) });
                 return;
               }
               // The answer is charged to the key that actually produced it, which after a retry is a
@@ -1573,6 +1651,9 @@ export class Proxy {
             if (ownSignIn) {
               target = { protocol: "https:", host: cfg.upstream, port: this.deps.upstreamPort ?? 443, agent: this.deps.upstreamAgent ?? this.agentFor(route.provider, "https:"), extraHeaders: {} };
               ownLogin = true;
+              setRecordAccount("current");
+              loginWatch = new LoginEmailWatch(() => this.claudeIdentity.identifyWith(loginHeaders(req.headers)));
+              loginWatchFor = undefined;
               const routeEffort = effortOf(json);
               if (routeEffort) record.effort = routeEffort;
               tag = `CLAUDE ${route.tag} account=app (no usable pool account)`;
@@ -1692,6 +1773,11 @@ export class Proxy {
           // An un-routed native Messages turn goes out on the app's own sign-in, and its answer is the
           // only statement of that login's unified limits when the usage endpoint refuses (2026-11-05).
           ownLogin = isMessages && typeof req.headers.authorization === "string";
+          if (ownLogin) {
+            setRecordAccount("current");
+            loginWatch = new LoginEmailWatch(() => this.claudeIdentity.identifyWith(loginHeaders(req.headers)));
+            loginWatchFor = undefined;
+          }
           // Passthrough stays byte-exact unless another model's thinking would get the turn refused.
           if (json) {
             const removed = this.thinkingOrigins.dropKnownForeign(json, "anthropic");
@@ -2169,7 +2255,7 @@ export class Proxy {
     json: Record<string, unknown>,
     query: WebSearchQuery,
     settings: NonNullable<Config["webSearch"]>,
-    record: { source?: string; target?: string; provider?: string; purpose?: RequestRecord["purpose"] },
+    record: { source?: string; target?: string; provider?: string; account?: string; borrowedLabel?: string; purpose?: RequestRecord["purpose"] },
     finish: (status: string, bytes: number, note?: string, failed?: boolean, extra?: { usage?: RequestUsage }) => void,
     markAttempted: () => void,
   ): Promise<boolean> {
@@ -2226,6 +2312,8 @@ export class Proxy {
       const outcome = await backend.search(query);
       blocks = webSearchBlocks(query, outcome).blocks;
       usage = outcome.usage;
+      if (outcome.account) record.account = outcome.account;
+      if (outcome.borrowedLabel !== undefined) record.borrowedLabel = outcome.borrowedLabel;
     } catch (e) {
       this.deps.log.warn(`web search via ${settings.provider}: ${(e as Error).message}`);
       return false;

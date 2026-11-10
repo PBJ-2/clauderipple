@@ -23,6 +23,7 @@ import { CLAUDE_CODE_IDENTITY, nativeAnthropicHeaders, type ClaudeCodeCredential
 import { ToolTranslation, ToolTranslationError } from "./tools.ts";
 import { ClaudeAccountAuthPool } from "../providers/anthropic-account-pool.ts";
 import { ObservedClaudeCodeAuth } from "../providers/anthropic-observed.ts";
+import { LoginEmailWatch, PendingRowWrites } from "../providers/anthropic-identity.ts";
 import type { ChatGptAdapter } from "../providers/chatgpt/index.ts";
 import type { Credential } from "../pool.ts";
 import {
@@ -57,9 +58,17 @@ type IngressDeps = {
    * or the first one configured (null name), or — with none configured — Codex's own login alone.
    */
   chatgpt?: (name: string | null) => ChatGptAdapter;
+  /**
+   * The identity of the login whose auth headers answered a request, snapshotted into its row (`accountEmail`).
+   * Called with the headers of the credential that answered, so the email is that token's.
+   */
+  claudeIdentity?: (headers: Record<string, string>) => Promise<{ email: string } | null>;
   /** While engaged (a network switch, tether.ts), new model calls wait here instead of starting. */
   hold?: HoldGate;
 };
+
+/** What the request has been answered on so far, so a row written by any exit names it. */
+type Served = { account?: string; borrowedLabel?: string | undefined; watch?: LoginEmailWatch | undefined };
 
 /**
  * The request body as JSON text. Codex signed in to ChatGPT compresses what it sends with zstd
@@ -100,7 +109,7 @@ export type IngressStats = {
   lastMessageEndedAt?: number;
 };
 
-type Outcome = { status: number; bytes: number; usage?: RequestUsage; stopReason?: string; note?: string };
+type Outcome = { status: number; bytes: number; account?: string; borrowedLabel?: string; usage?: RequestUsage; stopReason?: string; note?: string };
 
 function openAiError(message: string, type = "invalid_request_error", code: string | null = null): Json {
   return { error: { message, type, param: null, code } };
@@ -185,6 +194,8 @@ export class OpenAiIngress {
   private draining = false;
   /** Model calls waiting at the hold gate (not yet in `stats`): drain() waits for them too. */
   private held = 0;
+  /** Rows still waiting for their login's email; drain() waits for them, so an exit cannot lose one. */
+  readonly rows = new PendingRowWrites();
 
   constructor(deps: IngressDeps) {
     this.deps = deps;
@@ -233,6 +244,8 @@ export class OpenAiIngress {
       onProgress?.(this.stats.messagesInFlight);
       await new Promise((resolveP) => setTimeout(resolveP, 250));
     }
+    // A finished call's row may still wait for its login's email (at most FINAL_WAIT_MS): it is written first.
+    await this.rows.settled();
     for (const socket of this.sockets) socket.destroy();
   }
 
@@ -269,6 +282,7 @@ export class OpenAiIngress {
     }
     let record: Omit<RequestRecord, "id" | "at" | "ms" | "status" | "ok" | "usage" | "stopReason" | "note"> = { kind: "messages", source: "-", target: "-", provider: "-", stream: false };
     let completed = false;
+    const served: Served = {};
     const finish = (status: number, bytes: number, extra: Omit<Outcome, "status" | "bytes"> = {}): void => {
       if (completed) return;
       completed = true;
@@ -284,10 +298,16 @@ export class OpenAiIngress {
       this.deps.log.info(`OPENAI ${tagged}`);
       if (isCall) {
         const entry: RequestRecord = { ...record, id: requestId(), at: new Date(started).toISOString(), ms, status, ok: status >= 200 && status < 400 };
+        // An exit that carries no account (a client that left mid-stream, say) still names the one that answered.
+        const account = extra.account ?? served.account;
+        if (account) entry.account = account;
+        // The borrowed Codex login's name, as it was when it answered; only for the account that answered.
+        const borrowedLabel = extra.borrowedLabel ?? (account === served.account ? served.borrowedLabel : undefined);
+        if (borrowedLabel) entry.borrowedLabel = borrowedLabel;
         if (extra.usage) entry.usage = extra.usage;
         if (extra.stopReason) entry.stopReason = extra.stopReason;
         if (extra.note) entry.note = extra.note;
-        this.deps.requests.add(entry);
+        this.rows.write((row) => this.deps.requests.add(row), entry, account === served.account ? served.watch : undefined);
       }
     };
     // Codex closes the socket the moment it reads `response.completed`, often before Anthropic's
@@ -295,7 +315,7 @@ export class OpenAiIngress {
     let terminal: Outcome | null = null;
     res.once("close", () => {
       if (completed || res.writableEnded) return;
-      if (terminal) finish(terminal.status, terminal.bytes, { ...(terminal.usage ? { usage: terminal.usage } : {}), ...(terminal.stopReason ? { stopReason: terminal.stopReason } : {}), note: `${terminal.note ?? ""}; client closed after completion`.replace(/^; /, "") });
+      if (terminal) finish(terminal.status, terminal.bytes, { ...(terminal.account ? { account: terminal.account } : {}), ...(terminal.borrowedLabel ? { borrowedLabel: terminal.borrowedLabel } : {}), ...(terminal.usage ? { usage: terminal.usage } : {}), ...(terminal.stopReason ? { stopReason: terminal.stopReason } : {}), note: `${terminal.note ?? ""}; client closed after completion`.replace(/^; /, "") });
       else finish(499, 0, { note: "client closed" });
     });
 
@@ -371,9 +391,10 @@ export class OpenAiIngress {
         record = { kind: "messages", source: requested, target: explicit?.model ?? requested, provider: adapter.name, stream: body.stream === true };
         const outcome = await adapter.passthrough(req, res, path.slice("/v1".length), payload, codexConversation(req, body), {
           bodyEncoded: !renamed,
-          onCompleted: (done) => { terminal = { status: done.status, bytes: done.bytes, ...(done.usage ? { usage: done.usage } : {}), ...(done.note ? { note: done.note } : {}) }; },
+          onAccount: (ownerId, borrowedLabel) => { served.account = ownerId; served.borrowedLabel = borrowedLabel; },
+          onCompleted: (done) => { terminal = { status: done.status, bytes: done.bytes, ...(done.account ? { account: done.account } : {}), ...(done.borrowedLabel ? { borrowedLabel: done.borrowedLabel } : {}), ...(done.usage ? { usage: done.usage } : {}), ...(done.note ? { note: done.note } : {}) }; },
         });
-        finish(outcome.status, outcome.bytes, { ...(outcome.usage ? { usage: outcome.usage } : {}), ...(outcome.note ? { note: outcome.note } : {}) });
+        finish(outcome.status, outcome.bytes, { ...(outcome.account ? { account: outcome.account } : {}), ...(outcome.borrowedLabel ? { borrowedLabel: outcome.borrowedLabel } : {}), ...(outcome.usage ? { usage: outcome.usage } : {}), ...(outcome.note ? { note: outcome.note } : {}) });
         return;
       }
       if (path === "/v1/responses/compact") {
@@ -423,8 +444,8 @@ export class OpenAiIngress {
       wire.stream = stream;
       record = { kind: "messages", source: requested, target: route.model, provider: route.provider, ...(route.effort ? { effort: route.effort } : {}), stream };
       const kindNote = `openai-ingress ${path === "/v1/responses" ? "responses" : "chat"}`;
-      const outcome = await this.forward(res, provider, wire, route.model, path === "/v1/chat/completions", stream, compaction, translation, (done) => { terminal = { ...done, note: kindNote }; });
-      finish(outcome.status, outcome.bytes, { ...(outcome.usage ? { usage: outcome.usage } : {}), ...(outcome.stopReason ? { stopReason: outcome.stopReason } : {}), note: `${kindNote}${outcome.note ? `; ${outcome.note}` : ""}` });
+      const outcome = await this.forward(res, provider, wire, route.model, path === "/v1/chat/completions", stream, compaction, translation, served, (done) => { terminal = { ...done, note: kindNote }; });
+      finish(outcome.status, outcome.bytes, { ...(outcome.account ? { account: outcome.account } : {}), ...(outcome.usage ? { usage: outcome.usage } : {}), ...(outcome.stopReason ? { stopReason: outcome.stopReason } : {}), note: `${kindNote}${outcome.note ? `; ${outcome.note}` : ""}` });
     } catch (error) {
       if (completed) return; // already recorded (e.g. client closed after the terminal event)
       this.deps.log.warn(`OPENAI ingress error: ${(error as Error).message}`);
@@ -443,7 +464,7 @@ export class OpenAiIngress {
     }
   }
 
-  private async forward(res: http.ServerResponse, provider: AnthropicCompatibleProvider | AnthropicProvider, wire: Json, model: string, chat: boolean, stream: boolean, compaction: boolean, translation: ToolTranslation, onTerminal?: (outcome: Outcome) => void): Promise<Outcome> {
+  private async forward(res: http.ServerResponse, provider: AnthropicCompatibleProvider | AnthropicProvider, wire: Json, model: string, chat: boolean, stream: boolean, compaction: boolean, translation: ToolTranslation, served: Served, onTerminal?: (outcome: Outcome) => void): Promise<Outcome> {
     const native = provider.type === "anthropic";
     const upstream = new URL(native ? (this.deps.nativeUpstream ?? "https://api.anthropic.com") : provider.url);
     const protocol = upstream.protocol === "https:" ? "https:" : "http:";
@@ -458,6 +479,12 @@ export class OpenAiIngress {
       if (!credential) return { status: 401, bytes: sendJson(res, 401, openAiError("Claude login unavailable — connect a Claude subscription", "authentication_error")), note: "Claude OAuth unavailable" };
       poolCredential = credential;
       authentication = credential.headers;
+      if (credential.ownerId) {
+        served.account = credential.ownerId;
+        // Picked, not awaited: the row takes the login's email when it is written.
+        const identity = this.deps.claudeIdentity;
+        served.watch = credential.ownerId === "current" && identity ? new LoginEmailWatch(() => identity(credential.headers)) : undefined;
+      }
     } else if (native) {
       try {
         authentication = nativeAnthropicHeaders(provider);
@@ -486,7 +513,7 @@ export class OpenAiIngress {
       const safeText = redactErrorText(text, credentialHeaderValues(Object.entries(headers)));
       this.deps.log.warn(`OPENAI ingress upstream ${response.statusCode ?? 0} (${model}): ${safeText.slice(0, 400)}`);
       const mapped = httpStatusError(response.statusCode ?? 502, safeText);
-      return { status: mapped.status, bytes: sendJson(res, mapped.status, mapped.error), note: `upstream ${response.statusCode ?? 0}` };
+      return { status: mapped.status, bytes: sendJson(res, mapped.status, mapped.error), ...(poolCredential?.ownerId ? { account: poolCredential.ownerId } : {}), note: `upstream ${response.statusCode ?? 0}` };
     }
     const mapper = new ResponsesEventMapper(model, translation, compaction);
     let bytes = 0;
@@ -512,7 +539,7 @@ export class OpenAiIngress {
               if (stream) write(mapped);
               if (stream && mapped.some((e) => e.type === "response.completed")) {
                 if (chat) { bytes += Buffer.byteLength("data: [DONE]\n\n"); res.write("data: [DONE]\n\n"); }
-                onTerminal?.({ status: 200, bytes, usage: usage(mapper), stopReason: mapper.output.some((item) => item.type === "function_call" || item.type === "custom_tool_call") ? "tool_use" : "end_turn" });
+                onTerminal?.({ status: 200, bytes, ...(poolCredential?.ownerId ? { account: poolCredential.ownerId } : {}), usage: usage(mapper), stopReason: mapper.output.some((item) => item.type === "function_call" || item.type === "custom_tool_call") ? "tool_use" : "end_turn" });
               }
             }
           } catch (error) {
@@ -546,6 +573,6 @@ export class OpenAiIngress {
       const result = chat ? responsesToChatCompletion(mapper) : mapper.response("completed");
       bytes = sendJson(res, 200, result);
     }
-    return { status: 200, bytes, usage: usage(mapper), stopReason: mapper.output.some((item) => item.type === "function_call" || item.type === "custom_tool_call") ? "tool_use" : "end_turn" };
+    return { status: 200, bytes, ...(poolCredential?.ownerId ? { account: poolCredential.ownerId } : {}), usage: usage(mapper), stopReason: mapper.output.some((item) => item.type === "function_call" || item.type === "custom_tool_call") ? "tool_use" : "end_turn" };
   }
 }

@@ -49,7 +49,7 @@ import { CredentialPool } from "./pool.ts";
 import { ClaudeAccountAuthPool } from "./providers/anthropic-account-pool.ts";
 import type { ModelHealth, ProviderExhaustion } from "./health.ts";
 import type { Stats } from "./proxy.ts";
-import type { RequestLog } from "./requestlog.ts";
+import type { RequestLog, RequestRecord } from "./requestlog.ts";
 import { PRESETS, type ProviderPreset } from "./presets.ts";
 import { answersWebSearch, effortLevels, targetWarnings } from "./targets.ts";
 export { effortLevels } from "./targets.ts";
@@ -74,7 +74,7 @@ import { ClaudeOAuthSession, type ClaudeOAuthState } from "./providers/claude-oa
 import { readClaudeAuthFile } from "./providers/anthropic-token-file.ts";
 import { isCurrentClaudeAccountPaused, listClaudeAccounts, listClaudeAccountsWithSubject, removeClaudeAccount, updateClaudeAccount, setCurrentClaudeAccountPaused, setPreferredClaudeAccount } from "./providers/anthropic-accounts.ts";
 import { storedAccountsFor } from "./pinned-accounts.ts";
-import { readChatGptAccounts, removeChatGptAccount, summarize as summarizeChatGptAccount, updateChatGptAccount } from "./providers/chatgpt/accounts.ts";
+import { CODEX_LOGIN_ID, readChatGptAccounts, removeChatGptAccount, summarize as summarizeChatGptAccount, updateChatGptAccount } from "./providers/chatgpt/accounts.ts";
 import { exhaustedForMs, IMAGE_ASPECTS, IMAGE_BACKGROUNDS, IMAGE_FORMATS, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
 import type { GoogleAccountStatus } from "./providers/google/index.ts";
 import { googleWindowsFromGroups, type QuotaGroup } from "./providers/google/usage.ts";
@@ -254,6 +254,46 @@ function previewAccounts<T extends { id: string; paused: boolean; preferred: boo
     .map((account) => ({ id: account.id, preferred: account.preferred, headers: {} }));
   const next = new CredentialPool().pick("preview", credentials)?.id;
   return accounts.map((account) => ({ ...account, state: account.paused ? "paused" : credentials.some((credential) => credential.id === account.id) ? "ready" : "needs-login", inUse: account.id === next }));
+}
+
+/**
+ * Account names are read alongside the log, never written back into a record. A stored account is
+ * named by its owner id as it is now, so a rename shows on old rows. Two owners name a login that can
+ * be switched, and so are named only by what they said when they answered: the current login by the
+ * email snapshotted into `accountEmail`, the borrowed Codex login (`codex`) by the name snapshotted
+ * into `borrowedLabel`. Today's login is another person after a switch, so a row without a snapshot
+ * names nobody and the Codex login is never looked up by today's sign-in.
+ */
+function requestAccountNames(deps: AdminDeps): (record: RequestRecord) => string | undefined {
+  const cfg = deps.config();
+  const claude = listClaudeAccounts(homeDir());
+  const chatgpt = deps.chatgpt?.().accounts?.() ?? {};
+  const google = deps.google?.().accounts() ?? {};
+  const storedChatgpt = readChatGptAccounts(homeDir()).map(summarizeChatGptAccount);
+  const storedGoogle = readGoogleAccounts(homeDir()).map(summarizeGoogleAccount);
+  const byProvider = new Map<string, string>();
+  const byOwner = new Map<string, string>();
+  const put = (provider: string | undefined, account: { id: string; label?: string; email?: string }): void => {
+    if (account.id === CODEX_LOGIN_ID) return;
+    const label = account.label || account.email;
+    if (!label) return;
+    if (provider) byProvider.set(`${provider}\0${account.id}`, label);
+    if (!byOwner.has(account.id)) byOwner.set(account.id, label);
+  };
+  for (const [name, provider] of Object.entries(cfg.providers)) {
+    const accounts = provider.type === "chatgpt" ? chatgpt[name] ?? storedChatgpt
+      : provider.type === "google" ? google[name] ?? storedGoogle
+      : provider.type === "anthropic" ? claude : [];
+    for (const account of accounts) put(name, account);
+  }
+  for (const accounts of [...Object.values(chatgpt), ...Object.values(google)]) for (const account of accounts) put(undefined, account);
+  for (const account of [...storedChatgpt, ...storedGoogle, ...claude]) put(undefined, account);
+  return (record) => {
+    if (!record.account) return undefined;
+    if (record.account === CODEX_LOGIN_ID) return record.borrowedLabel;
+    if (record.account === "current") return record.accountEmail;
+    return byProvider.get(`${record.provider}\0${record.account}`) ?? byOwner.get(record.account);
+  };
 }
 
 /** Claude usage is looked up only where a Claude subscription provider is configured. */
@@ -3180,7 +3220,12 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         // A comma-separated list so one call can ask for several kinds; unknown entries are ignored
         // and a list with nothing valid left means no filter.
         const kinds = kindValue === null ? [] : kindValue.split(",").filter((k): k is "messages" | "count_tokens" | "other" | "image" => k === "messages" || k === "count_tokens" || k === "other" || k === "image");
-        sendJson(res, 200, { requests: deps.requests.list(n, { ...(provider ? { provider } : {}), ...(kinds.length ? { kind: kinds } : {}), ...(session ? { session } : {}) }) });
+        const records = deps.requests.list(n, { ...(provider ? { provider } : {}), ...(kinds.length ? { kind: kinds } : {}), ...(session ? { session } : {}) });
+        const nameOf = requestAccountNames(deps);
+        sendJson(res, 200, { requests: records.map((record) => {
+          const name = nameOf(record) ?? (record.account && record.account !== "current" ? record.account.slice(0, 8) : undefined);
+          return name ? { ...record, accountLabel: name } : record;
+        }) });
         return;
       }
       if (pathname === "/api/requests/summary" && method === "GET") {

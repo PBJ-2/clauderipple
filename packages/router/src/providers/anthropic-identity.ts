@@ -8,6 +8,7 @@
 
 import crypto from "node:crypto";
 import type { Credential } from "../pool.ts";
+import type { RequestRecord } from "../requestlog.ts";
 import { subjectHash } from "./anthropic-accounts.ts";
 
 export type ClaudeLoginIdentity = { email: string; subjectHash: string };
@@ -22,6 +23,72 @@ export function claudeIdentityFromBody(body: unknown): ClaudeLoginIdentity | nul
   return hash ? { email, subjectHash: hash } : null;
 }
 
+/** How long a finished row waits for a lookup still in flight; past it the row is written without the email. */
+const FINAL_WAIT_MS = 500;
+
+/**
+ * The email of the login that answers one request, looked up in the background. It starts when the
+ * account is picked and nothing waits on it there, so the turn never waits on the profile endpoint.
+ * A lookup that fails leaves no email.
+ */
+export class LoginEmailWatch {
+  settled = false;
+  email: string | undefined;
+  readonly done: Promise<void>;
+
+  constructor(lookup: () => Promise<{ email: string } | null>) {
+    this.done = Promise.resolve()
+      .then(lookup)
+      .then((identity) => { this.email = identity?.email; }, () => { /* no name */ })
+      .then(() => { this.settled = true; });
+  }
+}
+
+/**
+ * Writes one request's row. A `current` row takes the email only if the lookup has answered by the
+ * time the row is final, or within FINAL_WAIT_MS of that; past it the row is written without an email
+ * and names no person. Every other row is written at once. The promise resolves once the row is written.
+ */
+export function writeLoginRow(write: (record: RequestRecord) => void, record: RequestRecord, watch: LoginEmailWatch | undefined): Promise<void> {
+  if (!watch || record.account !== "current") {
+    write(record);
+    return Promise.resolve();
+  }
+  const attach = (): void => {
+    if (watch.email) record.accountEmail = watch.email;
+    write(record);
+  };
+  if (watch.settled) {
+    attach();
+    return Promise.resolve();
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([watch.done, new Promise<void>((resolve) => { timer = setTimeout(resolve, FINAL_WAIT_MS); })])
+    .then(() => { clearTimeout(timer); attach(); });
+}
+
+/**
+ * The rows still waiting for their login's email. A request leaves the in-flight count when it
+ * finishes, which can be before its row is written, so a drain and the exit after it wait for these
+ * rows: no row is lost to the process ending. Each wait is bounded by FINAL_WAIT_MS.
+ */
+export class PendingRowWrites {
+  private readonly pending = new Set<Promise<void>>();
+
+  /** Writes one row now, or once its login email is settled; tracked until it is written. */
+  write(write: (record: RequestRecord) => void, record: RequestRecord, watch: LoginEmailWatch | undefined): void {
+    // RequestLog.add does not throw; a writer that did must not leave the drain waiting on it.
+    const done = writeLoginRow(write, record, watch).catch(() => {});
+    this.pending.add(done);
+    void done.then(() => { this.pending.delete(done); });
+  }
+
+  /** Resolves once every row that was waiting for its login email has been written. */
+  async settled(): Promise<void> {
+    while (this.pending.size > 0) await Promise.all([...this.pending]);
+  }
+}
+
 type IdentitySource = { credentials(): Promise<Credential[]> };
 type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 type IdentityOptions = {
@@ -29,10 +96,15 @@ type IdentityOptions = {
   upstream: () => string;
   fetch?: FetchLike;
   now?: () => number;
+  /** How long a failed lookup is kept before it is asked again (ten minutes). */
   ttlMs?: number;
+  /** How long a successful lookup is kept: the token's life (a day). */
+  successTtlMs?: number;
   timeoutMs?: number;
   warn?: (message: string) => void;
 };
+
+const DAY_MS = 24 * 60 * 60_000;
 
 /** The account's own auth header, the value a new token changes. Null when there is none to send. */
 function authHeaderValue(headers: Record<string, string>): string | null {
@@ -44,13 +116,15 @@ function authHeaderValue(headers: Record<string, string>): string | null {
 }
 
 /**
- * The current login's identity, asked at most once per `ttlMs` (ten minutes) per token. The cache
+ * The current login's identity, asked once per token: a success is kept for the token's life, a failure
+ * for `ttlMs` (ten minutes). The cache
  * is keyed on a hash of the auth header rather than on time alone, so a fresh login asks again
  * immediately; a failure is cached the same way and retried when the cache expires, never on every
  * poll of the dashboard.
  */
 export class ClaudeCurrentIdentity {
-  private cached: { key: string; at: number; value: ClaudeLoginIdentity | null } | null = null;
+  // A few tokens at once: the pool's copy and a client's own sign-in may differ, and one entry would ask again on each turn.
+  private readonly cache = new Map<string, { at: number; value: ClaudeLoginIdentity | null }>();
   private readonly source: IdentitySource;
   private readonly opts: IdentityOptions;
 
@@ -59,6 +133,7 @@ export class ClaudeCurrentIdentity {
     this.opts = opts;
   }
 
+  /** The identity of the pool's own copy of the current login. */
   async identify(): Promise<ClaudeLoginIdentity | null> {
     let headers: Record<string, string> | undefined;
     try {
@@ -68,15 +143,29 @@ export class ClaudeCurrentIdentity {
       return null;
     }
     if (!headers) return null;
+    return this.identifyWith(headers);
+  }
+
+  /**
+   * The identity behind these auth headers. A request answered on the client's own sign-in names
+   * that login, which need not be the pool's copy, so the caller passes the headers it sent.
+   */
+  async identifyWith(headers: Record<string, string>): Promise<ClaudeLoginIdentity | null> {
     const auth = authHeaderValue(headers);
     if (!auth) return null;
     const key = crypto.createHash("sha256").update(auth).digest("hex");
     const now = (this.opts.now ?? Date.now)();
-    if (this.cached && this.cached.key === key && now - this.cached.at < (this.opts.ttlMs ?? 10 * 60_000)) {
-      return this.cached.value;
-    }
+    // A token's identity does not change, so a success lasts the token's life (a day here); a failure
+    // is retried after ten minutes.
+    const hit = this.cache.get(key);
+    if (hit && now - hit.at < (hit.value ? this.opts.successTtlMs ?? DAY_MS : this.opts.ttlMs ?? 10 * 60_000)) return hit.value;
     const value = await this.fetchProfile(headers);
-    this.cached = { key, at: now, value };
+    this.cache.delete(key);
+    this.cache.set(key, { at: now, value });
+    if (this.cache.size > 8) {
+      const oldest = this.cache.keys().next().value;
+      if (oldest !== undefined) this.cache.delete(oldest);
+    }
     return value;
   }
 

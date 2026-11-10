@@ -129,7 +129,10 @@ const health = new UpstreamHealth(
     const why = !c ? "" : c.result === "online" ? ` while this machine is online (${c.detail}): this process is stuck` : ` and the connectivity check could not tell (${c.detail})`;
     log!.error(`${n} consecutive upstream connect failures${why}; exiting ${EXIT_UPSTREAM_UNREACHABLE} for the supervisor to restart`);
     hold.close();
-    setTimeout(() => process.exit(EXIT_UPSTREAM_UNREACHABLE), 100);
+    // The self-exit writes the rows still waiting for a login's email first (each waits at most 500 ms).
+    setTimeout(() => {
+      void Promise.all([proxy.rows.settled(), ingress.rows.settled()]).finally(() => process.exit(EXIT_UPSTREAM_UNREACHABLE));
+    }, 100);
   },
   {
     // A fresh process (curl) asks first; a machine that is offline is not helped by a restart.
@@ -143,7 +146,7 @@ const observedClaudeCodeAuth = new ObservedClaudeCodeAuth(path.join(home, "claud
 allowLongSilences();
 const proxy = new Proxy({ config: () => store.get(), log, certs, health, home, requests, observedClaudeCodeAuth, hold });
 reconcileProxyConfig = config => proxy.reconcileConfig(config);
-const ingress = new OpenAiIngress({ config: () => store.get(), log, requests, home, observedClaudeCodeAuth, chatgpt: (name) => proxy.chatgptForCodex(name), hold });
+const ingress = new OpenAiIngress({ config: () => store.get(), log, requests, home, observedClaudeCodeAuth, chatgpt: (name) => proxy.chatgptForCodex(name), claudeIdentity: (headers) => proxy.claudeIdentity.identifyWith(headers), hold });
 
 // Lid-closed awake and hotspot failover (macOS and Windows; no-ops elsewhere, off until configured).
 // They read Claude's activity from the two servers' counters. Started after listen(), below.

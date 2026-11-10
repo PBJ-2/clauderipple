@@ -24,7 +24,9 @@ const requests = new RequestLog(path.join(home, "requests.jsonl"));
 
 type Hit = { path: string; method: string; headers: http.IncomingHttpHeaders; body: string; raw: Buffer };
 const hits: Hit[] = [];
-const behaviour = new Map<string, { status: number; headers?: Record<string, string>; body?: string }>();
+const behaviour = new Map<string, { status: number; headers?: Record<string, string>; body?: string; hold?: boolean }>();
+/** Answers left open mid-stream, for a turn the client drops before it ends. */
+const held: http.ServerResponse[] = [];
 const answer = [
   `event: response.created\ndata: ${JSON.stringify({ type: "response.created", response: { id: "r1" } })}\n\n`,
   `event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response: { id: "r1", usage: { input_tokens: 120, input_tokens_details: { cached_tokens: 100 }, output_tokens: 5 } } })}\n\n`,
@@ -39,6 +41,11 @@ const backend = http.createServer((req, res) => {
     hits.push({ path: req.url ?? "", method: req.method ?? "", headers: req.headers, body: raw.toString("utf8"), raw });
     const token = String(req.headers.authorization ?? "").replace(/^Bearer /, "");
     const planned = behaviour.get(token);
+    if (planned?.hold) {
+      held.push(res);
+      res.writeHead(200, { "content-type": "text/event-stream", "x-codex-turn-state": `ts-${token}-held` }).write(answer.slice(0, 60));
+      return;
+    }
     if (planned && planned.status !== 200) {
       res.writeHead(planned.status, { "content-type": "application/json", ...(planned.headers ?? {}) }).end(planned.body ?? "{}");
       return;
@@ -54,19 +61,19 @@ const backend = http.createServer((req, res) => {
 await new Promise<void>((r) => backend.listen(0, "127.0.0.1", () => r()));
 const backendUrl = `http://127.0.0.1:${(backend.address() as net.AddressInfo).port}`;
 
-saveChatGptAccount(home, { accessToken: "tok-1", refreshToken: "rt-1", accountId: "ws-1", expiresAt: Date.now() + 3_600_000 });
-saveChatGptAccount(home, { accessToken: "tok-2", refreshToken: "rt-2", accountId: "ws-2", expiresAt: Date.now() + 3_600_000 });
+const firstAccount = saveChatGptAccount(home, { accessToken: "tok-1", refreshToken: "rt-1", accountId: "ws-1", expiresAt: Date.now() + 3_600_000 });
+const secondAccount = saveChatGptAccount(home, { accessToken: "tok-2", refreshToken: "rt-2", accountId: "ws-2", expiresAt: Date.now() + 3_600_000 });
 const config: Config = { ...DEFAULTS, providers: { chatgpt: { type: "chatgpt", auth: "own", url: backendUrl } }, listen: { host: "127.0.0.1", port: 0, openaiPort: 0 } };
 let adapter = new ChatGptAdapter("chatgpt", config.providers.chatgpt as never, home, log, new CredentialPool());
 const ingress = new OpenAiIngress({ config: () => config, log, requests, home, claudeCodeCredentialReaders: noClaudeCodeCredentialReaders, chatgpt: () => adapter });
 const port = await ingress.listen();
 
-function codexCall(pathname: string, body: Record<string, unknown> | undefined, session = "sess-1", extra: Record<string, string> = {}): Promise<{ status: number; text: string; headers: http.IncomingHttpHeaders }> {
+function codexCall(pathname: string, body: Record<string, unknown> | undefined, session = "sess-1", extra: Record<string, string> = {}, at = port): Promise<{ status: number; text: string; headers: http.IncomingHttpHeaders }> {
   const data = body ? JSON.stringify(body) : undefined;
   return new Promise((resolve, reject) => {
     const req = http.request({
       host: "127.0.0.1",
-      port,
+      port: at,
       path: pathname,
       method: data ? "POST" : "GET",
       headers: {
@@ -107,6 +114,27 @@ test("a GPT turn from Codex goes out unchanged on a pool account, and comes back
   assert.equal(res.headers["set-cookie"], undefined, "only protocol headers are relayed");
   const record = requests.list(1)[0]!;
   assert.deepEqual(record.usage, { input: 20, cached: 100, output: 5 });
+  assert.equal(record.account, firstAccount.id);
+});
+
+test("a Codex turn the client drops mid-stream still names the account that was answering", async () => {
+  behaviour.set("tok-1", { status: 200, hold: true });
+  const before = requests.list(100).length;
+  await new Promise<void>((resolve, reject) => {
+    const req = http.request({ host: "127.0.0.1", port, path: "/v1/responses", method: "POST", headers: { authorization: "Bearer caller-token", "chatgpt-account-id": "ws-caller", originator: "codex_exec", session_id: "sess-drop", "content-type": "application/json" } }, (res) => {
+      res.once("data", () => { req.destroy(); resolve(); });
+    });
+    req.on("error", (error) => { if (!/socket hang up|aborted/i.test(error.message)) reject(error); });
+    req.end(JSON.stringify(turn));
+  });
+  // The row is written when the server sees the socket close, a moment after the client left.
+  for (let i = 0; i < 50 && requests.list(100).length === before; i++) await new Promise((r) => setTimeout(r, 20));
+  const record = requests.list(1)[0]!;
+  assert.equal(record.ok, false);
+  assert.equal(record.status, 499);
+  assert.equal(record.note, "client closed");
+  assert.equal(record.account, firstAccount.id, "a row cut off mid-stream still names the account that answered");
+  behaviour.delete("tok-1");
 });
 
 test("account 1 at its limit: Codex's same turn is answered on account 2, no sign-out", async () => {
@@ -117,6 +145,7 @@ test("account 1 at its limit: Codex's same turn is answered on account 2, no sig
   const sent = hits.slice(before);
   assert.deepEqual(sent.map((h) => h.headers.authorization), ["Bearer tok-1", "Bearer tok-2"]);
   assert.equal(sent[1]!.headers["x-codex-turn-state"], undefined, "account 1's turn token is not shown to account 2");
+  assert.equal(requests.list(1)[0]!.account, secondAccount.id);
   const next = await codexCall("/v1/responses", turn, "sess-3");
   assert.equal(next.status, 200);
   assert.equal(hits.at(-1)!.headers.authorization, "Bearer tok-2", "account 1 rests until its window resets");
@@ -128,7 +157,44 @@ test("every pool account out: Codex's own login answers instead of a failure", a
   assert.equal(res.status, 200);
   assert.equal(hits.at(-1)!.headers.authorization, "Bearer caller-token");
   assert.equal(hits.at(-1)!.headers["chatgpt-account-id"], "ws-caller");
+  assert.equal(requests.list(1)[0]!.account, undefined, "the caller's workspace id is not a local owner id");
   behaviour.clear();
+});
+
+/** Writes the Codex CLI's login as `~/.codex/auth.json` holds it, and returns its access token. */
+function writeCodexLogin(email: string, accountId: string): string {
+  const jwt = (claims: Record<string, unknown>): string => `eyJhbGciOiJub25lIn0.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.sig`;
+  const accessToken = jwt({ exp: Math.floor(Date.now() / 1000) + 3600, "https://api.openai.com/auth": { chatgpt_account_id: accountId } });
+  fs.writeFileSync(path.join(process.env.CODEX_HOME!, "auth.json"), JSON.stringify({ tokens: { access_token: accessToken, id_token: jwt({ email }), account_id: accountId } }));
+  return accessToken;
+}
+
+test("a Codex row keeps the name of the borrowed login that answered, after the Codex login is switched", async () => {
+  const firstToken = writeCodexLogin("first@example.test", "ws-codex-first");
+  // A provider on `auto` with no stored account of its own: the borrowed Codex login is the one that answers.
+  const borrowedHome = fs.mkdtempSync(path.join(os.tmpdir(), "cr-ingress-codex-login-"));
+  const borrowing = new ChatGptAdapter("chatgpt", { ...(config.providers.chatgpt as object), auth: "auto" } as never, borrowedHome, log, new CredentialPool());
+  const borrowingIngress = new OpenAiIngress({ config: () => config, log, requests, home: borrowedHome, claudeCodeCredentialReaders: noClaudeCodeCredentialReaders, chatgpt: () => borrowing });
+  const borrowingPort = await borrowingIngress.listen();
+  try {
+    const first = await codexCall("/v1/responses", turn, "sess-borrow-1", {}, borrowingPort);
+    assert.equal(first.status, 200);
+    assert.equal(hits.at(-1)!.headers.authorization, `Bearer ${firstToken}`, "the borrowed login answered");
+    const firstRow = requests.list(1)[0]!;
+    assert.equal(firstRow.account, "codex");
+    assert.equal(firstRow.borrowedLabel, "first@example.test");
+    assert.doesNotMatch(JSON.stringify(firstRow), /eyJ/, "no token in the row");
+
+    // The Codex CLI signs in as someone else: the owner id stays `codex`, the row keeps the name it answered as.
+    writeCodexLogin("second@example.test", "ws-codex-second");
+    const second = await codexCall("/v1/responses", turn, "sess-borrow-2", {}, borrowingPort);
+    assert.equal(second.status, 200);
+    assert.equal(requests.list(1)[0]!.borrowedLabel, "second@example.test");
+    assert.equal(requests.list(100).find((record) => record.id === firstRow.id)?.borrowedLabel, "first@example.test");
+  } finally {
+    await borrowingIngress.drain(1_000);
+    fs.rmSync(borrowedHome, { recursive: true, force: true });
+  }
 });
 
 test("remote compaction and Codex's catalogue refresh take the same route", async () => {
@@ -171,6 +237,7 @@ test("a WebSocket attempt is told 426, so Codex falls back to HTTP", async () =>
 });
 
 test("cleanup", async () => {
+  for (const res of held) res.destroy();
   await ingress.drain(0);
   backend.close();
 });

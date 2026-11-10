@@ -13,13 +13,18 @@ import { UpstreamHealth } from "../src/health.ts";
 import { Logger } from "../src/log.ts";
 import { Proxy } from "../src/proxy.ts";
 import { ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
+import { saveChatGptAccount } from "../src/providers/chatgpt/accounts.ts";
+import { saveGoogleAccount } from "../src/providers/google/accounts.ts";
 import { setCurrentClaudeAccountPaused } from "../src/providers/anthropic-accounts.ts";
-import { RequestLog } from "../src/requestlog.ts";
+import { RequestLog, type RequestRecord } from "../src/requestlog.ts";
 import { createCa, createLeaf } from "../src/x509.ts";
 
 const noClaudeCodeCredentialReaders = { keychain: () => null, credentialsFile: () => null };
 
-async function rig(options: { respond?: (res: http.ServerResponse) => void; healthLimit?: number } = {}) {
+async function rig(options: { respond?: (res: http.ServerResponse, req: http.IncomingMessage) => void; healthLimit?: number; profiles?: Record<string, string>; profileWait?: Promise<void>; refuse?: (req: http.IncomingMessage) => number | undefined } = {}) {
+  // The current login's email per bearer token, as `/api/oauth/profile` would name it. `profileWait`
+  // holds each answer until it resolves, to show what a slow lookup does to the turn and its row.
+  const profiles = options.profiles ?? {};
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-log-metadata-"));
   const ca = createCa({ cn: "request log test" });
   const leaf = createLeaf({ host: "localhost", caCertPem: ca.certPem, caKeyPem: ca.keyPem });
@@ -37,7 +42,9 @@ async function rig(options: { respond?: (res: http.ServerResponse) => void; heal
       const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
       seen.push(body);
       seenAuth.push(req.headers.authorization);
-      if (options.respond) { options.respond(res); return; }
+      const refused = options.refuse?.(req);
+      if (refused !== undefined) { res.writeHead(refused, { "content-type": "application/json" }).end('{"error":{"message":"refused"}}'); return; }
+      if (options.respond) { options.respond(res, req); return; }
       if ((body.tools as { type?: string }[] | undefined)?.some((tool) => tool.type === "image_generation")) {
         if (imageStatus !== 200) {
           res.writeHead(imageStatus, { "content-type": "application/json" }).end(JSON.stringify({ error: { message: "image backend failed" } }));
@@ -94,7 +101,15 @@ async function rig(options: { respond?: (res: http.ServerResponse) => void; heal
   const observed = new ObservedClaudeCodeAuth();
   const trips: number[] = [];
   const health = new UpstreamHealth(() => options.healthLimit ?? 100, (n) => trips.push(n));
-  const proxy = new Proxy({ config: () => cfg, home, requests, claudeCodeCredentialReaders: noClaudeCodeCredentialReaders, observedClaudeCodeAuth: observed, agentDir: path.join(home, "agents"), certs: new CertStore(home), log: new Logger(path.join(home, "router.log"), 1e6, 1, false), health, upstreamPort: (native.address() as net.AddressInfo).port, upstreamAgent: agent });
+  const claudeProfileFetch = async (_url: string, init: RequestInit): Promise<Response> => {
+    const token = String((init.headers as Record<string, string>).authorization ?? "").replace(/^Bearer\s+/i, "");
+    if (options.profileWait) await options.profileWait;
+    const email = profiles[token];
+    return email ? new Response(JSON.stringify({ account: { uuid: `uuid-${token}`, email } }), { status: 200 }) : new Response("{}", { status: 404 });
+  };
+  const proxy = new Proxy({ config: () => cfg, home, requests, claudeCodeCredentialReaders: noClaudeCodeCredentialReaders, observedClaudeCodeAuth: observed, agentDir: path.join(home, "agents"), certs: new CertStore(home), log: new Logger(path.join(home, "router.log"), 1e6, 1, false), health, upstreamPort: (native.address() as net.AddressInfo).port, upstreamAgent: agent, claudeProfileFetch,
+    // Each login is its own durable key, as a switch of the app's login is: the rest of a refused login must not follow to the next.
+    claudeLoginKey: () => { const authorization = observed.getFresh()?.authorization; return authorization ? `login:${authorization}` : undefined; } });
   await proxy.listen();
   const send = async (model: string, extra: Record<string, unknown> = {}, pathname = "/v1/messages", beforeSend?: (socket: tls.TLSSocket) => void, headers: Record<string, string> = {}) => {
     const socket = net.connect(port, "127.0.0.1");
@@ -124,7 +139,7 @@ async function rig(options: { respond?: (res: http.ServerResponse) => void; heal
     secure.destroy();
     return { text, record: requests.list(1)[0]! };
   };
-  return { cfg, seen, seenAuth, home, requests, proxy, observed, send, health, trips, failBackend: () => { responseStatus = 400; }, failImage: () => { imageStatus = 500; }, stop: async () => {
+  return { cfg, seen, seenAuth, home, requests, proxy, observed, profiles, send, health, trips, failBackend: () => { responseStatus = 400; }, failImage: () => { imageStatus = 500; }, stop: async () => {
     proxy.close(); agent.destroy();
     await Promise.all([backend, native].map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
     fs.rmSync(home, { recursive: true, force: true });
@@ -247,6 +262,64 @@ test("proxy finish correlates every translated message and records actual servic
   } finally { await r.stop(); }
 });
 
+test("a ChatGPT turn records the account that answered, not a token or workspace id", async () => {
+  const r = await rig();
+  try {
+    for (const stream of [true, false]) {
+      const { record } = await r.send("gpt-test", { stream });
+      assert.equal(record.ok, true);
+      assert.equal(record.account, "legacy");
+      assert.equal(record.credential, undefined);
+    }
+    const count = await r.send("gpt-test", {}, "/v1/messages/count_tokens");
+    assert.equal(count.record.account, undefined, "a local estimate uses no account");
+    assert.doesNotMatch(fs.readFileSync(path.join(r.home, "requests.jsonl"), "utf8"), /test-token|test-account/);
+  } finally { await r.stop(); }
+});
+
+for (const provider of ["chatgpt", "google"] as const) {
+  test(`a ${provider} retry records the account that answered the turn`, async () => {
+    let attempts = 0;
+    const r = await rig({ respond: (res, req) => {
+      if (++attempts === 1) {
+        res.writeHead(429, { "content-type": "application/json", "retry-after": "300" }).end('{"error":{"message":"rate limit"}}');
+        return;
+      }
+      const event = provider === "chatgpt"
+        ? { type: "response.completed", response: { usage: { input_tokens: 10, output_tokens: 2 } } }
+        : { response: { candidates: [{ content: { parts: [{ text: "answer" }] }, finishReason: "STOP" }], usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2 } } };
+      if (provider === "google" && !req.url?.includes("streamGenerateContent")) {
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(event));
+      } else res.writeHead(200, { "content-type": "text/event-stream" }).end(`data: ${JSON.stringify(event)}\n\n`);
+    } });
+    try {
+      const expiresAt = Date.now() + 3_600_000;
+      let owner: string;
+      if (provider === "chatgpt") {
+        owner = saveChatGptAccount(r.home, { accessToken: "second-token", accountId: "second-workspace", expiresAt }).id;
+      } else {
+        saveGoogleAccount(r.home, { accessToken: "first-google-token", projectId: "first-project", email: "first@example.test", expiresAt });
+        owner = saveGoogleAccount(r.home, { accessToken: "second-token", projectId: "second-project", email: "second@example.test", expiresAt }).id;
+        const google = r.cfg.providers.google;
+        assert.ok(google?.type === "google");
+        r.cfg.providers.google = { ...google, auth: "antigravity" };
+      }
+      const model = provider === "chatgpt" ? "gpt-test" : "gemini-test";
+      for (const stream of [true, false]) {
+        const { record } = await r.send(model, { stream });
+        assert.equal(record.ok, true, record.note);
+        assert.equal(record.account, owner);
+        assert.equal(record.credential, undefined);
+      }
+      assert.equal(attempts, 3, "the next turn stays on the account that answered");
+      assert.deepEqual(r.seenAuth, [provider === "chatgpt" ? "Bearer test-token" : "Bearer first-google-token", "Bearer second-token", "Bearer second-token"]);
+      assert.doesNotMatch(fs.readFileSync(path.join(r.home, "requests.jsonl"), "utf8"), /second-token|second-workspace|first-project|second-project|@example\.test/);
+      const count = await r.send(model, {}, "/v1/messages/count_tokens");
+      assert.equal(count.record.account, undefined);
+    } finally { await r.stop(); }
+  });
+}
+
 test("the agent header marks a subagent's turn, and the provider's Fast switch asks for the Codex tier", async () => {
   const r = await rig();
   try {
@@ -288,6 +361,27 @@ test("conversation identity separates agents in one session and survives model/p
   } finally { await r.stop(); }
 });
 
+test("a ChatGPT hosted search records the account that returned the results", async () => {
+  const r = await rig({ respond: (res) => {
+    const events = [
+      { type: "response.output_text.annotation.added", annotation: { type: "url_citation", title: "Result", url: "https://example.test/result" } },
+      { type: "response.completed", response: { tool_usage: { web_search: { num_requests: 1 } }, usage: { input_tokens: 10, output_tokens: 2 } } },
+    ];
+    res.writeHead(200, { "content-type": "text/event-stream" }).end(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""));
+  } });
+  try {
+    r.cfg.webSearch = { provider: "gpt", model: "gpt-test" };
+    const { record } = await r.send("claude-native", {
+      messages: [{ role: "user", content: "Perform a web search for the query: test" }],
+      tools: [{ name: "web_search", type: "web_search_20250305" }],
+    });
+    assert.equal(record.ok, true);
+    assert.equal(record.provider, "gpt");
+    assert.equal(record.purpose, "web-search");
+    assert.equal(record.account, "legacy");
+  } finally { await r.stop(); }
+});
+
 test("proxy generateImage records the image traffic, with usage on success and a failure record", async () => {
   const r = await rig();
   try {
@@ -300,6 +394,7 @@ test("proxy generateImage records the image traffic, with usage on success and a
       { kind: "image", source: "gpt-test", target: "image", provider: "gpt", stream: false, ok: true, status: 200, session: "session-1", note: "1536x1024 low png, 1 reference(s)" },
     );
     assert.deepEqual(record.usage, { input: 10, cached: 0, output: 2 });
+    assert.equal(record.account, "legacy");
     assert.match(record.at, /^\d{4}-\d\d-\d\dT/);
     assert.ok(record.ms >= 0);
 
@@ -309,6 +404,7 @@ test("proxy generateImage records the image traffic, with usage on success and a
     assert.equal(failed.ok, false);
     assert.equal(failed.status, 502);
     assert.equal(failed.session, "session-1");
+    assert.equal(failed.account, "legacy", "a failed image still names the account it was sent on");
     assert.match(failed.note!, /HTTP 500/);
     assert.equal(failed.usage, undefined);
     assert.equal(r.requests.list(10).length, 2, "one record per call, nothing else");
@@ -320,6 +416,7 @@ test("proxy generateImage records the image traffic, with usage on success and a
     const abortRecord = r.requests.list(1)[0]!;
     assert.equal(abortRecord.kind, "image");
     assert.equal(abortRecord.ok, false);
+    assert.equal(abortRecord.account, "legacy");
     assert.equal(abortRecord.status, "aborted");
   } finally { await r.stop(); }
 });
@@ -338,10 +435,136 @@ test("proxy logs native request-id and classifier purpose without configuring cl
     r.observed.observe(["authorization", "Bearer test-native", "anthropic-version", "2023-06-01"]);
     const pooled = (await r.send("claude-pool")).record;
     assert.equal(pooled.provider, "claude");
+    assert.equal(pooled.account, "current");
     assert.equal(pooled.upstreamRequestId, "req_final");
     assert.equal(pooled.messageId, undefined);
     assert.equal(pooled.purpose, undefined);
     assert.equal(pooled.requestedTier, undefined);
+  } finally { await r.stop(); }
+});
+
+test("a Claude row keeps the email of the login that answered after the login is switched", async () => {
+  const r = await rig({ profiles: { "test-native": "first@example.test", "test-second": "second@example.test" } });
+  try {
+    r.observed.observe(["authorization", "Bearer test-native", "anthropic-version", "2023-06-01"]);
+    const first = (await r.send("claude-pool")).record;
+    assert.equal(first.account, "current");
+    assert.equal(first.accountEmail, "first@example.test");
+
+    r.observed.observe(["authorization", "Bearer test-second", "anthropic-version", "2023-06-01"]);
+    const second = (await r.send("claude-pool")).record;
+    assert.equal(second.accountEmail, "second@example.test");
+    assert.equal(r.requests.list(10).find((record) => record.id === first.id)?.accountEmail, "first@example.test", "the old row keeps the person who answered it");
+
+    // A login whose profile cannot be read names nobody: the row keeps `current` and no email.
+    r.observed.observe(["authorization", "Bearer test-unknown", "anthropic-version", "2023-06-01"]);
+    const unknown = (await r.send("claude-pool")).record;
+    assert.equal(unknown.account, "current");
+    assert.equal(unknown.accountEmail, undefined);
+  } finally { await r.stop(); }
+});
+
+/** The first `current` row once the router has written it; rows are written after the turn, so this waits for them. */
+async function currentRow(r: { requests: RequestLog }): Promise<RequestRecord> {
+  for (let i = 0; i < 150; i += 1) {
+    const row = r.requests.list(5).find((record) => record.account === "current");
+    if (row) return row;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error("no current row was written");
+}
+
+test("a Claude turn goes upstream while its profile lookup is still unanswered, and its row is written without an email", async () => {
+  const r = await rig({ profiles: { "test-native": "never@example.test" }, profileWait: new Promise<void>(() => {}) });
+  try {
+    r.observed.observe(["authorization", "Bearer test-native", "anthropic-version", "2023-06-01"]);
+    const started = Date.now();
+    const { text } = await r.send("claude-pool");
+    assert.match(text, /HTTP\/1\.1 200/, "the turn is answered");
+    assert.equal(r.seenAuth.includes("Bearer test-native"), true, "the upstream request was sent");
+    assert.ok(Date.now() - started < 1_000, "the turn did not wait for the 1.5 s bound the lookup would have hit");
+    const row = await currentRow(r);
+    assert.equal(row.ok, true);
+    assert.equal(row.accountEmail, undefined, "an unanswered lookup names nobody");
+  } finally { await r.stop(); }
+});
+
+test("a profile lookup that answers after the response still names the login in its row", async () => {
+  const r = await rig({ profiles: { "test-native": "late@example.test" }, profileWait: new Promise<void>((resolve) => setTimeout(resolve, 60)) });
+  try {
+    r.observed.observe(["authorization", "Bearer test-native", "anthropic-version", "2023-06-01"]);
+    await r.send("claude-pool");
+    const row = await currentRow(r);
+    assert.equal(row.accountEmail, "late@example.test", "the lookup answered within the wait given when the row is final");
+  } finally { await r.stop(); }
+});
+
+test("an in-turn retry onto another login's token names the login that answered, not the refused one", async () => {
+  // The first token is refused while the app's login is switched to the second; the retry goes out on the
+  // second, so the row must carry that login's email and not the one the first lookup started with.
+  let r!: Awaited<ReturnType<typeof rig>>;
+  r = await rig({
+    profiles: { "test-native": "first@example.test", "test-second": "second@example.test" },
+    refuse: (req) => {
+      if (req.headers.authorization !== "Bearer test-native") return undefined;
+      r.observed.observe(["authorization", "Bearer test-second", "anthropic-version", "2023-06-01"]);
+      return 429;
+    },
+  });
+  try {
+    r.observed.observe(["authorization", "Bearer test-native", "anthropic-version", "2023-06-01"]);
+    const { text } = await r.send("claude-pool");
+    assert.match(text, /HTTP\/1\.1 200/);
+    assert.deepEqual(r.seenAuth, ["Bearer test-native", "Bearer test-second"], "the retry went out on the second login");
+    const row = await currentRow(r);
+    assert.equal(row.account, "current");
+    assert.equal(row.accountEmail, "second@example.test");
+  } finally { await r.stop(); }
+});
+
+test("a drain waits for a row still waiting for its login's email, so the row is on disk before the exit", async () => {
+  // The lookup never answers, so the row can only be written once its wait is over: the drain must wait for that.
+  const r = await rig({ profiles: { "test-native": "never@example.test" }, profileWait: new Promise<void>(() => {}) });
+  try {
+    r.observed.observe(["authorization", "Bearer test-native", "anthropic-version", "2023-06-01"]);
+    const { text } = await r.send("claude-pool");
+    assert.match(text, /HTTP\/1\.1 200/);
+    await r.proxy.drain(5_000);
+    const onDisk = fs.readFileSync(path.join(r.home, "requests.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line) as RequestRecord);
+    const row = onDisk.find((record) => record.account === "current");
+    assert.ok(row, "the row is written before the drain ends");
+    assert.equal(row.ok, true);
+    assert.equal(row.accountEmail, undefined, "an unanswered lookup names nobody");
+  } finally { await r.stop(); }
+});
+
+test("a drain waits for an image still being generated, so its row is on disk before the exit", async () => {
+  // The backend holds its answer, as an image takes a while there.
+  const r = await rig({ respond: (res) => {
+    setTimeout(() => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end([
+        { type: "response.created", response: {} },
+        { type: "response.output_item.done", item: { id: "ig_1", type: "image_generation_call", output_format: "png", quality: "low", size: "1536x1024", result: Buffer.from("PNGDATA").toString("base64") } },
+        { type: "response.completed", response: { usage: { input_tokens: 10, output_tokens: 2 } } },
+      ].map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""));
+    }, 300);
+  } });
+  try {
+    const pending = r.proxy.generateImage({ prompt: "a boat" }, undefined, { session: "session-drain" });
+    await r.proxy.drain(5_000);
+    const onDisk = fs.readFileSync(path.join(r.home, "requests.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line) as RequestRecord);
+    assert.ok(onDisk.some((record) => record.kind === "image" && record.ok === true && record.session === "session-drain"), "the image row is written before the drain ends");
+    assert.equal((await pending).data.toString(), "PNGDATA");
+  } finally { await r.stop(); }
+});
+
+test("a request answered on the app's own sign-in snapshots that login's email", async () => {
+  const r = await rig({ profiles: { "app-own-token": "app@example.test" } });
+  try {
+    const { record } = await r.send("claude-pool", {}, "/v1/messages", undefined, { authorization: "Bearer app-own-token" });
+    assert.equal(record.account, "current");
+    assert.equal(record.accountEmail, "app@example.test");
   } finally { await r.stop(); }
 });
 
