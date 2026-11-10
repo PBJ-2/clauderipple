@@ -548,9 +548,11 @@ function modeDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | null
 // pressed, it opens the limits pane, where each window's share and when it resets are readable
 // (2026-10-25: the row has no room to add the reset beside every figure). Widths alone decide,
 // never values: the bar is one width, the figure's slot fits "100%", and only the name takes what
-// it takes (a changing figure never moves a neighbour). Narrow, the GPT accounts go first (the
-// last one first), then the per-model windows; what is left not fitting means no second row, and
-// the first row keeps its limit fact as before.
+// it takes (a changing figure never moves a neighbour). Narrow, the later providers' scoped windows
+// (3P) go first, then the GPT accounts (the last one first), then the later providers' whole groups,
+// and only then Claude's per-model windows (Fable): Claude's own windows outlast every later
+// provider (the owner, 2026-11-10). Then the scoped windows that fit again come back (the refill).
+// What is left not fitting means no second row, and the first row keeps its limit fact as before.
 //
 // A window the router expects to run out before it resets (`exhaustsAt`) is the one exception to
 // "the share alone": its tone is at least amber, red within the hour, and after its figure the row
@@ -685,10 +687,13 @@ function forecastTips(groups: readonly LimitGroup[], numbered: (g: LimitGroup) =
 
 /**
  * The second row, or null: no `limits` extra, no windows at all, or not even Claude's own windows
- * fitting. Narrow, the scoped windows (Fable, 3P, …) go first, then a later provider's secondary
- * accounts (the last one first), then a later provider's whole group — Claude's own group stays to
- * the last. Of each provider's accounts the row shows only the one in use (bandLimitGroups),
- * unnumbered; the limits pane lists them all.
+ * fitting. Narrow, the scoped windows of the later providers (3P, …) go first, then a later
+ * provider's secondary accounts (the last one first), then a later provider's whole group, and
+ * only then Claude's own scoped windows (Fable): Claude's own group stays to the last, and its Fable
+ * outlasts every later provider (the owner, 2026-11-10). Then whatever scoped windows fit again come
+ * back into the groups drawn (Claude's first), so the row keeps every window that fits. Of each
+ * provider's accounts the row shows
+ * only the one in use (bandLimitGroups), unnumbered; the limits pane lists them all.
  * `onPress`: the row is a button (the limits pane); pressed it says so in the tip place, and each
  * window's own tip (its name and reset) gives way to that one.
  */

@@ -667,19 +667,27 @@ export function limitGroupNumbered(groups: readonly LimitGroup[]): (group: Limit
 }
 
 /**
- * The groups that fit `budget`, narrowing in this order: the scoped windows (Fable, 3P, …) go
- * first, one group's at a time from the last group back, so Claude's own Fable is the last of them
- * to go (all of them going at once hid Fable for Gemini's two 3P windows, 2026-10-15); then a later
- * provider's secondary accounts (the last one first), then a later provider's whole group —
- * Claude's own group (the first) stays to the last, even when it is a stored account (account 1…)
- * the row shows for being in use. Null when even that does not fit (no row).
+ * The groups that fit `budget`, narrowing in this order: first the scoped windows (3P, …) of every
+ * group but the first, one group's at a time from the last group back (all of them going at once
+ * hid Fable for Gemini's two 3P windows, 2026-10-15); then a later provider's secondary accounts
+ * (the last one first); then a later provider's whole group, last first; only then the first
+ * group's own scoped windows (Claude's Fable). The owner wants Claude's Fable on the band over later
+ * providers (2026-11-10). Claude's group (the first) stays to the last, even when it is a stored
+ * account (account 1…) the row shows for being in use; index 0 is the first group whether or not
+ * it is Claude's. Then the refill: the scoped windows dropped above come back into the groups still
+ * drawn, Claude's group first and the rest from first to last, each window only while the row still
+ * fits (so Gemini's 3P returns when the groups dropped after it leave room). A dropped group or
+ * secondary account never returns. Null when even that does not fit (no row).
  * `width` measures a set of groups the way the row draws it.
  */
 export function narrowLimitGroups(groups: readonly LimitGroup[], budget: number, width: (gs: readonly LimitGroup[]) => number): LimitGroup[] | null {
   let out = [...groups]
-  for (let i = out.length - 1; i >= 0 && width(out) > budget; i--) {
-    if (!out[i]!.items.some(item => item.kind === 'scoped')) continue
-    out = out.map((g, j) => j === i ? { ...g, items: g.items.filter(item => item.kind !== 'scoped') } : g).filter(g => g.items.length > 0)
+  // A group left with no window goes too. Index 0 is passed only by the last step below.
+  const dropScoped = (at: number) => {
+    out = out.map((g, j) => j === at ? { ...g, items: g.items.filter(item => item.kind !== 'scoped') } : g).filter(g => g.items.length > 0)
+  }
+  for (let i = out.length - 1; i >= 1 && width(out) > budget; i--) {
+    if (out[i]!.items.some(item => item.kind === 'scoped')) dropScoped(i)
   }
   // A secondary account is one whose provider already shows an earlier group, not any account
   // numbered past 0: the band keeps one group a provider (bandLimitGroups), and Gemini's account in
@@ -690,7 +698,29 @@ export function narrowLimitGroups(groups: readonly LimitGroup[], budget: number,
     out = out.filter((_, i) => i !== at)
   }
   while (width(out) > budget && out.length > 1) out = out.slice(0, -1)
+  // Only now the first group's own scoped windows: Claude's Fable outlasts every later provider.
+  if (width(out) > budget && out.length) dropScoped(0)
   if (!out.length || width(out) > budget) return null
+  return refillScoped(groups, out, budget, width)
+}
+
+/**
+ * The scoped windows `shown` lacks, put back into the groups it still draws while the row fits: the
+ * first group's first (Claude's Fable), then the others from first to last, each window in its own
+ * order and added only if the row still fits with it. A window that does not fit stays out, and no
+ * group or account is added back.
+ */
+function refillScoped(groups: readonly LimitGroup[], shown: LimitGroup[], budget: number, width: (gs: readonly LimitGroup[]) => number): LimitGroup[] {
+  let out = shown
+  for (let at = 0; at < out.length; at++) {
+    const original = groups.find(g => g.key === out[at]!.key)
+    if (!original) continue
+    for (const item of original.items) {
+      if (item.kind !== 'scoped' || out[at]!.items.includes(item)) continue
+      const next = out.map((g, j) => j !== at ? g : { ...g, items: original.items.filter(i => i === item || g.items.includes(i)) })
+      if (width(next) <= budget) out = next
+    }
+  }
   return out
 }
 

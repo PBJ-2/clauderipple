@@ -260,7 +260,7 @@ test('the groups name and order every provider; Claude first, accounts numbered 
   assert.deepEqual(groups.map(g => limitGroupName(g, (accounts.get(g.provider) ?? 1) > 1)), ['Claude', 'Go', 'GPT 1', 'GPT 2', 'Gemini'])
 })
 
-test('narrowing drops scoped windows, then secondary accounts, then trailing groups', () => {
+test('narrowing drops later providers\' scoped windows, then secondary accounts, then whole groups, and Claude\'s Fable last', () => {
   const group = (provider: string, account: number, kinds: string[]) => ({
     key: provider + '#' + account, provider, account,
     items: kinds.map((kind, i) => ({ provider, account, kind, label: kind === 'scoped' ? 'S' : '', percent: i })),
@@ -269,15 +269,16 @@ test('narrowing drops scoped windows, then secondary accounts, then trailing gro
   const measure = (gs: readonly { items: unknown[] }[]) => gs.reduce((n, g) => n + g.items.length, 0) + gs.length
   // Everything fits: unchanged.
   assert.deepEqual(narrowLimitGroups(base, 100, measure)?.map(g => g.key), ['anthropic#0', 'chatgpt#0', 'google-gemini#0', 'opencode-go#0'])
-  // The scoped windows go first, then a trailing group.
+  // The trailing group goes; Gemini's scoped window goes first and returns only if it fits (here it does not, see the refill test).
   const narrowed = narrowLimitGroups(base, 11, measure)
   assert.deepEqual(narrowed?.map(g => g.key), ['anthropic#0', 'chatgpt#0', 'google-gemini#0'])
-  assert.deepEqual(narrowed?.[0]?.items.map(i => i.kind), ['five_hour', 'seven_day'])
+  assert.deepEqual(narrowed?.[0]?.items.map(i => i.kind), ['five_hour', 'seven_day', 'scoped'])
   // Scoped windows go one group at a time from the back: Gemini's before Claude's Fable.
   const one = narrowLimitGroups(base, 13, measure)
   assert.deepEqual(one?.map(g => g.items.some(i => i.kind === 'scoped')), [true, false, false, false])
-  // Down to Claude alone; and null when not even that fits.
+  // Down to Claude alone, Fable still there; and null when not even Claude's main windows fit.
   assert.deepEqual(narrowLimitGroups(base, 4, measure)?.map(g => g.key), ['anthropic#0'])
+  assert.deepEqual(narrowLimitGroups(base, 4, measure)?.[0]?.items.map(i => i.kind), ['five_hour', 'seven_day', 'scoped'])
   assert.equal(narrowLimitGroups(base, 1, measure), null)
   // Claude's group stays to the last even as a stored account (account 1) the row shows for being in use.
   const stored = [group('anthropic', 1, ['five_hour']), group('chatgpt', 0, ['seven_day']), group('chatgpt', 1, ['seven_day'])]
@@ -287,6 +288,90 @@ test('narrowing drops scoped windows, then secondary accounts, then trailing gro
   // use (account 1) outlasts MiniMax after it (2026-11-09).
   const band = [group('anthropic', 0, ['seven_day']), group('google-gemini', 1, ['five_hour', 'seven_day']), group('minimax', 0, ['five_hour', 'seven_day'])]
   assert.deepEqual(narrowLimitGroups(band, 6, measure)?.map(g => g.key), ['anthropic#0', 'google-gemini#1'])
+})
+
+test('narrowing keeps Claude\'s Fable until every later provider is gone (the owner, 2026-11-10)', () => {
+  const group = (provider: string, account: number, kinds: string[]) => ({
+    key: provider + '#' + account, provider, account,
+    items: kinds.map((kind, i) => ({ provider, account, kind, label: kind === 'scoped' ? 'S' : '', percent: i })),
+  })
+  const measure = (gs: readonly { items: unknown[] }[]) => gs.reduce((n, g) => n + g.items.length, 0) + gs.length
+  // Claude [weekly, Fable], GPT, Gemini [main, 3P], MiniMax: 8 windows in 4 groups, 12 cells.
+  const all = [group('anthropic', 0, ['seven_day', 'scoped']), group('chatgpt', 0, ['seven_day']), group('google-gemini', 0, ['five_hour', 'seven_day', 'scoped']), group('minimax', 0, ['five_hour', 'seven_day'])]
+  assert.deepEqual(narrowLimitGroups(all, 12, measure)?.map(g => g.items.length), [2, 1, 3, 2])
+  // Gemini's 3P goes first.
+  const no3p = narrowLimitGroups(all, 11, measure)
+  assert.deepEqual(no3p?.map(g => g.key), ['anthropic#0', 'chatgpt#0', 'google-gemini#0', 'minimax#0'])
+  assert.deepEqual(no3p?.map(g => g.items.map(i => i.kind)), [['seven_day', 'scoped'], ['seven_day'], ['five_hour', 'seven_day'], ['five_hour', 'seven_day']])
+  // Then MiniMax, the last group, then Gemini, then GPT; Claude's Fable outlasts all of them.
+  assert.deepEqual(narrowLimitGroups(all, 10, measure)?.map(g => g.key), ['anthropic#0', 'chatgpt#0', 'google-gemini#0'])
+  assert.deepEqual(narrowLimitGroups(all, 7, measure)?.map(g => g.key), ['anthropic#0', 'chatgpt#0'])
+  assert.deepEqual(narrowLimitGroups(all, 4, measure)?.map(g => g.key), ['anthropic#0'])
+  assert.deepEqual(narrowLimitGroups(all, 4, measure)?.[0]?.items.map(i => i.kind), ['seven_day', 'scoped'])
+  // A budget that fits only Claude's weekly: Fable goes, weekly stays.
+  assert.deepEqual(narrowLimitGroups(all, 2, measure)?.map(g => [g.key, g.items.map(i => i.kind)]), [['anthropic#0', ['seven_day']]])
+  // Null when not even Claude's weekly fits.
+  assert.equal(narrowLimitGroups(all, 1, measure), null)
+})
+
+test('the first group keeps its place as last whether or not it is Claude\'s', () => {
+  const group = (provider: string, kinds: string[]) => ({
+    key: provider + '#0', provider, account: 0,
+    items: kinds.map((kind, i) => ({ provider, account: 0, kind, label: kind === 'scoped' ? 'S' : '', percent: i })),
+  })
+  const measure = (gs: readonly { items: unknown[] }[]) => gs.reduce((n, g) => n + g.items.length, 0) + gs.length
+  // No Claude windows: GPT is index 0, so its scoped window goes only after Gemini's whole group.
+  const gpt = [group('chatgpt', ['seven_day', 'scoped']), group('google-gemini', ['seven_day', 'scoped'])]
+  assert.deepEqual(narrowLimitGroups(gpt, 5, measure)?.map(g => [g.key, g.items.some(i => i.kind === 'scoped')]), [['chatgpt#0', true], ['google-gemini#0', false]])
+  assert.deepEqual(narrowLimitGroups(gpt, 4, measure)?.map(g => [g.key, g.items.some(i => i.kind === 'scoped')]), [['chatgpt#0', true]])
+  assert.deepEqual(narrowLimitGroups(gpt, 2, measure)?.map(g => [g.key, g.items.map(i => i.kind)]), [['chatgpt#0', ['seven_day']]])
+})
+
+test('Claude\'s Fable is dropped only when Claude\'s own group is all that is left and it does not fit with Fable', () => {
+  const group = (provider: string, account: number, kinds: string[]) => ({
+    key: provider + '#' + account, provider, account,
+    items: kinds.map((kind, i) => ({ provider, account, kind, label: kind === 'scoped' ? 'S' : '', percent: i })),
+  })
+  const measure = (gs: readonly { items: unknown[] }[]) => gs.reduce((n, g) => n + g.items.length, 0) + gs.length
+  // The five providers of the owner's band (2026-11-10), in the router's order.
+  const all = [group('anthropic', 0, ['seven_day', 'scoped']), group('chatgpt', 0, ['seven_day']), group('google-gemini', 0, ['five_hour', 'seven_day', 'scoped']), group('opencode-go', 0, ['five_hour', 'seven_day', 'window']), group('minimax', 0, ['five_hour', 'seven_day'])]
+  for (let budget = 1; budget <= 30; budget++) {
+    const out = narrowLimitGroups(all, budget, measure)
+    if (!out || out[0]?.items.some(i => i.kind === 'scoped')) continue
+    // Fable is gone: nothing but Claude's group may be left, and Claude with Fable must not fit.
+    assert.equal(out.length, 1, 'budget ' + budget)
+    assert.ok(measure([all[0]!]) > budget, 'budget ' + budget)
+  }
+})
+
+test('refill: a dropped scoped window comes back when the row still fits, and stays out when it does not (2026-11-10)', () => {
+  const group = (provider: string, account: number, kinds: string[]) => ({
+    key: provider + '#' + account, provider, account,
+    items: kinds.map((kind, i) => ({ provider, account, kind, label: kind === 'scoped' ? 'S' : '', percent: i })),
+  })
+  const measure = (gs: readonly { items: unknown[] }[]) => gs.reduce((n, g) => n + g.items.length, 0) + gs.length
+  // The owner's five providers: Gemini's scoped 3P window (Argon) is the one that drops first after Claude's.
+  const all = [group('anthropic', 0, ['seven_day', 'scoped']), group('chatgpt', 0, ['seven_day']), group('google-gemini', 0, ['five_hour', 'seven_day', 'scoped']), group('opencode-go', 0, ['five_hour', 'seven_day', 'window']), group('minimax', 0, ['five_hour', 'seven_day'])]
+  // 13 cells: MiniMax goes, and then Gemini's 3P fits again beside the rest.
+  const roomy = narrowLimitGroups(all, 13, measure)
+  assert.deepEqual(roomy?.map(g => g.key), ['anthropic#0', 'chatgpt#0', 'google-gemini#0', 'opencode-go#0'])
+  assert.deepEqual(roomy?.[2]?.items.map(i => i.kind), ['five_hour', 'seven_day', 'scoped'])
+  // 12 cells: the same window needs 13, so it stays out and Gemini keeps its main windows.
+  const tight = narrowLimitGroups(all, 12, measure)
+  assert.deepEqual(tight?.map(g => g.key), ['anthropic#0', 'chatgpt#0', 'google-gemini#0', 'opencode-go#0'])
+  assert.deepEqual(tight?.[2]?.items.map(i => i.kind), ['five_hour', 'seven_day'])
+  // 9 cells: Go is gone as a group and Gemini's 3P is back; at 8 it is not.
+  assert.deepEqual(narrowLimitGroups(all, 9, measure)?.[2]?.items.map(i => i.kind), ['five_hour', 'seven_day', 'scoped'])
+  assert.deepEqual(narrowLimitGroups(all, 8, measure)?.map(g => g.key), ['anthropic#0', 'chatgpt#0', 'google-gemini#0'])
+  assert.deepEqual(narrowLimitGroups(all, 8, measure)?.[2]?.items.map(i => i.kind), ['five_hour', 'seven_day'])
+  // Whatever the budget, the row fits it; a dropped group never comes back (MiniMax below 15, Go below 12).
+  for (let budget = 1; budget <= 30; budget++) {
+    const out = narrowLimitGroups(all, budget, measure)
+    if (!out) continue
+    assert.ok(measure(out) <= budget, 'budget ' + budget)
+    if (budget <= 14) assert.ok(!out.some(g => g.key === 'minimax#0'), 'minimax at ' + budget)
+    if (budget <= 11) assert.ok(!out.some(g => g.key === 'opencode-go#0'), 'go at ' + budget)
+  }
 })
 
 /** Several Claude accounts as `GET /api/limits` lists them (2026-11-04), and two GPT accounts. */
