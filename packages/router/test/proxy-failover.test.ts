@@ -81,7 +81,7 @@ type Rig = {
 };
 
 /** A live proxy in front of `providers`, reachable the way Claude Code reaches it. */
-async function rig(providers: Config["providers"], routes: Config["routes"]): Promise<Rig> {
+async function rig(providers: Config["providers"], routes: Config["routes"], native: { upstreamPort?: number; upstreamAgent?: https.Agent } = {}): Promise<Rig> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-failover-"));
   const ca = createCa({ cn: "clauderipple test" });
   fs.writeFileSync(path.join(home, "ca.pem"), ca.certPem);
@@ -96,6 +96,7 @@ async function rig(providers: Config["providers"], routes: Config["routes"]): Pr
     home,
     requests: new RequestLog(path.join(home, "requests.jsonl")),
     claudeCodeCredentialReaders: noClaudeCodeCredentialReaders,
+    ...native,
   });
   await proxy.listen();
 
@@ -714,6 +715,47 @@ test("an exhausted provider hands the turn to its fallback, and a healthy one ke
     assert.equal(backup.seen.length, 2);
   } finally { await r.stop(); await primary.close(); await backup.close(); }
 });
+
+for (const available of [true, false]) {
+  test(`Anthropic API-key fallback ${available ? "answers without an OAuth account" : "is skipped without a key despite a ready OAuth account"}`, async (t) => {
+    for (const [name, value] of Object.entries({ CLAUDE_CODE_OAUTH_TOKEN: available ? "" : "fake-oauth-token", ANTHROPIC_API_KEY: "" })) {
+      const before = process.env[name];
+      process.env[name] = value;
+      t.after(() => { if (before === undefined) delete process.env[name]; else process.env[name] = before; });
+    }
+    const primary = await upstream(() => ({ status: 429, headers: { "retry-after": "300" }, body: "{}" }));
+    const backup = await upstream(() => ({ status: 200 }));
+    const ca = createCa({ cn: "clauderipple API-key fallback test" });
+    const leaf = createLeaf({ host: "api.anthropic.com", caCertPem: ca.certPem, caKeyPem: ca.keyPem });
+    const native = await recorder((hit) => anthropicReply(hit, "API-key answer"), { cert: leaf.certPem, key: leaf.keyPem });
+    const agent = new https.Agent({ ca: ca.certPem, lookup: (_host, _options, callback) => callback(null, [{ address: "127.0.0.1", family: 4 }]) });
+    const r = await rig({
+      primary: { type: "anthropic-compatible", url: `http://127.0.0.1:${primary.port}`, headers: { "x-api-key": "fake-primary-key" } },
+      api: { type: "anthropic", auth: "api-key", apiKey: available ? "fake-native-key" : "" },
+      backup: { type: "anthropic-compatible", url: `http://127.0.0.1:${backup.port}` },
+    }, {
+      "claude-opus-4-8": { provider: "primary", model: "m1", fallbacks: [
+        { provider: "api", model: "claude-opus-5" }, { provider: "backup", model: "m2" },
+      ] },
+    }, { upstreamPort: native.port, upstreamAgent: agent });
+    try {
+      assert.equal(await r.send(), 429, "the first turn discovers the primary's rate limit");
+      assert.equal(await r.send(), 200, "the first usable configured fallback answers");
+      assert.equal(primary.seen.length, 1);
+      assert.equal(native.hits.length, available ? 1 : 0);
+      assert.equal(backup.seen.length, available ? 0 : 1);
+      if (available) {
+        assert.equal(native.hits[0]!.headers["x-api-key"], "fake-native-key");
+        assert.equal(native.hits[0]!.headers.authorization, undefined, "billing stays on the explicitly selected key");
+        assert.equal(native.hits[0]!.body.model, "claude-opus-5");
+      }
+    } finally {
+      await r.stop();
+      agent.destroy();
+      await Promise.all([primary.close(), backup.close(), native.close()]);
+    }
+  });
+}
 
 test("one client request survives a rate-limited credential without the client seeing it", async () => {
   // The turn that discovers a limit used to be spent: the client got the 429 and had to retry it

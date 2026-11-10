@@ -747,6 +747,10 @@ export class Proxy {
       const colon = target.lastIndexOf(":");
       const host = colon > 0 ? target.slice(0, colon) : target;
       const port = colon > 0 ? Number(target.slice(colon + 1)) : 443;
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        sock.end("HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+        return;
+      }
       sock.write("HTTP/1.1 200 Connection Established\r\n\r\n");
       if (rest.length > 0) sock.unshift(rest);
       if (terminateHosts(this.deps.config()).includes(host)) {
@@ -2471,6 +2475,10 @@ export class Proxy {
     const provider = providerFor(configured, target.model);
     if (provider.type === "anthropic") {
       if (!isTargetProvider(provider)) return false;
+      if (provider.auth === "api-key") {
+        try { nativeAnthropicHeaders(provider); return true; }
+        catch { return false; }
+      }
       const accounts = this.claudeAccounts.peekCredentials();
       return accounts.length > 0 && this.pool.hasUsable(target.provider, accounts);
     }
