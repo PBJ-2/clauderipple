@@ -43,8 +43,8 @@ type LimitsUi = {
   refreshHealth(): Promise<void>;
   renderHealthProviders(): void;
   limitsAccountRow(entry: unknown, account: unknown, now: number): Element;
-  limitsWindowRow(label: string, window: unknown, weekly: boolean, now: number, accountName?: string): Element;
-  limitsUsageWindow(account: unknown, kind: string): unknown;
+  limitsWindowRow(label: string, window: unknown, now: number, accountName?: string): Element;
+  limitsUsageWindow(window: unknown): unknown;
   settleLimits(): Promise<unknown>;
   providerLimits(name: string): { accounts: Record<string, unknown>[] } | null;
   limitsSnapshotPeek(): unknown;
@@ -123,8 +123,8 @@ test("ChatGPT accounts keep saved order, states and empty accounts without shift
   assert.match(text(rows[1]!), /Paused/);
   assert.match(text(rows[2]!), /Sign in again/);
   for (const row of rows.slice(1, 4)) {
-    assert.equal(findAll(row, (node) => node.attrs.text === "Unknown").length, 2);
-    assert.match(text(row), /No usage snapshot yet/);
+    assert.equal(findAll(row, hasClass("limits-windows")).length, 0, "no empty gauges for an account with no reading");
+    assert.match(text(row), /No usage snapshot yet|Paused|Sign in again/);
     assert.doesNotMatch(text(row), /23%|125%/);
   }
   assert.match(text(rows[4]!), /125%/);
@@ -200,7 +200,7 @@ test("accounts without any figures still have cards and a provider's sign-in act
   await ui.refresh();
   const row = ui.card.children[1]!;
   assert.equal(findAll(row, hasClass("limits-account")).length, 2);
-  assert.equal(findAll(row, hasClass("unknown")).length, 4);
+  assert.equal(findAll(row, hasClass("limits-windows")).length, 0, "no gauge stands in for a window nobody reported");
   assert.equal(findAll(row, (node) => node.tag === "button").length, 1);
   assert.ok(text(row).includes(t("providerStatus.loginNeeded")));
 });
@@ -241,31 +241,29 @@ test("a failed status read keeps the disconnected handling and existing provider
   assert.deepEqual(ui.card.children, rows);
 });
 
-test("window bars expose true percentages, reset times and unknown windows", () => {
+test("window gauges show the share and the reset, and a window with no reset says so", () => {
   const ui = limitsUi(async () => ({}));
-  const window = ui.limitsUsageWindow({ windows: [weekly, five] }, "five_hour");
-  assert.deepEqual(window, { usedPercent: 23, resetAt: now + 255 * 60_000 });
-  const row = ui.limitsWindowRow("5 hours", window, false, now);
+  const window = ui.limitsUsageWindow(five);
+  assert.deepEqual(window, { kind: "five_hour", usedPercent: 23, windowMinutes: 300, resetAt: now + 255 * 60_000 });
+  const row = ui.limitsWindowRow(t("limits.fiveHour"), window, now);
   assert.match(text(row), /resets in 4h 15m/);
-  const week = ui.limitsWindowRow("Weekly", { usedPercent: 125, resetAt: now + 86400_000 }, true, now);
+  const week = ui.limitsWindowRow(t("limits.weekly"), ui.limitsUsageWindow(weekly), now);
   const bar = findAll(week, (node) => node.attrs.role === "progressbar")[0]!;
   assert.equal(bar.attrs["aria-valuenow"], 100);
   assert.match(String(bar.attrs["aria-valuetext"]), /125%/);
   assert.equal(findAll(week, hasClass("limits-fill"))[0]!.style.width, "100%");
   assert.ok(text(week).includes(t("limits.resetsAt", { time: new Date(now + 86400_000).toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false }) })));
-  for (const window of [null, { usedPercent: Number.NaN }]) {
-    const missing = ui.limitsWindowRow("Weekly", window, true, now);
-    assert.match(text(missing), /Unknown.*Reset time unknown/);
-    assert.equal(findAll(missing, hasClass("unknown")).length, 1);
-    assert.equal(findAll(missing, hasClass("limits-fill")).length, 0);
-    assert.equal(findAll(missing, (node) => node.attrs.role === "progressbar")[0]!.attrs["aria-valuenow"], undefined);
-  }
+  // A reported window that gives no reset time says so, and keeps its share.
+  const unreset = ui.limitsWindowRow(t("limits.weekly"), ui.limitsUsageWindow({ kind: "seven_day", used_percent: 5, window_minutes: 10080 }), now);
+  assert.match(text(unreset), /5%.*Reset time unknown/);
+  assert.equal(findAll(unreset, (node) => node.attrs.role === "progressbar")[0]!.attrs["aria-valuenow"], 5);
   const passedDate = new Date(now - 1).toLocaleString(undefined, { weekday: "short", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
-  const passed = ui.limitsWindowRow("5 hours", { usedPercent: 0, resetAt: now - 1 }, false, now);
+  const passed = ui.limitsWindowRow(t("limits.fiveHour"), { usedPercent: 0, resetAt: now - 1 }, now);
   assert.match(text(passed), /0%.*Its reset time \(.*\) has passed\./);
   assert.ok(text(passed).includes(t("limits.passed", { date: passedDate })));
   assert.doesNotMatch(text(passed), /resets in/);
-  assert.match(text(ui.limitsWindowRow("Weekly", { usedPercent: 5 }, true, now)), /5%.*Reset time unknown/);
+  assert.equal(ui.limitsUsageWindow(null), null);
+  assert.equal(ui.limitsUsageWindow({ kind: "five_hour", used_percent: Number.NaN }), null, "a window with no share is not drawn");
 });
 
 test("an account label stays text and its timestamp is the figures' time", () => {
@@ -277,7 +275,7 @@ test("an account label stays text and its timestamp is the figures' time", () =>
 });
 
 test("every dashboard language names the limit windows, freshness and resets", () => {
-  const keys = ["active", "stale", "fiveHour", "weekly", "unknown", "resetUnknown", "resetsIn", "resetsAt", "fetchedAt", "notFetched"];
+  const keys = ["active", "stale", "fiveHour", "weekly", "resetUnknown", "resetsIn", "resetsAt", "fetchedAt", "notFetched"];
   for (const [lang, dict] of Object.entries(dictionaries)) {
     for (const key of keys) assert.ok(dict[`limits.${key}`], `${lang}: limits.${key}`);
     assert.match(dict["limits.resetsIn"]!, /\{hours\}/, lang);
@@ -429,7 +427,7 @@ test("a gauge's pace and exhaust forecast read as the mod's pane reads them", ()
   const ui = limitsUi(async () => ({}));
   const pace = (percent: number) => t("limits.paceProjected", { percent });
   const node = (row: Element, value: string) => findAll(row, (candidate) => candidate.attrs.text === value)[0];
-  const row = (window: Record<string, unknown>) => ui.limitsWindowRow("5 hours", { usedPercent: 40, resetAt: now + 255 * 60_000, ...window }, false, now);
+  const row = (window: Record<string, unknown>) => ui.limitsWindowRow("5 hours", { usedPercent: 40, resetAt: now + 255 * 60_000, ...window }, now);
   // Under 95 the label is muted; 95 to 100 is amber; above 100 says nothing.
   assert.equal(node(row({ projectedPercent: 84 }), pace(84))!.attrs.class, undefined);
   assert.equal(node(row({ projectedPercent: 95 }), pace(95))!.attrs.class, "warn-text");
@@ -455,14 +453,15 @@ test("each gauge's accessible name says which account it measures", () => {
   const ui = limitsUi(async () => ({}));
   const row = ui.limitsAccountRow({ type: "anthropic", title: "Claude" }, { account: 1, label: "Work", at: now, windows: [five, weekly] }, now);
   const names = findAll(row, (candidate) => candidate.attrs.role === "progressbar").map((bar) => bar.attrs["aria-label"]);
-  assert.deepEqual(names, ["Work · 5 hours", "Work · Weekly"]);
+  assert.deepEqual(names, [`Work · ${t("limits.fiveHour")}`, `Work · ${t("limits.weekly")}`]);
+  assert.deepEqual(names, ["Work · 5-hour", "Work · Weekly"], "the English names are the mod's");
 });
 
 test("no countdown reads 0 or less: a passed reset says so, and a cooled-off cooling account shows no countdown", () => {
   const ui = limitsUi(async () => ({}));
   // Just before, at, and just after the reset: the countdown is never "0h 0m", and a passed reset has its wording.
   for (const offset of [-60_000, -1, 0, 1, 59_999]) {
-    const row = ui.limitsWindowRow("5 hours", { usedPercent: 40, resetAt: now + offset }, false, now);
+    const row = ui.limitsWindowRow("5 hours", { usedPercent: 40, resetAt: now + offset }, now);
     assert.doesNotMatch(text(row), /resets in 0h 0m/, `offset ${offset}`);
     assert.equal(findAll(row, (node) => node.attrs.text === t("limits.passed", { date: new Date(now + offset).toLocaleString(undefined, { weekday: "short", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }) })).length, offset <= 0 ? 1 : 0, `offset ${offset}`);
   }
@@ -485,6 +484,74 @@ test("the pace and exhaust wording and the time units are the mod's, verbatim in
       const match = body.match(new RegExp(`'${key.replaceAll(".", "\\.")}': '([^']*)'`));
       assert.ok(match, `${lang} ${key} in the mod`);
       assert.equal(dictionaries[lang]![key], match[1], `${lang} ${key} matches the mod`);
+    }
+  }
+});
+
+test("every window the router reports gets a gauge, a scoped one named by its label as the mod names it", async () => {
+  const fable = { kind: "scoped", label: "Fable", used_percent: 6, window_minutes: 10080, reset_at: (now + 86400_000) / 1000 };
+  const ui = limitsUi(async (path) => path === "/api/limits" ? { providers: [
+    { type: "anthropic", provider: "claude", title: "Claude", accounts: [{ account: 0, id: "current", at: now, windows: [weekly, fable] }] },
+  ] } : {}, { providers: connected, claude: { accounts: [{ id: "current", quota: {} }] } });
+  await ui.refresh();
+  const row = ui.card.children[0]!;
+  const bars = findAll(row, (node) => node.attrs.role === "progressbar").map((bar) => bar.attrs["aria-label"]);
+  assert.deepEqual(bars, [`${t("providers.anthropicCurrentLogin")} · ${t("limits.weekly")}`, `${t("providers.anthropicCurrentLogin")} · Fable`]);
+  assert.match(text(row), /Fable.*6%/);
+  assert.equal(findAll(row, (node) => node.attrs.text === "5-hour").length, 0, "no 5-hour window is invented for a login that reports none");
+});
+
+test("a window the router did not report is not drawn, so one reported weekly window is one gauge", async () => {
+  const ui = limitsUi(async (path) => path === "/api/limits" ? { providers: [
+    { type: "chatgpt", provider: "gpt", title: "GPT", accounts: [{ account: 0, id: "a", label: "First", at: now, windows: [weekly] }] },
+  ] } : {}, { providers: connected, chatgpt: { accounts: { gpt: [{ id: "a", label: "First", state: "ready" }] } } });
+  await ui.refresh();
+  const row = ui.card.children[1]!;
+  assert.equal(findAll(row, hasClass("limits-window")).length, 1);
+  assert.doesNotMatch(text(row), /5-hour/);
+  assert.doesNotMatch(text(row), /Unknown/);
+});
+
+test("a paused account keeps its row with its state and no gauges, even when the read still holds its windows", async () => {
+  const ui = limitsUi(async (path) => path === "/api/limits" ? { providers: [
+    { type: "chatgpt", provider: "gpt", title: "GPT", accounts: [{ account: 0, id: "p", at: now, windows: [five, weekly] }] },
+  ] } : {}, { providers: connected, chatgpt: { accounts: { gpt: [{ id: "p", label: "Paused now", state: "paused", paused: true }] } } });
+  await ui.refresh();
+  const row = findAll(ui.card.children[1]!, hasClass("limits-account"))[0]!;
+  assert.equal(findAll(row, hasClass("limits-windows")).length, 0);
+  assert.equal(findAll(row, (node) => node.attrs.role === "progressbar").length, 0);
+  assert.ok(text(row).includes(t("providers.chatgptPaused")));
+});
+
+test("the Claude login is named in the dashboard's language, whatever label the router sent", async () => {
+  const ui = limitsUi(async (path) => path === "/api/limits" ? { providers: [
+    { type: "anthropic", provider: "claude", title: "Claude", accounts: [{ account: 0, id: "current", label: "Current Claude session", at: now, windows: [weekly] }] },
+  ] } : {}, { providers: connected, claude: { accounts: [{ id: "current", label: "Current Claude session", quota: {} }] } });
+  await ui.refresh();
+  const names = findAll(ui.card, hasClass("limits-account-head")).map((head) => head.children[0]!.attrs.text);
+  assert.deepEqual(names, [t("providers.anthropicCurrentLogin")]);
+  assert.doesNotMatch(text(ui.card), /Current Claude session/);
+});
+
+test("the window grid wraps by the room the account has, never a fixed pair of columns", () => {
+  const css = fs.readFileSync(path.join(uiDir, "style.css"), "utf8");
+  const rule = css.match(/\.limits-windows \{([^}]*)\}/);
+  assert.ok(rule, "the window grid has its rule");
+  assert.match(rule[1]!, /grid-template-columns: repeat\(auto-fit, minmax\(min\(100%, 200px\), 1fr\)\)/);
+  assert.doesNotMatch(rule[1]!, /repeat\(2/, "no fixed two-column grid is left in the window grid");
+});
+
+test("the 5-hour and weekly window names are the mod's, verbatim in every language", () => {
+  const modSource = fs.readFileSync(path.join(uiDir, "../mod/hooks/i18n.ts"), "utf8");
+  const blocks: Record<string, string> = { en: "const EN = {", ko: "const KO: Record", zh: "const ZH: Record", ja: "const JA: Record", es: "const ES: Record", pt: "const PT: Record" };
+  for (const [lang, marker] of Object.entries(blocks)) {
+    const start = modSource.indexOf(marker);
+    assert.ok(start > 0, `the mod's i18n has ${marker}`);
+    const body = modSource.slice(start, modSource.indexOf("\n}", start));
+    for (const [guiKey, modKey] of [["limits.fiveHour", "band.fiveHour"], ["limits.weekly", "band.weekly"]] as const) {
+      const match = body.match(new RegExp(`'${modKey.replaceAll(".", "\\.")}': '([^']*)'`));
+      assert.ok(match, `${lang} ${modKey} in the mod`);
+      assert.equal(dictionaries[lang]![guiKey], match[1], `${lang} ${guiKey} matches the mod's ${modKey}`);
     }
   }
 });

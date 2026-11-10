@@ -3,7 +3,7 @@
 const I18N = {
   ko: {
     "limits.active": "사용 중", "limits.stale": "오래된 정보",
-    "limits.fiveHour": "5시간", "limits.weekly": "주간", "limits.unknown": "알 수 없음", "limits.resetUnknown": "초기화 시간을 알 수 없습니다",
+    "limits.fiveHour": "5시간", "limits.weekly": "주간", "limits.resetUnknown": "초기화 시간을 알 수 없습니다",
     "limits.resetsIn": "{hours}시간 {minutes}분 후 초기화", "limits.resetsAt": "{time} 초기화",
     "limits.fetchedAt": "{time} 업데이트", "limits.notFetched": "아직 사용량 정보가 없습니다",
     "limits.paceProjected": "예상 사용률 {percent}%", "limits.exhaust": "이 속도라면 {time} 후 한도가 소진됩니다",
@@ -256,7 +256,7 @@ const I18N = {
   },
   en: {
     "limits.active": "Active", "limits.stale": "Stale",
-    "limits.fiveHour": "5 hours", "limits.weekly": "Weekly", "limits.unknown": "Unknown", "limits.resetUnknown": "Reset time unknown",
+    "limits.fiveHour": "5-hour", "limits.weekly": "Weekly", "limits.resetUnknown": "Reset time unknown",
     "limits.resetsIn": "resets in {hours}h {minutes}m", "limits.resetsAt": "resets {time}",
     "limits.fetchedAt": "Updated {time}", "limits.notFetched": "No usage snapshot yet",
     "limits.paceProjected": "projected {percent}%", "limits.exhaust": "At this pace it runs out in {time}",
@@ -509,7 +509,7 @@ const I18N = {
   },
   zh: {
     "limits.active": "使用中", "limits.stale": "数据已过期",
-    "limits.fiveHour": "5 小时", "limits.weekly": "每周", "limits.unknown": "未知", "limits.resetUnknown": "重置时间未知",
+    "limits.fiveHour": "5 小时", "limits.weekly": "每周", "limits.resetUnknown": "重置时间未知",
     "limits.resetsIn": "{hours} 小时 {minutes} 分钟后重置", "limits.resetsAt": "{time} 重置",
     "limits.fetchedAt": "更新于 {time}", "limits.notFetched": "暂无用量数据",
     "limits.paceProjected": "预计用量 {percent}%", "limits.exhaust": "按当前速度，{time}后将用尽",
@@ -1065,7 +1065,7 @@ const I18N = {
   },
   ja: {
     "limits.active": "使用中", "limits.stale": "古い情報",
-    "limits.fiveHour": "5時間", "limits.weekly": "週間", "limits.unknown": "不明", "limits.resetUnknown": "リセット時刻は不明です",
+    "limits.fiveHour": "5時間", "limits.weekly": "週間", "limits.resetUnknown": "リセット時刻は不明です",
     "limits.resetsIn": "{hours}時間{minutes}分後にリセット", "limits.resetsAt": "{time}にリセット",
     "limits.fetchedAt": "{time}更新", "limits.notFetched": "使用量の情報はまだありません",
     "limits.paceProjected": "予測使用率 {percent}%", "limits.exhaust": "このペースだと{time}後に上限に達します",
@@ -1621,7 +1621,7 @@ const I18N = {
   },
   es: {
     "limits.active": "En uso", "limits.stale": "Datos desactualizados",
-    "limits.fiveHour": "5 horas", "limits.weekly": "Semanal", "limits.unknown": "Desconocido", "limits.resetUnknown": "Hora de reinicio desconocida",
+    "limits.fiveHour": "5 horas", "limits.weekly": "semanal", "limits.resetUnknown": "Hora de reinicio desconocida",
     "limits.resetsIn": "se reinicia en {hours} h {minutes} min", "limits.resetsAt": "se reinicia el {time}",
     "limits.fetchedAt": "Actualizado a las {time}", "limits.notFetched": "Aún no hay datos de uso",
     "limits.paceProjected": "uso previsto {percent}%", "limits.exhaust": "A este ritmo se agota en {time}",
@@ -2177,7 +2177,7 @@ const I18N = {
   },
   pt: {
     "limits.active": "Em uso", "limits.stale": "Dados desatualizados",
-    "limits.fiveHour": "5 horas", "limits.weekly": "Semanal", "limits.unknown": "Desconhecido", "limits.resetUnknown": "Horário de redefinição desconhecido",
+    "limits.fiveHour": "5 horas", "limits.weekly": "semanal", "limits.resetUnknown": "Horário de redefinição desconhecido",
     "limits.resetsIn": "redefine em {hours} h {minutes} min", "limits.resetsAt": "redefine em {time}",
     "limits.fetchedAt": "Atualizado às {time}", "limits.notFetched": "Ainda não há dados de uso",
     "limits.paceProjected": "uso previsto {percent}%", "limits.exhaust": "Neste ritmo, acaba em {time}",

@@ -423,8 +423,8 @@ label.check input { margin-top: 2px; }
 .limits-account-head strong { font-size: var(--fs-sub); font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
 .limits-badges { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; min-width: 0; }
 .limits-badges .badge { font-size: var(--fs-cap); white-space: normal; overflow-wrap: anywhere; }
-.limits-windows { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 24px; }
-@media (max-width: 480px) { .limits-windows { grid-template-columns: minmax(0, 1fr); } }
+/* Windows wrap by the room they have: one column on a phone, more as the account's box widens, a row of three or more still full. */
+.limits-windows { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: 0 24px; }
 .limits-window { margin-top: 12px; }
 .limits-window-head { display: flex; justify-content: space-between; gap: 4px 12px; flex-wrap: wrap; margin-bottom: 5px; }
 .limits-window-head, .limits-window-foot { font-size: var(--fs-foot); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
@@ -432,7 +432,6 @@ label.check input { margin-top: 2px; }
 .limits-window-note { margin-top: 4px; font-size: var(--fs-foot); overflow-wrap: anywhere; }
 .limits-track { position: relative; height: 8px; border-radius: 4px; background: var(--fill-press); }
 .limits-fill { display: block; height: 100%; border-radius: 0 4px 4px 0; background: var(--accent-fill); }
-.limits-track.unknown { background: repeating-linear-gradient(135deg, var(--fill-press) 0 4px, transparent 4px 8px); }
 .limits-fetched { color: var(--label-2); font-size: var(--fs-cap); }
 @media (forced-colors: active) {
   .limits-track { border: 1px solid CanvasText; }

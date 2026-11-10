@@ -404,27 +404,25 @@ function limitsReset(window, weekly, now) {
  * under the row instead. A window whose reset has passed keeps its last share, so it is marked stale.
  * `accountName` puts whose gauge it is into the accessible name.
  */
-function limitsWindowRow(label, window, weekly, now, accountName = "") {
-  const known = window && Number.isFinite(window.usedPercent);
-  const percent = known ? `${Math.round(window.usedPercent * 10) / 10}%` : t("limits.unknown");
-  const reset = limitsReset(window, weekly, now);
+function limitsWindowRow(label, window, now, accountName = "") {
+  const percent = `${Math.round(window.usedPercent * 10) / 10}%`;
+  // A window of a day or more reads its reset as a weekday and clock; a shorter one as the time left.
+  const reset = limitsReset(window, window.kind === "seven_day" || window.windowMinutes >= 1440, now);
   const name = accountName ? `${accountName} · ${label}` : label;
-  const exhaustLeft = known ? limitsExhaustLeft(window, now) : null;
+  const exhaustLeft = limitsExhaustLeft(window, now);
   const note = exhaustLeft === null ? "" : t("limits.exhaust", { time: limitsTimeLeft(exhaustLeft) });
   const level = note ? null : limitsPaceLevel(window, now);
   const pace = level ? t("limits.paceProjected", { percent: Math.round(window.projectedPercent) }) : "";
-  const passed = Boolean(known) && Number.isFinite(window.resetAt) && window.resetAt <= now;
+  const passed = Number.isFinite(window.resetAt) && window.resetAt <= now;
   const track = el("div", {
-    class: `limits-track${known ? "" : " unknown"}`, role: "progressbar", tabindex: "0",
+    class: "limits-track", role: "progressbar", tabindex: "0",
     "aria-label": name, "aria-valuemin": "0", "aria-valuemax": "100",
-    ...(known ? { "aria-valuenow": Math.max(0, Math.min(100, window.usedPercent)) } : {}),
+    "aria-valuenow": Math.max(0, Math.min(100, window.usedPercent)),
     "aria-valuetext": [percent, reset, pace, note].filter(Boolean).join(" · "), title: [name, percent, reset].join(" · "),
   });
-  if (known) {
-    const fill = el("span", { class: "limits-fill", "aria-hidden": "true" });
-    fill.style.width = `${Math.max(0, Math.min(100, window.usedPercent))}%`;
-    track.appendChild(fill);
-  }
+  const fill = el("span", { class: "limits-fill", "aria-hidden": "true" });
+  fill.style.width = `${Math.max(0, Math.min(100, window.usedPercent))}%`;
+  track.appendChild(fill);
   const parts = [el("span", { text: reset })];
   if (passed) parts.push(el("span", { class: "warn-text", text: t("limits.stale") }));
   if (pace) parts.push(level === "tight" ? el("span", { class: "warn-text", text: pace }) : el("span", { text: pace }));
@@ -438,20 +436,65 @@ function limitsWindowRow(label, window, weekly, now, accountName = "") {
   ]);
 }
 
-/** The API's reset and exhaust moments are in epoch seconds; the date helpers read milliseconds. */
-function limitsUsageWindow(account, kind) {
-  const window = (account.windows || []).find((candidate) => candidate.kind === kind);
-  return window && {
+/** The router's generic names for an account nobody named ("Claude account 2"): the pane says the number instead, as the mod does. */
+const LIMITS_PLACEHOLDER = /^(?:Claude|ChatGPT|Google) account(?: \d+)?$/i;
+
+/** A name as the limits pane shows it: control characters dropped, cut at `max` with an ellipsis (the mod's displayText). */
+function limitsDisplay(value, max) {
+  const clean = String(value ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "").trim();
+  return clean.length > max ? `${clean.slice(0, max - 1).trimEnd()}…` : clean;
+}
+
+/** A span of minutes in the mod's units: "30d", "5h", "45m" (its units.* wording). */
+function limitsSpanName(minutes) {
+  if (minutes % 1440 === 0) return t("units.days", { n: minutes / 1440 });
+  if (minutes % 60 === 0) return t("units.hours", { n: minutes / 60 });
+  return t("units.minutes", { n: minutes });
+}
+
+/**
+ * A window's name as the mod's limitItemName gives it: the 5-hour and weekly names, a scoped window's own
+ * label ("Fable", "Argon weekly"), else its span ("30d"). Only the windows the router reported are named.
+ */
+function limitsItemName(window) {
+  if (window.kind === "five_hour") return t("limits.fiveHour");
+  if (window.kind === "seven_day") return t("limits.weekly");
+  if (window.kind === "scoped") return limitsDisplay(window.label || window.kind, 120);
+  if (window.windowMinutes === 300) return t("limits.fiveHour");
+  if (window.windowMinutes === 10080) return t("limits.weekly");
+  if (window.windowMinutes > 0) return limitsSpanName(window.windowMinutes);
+  return limitsDisplay(window.label || String(window.kind ?? "").replace(/_/g, " "), 120);
+}
+
+/** A window's name in its account: its own, and its span after it when another window of the account shares the name (Gemini's two "3P" windows). */
+function limitsWindowName(windows, index) {
+  const window = windows[index];
+  const name = limitsItemName(window);
+  const twin = windows.some((other, j) => j !== index && limitsItemName(other) === name);
+  return twin && window.windowMinutes ? `${name} ${limitsItemName({ kind: "window", windowMinutes: window.windowMinutes })}` : name;
+}
+
+/** A window the router reported, as the pane reads it; null for a window with no share. */
+function limitsUsageWindow(window) {
+  if (!window || !Number.isFinite(window.used_percent)) return null;
+  return {
+    kind: window.kind,
+    ...(window.label ? { label: window.label } : {}),
     usedPercent: window.used_percent,
+    ...(Number.isFinite(window.window_minutes) ? { windowMinutes: window.window_minutes } : {}),
+    // The API's reset and exhaust moments are in epoch seconds; the date helpers read milliseconds.
     ...(Number.isFinite(window.reset_at) ? { resetAt: window.reset_at * 1000 } : {}),
     ...(Number.isFinite(window.exhaust_at) ? { exhaustAt: window.exhaust_at * 1000 } : {}),
     ...(Number.isFinite(window.projected_percent) ? { projectedPercent: window.projected_percent } : {}),
   };
 }
 
+/** An account's name on the Status screen: the Claude login in the dashboard's language, else its label, else its provider's title and number. */
 function limitsAccountName(entry, account) {
-  if (account.label || account.email) return account.label || account.email;
-  if (entry.type === "anthropic" && account.account === 0) return t("providers.anthropicCurrentLogin");
+  // The router names the Claude app login in English ("Current Claude login"); the screen says it in its own language.
+  if (entry.type === "anthropic" && account.id === "current") return t("providers.anthropicCurrentLogin");
+  const label = limitsDisplay(account.label || account.email || "", 120);
+  if (label && !LIMITS_PLACEHOLDER.test(label)) return label;
   return account.account === null || account.account === undefined ? entry.title : `${entry.title} ${account.account + 1}`;
 }
 
@@ -464,15 +507,15 @@ function limitsAccountRow(entry, account, now) {
   if (entry.stale || account.stale || (account.quota && account.quota.stale)) badges.push(badge("warn", t("limits.stale")));
   const fetched = Number.isFinite(account.at) && account.at > 0 ? t("limits.fetchedAt", { time: new Date(account.at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: false }) }) : t("limits.notFetched");
   const name = limitsAccountName(entry, account);
+  const windows = (account.windows || []).map(limitsUsageWindow).filter(Boolean);
+  // One gauge per window the router reported; a window it did not report has no gauge, and an account with none has none.
+  const gauges = windows.map((window, index) => limitsWindowRow(limitsWindowName(windows, index), window, now, name));
   return el("div", { class: "limits-account" }, [
     el("div", { class: "limits-account-head" }, [
       el("strong", { text: name }),
       el("div", { class: "limits-badges" }, [...badges, el("span", { class: "limits-fetched", text: fetched })]),
     ]),
-    el("div", { class: "limits-windows" }, [
-      limitsWindowRow(t("limits.fiveHour"), limitsUsageWindow(account, "five_hour"), false, now, name),
-      limitsWindowRow(t("limits.weekly"), limitsUsageWindow(account, "seven_day"), true, now, name),
-    ]),
+    gauges.length ? el("div", { class: "limits-windows" }, gauges) : null,
   ]);
 }
 
