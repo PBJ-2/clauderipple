@@ -478,19 +478,37 @@ function limitsAccountRow(entry, account, now) {
 
 /**
  * Claude rows come from limits. ChatGPT keeps all status accounts; only those in rotation are numbered.
- * The status and the limits are two reads, so an account paused or removed between them must not hand its
- * figures to the next row: each row takes the figures listed under its own id, and none while it is paused
- * or waiting for a sign-in (the limits leave those out).
+ * The status and the limits are two reads, so a figure never outlives the status it is shown beside: a row
+ * keeps its figures only while the status lists its account under the same id and not as paused or waiting
+ * for a sign-in. The status's view wins for whose account it is and whether it is in use.
+ * Status does not carry `limits`, so before the config loads a provider the limits leave out may be one
+ * saved with limits off: it keeps its text lines. Once the config says the provider has limits, a ChatGPT
+ * provider shows its accounts even without figures. Claude shows only the rows the limits list, so an
+ * unlisted Claude provider keeps its text lines too.
  */
 function providerLimits(name) {
-  if (!limitsSnapshot || !Array.isArray(limitsSnapshot.providers)) return null;
-  const provider = (currentConfig && currentConfig.providers && currentConfig.providers[name]) || (status && status.providers && status.providers[name]);
+  if (!limitsSnapshot || !Array.isArray(limitsSnapshot.providers) || !status) return null;
+  const configured = currentConfig && currentConfig.providers && currentConfig.providers[name];
+  const provider = configured || (status.providers && status.providers[name]);
   if (!provider || provider.limits === false || (provider.type !== "anthropic" && provider.type !== "chatgpt")) return null;
   if (provider.type === "anthropic" && provider.auth !== "claude-code" && !provider.authSource) return null;
-  const entry = { ...(limitsSnapshot.providers.find((item) => item.provider === name) || { type: provider.type, title: provider.type === "anthropic" ? "Claude" : "GPT", accounts: [] }),
-    stale: limitsSnapshotStale || (provider.type === "chatgpt" && Boolean(status && status.chatgpt && status.chatgpt.staleReason && status.chatgpt.staleReason[name])),
+  const listed = limitsSnapshot.providers.find((item) => item.provider === name);
+  if (!listed && (!configured || provider.type === "anthropic")) return null;
+  const entry = { ...(listed || { type: provider.type, title: provider.type === "anthropic" ? "Claude" : "GPT", accounts: [] }),
+    stale: limitsSnapshotStale || (provider.type === "chatgpt" && Boolean(status.chatgpt && status.chatgpt.staleReason && status.chatgpt.staleReason[name])),
   };
-  const accounts = provider.type === "chatgpt" && status && status.chatgpt && status.chatgpt.accounts && status.chatgpt.accounts[name];
+  if (provider.type === "anthropic") {
+    // Without the status's account list there is nothing to check the limits against; keep them as they are.
+    const listedAccounts = status.claude && status.claude.accounts;
+    if (!Array.isArray(listedAccounts)) return entry.accounts.length ? entry : null;
+    const rows = entry.accounts.flatMap((figures) => {
+      const listed = figures.id === undefined ? undefined : listedAccounts.find((item) => item.id === figures.id);
+      if (!listed || listed.paused || listed.state === "paused" || listed.state === "needs-login") return [];
+      return [{ ...figures, ...(listed.label ? { label: listed.label } : {}), inUse: listed.inUse === true }];
+    });
+    return rows.length ? { ...entry, accounts: rows } : null;
+  }
+  const accounts = status.chatgpt && status.chatgpt.accounts && status.chatgpt.accounts[name];
   if (!accounts) return entry.accounts.length ? entry : null;
   let number = 0;
   const rows = accounts.map((account) => {
@@ -1152,8 +1170,9 @@ function renderHealthProviders() {
     const live = status && status.providers && status.providers[name];
     const lines = [];
     const limits = providerLimits(name);
-    // Older routers and a never-read limits list keep the text lines; once gauges exist they show the same figures.
-    const quota = limits ? null : quotaLine(name);
+    // Older routers and a never-read limits list keep the text lines; gauges replace them only where they show figures.
+    const figures = Boolean(limits && limits.accounts.some((account) => (account.windows || []).length));
+    const quota = figures ? null : quotaLine(name);
     if (quota) lines.push(el("span", { class: "cell-sub", text: quota }));
     // Claude subscription accounts, one line each: the current login and every account added here.
     // Before the config has loaded the rows come from the status, which names the sign-in source

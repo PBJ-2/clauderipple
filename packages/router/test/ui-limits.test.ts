@@ -49,10 +49,12 @@ type LimitsUi = {
   providerLimits(name: string): { accounts: Record<string, unknown>[] } | null;
   limitsSnapshotPeek(): unknown;
 };
-function limitsUi(api: (path: string) => Promise<unknown>, status: Record<string, unknown> = {}) {
+const defaultConfig = { providers: { claude: { type: "anthropic", auth: "claude-code" }, gpt: { type: "chatgpt" }, other: { type: "openai-compatible" } } };
+// `config` null is the screen before the config has loaded: the status alone names the providers.
+function limitsUi(api: (path: string) => Promise<unknown>, status: Record<string, unknown> = {}, config: Record<string, unknown> | null = defaultConfig) {
   const card = el("div"), desktop = el("div");
-  const build = new Function("api", "el", "t", "$", "status", `
-    const currentConfig = { providers: { claude: { type: "anthropic", auth: "claude-code" }, gpt: { type: "chatgpt" }, other: { type: "openai-compatible" } } };
+  const build = new Function("api", "el", "t", "$", "status", "config", `
+    let currentConfig = config;
     const stateFor = () => null, chevronIcon = () => null, openProvider = () => {}, chatgptLoginButton = () => el("button", { text: "Sign in" }), chatgptLoginMessage = "", providerLabel = (name) => name;
     const APP = null, clientsLoaded = false, modState = {}, updateState = {}, renderDiagnostics = () => {}, modRedraw = () => {}, versionRow = () => null, autoUpdateRow = () => null, priorityRow = () => null;
     let loadedUiRevision = null;
@@ -68,7 +70,7 @@ function limitsUi(api: (path: string) => Promise<unknown>, status: Record<string
   const ui = build(async (path: string) => {
     const response = await api(path);
     return path === "/api/status" ? { settings: {}, ...status, ...(response && typeof response === "object" ? response : {}) } : response;
-  }, el, t, (selector: string) => selector === "#health-providers" ? card : selector === "#health-desktop" ? desktop : el("div"), status);
+  }, el, t, (selector: string) => selector === "#health-providers" ? card : selector === "#health-desktop" ? desktop : el("div"), status, config);
   // A poll draws the status at once and the gauges when the limits read lands; tests wait for both.
   return { ...ui, card, desktop, refresh: async () => { await ui.refreshHealth(); await ui.settleLimits(); } };
 }
@@ -76,7 +78,7 @@ function limitsUi(api: (path: string) => Promise<unknown>, status: Record<string
 const now = Date.now();
 const five = { kind: "five_hour", used_percent: 23, window_minutes: 300, reset_at: (now + 255 * 60_000) / 1000 };
 const weekly = { kind: "seven_day", used_percent: 125, window_minutes: 10080, reset_at: (now + 86400_000) / 1000 };
-const current = { account: 0, inUse: true, at: now, windows: [weekly, five] };
+const current = { id: "current", account: 0, inUse: true, at: now, windows: [weekly, five] };
 const connected = { claude: { reachable: true }, gpt: { reachable: true }, other: { reachable: true } };
 
 test("Status replaces subscription text lines with per-account gauges, leaving other providers alone", async () => {
@@ -132,8 +134,12 @@ test("ChatGPT accounts keep saved order, states and empty accounts without shift
 
 test("Claude renders only limits entries, preserving their labels, order and active account", async () => {
   const ui = limitsUi(async (path) => path === "/api/limits" ? { providers: [
-    { type: "anthropic", provider: "claude", title: "Claude", accounts: [{ account: 2, label: "Preferred", at: now, windows: [five], inUse: true }, { ...current, inUse: false }] },
-  ] } : {}, { providers: connected, claude: { accounts: [{ id: "unread", label: "Unread" }] } });
+    { type: "anthropic", provider: "claude", title: "Claude", accounts: [{ account: 2, id: "pref", label: "Preferred", at: now, windows: [five] }, { ...current, inUse: false }] },
+  ] } : {}, { providers: connected, claude: { accounts: [
+    { id: "current", quota: {} },
+    { id: "pref", label: "Preferred", quota: {}, inUse: true },
+    { id: "unread", label: "Unread", quota: {} },
+  ] } });
   await ui.refresh();
   const rows = findAll(ui.card.children[0]!, hasClass("limits-account"));
   assert.equal(rows.length, 2);
@@ -300,6 +306,68 @@ test("ChatGPT figures join by account id, so a pause between the two reads moves
   assert.doesNotMatch(text(rows[1]!), /125%|40%|23%/, "a paused account takes no figures");
   assert.match(text(rows[2]!), /40%/);
   assert.doesNotMatch(text(rows[2]!), /23%|125%/, "the second account keeps its own figures, not the next position's");
+});
+
+test("an older limits read that lands after a newer status does not show an account the status removed or paused", async () => {
+  // The read was taken while all four accounts were listed. The status read after it has the login paused
+  // (the status leaves it out), "Work" removed, "Spare" in use, and "Held" listed as paused.
+  const oldLimits = { providers: [{ type: "anthropic", provider: "claude", title: "Claude", accounts: [
+    { ...current, inUse: false },
+    { account: 1, id: "work", label: "Work", at: now, windows: [five] },
+    { account: 2, id: "spare", label: "Spare", at: now, windows: [weekly] },
+    { account: 3, id: "held", label: "Held", at: now, windows: [five] },
+  ] }] };
+  let statusNow: Record<string, unknown> = { providers: connected, claude: { accounts: [
+    { id: "current", quota: {} }, { id: "work", label: "Work", quota: {} }, { id: "spare", label: "Spare", quota: {} }, { id: "held", label: "Held", quota: {} },
+  ] } };
+  let limitsReply: Promise<unknown> = Promise.resolve(oldLimits);
+  const ui = limitsUi(async (path) => path === "/api/status" ? statusNow : limitsReply, {});
+  await ui.refresh();
+  assert.equal(findAll(ui.card, hasClass("limits-account")).length, 4);
+
+  statusNow = { providers: connected, claude: { accounts: [
+    { id: "spare", label: "Spare", quota: {}, inUse: true },
+    { id: "held", label: "Held", quota: {}, paused: true },
+  ] } };
+  const names = () => findAll(ui.card, hasClass("limits-account")).map((row) => row.children[0]!.children[0]!.attrs.text);
+  // The status draws at once, before the limits read from the older poll lands.
+  let release: (value: unknown) => void = () => {};
+  limitsReply = new Promise((resolve) => { release = resolve; });
+  await ui.refreshHealth();
+  assert.deepEqual(names(), ["Spare"], "the removed, paused and signed-out accounts are gone at once");
+  assert.equal(findAll(ui.card, (node) => node.attrs.text === t("limits.active")).length, 1);
+  // The older read lands: it still lists them, and must not bring them back.
+  release(oldLimits);
+  await ui.settleLimits();
+  assert.deepEqual(names(), ["Spare"]);
+  assert.equal(findAll(ui.card, (node) => node.attrs.text === t("limits.active")).length, 1, "Active follows the status, not the older read");
+  assert.doesNotMatch(text(ui.card), /Work|Held|Current Claude login/);
+  assert.match(text(ui.card.children[0]!), /125%/, "the account that stayed keeps its own figures");
+});
+
+test("a ChatGPT provider saved with limits off keeps its quota text, before the config loads or after", async () => {
+  const statusNow = {
+    providers: { ...connected, gpt: { type: "chatgpt", reachable: true } },
+    chatgpt: { quota: { gpt: { rate_limits: { primary: five } } }, accounts: { gpt: [{ id: "a", label: "First", state: "ready" }] } },
+  };
+  for (const config of [null, { providers: { gpt: { type: "chatgpt", limits: false } } }]) {
+    // The router lists no limits for a provider saved with limits off, and status does not say it has them.
+    const ui = limitsUi(async (path) => path === "/api/limits" ? { providers: [] } : statusNow, {}, config);
+    await ui.refresh();
+    assert.equal(findAll(ui.card, hasClass("limits-account")).length, 0, JSON.stringify(config));
+    assert.ok(text(ui.card).includes(t("health.quota", { percent: 23, reset: "" })), JSON.stringify(config));
+    assert.doesNotMatch(text(ui.card), /No usage snapshot yet/);
+  }
+});
+
+test("a Claude login saved with limits off keeps its usage lines before the config loads", async () => {
+  const ui = limitsUi(async (path) => path === "/api/limits" ? { providers: [] } : {
+    providers: { ...connected, claude: { type: "anthropic", reachable: true, authSource: "observed" } },
+    claude: { accounts: [{ id: "current", quota: { rate_limits: { primary: five } } }] },
+  }, {}, null);
+  await ui.refresh();
+  assert.equal(findAll(ui.card, hasClass("limits-account")).length, 0);
+  assert.match(text(ui.card.children[0]!), /23%/);
 });
 
 test("a Claude account whose refresh was refused says its figures are stale, and only that account's", async () => {
