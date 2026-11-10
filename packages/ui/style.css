@@ -857,20 +857,43 @@ pre#logbox {
 /* One long page of cards, each card a heading over the usual grouped lists. */
 a.cell { color: inherit; text-decoration: none; }
 #mod-notice:not([hidden]) + #mod-content { margin-top: 28px; }
-.mod-card + .mod-card { margin-top: 48px; }
-.mod-card-head { margin: 0 4px 12px; }
-.mod-card-head h2 { font-size: 20px; font-weight: 700; letter-spacing: -0.015em; line-height: 1.25; }
-.mod-card-head .hint { margin-top: 3px; font-size: var(--fs-sub); }
+/* A card is a heading the size of Status's provider names over its rows, not a second page title. */
+.mod-card + .mod-card { margin-top: 40px; }
+.mod-card-head { margin: 0 4px 10px; }
+.mod-card-head h2 { font-size: 16px; font-weight: 650; letter-spacing: -0.01em; line-height: 1.3; }
+.mod-card-head .hint { margin-top: 3px; font-size: var(--fs-foot); line-height: 1.5; }
 .mod-card-head + .section, .mod-card-head + .group { margin-top: 0; }
+.mod-card .section + .section { margin-top: 18px; }
+.mod-card .section-title { color: var(--label-2); font-size: var(--fs-foot); }
+/* Rows say what a setting is in the body size and how it works in a quieter line. */
+.mod-card .cell-label { font-size: var(--fs-sub); }
+.mod-card .cell-sub { font-size: var(--fs-cap); }
+.mod-card .group-footer { font-size: var(--fs-cap); line-height: 1.55; }
+/* On a phone a choice keeps its whole word ("모든 서브에이전트" was cut to "모든 서브에이…"):
+   the buttons size to their words and the control wraps when they do not fit. */
+@media (max-width: 720px) {
+  .mod-card .cell.wide .segmented { flex-wrap: wrap; }
+  .mod-card .cell.wide .segmented button { flex: 1 1 auto; overflow: visible; text-overflow: clip; }
+  .mode-tabs { display: flex; }
+}
 .group-footer.warn-text, .cell-note.warn-text, .cell-sub.warn-text { color: var(--warn); }
 .mod-card .cell-value select { width: 320px; max-width: 100%; }
 .mod-card .cell-value select.narrow { width: 160px; }
 .text-field { width: 320px; }
 
 /* The models to use: one block per provider, its billing beside the name, a checkbox for each model. */
-.tick-group + .tick-group { border-top: 1px solid var(--separator); }
-.tick-head { padding: 12px 16px 0; color: var(--label-2); font-size: var(--fs-foot); font-weight: 500; }
+.tick-group { position: relative; }
+.tick-group + .tick-group::before { content: ""; position: absolute; top: 0; left: 16px; right: 0; height: 1px; background: var(--separator); }
+.tick-head { padding: 11px 16px 0; color: var(--label-2); font-size: var(--fs-cap); font-weight: 500; }
+.tick-name { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.tick-name > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tick-name .vendor-dot { width: 7px; height: 7px; }
 .tick-group .model-check .model-effort-tag { margin-left: auto; }
+/* The models are ticks on the card, not grey tiles in it: a row each, a hover the only fill. */
+.tick-group .model-checklist { gap: 0 8px; padding: 4px 8px 8px; }
+.tick-group .model-check { padding: 6px 8px; border-radius: 7px; background: transparent; font-size: var(--fs-foot); }
+.tick-group .model-check:hover { background: var(--fill); }
+.tick-group .model-check:has(input:not(:checked)) > span:first-of-type { color: var(--label-2); }
 /* A provider with pinned workers: its account tabs at the head's right, one account's models below.
    The lists share one cell, so the block is as tall as the longest and switching moves nothing. */
 .tick-head.has-tabs { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px 0 16px; }
@@ -888,10 +911,14 @@ a.cell { color: inherit; text-decoration: none; }
 .rung-row > .cell-value { flex-shrink: 0; max-width: 100%; }
 .mod-card .cell-value select.rung-model { width: 300px; }
 /* Saved worker sets: tabs browse, the separate control activates. Numbering is dispatch order. */
-.mode-on { display: inline-block; margin-left: 8px; padding: 1px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: var(--fs-cap); font-weight: 600; vertical-align: 1px; }
-.mode-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 18px 0 12px; }
-.mode-tabs button { padding: 8px 12px; border: 1px solid var(--separator); border-radius: 8px; background: var(--fill); color: var(--label-2); max-width: 100%; overflow-wrap: anywhere; }
-.mode-tabs button.active { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+/* The set in use carries the accent's outlined tag, the one point of violet among the tabs. */
+.mode-on { display: inline-block; margin-left: 7px; padding: 0 6px; border-radius: 999px; box-shadow: inset 0 0 0 1px var(--accent-line); color: var(--accent); font-size: 11px; font-weight: 600; line-height: 16px; vertical-align: 1px; }
+/* Saved worker sets as a segmented control: the open one raised, the rest flat. */
+.mode-tabs { display: inline-flex; flex-wrap: wrap; gap: 2px; max-width: 100%; margin: 20px 0 14px; padding: 2px; border-radius: 9px; background: var(--fill); }
+.mode-tabs button { min-height: 28px; padding: 3px 14px; border: 0; border-radius: 7px; background: transparent; color: var(--label); font-size: var(--fs-foot); font-weight: 500; max-width: 100%; overflow-wrap: anywhere; cursor: pointer; }
+.mode-tabs button:hover:not(.active):not(:disabled) { background: var(--fill); }
+.mode-tabs button.active { background: var(--segment-on); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12), 0 0 0 0.5px rgba(0, 0, 0, 0.04); font-weight: 600; }
+.mode-tabs button[data-key="mode-add"] { color: var(--label-2); }
 .rung-list { min-width: 0; width: 100%; text-align: left; }
 .rung-list ol { margin: 0 0 8px; padding-left: 22px; }
 .rung-item { padding: 3px 0 6px; }
@@ -910,7 +937,8 @@ a.cell { color: inherit; text-decoration: none; }
   .compact-at, .compact-at .segmented { flex-wrap: nowrap; }
   .compact-at .text-field { width: 112px; }
 }
-.offer-row { background: var(--accent-soft); }
+/* A one-time note: an accent rule at its edge rather than a violet ground. */
+.offer-row { box-shadow: inset 3px 0 0 var(--accent); }
 .offer-row .cell-label { font-size: var(--fs-sub); }
 
 /* The lean is a slider with a tick for each of its five stops, like a System Settings slider. */

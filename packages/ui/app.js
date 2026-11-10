@@ -5369,6 +5369,13 @@ function modGroups(choices) {
   return groups;
 }
 function modGroupLabel(group) { return group.billing ? `${group.name} · ${t(`mod.billing.${group.billing}`)}` : group.name; }
+/** A group's head in the models list: its vendor's hue as a dot (Claude's own models take Claude's), then its name and billing. */
+function modGroupHead(group) {
+  const key = group.name === "Claude" ? "anthropic" : group.name;
+  const dot = el("span", { class: "vendor-dot", "aria-hidden": "true" });
+  dot.style.color = providerHue(key, modProviderInfo(key));
+  return el("span", { class: "tick-name" }, [dot, el("span", { text: modGroupLabel(group) })]);
+}
 
 // ---- Accounts: a provider with pinned workers lists one account at a time
 //
@@ -5444,7 +5451,7 @@ function modTickRows() {
       return el("label", { class: "model-check", title: choice.model || choice.label }, [input, el("span", { text: choice.label }), other, off]);
     };
     const listed = group.items.filter(modListed);
-    if (!tabs) return el("div", { class: "tick-group" }, [el("div", { class: "tick-head", text: modGroupLabel(group) }), el("div", { class: "model-checklist" }, listed.map(box))]);
+    if (!tabs) return el("div", { class: "tick-group" }, [el("div", { class: "tick-head" }, [modGroupHead(group)]), el("div", { class: "model-checklist" }, listed.map(box))]);
     // Every account's list is drawn in the same place and only the picked one is visible, so the
     // block keeps the tallest list's height and switching accounts moves nothing below it.
     const shown = modAccountTab(group, tabs);
@@ -5460,7 +5467,7 @@ function modTickRows() {
       return panel;
     });
     return el("div", { class: "tick-group" }, [
-      el("div", { class: "tick-head has-tabs" }, [el("span", { text: modGroupLabel(group) }), tabList]),
+      el("div", { class: "tick-head has-tabs" }, [modGroupHead(group), tabList]),
       el("div", { class: "account-panels" }, panels),
     ]);
   });
