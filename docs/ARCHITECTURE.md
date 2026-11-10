@@ -1266,16 +1266,18 @@ loaded from the disk cache at startup (`loadAaPricesFrom`), and every dataset th
 loads or fetches is pushed to the price registry (`onDataset`), so a refreshed price reaches later
 costs without a restart.
 
-**Limit forecast (`limit-forecast.ts`, 2026-11-09).** Each `GET /api/limits` read records one
-sample per window (`at` is the account snapshot's time), keyed by (provider, account, kind, label,
-window_minutes). A reading less than a minute after the window's last stored sample is skipped, so
-frequent polling does not multiply the samples. A window whose `used_percent` fell, or whose
-`reset_at` changed, starts a new series. The rate is the least-squares slope of
-`used_percent` over the samples of the last 60 minutes; a forecast needs those samples to span
-at least 15 minutes and to rise at least 2 points, and the rate to be positive. Then
-`exhaust_at = latest sample + (100 − used_percent) / rate` (epoch seconds), emitted only while the
-window is below 100% and only when `exhaust_at` falls before `reset_at`. Samples are kept for three
-hours and are not persisted: a router restart starts every window fresh.
+**Limit forecast (`limit-forecast.ts`, rule revised 2026-11-10).** A window's `exhaust_at` is the
+moment it reaches 100% at its average pace since the window started, computed from the current
+reading alone (no sample history, nothing persisted, so a restart changes nothing). With
+`elapsed = now − (reset_at − window_minutes·60)` and `rate = used_percent / elapsed`:
+`exhaust_at = now + (100 − used_percent) / rate` (epoch seconds). `now` is the account snapshot's
+`at`, so a cached snapshot is judged at its own time. No forecast (the field is absent) when the
+window is at 0% or 100%, `reset_at` or `window_minutes` is missing, the reset is not after `now`,
+`elapsed` is less than min(24 h, 10% of the window), or `exhaust_at` is not before `reset_at`.
+The 10% floor keeps the average from being read before it holds a full day and night (5 h window:
+30 min; weekly: 16.8 h; 30-day: 24 h). The earlier rule fitted the last hour's slope: one busy hour
+extrapolated around the clock overstated weekly windows (a 52% → 54% hour projected 35+ hours of
+use), and integer percents doubled small rises (a real ~1 point rise read as 2).
 
 - **Server-side threads ("tether").** The first request of a session carries
   `thread: {type:"create"}` and the full history; later turns carry

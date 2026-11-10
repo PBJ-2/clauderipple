@@ -55,3 +55,24 @@ test("usage is cached per provider and a failed lookup keeps the last good windo
   assert.equal(third.length, 3);
   assert.equal(seen.length, 2);
 });
+
+test("a cached reading keeps the time it was taken, and a failed refresh keeps that time", async () => {
+  let fail = false;
+  const fetchImpl = (async () => (fail ? new Response("nope", { status: 500 }) : new Response(JSON.stringify(measured), { status: 200 }))) as unknown as typeof fetch;
+  const readTimes = (windows: { read_at?: number }[]) => windows.map((w) => w.read_at);
+  const headers = { authorization: "Bearer key" };
+  let now = 1_000_000;
+  const usage = new OpenCodeUsage({ fetch: fetchImpl, now: () => now, ttlMs: 300_000, warn: () => {} });
+  assert.deepEqual(readTimes(await usage.windows("go", "https://opencode.ai/zen/go/v1", headers)), [1_000_000, 1_000_000, 1_000_000]);
+  // Four minutes later the same reading is served from the cache: it was taken at 1,000,000, not now.
+  now += 4 * 60_000;
+  assert.deepEqual(readTimes(await usage.windows("go", "https://opencode.ai/zen/go/v1", headers)), [1_000_000, 1_000_000, 1_000_000], "a cached reading keeps its own time");
+  // A failed refresh keeps the reading, and with it the time it was taken.
+  now = 1_000_000 + 300_001;
+  fail = true;
+  assert.deepEqual(readTimes(await usage.windows("go", "https://opencode.ai/zen/go/v1", headers)), [1_000_000, 1_000_000, 1_000_000], "a failed refresh keeps the original time");
+  // A later good refresh is stamped with its own time.
+  now += 300_001;
+  fail = false;
+  assert.deepEqual(readTimes(await usage.windows("go", "https://opencode.ai/zen/go/v1", headers)), [now, now, now]);
+});

@@ -12,7 +12,11 @@
 // use, so absent reads as 0. Its scale (0–100, by its name) is not yet seen on a non-zero week.
 
 /** One window `/api/limits` reads, as the OpenCode Go reader gives it. */
-export type GrokWindow = { kind: "seven_day" | "window"; used_percent: number; window_minutes: number; reset_at?: number };
+/**
+ * `read_at` (epoch milliseconds) is when the request for the reading was sent: internal, kept while a
+ * failed read keeps the reading, and stripped before `/api/limits` answers.
+ */
+export type GrokWindow = { kind: "seven_day" | "window"; used_percent: number; window_minutes: number; reset_at?: number; read_at?: number };
 
 const WEEK = 7 * 24 * 60;
 const MONTH = 30 * 24 * 60;
@@ -61,6 +65,7 @@ export class GrokUsage {
   }
 
   private async fetchOne(url: string, headers: () => Promise<Record<string, string>>): Promise<GrokWindow[]> {
+    const readAt = (this.opts.now ?? Date.now)();
     try {
       const res = await (this.opts.fetch ?? fetch)(`${url.replace(/\/+$/, "")}/billing?format=credits`, {
         method: "GET",
@@ -72,7 +77,7 @@ export class GrokUsage {
         return this.last;
       }
       const windows = grokWindowsFromBilling(await res.json());
-      if (windows) this.last = windows;
+      if (windows) this.last = windows.map((w) => ({ ...w, read_at: readAt }));
       return this.last;
     } catch (e) {
       this.opts.warn?.(`grok usage ${this.name}: ${(e as Error).message}`);

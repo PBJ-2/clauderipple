@@ -47,3 +47,23 @@ test("the pool is read with the session's headers, cached, and kept through a fa
   assert.equal((await usage.windows("https://cli-chat-proxy.grok.com/v1", headers))[0]!.used_percent, 12, "the last good pool stays");
   assert.deepEqual(warnings, ["grok usage grok: HTTP 401"]);
 });
+
+test("a cached Grok reading keeps the time it was taken, and a failed read keeps that time", async () => {
+  let now = 1_000_000;
+  let status = 200;
+  const usage = new GrokUsage("grok", {
+    now: () => now,
+    warn: () => {},
+    fetch: async () => (status === 200 ? new Response(JSON.stringify({ config: { ...WEEK_BODY.config, creditUsagePercent: 12 } }), { status: 200 }) : new Response("nope", { status })),
+  });
+  const headers = async () => ({ authorization: "Bearer session" });
+  const url = "https://cli-chat-proxy.grok.com/v1";
+  assert.equal((await usage.windows(url, headers))[0]!.read_at, 1_000_000);
+  now += 4 * 60_000;
+  assert.equal((await usage.windows(url, headers))[0]!.read_at, 1_000_000, "a cached reading keeps its own time");
+  now += 2 * 60_000;
+  status = 401;
+  const kept = await usage.windows(url, headers);
+  assert.equal(kept[0]!.used_percent, 12);
+  assert.equal(kept[0]!.read_at, 1_000_000, "a failed read keeps the reading's time");
+});

@@ -412,8 +412,8 @@ export type LimitItem = {
   percent: number
   resetsAt?: string
   /**
-   * When, at the pace it is being used (epoch ms), the window reaches 100% before it resets: the
-   * router's `exhaust_at`. Absent for a window that is no risk or has too little data to tell.
+   * When, at the window's average pace since it started (epoch ms), the window reaches 100% before it
+   * resets: the router's `exhaust_at`. Absent for a window that is no risk, or too early in it to tell.
    */
   exhaustsAt?: number
 }

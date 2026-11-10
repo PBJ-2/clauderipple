@@ -119,6 +119,20 @@ test("usage is cached per provider and a failed lookup keeps the last good windo
   assert.equal(seen.length, 2);
 });
 
+test("a cached MiniMax reading keeps the time it was taken, and a failed refresh keeps that time", async () => {
+  let fail = false;
+  const fetchImpl = (async () => (fail ? new Response("nope", { status: 500 }) : new Response(JSON.stringify(measured), { status: 200 }))) as unknown as typeof fetch;
+  const readTimes = (windows: { read_at?: number }[]) => windows.map((w) => w.read_at);
+  let now = 1_000_000;
+  const usage = new MiniMaxUsage({ fetch: fetchImpl, now: () => now, ttlMs: 300_000, warn: () => {} });
+  assert.deepEqual(readTimes(await usage.windows("mini", "https://api.minimax.io/anthropic", { "x-api-key": "key" })), [1_000_000, 1_000_000]);
+  now += 4 * 60_000;
+  assert.deepEqual(readTimes(await usage.windows("mini", "https://api.minimax.io/anthropic", { "x-api-key": "key" })), [1_000_000, 1_000_000], "a cached reading keeps its own time");
+  now = 1_000_000 + 300_001;
+  fail = true;
+  assert.deepEqual(readTimes(await usage.windows("mini", "https://api.minimax.io/anthropic", { "x-api-key": "key" })), [1_000_000, 1_000_000], "a failed refresh keeps the original time");
+});
+
 test("a replaced key does not inherit the old key's windows", async () => {
   const noPlan = { model_remains: [], base_resp: { status_code: 1004, status_msg: "no plan" } };
   const fetchImpl = (async (_url: string, init?: RequestInit) => {

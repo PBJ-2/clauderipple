@@ -11,7 +11,8 @@ import { backfillContextWindows, effortLevelsForModel, googleHealth, measureUnse
 import type { ImageRequest } from "../src/providers/chatgpt/index.ts";
 import type { GoogleAccountStatus } from "../src/providers/google/index.ts";
 import type { QuotaGroup } from "../src/providers/google/usage.ts";
-import type { OpenCodeWindow } from "../src/providers/opencode-usage.ts";
+import { OpenCodeUsage, type OpenCodeWindow } from "../src/providers/opencode-usage.ts";
+import { MiniMaxUsage } from "../src/providers/minimax-usage.ts";
 import { RequestLog } from "../src/requestlog.ts";
 import { PRESETS } from "../src/presets.ts";
 import { saveClaudeAuthFile, saveClaudeOAuthFile } from "../src/providers/anthropic-token-file.ts";
@@ -3538,6 +3539,74 @@ test("GET /api/limits lists a MiniMax plan's five-hour and weekly windows", asyn
       { kind: "five_hour", used_percent: 9, window_minutes: 300, reset_at: future },
       { kind: "seven_day", used_percent: 1, window_minutes: 10080, reset_at: future },
     ] : [],
+  });
+});
+
+test("GET /api/limits forecasts a window whose average pace reaches 100% before its reset, and no other", async () => {
+  const now = Date.now();
+  const nowS = Math.floor(now / 1000);
+  const cfg = makeCfg({ providers: {
+    mini: { type: "anthropic-compatible", preset: "minimax", url: "https://api.minimax.io/anthropic", credentials: [{ id: "key-a", label: "A", headers: { "x-api-key": "hidden-a" } }] },
+  } });
+  await withAdmin(cfg, async ({ port }) => {
+    const body = (await (await fetch(`${base()}:${port}/api/limits`)).json()) as { providers: LimitsProvider[] };
+    const [fiveHour, weekly] = body.providers[0]!.accounts[0]!.windows;
+    // 60% after one hour of a five-hour window: 40 more minutes to 100%, well before its reset.
+    assert.ok(Math.abs(fiveHour!.exhaust_at! - (nowS + 2400)) <= 5, `five-hour exhaust_at ${fiveHour!.exhaust_at}`);
+    // 54% with 57.6 h to the reset of a week: the average pace never reaches 100% in time, so no field.
+    assert.equal("exhaust_at" in weekly!, false);
+  }, {
+    minimaxUsage: async (name: string, credentialId?: string) => name === "mini" && credentialId === "key-a" ? [
+      { kind: "five_hour", used_percent: 60, window_minutes: 300, reset_at: nowS + 4 * 3600 },
+      { kind: "seven_day", used_percent: 54, window_minutes: 10080, reset_at: nowS + Math.round(57.6 * 3600) },
+    ] : [],
+  });
+});
+
+test("GET /api/limits judges a cached reading at the time it was taken, so a later poll does not move exhaust_at", async (t) => {
+  const start = Date.parse("2026-11-10T00:00:00Z");
+  let clock = start;
+  t.mock.method(Date, "now", () => clock);
+  const startS = start / 1000;
+  // 60% of the five-hour window after one hour: 40 more minutes at that pace, so exhaust_at is 2400 s after the reading.
+  const resetS = startS + 4 * 3600;
+  let opencodeFetches = 0;
+  const opencode = new OpenCodeUsage({
+    fetch: (async () => {
+      opencodeFetches++;
+      return Response.json({ usage: { rolling: { status: "ok", percent: 60, resetsAt: new Date(resetS * 1000).toISOString() } } });
+    }) as unknown as typeof fetch,
+    now: () => clock,
+    ttlMs: 300_000,
+    warn: () => {},
+  });
+  const minimax = new MiniMaxUsage({
+    fetch: (async () => Response.json({
+      model_remains: [{ model_name: "general", end_time: resetS * 1000, current_interval_remaining_percent: 40, weekly_end_time: (startS + 6 * 86400) * 1000, current_weekly_remaining_percent: 99 }],
+      base_resp: { status_code: 0, status_msg: "success" },
+    })) as unknown as typeof fetch,
+    now: () => clock,
+    ttlMs: 300_000,
+    warn: () => {},
+  });
+  const cfg = makeCfg({ providers: {
+    go: { type: "openai-compatible", url: "https://opencode.ai/zen/go/v1", preset: "opencode-go" },
+    mini: { type: "anthropic-compatible", preset: "minimax", url: "https://api.minimax.io/anthropic" },
+  } });
+  await withAdmin(cfg, async ({ port }) => {
+    const limits = async () => (await (await fetch(`${base()}:${port}/api/limits`)).json()) as { providers: LimitsProvider[] };
+    const exhaustOf = (body: { providers: LimitsProvider[] }) => body.providers.map((p) => [p.provider, p.accounts[0]!.windows[0]!.exhaust_at]);
+    const first = await limits();
+    assert.deepEqual(exhaustOf(first), [["go", startS + 2400], ["mini", startS + 2400]]);
+    clock = start + 4 * 60_000;
+    const later = await limits();
+    assert.deepEqual(exhaustOf(later), exhaustOf(first), "the cached reading keeps its exhaust_at four minutes later");
+    assert.equal(opencodeFetches, 1, "the second poll is served from the cache");
+    // The internal read time never reaches the response.
+    assert.equal(later.providers.every((p) => p.accounts.every((a) => a.windows.every((w) => !("read_at" in w)))), true);
+  }, {
+    opencodeUsage: (name: string) => opencode.windows(name, "https://opencode.ai/zen/go/v1", { authorization: "Bearer key" }),
+    minimaxUsage: (name: string) => minimax.windows(name, "https://api.minimax.io/anthropic", { "x-api-key": "key" }),
   });
 });
 

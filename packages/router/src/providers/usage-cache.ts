@@ -6,8 +6,12 @@
 
 import type { FetchLike } from "./google/antigravity.ts";
 
-/** One window a plan's quota is read from. */
-export type UsageWindow = { kind: "five_hour" | "seven_day" | "window"; used_percent: number; window_minutes?: number; reset_at?: number };
+/**
+ * One window a plan's quota is read from. `read_at` (epoch milliseconds) is when the request for the
+ * reading was sent. The cache stamps it; a reading kept after a failed lookup keeps its own time. It is
+ * internal: `/api/limits` strips it, so the forecast judges a cached reading at the time it was taken.
+ */
+export type UsageWindow = { kind: "five_hour" | "seven_day" | "window"; used_percent: number; window_minutes?: number; reset_at?: number; read_at?: number };
 
 export type UsageCacheOptions = {
   fetch?: FetchLike;
@@ -53,6 +57,7 @@ export class UsageCache {
 
   private async fetchOne(name: string, url: string, headers: Record<string, string>, parse: (body: unknown) => UsageWindow[] | null): Promise<UsageWindow[]> {
     const keep = () => this.last.get(name) ?? [];
+    const readAt = (this.opts.now ?? Date.now)();
     try {
       const res = await (this.opts.fetch ?? fetch)(url, {
         method: "GET",
@@ -64,8 +69,9 @@ export class UsageCache {
         this.opts.warn?.(`${this.opts.label} ${name}: HTTP ${res.status}`);
         return keep();
       }
-      const windows = parse(await res.json());
-      if (!windows) return keep();
+      const parsed = parse(await res.json());
+      if (!parsed) return keep();
+      const windows = parsed.map((w) => ({ ...w, read_at: readAt }));
       this.last.set(name, windows);
       return windows;
     } catch (e) {
