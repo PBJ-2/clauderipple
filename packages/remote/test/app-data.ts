@@ -18,7 +18,7 @@ function unreadWal(ids: string[]): Buffer {
 }
 
 /** A Claude app data root for one Mac session. `row(at)` rewrites its last activity. */
-export function claudeAppData(t: TestContext, cliSessionId: string, activity = 2_000_000): { root: string; row: (activity: number) => void } {
+export function claudeAppData(t: TestContext, cliSessionId: string, activity = 2_000_000): { root: string; row: (activity: number, cli?: string) => void } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-app-data-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const scope = `${account}/${org}`, dir = path.join(root, "claude-code-sessions", scope), storage = path.join(root, "Local Storage", "leveldb");
@@ -28,8 +28,9 @@ export function claudeAppData(t: TestContext, cliSessionId: string, activity = 2
   write("claude_desktop_config.json", { preferences: { epitaxyPrefs: {
     "dframe-code-sections": { [scope]: { sections: [{ id: "sessions", kind: "sessions" }] } },
   } } });
-  const row = (at: number) => write(`claude-code-sessions/${scope}/local_${cliSessionId}.json`,
-    { sessionId: `local_${cliSessionId}`, cliSessionId, title: "앱 세션", lastActivityAt: at, lastFocusedAt: 1 });
+  // `cli` moves the row to another CLI id, as the app does after a /clear in place.
+  const row = (at: number, cli = cliSessionId) => write(`claude-code-sessions/${scope}/local_${cliSessionId}.json`,
+    { sessionId: `local_${cliSessionId}`, cliSessionId: cli, title: "앱 세션", lastActivityAt: at, lastFocusedAt: 1 });
   row(activity);
   fs.writeFileSync(path.join(storage, "000001.log"), unreadWal([`local_${cliSessionId}`]));
   return { root, row };

@@ -15,7 +15,7 @@ import { HostServer } from "../src/server.ts";
 import { ExpoNotifier } from "../src/expo-push.ts";
 import { posixModes } from "../../../test/capabilities.ts";
 
-async function fixture(t: import("node:test").TestContext, relay?: string, listen = "127.0.0.1") {
+async function fixture(t: import("node:test").TestContext, relay?: string, listen = "127.0.0.1", mod?: import("../src/local-control.ts").ModHost) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-local-"));
   const cfg = loadConfig(dir);
   if (relay) cfg.relay = relay;
@@ -28,7 +28,7 @@ async function fixture(t: import("node:test").TestContext, relay?: string, liste
   const inbox = new ModInbox(() => true, (_offer, outcome) => outcomes.push(outcome));
   const settingsJobs = new SettingsJobs();
   t.after(() => { inbox.close(); settingsJobs.close(); });
-  const local = new LocalControl({ dir, config: cfg, version: "test", hostPublicKey: "public-key", inbox, settingsJobs, phones: () => host.phones(), rotate: token => host.rotateToken(token) });
+  const local = new LocalControl({ dir, config: cfg, version: "test", hostPublicKey: "public-key", inbox, settingsJobs, phones: () => host.phones(), rotate: token => host.rotateToken(token), ...(mod ? { mod } : {}) });
   host = new HostServer({
     listen, port: 0, token: cfg.token, webDir: fileURLToPath(new URL("../web", import.meta.url)),
     sessions: { list: () => [], groups: () => undefined, pollDesktop: async () => {}, pollQueued: () => {}, tailUnwatched: () => {}, watchAttached: () => {} } as never,
@@ -161,6 +161,65 @@ test("inbox routes authenticate, validate and enforce first-wins without logging
   assert.equal((await f.call("inbox/result", { itemId: "item-1", outcome: "submitted" })).status, 409);
   assert.equal((await fetch(`${f.base}/local/inbox/claim`, { method: "POST", headers: { "x-ripple-local": f.secret }, body: "x".repeat(4097) })).status, 400);
   assert.equal(f.logs.join("\n").includes("private inbox text"), false);
+});
+
+test("the mod poll's send time reaches the host as a number, and a malformed one is refused before it does", async t => {
+  const polls: unknown[][] = [];
+  const mod = {
+    modApprovalStart: async () => ({ state: "hold" as const }),
+    modApprovalPoll: async (askId: string, waitMs?: number, sentAt?: number) => { polls.push([askId, waitMs, sentAt]); return { state: "pending" }; },
+    modApprovalDone: () => ({}),
+    reportMoved: () => true,
+  };
+  const f = await fixture(t, undefined, "127.0.0.1", mod);
+  const poll = (query: string) => fetch(`${f.base}/local/mod/approval?${query}`, { headers: { "x-ripple-local": f.secret } });
+  assert.deepEqual(await (await poll("askId=ask-1&sentAt=1700000000000")).json(), { state: "pending" });
+  assert.equal((await poll("askId=ask-1")).status, 200, "a mod that sends no send time is answered as before");
+  for (const bad of ["sentAt=", "sentAt=-5", "sentAt=1.5", "sentAt=soon", "sentAt=1&sentAt=2", `sentAt=${"9".repeat(16)}`]) {
+    assert.equal((await poll(`askId=ask-1&${bad}`)).status, 400, bad);
+  }
+  assert.deepEqual(polls, [["ask-1", undefined, 1700000000000], ["ask-1", undefined, undefined]]);
+});
+
+test("mod routes authenticate and validate, hand approvals and move reports to the host, and refuse what the host did not expect", async t => {
+  const calls: unknown[][] = [];
+  const mod = {
+    modApprovalStart: async (req: unknown) => { calls.push(["start", req]); return { state: "hold" as const }; },
+    modApprovalPoll: async (askId: string) => { calls.push(["poll", askId]); return { state: "pending" }; },
+    modApprovalDone: (askId: string) => { calls.push(["done", askId]); return {}; },
+    reportMoved: (itemId: string, from: string, to: string) => { calls.push(["moved", itemId, from, to]); return itemId === "claimed"; },
+  };
+  const f = await fixture(t, undefined, "127.0.0.1", mod);
+  assert.equal((await fetch(`${f.base}/local/mod/approval`, { method: "POST", body: "{}" })).status, 403, "the secret is required");
+  const valid = { askId: "ask-1", session: "cli-1", tool: "Bash", input: { command: "ls" }, suggestions: [], title: "" };
+  assert.deepEqual(await (await f.call("mod/approval", valid)).json(), { state: "hold" });
+  for (const bad of [{ ...valid, askId: "bad id" }, { ...valid, input: [] }, { ...valid, session: "" }, { ...valid, tool: "" }, { ...valid, suggestions: "x" }, { ...valid, title: 7 }, null, []]) {
+    assert.equal((await f.call("mod/approval", bad)).status, 400, JSON.stringify(bad));
+  }
+  assert.equal((await f.call("mod/approval", { ...valid, input: { command: "x".repeat(600 * 1024) } })).status, 400, "a request over the cap is refused, never started");
+  assert.deepEqual(await (await f.call("mod/approval/poll")).status, 404, "an unknown mod route is not answered");
+  assert.deepEqual(await (await fetch(`${f.base}/local/mod/approval?askId=ask-1`, { headers: { "x-ripple-local": f.secret } })).json(), { state: "pending" });
+  assert.equal((await fetch(`${f.base}/local/mod/approval?askId=bad%20id`, { headers: { "x-ripple-local": f.secret } })).status, 400);
+  assert.equal((await fetch(`${f.base}/local/mod/approval?askId=a&askId=b`, { headers: { "x-ripple-local": f.secret } })).status, 400);
+  assert.equal((await f.call("mod/approval/done", { askId: "ask-1" })).status, 200);
+  assert.equal((await f.call("mod/approval/done", {})).status, 400);
+  assert.equal((await f.call("mod/moved", { itemId: "claimed", from: "cli-1", to: "cli-2" })).status, 200);
+  assert.equal((await f.call("mod/moved", { itemId: "other", from: "cli-1", to: "cli-2" })).status, 409, "a move for an offer not claimed is refused");
+  assert.equal((await f.call("mod/moved", { itemId: "claimed", from: "cli-1" })).status, 400);
+  assert.deepEqual(calls.map(call => call[0]), ["start", "poll", "done", "moved", "moved"]);
+  assert.deepEqual(calls[3], ["moved", "claimed", "cli-1", "cli-2"]);
+});
+
+test("the approval done route hands a phone answer back to the hook, and says nothing else", async t => {
+  const mod = {
+    modApprovalStart: async () => ({ state: "hold" as const }),
+    modApprovalPoll: async () => ({ state: "pending" }),
+    modApprovalDone: (askId: string) => askId === "answered-1" ? { answer: { behavior: "allow" as const } } : {},
+    reportMoved: () => false,
+  };
+  const f = await fixture(t, undefined, "127.0.0.1", mod);
+  assert.deepEqual(await (await f.call("mod/approval/done", { askId: "answered-1" })).json(), { ok: true, state: "answered", answer: { behavior: "allow" } });
+  assert.deepEqual(await (await f.call("mod/approval/done", { askId: "other-1" })).json(), { ok: true });
 });
 
 test("settings job routes authenticate, validate and enforce one helper", async t => {

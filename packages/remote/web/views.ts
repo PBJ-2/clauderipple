@@ -5,7 +5,7 @@ import type { LinkStatus } from "./conn.ts";
 import type { OutboxEntry, PreservedItem } from "./outbox.ts";
 import type { PushAvail } from "./pushstate.ts";
 import { clock, duration, esc, folderName, icon, relTime, shortPath, toolIcon } from "./dom.ts";
-import { t, lang } from "./i18n.ts";
+import { t, lang, reasonLine } from "./i18n.ts";
 import { activitySummary } from "../src/tool-details.ts";
 import { activityOverview, activityStateKey } from "./activity.ts";
 import { emptyQuestionDraft, questionAnswers, questionsComplete, type QuestionDraft } from "./question-answers.ts";
@@ -358,7 +358,7 @@ export function item(it: TimelineItem, ui: UI): string {
         const id = it.key.slice(1);
         return `<div class="msg-user failed">${esc(it.text)}${images(it.images)}<div class="q bad">${icon.x(13)}<span>${esc(it.error)}</span></div><div class="q act"><button class="btn ghost" data-act="retry-send" data-id="${esc(id)}">${esc(t("conn.retryNow"))}</button><button class="icon-btn" data-act="edit-send" data-id="${esc(id)}" aria-label="${esc(t("a11y.editMessage"))}">${icon.pencil(16)}</button></div></div>`;
       }
-      const q = it.queued ? `<div class="q">${icon.clock(13)}${esc(it.queued === "pending" ? t("queue.pending") : t("queue.sending"))}</div>` : "";
+      const q = it.queued ? `<div class="q">${icon.clock(13)}${esc(it.queued === "pending" ? t("queue.pending") : it.queued === "waiting" ? t("queue.waiting") : t("queue.sending"))}</div>` : "";
       return `<div class="msg-user${it.queued ? " queued" : ""}">${esc(it.text)}${images(it.images)}${q}</div>`;
     }
     case "thinking":
@@ -385,13 +385,15 @@ export function item(it: TimelineItem, ui: UI): string {
     case "permission": {
       if (it.decision === null) return `<div class="perm-done open">${icon.shield(16)}<span class="nm">${esc(it.tool)}</span><span class="sm">${esc(it.summary)}</span><span>${esc(t("state.waiting"))}</span></div>`;
       const label = it.decision === "allow" ? t("perm.allowed") : it.decision === "allow_always" ? t("perm.allowedAlways") : it.decision === "deny" ? t("perm.denied") : t("perm.expired");
-      const cls = it.decision === "allow_always" ? "allow" : it.decision;
+      // An expired request with its reason is a closed card, not a failure: muted, not red.
+      const reason = it.decision === "expired" ? reasonLine(it.reason, { host: hostName(ui) }) : "";
+      const cls = it.decision === "allow_always" ? "allow" : it.decision === "expired" && reason ? "quiet" : it.decision;
       if (it.requestKind === "plan") {
         const open = ui.expanded.has(it.id);
         const body = ui.expanded.get(it.id) ?? textOf(it.input);
-        return `<div><div class="perm-done ${cls}"><button class="tool" data-act="tool" data-id="${esc(it.id)}" aria-expanded="${open}"><span class="nm">${esc(it.title || it.tool)}</span><span>${esc(label)}</span>${icon.chevron(16)}</button></div>${open ? `<div class="msg-asst">${markdown(body)}${it.decision === "expired" && it.reason ? `<div class="foot">${esc(t(`perm.reason.${it.reason}` as Key, { host: hostName(ui) }))}</div>` : ""}</div>` : ""}</div>`;
+        return `<div><div class="perm-done ${cls}"><button class="tool" data-act="tool" data-id="${esc(it.id)}" aria-expanded="${open}"><span class="nm">${esc(it.title || it.tool)}</span><span>${esc(label)}</span>${icon.chevron(16)}</button></div>${open ? `<div class="msg-asst">${markdown(body)}${reason ? `<div class="foot">${esc(reason)}</div>` : ""}</div>` : ""}</div>`;
       }
-      const why = it.decision === "expired" && it.reason ? `<span class="why">${esc(t(`perm.reason.${it.reason}` as Key, { host: hostName(ui) }))}</span>` : "";
+      const why = reason ? `<span class="why">${esc(reason)}</span>` : "";
       return `<div class="perm-done ${cls}">${it.decision === "allow" || it.decision === "allow_always" ? icon.check(16) : icon.x(16)}<span class="nm">${esc(it.tool)}</span><span class="sm">${esc(it.summary)}</span><span>${esc(label)}</span></div>${why ? `<div class="foot">${why}</div>` : ""}`;
     }
     case "result": {

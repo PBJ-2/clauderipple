@@ -225,7 +225,7 @@ export type EventBody = MessageImages & {
   | { kind: "figures"; figures: Figures }
   | { kind: "notice"; code: NoticeCode; text?: string });
 
-export type NoticeCode = "host_restarted" | "interrupted" | "api_retry" | "router_down" | "model_changed" | "resumed" | "desktop_open" | "desktop_resumed" | "desktop_bridge" | "desktop_blocked" | "desktop_handoff" | "desktop_handoff_requested" | "desktop_handoff_retry" | "desktop_handoff_failed" | "desktop_settings_failed";
+export type NoticeCode = "host_restarted" | "interrupted" | "api_retry" | "router_down" | "model_changed" | "resumed" | "desktop_open" | "desktop_resumed" | "desktop_bridge" | "desktop_blocked" | "desktop_handoff" | "desktop_handoff_requested" | "desktop_handoff_retry" | "desktop_handoff_failed" | "desktop_settings_failed" | "desktop_approval";
 
 export type SessionEvent = EventBody & { seq: number; at: number };
 
@@ -298,6 +298,9 @@ export interface SessionSummary {
   /** Desktop sessions: the Claude app's own session id (`local_…`), so a `#local_…` link in a
    * conversation can find this session. Absent on older hosts and for host-created sessions. */
   appSessionId?: string;
+  /** Desktop sessions: the CLI ids the Claude app moved this conversation on from by a /clear in place (the
+   * old transcripts are no longer listed). Absent on older hosts and when nothing was moved to this session. */
+  supersedes?: string[];
   title: string;
   /** Desktop sidebar metadata; absent on older hosts. */
   unread?: boolean;
@@ -365,8 +368,14 @@ export interface BackgroundTask {
 }
 export interface PlanStep { id?: string; text: string; status: "pending" | "in_progress" | "completed" }
 
-/** One queued message as the phone shows it; `id` is the phone's clientMsgId. */
-export interface QueuedMessage { id: string; text: string; attachments: number; at: number; /** Why it failed or is waiting; only queueHeld requires explicit resume. */ error?: string }
+/**
+ * One queued message as the phone shows it; `id` is the phone's clientMsgId.
+ * `error` is a real failure (queueHeld needs the person to resume). `wait` is a pre-send obstacle
+ * that clears by itself, as a machine code: `desktop_busy` (the Claude app is running a turn here)
+ * or `desktop_waiting` (the app's Remote Control must be on or the session closed). Phones word it
+ * themselves; a host from before this field put the sentence in `error` instead.
+ */
+export interface QueuedMessage { id: string; text: string; attachments: number; at: number; error?: string; wait?: "desktop_busy" | "desktop_waiting" }
 
 export interface ModelOption { model: string; name: string; provider: string; efforts: Effort[]; usable: boolean }
 export interface ProviderGroup { provider: string; label: string; usable: boolean; models: ModelOption[] }
@@ -461,7 +470,7 @@ export type ReqOp =
   /** Take a queued message out: returns { text, attachments: Attachment[] } for editing. */
   | { op: "queue_remove"; session: string; id: string }
   /** Send a queued message now, into the running turn like a steer; un-holds the queue. */
-  | { op: "queue_send"; session: string; id: string }
+  | { op: "queue_send"; session: string; id: string; /** Stop the Claude app's running turn first (needs the mod), then send. Absent: a busy session answers `desktop_busy`. */ interrupt?: boolean }
   /** Let a held queue go on by itself again. */
   | { op: "queue_resume"; session: string }
   /** The host's VAPID public key (base64url), for PushManager.subscribe's applicationServerKey. */
@@ -551,7 +560,11 @@ export type HostMsg =
   | { t: "history"; session: string; reqId: string; epoch?: string; events: SessionEvent[]; hasOlder: boolean }
   | { t: "sessions"; sessions: SessionSummary[]; groups?: string[] | undefined }
   | { t: "host"; host: HostInfo }
-  | { t: "ack"; clientMsgId: string; session: string }
+  /** `queued: true` when the host kept the message for later (the session was busy, or a Claude app
+   * clear is under way) instead of delivering it now. Absent on older hosts and for delivered sends. */
+  | { t: "ack"; clientMsgId: string; session: string; queued?: true }
   | { t: "res"; reqId: string; ok: true; data: unknown }
-  | { t: "res"; reqId: string; ok: false; error: string }
+  /** `code` is a machine code for failures a phone words itself (`desktop_busy`, `desktop_mod_offline`,
+   * `desktop_approval_local`); `error` stays the readable text for every host and phone. */
+  | { t: "res"; reqId: string; ok: false; error: string; code?: string }
   | { t: "error"; code: string; message: string; clientMsgId?: string; session?: string };

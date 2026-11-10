@@ -30,12 +30,24 @@ export const DESKTOP_BLOCKED = "Claude 앱에서 이 세션의 Remote Control을
 export const DESKTOP_WAITING = "Claude 앱에서 이 세션의 Remote Control을 켜거나 세션을 종료해 주세요. 전송할 수 있게 되면 대기 중인 메시지가 자동으로 전송됩니다.";
 /** The desktop still owns the transcript, but exposes no client transport. Never start a second writer. */
 export class DesktopBlockedError extends Error {
+  /** Machine code a phone reads in a request's error (`res.code`). */
+  readonly code: string = "desktop_blocked";
   constructor() { super(DESKTOP_BLOCKED); }
 }
 export const DESKTOP_BUSY = "Claude 앱에서 이 세션의 작업이 진행 중입니다. 작업이 완료되면 대기 중인 메시지가 자동으로 전송됩니다.";
 /** The app is running a turn in a session the host may otherwise resume: wait, never write beside it. */
 export class DesktopBusyError extends DesktopBlockedError {
+  override readonly code: string = "desktop_busy";
   constructor() { super(); this.message = DESKTOP_BUSY; }
+}
+/** A send-now the host refused because the app is busy: the message stays queued, the answer names no wait sentence. */
+export const DESKTOP_BUSY_NOW = "Claude 앱에서 작업 중이라 지금은 보낼 수 없습니다. 작업이 끝나면 다시 보내 주세요.";
+/** The app's turn is running and no mod answers to stop it, so a send-now cannot interrupt it. */
+export const DESKTOP_MOD_OFFLINE = "Claude 앱과 연결된 모드가 응답하지 않아 진행 중인 작업을 멈출 수 없습니다. Claude 앱에서 직접 중지한 뒤 다시 보내 주세요.";
+/** A failure with a machine code of its own (`res.code`), for the phone to word. */
+export class CodedError extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) { super(message); this.code = code; }
 }
 export const LOGIN_EXPIRED = "이 컴퓨터의 Claude 로그인이 만료되었습니다. Claude 앱을 한 번 열어 주십시오.";
 export const LOGIN_REFUSED = "이 컴퓨터의 Claude 로그인이 거절되었습니다 (401). Claude 앱을 한 번 열어 주십시오.";

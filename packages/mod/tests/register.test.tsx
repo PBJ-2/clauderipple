@@ -3401,6 +3401,268 @@ test('the band Clear asks first, and confirming runs the clear once', async ($, 
   await ui.unmount()
 })
 
+// A Desktop approval the phone may hold (no Remote Control): the host decides hold or dialog.
+const jsonReply = (text: string) => ({ value: { ok: true, status: 200, headers: {}, text } })
+test('a permission the terminal asks is never sent to the host', async ($, on) => {
+  const calls: string[] = []
+  boundaries(on, {}, { env: { CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' } })
+  on('classic.PermissionRequest', () => ({}))
+  on('http.fetch', { url: /\/api\/mod\/approval/ }, ($, e) => { calls.push(`${e.init?.method ?? 'GET'} ${new URL(e.url).pathname}`); return jsonReply('{"state":"hold"}') })
+  http(on)
+  await start($)
+  const answer = await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'ls' }, permission_suggestions: [] } as never)
+  expect(answer.decision).toBeUndefined()
+  expect(calls).toEqual([])
+})
+test('a held Desktop permission waits for the phone and answers the hook with its allow', async ($, on) => {
+  const calls: string[] = []
+  let polls = 0
+  boundaries(on, {}, { env: APP_ENV })
+  on('http.fetch', { url: /\/api\/mod\/approval/ }, ($, e) => {
+    const method = e.init?.method ?? 'GET'
+    calls.push(`${method} ${new URL(e.url).pathname}`)
+    if (method === 'POST' && e.url.endsWith('/approval/done')) return jsonReply('{"ok":true}')
+    if (method === 'POST') return jsonReply('{"state":"hold"}')
+    polls += 1
+    return jsonReply(polls < 2 ? '{"state":"pending"}' : '{"state":"answered","answer":{"behavior":"allow"}}')
+  })
+  http(on)
+  await start($)
+  const answer = await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'ls' }, permission_suggestions: [] } as never)
+  expect(answer.decision).toEqual({ behavior: 'allow' })
+  expect(calls).toEqual(['POST /api/mod/approval', 'GET /api/mod/approval', 'GET /api/mod/approval', 'POST /api/mod/approval/done'])
+})
+test('an approval the Mac answers first goes to the dialog, and the ask is forgotten after it', async ($, on) => {
+  const calls: string[] = []
+  boundaries(on, {}, { env: APP_ENV })
+  on('classic.PermissionRequest', () => ({}))
+  on('http.fetch', { url: /\/api\/mod\/approval/ }, ($, e) => {
+    calls.push(`${e.init?.method ?? 'GET'} ${new URL(e.url).pathname}`)
+    return jsonReply(e.url.endsWith('/approval/done') ? '{"ok":true}' : '{"state":"local"}')
+  })
+  http(on)
+  await start($)
+  const answer = await $.classic.PermissionRequest({ tool_name: 'Edit', tool_input: { file_path: 'a.txt' }, permission_suggestions: [] } as never)
+  // The Mac's dialog answers: the hook returns the engine's own answer, never one of its own.
+  expect(answer.decision).toBeUndefined()
+  expect(calls).toEqual(['POST /api/mod/approval', 'POST /api/mod/approval/done'])
+})
+test('a host without the approval route leaves every permission to the dialog', async ($, on) => {
+  const calls: string[] = []
+  boundaries(on, {}, { env: APP_ENV })
+  on('classic.PermissionRequest', () => ({}))
+  on('http.fetch', { url: /\/api\/mod\/approval/ }, ($, e) => { calls.push(`${e.init?.method ?? 'GET'} ${new URL(e.url).pathname}`); return { value: { ok: false, status: 404, headers: {}, text: '{"error":"unknown"}' } } })
+  http(on)
+  await start($)
+  const answer = await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'ls' }, permission_suggestions: [] } as never)
+  expect(answer.decision).toBeUndefined()
+  expect(calls).toEqual(['POST /api/mod/approval'])
+})
+test('a hold the host stops answering is closed at the host before the dialog opens, and forgotten after it', async ($, on) => {
+  const calls: string[] = []
+  const b = boundaries(on, {}, { env: APP_ENV })
+  on('classic.PermissionRequest', () => { calls.push('dialog'); return {} })
+  on('http.fetch', { url: /\/api\/mod\/approval/ }, ($, e) => {
+    const method = e.init?.method ?? 'GET'
+    calls.push(`${method} ${new URL(e.url).pathname}`)
+    if (method === 'POST' && e.url.endsWith('/approval/done')) return jsonReply('{"ok":true}')
+    if (method === 'POST') return jsonReply('{"state":"hold"}')
+    return { value: { ok: false, status: 503, headers: {}, text: '{"error":"down"}' } }
+  })
+  http(on)
+  await start($)
+  const pending = $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'ls' }, permission_suggestions: [] } as never)
+  // The hook retries once a second until a window has passed since its last poll, then stops. That poll went out at 7 s,
+  // so the host fences the hold at 15 s, and the dialog opens a margin after that.
+  for (let step = 0; step < 15; step++) await b.clock.advance(1000)
+  expect(calls).not.toContain('dialog')
+  await b.clock.advance(250)
+  const answer = await pending
+  // The Mac's dialog answers, and the phone's card was closed before it opened.
+  expect(answer.decision).toBeUndefined()
+  expect(calls).toEqual(['POST /api/mod/approval', ...Array(8).fill('GET /api/mod/approval'), 'POST /api/mod/approval/done', 'dialog', 'POST /api/mod/approval/done'])
+})
+test('a hook the host cannot reach gives the dialog only a freshness window after its last answered poll', async ($, on) => {
+  const calls: string[] = []
+  const b = boundaries(on, {}, { env: APP_ENV })
+  let polls = 0
+  on('classic.PermissionRequest', () => { calls.push('dialog'); return {} })
+  on('http.fetch', { url: /\/api\/mod\/approval/ }, ($, e) => {
+    const method = e.init?.method ?? 'GET'
+    calls.push(`${method} ${new URL(e.url).pathname}`)
+    if (method === 'POST' && e.url.endsWith('/approval/done')) return jsonReply('{"ok":true}')
+    if (method === 'POST') return jsonReply('{"state":"hold"}')
+    polls += 1
+    return polls === 1 ? jsonReply('{"state":"pending"}') : { value: { ok: false, status: 503, headers: {}, text: '{"error":"down"}' } }
+  })
+  http(on)
+  await start($)
+  const pending = $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'ls' }, permission_suggestions: [] } as never)
+  // The last answered poll was the hold's first moment. The hook's last poll went out at 7 s, the host fences the hold
+  // at 15 s, so the dialog waits for that: at 15 s it is still closed, and it opens a margin later.
+  for (let step = 0; step < 15; step++) await b.clock.advance(1000)
+  expect(calls).not.toContain('dialog')
+  await b.clock.advance(250)
+  const answer = await pending
+  expect(answer.decision).toBeUndefined()
+  expect(calls).toEqual(['POST /api/mod/approval', ...Array(9).fill('GET /api/mod/approval'), 'POST /api/mod/approval/done', 'dialog', 'POST /api/mod/approval/done'])
+})
+test('a poll the host never answers is cut at the freshness window, and the dialog opens a margin after that poll\'s window', async ($, on) => {
+  const calls: string[] = []
+  const b = boundaries(on, {}, { env: APP_ENV })
+  on('classic.PermissionRequest', () => { calls.push('dialog'); return {} })
+  on('http.fetch', { url: /\/api\/mod\/approval/ }, ($, e) => {
+    const method = e.init?.method ?? 'GET'
+    calls.push(`${method} ${new URL(e.url).pathname}`)
+    if (method === 'POST' && e.url.endsWith('/approval/done')) return jsonReply('{"ok":true}')
+    if (method === 'POST') return jsonReply('{"state":"hold"}')
+    return new Promise(() => {})
+  })
+  http(on)
+  await start($)
+  const pending = $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'ls' }, permission_suggestions: [] } as never)
+  // Its one poll went out at 0 s and was cut at the window (8 s): the dialog opens a margin after that poll's window.
+  for (let step = 0; step < 8; step++) await b.clock.advance(1000)
+  expect(calls).not.toContain('dialog')
+  await b.clock.advance(250)
+  const answer = await pending
+  expect(answer.decision).toBeUndefined()
+  expect(calls).toEqual(['POST /api/mod/approval', 'GET /api/mod/approval', 'POST /api/mod/approval/done', 'dialog', 'POST /api/mod/approval/done'])
+})
+test('a hook the host cannot reach at first takes the host\'s answer when a poll gets through inside the window', async ($, on) => {
+  const calls: string[] = []
+  const b = boundaries(on, {}, { env: APP_ENV })
+  let polls = 0
+  on('classic.PermissionRequest', () => { calls.push('dialog'); return {} })
+  on('http.fetch', { url: /\/api\/mod\/approval/ }, ($, e) => {
+    const method = e.init?.method ?? 'GET'
+    calls.push(`${method} ${new URL(e.url).pathname}`)
+    if (method === 'POST' && e.url.endsWith('/approval/done')) return jsonReply('{"ok":true}')
+    if (method === 'POST') return jsonReply('{"state":"hold"}')
+    polls += 1
+    if (polls < 3) return { value: { ok: false, status: 503, headers: {}, text: '{"error":"down"}' } }
+    return jsonReply('{"state":"answered","answer":{"behavior":"allow"}}')
+  })
+  http(on)
+  await start($)
+  const pending = $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'ls' }, permission_suggestions: [] } as never)
+  for (let step = 0; step < 3; step++) await b.clock.advance(1000)
+  const answer = await pending
+  expect(answer.decision).toEqual({ behavior: 'allow' })
+  expect(calls).not.toContain('dialog')
+})
+test('a phone answer the host holds when the hook gives up is applied, and the dialog never opens', async ($, on) => {
+  const calls: string[] = []
+  const b = boundaries(on, {}, { env: APP_ENV })
+  on('classic.PermissionRequest', () => { calls.push('dialog'); return {} })
+  on('http.fetch', { url: /\/api\/mod\/approval/ }, ($, e) => {
+    const method = e.init?.method ?? 'GET'
+    calls.push(`${method} ${new URL(e.url).pathname}`)
+    if (method === 'POST' && e.url.endsWith('/approval/done')) return jsonReply('{"ok":true,"state":"answered","answer":{"behavior":"deny","message":"not now"}}')
+    if (method === 'POST') return jsonReply('{"state":"hold"}')
+    return { value: { ok: false, status: 503, headers: {}, text: '{"error":"down"}' } }
+  })
+  http(on)
+  await start($)
+  const pending = $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'ls' }, permission_suggestions: [] } as never)
+  for (let step = 0; step < 15; step++) await b.clock.advance(1000)
+  await b.clock.advance(250)
+  const answer = await pending
+  expect(answer.decision).toEqual({ behavior: 'deny', message: 'not now' })
+  // The answer branch's own done follows the give-up's; the host has already forgotten the ask, so it is a no-op.
+  expect(calls).toEqual(['POST /api/mod/approval', ...Array(8).fill('GET /api/mod/approval'), 'POST /api/mod/approval/done', 'POST /api/mod/approval/done'])
+})
+
+// The host's side of one hold, as packages/remote/src/mod-approval.ts keeps it: a poll dates the hold by the time the hook
+// sent it (never later than its arrival, never backwards), and a poll that arrives after the window revives nothing; a
+// hold is fenced one window after its latest poll; a phone answer is refused once fenced.
+const HOLD_WINDOW = 8_000
+function holdHost(now: () => number) {
+  let polledAt = now()
+  let state: 'pending' | 'answered' | 'local' = 'pending'
+  return {
+    poll(sentAt: number | null): string {
+      if (state === 'pending') {
+        if (now() - polledAt >= HOLD_WINDOW) state = 'local'
+        else polledAt = Math.max(polledAt, sentAt === null ? now() : Math.min(sentAt, now()))
+      }
+      return state === 'answered' ? '{"state":"answered","answer":{"behavior":"allow"}}' : `{"state":"${state}"}`
+    },
+    phone(): boolean {
+      if (state !== 'pending') return false
+      if (now() - polledAt >= HOLD_WINDOW) { state = 'local'; return false }
+      state = 'answered'
+      return true
+    },
+    done(): string {
+      if (state === 'pending') state = 'local'
+      return state === 'answered' ? '{"ok":true,"state":"answered","answer":{"behavior":"allow"}}' : '{"ok":true}'
+    },
+    fenced: (): boolean => now() - polledAt >= HOLD_WINDOW,
+    state: () => state,
+  }
+}
+
+// A hold through a router that flaps: the last good poll reply at 0 s, a retry at 7 s that reaches the host but whose reply
+// is lost, and every other approval request fails until `backAt` ms into the hold. The phone's answers come through the
+// phone's own route, not this one.
+async function flappingHold($: Engine, on: On, backAt: number) {
+  const b = boundaries(on, {}, { env: APP_ENV })
+  const host = holdHost(() => b.clock.now())
+  const started = b.clock.now()
+  const at = () => b.clock.now() - started
+  const calls: string[] = []
+  const down = { value: { ok: false, status: 503, headers: {}, text: '{"error":"down"}' } }
+  let answered = false
+  const dialog = { calls: 0, fenced: null as boolean | null }
+  on('classic.PermissionRequest', () => { calls.push('dialog'); dialog.calls++; dialog.fenced = host.fenced(); return {} })
+  on('http.fetch', { url: /\/api\/mod\/approval/ }, ($, e) => {
+    const method = e.init?.method ?? 'GET'
+    const url = new URL(e.url)
+    calls.push(`${method} ${url.pathname}@${at()}`)
+    if (method === 'POST' && url.pathname.endsWith('/approval/done')) return at() < backAt ? down : jsonReply(host.done())
+    if (method === 'POST') return jsonReply('{"state":"hold"}')
+    const sent = url.searchParams.get('sentAt')
+    const sentAt = sent === null ? null : Number(sent)
+    if (!answered) { answered = true; return jsonReply(host.poll(sentAt)) }
+    if (at() === 7_000) { host.poll(sentAt); return new Promise(() => {}) }
+    if (at() < backAt) return down
+    return jsonReply(host.poll(sentAt))
+  })
+  http(on)
+  await start($)
+  const pending = $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'ls' }, permission_suggestions: [] } as never)
+  return { b, host, calls, dialog, at, pending }
+}
+
+test('a lost poll reply does not open the dialog beside a hold the host still holds: the phone answer at 9 s is the one answer', async ($, on) => {
+  const { b, host, calls, dialog, at, pending } = await flappingHold($, on, 15_000)
+  for (let step = 0; step < 9; step++) await b.clock.advance(1000)
+  expect(at()).toBe(9_000)
+  expect(host.phone()).toBe(true)
+  for (let step = 0; step < 6; step++) await b.clock.advance(1000)
+  expect(calls).not.toContain('dialog')
+  await b.clock.advance(250)
+  const answer = await pending
+  expect(answer.decision).toEqual({ behavior: 'allow' })
+  expect(dialog.calls).toBe(0)
+  expect(host.state()).toBe('answered')
+})
+
+test('the dialog opens only after the host fences the hold, so a phone answer after the dialog opened is refused', async ($, on) => {
+  const { b, host, calls, dialog, at, pending } = await flappingHold($, on, 16_000)
+  for (let step = 0; step < 15; step++) await b.clock.advance(1000)
+  expect(dialog.calls).toBe(0)
+  await b.clock.advance(250)
+  const answer = await pending
+  expect(answer.decision).toBeUndefined()
+  expect(calls.filter(call => call === 'dialog')).toEqual(['dialog'])
+  expect(dialog.fenced).toBe(true)
+  await b.clock.advance(750)
+  expect(at()).toBe(16_000)
+  expect(host.phone()).toBe(false)
+  expect(host.state()).toBe('local')
+})
 // The phone inbox is a first-wins handoff, never a retry of a submitted prompt.
 // Only the app's own CLI process polls it: the app sets this entrypoint, the host's runs do not.
 const APP_ENV = { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop' }

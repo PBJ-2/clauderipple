@@ -234,6 +234,7 @@ async function runHost(): Promise<void> {
       phones: () => server?.phones() ?? [],
       inbox: live.modInbox,
       settingsJobs: live.settingsJobs,
+      mod: live,
       rotate: token => { server?.rotateToken(token); },
       shutdown: () => stop(),
       busy: () => live.busy(),

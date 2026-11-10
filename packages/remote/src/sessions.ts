@@ -20,7 +20,8 @@ import { ATTACHMENT_CAP, ATTACHMENT_COUNT, WATCH_IDLE_MS, type Attachment, type 
 import { DesktopSessions, type DesktopProcess, type TurnWrapUp } from "./desktop.ts";
 import { firstSentence, STATUS_CAP } from "./wrap-up.ts";
 import { DesktopSidebar, PHONE_GROUP, type SidebarOptions } from "./sidebar.ts";
-import { BridgeAuthError, BridgeClient, bridgeCreateNotCreated, bridgeWriteUnknown, CLI_NOT_LOGGED_IN, DESKTOP_BLOCKED, DESKTOP_BUSY, DESKTOP_WAITING, DesktopBlockedError, DesktopBusyError, isLoginRefusal, object, permissionSuppression, slashCommands, type BridgeFrame } from "./bridge-client.ts";
+import { BridgeAuthError, BridgeClient, bridgeCreateNotCreated, bridgeWriteUnknown, CLI_NOT_LOGGED_IN, CodedError, DESKTOP_BLOCKED, DESKTOP_BUSY, DESKTOP_BUSY_NOW, DESKTOP_MOD_OFFLINE, DESKTOP_WAITING, DesktopBlockedError, DesktopBusyError, isLoginRefusal, object, permissionSuppression, slashCommands, type BridgeFrame } from "./bridge-client.ts";
+import { APPROVAL_LOCAL_REASON, APPROVAL_WAIT_MS, Approvals, type ApprovalAnswer, type ApprovalState } from "./mod-approval.ts";
 import type { HandoffRunner } from "./handoff.ts";
 import { isDirectory, macConsent, readableFolder } from "./folders.ts";
 import { readJson, writeFileAtomic } from "./fsutil.ts";
@@ -283,6 +284,39 @@ const APP_STOP = "이 세션은 Claude 앱에서 실행 중입니다. Claude 앱
 /** The stricter permission mode the person picked was not confirmed by the app's worker. */
 class EnvironmentModeError extends Error {}
 const MOD_CLAIMED = "Claude 앱에서 메시지를 처리하고 있습니다. 처리가 완료된 후 다시 시도해 주세요.";
+/** A /clear the mod ran in place failed before the app reported its new session. */
+const MOD_CLEAR_FAILED = "Claude 앱에서 대화를 비우지 못했습니다. Claude 앱에서 확인한 뒤 대기 중인 메시지를 다시 보내 주세요.";
+/** The approval the phone can no longer give: the Mac answered it first. */
+const APPROVAL_LOCAL = "Claude 앱에서 이 승인을 이미 처리했습니다. 휴대폰에서는 승인할 수 없습니다.";
+/** Shown on the phone's session while an approval waits at the Mac (the phone holds none). */
+const APPROVAL_AT_MAC = "승인 요청이 Claude 앱에 표시되었습니다. Claude 앱에서 승인해 주세요.";
+const APPROVAL_DENIED = "The user denied this from their phone.";
+/** A session id the CLI itself writes: a UUID. The phone never supplies one for a move. */
+const CLI_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** The composer's fresh-conversation commands: /clear and /new are the same thing to the phone. */
+const CLEAR_TEXT = /^\/(clear|new)\s*$/;
+/** A queued message the mod can stop a turn for or send: plain text, no attachment, no slash command. */
+const plainText = (text: string, attachments: readonly unknown[]): boolean => !attachments.length && !text.trimStart().startsWith("/");
+
+/** What a phone's "always" may add to the session: a rule the app's own suggestion named, or a mode it suggested. */
+type AlwaysUpdate = ReturnType<typeof sessionPermissionRules>[number] | { type: "setMode"; mode: PermissionMode; destination: "session" };
+/** The modes an "always" may set. `bypassPermissions` is never one a phone answer grants. */
+const ALWAYS_MODES: readonly string[] = ["default", "acceptEdits", "auto", "plan"];
+/** The always-allow updates for a hook's `permission_suggestions`: suggested modes first, else the session rules. */
+export function alwaysUpdates(tool: string, suggestions: readonly unknown[]): AlwaysUpdate[] {
+  const modes: AlwaysUpdate[] = [];
+  for (const value of suggestions) {
+    const update = object(value);
+    if (update?.type === "setMode" && typeof update.mode === "string" && ALWAYS_MODES.includes(update.mode)) modes.push({ type: "setMode", mode: update.mode as PermissionMode, destination: "session" });
+  }
+  return modes.length ? modes : sessionPermissionRules(tool, suggestions, false);
+}
+/** The names the Claude app's Code tab gives each mode (the phone uses the same names), Korean and English. */
+const MODE_NAMES: Partial<Record<PermissionMode, string>> = { default: "수동 (Ask)", acceptEdits: "수정 수락 (Accept edits)", auto: "자동 (Auto)", plan: "계획 (Plan)" };
+/** What an always-allow would add, in words the phone shows: each rule, or the mode it sets. Empty when there is nothing to show. */
+function alwaysSummary(updates: readonly AlwaysUpdate[]): string {
+  return updates.flatMap(update => "rules" in update ? update.rules.map(rule => `${rule.toolName}(${rule.ruleContent})`) : [`권한 모드: ${MODE_NAMES[update.mode] ?? update.mode}`]).join("\n");
+}
 /** A lane item checks its token before every outgoing call; a setting change also checks it after
  * each await before recording. A message already handed on records its outcome regardless. */
 type LaneToken = { check(): void };
@@ -304,7 +338,8 @@ function uuidFrom(text: string): string {
 /** The list-level state the host keeps outside any session's log: who wants a look, what is archived,
  * and up to which activity the phone has read each session (the app's unread dot is its own file,
  * which the host only reads — so the phone's reading is remembered here). */
-export interface ListState { attention: Record<string, Attention>; archived: string[]; readAt: Record<string, number> }
+/** `moved`: a Claude app session's CLI id → the id its /clear in place gave it (the list shows the new one). */
+export interface ListState { attention: Record<string, Attention>; archived: string[]; readAt: Record<string, number>; moved?: Record<string, string> }
 
 /**
  * The attention a state change should leave behind, or null when it should leave none.
@@ -368,13 +403,28 @@ export class Sessions {
   private now: () => number;
   private receipts: MessageReceipts;
   private settings: SessionSettings;
-  private permissionRules = new Map<string, ReturnType<typeof sessionPermissionRules>>();
+  private permissionRules = new Map<string, AlwaysUpdate[]>();
   private sendQueue: SendQueue;
   readonly modInbox: ModInbox;
   readonly settingsJobs: SettingsJobs;
   private desktopSettings: DesktopSettings | null;
   private adoptionTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private modOwners = new Map<string, string>();
+  /** Mod asks (no Remote Control): the hold or local decision for each classic.PermissionRequest. */
+  private approvals: Approvals;
+  /** The phone-visible event an ask shows for a session with no record (its card, then its decision), by
+   * ask id. Its Desktop snapshot is rebuilt from the transcript, so `heldFor` puts these back each time. */
+  private heldApprovals = new Map<string, { phoneId: string; event: EventBody }>();
+  /** Mod-run /clear in place: the CLI id a clear offer was made for, by offer id. */
+  private clearFrom = new Map<string, string>();
+  /** Mod-run abort offers still awaiting the mod's result, by offer id. */
+  private abortWaiters = new Map<string, (ok: boolean) => void>();
+  /** Clear offers whose mod reported the new session id (before its result). */
+  private movedClears = new Set<string>();
+  /** Queued messages the host kept (not delivered) since the phone last took the ack: `${session}/${clientMsgId}`. */
+  private queuedAcks = new Set<string>();
+  /** CLI session id → the id it became after a /clear in place (`list-state.json`), never followed back. */
+  private moved = new Map<string, string>();
   /** In-flight turns keyed by receipt key, so a concurrent resend rides the first attempt. */
   private sending = new Map<string, Promise<string>>();
   private desktop: DesktopSessions | null;
@@ -543,17 +593,23 @@ export class Sessions {
     this.settings = new SessionSettings(path.join(opts.dir, "settings-operations.json"));
     this.sendQueue = SendQueue.open(opts.dir);
     this.modInbox = new ModInbox(offer => {
+      // Abort offers name no queued message; a clear offer claims the queued /clear like any message.
+      if (offer.kind === "abort") return true;
       const id = this.modOwners.get(offer.itemId);
       if (!id || this.shuttingDown || this.sendQueue.held(id)) return false;
       const claimed = this.sendQueue.claimMod(id, offer.itemId);
       if (claimed) {
-        this.rememberModEcho(id, offer);
+        if (offer.kind !== "clear") this.rememberModEcho(id, offer);
         this.opts.onSessions();
       }
       return claimed;
-    }, (offer, outcome) => this.finishMod(offer, outcome), opts.modResultMs);
-    this.sendQueue.retryFailures("Claude 앱에서 열려 있는 세션에 지금은 보낼 수 없습니다.", DESKTOP_WAITING);
-    this.sendQueue.retryFailures(DESKTOP_BLOCKED, DESKTOP_WAITING);
+    }, (offer, outcome) => offer.kind === "abort" ? this.finishAbort(offer, outcome) : this.finishMod(offer, outcome), opts.modResultMs);
+    this.approvals = new Approvals(() => this.now());
+    this.sendQueue.retryFailures("Claude 앱에서 열려 있는 세션에 지금은 보낼 수 없습니다.", "desktop_waiting");
+    this.sendQueue.retryFailures(DESKTOP_BLOCKED, "desktop_waiting");
+    // Waits written by an older host sat in `error`; they are waits, so they move to `wait`.
+    this.sendQueue.moveWaits(DESKTOP_BUSY, "desktop_busy");
+    this.sendQueue.moveWaits(DESKTOP_WAITING, "desktop_waiting");
     for (const r of readJson<SessionRecord[]>(this.file) ?? []) this.records.set(r.id, r);
     const listState = readJson<ListState>(this.listFile);
     for (const [id, attention] of Object.entries(listState?.attention ?? {})) if (attention?.reason) {
@@ -564,6 +620,7 @@ export class Sessions {
     }
     for (const id of listState?.archived ?? []) this.archived.add(id);
     for (const [id, at] of Object.entries(listState?.readAt ?? {})) if (typeof at === "number" && Number.isFinite(at)) this.readAt.set(id, at);
+    for (const [from, to] of Object.entries(listState?.moved ?? {})) if (CLI_ID.test(from) && CLI_ID.test(to) && from !== to) this.moved.set(from, to);
     // On a Mac the sidebar option carries no root (the app's default folder is meant): a null here
     // switched every model/effort sync off in production while the tests, which pass a root, passed.
     this.desktopSettings = opts.desktopSidebar || opts.environmentRoot ? new DesktopSettings(opts.desktopSidebar?.root ?? opts.environmentRoot, this.now) : null;
@@ -572,7 +629,7 @@ export class Sessions {
     }) : null;
     this.desktop = opts.desktopProjects === undefined ? null : new DesktopSessions({
       ...(this.sidebar ? { sidebarIds: () => new Set(this.sidebar!.read().sessions.keys()) } : {}),
-      projects: opts.desktopProjects, now: this.now, summarize, figures: id => this.desktopFigures.get(id), userId: (id, uuid, text) => this.appUserId(id, uuid, text),
+      projects: opts.desktopProjects, now: this.now, summarize, figures: id => this.desktopFigures.get(id), userId: (id, uuid, text) => this.appUserId(id, uuid, text), held: id => this.heldFor(id),
       ...(opts.desktopProcesses ? { processes: opts.desktopProcesses } : {}),
       ...(opts.desktopRegistry ? { registry: opts.desktopRegistry } : {}),
       // Only transcripts the host is writing right now, or a phone session not yet handed to the
@@ -714,15 +771,18 @@ export class Sessions {
 
   list(): SessionSummary[] {
     this.adoptEnvironmentSessions();
-    const host = Array.from(this.records.values()).sort((a, b) => b.updatedAt - a.updatedAt).map((r) => this.summary(r));
+    // A session an approval waits on at the Mac reads as waiting, whatever the registry says.
+    const waiting = (s: SessionSummary): SessionSummary => this.approvals.active(s.id).length && s.state !== "waiting" ? { ...s, state: "waiting" } : s;
+    const host = Array.from(this.records.values()).sort((a, b) => b.updatedAt - a.updatedAt).map((r) => waiting(this.summary(r)));
     const hostCliIds = new Set([...this.records.values(), ...this.skippedRecords.values()].flatMap(r => r.sdkSessionId ? [r.id, r.sdkSessionId] : [r.id]));
-    const sessions = [...host, ...(this.desktop?.list() ?? []).filter(s => !this.records.has(s.id) && !hostCliIds.has(s.id)).map(s => {
+    // The CLI session a /clear in place left behind is the old transcript: the new id is listed instead.
+    const sessions = [...host, ...(this.desktop?.list() ?? []).filter(s => !this.records.has(s.id) && !hostCliIds.has(s.id) && !this.moved.has(s.id)).map(s => {
       const process = this.desktop?.liveProcess(s.id);
       const status = this.statusLine(s.id);
       const appSessionId = this.desktopSettings?.appSessionIdFor(s.id);
-      return { ...s, ...(appSessionId ? { appSessionId } : {}), ...this.desktopModels.get(s.id), controls: this.sessionControls(s.id), ...(process?.bridgeSessionId ? { state: this.bridgeState(process), desktopBridge: true, background: this.background(process) } : {}), ...(this.archived.has(s.id) ? { archived: true } : {}), attention: this.attention.get(s.id) ?? null, ...(status ? { status } : {}), ...this.queueSummary(s.id) };
+      return waiting({ ...s, ...(appSessionId ? { appSessionId } : {}), ...this.desktopModels.get(s.id), controls: this.sessionControls(s.id), ...(process?.bridgeSessionId ? { state: this.bridgeState(process), desktopBridge: true, background: this.background(process) } : {}), ...(this.archived.has(s.id) ? { archived: true } : {}), attention: this.attention.get(s.id) ?? null, ...(status ? { status } : {}), ...this.queueSummary(s.id) });
     })];
-    const listed = this.sidebar?.join(sessions, id => this.records.get(id)?.sdkSessionId ?? id, id => !!this.records.get(id)?.environmentBridgeId) ?? sessions;
+    const listed = this.sidebar?.join(sessions, id => this.records.get(id)?.sdkSessionId ?? id, id => !!this.records.get(id)?.environmentBridgeId, new Set(this.moved.keys())) ?? sessions;
     // A session the list no longer holds keeps no read record (this map must not outgrow the list).
     const present = new Set(listed.map(s => s.id));
     let pruned = false;
@@ -730,7 +790,18 @@ export class Sessions {
     if (pruned) this.saveListState();
     // Reading on the phone clears the Mac app's unread dot: a look after the last activity outranks
     // the app's late-written unread set (sidebar.ts:98). Newer activity outruns the record again.
-    return listed.map(s => s.unread && (this.readAt.get(s.id) ?? 0) >= s.updatedAt ? { ...s, unread: false } : s);
+    // The session a /clear in place moved the conversation to names the ids it took over, so the phone
+    // follows the list from the old id to the new one (the old transcript is no longer listed).
+    const takenOver = new Map<string, string[]>();
+    for (const from of this.moved.keys()) {
+      const to = this.followed(from);
+      takenOver.set(to, [...(takenOver.get(to) ?? []), from]);
+    }
+    return listed.map(s => {
+      const read = s.unread && (this.readAt.get(s.id) ?? 0) >= s.updatedAt ? { ...s, unread: false } : s;
+      const supersedes = takenOver.get(s.id);
+      return supersedes ? { ...read, supersedes } : read;
+    });
   }
 
   groups(): string[] | undefined {
@@ -770,6 +841,7 @@ export class Sessions {
 
   async pollDesktop(): Promise<void> {
     if (this.shuttingDown) return;
+    this.sweepApprovals();
     if (this.desktop?.poll()) this.opts.onSessions();
     this.adoptEnvironmentSessions();
     this.syncDesktopSettings();
@@ -941,8 +1013,9 @@ export class Sessions {
     const before = this.desktop.snapshot(id);
     const log = this.desktop.log(id);
     if (before === log) return;
-    // Read-only desktop snapshots get a new epoch when rebuilt; the server sends a fresh tail.
-    const last = log.tail().events.at(-1);
+    // Read-only desktop snapshots get a new epoch when rebuilt; the server sends a fresh tail. A held
+    // approval the rebuild put back is not news: announcing its card again would push it again.
+    const last = log.tail().events.filter(event => event.kind !== "permission" && event.kind !== "permission_decided").at(-1);
     if (last) this.opts.onEvent(id, last);
     this.opts.onSessions();
   }
@@ -1130,7 +1203,8 @@ export class Sessions {
     for (const s of sessions) {
       if (s.origin !== "desktop" || this.records.has(s.id) || this.archived.has(s.id)) continue;
       seen.add(s.id);
-      const permission = s.state === "waiting" || s.pending > 0;
+      // A mod approval the phone holds is pushed as its own permission event; reading it as waiting here would push twice.
+      const permission = s.state === "waiting" && this.approvals.active(s.id).length === 0 || s.pending > 0;
       if (permission || BUSY.has(s.state)) this.lastBusyAt = this.now();
       const previous = this.macStates.get(s.id);
       this.macStates.set(s.id, { state: s.state, permission });
@@ -1444,7 +1518,7 @@ export class Sessions {
   }
 
   private saveListState(): void {
-    writeFileAtomic(this.listFile, JSON.stringify({ attention: Object.fromEntries(this.attention), archived: [...this.archived], readAt: Object.fromEntries(this.readAt) } satisfies ListState));
+    writeFileAtomic(this.listFile, JSON.stringify({ attention: Object.fromEntries(this.attention), archived: [...this.archived], readAt: Object.fromEntries(this.readAt), moved: Object.fromEntries(this.moved) } satisfies ListState));
   }
 
   /** Set/clear a session's attention, persisting only when it actually changed. */
@@ -1521,7 +1595,8 @@ export class Sessions {
 
   /** Queue a message; a session that is not busy takes it at once. An id still being sent answers
    * with that send, so its failure reaches the phone rather than an "it is queued". */
-  enqueue(id: string, clientMsgId: string, text: string, attachments: Attachment[] = []): Promise<void> | undefined {
+  enqueue(id0: string, clientMsgId: string, text: string, attachments: Attachment[] = []): Promise<void> | undefined {
+    const id = this.followed(id0);
     if (!this.has(id)) throw new Error("no such session");
     if (!/^[\w-]{1,100}$/.test(clientMsgId)) throw new Error("Invalid message id.");
     if (typeof text !== "string" || (!text.trim() && !attachments.length)) throw new Error("Nothing to queue.");
@@ -1545,13 +1620,26 @@ export class Sessions {
     }
     if (this.seen(id, clientMsgId)) return;
     if (!this.sendQueue.add(id, { id: clientMsgId, text, attachments: files }, this.now(), this.records.get(id)?.sdkSessionId ?? id)) return;
+    this.noteQueued(id, clientMsgId);
     this.watchQueueRegistry();
     this.opts.onSessions();
     void this.drainQueue(id);
   }
 
+  /** The ack for a send says `queued` when the host kept the message instead of delivering it. */
+  private noteQueued(id: string, clientMsgId: string): void {
+    while (this.queuedAcks.size >= Sessions.ECHO_CAP) this.queuedAcks.delete(this.queuedAcks.values().next().value!);
+    this.queuedAcks.add(`${id}/${clientMsgId}`);
+  }
+
+  /** Whether the host kept this send in its queue (and forgets it): the server reads it once, for the ack. */
+  takeQueued(id: string, clientMsgId: string): boolean {
+    return this.queuedAcks.delete(`${id}/${clientMsgId}`);
+  }
+
   /** Take text and upload-shaped attachments back to the composer's editing draft. */
-  removeQueued(id: string, itemId: string): { text: string; attachments: Attachment[] } | null {
+  removeQueued(id0: string, itemId: string): { text: string; attachments: Attachment[] } | null {
+    const id = this.followed(id0);
     const item = this.sendQueue.items(id).find(item => item.id === itemId);
     if (!item) return null;
     if (item.claimedBy) throw new Error(MOD_CLAIMED);
@@ -1570,8 +1658,13 @@ export class Sessions {
     });
   }
 
-  /** Send one queued message now, into the running turn like a steer. */
-  async sendQueued(id: string, itemId: string): Promise<string> {
+  /**
+   * Send one queued message now, into the running turn like a steer. A Claude app session that is
+   * busy answers `desktop_busy` (code) and the message stays queued, unless `interrupt`: then the mod
+   * stops the app's running turn and the message goes next (`desktop_mod_offline` when no mod answers).
+   */
+  async sendQueued(id0: string, itemId: string, options: { interrupt?: boolean } = {}): Promise<string> {
+    const id = this.followed(id0);
     const item = this.sendQueue.items(id).find(queued => queued.id === itemId);
     if (!item) throw new Error("That message is no longer queued.");
     if (this.sendQueue.items(id).some(queued => queued.claimedBy)) throw new Error(MOD_CLAIMED);
@@ -1590,6 +1683,29 @@ export class Sessions {
       };
       mayGo();
       const desktopId = this.records.get(id)?.sdkSessionId ?? id;
+      const busy = this.appModSession(id, desktopId) && this.appBusy(desktopId);
+      if (busy && options.interrupt && plainText(item.text, item.attachments)) {
+        if (!this.modConnected(desktopId) || !await this.modAbort(desktopId)) throw new CodedError("desktop_mod_offline", DESKTOP_MOD_OFFLINE);
+        mayGo();
+        // The stopped turn ends as `aborted`; the mod submits this text as the turn after it.
+        const offer = this.offerMod(id, desktopId, item);
+        if (!offer) throw new Error(MOD_CLAIMED);
+        if (await offer === "claimed") return id;
+        mayGo();
+        throw new CodedError("desktop_mod_offline", DESKTOP_MOD_OFFLINE);
+      }
+      if (busy) {
+        if (this.sendQueue.wait(id, itemId, "desktop_busy")) this.opts.onSessions();
+        throw new CodedError("desktop_busy", DESKTOP_BUSY_NOW);
+      }
+      if (this.modClear(id, desktopId, item)) {
+        const offer = this.offerMod(id, desktopId, item, "clear");
+        if (offer && await offer === "claimed") return id;
+        mayGo();
+        // Like the drain: the /clear waits for the mod and is offered again, so the row says so.
+        if (this.sendQueue.wait(id, itemId, "desktop_waiting")) this.opts.onSessions();
+        throw new DesktopBlockedError();
+      }
       if (this.modEligible(id, desktopId, item)) {
         const offer = this.offerMod(id, desktopId, item);
         const state = offer ? await offer : null;
@@ -1622,18 +1738,25 @@ export class Sessions {
     return this.appModSession(id, desktopId) && !this.appBusy(desktopId) && !item.attachments.length && !item.text.trimStart().startsWith("/");
   }
 
-  resumeQueue(id: string): void {
+  resumeQueue(id0: string): void {
+    const id = this.followed(id0);
     if (this.sendQueue.resume(id)) { this.opts.onSessions(); void this.drainQueue(id); }
   }
 
   /** The phone's Stop: what is queued waits for the person instead of going on its own. */
-  holdQueue(id: string): void {
+  holdQueue(id0: string): void {
+    const id = this.followed(id0);
     if (!this.sendQueue.hold(id)) return;
     for (const item of this.sendQueue.items(id)) this.withdrawMod(id, item.id);
     this.opts.onSessions();
   }
-  /** The socket send joins synchronously, including /clear's settings snapshot. */
-  orderedSend(id: string, clientMsgId: string, text: string, attachments?: Attachment[], behavior?: SendBehavior): Promise<string> {
+  /**
+   * The socket send joins synchronously, including /clear's settings snapshot. Resolves to the id the
+   * message went to: a session the Claude app moved on (a /clear in place) answers at its new id, so the
+   * phone's ack names it and the phone follows.
+   */
+  orderedSend(id0: string, clientMsgId: string, text: string, attachments?: Attachment[], behavior?: SendBehavior): Promise<string> {
+    const id = this.followed(id0);
     return this.inSessionLane(id, token => {
       token.check();
       return this.send(id, clientMsgId, text, attachments, behavior, token);
@@ -1711,7 +1834,7 @@ export class Sessions {
     const desktopId = this.records.get(id)?.sdkSessionId ?? id;
     const process = this.desktop?.liveProcess(desktopId);
     if (this.appModSession(id, desktopId) && this.appBusy(desktopId)) {
-      if (this.sendQueue.wait(id, head.id, DESKTOP_BUSY)) this.opts.onSessions();
+      if (this.sendQueue.wait(id, head.id, "desktop_busy")) this.opts.onSessions();
       return;
     }
     // Registry idle can precede the accepted bridge turn actually starting.
@@ -1732,6 +1855,16 @@ export class Sessions {
     token.check();
     if (this.queueHead(id, registryIdle) !== head) return;
     const desktopId = this.records.get(id)?.sdkSessionId ?? id;
+    if (this.modClear(id, desktopId, head)) {
+      const offer = this.offerMod(id, desktopId, head, "clear");
+      const state = offer ? await offer : null;
+      if (state === "claimed") return;
+      token.check();
+      if (this.sendQueue.items(id)[0] !== head || this.sendQueue.held(id)) return;
+      // No mod answered in time: the /clear waits, as it does without Remote Control, and is offered again later.
+      if (this.sendQueue.wait(id, head.id, "desktop_waiting")) this.opts.onSessions();
+      return;
+    }
     if (this.modEligible(id, desktopId, head)) {
       const offer = this.offerMod(id, desktopId, head);
       const state = offer ? await offer : null;
@@ -1774,20 +1907,115 @@ export class Sessions {
       this.opts.onSessions();
       return sent;
     } catch (error) {
-      if (error instanceof DesktopBusyError) this.sendQueue.wait(id, item.id, DESKTOP_BUSY);
-      else if (error instanceof DesktopBlockedError) this.sendQueue.wait(id, item.id, DESKTOP_WAITING);
+      if (error instanceof DesktopBusyError) this.sendQueue.wait(id, item.id, "desktop_busy");
+      else if (error instanceof DesktopBlockedError) this.sendQueue.wait(id, item.id, "desktop_waiting");
       else this.sendQueue.fail(id, item.id, error instanceof Error ? error.message : String(error));
       this.opts.onSessions();
       throw error;
     }
   }
 
-  private offerMod(id: string, sessionId: string, item: QueueItem): Promise<"claimed" | "withdrawn" | "expired"> | null {
+  private offerMod(id: string, sessionId: string, item: QueueItem, kind?: "clear"): Promise<"claimed" | "withdrawn" | "expired"> | null {
     if (this.modOwners.has(item.id)) return null;
     this.modOwners.set(item.id, id);
-    const offered = this.modInbox.offer({ sessionId, itemId: item.id, text: item.text, offeredAt: this.now() }, this.opts.modOfferMs ?? 6000);
-    if (!offered) { this.modOwners.delete(item.id); return null; }
-    return offered.then(state => { if (state !== "claimed") this.modOwners.delete(item.id); return state; });
+    if (kind === "clear") this.clearFrom.set(item.id, sessionId);
+    const offered = this.modInbox.offer({ sessionId, itemId: item.id, text: item.text, offeredAt: this.now(), ...(kind ? { kind } : {}) }, this.opts.modOfferMs ?? 6000);
+    if (!offered) { this.modOwners.delete(item.id); this.clearFrom.delete(item.id); return null; }
+    return offered.then(state => { if (state !== "claimed") { this.modOwners.delete(item.id); this.clearFrom.delete(item.id); } return state; });
+  }
+
+  /** Whether the mod answers for this Claude app session now (it read its inbox a moment ago). */
+  private modConnected(desktopId: string): boolean {
+    return this.modInbox.connected(desktopId, this.now());
+  }
+
+  /** A queued /clear of a Claude app session the mod answers for: it runs in place, not as a new session. */
+  private modClear(id: string, desktopId: string, item: QueueItem): boolean {
+    return CLEAR_TEXT.test(item.text) && !item.attachments.length && this.appModSession(id, desktopId) && this.modConnected(desktopId);
+  }
+
+  /**
+   * Asks the mod to stop the Claude app session's running turn. True once the mod reports it stopped;
+   * false when no mod claimed the offer in time or its result failed.
+   */
+  private modAbort(desktopId: string): Promise<boolean> {
+    const itemId = `abort-${randomUUID()}`;
+    const stopped = new Promise<boolean>(resolve => this.abortWaiters.set(itemId, resolve));
+    const offer = this.modInbox.offer({ kind: "abort", sessionId: desktopId, itemId, text: "", offeredAt: this.now() }, this.opts.modOfferMs ?? 6000);
+    if (!offer) { this.abortWaiters.delete(itemId); return Promise.resolve(false); }
+    return offer.then(state => {
+      if (state === "claimed") return stopped;
+      this.abortWaiters.delete(itemId);
+      return false;
+    });
+  }
+
+  private finishAbort(offer: ModOffer, outcome: ModOutcome): void {
+    const done = this.abortWaiters.get(offer.itemId);
+    this.abortWaiters.delete(offer.itemId);
+    done?.(outcome === "submitted");
+  }
+
+  /**
+   * The mod ran /clear in place and reports the CLI session id it has now (for the offer it claimed).
+   * The record, if any, follows to it and the list drops the old transcript; the phone's id for a
+   * session with no record becomes the new one. Returns false for an offer not claimed for `from`.
+   */
+  reportMoved(itemId: string, from: string, to: string): boolean {
+    if (!this.modInbox.claimed(itemId) || this.clearFrom.get(itemId) !== from || !CLI_ID.test(to) || to === from) return false;
+    this.movedClears.add(itemId);
+    this.repoint(from, to);
+    // The new transcript is listed now; the phone follows the list's drop of `from` to `to`.
+    this.desktop?.rediscover(to);
+    this.opts.onSessions();
+    return true;
+  }
+
+  /** The CLI session `from` is `to` now: a record follows to it, the old transcript leaves the list. */
+  private repoint(from: string, to: string): void {
+    let changed = false;
+    for (const r of this.records.values()) {
+      if (r.sdkSessionId !== from) continue;
+      r.sdkSessionId = to;
+      // The tail offset counted bytes of the old transcript; the new one starts from its own beginning.
+      if (r.transcriptOffset !== undefined) r.transcriptOffset = 0;
+      changed = true;
+    }
+    const settings = this.desktopModels.get(from);
+    if (settings) { this.desktopModels.set(to, settings); this.desktopModels.delete(from); }
+    this.moved.set(from, to);
+    if (!this.records.has(from)) this.carryState(from, to);
+    this.saveListState();
+    if (changed) this.save();
+  }
+
+  /**
+   * The id a session the Claude app moved on from answers to now: the newest id in its chain of moves
+   * (a session with a record keeps its own id, so it is never followed).
+   */
+  private followed(id: string): string {
+    let current = id;
+    for (let hops = 0; hops < 16 && !this.records.has(current) && this.moved.has(current); hops++) current = this.moved.get(current)!;
+    return current;
+  }
+
+  /**
+   * A session with no record is known by its CLI id, so what the host holds by that id moves to the id
+   * the /clear gave it: the queued messages (one sent after the /clear must not wait under the hidden old
+   * id), the send receipts (a resend of a message already run must not be offered again), the attention,
+   * the read mark, the archive flag, and the mod's owner of each queued item.
+   */
+  private carryState(from: string, to: string): void {
+    this.sendQueue.rekey(from, to);
+    this.receipts.moveSession(from, to);
+    const attention = this.attention.get(from);
+    if (attention) { this.attention.delete(from); this.attention.set(to, attention); }
+    const read = this.readAt.get(from);
+    if (read !== undefined) { this.readAt.delete(from); this.readAt.set(to, Math.max(read, this.readAt.get(to) ?? 0)); }
+    if (this.archived.delete(from)) this.archived.add(to);
+    for (const [itemId, session] of [...this.modOwners]) if (session === from) this.modOwners.set(itemId, to);
+    for (const [itemId, session] of [...this.clearFrom]) if (session === from) this.clearFrom.set(itemId, to);
+    for (const key of [...this.queuedAcks]) if (key.startsWith(`${from}/`)) { this.queuedAcks.delete(key); this.queuedAcks.add(`${to}/${key.slice(from.length + 1)}`); }
   }
 
   private withdrawMod(id: string, itemId: string): void {
@@ -1827,6 +2055,7 @@ export class Sessions {
   private finishMod(offer: ModOffer, outcome: ModOutcome): void {
     const id = this.modOwners.get(offer.itemId);
     if (!id) throw new Error("Missing mod offer owner");
+    if (offer.kind === "clear") return this.finishClear(id, offer, outcome);
     if (outcome === "failed") { this.modEchoes.delete(offer.itemId); this.sendQueue.failMod(id, offer.itemId, MOD_UNKNOWN); }
     else {
       const key = `send:${id}:${offer.itemId}`;
@@ -1853,6 +2082,190 @@ export class Sessions {
     this.opts.onSessions();
     // A message that came in behind this one waited in the queue for the next poll.
     if (outcome !== "failed" && this.sendQueue.items(id).length) setImmediate(() => void this.drainQueue(id));
+  }
+
+  /** The queued /clear is done (the move was reported before this result) or failed; the queue moves on. */
+  private finishClear(id: string, offer: ModOffer, outcome: ModOutcome): void {
+    const moved = this.movedClears.delete(offer.itemId);
+    this.clearFrom.delete(offer.itemId);
+    this.modOwners.delete(offer.itemId);
+    // Submitted without a reported move is not a clear this host can see: it stays a failure.
+    if (outcome === "failed" || !moved) this.sendQueue.failMod(id, offer.itemId, MOD_CLEAR_FAILED);
+    else {
+      const key = `send:${id}:${offer.itemId}`;
+      if (this.receipts.status(key) === null) this.receipts.begin(key, id, sendFingerprint(offer.text, []));
+      this.receipts.complete(key, id);
+      this.sendQueue.remove(id, offer.itemId);
+    }
+    this.opts.onSessions();
+    if (outcome !== "failed" && this.sendQueue.items(id).length) setImmediate(() => void this.drainQueue(id));
+  }
+
+  // ---- mod approvals: a permission request in a Claude app session with no Remote Control ----------
+
+  /**
+   * The mod's classic.PermissionRequest asks. Away from the Mac: `hold`, the phone's card carries the
+   * approval and the hook waits on `modApprovalPoll`. At the Mac, or a session this path does not own
+   * (bridged, host-run, unknown): `local`, and the Claude app's own dialog answers. Never a hold the
+   * host cannot end.
+   */
+  async modApprovalStart(req: { askId: string; session: string; tool: string; input: Record<string, unknown>; suggestions: unknown[]; title: string }): Promise<{ state: "hold" | "local" }> {
+    this.sweepApprovals();
+    const known = this.approvals.get(req.askId);
+    if (known) return { state: known.recordId && known.state === "pending" ? "hold" : "local" };
+    const phoneId = [...this.records.values()].find(r => r.sdkSessionId === req.session)?.id ?? req.session;
+    if (!this.appModSession(phoneId, req.session)) return { state: "local" };
+    // Opened before the await: a second start for the same ask finds it and never opens a second hold.
+    this.approvals.open({ askId: req.askId, phoneId, desktopId: req.session, tool: req.tool });
+    const away = this.opts.away ? await this.opts.away() : false;
+    if (!away) {
+      this.approvalAtMac(req.askId, phoneId);
+      return { state: "local" };
+    }
+    const cwd = this.summaryOf(phoneId)?.cwd ?? "";
+    const updates = alwaysUpdates(req.tool, req.suggestions);
+    const summary = summarize(req.tool, req.input, cwd);
+    let held: ReturnType<PermissionQueue["request"]>;
+    try {
+      held = this.opts.permissions.request({ session: phoneId, tool: req.tool, title: req.title, summary, input: req.input });
+    } catch {
+      this.approvalAtMac(req.askId, phoneId);
+      return { state: "local" };
+    }
+    const { record, decision } = held;
+    this.permissionRules.set(record.id, updates);
+    this.approvals.attach(req.askId, record.id);
+    // An always the phone can offer must say what it adds: a mode update is named, so nothing is offered blank.
+    const always = alwaysSummary(updates);
+    this.approvalEvent(req.askId, phoneId, { kind: "permission", id: record.id, tool: req.tool, title: req.title, summary, input: permissionDetail(req.tool, req.input, cwd), canAlways: always !== "",
+      ...(always ? { alwaysAllow: { scope: "session" as const, summary: always } } : {}),
+      requestKind: req.tool === "ExitPlanMode" ? "plan" : "tool" });
+    this.opts.onSessions();
+    void decision.then(answer => this.approvalDecided(req.askId, record.id, updates, answer));
+    return { state: "hold" };
+  }
+
+  /** The Mac owns the answer: the phone shows the session waiting, with a notice, and no card. */
+  private approvalAtMac(askId: string, phoneId: string): void {
+    this.approvals.settle(askId, "local", { reason: APPROVAL_LOCAL_REASON });
+    this.appendFor(phoneId, { kind: "notice", code: "desktop_approval", text: APPROVAL_AT_MAC }, false);
+    this.opts.onSessions();
+  }
+
+  /** The phone's decision (or the record's end) reaches the hook's next poll: one winner, the first to settle. */
+  private approvalDecided(askId: string, recordId: string, updates: AlwaysUpdate[], answer: { decision: "allow" | "allow_always" | "deny" | "expired"; reason?: string }): void {
+    this.permissionRules.delete(recordId);
+    const ask = this.approvals.get(askId);
+    if (!ask || ask.state !== "pending") return;
+    if (answer.decision === "expired") {
+      this.approvals.settle(askId, "expired", { reason: answer.reason ?? "expired" });
+      this.approvalEvent(askId, ask.phoneId, { kind: "permission_decided", id: recordId, decision: "expired", ...(answer.reason ? { reason: answer.reason } : {}) });
+      this.opts.onSessions();
+      return;
+    }
+    const result: ApprovalAnswer = answer.decision === "deny" ? { behavior: "deny", message: answer.reason ?? APPROVAL_DENIED }
+      : answer.decision === "allow_always" ? { behavior: "allow", updates } : { behavior: "allow" };
+    this.approvals.settle(askId, "answered", { answer: result });
+    this.approvalEvent(askId, ask.phoneId, { kind: "permission_decided", id: recordId, decision: answer.decision, ...(answer.decision === "allow_always" ? { ruleStatus: "sent" as const } : {}), ...(answer.reason ? { reason: answer.reason } : {}) });
+    this.opts.onSessions();
+  }
+
+  /** The Mac answered first: the card closes with the Mac's word and the phone can no longer answer it. */
+  private settleAtMac(askId: string): void {
+    const ask = this.approvals.get(askId);
+    if (!ask || ask.state !== "pending") return;
+    this.approvals.settle(askId, "local", { reason: APPROVAL_LOCAL_REASON });
+    if (ask.recordId) {
+      this.opts.permissions.expire(ask.recordId, APPROVAL_LOCAL_REASON);
+      this.approvalEvent(askId, ask.phoneId, { kind: "permission_decided", id: ask.recordId, decision: "expired", reason: APPROVAL_LOCAL });
+    }
+    this.opts.onSessions();
+  }
+
+  /**
+   * The hook's poll. It waits up to `waitMs` for the ask to settle, and checks on each turn whether the
+   * person is back at the Mac: then the Mac decides (`local`). A poll is also the hook's heartbeat.
+   */
+  async modApprovalPoll(askId: string, waitMs = APPROVAL_WAIT_MS, sentAt?: number): Promise<{ state: ApprovalState | "unknown"; answer?: ApprovalAnswer }> {
+    this.sweepApprovals();
+    if (!this.approvals.get(askId)) return { state: "unknown" };
+    // Past the freshness window the hook may already have given the Mac its dialog. A late poll does not
+    // revive the hold: the Mac answers, and the phone's card closes. `sentAt` dates the poll by when the hook sent it.
+    if (!this.approvals.touch(askId, sentAt)) { this.settleAtMac(askId); return { state: "local" }; }
+    const deadline = this.now() + waitMs;
+    while (this.approvals.get(askId)?.state === "pending") {
+      if (this.opts.away && !await this.opts.away()) { this.settleAtMac(askId); break; }
+      const left = deadline - this.now();
+      if (left <= 0) break;
+      await this.approvals.wait(askId, Math.min(1000, left));
+    }
+    const ask = this.approvals.get(askId);
+    if (!ask) return { state: "unknown" };
+    return { state: ask.state, ...(ask.answer ? { answer: ask.answer } : {}) };
+  }
+
+  /**
+   * The hook's `done`. A still-pending ask means the hook gave up polling and the Mac's dialog answers
+   * from here: the phone's card closes as the Mac's, and the ask stays until the dialog's own `done`
+   * (the Mac still waits). An ask the phone answered first returns that answer, so the hook applies it
+   * instead of opening the dialog beside it. Any other ask is forgotten.
+   */
+  modApprovalDone(askId: string): { answer?: ApprovalAnswer } {
+    const ask = this.approvals.get(askId);
+    if (!ask) return {};
+    if (ask.state === "pending") { this.settleAtMac(askId); this.opts.onSessions(); return {}; }
+    this.approvals.forget(askId);
+    this.pruneHeld();
+    this.opts.onSessions();
+    return ask.state === "answered" && ask.answer ? { answer: ask.answer } : {};
+  }
+
+  /**
+   * Stale holds lose their card: an ask whose hook stopped polling for the bound is expired by the host
+   * itself, so a router outage cannot leave a phone answer open. A Mac-side local ask outlives its turn
+   * only until the sweep's next look.
+   */
+  private sweepApprovals(): void {
+    const stale = this.approvals.sweep(desktopId => this.appBusy(desktopId));
+    for (const ask of stale) {
+      if (!ask.recordId) continue;
+      this.opts.permissions.expire(ask.recordId, "stale");
+      this.approvalEvent(ask.askId, ask.phoneId, { kind: "permission_decided", id: ask.recordId, decision: "expired" });
+    }
+    this.pruneHeld();
+    if (stale.length) this.opts.onSessions();
+  }
+
+  /**
+   * A held ask's card or decision for a session with no record: appended now, and kept so every rebuild
+   * of that session's Desktop snapshot carries it until the ask is gone (see `heldFor`). The event is
+   * appended before it is kept, so a snapshot built right here does not hold it twice.
+   */
+  private approvalEvent(askId: string, phoneId: string, event: EventBody): void {
+    this.appendFor(phoneId, event);
+    if (!this.records.has(phoneId)) this.heldApprovals.set(askId, { phoneId, event });
+  }
+
+  /** The held approvals a session's snapshot carries, in the order they were first shown. */
+  private heldFor(id: string): EventBody[] {
+    return [...this.heldApprovals.values()].filter(held => held.phoneId === id).map(held => held.event);
+  }
+
+  /** A held event goes once the approvals have forgotten its ask (a settled ask is kept for a while, with its decision). */
+  private pruneHeld(): void {
+    for (const askId of [...this.heldApprovals.keys()]) if (!this.approvals.get(askId)) this.heldApprovals.delete(askId);
+  }
+
+  /**
+   * An event for a session the phone shows: into its log when the host has a record, else into the
+   * app snapshot the phone reads (built now if none is cached yet, so the event is not lost to a
+   * reader that has not asked for the session yet).
+   */
+  private appendFor(id: string, event: EventBody, touch = true): void {
+    if (this.records.has(id)) { this.append(id, event, touch); return; }
+    if (!this.desktop?.has(id)) return;
+    const snapshot = this.desktop.snapshot(id) ?? this.desktop.log(id);
+    this.opts.onEvent(id, snapshot.append(event));
   }
 
   // ---- what the phone asks for --------------------------------------------------------------
@@ -2022,14 +2435,21 @@ export class Sessions {
     const existing = this.sendQueue.items(id).find(item => item.id === clientMsgId);
     if (existing) {
       if (existing.text !== text || existing.attachments.length !== attachments.length) throw new Error(SAME_ID_OTHER_CONTENT);
+      this.noteQueued(id, clientMsgId);
       return id;
     }
     const desktopId = this.records.get(id)?.sdkSessionId ?? id;
     const eligible = this.appModSession(id, desktopId);
+    // A /clear to a Claude app session whose mod answers runs in place (the same session, its settings
+    // kept), queued like a message; without a mod the fresh-session fallback below stands.
+    if (eligible && behavior !== "interrupt" && CLEAR_TEXT.test(text) && !attachments.length && this.modConnected(desktopId) && !this.seen(id, clientMsgId)) {
+      this.enqueue(id, clientMsgId, text, attachments);
+      return id;
+    }
     if (eligible && !this.handedOff(id) && (behavior === "interrupt" || attachments.length || text.trimStart().startsWith("/"))) throw new DesktopBlockedError();
     if (eligible && this.seen(id, clientMsgId)) return id;
     if (eligible && this.sendQueue.items(id).some(item => item.claimedBy || this.modOwners.get(item.id) === id)) {
-      if (this.sendQueue.items(id).some(item => item.id === clientMsgId)) return id;
+      if (this.sendQueue.items(id).some(item => item.id === clientMsgId)) { this.noteQueued(id, clientMsgId); return id; }
       if (behavior === "interrupt" || attachments.length || text.trimStart().startsWith("/")) throw new Error(MOD_CLAIMED);
       this.enqueue(id, clientMsgId, text, attachments);
       return id;
@@ -2062,7 +2482,10 @@ export class Sessions {
     if (this.seen(id, clientMsgId)) return id;
     if (!queued && this.sendQueue.items(id).some(item => item.id === clientMsgId)) return id;
     // Delegated turns own their own receipts; this wrapper only forwards them.
-    if (/^\/(clear|new)\s*$/.test(text) && !attachments.length) {
+    if (CLEAR_TEXT.test(text) && !attachments.length) {
+      // A Claude app session that is not handed off must not fork into a host session here (a queued
+      // /clear that outlived its mod): the send waits instead, and the next try runs it in place.
+      if (this.appModSession(id, this.records.get(id)?.sdkSessionId ?? id) && !this.handedOff(id)) throw new DesktopBlockedError();
       const s = this.list().find(s => s.id === id);
       if (!s) throw new Error("no such session");
       // This is a fresh conversation, not an SDK /clear: carry its label separately from the
@@ -2091,8 +2514,7 @@ export class Sessions {
     const desktopId = this.records.get(id)?.sdkSessionId ?? id;
     if (!queued && this.appModSession(id, desktopId) && this.appBusy(desktopId)) {
       this.enqueue(id, clientMsgId, text, attachments);
-      const head = this.sendQueue.items(id)[0];
-      if (head && this.sendQueue.wait(id, head.id, DESKTOP_BUSY)) this.opts.onSessions();
+      if (this.sendQueue.wait(id, clientMsgId, "desktop_busy")) this.opts.onSessions();
       return id;
     }
     this.receipts.begin(key, id, fingerprint);
@@ -2526,7 +2948,13 @@ export class Sessions {
       return answer;
     }
     const p = this.opts.permissions.get(permId);
+    // The Mac answered this approval first: say so, rather than "already handled" (the phone words the code).
+    if (p?.session === id && p.state === "expired" && p.reason === APPROVAL_LOCAL_REASON) throw new CodedError("desktop_approval_local", APPROVAL_LOCAL);
     if (!p || p.session !== id || p.state !== "pending") return false;
+    // A hold whose hook stopped polling for the freshness window is the Mac's: the hook may already have
+    // opened the dialog, so the phone's answer is refused and its card closes as the Mac's.
+    const fenced = this.approvals.active(p.session).find(ask => ask.recordId === permId && this.approvals.fenced(ask.askId));
+    if (fenced) { this.settleAtMac(fenced.askId); throw new CodedError("desktop_approval_local", APPROVAL_LOCAL); }
     if (p.tool === "ExitPlanMode" && decision !== "deny") return this.implementPlan(id, permId).then(ok => { if (ok) this.receipts.complete(key, id); return ok; });
     if (p.tool === "AskUserQuestion" && decision !== "deny") {
       const questions = questionInputs(object(p.input) ?? {});

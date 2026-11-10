@@ -1,7 +1,7 @@
 // Engine wiring lives here: imported logic and drawings never receive the engine interface.
 // Timers own background work; hooks only admit/rewrite a request and record its result.
 import { atom, read, update } from 'claude-code'
-import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, Register, RenderElement, RenderInput, RenderNode, SessionCompactResult, SessionContextBreakdown, SessionContextUsage, SessionRateLimit, ToolCallInput, ToolCallResult, TurnStepInput, TurnUsage } from 'claude-code'
+import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, PermissionRequestDecision, Register, RenderElement, RenderInput, RenderNode, SessionCompactResult, SessionContextBreakdown, SessionContextUsage, SessionRateLimit, ToolCallInput, ToolCallResult, TurnStepInput, TurnUsage } from 'claude-code'
 import type { AgentRec, CacheMemory, CostSummary, Effort, JudgeInput, JudgeKind, JudgeRun, LimitItem, ModSettingsSnapshot, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
 import { MOD_SETTINGS_SCHEMA_VERSION, RUNG_EFFORT, applySettingsChanges, normalizeSettings, settingsChanges } from './settings'
 import { rungOf, workerLadderLine } from './ladder'
@@ -17,6 +17,8 @@ import { afterPing, cacheMemoryKey, CACHE_MEMORY_PREFIX, laterMemo, liveContextT
 import { HEAVY_PERCENT, bandPriority, claudeLimitsFrom, claudeScopedFrom, coldAlert, contextWindow, countsPrecisely, modelCompactWindow, hotAlert, hottest, hotWindowMoved, keptAlert, costFromSummary, localMidnight, routerLimitItems, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
 import type { ScopedLimit } from './session'
 import { QUICK_PROMPT, wrapForNewChat } from './handoff'
+import { APPROVAL_BODY_CAP, APPROVAL_FRESH_MARGIN_MS, APPROVAL_FRESH_MS, askId, decisionOf, heldReply, holdable } from './approval'
+import type { HeldReply, HostAnswer } from './approval'
 import { addTask, endTasks, endWithAgent, settleTasks, settleWithAgent, stillRunning, stopTask, taskEnds, taskStarted } from './tasks'
 import { addAgentStep, addJudge, addPrompt, addRequest, addWarm, addWorker, emptyStats, formatStats, sentEffort } from './stats'
 import { besideBand, renderBand, renderFooter } from './ui/band'
@@ -1554,6 +1556,107 @@ async function tick($: EngineInterface): Promise<void> {
 }
 let inboxPolling = false
 let inboxRetryAt = 0
+/** The main turn the mod saw start and not yet end: the id `$.turn.abort` needs (the host asks for a stop). */
+let currentTurn: string | null = null
+/** The session id a /clear in place gave the session (classic.SessionStart, source clear), until the inbox run reads it. */
+let clearedTo: string | null = null
+
+/** Stops the main turn the mod saw start. The host then sends the phone's message as the turn after it. */
+async function stopTurn($: EngineInterface): Promise<boolean> {
+  const turnId = currentTurn
+  if (!turnId) return false
+  await $.turn.abort({ turnId })
+  return true
+}
+
+/**
+ * Whether the host takes a move report from this route. The host answers 409 to an empty move (a move
+ * it never asked for); anything else, a route that does not exist yet included, says no. Asked before
+ * a clear is claimed and again before it runs, so a /clear is never run with no way to report it.
+ */
+async function moveRouteReady($: EngineInterface, admin: string, session: string, itemId: string): Promise<boolean> {
+  const probe = await $.http.fetch(`${admin}/api/mod/moved`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ itemId, from: session, to: '' }) })
+  return probe.status === 409
+}
+
+/**
+ * Runs the session's own /clear, which keeps its model, effort and permission mode, and reports the
+ * session id the CLI gives it to the host. False when no new id arrived or the host did not take it.
+ */
+async function clearInPlace($: EngineInterface, admin: string, session: string, itemId: string): Promise<boolean> {
+  if (!await moveRouteReady($, admin, session, itemId)) return false
+  clearedTo = null
+  await $.command.run({ command: 'clear' })
+  for (let waited = 0; clearedTo === null && waited < 40; waited++) await $.clock.sleep(500)
+  const to = clearedTo
+  clearedTo = null
+  if (!to || to === session) return false
+  const moved = await $.http.fetch(`${admin}/api/mod/moved`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ itemId, from: session, to }) })
+  return moved.status === 200
+}
+
+/**
+ * The hook is done with an ask. The host closes a still-pending one as the Mac's (the phone's card
+ * closes) and keeps it until the dialog's own done. Returns the phone's answer when the phone answered
+ * first, which the hook then applies instead of the dialog. Its failure changes nothing for the person:
+ * the host expires an ask whose hook stopped polling.
+ */
+async function forgetAsk($: EngineInterface, admin: string, ask: string | null): Promise<HostAnswer | null> {
+  if (!ask) return null
+  try {
+    const done = await $.http.fetch(`${admin}/api/mod/approval/done`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ askId: ask }) })
+    if (done.status !== 200) return null
+    const reply = heldReply(done.text)
+    return reply.state === 'answered' ? reply.answer ?? null : null
+  } catch { /* nothing here must fail the answer */ return null }
+}
+
+/**
+ * Polls the host about one held approval until the phone answers. The host decides the hold: a `local`
+ * or `expired` reply returns null and the Mac's own dialog answers. Each poll carries the time it was sent,
+ * and the host dates the hold by that time (never later than its arrival). When the host cannot be reached,
+ * the hook keeps trying until APPROVAL_FRESH_MS has passed since its last answered poll (or the hold's start),
+ * then stops polling. The host fences the hold APPROVAL_FRESH_MS after the latest poll it was sent, so the
+ * dialog waits until that fence has passed (plus a margin): no phone answer can then settle the hold beside it.
+ * A reply that gets through in time takes the host's answer, and a done that gets through takes the host's word.
+ */
+async function waitForPhone($: EngineInterface, admin: string, ask: string): Promise<HostAnswer | null> {
+  // Read after the start reply: the host had opened the ask before it answered, so this mark is never earlier than its own.
+  let heard = await $.clock.now()
+  let sent = heard
+  for (;;) {
+    const at = await $.clock.now()
+    // No poll once a window has passed since the last answered one: the host fences the hold no later than sent + window.
+    if (at - heard >= APPROVAL_FRESH_MS) break
+    sent = at
+    let reply: HeldReply | null = null
+    try {
+      // A poll never outlasts the window: a request that never answers must not hold the hook past it.
+      const left = Math.max(0, heard + APPROVAL_FRESH_MS - at)
+      const polled = await Promise.race([
+        $.http.fetch(`${admin}/api/mod/approval?askId=${encodeURIComponent(ask)}&sentAt=${Math.floor(sent)}`),
+        $.clock.sleep(left).then(() => null),
+      ])
+      if (polled?.status === 200) reply = heldReply(polled.text)
+    } catch { /* counted as a failed poll below */ }
+    if (reply && reply.state !== 'unknown') {
+      heard = await $.clock.now()
+      if (reply.state === 'answered') return reply.answer ?? null
+      if (reply.state !== 'pending') return null
+      continue
+    }
+    const now = await $.clock.now()
+    if (now - heard >= APPROVAL_FRESH_MS) break
+    await $.clock.sleep(Math.min(1000, heard + APPROVAL_FRESH_MS - now))
+  }
+  // Stopped polling. The host's fence is at most `sent + APPROVAL_FRESH_MS` (no poll it holds is dated later), so the dialog
+  // waits for that, and the done that follows is no poll: it does not move the hold.
+  const dialogAt = sent + APPROVAL_FRESH_MS + APPROVAL_FRESH_MARGIN_MS
+  const wait = dialogAt - await $.clock.now()
+  if (wait > 0) await $.clock.sleep(wait)
+  return await forgetAsk($, admin, ask)
+}
+
 /** A claim is never retried or submitted without a 200: a lost reply may already have claimed it. */
 async function pollPhoneInbox($: EngineInterface): Promise<void> {
   if (inboxPolling) return
@@ -1572,7 +1675,11 @@ async function pollPhoneInbox($: EngineInterface): Promise<void> {
     for (const raw of offers) {
       const offer = object(raw)
       if (offer.sessionId !== session || typeof offer.itemId !== 'string' || !/^[\w-]{1,100}$/.test(offer.itemId) || typeof offer.text !== 'string') throw new Error('invalid inbox offer')
+      // `kind` is the host's: an offer without one is a phone message to submit, as before.
+      const kind = offer.kind === 'abort' || offer.kind === 'clear' ? offer.kind : 'prompt'
       if (await $.session.id() !== session) return
+      // A clear the host cannot be told about is left unclaimed: the offer expires and the /clear waits.
+      if (kind === 'clear' && !await moveRouteReady($, admin, session, offer.itemId)) continue
       const claimAt = await $.clock.now()
       const claim = await $.http.fetch(`${admin}/api/phone-inbox/claim`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ itemId: offer.itemId }) })
       if (claim.status === 409) continue
@@ -1582,8 +1689,12 @@ async function pollPhoneInbox($: EngineInterface): Promise<void> {
         const now = await $.clock.now()
         // A claim answered this late is not submitted: the host may be close to giving up on it.
         if (now >= claimAt && now - claimAt < 10_000 && await $.session.id() === session) {
-          const sent = await $.prompt.submit({ text: offer.text, asUser: true })
-          if (!('drop' in sent)) outcome = 'submitted'
+          if (kind === 'abort') { if (await stopTurn($)) outcome = 'submitted' }
+          else if (kind === 'clear') { if (await clearInPlace($, admin, session, offer.itemId)) outcome = 'submitted' }
+          else {
+            const sent = await $.prompt.submit({ text: offer.text, asUser: true })
+            if (!('drop' in sent)) outcome = 'submitted'
+          }
         }
       } catch { /* The host shows the failed item for a deliberate resend. */ }
       const result = await $.http.fetch(`${admin}/api/phone-inbox/result`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ itemId: offer.itemId, outcome }) })
@@ -2143,6 +2254,8 @@ export const register: Register = on => {
   })
   on('classic.SessionStart', async ($, e, next) => {
     try {
+      // A /clear the host asked for in place: the session's new id is what the host must follow.
+      if (e.source === 'clear') clearedTo = e.session_id
       if (['clear', 'resume', 'fork'].includes(e.source)) {
         generation++
         judgeSequence++
@@ -2198,6 +2311,39 @@ export const register: Register = on => {
       }
     } catch (error) { await report($, 'classic.Stop', error) }
     return next(e)
+  })
+  // A permission the Claude app asks for, with no Remote Control: the host decides whether the phone
+  // answers it (the person is away from the Mac) or this dialog does. Anything unclear is the dialog.
+  on('classic.PermissionRequest', async ($, e, next) => {
+    if (!holdable(e.tool_name) || await $.env.get('CLAUDE_CODE_ENTRYPOINT') !== 'claude-desktop') return next(e)
+    let ask: string | null = null
+    let admin = ''
+    let answer: HostAnswer | null = null
+    try {
+      const language = await read($, lang)
+      admin = await adminUrl($)
+      const id = askId(await $.clock.now())
+      const body = JSON.stringify({ askId: id, session: await $.session.id(), tool: e.tool_name, input: e.tool_input, suggestions: e.permission_suggestions ?? [], title: '' })
+      if (body.length <= APPROVAL_BODY_CAP) {
+        const start = await $.http.fetch(`${admin}/api/mod/approval`, { method: 'POST', headers: { 'content-type': 'application/json' }, body })
+        if (start.status === 200) {
+          ask = id
+          if (object(JSON.parse(start.text)).state === 'hold') {
+            $.ui.status(t(language, 'approval.phone'))
+            answer = await waitForPhone($, admin, id)
+            $.ui.status(undefined)
+          }
+        }
+      }
+    } catch { await report($, 'permission hold', 'request failed') }
+    if (answer) {
+      await forgetAsk($, admin, ask)
+      return { decision: decisionOf(answer) as PermissionRequestDecision }
+    }
+    // The Mac's own dialog answers: the phone waits on it until the dialog is done, then the ask is over.
+    const result = await next(e)
+    await forgetAsk($, admin, ask)
+    return result
   })
   on('session.receive', { origin: { kind: 'coordinator' } }, async ($, e, next) => {
     if (!e.agentId) return next(e)
@@ -2328,9 +2474,11 @@ export const register: Register = on => {
     // The Compact press's tidy prompt becomes a turn of its own; its id is how its end is told from
     // every other turn's (a prompt queued before it, or one the person types next).
     if (tidy && tidy.turnId === null && !e.agentId && e.text.includes(tidy.text)) tidy.turnId = e.turnId
+    if (!e.agentId) currentTurn = e.turnId
     return next(e)
   })
   on('turn.complete', async ($, e, next) => {
+    if (!e.agentId && currentTurn === e.turnId) currentTurn = null
     try {
       if (!e.agentId && tidy?.turnId === e.turnId) {
         const { note, model } = tidy

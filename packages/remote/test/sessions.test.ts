@@ -12,7 +12,8 @@ import { sessionGroup, sidebarState } from "../web/sidebar.ts";
 import { INLINE_CAP, WATCH_IDLE_MS } from "../src/protocol.ts";
 import type { Effort, SessionEvent } from "../src/protocol.ts";
 import { Sessions, modelArg, nextAttention, summarize } from "../src/sessions.ts";
-import { BridgeClient, CLI_NOT_LOGGED_IN, DESKTOP_BUSY, DESKTOP_WAITING, DesktopBlockedError } from "../src/bridge-client.ts";
+import { APPROVAL_FRESH_MS } from "../src/mod-approval.ts";
+import { BridgeClient, CLI_NOT_LOGGED_IN, DesktopBlockedError } from "../src/bridge-client.ts";
 import { transcriptEvents, type DesktopProcess, type SubagentState } from "../src/desktop.ts";
 import type { CanUseTool, PermissionAnswer, QueryFn, SdkUserMessage, SessionsOptions } from "../src/sessions.ts";
 import { posixPaths } from "../../../test/capabilities.ts";
@@ -118,7 +119,7 @@ function controlledQueries(readInputs = true, waitForExit = false) {
   return { queryFn, queries };
 }
 
-function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {}, extra: Partial<Pick<SessionsOptions, "handoff" | "log" | "queryFn" | "desktopProjects" | "desktopRegistry" | "desktopProcesses" | "bridgeClient" | "desktopSidebar" | "now" | "onSessions" | "onLoginProblem" | "environmentRoot" | "environmentWaitMs" | "environmentPollMs" | "environmentModeMs" | "modOfferMs" | "modResultMs">> = {}) {
+function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {}, extra: Partial<Pick<SessionsOptions, "handoff" | "log" | "queryFn" | "desktopProjects" | "desktopRegistry" | "desktopProcesses" | "bridgeClient" | "desktopSidebar" | "now" | "onSessions" | "onLoginProblem" | "environmentRoot" | "environmentWaitMs" | "environmentPollMs" | "environmentModeMs" | "modOfferMs" | "modResultMs" | "away">> = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-sessions-"));
   const cwd = path.join(dir, "project");
   fs.mkdirSync(cwd);
@@ -1369,7 +1370,7 @@ test("a handed-off session waits while the app runs a turn, across a host restar
   await waitFor(() => registry.has(sdkId) && boundary.queries[0]!.closed);
   await f.sessions.send(id, "while-app-works", "sent while the app works");
   f.sessions.pollQueued();
-  await waitFor(() => f.sessions.summaryOf(id)?.queue?.[0]?.error === DESKTOP_BUSY);
+  await waitFor(() => f.sessions.summaryOf(id)?.queue?.[0]?.wait === "desktop_busy");
   assert.equal(boundary.queries.length, 1, "no second writer while the app is busy");
   f.sessions.shutdown();
   const active = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: boundary.queryFn, desktopProjects: projects,
@@ -1914,14 +1915,14 @@ for (const outcome of ["missing", "mismatch", "ambiguous", "account-mismatch", "
   }
 });
 
-async function modFixture(t: TestContext, modOfferMs = 100, modResultMs = 100, waitForExit = false, appRoot?: string) {
+async function modFixture(t: TestContext, modOfferMs = 100, modResultMs = 100, waitForExit = false, appRoot?: string, now?: () => number) {
   const projects = fs.mkdtempSync(path.join(os.tmpdir(), "mod-inbox-projects-"));
   t.after(() => fs.rmSync(projects, { recursive: true, force: true }));
   const sdkId = "dddddddd-dddd-dddd-dddd-dddddddddddd";
   const registry = new Map<string, DesktopProcess>();
   const boundary = controlledQueries(true, waitForExit);
   const f = fixture(t, {}, { queryFn: boundary.queryFn, desktopProjects: projects, desktopRegistry: () => registry, desktopProcesses: () => "", modOfferMs, modResultMs,
-    ...(appRoot ? { desktopSidebar: { root: appRoot } } : {}),
+    ...(appRoot ? { desktopSidebar: { root: appRoot } } : {}), ...(now ? { now } : {}),
     handoff: async () => { registry.set(sdkId, { sessionId: sdkId, pid: 42, status: "idle" }); return "opened"; }, log() {} });
   const id = await f.create();
   await waitFor(() => boundary.queries.length === 1);
@@ -1936,7 +1937,7 @@ async function modFixture(t: TestContext, modOfferMs = 100, modResultMs = 100, w
 
 const transcriptLine = (value: unknown) => JSON.stringify(value) + "\n";
 
-function appNativeModFixture(t: TestContext, modOfferMs = 500) {
+function appNativeModFixture(t: TestContext, modOfferMs = 500, extra: Partial<Pick<SessionsOptions, "away" | "now">> = {}) {
   const id = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
   const app = claudeAppData(t, id);
   const projects = fs.mkdtempSync(path.join(os.tmpdir(), "app-native-mod-"));
@@ -1944,12 +1945,12 @@ function appNativeModFixture(t: TestContext, modOfferMs = 500) {
   const registry = new Map<string, DesktopProcess>([[id, { sessionId: id, pid: 42, status: "idle" }]]);
   const boundary = controlledQueries();
   const f = fixture(t, {}, { queryFn: boundary.queryFn, desktopProjects: projects, desktopRegistry: () => registry,
-    desktopProcesses: () => "", desktopSidebar: { root: app.root }, modOfferMs, modResultMs: 500, log() {} });
+    desktopProcesses: () => "", desktopSidebar: { root: app.root }, modOfferMs, modResultMs: 500, log() {}, ...extra });
   fs.mkdirSync(path.join(projects, "project"));
   const file = path.join(projects, "project", `${id}.jsonl`);
   fs.writeFileSync(file, transcriptLine({ type: "user", uuid: "first", cwd: f.cwd, message: { content: "From the app" } }));
   assert.equal(f.sessions.summaryOf(id)?.origin, "desktop");
-  return { ...f, id, registry, boundary, file };
+  return { ...f, id, registry, boundary, file, app };
 }
 
 test("a desktop session's summary carries the Claude app's own session id", async t => {
@@ -1995,11 +1996,18 @@ for (const order of ["report-first", "transcript-first"] as const) test(`an app-
   assert.equal(f.boundary.queries.length, 0);
 });
 
+function appNativeModFixtureClocked(t: TestContext, modOfferMs = 500) {
+  let now = 5_000_000;
+  const f = appNativeModFixture(t, modOfferMs, { now: () => now });
+  return { ...f, clock: { now: () => now, advance: (ms: number) => { now += ms; } } };
+}
+
 test("an app-created session queues while busy and offers once the registry becomes idle", async t => {
   const f = appNativeModFixture(t);
   f.registry.get(f.id)!.status = "busy";
   await f.sessions.send(f.id, "busy-native", "Wait for idle");
-  assert.equal(f.sessions.summaryOf(f.id)?.queue?.[0]?.error, DESKTOP_BUSY);
+  assert.equal(f.sessions.summaryOf(f.id)?.queue?.[0]?.wait, "desktop_busy");
+  assert.equal(f.sessions.summaryOf(f.id)?.queue?.[0]?.error, undefined);
   assert.deepEqual(f.sessions.modInbox.pending(f.id), []);
   f.sessions.pollQueued();
   assert.equal(f.boundary.queries.length, 0);
@@ -2014,7 +2022,7 @@ test("an app-created session queues while busy and offers once the registry beco
 test("an unclaimed app-created offer stays queued with Remote Control guidance, including send-now", async t => {
   const f = appNativeModFixture(t, 20);
   await f.sessions.send(f.id, "unclaimed-native", "Keep this message");
-  await waitFor(() => f.sessions.summaryOf(f.id)?.queue?.[0]?.error === DESKTOP_WAITING);
+  await waitFor(() => f.sessions.summaryOf(f.id)?.queue?.[0]?.wait === "desktop_waiting");
   assert.equal(f.sessions.modInbox.claim("unclaimed-native"), false);
   assert.equal(MessageReceipts.open(path.join(f.dir, "receipts.json")).status(`send:${f.id}:unclaimed-native`), null);
   await assert.rejects(f.sessions.sendQueued(f.id, "unclaimed-native"), DesktopBlockedError);
@@ -2412,4 +2420,420 @@ test("a new session keeps one idempotent create per content", async t => {
   const first = await f.create("create-content");
   assert.equal(await f.create("create-content"), first);
   await assert.rejects(f.create("create-content", "claude-other"), /같은 메시지 ID에 다른 내용이 이미 접수되었습니다/);
+});
+
+// ---- the mod in a Claude app session with no Remote Control: approvals, clear in place, send-now ----
+
+const APP_ID = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+const askOf = (askId: string, over: Record<string, unknown> = {}) => ({ askId, session: APP_ID, tool: "Bash", input: { command: "ls" }, suggestions: [] as unknown[], title: "", ...over });
+/** The newest permission card the phone was handed for this session. */
+const cardOf = (f: ReturnType<typeof appNativeModFixture>) => {
+  const card = f.events.map(row => row.event).filter(event => event.kind === "permission").at(-1);
+  assert.ok(card?.kind === "permission");
+  return card;
+};
+const kindsOf = (f: ReturnType<typeof appNativeModFixture>, kind: string) => f.events.map(row => row.event).filter(event => event.kind === kind);
+
+test("away from the Mac, a mod approval is held for the phone; its allow answers the hook", async t => {
+  const f = appNativeModFixture(t, 500, { away: async () => true });
+  f.registry.get(APP_ID)!.status = "busy";
+  assert.deepEqual(await f.sessions.modApprovalStart(askOf("hold-allow")), { state: "hold" });
+  assert.equal(f.sessions.summaryOf(APP_ID)?.state, "waiting", "the phone sees the session waiting");
+  const card = cardOf(f);
+  assert.deepEqual(await f.sessions.modApprovalPoll("hold-allow", 20), { state: "pending" });
+  assert.equal(f.sessions.decide(APP_ID, card.id, "allow"), true);
+  await nextTick();
+  assert.deepEqual(await f.sessions.modApprovalPoll("hold-allow", 20), { state: "answered", answer: { behavior: "allow" } });
+  assert.equal(kindsOf(f, "permission_decided").length, 1);
+  assert.notEqual(f.sessions.summaryOf(APP_ID)?.state, "waiting", "the approval is no longer waiting");
+  assert.equal(f.boundary.queries.length, 0, "the phone's answer never starts a host writer");
+});
+
+test("a phone deny carries its message to the model, and a second answer is refused", async t => {
+  const f = appNativeModFixture(t, 500, { away: async () => true });
+  f.registry.get(APP_ID)!.status = "busy";
+  await f.sessions.modApprovalStart(askOf("hold-deny"));
+  const card = cardOf(f);
+  assert.equal(f.sessions.decide(APP_ID, card.id, "deny", "not this one"), true);
+  await nextTick();
+  assert.deepEqual(await f.sessions.modApprovalPoll("hold-deny", 20), { state: "answered", answer: { behavior: "deny", message: "not this one" } });
+  assert.equal(f.sessions.decide(APP_ID, card.id, "allow"), false, "one winner: the card is no longer open");
+});
+
+test("the phone's always-allow carries the session rule the app suggested, and a mode suggestion becomes a mode update", async t => {
+  const f = appNativeModFixture(t, 500, { away: async () => true });
+  f.registry.get(APP_ID)!.status = "busy";
+  const suggestions = [{ type: "addRules", rules: [{ toolName: "Bash", ruleContent: "ls" }], behavior: "allow", destination: "session" }];
+  await f.sessions.modApprovalStart(askOf("hold-always", { suggestions }));
+  assert.equal(f.events.some(row => row.event.kind === "permission" && row.event.canAlways === true), true, "the card offers always-allow");
+  f.sessions.decide(APP_ID, cardOf(f).id, "allow_always");
+  await nextTick();
+  assert.deepEqual(await f.sessions.modApprovalPoll("hold-always", 20), { state: "answered", answer: { behavior: "allow", updates: [{ type: "addRules", rules: [{ toolName: "Bash", ruleContent: "ls" }], behavior: "allow", destination: "session" }] } });
+
+  await f.sessions.modApprovalStart(askOf("hold-mode", { tool: "Edit", input: { file_path: "a.txt" }, suggestions: [{ type: "setMode", mode: "acceptEdits", destination: "session" }] }));
+  f.sessions.decide(APP_ID, cardOf(f).id, "allow_always");
+  await nextTick();
+  assert.deepEqual(await f.sessions.modApprovalPoll("hold-mode", 20), { state: "answered", answer: { behavior: "allow", updates: [{ type: "setMode", mode: "acceptEdits", destination: "session" }] } });
+
+  await f.sessions.modApprovalStart(askOf("hold-bypass", { tool: "Write", input: { file_path: "b.txt" }, suggestions: [{ type: "setMode", mode: "bypassPermissions", destination: "session" }] }));
+  assert.equal(f.events.filter(row => row.event.kind === "permission" && row.event.canAlways === true).length, 2, "bypass is never offered as always");
+});
+
+test("at the Mac, a mod approval stays the Mac's dialog: no card, the session waits, and done clears it", async t => {
+  const f = appNativeModFixture(t, 500, { away: async () => false });
+  f.registry.get(APP_ID)!.status = "busy";
+  assert.deepEqual(await f.sessions.modApprovalStart(askOf("local-1")), { state: "local" });
+  assert.equal(kindsOf(f, "permission").length, 0, "the phone holds no card for a Mac approval");
+  assert.equal(f.events.some(row => row.event.kind === "notice" && row.event.code === "desktop_approval"), true, "the phone is told it waits at the Mac");
+  assert.equal(f.sessions.summaryOf(APP_ID)?.state, "waiting");
+  assert.deepEqual(await f.sessions.modApprovalPoll("local-1", 20), { state: "local" });
+  f.sessions.modApprovalDone("local-1");
+  assert.notEqual(f.sessions.summaryOf(APP_ID)?.state, "waiting");
+  assert.deepEqual(await f.sessions.modApprovalPoll("local-1", 20), { state: "unknown" }, "a done ask is forgotten");
+});
+
+test("a session the host does not hold for the phone (unknown, or with Remote Control) is always the Mac's dialog", async t => {
+  const f = appNativeModFixture(t, 500, { away: async () => true });
+  assert.deepEqual(await f.sessions.modApprovalStart(askOf("unknown-session", { session: "ffffffff-ffff-ffff-ffff-ffffffffffff" })), { state: "local" });
+  assert.equal(kindsOf(f, "permission").length, 0);
+});
+
+test("when the person returns to the Mac mid-hold, the Mac answers: the phone's card closes and its late answer is refused", async t => {
+  let away = true;
+  const f = appNativeModFixture(t, 500, { away: async () => away });
+  f.registry.get(APP_ID)!.status = "busy";
+  await f.sessions.modApprovalStart(askOf("back-1"));
+  const card = cardOf(f);
+  away = false;
+  assert.deepEqual(await f.sessions.modApprovalPoll("back-1", 50), { state: "local" });
+  assert.equal(kindsOf(f, "permission_decided").some(event => event.kind === "permission_decided" && event.decision === "expired"), true, "the card closes");
+  assert.throws(() => f.sessions.decide(APP_ID, card.id, "allow"), (error: unknown) => (error as { code?: unknown }).code === "desktop_approval_local", "the Mac answered first");
+});
+
+test("a hook that stops polling loses its hold, and the phone's card closes with it", async t => {
+  let now = 1_000_000;
+  const f = appNativeModFixture(t, 500, { away: async () => true, now: () => now });
+  f.registry.get(APP_ID)!.status = "busy";
+  await f.sessions.modApprovalStart(askOf("silent-1"));
+  const card = cardOf(f);
+  now += 46_000;
+  assert.deepEqual(await f.sessions.modApprovalPoll("silent-1", 20), { state: "expired" });
+  assert.equal(f.sessions.decide(APP_ID, card.id, "allow"), false, "nothing is left to answer");
+  assert.equal(kindsOf(f, "permission_decided").length >= 1, true);
+});
+
+test("a held approval also ends when its Claude app turn ends (idle for the grace period)", async t => {
+  let now = 1_000_000;
+  const f = appNativeModFixture(t, 500, { away: async () => true, now: () => now });
+  f.registry.get(APP_ID)!.status = "busy";
+  await f.sessions.modApprovalStart(askOf("ended-1"));
+  f.registry.get(APP_ID)!.status = "idle";
+  await f.sessions.pollDesktop();
+  now += 16_000;
+  assert.deepEqual(await f.sessions.modApprovalPoll("ended-1", 20), { state: "expired" });
+});
+
+test("a /clear from the phone runs in place when the mod answers: the session moves to the new id and nothing new starts", async t => {
+  const f = appNativeModFixtureClocked(t, 500);
+  const projects = path.dirname(path.dirname(f.file));
+  f.sessions.modInbox.listen(APP_ID, f.clock.now());
+  assert.equal(await f.sessions.send(APP_ID, "clear-1", "/clear"), APP_ID);
+  assert.equal(f.sessions.takeQueued(APP_ID, "clear-1"), true, "the ack says queued");
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "clear-1"));
+  assert.equal(f.sessions.modInbox.pending(APP_ID).find(offer => offer.itemId === "clear-1")?.kind, "clear");
+  assert.equal(f.sessions.reportMoved("clear-1", APP_ID, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"), false, "a move is only taken from the offer the mod claimed");
+  assert.equal(f.sessions.modInbox.claim("clear-1"), true);
+  const next = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+  fs.writeFileSync(path.join(projects, "project", `${next}.jsonl`), transcriptLine({ type: "user", uuid: "after-clear", cwd: f.cwd, message: { content: "fresh" } }));
+  assert.equal(f.sessions.reportMoved("clear-1", APP_ID, "not-a-session"), false);
+  assert.equal(f.sessions.reportMoved("clear-1", APP_ID, next), true);
+  // The app re-keys its own row to the new CLI id; the host lists transcripts the app's sidebar names.
+  f.app.row(2_000_000, next);
+  f.clock.advance(31_000);
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.list().some(s => s.id === APP_ID), false, "the old transcript leaves the list");
+  assert.equal(f.sessions.list().some(s => s.id === next), true, "the new id is the session the phone sees");
+  assert.equal(f.sessions.modInbox.result("clear-1", "submitted"), true);
+  assert.equal(f.sessions.summaryOf(APP_ID)?.queue, undefined, "the queued /clear is done");
+  assert.equal(f.boundary.queries.length, 0, "no new host session was started");
+});
+
+test("a /clear in place lists the new session when the move is reported, not at the next 30 s scan", async t => {
+  const f = appNativeModFixtureClocked(t, 500);
+  const projects = path.dirname(path.dirname(f.file));
+  f.sessions.modInbox.listen(APP_ID, f.clock.now());
+  assert.equal(await f.sessions.send(APP_ID, "clear-now", "/clear"), APP_ID);
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "clear-now"));
+  assert.equal(f.sessions.modInbox.claim("clear-now"), true);
+  const next = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+  fs.writeFileSync(path.join(projects, "project", `${next}.jsonl`), transcriptLine({ type: "user", uuid: "after-clear-now", cwd: f.cwd, message: { content: "fresh" } }));
+  f.app.row(2_000_000, next);
+  assert.equal(f.sessions.reportMoved("clear-now", APP_ID, next), true);
+  assert.equal(f.sessions.list().some(s => s.id === next), true, "the new id is listed with the move, no clock advance needed");
+  assert.deepEqual(f.sessions.list().find(s => s.id === next)?.supersedes, [APP_ID], "the new session names the id it took over");
+  assert.equal(f.sessions.list().some(s => s.id === APP_ID), false, "the old transcript leaves the list at once");
+});
+
+test("a claimed /clear that never reports its new session is a failure, not a clear", async t => {
+  const f = appNativeModFixture(t, 500);
+  f.sessions.modInbox.listen(APP_ID, Date.now());
+  await f.sessions.send(APP_ID, "clear-silent", "/clear");
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "clear-silent"));
+  assert.equal(f.sessions.modInbox.claim("clear-silent"), true);
+  assert.equal(f.sessions.modInbox.result("clear-silent", "submitted"), true);
+  assert.ok(f.sessions.summaryOf(APP_ID)?.queue?.[0]?.error, "without a reported move the item stays failed for the person to act on");
+  assert.equal(f.boundary.queries.length, 0);
+});
+
+test("a /clear with no mod answer waits as desktop_waiting and never forks a host session", async t => {
+  const f = appNativeModFixture(t, 20);
+  f.sessions.modInbox.listen(APP_ID, Date.now());
+  await f.sessions.send(APP_ID, "clear-unclaimed", "/clear");
+  await waitFor(() => f.sessions.summaryOf(APP_ID)?.queue?.[0]?.wait === "desktop_waiting");
+  assert.equal(f.sessions.summaryOf(APP_ID)?.queue?.[0]?.error, undefined);
+  assert.equal(f.sessions.list().length, 1, "no fresh host session appeared");
+  assert.equal(f.boundary.queries.length, 0);
+});
+
+test("without a mod, a /clear to a Claude app session stays blocked as before", async t => {
+  const f = appNativeModFixture(t);
+  assert.throws(() => f.sessions.send(APP_ID, "clear-no-mod", "/clear"), DesktopBlockedError);
+});
+
+test("send-now on a busy Claude app session answers desktop_busy, and interrupts through the mod only when asked", async t => {
+  const f = appNativeModFixture(t, 500);
+  f.registry.get(APP_ID)!.status = "busy";
+  await f.sessions.send(APP_ID, "steer-1", "Do this next");
+  assert.equal(f.sessions.takeQueued(APP_ID, "steer-1"), true);
+  assert.equal(f.sessions.summaryOf(APP_ID)?.queue?.[0]?.wait, "desktop_busy");
+  await assert.rejects(f.sessions.sendQueued(APP_ID, "steer-1"), (error: unknown) => (error as { code?: unknown }).code === "desktop_busy");
+  assert.equal(f.sessions.summaryOf(APP_ID)?.queue?.[0]?.wait, "desktop_busy", "still queued");
+  await assert.rejects(f.sessions.sendQueued(APP_ID, "steer-1", { interrupt: true }), (error: unknown) => (error as { code?: unknown }).code === "desktop_mod_offline", "no mod to stop the turn");
+
+  f.sessions.modInbox.listen(APP_ID, Date.now());
+  const sent = f.sessions.sendQueued(APP_ID, "steer-1", { interrupt: true });
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.kind === "abort"));
+  const abort = f.sessions.modInbox.pending(APP_ID).find(offer => offer.kind === "abort")!;
+  assert.equal(f.sessions.modInbox.claim(abort.itemId), true);
+  assert.equal(f.sessions.modInbox.result(abort.itemId, "submitted"), true);
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "steer-1" && offer.kind === undefined));
+  assert.equal(f.sessions.modInbox.claim("steer-1"), true);
+  assert.equal(f.sessions.modInbox.result("steer-1", "submitted"), true);
+  assert.equal(await sent, APP_ID);
+  assert.equal(f.sessions.summaryOf(APP_ID)?.queue, undefined, "the message went as the next turn");
+});
+
+test("a stop the mod cannot report leaves the message queued with its error code", async t => {
+  const f = appNativeModFixture(t, 20);
+  f.registry.get(APP_ID)!.status = "busy";
+  await f.sessions.send(APP_ID, "steer-2", "Still queued");
+  f.sessions.modInbox.listen(APP_ID, Date.now());
+  await assert.rejects(f.sessions.sendQueued(APP_ID, "steer-2", { interrupt: true }), (error: unknown) => (error as { code?: unknown }).code === "desktop_mod_offline");
+  assert.equal(f.sessions.summaryOf(APP_ID)?.queue?.[0]?.text, "Still queued");
+});
+
+test("a held approval's card and its decision survive a rebuild of the app session's snapshot", async t => {
+  const f = appNativeModFixture(t, 500, { away: async () => true });
+  f.registry.get(APP_ID)!.status = "busy";
+  assert.deepEqual(await f.sessions.modApprovalStart(askOf("rebuild-card")), { state: "hold" });
+  const card = cardOf(f);
+  // The app writes to its transcript while the hook still waits: the snapshot is rebuilt from it.
+  fs.appendFileSync(f.file, transcriptLine({ type: "assistant", uuid: "rebuild-a", message: { model: "test", content: [{ type: "text", text: "working" }] } }));
+  assert.ok(f.sessions.log(APP_ID).readAfter(0).events.some(event => event.kind === "permission" && event.id === card.id), "the rebuilt snapshot still shows the card");
+  assert.deepEqual(await f.sessions.modApprovalPoll("rebuild-card", 20), { state: "pending" });
+  assert.equal(f.sessions.decide(APP_ID, card.id, "allow"), true);
+  await nextTick();
+  fs.appendFileSync(f.file, transcriptLine({ type: "user", uuid: "rebuild-u", cwd: f.cwd, message: { content: "next prompt" } }));
+  const events = f.sessions.log(APP_ID).readAfter(0).events;
+  assert.ok(events.some(event => event.kind === "permission_decided" && event.id === card.id && event.decision === "allow"), "the rebuilt snapshot shows the decision");
+  assert.equal(events.some(event => event.kind === "permission" && event.id === card.id), false, "a decided card is not shown as open");
+  assert.deepEqual(await f.sessions.modApprovalPoll("rebuild-card", 20), { state: "answered", answer: { behavior: "allow" } });
+});
+
+test("a hold whose hook stopped polling is closed by the host's own sweep, with no poll needed", async t => {
+  let now = 1_000_000;
+  const f = appNativeModFixture(t, 500, { away: async () => true, now: () => now });
+  f.registry.get(APP_ID)!.status = "busy";
+  await f.sessions.modApprovalStart(askOf("silent-own"));
+  const card = cardOf(f);
+  now += 46_000;
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.decide(APP_ID, card.id, "allow"), false, "nothing is left to answer");
+  assert.equal(kindsOf(f, "permission_decided").some(event => event.kind === "permission_decided" && event.id === card.id && event.decision === "expired"), true, "the card closes");
+});
+
+test("a hook that gives up closes the phone's card at once: a late phone answer is refused, and the dialog's done forgets the ask", async t => {
+  const f = appNativeModFixture(t, 500, { away: async () => true });
+  f.registry.get(APP_ID)!.status = "busy";
+  await f.sessions.modApprovalStart(askOf("gave-up"));
+  const card = cardOf(f);
+  assert.deepEqual(f.sessions.modApprovalDone("gave-up"), {}, "nothing was answered on the phone");
+  assert.equal(kindsOf(f, "permission_decided").some(event => event.kind === "permission_decided" && event.id === card.id && event.decision === "expired"), true, "the card closes at once");
+  assert.throws(() => f.sessions.decide(APP_ID, card.id, "allow"), (error: unknown) => (error as { code?: unknown }).code === "desktop_approval_local", "the Mac's dialog answers, so the phone's answer is refused");
+  assert.equal(f.sessions.summaryOf(APP_ID)?.state, "waiting", "the Mac still waits on its dialog");
+  assert.deepEqual(f.sessions.modApprovalDone("gave-up"), {}, "the dialog's own done forgets the ask");
+  assert.deepEqual(await f.sessions.modApprovalPoll("gave-up", 20), { state: "unknown" });
+});
+
+test("a phone answer that lands before the hook gives up is the answer the hook takes, and no dialog opens beside it", async t => {
+  const f = appNativeModFixture(t, 500, { away: async () => true });
+  f.registry.get(APP_ID)!.status = "busy";
+  await f.sessions.modApprovalStart(askOf("late-answer"));
+  const card = cardOf(f);
+  assert.equal(f.sessions.decide(APP_ID, card.id, "deny", "not from the dialog"), true);
+  await nextTick();
+  assert.deepEqual(f.sessions.modApprovalDone("late-answer"), { answer: { behavior: "deny", message: "not from the dialog" } });
+  assert.deepEqual(await f.sessions.modApprovalPoll("late-answer", 20), { state: "unknown" }, "the done forgot the answered ask");
+});
+
+// The hook's polls are the host's freshness: a hook that keeps polling keeps the phone's answer open however
+// long the hold has run, and a hook that stops (the router is down) loses it one freshness window after its last poll.
+test("a hook that keeps polling keeps the phone's answer open, however long the hold has run", async t => {
+  let now = 1_000_000;
+  const f = appNativeModFixture(t, 500, { away: async () => true, now: () => now });
+  f.registry.get(APP_ID)!.status = "busy";
+  await f.sessions.modApprovalStart(askOf("polled-long"));
+  for (let poll = 0; poll < 3; poll++) {
+    now += 3_000;
+    assert.deepEqual(await f.sessions.modApprovalPoll("polled-long", 0), { state: "pending" });
+  }
+  now += APPROVAL_FRESH_MS - 1;
+  assert.equal(f.sessions.decide(APP_ID, cardOf(f).id, "allow"), true, "inside the window of its last poll, the phone's answer stands");
+  await nextTick();
+  assert.deepEqual(await f.sessions.modApprovalPoll("polled-long", 0), { state: "answered", answer: { behavior: "allow" } });
+});
+
+test("a hook that stops polling loses the phone's answer one freshness window after its last poll: the card closes as the Mac's", async t => {
+  let now = 1_000_000;
+  const f = appNativeModFixture(t, 500, { away: async () => true, now: () => now });
+  f.registry.get(APP_ID)!.status = "busy";
+  await f.sessions.modApprovalStart(askOf("outage-1"));
+  assert.deepEqual(await f.sessions.modApprovalPoll("outage-1", 0), { state: "pending" });
+  const card = cardOf(f);
+  // The router is down: no poll reaches the host, and the phone's answer arrives one window later.
+  now += APPROVAL_FRESH_MS;
+  assert.throws(() => f.sessions.decide(APP_ID, card.id, "allow"), (error: unknown) => (error as { code?: unknown }).code === "desktop_approval_local", "the phone's answer is refused: the hook may already have opened the dialog");
+  assert.ok(kindsOf(f, "permission_decided").some(event => event.kind === "permission_decided" && event.id === card.id && event.decision === "expired"), "the card closes as the Mac's");
+  assert.equal(f.sessions.summaryOf(APP_ID)?.state, "waiting", "the Mac still waits on its dialog");
+  assert.deepEqual(await f.sessions.modApprovalPoll("outage-1", 0), { state: "local" }, "a poll that gets through late hears the Mac's word, and the hold is not revived");
+  assert.throws(() => f.sessions.decide(APP_ID, card.id, "deny"), (error: unknown) => (error as { code?: unknown }).code === "desktop_approval_local", "still one winner");
+  assert.equal(f.boundary.queries.length, 0, "no host session was started");
+});
+
+// The hook dates each poll by when it sent it. A poll the router delivers late holds the phone's answer only to the
+// window its send began, so the hook's dialog (a window after its last send, plus a margin) never precedes the fence.
+test("a poll delivered late is dated by when the hook sent it: the phone's answer after that window is refused", async t => {
+  let now = 1_000_000;
+  const f = appNativeModFixture(t, 500, { away: async () => true, now: () => now });
+  f.registry.get(APP_ID)!.status = "busy";
+  await f.sessions.modApprovalStart(askOf("late-poll"));
+  const card = cardOf(f);
+  // Sent at 0 s, delivered at 6 s: fenced at 8 s. Dated by its arrival it would hold to 14 s.
+  now += 6_000;
+  assert.deepEqual(await f.sessions.modApprovalPoll("late-poll", 0, 1_000_000), { state: "pending" });
+  now += 2_000;
+  assert.throws(() => f.sessions.decide(APP_ID, card.id, "allow"), (error: unknown) => (error as { code?: unknown }).code === "desktop_approval_local", "at 8 s the phone's answer is refused: the hook may already have opened the dialog");
+  assert.deepEqual(await f.sessions.modApprovalPoll("late-poll", 0, 1_000_000), { state: "local" }, "the next poll hears the Mac's word");
+});
+
+test("a send time ahead of the arrival counts as the arrival", async t => {
+  let now = 1_000_000;
+  const f = appNativeModFixture(t, 500, { away: async () => true, now: () => now });
+  f.registry.get(APP_ID)!.status = "busy";
+  await f.sessions.modApprovalStart(askOf("future-poll"));
+  const card = cardOf(f);
+  assert.deepEqual(await f.sessions.modApprovalPoll("future-poll", 0, 1_000_000 + 60_000), { state: "pending" });
+  now += APPROVAL_FRESH_MS;
+  assert.throws(() => f.sessions.decide(APP_ID, card.id, "allow"), (error: unknown) => (error as { code?: unknown }).code === "desktop_approval_local", "the window runs from the arrival, not from the claimed send time");
+});
+
+test("a mode-only always-allow names the mode it sets, so the phone offers it with words to show", async t => {
+  const f = appNativeModFixture(t, 500, { away: async () => true });
+  f.registry.get(APP_ID)!.status = "busy";
+  await f.sessions.modApprovalStart(askOf("mode-named", { tool: "Edit", input: { file_path: "a.txt" }, suggestions: [{ type: "setMode", mode: "acceptEdits", destination: "session" }] }));
+  const card = cardOf(f);
+  assert.equal(card.canAlways, true);
+  assert.equal(card.alwaysAllow?.summary, "권한 모드: 수정 수락 (Accept edits)");
+});
+
+test("a message queued across a /clear in place follows the session to its new id, and a send to the old id lands there", async t => {
+  const f = appNativeModFixtureClocked(t, 500);
+  const projects = path.dirname(path.dirname(f.file));
+  const next = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+  f.sessions.modInbox.listen(APP_ID, f.clock.now());
+  assert.equal(await f.sessions.send(APP_ID, "clear-2", "/clear"), APP_ID);
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "clear-2"));
+  assert.equal(f.sessions.modInbox.claim("clear-2"), true);
+  // Sent while the clear is under way: it waits behind the clear, under the id the phone has now.
+  assert.equal(await f.sessions.send(APP_ID, "during-clear", "Next words"), APP_ID);
+  fs.writeFileSync(path.join(projects, "project", `${next}.jsonl`), transcriptLine({ type: "user", uuid: "fresh", cwd: f.cwd, message: { content: "fresh" } }));
+  assert.equal(f.sessions.reportMoved("clear-2", APP_ID, next), true);
+  f.app.row(2_000_000, next);
+  f.registry.set(next, { sessionId: next, pid: 43, status: "busy" });
+  f.clock.advance(31_000);
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.list().some(s => s.id === APP_ID), false, "the old transcript leaves the list");
+  assert.deepEqual(f.sessions.summaryOf(next)?.queue?.map(item => item.id), ["during-clear"], "the message moved with the session");
+  // The phone still has the old id open: its next send lands on the new one, and the ack names it.
+  assert.equal(await f.sessions.orderedSend(APP_ID, "stale-id", "Still on the old id"), next);
+  assert.deepEqual(f.sessions.summaryOf(next)?.queue?.map(item => item.id), ["during-clear", "stale-id"]);
+  assert.equal(f.sessions.modInbox.result("clear-2", "submitted"), true);
+  assert.equal(f.sessions.summaryOf(next)?.queue?.some(item => item.id === "clear-2"), false, "the queued /clear is done");
+  assert.equal(f.boundary.queries.length, 0, "no new host session was started");
+});
+
+// The app ran the message, the phone lost the ack, a /clear moved the session, and the phone resent the
+// same id under the old id it still had open. The receipt was written under the old id, so the resend is
+// acknowledged at the new one and never offered to the app again.
+test("a resend of a message the app already ran is acknowledged after a /clear moved the session, and runs nothing again", async t => {
+  const f = appNativeModFixtureClocked(t, 500);
+  const projects = path.dirname(path.dirname(f.file));
+  const next = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+  f.sessions.modInbox.listen(APP_ID, f.clock.now());
+  assert.equal(await f.sessions.send(APP_ID, "ran-1", "Ran once"), APP_ID);
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "ran-1"));
+  assert.equal(f.sessions.modInbox.claim("ran-1"), true);
+  assert.equal(f.sessions.modInbox.result("ran-1", "submitted"), true);
+  assert.equal(await f.sessions.send(APP_ID, "clear-r", "/clear"), APP_ID);
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "clear-r"));
+  assert.equal(f.sessions.modInbox.claim("clear-r"), true);
+  fs.writeFileSync(path.join(projects, "project", `${next}.jsonl`), transcriptLine({ type: "user", uuid: "fresh", cwd: f.cwd, message: { content: "fresh" } }));
+  assert.equal(f.sessions.reportMoved("clear-r", APP_ID, next), true);
+  f.app.row(2_000_000, next);
+  f.registry.set(next, { sessionId: next, pid: 43, status: "idle" });
+  f.clock.advance(31_000);
+  await f.sessions.pollDesktop();
+  assert.equal(await f.sessions.orderedSend(APP_ID, "ran-1", "Ran once"), next, "the resend is acknowledged at the new id");
+  await delay(20);
+  assert.deepEqual(f.sessions.modInbox.pending(next), [], "the app is not offered the message a second time");
+  assert.equal(f.sessions.summaryOf(next)?.queue, undefined, "nothing is queued for the resend");
+  assert.equal(MessageReceipts.open(path.join(f.dir, "receipts.json")).status(`send:${next}:ran-1`), "completed");
+  assert.equal(f.boundary.queries.length, 0, "no new host session was started");
+});
+
+test("a handed-off session whose /clear moved it to a shorter transcript tails the new one from its start", async t => {
+  let clock = Date.now();
+  const f = await modFixture(t, 500, 500, false, undefined, () => clock);
+  const file = path.join(f.projects, "project", `${f.sdkId}.jsonl`);
+  const next = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+  fs.appendFileSync(file, transcriptLine({ type: "user", uuid: "long-1", cwd: f.cwd, message: { content: "A long conversation in the app, with plenty of words the new one never repeats" } }) +
+    transcriptLine({ type: "assistant", uuid: "long-2", message: { model: "test", content: [{ type: "text", text: "A long answer that the new conversation does not repeat at all" }] } }));
+  await f.sessions.pollDesktop();
+  assert.ok(f.sessions.log(f.id).readAfter(0).events.some(e => e.kind === "assistant" && e.text === "A long answer that the new conversation does not repeat at all"));
+  f.sessions.modInbox.listen(f.sdkId, Date.now());
+  await f.sessions.send(f.id, "clear-h", "/clear");
+  await waitFor(() => f.sessions.modInbox.pending(f.sdkId).some(offer => offer.itemId === "clear-h"));
+  assert.equal(f.sessions.modInbox.claim("clear-h"), true);
+  const newFile = path.join(f.projects, "project", `${next}.jsonl`);
+  fs.writeFileSync(newFile, transcriptLine({ type: "user", uuid: "fresh-1", cwd: f.cwd, message: { content: "fresh" } }));
+  assert.ok(fs.statSync(newFile).size < fs.statSync(file).size, "the new transcript is shorter than the old offset");
+  assert.equal(f.sessions.reportMoved("clear-h", f.sdkId, next), true);
+  // Desktop discovers a new transcript at most every 30 s: the clock moves past that, as the app's would.
+  clock += 31_000;
+  await f.sessions.pollDesktop();
+  fs.appendFileSync(newFile, transcriptLine({ type: "assistant", uuid: "fresh-2", message: { model: "test", content: [{ type: "text", text: "fresh answer after the clear" }] } }));
+  await f.sessions.pollDesktop();
+  const events = f.sessions.log(f.id).readAfter(0).events;
+  assert.ok(events.some(e => e.kind === "user" && e.text === "fresh"), "the new conversation's first prompt reaches the phone");
+  assert.equal(events.filter(e => e.kind === "assistant" && e.text === "fresh answer after the clear").length, 1, "the new answer arrives once");
 });

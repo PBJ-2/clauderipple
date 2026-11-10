@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Sessions } from "../src/sessions.ts";
-import { BridgeClient, DESKTOP_WAITING, DesktopBlockedError } from "../src/bridge-client.ts";
+import { BridgeClient, DesktopBlockedError } from "../src/bridge-client.ts";
 import { setTimeout as delay } from "node:timers/promises";
 import { PermissionQueue } from "../src/permissions.ts";
 import { liveDesktopProcesses, type DesktopProcess } from "../src/desktop.ts";
@@ -347,7 +347,8 @@ for (const bridgeAppears of [true, false]) test(`a completed Desktop session wit
   f.sessions.enqueue(id, "waiting-rc", "원문\n" + "긴 메시지 😀".repeat(1000));
   await delay(40);
   assert.equal(f.sessions.summaryOf(id)?.queueHeld, undefined);
-  assert.equal(f.sessions.summaryOf(id)?.queue?.[0]?.error, DESKTOP_WAITING);
+  assert.equal(f.sessions.summaryOf(id)?.queue?.[0]?.wait, "desktop_waiting", "a wait is a code, not the failure text");
+  assert.equal(f.sessions.summaryOf(id)?.queue?.[0]?.error, undefined);
   assert.equal(f.queries(), 0);
   assert.equal(f.posts.length, 0);
   if (bridgeAppears) f.registry.get(id)!.bridgeSessionId = "bridge";

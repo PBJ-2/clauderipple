@@ -7,6 +7,7 @@ import type { LinkStatus } from "./conn.ts";
 import { esc, icon } from "./dom.ts";
 import { patchList, setHTML } from "./html.ts";
 import { lang, pickLang, setLang, t } from "./i18n.ts";
+import { ANSWERED_ELSEWHERE, answeredElsewhere } from "./approval-refusal.ts";
 import { browserPushEnv, currentSubscription, enablePush, sameKey } from "./notify.ts";
 import { adopt, autoSendable, createSend, hostIdentity, loadOutbox, named, outboxStart, preserved, refuse, requeue, writeOutbox } from "./outbox.ts";
 import type { OutboxEntry, OutboxStart, PreservedItem } from "./outbox.ts";
@@ -389,7 +390,7 @@ export class App {
         if (!m.ok) this.failOlder(m.reqId);
         const p = this.pending.get(m.reqId);
         this.pending.delete(m.reqId);
-        if (p) { if (m.ok) p.resolve(m.data); else p.reject(new Error(m.error)); }
+        if (p) { if (m.ok) p.resolve(m.data); else p.reject(Object.assign(new Error(m.error), m.code ? { code: m.code } : {})); }
         break;
       }
       case "error": {
@@ -407,6 +408,9 @@ export class App {
             if (this.screen.name === "session") this.renderSession();
           }
         }
+        // A decision without a request id (no reply to wait for) that the Claude app answered first: the
+        // approval closes with the host's sentence on its own `permission_decided`; no toast for it.
+        if (m.code === ANSWERED_ELSEWHERE) break;
         this.toast(t("error.generic", { text: m.message }));
         break;
       }
@@ -1408,7 +1412,9 @@ export class App {
             deciding.add(id); this.renderSession(true);
             try { await this.requestFrame(reqId => ({ t: "decide", reqId, session, id, decision, ...(decision !== "deny" ? { answers } : {}) })); }
             catch (error) {
-              if (deciding.has(id)) {
+              // The Claude app answered this one first: the card stays disabled until its
+              // `permission_decided` closes it with the host's sentence, so there is no toast.
+              if (deciding.has(id) && !answeredElsewhere(error)) {
                 const unknown = error instanceof Error && error.message === "timeout";
                 if (!unknown) deciding.delete(id);
                 this.toast(unknown ? t("perm.unconfirmed") : t("error.generic", { text: error instanceof Error ? error.message : String(error) }));

@@ -33,6 +33,11 @@ const CATCHUP_FRAMES = 4;
 const BATCH_MS = 80;
 /** Sent at once, with nothing held back: a permission request the phone must answer, and the decision that clears it. */
 const URGENT_EVENTS: ReadonlySet<SessionEvent["kind"]> = new Set(["permission", "permission_decided"]);
+/** A failure's machine code for the phone (`desktop_busy`, `desktop_approval_local`, ...), or undefined: other codes are internal. */
+const machineCode = (e: unknown): string | undefined => {
+  const code = (e as { code?: unknown }).code;
+  return typeof code === "string" && code.startsWith("desktop_") ? code : undefined;
+};
 /** `/api/limits` makes the router read each provider's quota; once a minute is plenty for percentages. */
 const LIMITS_MS = 60_000;
 const BLOB_CHUNK_CHARS = 60_000;
@@ -585,11 +590,13 @@ export class HostServer {
           const desktop = s.list().some(session => session.id === msg.session && session.origin === "desktop");
           const id = await s.orderedSend(msg.session, msg.clientMsgId, msg.text, msg.attachments, msg.behavior);
           // A message the person sends after a Stop is them carrying on: the queue goes on after it.
-          s.resumeQueue(msg.session);
+          // `id` is the session the message went to (a session the app moved on from answers at its new id).
+          s.resumeQueue(id);
           // The message's own echo may sit in a window; it goes before the ack, so the phone never drops the
           // optimistic bubble before the real one has arrived.
           if (c.batches.has(id)) this.pumpNow(c, id);
-          this.send(c, { t: "ack", clientMsgId: msg.clientMsgId, session: id });
+          const queued = s.takeQueued(id, msg.clientMsgId);
+          this.send(c, { t: "ack", clientMsgId: msg.clientMsgId, session: id, ...(queued ? { queued: true as const } : {}) });
           if (desktop && id === msg.session) this.attach(c, id, undefined, undefined);
         } catch (e) {
           if (e instanceof OutcomeUnknownError) {
@@ -607,8 +614,9 @@ export class HostServer {
           if (!await s.decide(msg.session, msg.id, msg.decision, msg.message, msg.answers, msg.reqId)) throw new Error("이미 처리됨");
           if (msg.reqId) this.send(c, { t: "res", reqId: msg.reqId, ok: true, data: null });
         } catch (e) {
-          if (msg.reqId) this.send(c, { t: "res", reqId: msg.reqId, ok: false, error: (e as Error).message });
-          else this.send(c, { t: "error", code: "permission", message: (e as Error).message, session: msg.session });
+          const code = machineCode(e);
+          if (msg.reqId) this.send(c, { t: "res", reqId: msg.reqId, ok: false, error: (e as Error).message, ...(code ? { code } : {}) });
+          else this.send(c, { t: "error", code: code ?? "permission", message: (e as Error).message, session: msg.session });
         }
         return;
       case "set_mode":
@@ -641,7 +649,9 @@ export class HostServer {
         try {
           this.send(c, { t: "res", reqId: msg.reqId, ok: true, data: await this.request(msg.op, c) });
         } catch (e) {
-          this.send(c, { t: "res", reqId: msg.reqId, ok: false, error: (e as Error).message });
+          // A failure that names a machine code (a busy app session, a mod that is offline) keeps it for the phone.
+          const code = machineCode(e);
+          this.send(c, { t: "res", reqId: msg.reqId, ok: false, error: (e as Error).message, ...(code ? { code } : {}) });
         }
         return;
     }
@@ -707,7 +717,7 @@ export class HostServer {
       }
       case "enqueue": await s.enqueue(op.session, op.clientMsgId, op.text, op.attachments ?? []); return { queued: true };
       case "queue_remove": return s.removeQueued(op.session, op.id);
-      case "queue_send": return { session: await s.sendQueued(op.session, op.id) };
+      case "queue_send": return { session: await s.sendQueued(op.session, op.id, { interrupt: op.interrupt === true }) };
       case "queue_resume": s.resumeQueue(op.session); return null;
       case "blob": {
         if (!s.has(op.session)) throw new Error("no such session");

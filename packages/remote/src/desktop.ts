@@ -18,6 +18,8 @@ export { nextPlan } from "./task-plan.ts";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const WINDOW = 256 * 1024;
 const RECENT_MS = 14 * 24 * 60 * 60 * 1000;
+/** How long a session the host was told of (DesktopSessions.rediscover) stays listed while the sidebar lags. */
+const NAMED_MS = 10 * 60 * 1000;
 type RecordValue = Record<string, unknown>;
 type Summarize = (tool: string, input: RecordValue, cwd: string) => string;
 interface Source { file: string; size: number; mtime: number; unfinished: boolean; summary: SessionSummary }
@@ -117,6 +119,9 @@ export interface DesktopOptions {
   /** The latest figures the host read for a session. A snapshot is rebuilt from the transcript
    * whenever it grows, so the figures are put back at the end of every rebuild. */
   figures?: (id: string) => Figures | undefined;
+  /** The events the host holds for a session beyond its transcript (a held approval's card and its
+   * decision): a snapshot is rebuilt from the transcript, so these are put back at the end of every rebuild. */
+  held?: (id: string) => EventBody[];
   /** The phone's id for a user line the app's mod typed in (by the line's uuid and text), so the
    * phone can tell its own message when it comes back in a rebuilt snapshot. */
   userId?: (id: string, uuid: string, text: string) => string | undefined;
@@ -526,6 +531,9 @@ export class DesktopSessions {
   private temp: string | null = null;
   private scannedAt = -Infinity;
   private checkedAt = -Infinity;
+  /** Transcripts the host was told the Claude app moved on to (a /clear in place): listed at once, even
+   * before the app's sidebar names them. id → when it was named; forgotten once the sidebar lists it. */
+  private named = new Map<string, number>();
 
   constructor(opts: DesktopOptions) {
     this.opts = opts;
@@ -566,6 +574,14 @@ export class DesktopSessions {
     if (!UUID.test(id) || this.opts.excluded().has(id)) return false;
     this.refresh();
     return this.sources.has(id);
+  }
+
+  /** The Claude app moved a session on to `id` (a /clear in place): rediscover now, not at the next 30 s
+   * scan, and keep listing `id` until the app's sidebar names it. */
+  rediscover(id: string): void {
+    if (!UUID.test(id)) return;
+    this.named.set(id, (this.opts.now ?? Date.now)());
+    this.scannedAt = -Infinity;
   }
 
   liveProcess(id: string, maxAgeMs = 1000): DesktopProcess | undefined {
@@ -1020,6 +1036,7 @@ export class DesktopSessions {
       this.tailSubs.set(id, state);
       this.tailCopies.delete(id); // an import writes line identities to the log, which dedupes from here
       importing = false;
+      for (const body of this.opts.held?.(id) ?? []) log.append(body);
       const figures = this.opts.figures?.(id);
       if (figures) log.append({ kind: "figures", figures });
       return log;
@@ -1056,6 +1073,7 @@ export class DesktopSessions {
     const candidates: { id: string; file: string; stat: fs.Stats }[] = [];
     const excluded = this.opts.excluded();
     const sidebar = this.opts.sidebarIds?.();
+    for (const [id, at] of this.named) if (sidebar?.has(id) || now - at > NAMED_MS) this.named.delete(id);
     try {
       for (const project of fs.readdirSync(this.projects, { withFileTypes: true })) {
         if (!project.isDirectory()) continue; // Never follow project symlinks or recurse.
@@ -1065,7 +1083,7 @@ export class DesktopSessions {
           if (!entry.isFile() || !entry.name.endsWith(".jsonl") || !UUID.test(id) || excluded.has(id)) continue;
           const file = path.join(dir, entry.name);
           const stat = fs.lstatSync(file);
-          if (stat.isFile() && (sidebar?.size ? sidebar.has(id) : stat.mtimeMs >= now - RECENT_MS)) candidates.push({ id, file, stat });
+          if (stat.isFile() && (this.named.has(id) || (sidebar?.size ? sidebar.has(id) : stat.mtimeMs >= now - RECENT_MS))) candidates.push({ id, file, stat });
         }
       }
     } catch (error) { if (!missing(error)) throw error; }

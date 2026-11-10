@@ -13,7 +13,10 @@ import type { Attachment, QueuedMessage, SessionEvent } from "./protocol.ts";
 export const QUEUE_CAP = 20;
 
 export interface QueueAttachment { name: string; mediaType: string; file: string }
-export interface QueueItem { id: string; text: string; attachments: QueueAttachment[]; at: number; error?: string; claimedBy?: "mod" }
+/** Why a message waits before it can go, as a machine code (the phone words it). Never a failure. */
+export type QueueWait = "desktop_busy" | "desktop_waiting";
+const WAITS: readonly string[] = ["desktop_busy", "desktop_waiting"];
+export interface QueueItem { id: string; text: string; attachments: QueueAttachment[]; at: number; /** A real failure: the queue holds at this item until the person acts. */ error?: string; /** A pre-send obstacle that clears by itself; the message stays queued. */ wait?: QueueWait; claimedBy?: "mod" }
 interface Entry {
   items: QueueItem[];
   /** Attachments taken back to the composer; retained outside the timeline's rebase lifecycle. */
@@ -42,7 +45,8 @@ export class SendQueue {
     const saved = readJson<Record<string, Entry>>(queue.file) ?? {};
     for (const [session, entry] of Object.entries(saved)) {
       if (!entry || !Array.isArray(entry.items)) continue;
-      const items = entry.items.filter(item => item && typeof item.id === "string" && typeof item.text === "string" && Array.isArray(item.attachments));
+      const items = entry.items.filter(item => item && typeof item.id === "string" && typeof item.text === "string" && Array.isArray(item.attachments))
+        .map(item => { if (item.wait !== undefined && !WAITS.includes(item.wait)) delete item.wait; return item; });
       if (items.length || entry.awaiting || entry.editing?.length) queue.entries.set(session, { items, held: entry.held === true, ...(entry.heldBy ? { heldBy: entry.heldBy } : {}), ...(typeof entry.desktopId === "string" ? { desktopId: entry.desktopId } : {}), ...(entry.awaiting ? { awaiting: entry.awaiting } : {}), ...(entry.editing?.length ? { editing: entry.editing } : {}) });
     }
     return queue;
@@ -57,7 +61,7 @@ export class SendQueue {
   summary(session: string): { queue?: QueuedMessage[]; queueHeld?: boolean } {
     const entry = this.entries.get(session);
     if (!entry?.items.length) return {};
-    return { queue: entry.items.map(item => ({ id: item.id, text: item.text, attachments: item.attachments.length, at: item.at, ...(item.error ? { error: item.error } : {}) })), ...(entry.held ? { queueHeld: true } : {}) };
+    return { queue: entry.items.map(item => ({ id: item.id, text: item.text, attachments: item.attachments.length, at: item.at, ...(item.error ? { error: item.error } : {}), ...(item.wait ? { wait: item.wait } : {}) })), ...(entry.held ? { queueHeld: true } : {}) };
   }
 
   /** Adds to the end; false when this id is already queued (a resend after a lost ack). */
@@ -118,6 +122,7 @@ export class SendQueue {
     const item = this.entries.get(session)?.items.find(queued => queued.id === id);
     if (!item) return;
     item.error = error;
+    delete item.wait;
     this.entries.get(session)!.held = true;
     this.entries.get(session)!.heldBy ??= "failure";
     this.save();
@@ -145,23 +150,42 @@ export class SendQueue {
     }
   }
 
-  /** A known pre-send obstacle is not a failed write: keep watching, with the reason visible. */
-  wait(session: string, id: string, reason: string): boolean {
+  /**
+   * A known pre-send obstacle is not a failed write: the message stays queued and says why, with a
+   * machine code in `wait` (never in `error`, which a failure alone uses). Returns whether it changed.
+   */
+  wait(session: string, id: string, code: QueueWait): boolean {
     const item = this.entries.get(session)?.items.find(item => item.id === id);
-    if (!item || item.error === reason) return false;
-    item.error = reason;
+    if (!item || item.wait === code && item.error === undefined) return false;
+    item.wait = code;
+    delete item.error;
     this.save();
     return true;
   }
 
+  /** Records written before `wait` existed kept the wait sentence in `error`; move each such item over. */
+  moveWaits(text: string, code: QueueWait): void {
+    let changed = false;
+    for (const entry of this.entries.values()) {
+      for (const item of entry.items) {
+        if (item.error !== text) continue;
+        item.wait = code;
+        delete item.error;
+        changed = true;
+      }
+    }
+    if (changed) this.save();
+  }
+
   /** Older hosts held these definite pre-send refusals forever. Never release an explicit Stop. */
-  retryFailures(error: string, reason: string): void {
+  retryFailures(error: string, code: QueueWait): void {
     let changed = false;
     for (const entry of this.entries.values()) {
       if (!entry.held || entry.heldBy === "user" || entry.items[0]?.error !== error) continue;
       entry.held = false;
       delete entry.heldBy;
-      entry.items[0].error = reason;
+      delete entry.items[0].error;
+      entry.items[0].wait = code;
       changed = true;
     }
     if (changed) this.save();
@@ -188,6 +212,28 @@ export class SendQueue {
 
   sent(session: string, seq: number, at: number): void {
     this.entry(session).awaiting = { seq, at };
+    this.save();
+  }
+
+  /**
+   * The Claude app moved a session on (a /clear in place): its queued messages and their held state go
+   * to the new id, so nothing waits under the old one, which the list no longer shows. The turn the last
+   * send started ran in the old transcript, so nothing waits for it any more (`awaiting` does not move).
+   */
+  rekey(from: string, to: string): void {
+    const moving = this.entries.get(from);
+    if (!moving || from === to) return;
+    this.entries.delete(from);
+    const target = this.entries.get(to);
+    const editing = [...(moving.editing ?? []), ...(target?.editing ?? [])];
+    const heldBy = moving.heldBy ?? target?.heldBy;
+    this.entries.set(to, {
+      items: [...moving.items, ...(target?.items ?? [])],
+      held: moving.held || target?.held === true,
+      ...(heldBy ? { heldBy } : {}),
+      ...(editing.length ? { editing } : {}),
+    });
+    this.prune(to);
     this.save();
   }
 

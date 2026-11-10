@@ -6,6 +6,7 @@ import qrcode from "qrcode-generator";
 import { DEFAULT_RELAY, loadConfig, newToken, normalizeRelay, pairingUrl, relayPairingUrl, resolveBind, saveConfig, tokenMatches } from "./config.ts";
 import type { HostConfig } from "./config.ts";
 import type { ModInbox } from "./mod-inbox.ts";
+import type { ApprovalAnswer } from "./mod-approval.ts";
 import { settingsId, validSettingsJobAction, type SettingsJobs } from "./settings-jobs.ts";
 
 export interface Phone { clientId: string; connected: boolean; lastSeen: number | null; push: boolean }
@@ -23,7 +24,22 @@ export interface LocalControlOptions {
   refresh?(): void;
   inbox?: ModInbox;
   settingsJobs?: SettingsJobs;
+  /** The Claude app sessions' mod: its approvals (classic.PermissionRequest) and its own /clear moves. */
+  mod?: ModHost;
 }
+
+/** What the mod reports about its own permission asks and /clear runs (see Sessions). */
+export interface ModHost {
+  modApprovalStart(req: { askId: string; session: string; tool: string; input: Record<string, unknown>; suggestions: unknown[]; title: string }): Promise<{ state: "hold" | "local" }>;
+  /** `sentAt` is when the hook sent the poll (its clock, this host's): the poll is dated by it, never by a later arrival. */
+  modApprovalPoll(askId: string, waitMs?: number, sentAt?: number): Promise<unknown>;
+  /** The hook is done with its ask. An ask the phone answered first comes back with its answer (the hook applies it). */
+  modApprovalDone(askId: string): { answer?: ApprovalAnswer };
+  reportMoved(itemId: string, from: string, to: string): boolean;
+}
+
+/** A mod's approval request carries the tool's whole input (a Write's content): larger than the settings cap. */
+const MOD_BODY_CAP = 512 * 1024;
 
 export function isLoopback(address: string | undefined): boolean {
   return address === "::1" || /^127(?:\.\d{1,3}){3}$/.test(address ?? "") || /^::ffff:127(?:\.\d{1,3}){3}$/i.test(address ?? "");
@@ -46,15 +62,35 @@ function json(res: http.ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
-async function settingsBody(req: http.IncomingMessage): Promise<unknown> {
+async function settingsBody(req: http.IncomingMessage, cap = 4096): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
+  // An oversized body is read to its end (up to 8 caps) before refusing, so the caller's 400 reaches
+  // the client instead of a reset socket still being written to.
   for await (const chunk of req) {
     size += Buffer.byteLength(chunk);
-    if (size > 4096) throw new Error("settings body exceeds 4096 bytes");
-    chunks.push(Buffer.from(chunk));
+    if (size > cap * 8) throw new Error(`settings body exceeds ${cap} bytes`);
+    if (size <= cap) chunks.push(Buffer.from(chunk));
   }
+  if (size > cap) throw new Error(`settings body exceeds ${cap} bytes`);
   return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+}
+
+const ASK_ID = /^[\w-]{1,100}$/;
+/** A poll's send time: the hook's clock in whole milliseconds since the epoch. */
+const SENT_AT = /^\d{1,15}$/;
+/** The one request body a mod sends for an approval; anything else is refused, never guessed at. */
+function approvalStart(raw: unknown): { askId: string; session: string; tool: string; input: Record<string, unknown>; suggestions: unknown[]; title: string } | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const body = raw as Record<string, unknown>;
+  const { askId, session, tool, input, suggestions, title } = body;
+  if (typeof askId !== "string" || !ASK_ID.test(askId)) return null;
+  if (typeof session !== "string" || !session || session.length > 200) return null;
+  if (typeof tool !== "string" || !tool || tool.length > 100) return null;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  if (!Array.isArray(suggestions) || suggestions.length > 16) return null;
+  if (title !== undefined && (typeof title !== "string" || title.length > 500)) return null;
+  return { askId, session, tool, input: input as Record<string, unknown>, suggestions, title: typeof title === "string" ? title : "" };
 }
 
 export class LocalControl {
@@ -94,8 +130,44 @@ export class LocalControl {
       if (route === "/local/inbox" && req.method === "GET" && this.opts.inbox) {
         const session = url.searchParams.get("session");
         if (!session || session.length > 200 || url.searchParams.getAll("session").length !== 1) { json(res, 400, { error: "invalid session" }); return; }
+        // Every poll is the mod's heartbeat: the host offers clear-in-place and abort only to a mod that reads.
+        this.opts.inbox.listen(session, Date.now());
         json(res, 200, { offers: this.opts.inbox.pending(session) });
         return;
+      }
+      if (route.startsWith("/local/mod/") && this.opts.mod) {
+        const mod = this.opts.mod;
+        if (route === "/local/mod/approval" && req.method === "POST") {
+          let raw: unknown;
+          try { raw = await settingsBody(req, MOD_BODY_CAP); } catch { json(res, 400, { error: "invalid approval request" }); return; }
+          const start = approvalStart(raw);
+          if (!start) { json(res, 400, { error: "invalid approval request" }); return; }
+          json(res, 200, await mod.modApprovalStart(start)); return;
+        }
+        if (route === "/local/mod/approval" && req.method === "GET") {
+          const askId = url.searchParams.get("askId");
+          if (!askId || !ASK_ID.test(askId) || url.searchParams.getAll("askId").length !== 1) { json(res, 400, { error: "invalid approval" }); return; }
+          // The send time is optional: a mod that predates it is dated by the poll's arrival, as before.
+          const sent = url.searchParams.getAll("sentAt");
+          if (sent.length > 1 || sent.length === 1 && !SENT_AT.test(sent[0]!)) { json(res, 400, { error: "invalid approval" }); return; }
+          json(res, 200, await mod.modApprovalPoll(askId, undefined, sent.length ? Number(sent[0]) : undefined)); return;
+        }
+        if (route === "/local/mod/approval/done" && req.method === "POST") {
+          let raw: unknown;
+          try { raw = await settingsBody(req); } catch { json(res, 400, { error: "invalid approval" }); return; }
+          const askId = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>).askId : undefined;
+          if (typeof askId !== "string" || !ASK_ID.test(askId)) { json(res, 400, { error: "invalid approval" }); return; }
+          const done = mod.modApprovalDone(askId);
+          json(res, 200, done.answer ? { ok: true, state: "answered", answer: done.answer } : { ok: true }); return;
+        }
+        if (route === "/local/mod/moved" && req.method === "POST") {
+          let raw: unknown;
+          try { raw = await settingsBody(req); } catch { json(res, 400, { error: "invalid move" }); return; }
+          const body = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
+          if (!body || typeof body.itemId !== "string" || !ASK_ID.test(body.itemId) || typeof body.from !== "string" || typeof body.to !== "string") { json(res, 400, { error: "invalid move" }); return; }
+          const ok = mod.reportMoved(body.itemId, body.from, body.to);
+          json(res, ok ? 200 : 409, ok ? { ok: true } : { error: "move unavailable" }); return;
+        }
       }
       if ((route === "/local/inbox/claim" || route === "/local/inbox/result") && req.method === "POST" && this.opts.inbox) {
         let raw: unknown;

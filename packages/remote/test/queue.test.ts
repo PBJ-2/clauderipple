@@ -46,39 +46,52 @@ test("the queue holds twenty; a failure records why and holds; resume clears bot
   assert.equal(q.held("s"), false);
 });
 
-test("a temporary obstacle survives reopen without holding, and Stop still wins", t => {
+test("a temporary obstacle is a wait code, not an error, survives reopen without holding, and Stop still wins", t => {
   const d = dir(t);
   const q = SendQueue.open(d);
   q.add("s", { id: "a", text: "original", attachments: [] }, 1);
-  assert.equal(q.wait("s", "a", "waiting for RC"), true);
-  assert.equal(q.wait("s", "a", "waiting for RC"), false);
+  assert.equal(q.wait("s", "a", "desktop_busy"), true);
+  assert.equal(q.wait("s", "a", "desktop_busy"), false);
   const again = SendQueue.open(d);
   assert.equal(again.held("s"), false);
-  assert.equal(again.summary("s").queue![0]!.error, "waiting for RC");
+  assert.deepEqual(again.summary("s").queue![0], { id: "a", text: "original", attachments: 0, at: 1, wait: "desktop_busy" }, "the wait is a code, never the error");
   again.hold("s");
   const stopped = SendQueue.open(d);
-  stopped.retryFailures("waiting for RC", "retry automatically");
-  assert.equal(stopped.held("s"), true);
+  stopped.retryFailures("desktop_busy", "desktop_waiting");
+  assert.equal(stopped.held("s"), true, "a retry only releases a failure held by the host, not an explicit Stop");
 });
 
-test("legacy automatic refusals recover without releasing an explicit Stop or other failures", t => {
+test("a real failure replaces a wait, and a resume keeps a wait", t => {
+  const q = SendQueue.open(dir(t));
+  q.add("s", { id: "a", text: "x", attachments: [] }, 1);
+  q.wait("s", "a", "desktop_waiting");
+  q.fail("s", "a", "write outcome unknown");
+  assert.deepEqual(q.summary("s").queue![0], { id: "a", text: "x", attachments: 0, at: 1, error: "write outcome unknown" });
+  assert.equal(q.wait("s", "a", "desktop_busy"), true);
+  assert.equal(q.summary("s").queue![0]!.error, undefined, "a wait clears the failure text it replaces");
+});
+
+test("legacy waits kept in error move to the wait code, and legacy automatic refusals recover without releasing an explicit Stop or other failures", t => {
   const d = dir(t);
   const q = SendQueue.open(d);
-  for (const id of ["legacy", "stopped", "other"]) q.add(id, { id: "a", text: id, attachments: [] }, 1);
+  for (const id of ["legacy", "stopped", "other", "busy"]) q.add(id, { id: "a", text: id, attachments: [] }, 1);
   q.fail("legacy", "a", "old desktop refusal");
   q.fail("stopped", "a", "old desktop refusal");
   q.hold("stopped");
   q.fail("other", "a", "write outcome unknown");
+  q.fail("busy", "a", "Claude app busy sentence");
   const file = path.join(d, "queue.json");
   const saved = JSON.parse(fs.readFileSync(file, "utf8"));
   delete saved.legacy.heldBy; // Actual old format had no reason for its hold.
   fs.writeFileSync(file, JSON.stringify(saved));
   const again = SendQueue.open(d);
-  again.retryFailures("old desktop refusal", "waiting for RC");
+  again.retryFailures("old desktop refusal", "desktop_waiting");
   assert.equal(again.held("legacy"), false);
-  assert.equal(again.summary("legacy").queue![0]!.error, "waiting for RC");
+  assert.deepEqual(again.summary("legacy").queue![0], { id: "a", text: "legacy", attachments: 0, at: 1, wait: "desktop_waiting" });
   assert.equal(again.held("stopped"), true);
   assert.equal(again.held("other"), true);
+  again.moveWaits("Claude app busy sentence", "desktop_busy");
+  assert.deepEqual(again.summary("busy").queue![0], { id: "a", text: "busy", attachments: 0, at: 1, wait: "desktop_busy" });
   assert.equal(SendQueue.open(d).held("legacy"), false);
 });
 

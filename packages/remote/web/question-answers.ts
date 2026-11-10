@@ -1,6 +1,7 @@
 import type { Question } from "../src/protocol.ts";
 
-export interface QuestionDraft { current: number; selected: Record<string, string[]>; free: Record<string, string>; sending?: boolean; unconfirmed?: boolean; error?: string }
+/** `closed`: the Claude app answered this approval first; the host's sentence is shown, muted, and nothing more is sent. */
+export interface QuestionDraft { current: number; selected: Record<string, string[]>; free: Record<string, string>; sending?: boolean; unconfirmed?: boolean; error?: string; closed?: string }
 export const emptyQuestionDraft = (): QuestionDraft => ({ current: 0, selected: {}, free: {} });
 
 export function toggleOption(draft: QuestionDraft, question: Question, index: number): QuestionDraft {

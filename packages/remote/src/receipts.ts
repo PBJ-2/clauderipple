@@ -122,6 +122,24 @@ export class MessageReceipts {
     this.flying.delete(key);
   }
 
+  /**
+   * A /clear in place gave a session with no record a new id: the send receipts its messages were
+   * accepted under follow it, so a resend under the old id is acknowledged at the new one, not run again.
+   * A recordless session's sends are accepted in the call that begins them, so no attempt is in flight here.
+   */
+  moveSession(from: string, to: string): void {
+    const prefix = `send:${from}:`;
+    const moving = [...this.records.values()].filter(record => record.key.startsWith(prefix));
+    if (moving.length === 0) return;
+    const records = new Map(this.records);
+    for (const record of moving) {
+      records.delete(record.key);
+      const key = `send:${to}:${record.key.slice(prefix.length)}`;
+      if (!records.has(key)) records.set(key, { ...record, key, session: to });
+    }
+    this.persist(records);
+  }
+
   /** The attempt was rejected before the SDK saw it: a resend must run fresh, not stay unknown. */
   abandon(key: string): void {
     if (!this.records.has(key)) { this.flying.delete(key); return; }

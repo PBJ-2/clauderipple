@@ -24,7 +24,7 @@ export function controlCommand(text: string): ControlCommand | null {
 }
 
 export type Item =
-  | { type: "user"; key: string; ver: string; text: string; images?: ImagePart[]; files?: SessionFile[]; at: number; queued?: "pending" | "sending" | "uploading" | "failed"; /** the host refused it, in the host's own words: it will not go out by itself */ error?: string;
+  | { type: "user"; key: string; ver: string; text: string; images?: ImagePart[]; files?: SessionFile[]; at: number; queued?: "pending" | "sending" | "waiting" | "uploading" | "failed"; /** the host refused it, in the host's own words: it will not go out by itself */ error?: string;
       /** a message the phone is still holding: its photos as they are on the phone, its upload's chunks so far, and the phone's id for it */
       clientMsgId?: string; previews?: string[]; progress?: { sent: number; total: number } }
   | { type: "control"; key: string; ver: string; command: ControlCommand; state: "running" | "done" | "failed"; at: number }
@@ -51,7 +51,8 @@ export interface SessionView {
 
 /** A message this phone is holding for the host. `error` is the host's reason for refusing it: the
  * words stay, and it is not sent again on its own until the person retries or takes them back. */
-export interface Outgoing { clientMsgId: string; text: string; at: number; state: "pending" | "sending" | "uploading" | "failed"; error?: string;
+/** `waiting`: the host took the message into its queue, so it is not running yet (it is not "sending"). */
+export interface Outgoing { clientMsgId: string; text: string; at: number; state: "pending" | "sending" | "waiting" | "uploading" | "failed"; error?: string;
   /** photos as the phone draws them, and how many of the upload's chunks have gone (of `total`) */
   previews?: string[]; sent?: number; total?: number }
 

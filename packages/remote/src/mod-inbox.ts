@@ -1,11 +1,21 @@
-export interface ModOffer { sessionId: string; itemId: string; text: string; offeredAt: number }
+/**
+ * What the mod is asked to do. `prompt` (the default, and the only kind before 2026-11) submits
+ * `text` as the next turn. `clear` runs the CLI's own /clear in place and reports the new session id
+ * (`itemId` is the queued message's id). `abort` stops the session's running turn (`itemId` is random).
+ */
+export type ModKind = "prompt" | "clear" | "abort";
+export interface ModOffer { sessionId: string; itemId: string; text: string; offeredAt: number; kind?: ModKind }
 export type ModOutcome = "submitted" | "failed";
+/** The mod polls its inbox every 1.5 s; a session it has not polled for this long has no mod. */
+export const MOD_CONNECTED_MS = 6_000;
 
 type OfferState = { offer: ModOffer; claimed: boolean; resolve: (state: "claimed" | "withdrawn" | "expired") => void; timer: ReturnType<typeof setTimeout> };
 
 /** In-memory arbitration; the claim callback must persist before the winner is told. */
 export class ModInbox {
   private offers = new Map<string, OfferState>();
+  /** Session → when its mod last read this session's inbox (every poll reads it). */
+  private heard = new Map<string, number>();
   private persist: (offer: ModOffer) => boolean;
   private finish: (offer: ModOffer, outcome: ModOutcome) => void;
   private resultMs: number;
@@ -28,6 +38,23 @@ export class ModInbox {
 
   pending(sessionId: string): ModOffer[] {
     return [...this.offers.values()].filter(state => !state.claimed && state.offer.sessionId === sessionId).map(state => ({ ...state.offer }));
+  }
+
+  /** Whether the mod has claimed this offer and not yet reported its result. */
+  claimed(itemId: string): boolean {
+    return this.offers.get(itemId)?.claimed === true;
+  }
+
+  /** The mod read this session's inbox: it is connected to the Claude app session for now. */
+  listen(sessionId: string, now: number): void {
+    this.heard.set(sessionId, now);
+    while (this.heard.size > 200) this.heard.delete(this.heard.keys().next().value!);
+  }
+
+  /** Whether the session's mod has read its inbox within MOD_CONNECTED_MS. */
+  connected(sessionId: string, now: number): boolean {
+    const at = this.heard.get(sessionId);
+    return at !== undefined && now - at <= MOD_CONNECTED_MS;
   }
 
   claim(itemId: string): boolean {

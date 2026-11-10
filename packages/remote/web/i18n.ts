@@ -148,6 +148,7 @@ const ko = {
   "control.rewind.failed": "이전 지점으로 되돌리지 못했습니다",
   "queue.pending": "연결 시 전송",
   "queue.sending": "보내는 중…",
+  "queue.waiting": "대기 중",
   "outbox.unreadable": "저장된 미전송함을 읽지 못했습니다. 원문은 변경하지 않았습니다.",
   "outbox.storageUnavailable": "저장소에 접근할 수 없습니다. 메시지를 보내기 전에 저장소 설정을 확인해 주세요.",
   "outbox.saveFailed": "메시지를 저장하지 못했습니다. 이 화면을 닫기 전에 원문을 복사해 주세요.",
@@ -173,6 +174,7 @@ const ko = {
   "notice.desktop_handoff_retry": "Claude 앱에 대화를 열지 못했습니다. 잠시 후 다시 시도합니다. 휴대폰의 대화 기록은 유지됩니다.",
   "notice.desktop_handoff_failed": "Claude 앱에 대화를 열지 못했습니다. 컴퓨터에서 Claude 앱을 확인해 주세요. 휴대폰의 대화 기록은 유지됩니다.",
   "notice.desktop_settings_failed": "{text}",
+  "notice.desktop_approval": "승인 요청이 Claude 앱에 표시되었습니다. Claude 앱에서 승인해 주세요.",
   "perm.reason.cancelled": "{host}에서 요청이 취소되었거나 이미 응답되었습니다.",
   "notice.desktop_resumed": "Claude 앱에서 이 대화를 다시 열면 휴대폰에서 이어 간 내용이 보입니다.",
   "notice.model_changed": "모델이 변경되었습니다: {text}",
@@ -429,6 +431,7 @@ const en: Record<Key, string> = {
   "control.rewind.failed": "The conversation was not rewound",
   "queue.pending": "Sends when connected",
   "queue.sending": "Sending…",
+  "queue.waiting": "Waiting",
   "outbox.unreadable": "Your saved unsent queue could not be read. The stored text was left unchanged.",
   "outbox.storageUnavailable": "This browser's storage can't be reached. Check its storage settings before sending messages.",
   "outbox.saveFailed": "This message could not be saved. Copy the text before closing this screen.",
@@ -454,6 +457,7 @@ const en: Record<Key, string> = {
   "notice.desktop_handoff_retry": "The conversation could not be opened in the Claude app. It will try again shortly. Your phone's conversation history is preserved.",
   "notice.desktop_handoff_failed": "The conversation could not be opened in the Claude app. Check the Claude app on your computer. Your phone's conversation history is preserved.",
   "notice.desktop_settings_failed": "{text}",
+  "notice.desktop_approval": "The approval request is shown in the Claude app on your computer. Approve it there.",
   "perm.reason.cancelled": "The request was cancelled or already answered on your {host}.",
   "notice.desktop_resumed": "When you reopen this conversation in the Claude app, it will show what you continue on your phone.",
   "notice.model_changed": "Model changed: {text}",
@@ -587,4 +591,16 @@ export function t(key: Key, vars?: Record<string, string | number>): string {
   if (vars) for (const [k, v] of Object.entries(vars)) s = s.replaceAll(`{${k}}`, String(v));
   // `{n|tool|tools}` picks the singular when that count is 1 (English needs it; Korean never uses it).
   return s.replace(/\{(\w+)\|([^|}]*)\|([^}]*)\}/g, (_, k: string, one: string, other: string) => (Number(vars?.[k]) === 1 ? one : other));
+}
+
+/**
+ * The line that says why a request ended (`permission_decided` with `decision: "expired"`). A known
+ * reason word is translated; a readable sentence from the host (Korean, e.g. "the Claude app answered
+ * first") passes through as it is; a bare machine word this phone does not know is left out, as before.
+ */
+export function reasonLine(reason: string | undefined, vars?: Record<string, string>): string {
+  if (!reason) return "";
+  const key = `perm.reason.${reason}`;
+  if (key in dictionaries[current]) return t(key as Key, vars);
+  return /\s|[ㄱ-ㆎ가-힣]/.test(reason) ? reason : "";
 }

@@ -10,7 +10,7 @@ import { FRAME_CAP } from "../src/protocol.ts";
 import { BackgroundActivity } from "../src/background-activity.ts";
 import { reduce } from "../web/timeline.ts";
 import { activityOverview } from "../web/activity.ts";
-import { BridgeClient, DESKTOP_BUSY } from "../src/bridge-client.ts";
+import { BridgeClient } from "../src/bridge-client.ts";
 import { fileSymlinks } from "../../../test/capabilities.ts";
 import { signatureOf } from "./narration-signature.ts";
 
@@ -396,7 +396,7 @@ for (const mode of ["resume", "process", "recent"] as const) test(`desktop conti
   if (mode === "process") {
     await assert.rejects(sessions.setModel(id, "chosen-model", "high"), /Claude 앱/);
     assert.equal(sessions.send(id, "first-phone", "continue"), id);
-    assert.equal(sessions.summaryOf(id)?.queue?.[0]?.error, DESKTOP_BUSY, "an open process without registry status waits safely");
+    assert.equal(sessions.summaryOf(id)?.queue?.[0]?.wait, "desktop_busy", "an open process without registry status waits safely");
     assert.equal(options.length, 0);
     assert.equal(sessions.log(id).tail().events.some(e => e.kind === "user" && e.clientMsgId === "first-phone"), false);
     return;
@@ -726,4 +726,51 @@ test("processHasSession answers every session from one tokenization of the listi
   // A new listing replaces the memoized one.
   assert.equal(processHasSession(`1 claude --resume=${ids[0]}`, ids[0]!), true);
   assert.equal(processHasSession(`1 claude --resume=${ids[1]}`, ids[0]!), false);
+});
+
+test("a transcript the host was told of is listed at once, not at the next 30 s rediscovery", t => {
+  const f = fixture(t);
+  const moved = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+  fs.writeFileSync(path.join(f.project, `${id}.jsonl`), line(user));
+  assert.deepEqual(f.desktop.list().map(s => s.id), [id]);
+  f.advance();
+  fs.writeFileSync(path.join(f.project, `${moved}.jsonl`), line(user));
+  assert.deepEqual(f.desktop.list().map(s => s.id), [id], "the scan waits out its 30 s");
+  f.desktop.rediscover(moved);
+  assert.deepEqual(f.desktop.list().map(s => s.id).sort(), [id, moved].sort());
+  f.desktop.rediscover("not-a-session");
+  assert.deepEqual(f.desktop.list().map(s => s.id).sort(), [id, moved].sort(), "an id that is not a session is ignored");
+});
+
+test("a named transcript stays listed while the app's sidebar lags, and is dropped after ten minutes without it", t => {
+  const f = fixture(t);
+  const listed = new Set([id]);
+  let now = Date.now();
+  const desktop = new DesktopSessions({ projects: f.projects, summarize, excluded: () => f.excluded, now: () => now, processes: () => "", sidebarIds: () => listed });
+  t.after(() => desktop.close());
+  fs.writeFileSync(path.join(f.project, `${id}.jsonl`), line(user));
+  assert.deepEqual(desktop.list().map(s => s.id), [id]);
+  fs.writeFileSync(path.join(f.project, `${other}.jsonl`), line(user));
+  desktop.rediscover(other);
+  assert.deepEqual(desktop.list().map(s => s.id).sort(), [id, other].sort(), "named at once, before the sidebar lists it");
+  now += 60_000;
+  assert.deepEqual(desktop.list().map(s => s.id).sort(), [id, other].sort(), "still named on a later scan");
+  now += 10 * 60_000;
+  assert.deepEqual(desktop.list().map(s => s.id), [id], "named for ten minutes only, then the sidebar alone decides");
+});
+
+test("once the sidebar lists a named transcript, the sidebar alone keeps it", t => {
+  const f = fixture(t);
+  const listed = new Set([id]);
+  let now = Date.now();
+  const desktop = new DesktopSessions({ projects: f.projects, summarize, excluded: () => f.excluded, now: () => now, processes: () => "", sidebarIds: () => listed });
+  t.after(() => desktop.close());
+  fs.writeFileSync(path.join(f.project, `${id}.jsonl`), line(user));
+  fs.writeFileSync(path.join(f.project, `${other}.jsonl`), line(user));
+  desktop.rediscover(other);
+  listed.add(other);
+  assert.deepEqual(desktop.list().map(s => s.id).sort(), [id, other].sort(), "the sidebar names it");
+  listed.delete(other);
+  now += 60_000;
+  assert.deepEqual(desktop.list().map(s => s.id), [id], "no longer named, and the sidebar no longer lists it");
 });
