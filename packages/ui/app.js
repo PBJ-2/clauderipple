@@ -184,7 +184,7 @@ function applyProviderLabel(provider, key, typedName) {
  * (providerTitle), with its key after it only when another provider would read the same ("ChatGPT
  * (chatgpt-2)"), so two of a kind stay apart in a list or a menu.
  */
-function providerName(name, provider = currentConfig && currentConfig.providers && currentConfig.providers[name]) {
+function providerDisplayName(name, provider = currentConfig && currentConfig.providers && currentConfig.providers[name]) {
   const title = providerTitle(name, provider);
   const others = Object.entries((currentConfig && currentConfig.providers) || {}).filter(([key]) => key !== name);
   return title !== name && others.some(([key, other]) => providerTitle(key, other) === title) ? `${title} (${name})` : title;
@@ -1417,11 +1417,13 @@ function renderClients() {
     // only enforced by the router, and left to the config file rather than made a form (U36).
     const fallbacks = (route.fallbacks || []).map((fallback) => {
       const model = (groups.find((group) => group.name === fallback.provider) || { models: [] }).models.find((item) => item.id === fallback.model) || { id: fallback.model };
-      return `${labelOf(model)} · ${providerLabel(fallback.provider, currentConfig.providers[fallback.provider] || {})}`;
+      return `${labelOf(model)} · ${providerDisplayName(fallback.provider, currentConfig.providers[fallback.provider] || {})}`;
     });
+    // Who answers behind its vendor's dot, as the mapping page draws it; the provider's name is the dot's tooltip.
+    const dot = vendorDot(route.provider, currentConfig.providers[route.provider]);
     return cell(
       labelOf(claudeModels.find((model) => model.id === source) || { id: source }),
-      el("span", { text: labelOf(target) }),
+      el("span", { class: "route-target", title: providerDisplayName(route.provider, currentConfig.providers[route.provider] || {}) }, [dot, el("span", { text: labelOf(target) })]),
       fallbacks.length ? el("span", { class: "cell-sub", text: t("slots.fallbacks", { list: fallbacks.join(" → ") }) }) : null,
     );
   });
@@ -1445,7 +1447,7 @@ function renderClientPickerModels(enabled) {
   const groups = groupedModels(currentConfig);
   const key = JSON.stringify([
     [...checked].sort(),
-    groups.map((group) => [group.name, providerLabel(group.name, group.provider), group.models.map((model) => [
+    groups.map((group) => [group.name, providerDisplayName(group.name, group.provider), group.models.map((model) => [
       model.id, labelOf(model), discoveredContextWindow(group.name, model.id) ?? null,
       savedContextWindow(model.id) ?? null, pickerContextWindows.catalogWindows[model.id] ?? null,
       pickerContextWindows.windows[model.id] ?? null,
@@ -1463,6 +1465,8 @@ function renderClientPickerModels(enabled) {
   for (const id of [...pickerWindowDrafts.keys()]) if (!known.has(id)) pickerWindowDrafts.delete(id);
   box.replaceChildren();
   for (const group of groups) for (const model of group.models) {
+    // Each provider's models under its name and vendor's dot, as on Status, instead of the provider repeated on every model.
+    if (model === group.models[0]) box.appendChild(el("div", { class: "picker-group-head" }, [vendorDot(group.name, group.provider), el("span", { text: providerDisplayName(group.name, group.provider) })]));
     const input = el("input", { type: "checkbox", checked: checked.has(model.id) });
     input.dataset.model = model.id;
     input.dataset.provider = group.name;
@@ -1493,14 +1497,12 @@ function renderClientPickerModels(enabled) {
       if (windowNote) windowNote.hidden = !input.checked;
       void saveClientPickerModels();
     });
-    // Two lines: the name owns the first — on one line it was the thing that collapsed, down to
-    // "GPT…" — and the provider and the window share the second; the catalogue note, when there is
-    // one, takes a third of its own (style.css places it: an inline style is dropped by the CSP).
-    // The field sits outside the <label>, because inside it every click toggles the checkbox instead
-    // of reaching the field.
+    // One line: the name, then the window field at the end; the catalogue note, when there is one,
+    // takes a line of its own (style.css places it: an inline style is dropped by the CSP). The
+    // provider is the group's head above. The field sits outside the <label>, because inside it every
+    // click toggles the checkbox instead of reaching the field.
     box.appendChild(el("div", { class: "picker-model", title: model.id }, [
       el("label", { class: "pm-main" }, [input, el("span", { text: labelOf(model) })]),
-      el("small", { text: providerLabel(group.name, group.provider) }),
       windowField,
       windowNote,
     ]));
@@ -1541,7 +1543,7 @@ function renderClientPickerOrder(enabled) {
   const rows = ids.map((id) => {
     const entry = entries.find((item) => item.model === id);
     const owner = pickerOwner(currentConfig, id);
-    return { id, name: (entry && entry.name) || id, provider: owner ? providerLabel(owner, currentConfig.providers[owner] || {}) : "" };
+    return { id, name: (entry && entry.name) || id, provider: owner ? providerDisplayName(owner, currentConfig.providers[owner] || {}) : "" };
   });
   const key = JSON.stringify(rows);
   if (key === pickerOrderDrawnFor.key && box.childElementCount) return;
@@ -1563,7 +1565,7 @@ function renderClientPickerOrder(enabled) {
       void saveClientPickerModels(false);
     };
     const button = (suffix, text, labelKey, disabled, delta) => el("button", {
-      type: "button", class: "btn secondary compact", "data-key": `picker-order:${row.id}:${suffix}`, text,
+      type: "button", class: "icon-btn po-move", "data-key": `picker-order:${row.id}:${suffix}`, text,
       "aria-label": t(labelKey, { name: row.name }), title: t(labelKey, { name: row.name }),
       ...(disabled ? { disabled: "" } : {}), onclick: () => move(delta, suffix),
     });
@@ -1627,7 +1629,7 @@ function renderModelSlots() {
     MODEL_SLOTS.map((slot) => chosen[slot] || ""),
     searchIntercepted ? 1 : 0,
     currentConfig.webSearch ? [currentConfig.webSearch.provider, currentConfig.webSearch.model] : null,
-    groups.map((group) => [group.name, providerLabel(group.name, group.provider), group.models.map((model) => [
+    groups.map((group) => [group.name, providerDisplayName(group.name, group.provider), group.models.map((model) => [
       model.id, labelOf(model), providerCannotSearch(group.name, model.id),
       Boolean(currentConfig.providers[group.name] && currentConfig.providers[group.name].type === "anthropic"),
     ])]),
@@ -1639,7 +1641,7 @@ function renderModelSlots() {
     const select = el("select", {});
     select.appendChild(el("option", { value: "", text: t("slots.slotDefault") }));
     for (const group of groups) for (const model of group.models) {
-      const option = el("option", { value: model.id, text: `${labelOf(model)} · ${providerLabel(group.name, group.provider)}` });
+      const option = el("option", { value: model.id, text: `${labelOf(model)} · ${providerDisplayName(group.name, group.provider)}` });
       if (chosen[slot] === model.id) option.selected = true;
       // `smallFast` is what a WebSearch runs on, so an inability to search is fatal there and
       // merely worth knowing everywhere else.
@@ -1677,7 +1679,7 @@ function renderWebSearchSlot() {
     // A Claude account searches on its own when routed to, but `serveWebSearch` has no backend for
     // that provider kind: named here, the search would quietly fall back to `smallFast`.
     if (currentConfig.providers[group.name] && currentConfig.providers[group.name].type === "anthropic") continue;
-    const option = el("option", { value: webSearchChoice(group.name, model.id), text: `${labelOf(model)} · ${providerLabel(group.name, group.provider)}` });
+    const option = el("option", { value: webSearchChoice(group.name, model.id), text: `${labelOf(model)} · ${providerDisplayName(group.name, group.provider)}` });
     if (saved && saved.provider === group.name && saved.model === model.id) { option.selected = true; found = true; }
     select.appendChild(option);
   }
@@ -1794,7 +1796,7 @@ function classifierRow(stage, saved, groups) {
   target.appendChild(selectOption("", t("classifier.native")));
   let found = false;
   for (const group of groups) {
-    const optgroup = el("optgroup", { label: providerLabel(group.name, group.provider) });
+    const optgroup = el("optgroup", { label: providerDisplayName(group.name, group.provider) });
     for (const model of group.models) {
       const option = selectOption(JSON.stringify([group.name, model.id]), labelOf(model));
       if (stage === "rest" && CLASSIFIER_REFUSES_STAGE2.has(model.id)) option.textContent += ` (${t("classifier.refusesStage2")})`;
@@ -2607,7 +2609,7 @@ function targetSelect(route) {
   const select = el("select", {});
   select.appendChild(selectOption("", t("slots.passthrough")));
   for (const group of groupedModels(currentConfig)) {
-    const optgroup = el("optgroup", { label: providerName(group.name, group.provider) });
+    const optgroup = el("optgroup", { label: providerDisplayName(group.name, group.provider) });
     for (const model of group.models) optgroup.appendChild(selectOption(JSON.stringify([group.name, model.id]), labelOf(model)));
     select.appendChild(optgroup);
   }
@@ -3051,7 +3053,7 @@ function providerRailItem(name, provider) {
   }, [
     vendorDot(name, provider),
     el("span", { class: "provider-rail-copy" }, [
-      el("strong", { text: providerName(name, provider) }),
+      el("strong", { text: providerDisplayName(name, provider) }),
       el("span", { text: t("providers.modelsCountShort", { count: modelsOf(provider).length }) }),
     ]),
     providerState(name, provider),
@@ -3081,7 +3083,7 @@ function renderProviderRail() {
   const list = $("#providers-list");
   const entries = Object.entries((currentConfig && currentConfig.providers) || {});
   const query = providerSearch.trim().toLowerCase();
-  const visible = entries.filter(([name, provider]) => !query || name.toLowerCase().includes(query) || providerLabel(name, provider).toLowerCase().includes(query) || providerName(name, provider).toLowerCase().includes(query) || providerKind(name, provider).toLowerCase().includes(query));
+  const visible = entries.filter(([name, provider]) => !query || name.toLowerCase().includes(query) || providerLabel(name, provider).toLowerCase().includes(query) || providerDisplayName(name, provider).toLowerCase().includes(query) || providerKind(name, provider).toLowerCase().includes(query));
   list.replaceChildren(...visible.map(([name, provider]) => providerRailItem(name, provider)));
   if (!entries.length) list.appendChild(el("div", { class: "provider-rail-empty", text: t("providers.empty") }));
   else if (!visible.length) list.appendChild(el("div", { class: "provider-rail-empty", text: t("providers.noSelection") }));
@@ -3120,7 +3122,7 @@ async function removeProvider(name, provider) {
   const extra = usages.fallbacks.length || usages.direct || usages.picker || usages.search || usages.classifier
     ? `\n\n${t("providers.removeExtra", { fallbacks: usages.fallbacks.length, direct: usages.direct, picker: usages.picker })}${usageSuffix(usages, { search: t("providers.usageSearch"), classifier: t("providers.usageClassifier") })}`
     : "";
-  if (!confirm(`${t("providers.removeConfirm", { name: providerName(name, provider) })}${extra}`)) return;
+  if (!confirm(`${t("providers.removeConfirm", { name: providerDisplayName(name, provider) })}${extra}`)) return;
   const next = clone(await latestConfig());
   // Resolve ownership before deleting declarations or the disambiguating direct rules.
   if (next.cli) next.cli.extraModels = (next.cli.extraModels || []).filter((entry) => {
@@ -4050,7 +4052,7 @@ function keyAccountsPanel(name) {
   add.addEventListener("click", () => { keyForm = { provider: name, id: null }; renderProviderDetail(); });
   const panel = el("div", { class: "provider-panel" }, [
     el("section", { class: "section" }, [
-      el("div", { class: "section-head" }, [el("h3", { class: "section-title", text: t("providers.keyAccountsTitle", { name: providerName(name) }) }), el("span", { id: "key-account-count", class: "small" })]),
+      el("div", { class: "section-head" }, [el("h3", { class: "section-title", text: t("providers.keyAccountsTitle", { name: providerDisplayName(name) }) }), el("span", { id: "key-account-count", class: "small" })]),
       el("div", { class: "group account-group" }, [rows, adding ? keyAccountForm(name, null, -1, []) : add]),
       el("p", { class: "group-footer", text: t("providers.keyAccountsHelp") }),
     ]),
@@ -4079,7 +4081,7 @@ function renderProviderDetail() {
   const back = el("button", { class: "provider-back", type: "button", onclick: closeProviderDetail }, [svgIcon("0 0 9 15", ["M7.5 1.5l-6 6 6 6"]), el("span", { text: t("nav.providers") })]);
   // The name people know it by, in its vendor's hue; under it the kind and, when the name is not the
   // key, the key itself, since routes, the picker and the config file name the provider by it.
-  const title = providerName(name, provider);
+  const title = providerDisplayName(name, provider);
   const header = el("header", { class: "provider-detail-header" }, [
     el("div", {}, [
       el("div", { class: "provider-title-line" }, [vendorDot(name, provider), el("h2", { text: title }), providerState(name, provider)]),

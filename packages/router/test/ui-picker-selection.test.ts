@@ -445,6 +445,8 @@ class SaveNode {
   checked: boolean;
   disabled = false;
   textContent = '';
+  // A provider's head in the picker list colours its vendor dot through the style object (the page's CSP drops style attributes).
+  style: Record<string, string> = {};
   placeholder: string;
   type: string;
   dataset: Record<string, string> = {};
@@ -1212,7 +1214,7 @@ function orderCardHarness(extraModels: string[]) {
     const claudeModels = [{ id: 'claude-opus-5-5' }];
     const $ = selector => selector === '#client-picker-order-card' ? h.card : h.box;
     const t = (key, vars) => vars ? key + ':' + vars.name : key, CSS = { escape: value => value };
-    const providerLabel = name => name;
+    const providerLabel = name => name, providerDisplayName = name => name;
     const groupedModels = config => Object.entries(config.providers).map(([name, p]) => ({ name, models: p.models }));
     const saveClientPickerModels = changed => { h.saves.push(changed); };
     ${dashboardBlock('function allKnownModelIds(', 'function updateSlotSummary(')}
