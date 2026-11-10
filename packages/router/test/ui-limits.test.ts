@@ -590,3 +590,38 @@ test("the exhaustion reasons are the mod's words: Korean and English verbatim, t
   assert.equal(dictionaries.ko!["providerStatus.unavailable"], fallback[1]);
   assert.equal(dictionaries.en!["providerStatus.unavailable"], fallback[2]);
 });
+
+test("every provider the read lists gets its gauges, whatever its type: OpenCode Go's 30-day window and Gemini's accounts", async () => {
+  const ui = limitsUi(async (path) => path === "/api/limits" ? { providers: [
+    { type: "opencode-go", provider: "other", title: "Go", accounts: [{ account: 0, at: now, windows: [{ kind: "window", used_percent: 93, window_minutes: 43200, reset_at: (now + 86400_000) / 1000, exhaust_at: (now + 130 * 60_000) / 1000 }] }] },
+    { type: "google", provider: "gem", title: "Gemini", accounts: [
+      { account: 0, id: "g1", label: "work@example.test", inUse: true, at: now, windows: [
+        { kind: "five_hour", used_percent: 12, window_minutes: 300, reset_at: (now + 3_600_000) / 1000 },
+        { kind: "scoped", label: "Argon weekly", used_percent: 40, window_minutes: 10080, reset_at: (now + 86400_000) / 1000 },
+      ] },
+    ] },
+  ] } : {}, { providers: { ...connected, gem: { reachable: true } } }, {
+    providers: { claude: { type: "anthropic", auth: "claude-code" }, gpt: { type: "chatgpt" }, other: { type: "openai-compatible" }, gem: { type: "google", auth: "antigravity" } },
+  });
+  await ui.refresh();
+  const blocks = findAll(ui.card, hasClass("provider-block"));
+  assert.equal(blocks.length, 2, "OpenCode Go and Gemini each have their gauges");
+  const go = blocks[0]!;
+  assert.equal(findAll(go, (node) => node.attrs.role === "progressbar").length, 1);
+  assert.match(text(go), /30d/, "a 43200-minute window is named by its span, as the mod does");
+  assert.match(text(go), /93%/);
+  assert.ok(text(go).includes(t("limits.exhaust", { time: "2h 10m" })), "an exhaust forecast reads as the mod's pane reads it");
+  const gemini = blocks[1]!;
+  assert.deepEqual(findAll(gemini, (node) => node.attrs.role === "progressbar").map((bar) => bar.attrs["aria-label"]), ["work@example.test · 5-hour", "work@example.test · Argon weekly"]);
+  assert.match(text(gemini), /Active/);
+  assert.match(text(gemini), /Argon weekly.*40%/);
+});
+
+test("a provider that needs a sign-in shows its text line and no gauges, even while the read still holds its windows", async () => {
+  const ui = limitsUi(async (path) => path === "/api/limits" ? { providers: [
+    { type: "google", provider: "gem", title: "Gemini", accounts: [{ account: 0, id: "g1", at: now, windows: [five] }] },
+  ] } : {}, { providers: { gem: { reachable: true, needsLogin: true } } }, { providers: { gem: { type: "google", auth: "antigravity" } } });
+  await ui.refresh();
+  assert.equal(findAll(ui.card, hasClass("provider-block")).length, 0);
+  assert.ok(text(ui.card).includes(t("providerStatus.loginNeeded")));
+});

@@ -533,14 +533,16 @@ function providerLimits(name) {
   if (!limitsSnapshot || !Array.isArray(limitsSnapshot.providers) || !status) return null;
   const configured = currentConfig && currentConfig.providers && currentConfig.providers[name];
   const provider = configured || (status.providers && status.providers[name]);
-  if (!provider || provider.limits === false || (provider.type !== "anthropic" && provider.type !== "chatgpt")) return null;
+  if (!provider || provider.limits === false) return null;
   if (provider.type === "anthropic" && provider.auth !== "claude-code" && !provider.authSource) return null;
   const listed = limitsSnapshot.providers.find((item) => item.provider === name);
-  if (!listed && (!configured || provider.type === "anthropic")) return null;
-  const entry = { ...(listed || { type: provider.type, title: provider.type === "anthropic" ? "Claude" : "GPT", accounts: [] }),
+  // A ChatGPT provider the config says has limits keeps its account rows without figures; any other provider the read does not list keeps its text lines.
+  if (!listed && (!configured || provider.type !== "chatgpt")) return null;
+  const live = status.providers && status.providers[name];
+  const entry = { ...(listed || { type: provider.type, title: "GPT", accounts: [] }),
     stale: limitsSnapshotStale || (provider.type === "chatgpt" && Boolean(status.chatgpt && status.chatgpt.staleReason && status.chatgpt.staleReason[name])),
   };
-  if (provider.type === "anthropic") {
+  if (entry.type === "anthropic") {
     // Without the status's account list there is nothing to check the limits against; keep them as they are.
     const listedAccounts = status.claude && status.claude.accounts;
     if (!Array.isArray(listedAccounts)) return entry.accounts.length ? entry : null;
@@ -551,15 +553,21 @@ function providerLimits(name) {
     });
     return rows.length ? { ...entry, accounts: rows } : null;
   }
-  const accounts = status.chatgpt && status.chatgpt.accounts && status.chatgpt.accounts[name];
-  if (!accounts) return entry.accounts.length ? entry : null;
-  let number = 0;
-  const rows = accounts.map((account) => {
-    const index = account.state !== "paused" && account.state !== "needs-login" ? number++ : null;
-    const figures = index === null || account.id === undefined ? null : entry.accounts.find((item) => item.id === account.id);
-    return { ...account, account: index, windows: figures ? figures.windows : [], at: figures ? figures.at : 0, ...(figures && figures.stale ? { stale: true } : {}) };
-  });
-  return rows.length ? { ...entry, accounts: rows } : null;
+  if (entry.type === "chatgpt") {
+    const accounts = status.chatgpt && status.chatgpt.accounts && status.chatgpt.accounts[name];
+    if (!accounts) return entry.accounts.length ? entry : null;
+    let number = 0;
+    const rows = accounts.map((account) => {
+      const index = account.state !== "paused" && account.state !== "needs-login" ? number++ : null;
+      const figures = index === null || account.id === undefined ? null : entry.accounts.find((item) => item.id === account.id);
+      return { ...account, account: index, windows: figures ? figures.windows : [], at: figures ? figures.at : 0, ...(figures && figures.stale ? { stale: true } : {}) };
+    });
+    return rows.length ? { ...entry, accounts: rows } : null;
+  }
+  // Google, OpenCode Go, MiniMax and Grok: the status has no account list these rows can join by id, so each row stands as the
+  // read gave it. The read itself leaves out paused and signed-out Google accounts; a provider that needs a sign-in shows its text line.
+  if (live && live.needsLogin) return null;
+  return entry.accounts.length ? entry : null;
 }
 
 /**
