@@ -723,6 +723,8 @@ label.check input { margin-top: 2px; }
 .provider-tabs { margin-bottom: 20px; }
 .provider-panel { display: grid; gap: 24px; }
 .provider-panel > .section { margin-top: 0; }
+/* A switch keeps its width beside a long explanation: squeezed, its column shrank under the switch and the switch covered the text on a phone. */
+.provider-panel .cell-value:has(> .switch) { flex-shrink: 0; }
 
 /* The overview: one card of facts, a quiet name on the left and what it says on the right. */
 .provider-fact { position: relative; display: grid; grid-template-columns: 128px minmax(0, 1fr); column-gap: 16px; align-items: baseline; padding: 11px 16px; }
