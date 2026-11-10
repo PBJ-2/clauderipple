@@ -909,8 +909,12 @@ must preserve **Data: Artificial Analysis (artificialanalysis.ai)** attribution.
     one snapshot (the account that answers next — the tray and other readers
     want one number) and adds `chatgpt.accounts` per account; `/wham/usage` is
     asked for every account.
-  - **Quota display only (2026-11-11).** Status shows both available quota windows
-    from the existing backend active-account snapshot. The icon-only account quota
+  - **Quota display only (2026-11-11).** Status lists each ChatGPT account's name and
+    its own available quota windows, including exhausted accounts, from the existing
+    per-account status data. A shared-pool snapshot is not attributed to a provider's
+    presumed login: older payloads with no account list explicitly say "shared account
+    pool summary", and an account with no quota says that its limits are unavailable.
+    A known empty list never revives a stale aggregate. The icon-only account quota
     control switches readouts between usage and remaining limits, remembering only
     the viewer's local display preference; it does not save config or modify quota
     data. There is no provider-local `account` config field or account selector.

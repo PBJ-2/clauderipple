@@ -16,6 +16,7 @@ function block(from: string, to: string) {
 
 type Window = { used_percent: number; window_minutes?: number; reset_at?: number };
 type Quota = { rate_limits: { primary: Window | null; secondary: Window | null } };
+type Account = { id: string; label?: string; email?: string; quota: Quota | null; active?: boolean; inUse?: boolean };
 const quota = (used = 27, weekly = 35): Quota => ({ rate_limits: { primary: { used_percent: used, window_minutes: 300 }, secondary: { used_percent: weekly, window_minutes: 10080 } } });
 
 class Element {
@@ -44,7 +45,7 @@ function harness(options: { stored?: string; blockedStorage?: boolean; lang?: st
   const h = {
     nodes, health, storage, writes: [] as unknown[],
     config: { providers: { a: { type: "chatgpt" }, b: { type: "chatgpt" } } },
-    status: { chatgpt: { quota: { a: quota(97, 98), b: quota() } }, providers: {} },
+    status: { chatgpt: { quota: { a: quota(97, 98), b: quota() }, accounts: {} as Record<string, Account[] | undefined> }, providers: {} },
   };
   const el = (tag: string, attrs: Record<string, unknown> = {}, children: Element[] = []) => {
     const node = new Element(tag);
@@ -160,17 +161,78 @@ test("quota display adds no provider-local account controls or config saves", ()
   assert.deepEqual(h.writes, []);
 });
 
-test("status renders the existing backend active-account snapshot", () => {
+test("older status payloads explicitly label their snapshot as a shared pool summary", () => {
   const { h, ui } = harness();
   h.status.chatgpt.quota.a = quota(27, 35);
   assert.equal(ui.quotaLine("a"), "5h 27% used · weekly 35% used");
   ui.renderHealthProviders();
-  assert.match(texts(h.health), /5h 27% used · weekly 35% used/);
+  assert.match(texts(h.health), /Shared account pool summary · 5h 27% used · weekly 35% used/);
   assert.doesNotMatch(texts(h.health), /97% used|98% used/);
 });
 
+test("status keeps the exhausted account's zero and the other account's seven percent with their owners", () => {
+  const { h, ui } = harness({ stored: "true" });
+  const accounts: Account[] = [
+    { id: "spent", label: "Spent account", quota: { rate_limits: { primary: { used_percent: 100, window_minutes: 10080 }, secondary: null } } },
+    { id: "usable", label: "Available account", quota: quota(100, 93), active: true, inUse: true },
+  ];
+  h.status.chatgpt.quota.a = quota(100, 93);
+  h.status.chatgpt.accounts.a = structuredClone(accounts);
+  h.status.chatgpt.accounts.b = structuredClone(accounts);
+  const before = structuredClone(h.status);
+  const originalConfig = structuredClone(h.config);
+  ui.renderHealthProviders();
+  for (const provider of h.health.children) {
+    const group = provider.children.find(node => node.attrs.class === "cell-sub account-usage")!;
+    assert.deepEqual(group.children.map(texts), [
+      "Spent account · weekly 0% remaining",
+      "Available account · 5h 0% remaining · weekly 7% remaining",
+    ]);
+    assert.doesNotMatch(texts(provider), /Shared account pool summary/);
+  }
+  ui.setQuotaRemaining(false);
+  assert.match(texts(h.health), /Spent account · weekly 100% used/);
+  assert.match(texts(h.health), /Available account · 5h 100% used · weekly 93% used/);
+  assert.deepEqual(h.status, before);
+  assert.deepEqual(h.config, originalConfig);
+  assert.deepEqual(h.writes, []);
+});
+
+test("account rows never borrow a pool snapshot when their own quota is unavailable", () => {
+  const { h, ui } = harness();
+  h.status.chatgpt.accounts.a = [{ id: "unknown", email: "unknown@example.test", quota: null }];
+  h.status.chatgpt.accounts.b = [{ id: "local-id", quota: { rate_limits: { primary: null, secondary: null } } }];
+  ui.renderHealthProviders();
+  assert.match(texts(h.health), /unknown@example.test · Limits unavailable/);
+  assert.match(texts(h.health), /local-id · Limits unavailable/);
+  assert.doesNotMatch(texts(h.health), /97%|98%|27%|35%|Shared account pool summary/);
+});
+
+test("a known empty account list does not revive a stale pool summary", () => {
+  const { h, ui } = harness();
+  h.status.chatgpt.accounts.a = [];
+  h.status.chatgpt.accounts.b = [];
+  ui.renderHealthProviders();
+  assert.doesNotMatch(texts(h.health), /%|Shared account pool summary/);
+});
+
+test("status re-renders changed account data without attributing the new active account to another login", () => {
+  const { h, ui } = harness({ stored: "true" });
+  h.status.chatgpt.accounts.a = [
+    { id: "first", label: "First login", quota: quota(10, 20), active: true },
+    { id: "second", label: "Second login", quota: quota(30, 40), active: false },
+  ];
+  ui.renderHealthProviders();
+  h.status.chatgpt.accounts.a[0]!.quota = quota(100, 100);
+  h.status.chatgpt.accounts.a[0]!.active = false;
+  h.status.chatgpt.accounts.a[1]!.active = true;
+  ui.renderHealthProviders();
+  assert.match(texts(h.health), /First login · 5h 0% remaining · weekly 0% remaining/);
+  assert.match(texts(h.health), /Second login · 5h 70% remaining · weekly 60% remaining/);
+});
+
 test("quota display strings are translated in every dashboard language", () => {
-  const keys = ["quota.usedLine", "quota.remainingLine", "quota.showUsed", "quota.showRemaining"];
+  const keys = ["quota.usedLine", "quota.remainingLine", "quota.showUsed", "quota.showRemaining", "quota.unavailable", "quota.sharedPool"];
   for (const [language, dictionary] of Object.entries(dictionaries)) {
     for (const key of keys) assert.ok(dictionary[key], `${language}: ${key}`);
   }

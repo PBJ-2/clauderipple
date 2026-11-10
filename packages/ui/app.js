@@ -1001,8 +1001,21 @@ function renderHealthProviders() {
   box.replaceChildren(...providers.map(([name, provider]) => {
     const live = status && status.providers && status.providers[name];
     const lines = [];
-    const quota = quotaLine(name);
-    if (quota) lines.push(el("span", { class: "cell-sub", text: quota }));
+    if (provider.type === "chatgpt") {
+      const accounts = status && status.chatgpt && status.chatgpt.accounts && status.chatgpt.accounts[name];
+      if (Array.isArray(accounts)) {
+        // A provider names a shared pool, not a login. Keep each account's quota with its owner,
+        // including spent accounts, instead of attributing the next usable account to the provider.
+        const usage = accounts.map((account, index) => el("div", {
+          text: `${account.label || account.email || account.id || `${t("providers.chatgptAccountsTitle")} #${index + 1}`} · ${chatgptQuotaText(account.quota) || t("quota.unavailable")}`,
+        }));
+        if (usage.length) lines.push(el("div", { class: "cell-sub account-usage" }, usage));
+      } else {
+        // Older status payloads may have only a pool snapshot; never present it as one login's quota.
+        const quota = quotaLine(name);
+        if (quota) lines.push(el("span", { class: "cell-sub", text: `${t("quota.sharedPool")} · ${quota}` }));
+      }
+    }
     // Claude subscription accounts, one line each: the current login and every account added here.
     // Before the config has loaded the rows come from the status, which names the sign-in source
     // rather than the auth mode.
