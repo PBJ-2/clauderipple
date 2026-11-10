@@ -521,6 +521,8 @@ export class DesktopSessions {
   private tailCopies = new Map<string, LineCopies>();
   /** session → toolUseId → agentId, rebuilt when the subagents directory changes. */
   private agentMaps = new Map<string, { at: number; map: Map<string, string> }>();
+  /** A worker's recorded effort by meta.json path: a found one never changes, a missing one is asked again after a while. */
+  private efforts = new Map<string, { at: number; effort: string | undefined }>();
   private temp: string | null = null;
   private scannedAt = -Infinity;
   private checkedAt = -Infinity;
@@ -684,8 +686,17 @@ export class DesktopSessions {
   /** A worker's effort as its own meta.json records it (the same record subInfo reads), by agent id. Undefined when the record does not say. */
   private recordedEffort(source: Source, agentId: string): string | undefined {
     if (!/^[\w-]+$/.test(agentId)) return undefined;
-    const meta = record(safeRead(path.join(this.subagentsDir(source), `agent-${agentId}.meta.json`)));
-    return effortOf(str(meta?.model), str(meta?.description)) || undefined;
+    // Read on every session-list build (several a second while a plan changes), so the file is read
+    // once per worker: a recorded effort is fixed for the worker's life; an absent one may still be written.
+    const file = path.join(this.subagentsDir(source), `agent-${agentId}.meta.json`);
+    const now = Date.now();
+    const known = this.efforts.get(file);
+    if (known && (known.effort !== undefined || now - known.at < 30_000)) return known.effort;
+    const meta = record(safeRead(file));
+    const effort = effortOf(str(meta?.model), str(meta?.description)) || undefined;
+    this.efforts.set(file, { at: now, effort });
+    if (this.efforts.size > 2_000) this.efforts.delete(this.efforts.keys().next().value!);
+    return effort;
   }
   turnStartedAt(id: string): number | null { return this.scan(id)?.turnStartedAt ?? null; }
   plan(id: string): PlanStep[] { return this.scan(id)?.plan ?? []; }
