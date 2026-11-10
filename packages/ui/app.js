@@ -179,6 +179,22 @@ function applyProviderLabel(provider, key, typedName) {
   else delete provider.label;
   return provider;
 }
+/**
+ * A provider's name on the Providers, Model mapping and Clients pages: the name people know it by
+ * (providerTitle), with its key after it only when another provider would read the same ("ChatGPT
+ * (chatgpt-2)"), so two of a kind stay apart in a list or a menu.
+ */
+function providerName(name, provider = currentConfig && currentConfig.providers && currentConfig.providers[name]) {
+  const title = providerTitle(name, provider);
+  const others = Object.entries((currentConfig && currentConfig.providers) || {}).filter(([key]) => key !== name);
+  return title !== name && others.some(([key, other]) => providerTitle(key, other) === title) ? `${title} (${name})` : title;
+}
+/** The vendor's hue as a dot before a provider's name, as on the Status screen. */
+function vendorDot(name, provider) {
+  const dot = el("span", { class: "vendor-dot", "aria-hidden": "true" });
+  dot.style.color = providerHue(name, provider);
+  return dot;
+}
 // The router's `isTargetProvider` (packages/router/src/targets.ts), copied because the forms ask it of
 // providers not saved yet; `ui-targets.test.ts` keeps the two equal. A native Claude login becomes a
 // mapping target only after the explicit account-pool opt-in, and stays OpenAI-ingress-only without
@@ -669,6 +685,7 @@ function refreshLimits() {
   }).finally(() => {
     limitsRead = null;
     if (status) renderHealthProviders();
+    if (status) refreshProviderUsage();
   });
   return limitsRead;
 }
@@ -3023,8 +3040,9 @@ function providerRailItem(name, provider) {
     role: "option",
     "aria-selected": String(selected),
   }, [
+    vendorDot(name, provider),
     el("span", { class: "provider-rail-copy" }, [
-      el("strong", { text: providerLabel(name, provider) }),
+      el("strong", { text: providerName(name, provider) }),
       el("span", { text: t("providers.modelsCountShort", { count: modelsOf(provider).length }) }),
     ]),
     providerState(name, provider),
@@ -3054,7 +3072,7 @@ function renderProviderRail() {
   const list = $("#providers-list");
   const entries = Object.entries((currentConfig && currentConfig.providers) || {});
   const query = providerSearch.trim().toLowerCase();
-  const visible = entries.filter(([name, provider]) => !query || name.toLowerCase().includes(query) || providerLabel(name, provider).toLowerCase().includes(query) || providerKind(name, provider).toLowerCase().includes(query));
+  const visible = entries.filter(([name, provider]) => !query || name.toLowerCase().includes(query) || providerLabel(name, provider).toLowerCase().includes(query) || providerName(name, provider).toLowerCase().includes(query) || providerKind(name, provider).toLowerCase().includes(query));
   list.replaceChildren(...visible.map(([name, provider]) => providerRailItem(name, provider)));
   if (!entries.length) list.appendChild(el("div", { class: "provider-rail-empty", text: t("providers.empty") }));
   else if (!visible.length) list.appendChild(el("div", { class: "provider-rail-empty", text: t("providers.noSelection") }));
@@ -3093,7 +3111,7 @@ async function removeProvider(name, provider) {
   const extra = usages.fallbacks.length || usages.direct || usages.picker || usages.search || usages.classifier
     ? `\n\n${t("providers.removeExtra", { fallbacks: usages.fallbacks.length, direct: usages.direct, picker: usages.picker })}${usageSuffix(usages, { search: t("providers.usageSearch"), classifier: t("providers.usageClassifier") })}`
     : "";
-  if (!confirm(`${t("providers.removeConfirm", { name: providerLabel(name, provider) })}${extra}`)) return;
+  if (!confirm(`${t("providers.removeConfirm", { name: providerName(name, provider) })}${extra}`)) return;
   const next = clone(await latestConfig());
   // Resolve ownership before deleting declarations or the disambiguating direct rules.
   if (next.cli) next.cli.extraModels = (next.cli.extraModels || []).filter((entry) => {
@@ -3154,42 +3172,73 @@ function providerTabs(name, provider) {
   }));
 }
 
+/** One line of the overview's facts: a quiet name on the left, what it says on the right. */
+function providerFact(label, children) {
+  return el("div", { class: "provider-fact" }, [el("span", { class: "provider-fact-k", text: label }), el("div", { class: "provider-fact-v" }, children.filter(Boolean))]);
+}
+
+/**
+ * The overview reads like the provider's block on the Status screen: one card of facts (the connection
+ * verdict and what to do about it, where the config names the provider, its models), then its usage
+ * gauges as Status draws them. A provider the limits read does not list keeps its one-line usage figure.
+ */
 function providerOverview(name, provider) {
   const state = stateFor(name);
   const live = status && status.providers && status.providers[name];
-  const connection = section(t("providers.connection"), [
-    // The kind is already under the page title; this row is only the verdict and what to do about it.
-    cell(t("health.connection"), providerState(name, provider), [
-      state && !state.ok && state.error ? el("span", { class: "cell-sub bad-text", text: shortError(state.error), title: state.error }) : null,
-      live && live.needsLogin && provider.type === "chatgpt" ? el("div", { class: "cell-actions" }, [chatgptLoginButton(renderProviderDetail)]) : null,
-    ]),
-  ]);
   const models = modelsOf(provider);
   const measuring = measureStates.get(name);
   const running = measuring && measuring.state === "running";
-  // Names only, as one quiet line: the Models tab is where each one is listed and edited.
-  const modelSummary = section(t("providers.selectedModels"), [
-    models.length ? el("div", { class: "cell-note" }, [el("span", { class: "cell-label", text: models.map(labelOf).join(", ") })]) : el("div", { class: "cell-note", text: t("providers.noModels") }),
-    running ? el("div", { class: "cell-note", text: t("measure.running", { done: measuring.done, total: measuring.total }) }) : null,
-  ], running ? t("measure.help") : null);
-  const quota = quotaLine(name);
   // Where this provider is named besides its own block: routes, fallbacks, direct rules, the picker
   // and the two single-provider settings. Seeing them before pressing remove is the point (B13).
   const usages = providerUsages(currentConfig || {}, name);
-  const usedBy = usages.routes.length || usages.fallbacks.length || usages.direct || usages.picker || usages.search || usages.classifier
-    ? section(t("providers.usedBy"), [
-        cell(t("providers.usageCounts", { routes: usages.routes.length, fallbacks: usages.fallbacks.length, direct: usages.direct, picker: usages.picker }) + usageSuffix(usages, { search: t("providers.usageSearch"), classifier: t("providers.usageClassifier") })),
-        usages.fallbacks.length
-          ? el("div", { class: "cell-note" }, [el("span", { class: "cell-sub mono", text: t("providers.usageFallbacks", { list: usages.fallbacks.map((fallback) => `${fallback.route} → ${fallback.model}`).join(", ") }) })])
-          : null,
-      ])
-    : null;
-  return el("div", { class: "provider-panel" }, [
-    connection,
-    usedBy,
-    quota ? section(null, [cell(t("providers.usage"), el("span", { text: quota }))]) : null,
-    modelSummary,
+  const used = usages.routes.length || usages.fallbacks.length || usages.direct || usages.picker || usages.search || usages.classifier;
+  const quota = quotaLine(name);
+  const gauges = providerGauges(name);
+  const facts = el("div", { class: "group provider-facts" }, [
+    // The kind is already under the page title; this line is only the verdict and what to do about it.
+    providerFact(t("health.connection"), [
+      providerState(name, provider),
+      state && !state.ok && state.error ? el("span", { class: "cell-sub bad-text", text: shortError(state.error), title: state.error }) : null,
+      live && live.needsLogin && provider.type === "chatgpt" ? el("div", { class: "cell-actions" }, [chatgptLoginButton(renderProviderDetail)]) : null,
+    ]),
+    used ? providerFact(t("providers.usedBy"), [
+      el("span", { text: t("providers.usageCounts", { routes: usages.routes.length, fallbacks: usages.fallbacks.length, direct: usages.direct, picker: usages.picker }) + usageSuffix(usages, { search: t("providers.usageSearch"), classifier: t("providers.usageClassifier") }) }),
+      usages.fallbacks.length ? el("span", { class: "cell-sub mono", text: t("providers.usageFallbacks", { list: usages.fallbacks.map((fallback) => `${fallback.route} → ${fallback.model}`).join(", ") }) }) : null,
+    ]) : null,
+    // Names only, as one line: the Models tab is where each one is listed and edited.
+    providerFact(t("providers.selectedModels"), [
+      el("span", { class: models.length ? "" : "cell-sub", text: models.length ? models.map(labelOf).join(", ") : t("providers.noModels") }),
+      running ? el("span", { class: "cell-sub", text: t("measure.running", { done: measuring.done, total: measuring.total }) }) : null,
+      running ? el("span", { class: "cell-sub", text: t("measure.help") }) : null,
+    ]),
+    !gauges && quota ? providerFact(t("providers.usage"), [el("span", { text: quota })]) : null,
   ]);
+  return el("div", { class: "provider-panel" }, [facts, providerUsageSection(name)]);
+}
+/** The provider's entry in the limits read when it has figures to draw, else null. */
+function providerGauges(name) {
+  const limits = providerLimits(name);
+  return limits && limits.accounts.some((account) => (account.windows || []).length) ? limits : null;
+}
+/** The overview's usage: Status's own account rows for this provider, or an empty placeholder until the read has figures. */
+function providerUsageSection(name) {
+  const gauges = providerGauges(name);
+  if (!gauges) return el("div", { id: "provider-usage-section", hidden: "" });
+  const now = Date.now();
+  const credentials = (status && status.credentials && status.credentials[name]) || [];
+  return el("section", { class: "section", id: "provider-usage-section" }, [
+    el("div", { class: "section-head" }, [el("h3", { class: "section-title", text: t("providers.usage") })]),
+    el("div", { class: "group provider-limits provider-usage" }, gauges.accounts.map((account) =>
+      limitsAccountRow(gauges, account, now, account.id === undefined ? undefined : credentials.find((c) => c.id === account.id)))),
+  ]);
+}
+/** A limits read landed: the open overview's gauges follow it, as Status's do, and nothing else on the page is redrawn. */
+function refreshProviderUsage() {
+  const shown = $("#provider-usage-section");
+  if (!shown || !selectedProviderName || providerDetailTab !== "overview") return;
+  // A provider that had no figures when the overview was drawn keeps its one-line usage figure there until the page is redrawn.
+  if (shown.hidden && quotaLine(selectedProviderName)) return;
+  shown.replaceWith(providerUsageSection(selectedProviderName));
 }
 
 function providerModelsPanel(name, provider) {
@@ -3238,7 +3287,7 @@ function claudeAccountLabel(account) {
 /** "5h 14% · weekly 10%" under a Claude account, or nothing while its usage is unknown. */
 function claudeQuotaNode(account) {
   const text = chatgptQuotaText(account && account.quota);
-  return text ? el("p", { class: "small account-quota", text }) : null;
+  return text ? quotaMeters([account.quota.rate_limits.primary, account.quota.rate_limits.secondary]) : null;
 }
 
 /** "Use first" for an account the pool does not lead with; `null` hands first place back to the current login. */
@@ -3298,7 +3347,7 @@ function accountPoolBadges(account) {
     chatgptStateBadge(account),
     ...Object.entries(account.quotaCooldowns || {}).map(([group, seconds]) =>
       el("span", { class: "badge warn", text: `${quotaGroupLabel(group)} · ${t("pool.coolingFor", { duration: durationText(seconds) })}` })),
-    account.inUse && account.state && account.state !== "ready" ? el("span", { class: "badge ok", text: t("providers.chatgptInUse") }) : null,
+    account.inUse && account.state && account.state !== "ready" ? el("span", { class: "badge ok in-use", text: t("providers.chatgptInUse") }) : null,
   ];
 }
 
@@ -3368,7 +3417,7 @@ function renderClaudeAccountRows(target, data, name, generation) {
     }
     rows.push(el("article", { class: "cell account-card" }, [
       el("div", { class: "cell-text account-card-copy" }, [
-        el("strong", { text: claudeAccountLabel(account) }), account.email && account.email !== account.label ? el("span", { class: "small", text: account.email }) : null, claudeQuotaNode(account), hint(t("providers.addedAccountHelp")),
+        el("strong", { text: claudeAccountLabel(account) }), account.email && account.email !== account.label ? el("span", { class: "small", text: account.email }) : null, claudeQuotaNode(account),
         el("div", { class: "account-card-actions" }, actions),
       ]),
       el("div", { class: "account-card-badges" }, accountPoolBadges({ ...account, state: account.state || (unavailable ? "needs-login" : "ready"), preferred: account.preferred || (choosable && account.id === leader) })),
@@ -3412,19 +3461,14 @@ function anthropicAccountsPanel(name, provider) {
   const rotation = el("input", { type: "checkbox", checked: Boolean(provider.accountPool) });
   const rotationMessage = el("span", { class: "small" });
   rotation.addEventListener("change", () => void saveAnthropicRotation(name, provider, rotation.checked, rotation, rotationMessage));
-  const add = el("button", { class: "cell-button", type: "button", text: t("providers.addClaudeAccount") });
+  const add = el("button", { class: "cell-button account-add", type: "button", text: t("providers.addClaudeAccount") });
   add.addEventListener("click", () => openClaudeAccountConsent(name));
-  const removeAll = el("button", { class: "cell-button destructive", type: "button", text: t("providers.anthropicLogoutAll") });
-  removeAll.addEventListener("click", async () => {
-    if (!confirm(t("providers.anthropicLogoutAllConfirm"))) return;
-    try { await api("/api/claude-logout", { method: "POST" }); await refreshClaudeAccountPanel(name); }
-    catch (error) { toast(t("common.actionFailed"), true, error.message); }
-  });
   rotation.setAttribute("role", "switch");
   rotation.setAttribute("aria-label", t("providers.anthropicPool"));
-  const rows = el("div", { id: "claude-account-rows", class: "group account-card-list" }, [el("div", { class: "small", text: t("providers.checking") })]);
+  const rows = el("div", { id: "claude-account-rows", class: "account-card-list" }, [el("div", { class: "small", text: t("providers.checking") })]);
   // The rotation switch first (it decides whether added accounts are used at all), then the
-  // accounts with "Add" at the end of their list, then the one destructive act on its own.
+  // accounts with "Add" as the last row of their card. Removing every added account is destructive,
+  // so it stands at the bottom beside removing the provider (anthropicLogoutAllButton).
   const panel = el("div", { class: "provider-panel" }, [
     el("section", { class: "section" }, [
       el("div", { class: "group" }, [cell(t("providers.anthropicPool"), el("label", { class: "switch" }, [rotation, el("span")]), [t("providers.accountPoolSubtitle"), rotationMessage])]),
@@ -3432,15 +3476,25 @@ function anthropicAccountsPanel(name, provider) {
     ]),
     el("section", { class: "section" }, [
       el("div", { class: "section-head" }, [el("h3", { class: "section-title", text: t("providers.accountPoolTitle") }), el("span", { id: "claude-account-count", class: "small", text: t("providers.accountCount", { count: 0 }) })]),
-      rows,
-      el("div", { class: "group stacked-add" }, [add]),
-      el("p", { class: "group-footer", text: t("providers.accountCountHelp") }),
+      el("div", { class: "group account-group" }, [rows, add]),
       el("p", { id: "claude-account-prefer", class: "group-footer", text: t("providers.preferHelp"), hidden: "" }),
+      el("p", { class: "group-footer", text: t("providers.accountCountHelp") }),
+      // Said once for every account added here, rather than under each of them.
+      el("p", { class: "group-footer", text: t("providers.addedAccountHelp") }),
     ]),
-    section(t("providers.dangerZone"), [removeAll], t("providers.anthropicLogoutAllConfirm")),
   ]);
   queueMicrotask(() => void refreshClaudeAccountPanel(name));
   return panel;
+}
+/** Signs every added Claude account out; the current Claude login is not one of them. */
+function anthropicLogoutAllButton(name) {
+  const removeAll = el("button", { class: "cell-button destructive", type: "button", text: t("providers.anthropicLogoutAll") });
+  removeAll.addEventListener("click", async () => {
+    if (!confirm(t("providers.anthropicLogoutAllConfirm"))) return;
+    try { await api("/api/claude-logout", { method: "POST" }); await refreshClaudeAccountPanel(name); }
+    catch (error) { toast(t("common.actionFailed"), true, error.message); }
+  });
+  return removeAll;
 }
 
 /** "5h 42%", "weekly 100% · resets 14:05" — the reset only matters once a window is full. */
@@ -3451,20 +3505,48 @@ function chatgptQuotaText(quota) {
 }
 /** The same line for any list of usage windows (`/api/limits` windows included). */
 function quotaWindowsText(windows) {
-  const windowName = (w) => {
-    const minutes = w.window_minutes;
-    if (!minutes) return "";
-    if (minutes >= 28 * 24 * 60) return t("quota.windowMonth");
-    if (minutes >= 7 * 24 * 60) return t("quota.windowWeek");
-    if (minutes === 300) return t("quota.window5h");
-    return t("quota.windowHours", { hours: Math.round(minutes / 60) });
-  };
   return (windows || []).filter((w) => w && typeof w.used_percent === "number").map((w) => {
-    const line = t("quota.line", { window: windowName(w), percent: Math.round(w.used_percent) }).trim();
-    if (w.used_percent < 100) return line;
-    const at = typeof w.reset_after_seconds === "number" ? Date.now() + w.reset_after_seconds * 1000 : typeof w.reset_at === "number" ? w.reset_at * 1000 : null;
-    return at ? `${line} · ${t("quota.resetAt", { time: new Date(at).toLocaleString([], { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) })}` : line;
+    const line = t("quota.line", { window: quotaWindowName(w), percent: Math.round(w.used_percent) }).trim();
+    const reset = quotaFullReset(w);
+    return reset ? `${line} · ${reset}` : line;
   }).join(" · ");
+}
+/** A usage window's name in a quota line: "5시간", "주간", "월간", else its hours. */
+function quotaWindowName(w) {
+  const minutes = w.window_minutes;
+  if (!minutes) return "";
+  if (minutes >= 28 * 24 * 60) return t("quota.windowMonth");
+  if (minutes >= 7 * 24 * 60) return t("quota.windowWeek");
+  if (minutes === 300) return t("quota.window5h");
+  return t("quota.windowHours", { hours: Math.round(minutes / 60) });
+}
+/** When a full window resets ("resets 11/12 14:05"); nothing for a window that still has room, where nobody acts on it. */
+function quotaFullReset(w) {
+  if (w.used_percent < 100) return "";
+  const at = typeof w.reset_after_seconds === "number" ? Date.now() + w.reset_after_seconds * 1000 : typeof w.reset_at === "number" ? w.reset_at * 1000 : null;
+  return at ? t("quota.resetAt", { time: new Date(at).toLocaleString([], { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) }) : "";
+}
+/**
+ * An account's usage on its row in the accounts list: the windows of its quota line, each as a name, a
+ * thin meter and its share, amber from 80% and red from 95% as on Status; a full window keeps its reset.
+ * The whole line is the group's accessible name. Nothing when no window has a share.
+ */
+function quotaMeters(windows) {
+  const shown = (windows || []).filter((w) => w && typeof w.used_percent === "number");
+  if (!shown.length) return null;
+  const text = quotaWindowsText(shown);
+  return el("div", { class: "account-quota account-meters", role: "img", "aria-label": text, title: text }, shown.map((w) => {
+    const percent = Math.round(w.used_percent);
+    const fill = el("span", { class: "meter-fill" });
+    fill.style.width = `${Math.max(0, Math.min(100, w.used_percent))}%`;
+    const reset = quotaFullReset(w);
+    return el("span", { class: `account-meter${percent >= 95 ? " tone-bad" : percent >= 80 ? " tone-warn" : ""}`, "aria-hidden": "true" }, [
+      el("span", { class: "account-meter-name", text: quotaWindowName(w) }),
+      el("span", { class: "meter" }, [fill]),
+      el("span", { class: "account-meter-figure", text: `${percent}%` }),
+      reset ? el("span", { class: "account-meter-reset", text: reset }) : null,
+    ]);
+  }));
 }
 
 /** A wait people read at a glance: "1시간 29분", "12분", "40초". */
@@ -3480,7 +3562,7 @@ function chatgptStateBadge(account) {
   if (account.state === "needs-login" || account.state === "quarantined") return el("span", { class: "badge bad", text: t("providers.anthropicReauth") });
   if (account.state === "needs-verification") return el("span", { class: "badge warn", text: t("providers.googleVerifyNeeded") });
   if (account.state === "cooling") return el("span", { class: "badge warn", text: t("pool.coolingFor", { duration: durationText(account.cooldownSeconds) }) });
-  return el("span", { class: "badge ok", text: account.inUse ? t("providers.chatgptInUse") : t("providers.chatgptStandby") });
+  return el("span", { class: account.inUse ? "badge ok in-use" : "badge ok", text: account.inUse ? t("providers.chatgptInUse") : t("providers.chatgptStandby") });
 }
 
 async function patchChatgptAccount(name, id, change) {
@@ -3524,13 +3606,14 @@ function renderChatgptAccountRows(target, data, name, generation) {
     }
     const quota = chatgptQuotaText(account.quota);
     const detail = [account.email && account.email !== account.label ? account.email : null, account.planType || null].filter(Boolean).join(" · ");
-    const help = account.state === "needs-login" || account.state === "quarantined" ? t("providers.chatgptReauthHelp") : own ? t("providers.chatgptOwnHelp") : t("providers.chatgptCodexHelp");
+    // How an account added here is kept is said once under the list (chatgptAccountsPanel); a row says only what is its own.
+    const help = account.state === "needs-login" || account.state === "quarantined" ? t("providers.chatgptReauthHelp") : own ? "" : t("providers.chatgptCodexHelp");
     return el("article", { class: `cell account-card${account.inUse ? " current" : ""}` }, [
       el("div", { class: "cell-text account-card-copy" }, [
         el("strong", { text: account.label }),
         detail ? el("span", { class: "small", text: detail }) : null,
-        quota ? el("p", { class: "small account-quota", text: quota }) : null,
-        hint(help),
+        quota ? quotaMeters([account.quota.rate_limits.primary, account.quota.rate_limits.secondary]) : null,
+        help ? hint(help) : null,
         actions.length ? el("div", { class: "account-card-actions" }, actions) : null,
       ]),
       el("div", { class: "account-card-badges" }, accountPoolBadges(account)),
@@ -3639,7 +3722,8 @@ function renderGoogleAccountRows(target, data, name, generation) {
       el("div", { class: "cell-text account-card-copy" }, [
         el("strong", { text: account.label }),
         detail ? el("span", { class: "small", text: detail }) : null,
-        hint(account.state === "needs-login" || account.state === "quarantined" ? t("providers.chatgptReauthHelp") : account.state === "needs-verification" ? t("providers.googleVerifyHelp") : t("providers.googleOwnHelp")),
+        // How an account is kept is said once under the list (googleAccountsPanel); a row says only what it needs.
+        account.state === "needs-login" || account.state === "quarantined" ? hint(t("providers.chatgptReauthHelp")) : account.state === "needs-verification" ? hint(t("providers.googleVerifyHelp")) : null,
         el("div", { class: "account-card-actions" }, actions),
       ]),
       el("div", { class: "account-card-badges" }, accountPoolBadges(account)),
@@ -3659,18 +3743,18 @@ async function refreshGoogleAccountPanel(name) {
 }
 
 function googleAccountsPanel(name) {
-  const add = el("button", { class: "cell-button", type: "button", text: t("providers.addGoogleAccount") });
+  const add = el("button", { class: "cell-button account-add", type: "button", text: t("providers.addGoogleAccount") });
   add.disabled = googleLoginBusy;
   add.addEventListener("click", () => void startGoogleLogin(() => { renderProviderDetail(); void refreshGoogleAccountPanel(name); }));
-  const rows = el("div", { id: "google-account-rows", class: "group account-card-list" }, [el("div", { class: "small", text: t("providers.checking") })]);
+  const rows = el("div", { id: "google-account-rows", class: "account-card-list" }, [el("div", { class: "small", text: t("providers.checking") })]);
   const panel = el("div", { class: "provider-panel" }, [
     el("section", { class: "section" }, [
       el("div", { class: "section-head" }, [el("h3", { class: "section-title", text: t("providers.googleAccountsTitle") }), el("span", { id: "google-account-count", class: "small", text: t("providers.chatgptAccountCount", { count: 0 }) })]),
-      rows,
-      el("div", { class: "group stacked-add" }, [add]),
+      el("div", { class: "group account-group" }, [rows, add]),
       googleLoginBusy ? el("p", { class: "group-footer", text: t("providers.googleLoginWaiting") }) : null,
+      el("div", { class: "group-footer notice warn" }, [el("strong", { text: t("providers.googleWarningShort") })]),
       el("p", { class: "group-footer", text: t("providers.googleAccountsSubtitle") }),
-      el("div", { class: "group-footer notice" }, [el("strong", { text: t("providers.googleWarningShort") })]),
+      el("p", { class: "group-footer", text: t("providers.googleOwnHelp") }),
     ]),
   ]);
   queueMicrotask(() => void refreshGoogleAccountPanel(name));
@@ -3686,19 +3770,19 @@ async function refreshChatgptAccountPanel(name) {
 }
 
 function chatgptAccountsPanel(name) {
-  const add = el("button", { class: "cell-button", type: "button", text: t("providers.addChatgptAccount") });
+  const add = el("button", { class: "cell-button account-add", type: "button", text: t("providers.addChatgptAccount") });
   add.disabled = chatgptLoginBusy;
   const waiting = el("p", { class: "group-footer", text: chatgptLoginBusy ? t("providers.chatgptAddWaiting") : "" });
   waiting.hidden = !chatgptLoginBusy;
   add.addEventListener("click", () => void startChatgptLogin(() => { renderProviderDetail(); void refreshChatgptAccountPanel(name); }, true));
-  const rows = el("div", { id: "chatgpt-account-rows", class: "group account-card-list" }, [el("div", { class: "small", text: t("providers.checking") })]);
+  const rows = el("div", { id: "chatgpt-account-rows", class: "account-card-list" }, [el("div", { class: "small", text: t("providers.checking") })]);
   const panel = el("div", { class: "provider-panel" }, [
     el("section", { class: "section" }, [
       el("div", { class: "section-head" }, [el("h3", { class: "section-title", text: t("providers.chatgptAccountsTitle") }), el("span", { id: "chatgpt-account-count", class: "small", text: t("providers.chatgptAccountCount", { count: 0 }) })]),
-      rows,
-      el("div", { class: "group stacked-add" }, [add]),
+      el("div", { class: "group account-group" }, [rows, add]),
       waiting,
       el("p", { class: "group-footer", text: t("providers.chatgptAccountsSubtitle") }),
+      el("p", { class: "group-footer", text: t("providers.chatgptOwnHelp") }),
     ]),
   ]);
   queueMicrotask(() => void refreshChatgptAccountPanel(name));
@@ -3775,9 +3859,14 @@ function keyStateBadge(name, credential, single) {
 }
 
 function keyUsageText(name, index) {
+  const windows = keyUsageWindows(name, index);
+  return windows ? quotaWindowsText(windows) : "";
+}
+/** The key's usage windows in the last limits read, by its place in the pool; null when the read has none for it. */
+function keyUsageWindows(name, index) {
   const entry = ((keyLimits && keyLimits.providers) || []).find((item) => item.provider === name);
   const account = entry && (entry.accounts || []).find((item) => item.account === index);
-  return account ? quotaWindowsText(account.windows) : "";
+  return account ? account.windows : null;
 }
 
 async function saveKeyPool(next) {
@@ -3911,12 +4000,12 @@ function keyAccountRow(name, credential, index, pool) {
     el("div", { class: "cell-text account-card-copy" }, [
       el("strong", { text: label }),
       key ? el("span", { class: "small mono", text: maskKey(key) }) : null,
-      usage ? el("p", { class: "small account-quota", text: usage }) : null,
+      usage ? quotaMeters(keyUsageWindows(name, index)) : null,
       el("div", { class: "account-card-actions" }, [...actions, edit, remove]),
     ]),
     el("div", { class: "account-card-badges" }, [
       account.preferred ? el("span", { class: "badge first", text: t("providers.preferBadge") }) : null,
-      account.inUse ? el("span", { class: "badge ok", text: t("providers.chatgptInUse") }) : null,
+      account.inUse ? el("span", { class: "badge ok in-use", text: t("providers.chatgptInUse") }) : null,
       keyStateBadge(name, account, single),
     ]),
   ]);
@@ -3946,15 +4035,14 @@ async function refreshKeyAccountPanel(name) {
 }
 
 function keyAccountsPanel(name) {
-  const rows = el("div", { id: "key-account-rows", class: "group account-card-list" });
+  const rows = el("div", { id: "key-account-rows", class: "account-card-list" });
   const adding = keyForm && keyForm.provider === name && keyForm.id === null;
-  const add = el("button", { class: "cell-button", type: "button", text: t("providers.addKeyAccount") });
+  const add = el("button", { class: "cell-button account-add", type: "button", text: t("providers.addKeyAccount") });
   add.addEventListener("click", () => { keyForm = { provider: name, id: null }; renderProviderDetail(); });
   const panel = el("div", { class: "provider-panel" }, [
     el("section", { class: "section" }, [
-      el("div", { class: "section-head" }, [el("h3", { class: "section-title", text: t("providers.keyAccountsTitle", { name: providerLabel(name) }) }), el("span", { id: "key-account-count", class: "small" })]),
-      rows,
-      el("div", { class: "group stacked-add" }, [adding ? keyAccountForm(name, null, -1, []) : add]),
+      el("div", { class: "section-head" }, [el("h3", { class: "section-title", text: t("providers.keyAccountsTitle", { name: providerName(name) }) }), el("span", { id: "key-account-count", class: "small" })]),
+      el("div", { class: "group account-group" }, [rows, adding ? keyAccountForm(name, null, -1, []) : add]),
       el("p", { class: "group-footer", text: t("providers.keyAccountsHelp") }),
     ]),
   ]);
@@ -3980,8 +4068,14 @@ function renderProviderDetail() {
   // Removing is the one destructive act on this page, so it sits apart at the bottom, not beside Edit.
   const remove = el("button", { class: "cell-button destructive", type: "button", text: t("providers.remove"), onclick: () => void removeProvider(name, provider) });
   const back = el("button", { class: "provider-back", type: "button", onclick: closeProviderDetail }, [svgIcon("0 0 9 15", ["M7.5 1.5l-6 6 6 6"]), el("span", { text: t("nav.providers") })]);
+  // The name people know it by, in its vendor's hue; under it the kind and, when the name is not the
+  // key, the key itself, since routes, the picker and the config file name the provider by it.
+  const title = providerName(name, provider);
   const header = el("header", { class: "provider-detail-header" }, [
-    el("div", {}, [el("div", { class: "provider-title-line" }, [el("h2", { text: providerLabel(name, provider) }), providerState(name, provider)]), el("p", { class: "small", text: providerKind(name, provider) })]),
+    el("div", {}, [
+      el("div", { class: "provider-title-line" }, [vendorDot(name, provider), el("h2", { text: title }), providerState(name, provider)]),
+      el("p", { class: "small provider-kind" }, [el("span", { text: providerKind(name, provider) }), title !== name ? el("span", { class: "mono provider-key", text: name }) : null]),
+    ]),
     el("div", { class: "provider-detail-actions" }, [check, edit]),
   ]);
   let content;
@@ -3991,7 +4085,9 @@ function renderProviderDetail() {
   else if (providerDetailTab === "accounts" && isKeyProvider(provider)) content = keyAccountsPanel(name);
   else if (providerDetailTab === "models") content = providerModelsPanel(name, provider);
   else { providerDetailTab = "overview"; content = providerOverview(name, provider); }
-  detail.replaceChildren(back, header, providerTabs(name, provider), el("div", { id: "provider-tab-panel", role: "tabpanel", "aria-labelledby": `provider-tab-${providerDetailTab}` }, [content]), el("div", { class: "group provider-remove" }, [remove]));
+  // The destructive acts share one card at the bottom: on a Claude login's accounts, signing every added account out, then removing the provider.
+  const logoutAll = providerDetailTab === "accounts" && provider.type === "anthropic" && provider.auth === "claude-code" ? anthropicLogoutAllButton(name) : null;
+  detail.replaceChildren(back, header, providerTabs(name, provider), el("div", { id: "provider-tab-panel", role: "tabpanel", "aria-labelledby": `provider-tab-${providerDetailTab}` }, [content]), el("div", { class: "group provider-remove" }, [logoutAll, remove]));
 }
 
 function renderProviderWorkspace() {

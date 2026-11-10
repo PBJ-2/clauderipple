@@ -55,7 +55,7 @@ function limitsUi(api: (path: string) => Promise<unknown>, status: Record<string
   const card = el("div"), desktop = el("div");
   const build = new Function("api", "el", "t", "$", "status", "config", `
     let currentConfig = config;
-    const stateFor = () => null, chevronIcon = () => null, openProvider = () => {}, chatgptLoginButton = () => el("button", { text: "Sign in" }), chatgptLoginMessage = "", providerLabel = (name) => name, providerTitle = (name) => name, providerHue = () => "#000";
+    const stateFor = () => null, chevronIcon = () => null, openProvider = () => {}, refreshProviderUsage = () => {}, chatgptLoginButton = () => el("button", { text: "Sign in" }), chatgptLoginMessage = "", providerLabel = (name) => name, providerTitle = (name) => name, providerHue = () => "#000";
     const APP = null, clientsLoaded = false, modState = {}, updateState = {}, renderDiagnostics = () => {}, modRedraw = () => {}, versionRow = () => null, autoUpdateRow = () => null, priorityRow = () => null;
     let loadedUiRevision = null;
     ${block("function badge(", "/** A titled group")}

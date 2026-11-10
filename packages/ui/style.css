@@ -632,7 +632,11 @@ label.check input { margin-top: 2px; }
 
 /* ---- Providers ----------------------------------------------------------------------- */
 
-.provider-workspace { display: grid; grid-template-columns: 264px minmax(0, 1fr); gap: 28px; align-items: start; }
+/* The Status screen's language: a provider is its vendor's dot and the name people know it by; a
+   page is one card of dense rows rather than a card per fact; tags under a name say its state, the
+   account in use being the one point of violet; destructive acts share one card at the bottom. */
+
+.provider-workspace { display: grid; grid-template-columns: 248px minmax(0, 1fr); gap: 28px; align-items: start; }
 .provider-rail { position: sticky; top: 24px; min-width: 0; }
 .provider-rail-tools { display: flex; gap: 6px; align-items: center; margin-bottom: 10px; }
 .provider-rail-tools input { flex: 1 1 auto; min-width: 0; }
@@ -640,12 +644,12 @@ label.check input { margin-top: 2px; }
 .provider-rail-item {
   appearance: none;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
+  column-gap: 10px;
   width: 100%;
   min-width: 0;
-  padding: 8px 11px;
+  padding: 7px 10px 7px 11px;
   border: 0;
   border-radius: 8px;
   background: transparent;
@@ -654,10 +658,13 @@ label.check input { margin-top: 2px; }
   cursor: pointer;
 }
 .provider-rail-item:hover { background: var(--fill); }
-.provider-rail-item.selected { background: var(--accent-soft); }
-.provider-rail-copy { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.provider-rail-copy strong { font-weight: 500; font-size: var(--fs-sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.provider-rail-copy span { color: var(--label-2); font-size: var(--fs-foot); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The open provider is marked like the open page in the sidebar: a quiet fill, never a violet ground. */
+.provider-rail-item.selected { background: var(--nav-selected); }
+.provider-rail-item.selected strong { font-weight: 600; }
+.provider-rail-item > .vendor-dot { align-self: start; margin-top: 7px; }
+.provider-rail-copy { min-width: 0; display: flex; flex-direction: column; gap: 0; }
+.provider-rail-copy strong { font-weight: 500; font-size: var(--fs-sub); line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.provider-rail-copy span { color: var(--label-2); font-size: var(--fs-cap); line-height: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .provider-rail-item .badge { font-size: 0; gap: 0; }
 .provider-rail-empty { padding: 20px 12px; color: var(--label-2); font-size: var(--fs-sub); text-align: center; }
 .provider-back { display: none; }
@@ -666,14 +673,46 @@ label.check input { margin-top: 2px; }
 .provider-detail-empty { display: grid; place-items: center; min-height: 320px; color: var(--label-2); }
 .provider-detail-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 18px; }
 .provider-detail-header > div:first-child { min-width: 0; }
-.provider-title-line { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.provider-title-line h2 { font-size: 22px; font-weight: 700; letter-spacing: -0.015em; overflow-wrap: anywhere; }
+.provider-title-line { display: flex; align-items: center; gap: 6px 10px; flex-wrap: wrap; }
+.provider-title-line > .vendor-dot { width: 10px; height: 10px; }
+.provider-title-line h2 { font-size: 22px; font-weight: 700; letter-spacing: -0.015em; line-height: 1.25; overflow-wrap: anywhere; }
+.provider-title-line .badge { font-size: var(--fs-foot); }
 .provider-detail-header p { margin: 3px 0 0; }
+.provider-kind { padding-left: 20px; }
+.provider-kind .provider-key::before { content: "·"; margin: 0 6px; color: var(--label-3); font-family: var(--sans); }
+.provider-key { color: var(--label-3); font-size: var(--fs-cap); }
 .provider-detail-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; flex: 0 0 auto; }
-.provider-tabs { margin-bottom: 22px; }
-.provider-panel { display: grid; gap: 26px; }
+.provider-tabs { margin-bottom: 20px; }
+.provider-panel { display: grid; gap: 24px; }
 .provider-panel > .section { margin-top: 0; }
+
+/* The overview: one card of facts, a quiet name on the left and what it says on the right. */
+.provider-fact { position: relative; display: grid; grid-template-columns: 128px minmax(0, 1fr); column-gap: 16px; align-items: baseline; padding: 11px 16px; }
+.provider-facts > * + .provider-fact::before { content: ""; position: absolute; top: 0; left: 16px; right: 0; height: 1px; background: var(--separator); }
+.provider-fact-k { color: var(--label-2); font-size: var(--fs-foot); line-height: 20px; }
+.provider-fact-v { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; min-width: 0; color: var(--label); font-size: var(--fs-sub); line-height: 20px; overflow-wrap: anywhere; }
+.provider-fact-v .badge { font-size: var(--fs-sub); color: var(--label); }
+.provider-fact-v .badge.bad { color: var(--bad); }
+.provider-fact-v .cell-actions { margin-top: 4px; }
+/* Its usage: Status's own account rows, without the indent they take under a provider's name there. */
+.provider-usage .limits-account { padding-left: 16px; }
+.provider-usage .limits-account::before { left: 16px; }
+.provider-usage > .limits-account:first-child::before { display: none; }
+.provider-usage { padding: 2px 0 4px; }
+
+/* The destructive acts, together at the bottom of the page. */
 .provider-remove { margin-top: 30px; }
+.provider-remove > .cell-button { position: relative; border-radius: 0; }
+.provider-remove > .cell-button:first-child { border-top-left-radius: var(--radius); border-top-right-radius: var(--radius); }
+.provider-remove > .cell-button:last-child { border-bottom-left-radius: var(--radius); border-bottom-right-radius: var(--radius); }
+.provider-remove > .cell-button + .cell-button::before { content: ""; position: absolute; top: 0; left: 16px; right: 0; height: 1px; background: var(--separator); }
+
+/* A provider's models: the name with its id under it, and a small tag for whether it takes an effort. */
+.provider-model-row { min-height: 0; padding-top: 9px; padding-bottom: 9px; }
+.provider-model-row .cell-label { font-size: var(--fs-sub); }
+.provider-model-row .cell-sub.mono { color: var(--label-3); font-size: var(--fs-cap); }
+.provider-model-row .model-effort-tag { padding: 1px 7px; border-radius: 999px; background: var(--fill); color: var(--label-2); font-size: 11px; font-weight: 500; line-height: 16px; }
+.provider-model-row .model-effort-tag.no-effort { background: transparent; box-shadow: inset 0 0 0 1px var(--separator); color: var(--label-3); }
 
 .account-card-list > div.small, .account-card-list > .bad-text { padding: 14px 16px; }
 .stacked-add { margin-top: 10px; }
@@ -682,17 +721,62 @@ label.check input { margin-top: 2px; }
 .model-effort-tag.no-effort { color: var(--label-3); }
 .model-check .model-effort-tag { margin-left: auto; }
 
-.account-card { align-items: flex-start; }
-.account-card .cell-text strong { font-weight: 500; font-size: var(--fs-body); overflow-wrap: anywhere; }
-.account-card .hint { margin-top: 2px; }
-.account-card .account-quota { margin: 0; color: var(--label); font-variant-numeric: tabular-nums; }
-.account-card-badges { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex: 0 0 auto; padding-top: 2px; }
+/* An account list: the accounts, then "Add" as the last row of the same card. */
+.account-card-list > * + .cell::before, .account-group > .account-card-list + .cell-button::before {
+  content: ""; position: absolute; top: 0; left: 16px; right: 0; height: 1px; background: var(--separator);
+}
+.account-group > .cell-button { position: relative; border-radius: 0 0 var(--radius) var(--radius); }
+.account-group > .account-card-list:empty + .cell-button { border-radius: var(--radius); }
+.account-group > .account-card-list:empty + .cell-button::before { display: none; }
+
+/* An account: its name with its tags after it, then what it is, its usage, a note when it needs one,
+   and its actions. The copy column is laid out with the row, so the tags can follow the name. */
+.account-card { flex-wrap: wrap; align-items: center; column-gap: 8px; row-gap: 2px; padding-top: 11px; padding-bottom: 12px; }
+.account-card > .account-card-copy { display: contents; }
+.account-card-copy > strong { order: 0; flex: 0 1 auto; min-width: 0; color: var(--label); font-size: var(--fs-sub); font-weight: 600; line-height: 20px; overflow-wrap: anywhere; }
+.account-card > .account-card-badges { order: 1; flex: 1 1 auto; }
+.account-card-copy > :not(strong) { order: 2; flex: 1 1 100%; min-width: 0; }
+.account-card .small { color: var(--label-2); font-size: var(--fs-foot); line-height: 1.4; overflow-wrap: anywhere; }
+.account-card .hint { margin-top: 2px; font-size: var(--fs-cap); color: var(--label-2); }
+.account-card .account-quota { margin: 1px 0 0; color: var(--label); font-size: var(--fs-foot); font-variant-numeric: tabular-nums; }
+/* Its usage: a short meter per window, side by side, wrapping on a phone. */
+.account-meters { display: flex; flex-wrap: wrap; gap: 4px 18px; margin: 4px 0 1px; }
+.account-meter { display: inline-flex; align-items: center; gap: 7px; min-width: 0; font-size: var(--fs-cap); line-height: 18px; }
+.account-meter-name { color: var(--label-2); }
+.account-meter > .meter { flex: 0 0 64px; }
+.account-meter-figure { color: var(--label); font-size: var(--fs-foot); font-weight: 600; }
+.account-meter-reset { color: var(--label-2); }
+.account-meter.tone-warn .account-meter-figure { color: var(--warn); }
+.account-meter.tone-bad .account-meter-figure, .account-meter.tone-bad .account-meter-reset { color: var(--bad); }
+.account-card-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }
+/* Its state as tags, as on Status: the account in use outlined in violet, first place in ink, a pause grey, a warning tinted. */
+.account-card-badges .badge { display: inline-flex; max-width: 100%; padding: 1px 7px; border-radius: 999px; background: var(--fill); color: var(--label-2); font-size: 11px; font-weight: 500; line-height: 16px; white-space: normal; overflow-wrap: anywhere; }
+.account-card-badges .badge::before { display: none; }
+.account-card-badges .badge.first { color: var(--label); font-weight: 600; }
+.account-card-badges .badge.in-use { background: transparent; box-shadow: inset 0 0 0 1px var(--accent-line); color: var(--accent); font-weight: 600; }
+.account-card-badges .badge.warn { background: var(--tint-warn); color: var(--warn); }
+.account-card-badges .badge.bad { background: var(--tint-bad); color: var(--bad); }
 .account-card-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+/* Row actions are outlined, so a list of accounts does not read as a wall of grey buttons. */
+.account-card-actions .btn.secondary, .account-card-actions .btn.danger { background: transparent; box-shadow: inset 0 0 0 1px var(--separator); }
+.account-card-actions .btn.secondary:hover, .account-card-actions .btn.danger:hover { background: var(--fill); }
 .account-empty { padding: 16px; color: var(--label-2); font-size: var(--fs-sub); }
 /* The API-key add/edit form, inline in the accounts list: the modal form's fields at row padding. */
 .key-account-form { padding-top: 14px; padding-bottom: 14px; }
 .key-account-form .form-field:first-child { margin-top: 0; }
 .key-account-form .actions { margin-top: 12px; }
+.account-group > .key-account-form { border-radius: 0 0 var(--radius) var(--radius); }
+
+/* A narrow window lists the providers and pushes to one: each row says so with a chevron, and none is marked open. */
+@media (max-width: 860px) {
+  .provider-rail-item { grid-template-columns: auto minmax(0, 1fr) auto auto; }
+  .provider-rail-item::after { content: ""; width: 7px; height: 7px; margin: 0 2px 0 4px; border-right: 1.6px solid var(--label-3); border-bottom: 1.6px solid var(--label-3); transform: rotate(-45deg); }
+  .provider-rail-item.selected strong { font-weight: 500; }
+}
+@media (max-width: 720px) {
+  .provider-fact { grid-template-columns: minmax(0, 1fr); row-gap: 2px; }
+  .provider-kind { padding-left: 0; }
+}
 
 .notice { display: flex; flex-direction: column; gap: 3px; font-size: var(--fs-foot); line-height: 1.45; color: var(--label-2); }
 .notice strong { color: var(--warn); font-weight: 600; }
