@@ -905,8 +905,11 @@ export class ChatGptAdapter {
     subPath: string,
     body: Buffer | undefined,
     conversation: string | undefined,
-    /** `onCompleted` fires at `response.completed`: Codex hangs up right after it, and that is a finished turn. */
-    opts: { bodyEncoded?: boolean; onCompleted?: (outcome: ChatGptOutcome) => void } = {},
+    /**
+     * `onCompleted` fires at `response.completed`: Codex hangs up right after it, and that is a finished turn.
+     * `onAccount` fires as soon as an account answers, so a turn the client drops mid-stream still names it.
+     */
+    opts: { bodyEncoded?: boolean; onCompleted?: (outcome: ChatGptOutcome) => void; onAccount?: (ownerId: string) => void } = {},
   ): Promise<ChatGptOutcome> {
     const ac = new AbortController();
     const onClose = (): void => ac.abort();
@@ -936,6 +939,7 @@ export class ChatGptAdapter {
     if (sent.kind === "ok") {
       upstream = sent.upstream;
       owner = sent.credential.ownerId;
+      opts.onAccount?.(owner);
     } else if (sent.kind === "aborted") {
       res.off("close", onClose);
       return { status: 0, bytes: 0, note: "client closed" };

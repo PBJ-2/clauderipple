@@ -24,7 +24,9 @@ const requests = new RequestLog(path.join(home, "requests.jsonl"));
 
 type Hit = { path: string; method: string; headers: http.IncomingHttpHeaders; body: string; raw: Buffer };
 const hits: Hit[] = [];
-const behaviour = new Map<string, { status: number; headers?: Record<string, string>; body?: string }>();
+const behaviour = new Map<string, { status: number; headers?: Record<string, string>; body?: string; hold?: boolean }>();
+/** Answers left open mid-stream, for a turn the client drops before it ends. */
+const held: http.ServerResponse[] = [];
 const answer = [
   `event: response.created\ndata: ${JSON.stringify({ type: "response.created", response: { id: "r1" } })}\n\n`,
   `event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response: { id: "r1", usage: { input_tokens: 120, input_tokens_details: { cached_tokens: 100 }, output_tokens: 5 } } })}\n\n`,
@@ -39,6 +41,11 @@ const backend = http.createServer((req, res) => {
     hits.push({ path: req.url ?? "", method: req.method ?? "", headers: req.headers, body: raw.toString("utf8"), raw });
     const token = String(req.headers.authorization ?? "").replace(/^Bearer /, "");
     const planned = behaviour.get(token);
+    if (planned?.hold) {
+      held.push(res);
+      res.writeHead(200, { "content-type": "text/event-stream", "x-codex-turn-state": `ts-${token}-held` }).write(answer.slice(0, 60));
+      return;
+    }
     if (planned && planned.status !== 200) {
       res.writeHead(planned.status, { "content-type": "application/json", ...(planned.headers ?? {}) }).end(planned.body ?? "{}");
       return;
@@ -110,6 +117,26 @@ test("a GPT turn from Codex goes out unchanged on a pool account, and comes back
   assert.equal(record.account, firstAccount.id);
 });
 
+test("a Codex turn the client drops mid-stream still names the account that was answering", async () => {
+  behaviour.set("tok-1", { status: 200, hold: true });
+  const before = requests.list(100).length;
+  await new Promise<void>((resolve, reject) => {
+    const req = http.request({ host: "127.0.0.1", port, path: "/v1/responses", method: "POST", headers: { authorization: "Bearer caller-token", "chatgpt-account-id": "ws-caller", originator: "codex_exec", session_id: "sess-drop", "content-type": "application/json" } }, (res) => {
+      res.once("data", () => { req.destroy(); resolve(); });
+    });
+    req.on("error", (error) => { if (!/socket hang up|aborted/i.test(error.message)) reject(error); });
+    req.end(JSON.stringify(turn));
+  });
+  // The row is written when the server sees the socket close, a moment after the client left.
+  for (let i = 0; i < 50 && requests.list(100).length === before; i++) await new Promise((r) => setTimeout(r, 20));
+  const record = requests.list(1)[0]!;
+  assert.equal(record.ok, false);
+  assert.equal(record.status, 499);
+  assert.equal(record.note, "client closed");
+  assert.equal(record.account, firstAccount.id, "a row cut off mid-stream still names the account that answered");
+  behaviour.delete("tok-1");
+});
+
 test("account 1 at its limit: Codex's same turn is answered on account 2, no sign-out", async () => {
   behaviour.set("tok-1", { status: 429, headers: { "x-codex-primary-used-percent": "100", "x-codex-primary-reset-after-seconds": "1800", "x-codex-primary-window-minutes": "300" }, body: JSON.stringify({ error: { type: "usage_limit_reached", message: "limit" } }) });
   const before = hits.length;
@@ -174,6 +201,7 @@ test("a WebSocket attempt is told 426, so Codex falls back to HTTP", async () =>
 });
 
 test("cleanup", async () => {
+  for (const res of held) res.destroy();
   await ingress.drain(0);
   backend.close();
 });

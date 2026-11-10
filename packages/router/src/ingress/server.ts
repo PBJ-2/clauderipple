@@ -291,9 +291,11 @@ export class OpenAiIngress {
       this.deps.log.info(`OPENAI ${tagged}`);
       if (isCall) {
         const entry: RequestRecord = { ...record, id: requestId(), at: new Date(started).toISOString(), ms, status, ok: status >= 200 && status < 400 };
-        if (extra.account) {
-          entry.account = extra.account;
-          if (extra.account === served.account && served.accountEmail) entry.accountEmail = served.accountEmail;
+        // An exit that carries no account (a client that left mid-stream, say) still names the one that answered.
+        const account = extra.account ?? served.account;
+        if (account) {
+          entry.account = account;
+          if (account === served.account && served.accountEmail) entry.accountEmail = served.accountEmail;
         }
         if (extra.usage) entry.usage = extra.usage;
         if (extra.stopReason) entry.stopReason = extra.stopReason;
@@ -382,6 +384,7 @@ export class OpenAiIngress {
         record = { kind: "messages", source: requested, target: explicit?.model ?? requested, provider: adapter.name, stream: body.stream === true };
         const outcome = await adapter.passthrough(req, res, path.slice("/v1".length), payload, codexConversation(req, body), {
           bodyEncoded: !renamed,
+          onAccount: (ownerId) => { served.account = ownerId; },
           onCompleted: (done) => { terminal = { status: done.status, bytes: done.bytes, ...(done.account ? { account: done.account } : {}), ...(done.usage ? { usage: done.usage } : {}), ...(done.note ? { note: done.note } : {}) }; },
         });
         finish(outcome.status, outcome.bytes, { ...(outcome.account ? { account: outcome.account } : {}), ...(outcome.usage ? { usage: outcome.usage } : {}), ...(outcome.note ? { note: outcome.note } : {}) });
