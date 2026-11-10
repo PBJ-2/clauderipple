@@ -352,8 +352,6 @@ function credentialOf(ownerId: string, label: string, accessToken: string, accou
 export type ChatGptAccountPoolOptions = {
   home: string;
   mode: "own" | "borrow-codex" | "auto";
-  /** Exact local summary id. This restricts the auth mode; it never widens it. */
-  account?: string;
   log: Pick<Logger, "info" | "warn">;
   fetch?: FetchLike;
   now?: () => number;
@@ -367,7 +365,6 @@ export type ChatGptAccountPoolOptions = {
 export class ChatGptAccountPool {
   private readonly home: string;
   private readonly mode: "own" | "borrow-codex" | "auto";
-  private readonly account: string | undefined;
   private readonly log: Pick<Logger, "info" | "warn">;
   private readonly fetchImpl: FetchLike | undefined;
   private readonly now: () => number;
@@ -375,7 +372,6 @@ export class ChatGptAccountPool {
   constructor(options: ChatGptAccountPoolOptions) {
     this.home = options.home;
     this.mode = options.mode;
-    this.account = options.account;
     this.log = options.log;
     this.fetchImpl = options.fetch;
     this.now = options.now ?? Date.now;
@@ -383,12 +379,12 @@ export class ChatGptAccountPool {
 
   /** Stored accounts this provider may use (paused and needs-sign-in included, for display). */
   ownAccounts(): ChatGptAccount[] {
-    return this.mode === "borrow-codex" ? [] : readChatGptAccounts(this.home).filter((account) => this.account === undefined || account.id === this.account);
+    return this.mode === "borrow-codex" ? [] : readChatGptAccounts(this.home);
   }
 
   /** The Codex CLI's login, when this provider may use it and it is not one of ours already. */
   codexLogin(): Tokens | null {
-    if (this.mode === "own" || (this.account !== undefined && this.account !== CODEX_LOGIN_ID)) return null;
+    if (this.mode === "own") return null;
     const borrowed = readBorrowed();
     if (!borrowed) return null;
     const identity = identityFromTokens(borrowed);
@@ -423,7 +419,7 @@ export class ChatGptAccountPool {
 
   /** Refresh every stored account inside its lead window. */
   async refreshDue(): Promise<void> {
-    const due = this.ownAccounts().filter((account) => !account.paused && !account.needsReauth && account.refreshToken && this.now() >= account.expiresAt - REFRESH_LEAD_MS);
+    const due = this.ownAccounts().filter((account) => !account.needsReauth && account.refreshToken && this.now() >= account.expiresAt - REFRESH_LEAD_MS);
     await Promise.all(due.map((account) => this.refresh(account)));
   }
 
@@ -434,7 +430,7 @@ export class ChatGptAccountPool {
    */
   async forceRefresh(ownerId: string): Promise<boolean> {
     const account = this.ownAccounts().find((candidate) => candidate.id === ownerId);
-    if (!account?.refreshToken || account.paused || account.needsReauth) return false;
+    if (!account?.refreshToken || account.needsReauth) return false;
     const before = account.accessToken;
     await this.refresh(account);
     const after = this.ownAccounts().find((candidate) => candidate.id === ownerId);
@@ -494,9 +490,8 @@ export class ChatGptAccountPool {
     return out;
   }
 
-  /** Unbound keeps the legacy any-login check; a binding reports only its usable credentials. */
+  /** Whether anything is signed in at all, expired or not — the "log in first" check. */
   signedIn(): boolean {
-    if (this.account !== undefined) return this.peekCredentials().length > 0;
     return this.ownAccounts().length > 0 || this.codexLogin() !== null || (this.mode !== "own" && readBorrowed() !== null);
   }
 }

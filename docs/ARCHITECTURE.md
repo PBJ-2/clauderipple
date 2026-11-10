@@ -909,19 +909,16 @@ must preserve **Data: Artificial Analysis (artificialanalysis.ai)** attribution.
     one snapshot (the account that answers next — the tray and other readers
     want one number) and adds `chatgpt.accounts` per account; `/wham/usage` is
     asked for every account.
-  - **Provider-local account binding (2026-11-10).** A ChatGPT provider's optional
-    `account` is an exact local account summary id (not the upstream workspace id).
-    Omitted, the shared pool rotates as before. Set, credentials, refresh, quota,
-    side calls and generated account workers are restricted to that account before
-    conversation affinity or a worker pin is considered; an unavailable selection
-    never falls through to another account or the Codex caller's login. Changing
-    the binding replaces the adapter and its cached quota/catalogue. The Accounts
-    selector still discovers all auth-mode-eligible account metadata, but unselected
-    discovery rows claim no quota or active use. The dashboard shows both available
-    quota windows on Status; its icon-only account control switches these quota
-    readouts between usage and remaining limits, remembering the viewer's preference
-    locally without modifying backend usage or routing. Regression tests:
-    `chatgpt-provider-account.test.ts`, `ui-quota-display.test.ts`.
+  - **Quota display only (2026-11-11).** Status shows both available quota windows
+    from the existing backend active-account snapshot. The icon-only account quota
+    control switches readouts between usage and remaining limits, remembering only
+    the viewer's local display preference; it does not save config or modify quota
+    data. There is no provider-local `account` config field or account selector.
+    The original shared pool, global preferred account, explicit worker pins,
+    conversation affinity, credential refresh and auth-mode boundaries are unchanged,
+    as are automatic account failover and the Codex caller's login fallback. The
+    existing account-list rotation explanation remains visible. Regression tests:
+    `ui-quota-display.test.ts`, `ui-i18n-parity.test.ts`.
   - **The prompt cache is keyed on the conversation's identity, not on
     `prompt_cache_key` (since mid-September 2026).** Five turns with byte-identical
     instructions, tools and input prefix, 3–6s apart under one key, all came back

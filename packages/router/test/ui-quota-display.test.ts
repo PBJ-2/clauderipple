@@ -24,7 +24,6 @@ class Element {
   children: Element[] = [];
   textContent = "";
   title = "";
-  value = "";
   disabled = false;
   listeners: Record<string, () => void> = {};
   tag: string;
@@ -35,21 +34,17 @@ class Element {
   }
   addEventListener(event: string, fn: () => void) { this.listeners[event] = fn; }
   replaceChildren(...children: Element[]) { this.children = children; }
-  contains(node: Element | null): boolean { return node === this || this.children.some(child => typeof child !== "string" && child.contains(node)); }
   click() { this.listeners.click?.(); }
 }
 
-type Config = { providers: Record<string, { type: string; account?: string; label?: string }>; autoUpdate?: boolean };
 function harness(options: { stored?: string; blockedStorage?: boolean; lang?: string } = {}) {
   const nodes: Element[] = [];
   const health = new Element("health");
-  const binding = new Element("binding");
   const storage = new Map(options.stored === undefined ? [] : [["clauderipple_quota_remaining", options.stored]]);
   const h = {
-    nodes, health, binding, storage, writes: [] as Config[], toasts: [] as string[], failRead: false, failWrite: false,
-    config: { providers: { a: { type: "chatgpt", account: "first" }, b: { type: "chatgpt", account: "second" } }, autoUpdate: true } as Config,
+    nodes, health, storage, writes: [] as unknown[],
+    config: { providers: { a: { type: "chatgpt" }, b: { type: "chatgpt" } } },
     status: { chatgpt: { quota: { a: quota(97, 98), b: quota() } }, providers: {} },
-    selectedProviderName: "a", renders: 0, activeElement: null as Element | null,
   };
   const el = (tag: string, attrs: Record<string, unknown> = {}, children: Element[] = []) => {
     const node = new Element(tag);
@@ -65,8 +60,7 @@ function harness(options: { stored?: string; blockedStorage?: boolean; lang?: st
     const t = (key, vars = {}) => (dict[key] || key).replace(/\\{(\\w+)\\}/g, (_, name) => String(vars[name]));
     const localStorage = { getItem: key => { if (${Boolean(options.blockedStorage)}) throw Error('blocked'); return h.storage.get(key); }, setItem: (key, value) => { if (${Boolean(options.blockedStorage)}) throw Error('blocked'); h.storage.set(key, value); } };
     const $all = selector => h.nodes.filter(node => selector === '[data-quota-windows]' ? node.dataset.quotaWindows : node.attrs.class === 'quota-view-toggle');
-    const $ = selector => selector === '#health-providers' ? h.health : selector === '#chatgpt-account-binding' ? h.binding : null;
-    const document = { get activeElement() { return h.activeElement; } };
+    const $ = selector => selector === '#health-providers' ? h.health : null;
     const svgIcon = () => el('svg');
     const cell = (label, value, sub = []) => el('cell', {}, [typeof label === 'string' ? el('label', {text:label}) : label, ...(Array.isArray(value) ? value : [value]), ...sub].filter(Boolean));
     const providerLabel = (name, provider) => provider.label || name;
@@ -75,21 +69,15 @@ function harness(options: { stored?: string; blockedStorage?: boolean; lang?: st
     const chevronIcon = () => el('svg');
     const hint = text => el('hint', {text});
     const openProvider = () => {};
-    const clone = value => JSON.parse(JSON.stringify(value));
-    let status = h.status, currentConfig = clone(h.config), slotsLoaded = true, clientsLoaded = true;
-    let selectedProviderName = h.selectedProviderName, providerDetailTab = 'accounts';
-    const api = async path => { if (h.failRead) throw Error('offline'); if (path !== '/api/config') throw Error(path); return clone(h.config); };
-    const configRequest = async next => { h.writes.push(clone(next)); if (h.failWrite) throw Error('write failed'); h.config = clone(next); return {}; };
-    const toast = message => h.toasts.push(message);
-    const configSaved = (_, message) => h.toasts.push(message);
-    const refreshHealth = async () => {};
-    const renderProviderWorkspace = () => h.renders++;
-    const modSelect = (key, items, value, label, onChange) => { const node = el('select', {'data-key':key, 'aria-label':label}, items.map(item => el('option', {value:item.value, text:item.label}))); node.value = value; node.addEventListener('change', () => onChange(node.value)); return node; };
+    const status = h.status, currentConfig = h.config;
+    const configRequest = next => { h.writes.push(next); throw Error('display must not save config'); };
     ${block("const QUOTA_VIEW_STORE =", "function shortError(")}
     ${block("function renderHealthProviders()", "let statusModBusy =")}
     ${block("function chatgptQuotaText(", "/** A wait people read")}
-    ${block("async function saveChatgptBinding(", "function renderChatgptAccountRows(")}
-    return { quotaLine, quotaWindowsText, chatgptQuotaText, accountQuotaNode, setQuotaRemaining, renderHealthProviders, saveChatgptBinding, renderChatgptBinding };
+    const chatgptLoginBusy = false;
+    const queueMicrotask = () => {};
+    ${block("function chatgptAccountsPanel(", "// ---- API-key accounts")}
+    return { quotaLine, quotaWindowsText, chatgptQuotaText, accountQuotaNode, setQuotaRemaining, renderHealthProviders, chatgptAccountsPanel };
   `)(h, el, dictionaries[options.lang || "en"]!) as {
     quotaLine(name: string): string | null;
     quotaWindowsText(windows: (Window | null)[]): string;
@@ -97,8 +85,7 @@ function harness(options: { stored?: string; blockedStorage?: boolean; lang?: st
     accountQuotaNode(q: Quota | null): Element | null;
     setQuotaRemaining(remaining: boolean): void;
     renderHealthProviders(): void;
-    saveChatgptBinding(name: string, id: string, select: Element): Promise<void>;
-    renderChatgptBinding(accounts: { id: string; label: string }[], name: string): void;
+    chatgptAccountsPanel(name: string): Element;
   };
   return { h, ui };
 }
@@ -117,6 +104,8 @@ test("an icon-only account button switches every account and status to remaining
   const { h, ui } = harness();
   const first = ui.accountQuotaNode(quota())!;
   const second = ui.accountQuotaNode(quota(97, 100))!;
+  const originalConfig = structuredClone(h.config);
+  const originalStatus = structuredClone(h.status);
   ui.renderHealthProviders();
   const button = first.children[1]!;
   assert.equal(button.textContent, "");
@@ -133,7 +122,9 @@ test("an icon-only account button switches every account and status to remaining
   second.children[1]!.click();
   assert.equal(first.children[0]!.textContent, "5h 27% used · weekly 35% used");
   assert.match(texts(h.health), /5h 27% used · weekly 35% used/);
-  assert.deepEqual(h.writes, [], "the preference must not change account routing or quota data");
+  assert.deepEqual(h.writes, [], "the display control must not save config");
+  assert.deepEqual(h.config, originalConfig);
+  assert.deepEqual(h.status, originalStatus, "displaying remaining limits must not mutate backend quota");
 });
 
 test("remaining preference survives reload and does not require browser storage", () => {
@@ -153,68 +144,33 @@ test("remaining percentages clamp to the valid range and missing values stay mis
   assert.match(full, /^5h 0% remaining · resets /, "a full window keeps its reset information");
 });
 
-test("account selection preserves all choices, including a missing saved account", () => {
+test("quota display adds no provider-local account controls or config saves", () => {
   const { h, ui } = harness();
-  ui.renderChatgptBinding([{ id: "first", label: "First" }, { id: "second", label: "Second" }], "a");
-  const select = h.binding.children[0]!.children[1]!;
-  assert.equal(select.value, "first");
-  assert.deepEqual(select.children.map(node => node.attrs.value), ["", "first", "second"]);
-  h.activeElement = select;
-  ui.renderChatgptBinding([{ id: "second", label: "Second" }], "a");
-  assert.equal(h.binding.children[0]!.children[1], select, "polling preserves a focused account menu");
-  h.activeElement = null;
-  ui.renderChatgptBinding([{ id: "second", label: "Second" }], "a");
-  assert.match(texts(h.binding), /Unavailable account · first/);
-});
-
-test("binding saves only that provider's account onto fresh config and automatic clears it", async () => {
-  const { h, ui } = harness();
-  h.config.autoUpdate = false;
-  h.config.providers.b!.label = "Changed elsewhere";
-  const select = new Element("select");
-  await ui.saveChatgptBinding("a", "second", select);
-  assert.equal(h.writes[0]!.providers.a!.account, "second");
-  assert.equal(h.writes[0]!.providers.b!.label, "Changed elsewhere");
-  assert.equal(h.writes[0]!.autoUpdate, false);
-  assert.equal(select.disabled, false);
-  await ui.saveChatgptBinding("a", "", select);
-  assert.equal(Object.hasOwn(h.writes[1]!.providers.a!, "account"), false);
-});
-
-test("failed binding reads or writes never claim success and restore the selection", async () => {
-  for (const failure of ["failRead", "failWrite"] as const) {
-    const { h, ui } = harness();
-    h[failure] = true;
-    const select = new Element("select");
-    select.value = "second";
-    await ui.saveChatgptBinding("a", "second", select);
-    assert.equal(select.value, "first");
-    assert.equal(select.disabled, false);
-    assert.equal(h.renders, 0);
-    assert.deepEqual(h.toasts, ["Could not save."]);
-    if (failure === "failRead") assert.deepEqual(h.writes, []);
+  const panel = ui.chatgptAccountsPanel("a");
+  assert.equal(panel.children.length, 1, "no extra account-selection section");
+  assert.equal(panel.children[0]!.children.at(-1)!.textContent, dictionaries.en!["providers.chatgptAccountsSubtitle"]);
+  assert.equal(h.nodes.some(node => node.tag === "select"), false);
+  assert.doesNotMatch(source, /saveChatgptBinding|renderChatgptBinding|chatgpt-account-binding|chatgpt-account-selection/);
+  assert.doesNotMatch(block("async function probeProvider(", "// ---- Capability measurement"), /provider\.account/);
+  for (const dictionary of Object.values(dictionaries)) {
+    for (const key of ["providers.chatgptAccountBinding", "providers.chatgptAccountAuto", "providers.chatgptAccountMissing", "providers.chatgptAccountBindingHelp"]) {
+      assert.equal(Object.hasOwn(dictionary, key), false, key);
+    }
   }
+  assert.deepEqual(h.writes, []);
 });
 
-test("connection probes carry the provider's selected account and auth mode", async () => {
-  const sent: { auth?: string; account?: string }[] = [];
-  const probeProvider = new Function("api", `
-    const probeStates = new Map();
-    const renderHealthProviders = () => {};
-    ${block("async function probeProvider(", "// ---- Capability measurement")}
-    return probeProvider;
-  `)(async (url: string, options: { body: string }) => {
-    assert.equal(url, "/api/providers/probe");
-    sent.push(JSON.parse(options.body));
-    return { ok: true };
-  }) as (name: string, provider: { type: string; auth: string; account?: string }) => Promise<unknown>;
-  await probeProvider("a", { type: "chatgpt", auth: "own", account: "first" });
-  await probeProvider("b", { type: "chatgpt", auth: "auto" });
-  assert.deepEqual(sent, [{ type: "chatgpt", auth: "own", account: "first" }, { type: "chatgpt", auth: "auto" }]);
+test("status renders the existing backend active-account snapshot", () => {
+  const { h, ui } = harness();
+  h.status.chatgpt.quota.a = quota(27, 35);
+  assert.equal(ui.quotaLine("a"), "5h 27% used · weekly 35% used");
+  ui.renderHealthProviders();
+  assert.match(texts(h.health), /5h 27% used · weekly 35% used/);
+  assert.doesNotMatch(texts(h.health), /97% used|98% used/);
 });
 
-test("quota and account-selection strings are translated in every dashboard language", () => {
-  const keys = ["quota.usedLine", "quota.remainingLine", "quota.showUsed", "quota.showRemaining", "providers.chatgptAccountBinding", "providers.chatgptAccountAuto", "providers.chatgptAccountMissing", "providers.chatgptAccountBindingHelp"];
+test("quota display strings are translated in every dashboard language", () => {
+  const keys = ["quota.usedLine", "quota.remainingLine", "quota.showUsed", "quota.showRemaining"];
   for (const [language, dictionary] of Object.entries(dictionaries)) {
     for (const key of keys) assert.ok(dictionary[key], `${language}: ${key}`);
   }

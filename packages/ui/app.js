@@ -2549,8 +2549,6 @@ async function probeProvider(name, provider, onComplete) {
       ? { type: "anthropic", auth: provider.auth, ...(provider.auth === "api-key" && provider.apiKey ? { apiKey: provider.apiKey } : {}) }
       : provider.type === "google"
       ? { type: "google", auth: provider.auth, ...(provider.apiKey ? { apiKey: provider.apiKey } : {}), ...(provider.url ? { url: provider.url } : {}) }
-      : provider.type === "chatgpt"
-      ? { type: "chatgpt", auth: provider.auth, ...(provider.account ? { account: provider.account } : {}) }
       : provider.type === "grok"
       ? { type: "grok", ...Object.fromEntries(["home", "cli", "url", "clientVersion"].filter((key) => provider[key]).map((key) => [key, provider[key]])) }
       : {
@@ -3163,46 +3161,9 @@ async function patchChatgptAccount(name, id, change) {
   } catch (error) { toast(t("common.actionFailed"), true, error.message); }
 }
 
-async function saveChatgptBinding(name, account, select) {
-  const previous = currentConfig && currentConfig.providers && currentConfig.providers[name];
-  const previousAccount = (previous && previous.account) || "";
-  select.disabled = true;
-  try {
-    const next = clone(await api("/api/config"));
-    const provider = next.providers && next.providers[name];
-    if (!provider || provider.type !== "chatgpt") throw new Error(t("providers.noSelection"));
-    if (account) provider.account = account;
-    else delete provider.account;
-    const out = await configRequest(next);
-    currentConfig = next;
-    slotsLoaded = false;
-    clientsLoaded = false;
-    configSaved(out, t("common.saved"));
-    await refreshHealth();
-    if (selectedProviderName === name && providerDetailTab === "accounts") renderProviderWorkspace();
-  } catch (error) {
-    select.value = previousAccount;
-    toast(t("common.saveFailed"), true, error.message);
-  } finally { select.disabled = false; }
-}
-
-function renderChatgptBinding(accounts, name) {
-  const target = $("#chatgpt-account-binding");
-  if (!target || target.contains(document.activeElement)) return;
-  const provider = currentConfig && currentConfig.providers && currentConfig.providers[name];
-  const selected = (provider && provider.account) || "";
-  const items = [{ value: "", label: t("providers.chatgptAccountAuto") }, ...accounts.map((account) => ({ value: account.id, label: account.label }))];
-  if (selected && !accounts.some((account) => account.id === selected)) {
-    items.push({ value: selected, label: t("providers.chatgptAccountMissing", { id: selected }) });
-  }
-  const select = modSelect("chatgpt-account-selection", items, selected, t("providers.chatgptAccountBinding"), (value) => void saveChatgptBinding(name, value, select));
-  target.replaceChildren(cell(t("providers.chatgptAccountBinding"), select, [t("providers.chatgptAccountBindingHelp")]));
-}
-
 function renderChatgptAccountRows(target, data, name, generation) {
   if (generation !== providerDetailGeneration) return;
   const accounts = Array.isArray(data.accounts) ? data.accounts : [];
-  renderChatgptBinding(accounts, name);
   const rows = accounts.map((account) => {
     const own = account.source !== "codex";
     const actions = [];
@@ -3403,13 +3364,12 @@ function chatgptAccountsPanel(name) {
   add.addEventListener("click", () => void startChatgptLogin(() => { renderProviderDetail(); void refreshChatgptAccountPanel(name); }, true));
   const rows = el("div", { id: "chatgpt-account-rows", class: "group account-card-list" }, [el("div", { class: "small", text: t("providers.checking") })]);
   const panel = el("div", { class: "provider-panel" }, [
-    el("section", { class: "section" }, [el("div", { id: "chatgpt-account-binding", class: "group" })]),
     el("section", { class: "section" }, [
       el("div", { class: "section-head" }, [el("h3", { class: "section-title", text: t("providers.chatgptAccountsTitle") }), el("span", { id: "chatgpt-account-count", class: "small", text: t("providers.chatgptAccountCount", { count: 0 }) })]),
       rows,
       el("div", { class: "group stacked-add" }, [add]),
       waiting,
-      currentConfig.providers[name].account ? null : el("p", { class: "group-footer", text: t("providers.chatgptAccountsSubtitle") }),
+      el("p", { class: "group-footer", text: t("providers.chatgptAccountsSubtitle") }),
     ]),
   ]);
   queueMicrotask(() => void refreshChatgptAccountPanel(name));
