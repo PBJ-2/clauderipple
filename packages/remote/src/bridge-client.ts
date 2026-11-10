@@ -163,47 +163,6 @@ export function loadBridgeAuth(options: BridgeAuthOptions = {}): BridgeAuth {
   throw new BridgeAuthError(LOGIN_EXPIRED);
 }
 export interface BridgeFrame { event: string; data: Record<string, unknown> }
-
-// TEMPORARY PROBE, measurement only (2026-11-10): removed by the follow-up commit. It counts Remote Control frame
-// kinds, payload sizes and the paths of text-like keys, and the gaps between frames that carry them. It never
-// logs a value, an id or text. One summary line a minute goes to stderr.
-const PROBE_WINDOW_MS = 60_000;
-const probe = { start: Date.now(), last: 0, frames: new Map<string, number>(), sizes: new Map<string, number>(), paths: new Map<string, number>(), gaps: [] as number[] };
-const PROBE_NAME = /^[a-z][a-z_]{0,39}$/;
-function probeCount(map: Map<string, number>, key: string): void { map.set(key, (map.get(key) ?? 0) + 1); }
-function probePaths(value: unknown, path: string, depth: number, out: Set<string>): void {
-  if (depth > 5 || value === null || typeof value !== "object") return;
-  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-    const next = `${path}.${PROBE_NAME.test(key) ? key : "*"}`;
-    if (/delta|text|partial/i.test(key)) out.add(next);
-    probePaths(child, next, depth + 1, out);
-  }
-}
-function probeFlush(now: number): void {
-  const gaps = [...probe.gaps].sort((a, b) => a - b);
-  const at = (p: number) => (gaps.length ? gaps[Math.min(gaps.length - 1, Math.floor(p * gaps.length))] : null);
-  process.stderr.write(`[probe] ${JSON.stringify({ windowS: Math.round((now - probe.start) / 1000), frames: Object.fromEntries(probe.frames), bytes: Object.fromEntries(probe.sizes), textPaths: Object.fromEntries(probe.paths), textGapMs: { n: gaps.length, p50: at(0.5), p90: at(0.9), max: gaps.at(-1) ?? null } })}\n`);
-  probe.start = now;
-  probe.frames.clear(); probe.sizes.clear(); probe.paths.clear(); probe.gaps = [];
-}
-function probeFrame(frame: BridgeFrame): void {
-  try {
-    const now = Date.now();
-    const payload = frame.data.payload as { type?: unknown } | undefined;
-    const typed = payload && typeof payload === "object" && typeof payload.type === "string" ? payload.type : undefined;
-    probeCount(probe.frames, `${frame.event}|${typed === undefined ? "none" : PROBE_NAME.test(typed) ? typed : "other"}`);
-    const bytes = JSON.stringify(frame.data).length;
-    probeCount(probe.sizes, `${frame.event}|${bytes < 256 ? "<256" : bytes < 1024 ? "<1k" : bytes < 4096 ? "<4k" : bytes < 16384 ? "<16k" : bytes < 65536 ? "<64k" : ">=64k"}`);
-    const found = new Set<string>();
-    probePaths(frame.data, frame.event, 0, found);
-    if (found.size) {
-      for (const path of found) probeCount(probe.paths, path);
-      if (probe.last) probe.gaps.push(now - probe.last);
-      probe.last = now;
-    }
-    if (now - probe.start >= PROBE_WINDOW_MS) probeFlush(now);
-  } catch { /* the probe never breaks the stream */ }
-}
 /** `slash_commands` minus `terminal_slash_commands`, which phone UIs should hide (SDK init docs). */
 export function slashCommands(init: Record<string, unknown>): string[] | null {
   if (!Array.isArray(init.slash_commands)) return null;
@@ -471,7 +430,6 @@ export class BridgeClient {
       let handling = false;
       try {
         for await (const frame of decodeSse(response.body)) {
-          probeFrame(frame);
           handling = true;
           // Only live permission prompts come from here; the conversation itself is read from the transcript.
           if (frame.event === "catch_up_truncated") { handling = false; continue; }
