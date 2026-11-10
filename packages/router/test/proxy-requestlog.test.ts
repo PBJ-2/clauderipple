@@ -21,7 +21,9 @@ import { createCa, createLeaf } from "../src/x509.ts";
 
 const noClaudeCodeCredentialReaders = { keychain: () => null, credentialsFile: () => null };
 
-async function rig(options: { respond?: (res: http.ServerResponse, req: http.IncomingMessage) => void; healthLimit?: number } = {}) {
+async function rig(options: { respond?: (res: http.ServerResponse, req: http.IncomingMessage) => void; healthLimit?: number; profiles?: Record<string, string> } = {}) {
+  // The current login's email per bearer token, as `/api/oauth/profile` would name it.
+  const profiles = options.profiles ?? {};
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-log-metadata-"));
   const ca = createCa({ cn: "request log test" });
   const leaf = createLeaf({ host: "localhost", caCertPem: ca.certPem, caKeyPem: ca.keyPem });
@@ -96,7 +98,12 @@ async function rig(options: { respond?: (res: http.ServerResponse, req: http.Inc
   const observed = new ObservedClaudeCodeAuth();
   const trips: number[] = [];
   const health = new UpstreamHealth(() => options.healthLimit ?? 100, (n) => trips.push(n));
-  const proxy = new Proxy({ config: () => cfg, home, requests, claudeCodeCredentialReaders: noClaudeCodeCredentialReaders, observedClaudeCodeAuth: observed, agentDir: path.join(home, "agents"), certs: new CertStore(home), log: new Logger(path.join(home, "router.log"), 1e6, 1, false), health, upstreamPort: (native.address() as net.AddressInfo).port, upstreamAgent: agent });
+  const claudeProfileFetch = async (_url: string, init: RequestInit): Promise<Response> => {
+    const token = String((init.headers as Record<string, string>).authorization ?? "").replace(/^Bearer\s+/i, "");
+    const email = profiles[token];
+    return email ? new Response(JSON.stringify({ account: { uuid: `uuid-${token}`, email } }), { status: 200 }) : new Response("{}", { status: 404 });
+  };
+  const proxy = new Proxy({ config: () => cfg, home, requests, claudeCodeCredentialReaders: noClaudeCodeCredentialReaders, observedClaudeCodeAuth: observed, agentDir: path.join(home, "agents"), certs: new CertStore(home), log: new Logger(path.join(home, "router.log"), 1e6, 1, false), health, upstreamPort: (native.address() as net.AddressInfo).port, upstreamAgent: agent, claudeProfileFetch });
   await proxy.listen();
   const send = async (model: string, extra: Record<string, unknown> = {}, pathname = "/v1/messages", beforeSend?: (socket: tls.TLSSocket) => void, headers: Record<string, string> = {}) => {
     const socket = net.connect(port, "127.0.0.1");
@@ -126,7 +133,7 @@ async function rig(options: { respond?: (res: http.ServerResponse, req: http.Inc
     secure.destroy();
     return { text, record: requests.list(1)[0]! };
   };
-  return { cfg, seen, seenAuth, home, requests, proxy, observed, send, health, trips, failBackend: () => { responseStatus = 400; }, failImage: () => { imageStatus = 500; }, stop: async () => {
+  return { cfg, seen, seenAuth, home, requests, proxy, observed, profiles, send, health, trips, failBackend: () => { responseStatus = 400; }, failImage: () => { imageStatus = 500; }, stop: async () => {
     proxy.close(); agent.destroy();
     await Promise.all([backend, native].map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
     fs.rmSync(home, { recursive: true, force: true });
@@ -425,6 +432,36 @@ test("proxy logs native request-id and classifier purpose without configuring cl
     assert.equal(pooled.messageId, undefined);
     assert.equal(pooled.purpose, undefined);
     assert.equal(pooled.requestedTier, undefined);
+  } finally { await r.stop(); }
+});
+
+test("a Claude row keeps the email of the login that answered after the login is switched", async () => {
+  const r = await rig({ profiles: { "test-native": "first@example.test", "test-second": "second@example.test" } });
+  try {
+    r.observed.observe(["authorization", "Bearer test-native", "anthropic-version", "2023-06-01"]);
+    const first = (await r.send("claude-pool")).record;
+    assert.equal(first.account, "current");
+    assert.equal(first.accountEmail, "first@example.test");
+
+    r.observed.observe(["authorization", "Bearer test-second", "anthropic-version", "2023-06-01"]);
+    const second = (await r.send("claude-pool")).record;
+    assert.equal(second.accountEmail, "second@example.test");
+    assert.equal(r.requests.list(10).find((record) => record.id === first.id)?.accountEmail, "first@example.test", "the old row keeps the person who answered it");
+
+    // A login whose profile cannot be read names nobody: the row keeps `current` and no email.
+    r.observed.observe(["authorization", "Bearer test-unknown", "anthropic-version", "2023-06-01"]);
+    const unknown = (await r.send("claude-pool")).record;
+    assert.equal(unknown.account, "current");
+    assert.equal(unknown.accountEmail, undefined);
+  } finally { await r.stop(); }
+});
+
+test("a request answered on the app's own sign-in snapshots that login's email", async () => {
+  const r = await rig({ profiles: { "app-own-token": "app@example.test" } });
+  try {
+    const { record } = await r.send("claude-pool", {}, "/v1/messages", undefined, { authorization: "Bearer app-own-token" });
+    assert.equal(record.account, "current");
+    assert.equal(record.accountEmail, "app@example.test");
   } finally { await r.stop(); }
 });
 

@@ -256,28 +256,41 @@ function previewAccounts<T extends { id: string; paused: boolean; preferred: boo
   return accounts.map((account) => ({ ...account, state: account.paused ? "paused" : credentials.some((credential) => credential.id === account.id) ? "ready" : "needs-login", inUse: account.id === next }));
 }
 
-/** Account names are read alongside the log, never written into requests.jsonl. */
-async function requestAccountLabels(deps: AdminDeps, records: readonly RequestRecord[]): Promise<Map<string, string>> {
-  const labels = new Map<string, string>();
-  const providers = new Set(records.filter((record) => record.account).map((record) => record.provider));
-  if (providers.size === 0) return labels;
+/**
+ * Account names are read alongside the log, never written back into a record. A stored account is
+ * named by its owner id as it is now, so a rename shows on old rows. The current login is named only
+ * by the email snapshotted when it answered (`accountEmail`): today's login is another person after a
+ * switch, so a row without a snapshot names nobody. A borrowed login is found under any provider that
+ * lists it, so a row whose provider is not configured still gets the name its account has.
+ */
+function requestAccountNames(deps: AdminDeps): (record: RequestRecord) => string | undefined {
   const cfg = deps.config();
   const claude = listClaudeAccounts(homeDir());
   const chatgpt = deps.chatgpt?.().accounts?.() ?? {};
   const google = deps.google?.().accounts() ?? {};
   const storedChatgpt = readChatGptAccounts(homeDir()).map(summarizeChatGptAccount);
   const storedGoogle = readGoogleAccounts(homeDir()).map(summarizeGoogleAccount);
-  const identity = records.some((record) => record.account === "current")
-    ? await deps.claudeIdentity?.().catch(() => null) : null;
-  for (const name of providers) {
-    const type = cfg.providers[name]?.type;
-    const accounts = type === "chatgpt" ? chatgpt[name] ?? storedChatgpt
-      : type === "google" ? google[name] ?? storedGoogle
-      : type === "anthropic" || name === "anthropic" ? claude : [];
-    for (const account of accounts) labels.set(`${name}\0${account.id}`, account.label || account.email || account.id.slice(0, 8));
-    if (type === "anthropic" || name === "anthropic") labels.set(`${name}\0current`, identity?.email ?? "Current Claude login");
+  const byProvider = new Map<string, string>();
+  const byOwner = new Map<string, string>();
+  const put = (provider: string | undefined, account: { id: string; label?: string; email?: string }): void => {
+    const label = account.label || account.email;
+    if (!label) return;
+    if (provider) byProvider.set(`${provider}\0${account.id}`, label);
+    if (!byOwner.has(account.id)) byOwner.set(account.id, label);
+  };
+  for (const [name, provider] of Object.entries(cfg.providers)) {
+    const accounts = provider.type === "chatgpt" ? chatgpt[name] ?? storedChatgpt
+      : provider.type === "google" ? google[name] ?? storedGoogle
+      : provider.type === "anthropic" ? claude : [];
+    for (const account of accounts) put(name, account);
   }
-  return labels;
+  for (const accounts of [...Object.values(chatgpt), ...Object.values(google)]) for (const account of accounts) put(undefined, account);
+  for (const account of [...storedChatgpt, ...storedGoogle, ...claude]) put(undefined, account);
+  return (record) => {
+    if (!record.account) return undefined;
+    if (record.account === "current") return record.accountEmail;
+    return byProvider.get(`${record.provider}\0${record.account}`) ?? byOwner.get(record.account);
+  };
 }
 
 /** Claude usage is looked up only where a Claude subscription provider is configured. */
@@ -3205,10 +3218,11 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         // and a list with nothing valid left means no filter.
         const kinds = kindValue === null ? [] : kindValue.split(",").filter((k): k is "messages" | "count_tokens" | "other" | "image" => k === "messages" || k === "count_tokens" || k === "other" || k === "image");
         const records = deps.requests.list(n, { ...(provider ? { provider } : {}), ...(kinds.length ? { kind: kinds } : {}), ...(session ? { session } : {}) });
-        const labels = await requestAccountLabels(deps, records);
-        sendJson(res, 200, { requests: records.map((record) => record.account
-          ? { ...record, accountLabel: labels.get(`${record.provider}\0${record.account}`) ?? record.account.slice(0, 8) }
-          : record) });
+        const nameOf = requestAccountNames(deps);
+        sendJson(res, 200, { requests: records.map((record) => {
+          const name = nameOf(record) ?? (record.account && record.account !== "current" ? record.account.slice(0, 8) : undefined);
+          return name ? { ...record, accountLabel: name } : record;
+        }) });
         return;
       }
       if (pathname === "/api/requests/summary" && method === "GET") {

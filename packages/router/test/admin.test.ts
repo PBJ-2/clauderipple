@@ -2000,6 +2000,8 @@ test("GET /api/requests resolves account names at read time without changing the
     requests.add(old);
     requests.add({ ...old, id: "borrowed", provider: "borrowed-gpt", account: "codex" });
     requests.add({ ...old, id: "current-again", account: "current" });
+    requests.add({ ...old, id: "snapshot", provider: "claude", account: "current", accountEmail: "was@example.test" });
+    requests.add({ ...old, id: "codex-only", provider: "codex-login", account: "codex" });
     for (const [provider, account] of [["claude", claude.id], ["claude", "current"], ["gpt", gpt.id], ["google", gemini.id], ["gpt", removed.id]] as const) {
       requests.add({ ...old, id: account, provider, account });
     }
@@ -2010,10 +2012,9 @@ test("GET /api/requests resolves account names at read time without changing the
       "borrowed-gpt": { type: "chatgpt", auth: "borrow-codex" },
       google: { type: "google", auth: "antigravity" },
     } });
-    let known = true;
-    let lookups = 0;
     const extra = await startAdmin({ config: () => cfg, configFile: path.join(home, "extra-config.json"), log: new Logger(null, 1_000_000, 1, false), stats: () => ({ inFlight: 0, messagesInFlight: 0, started: 0, completed: 0, failed: 0 }), health: () => 0, version: "test", requests,
-      claudeIdentity: async () => { lookups++; if (!known) throw new Error("identity unavailable"); return { email: "current@example.test", subjectHash: "test-subject" }; },
+      // Today's login is another person: the rows that were written before the switch must not take its name.
+      claudeIdentity: async () => ({ email: "today@example.test", subjectHash: "test-subject" }),
       chatgpt: () => ({ quota: {}, auth: {}, accounts: () => ({ "borrowed-gpt": [
         { id: "codex", label: "codex@example.test", email: "codex@example.test", source: "codex", expiresAt, needsReauth: false, paused: false, preferred: false, state: "ready", inUse: true, active: true, quota: null },
       ] }) }),
@@ -2026,22 +2027,23 @@ test("GET /api/requests resolves account names at read time without changing the
       let records = await rows();
       const label = (id: string) => records.find((row) => row.id === id)?.accountLabel;
       assert.equal(label(claude.id), "claude@example.test");
-      assert.equal(label("current"), "current@example.test");
+      // A row written before the snapshot existed names nobody, and never today's login.
+      assert.equal(label("current"), undefined);
+      assert.equal(label("current-again"), undefined);
+      assert.equal(label("snapshot"), "was@example.test", "the email that answered is the one kept");
       assert.equal(label(gpt.id), "Work ChatGPT");
       assert.equal(label(gemini.id), "Runtime Google", "the same live summary as the accounts tab");
       assert.equal(label("borrowed"), "codex@example.test", "a borrowed login is not in the stored-account file");
+      assert.equal(label("codex-only"), "codex@example.test", "a row whose provider is not configured still gets its account's name");
       assert.equal(label(removed.id), removed.id.slice(0, 8));
       assert.deepEqual(records.find((row) => row.id === "old"), old, "an old record gains no fields");
-      assert.equal(lookups, 1, "identity is read once for the response, not per record");
       chatgpt.updateChatGptAccount(home, gpt.id, { label: "Renamed ChatGPT" });
-      known = false;
       records = await rows();
       assert.equal(label(gpt.id), "Renamed ChatGPT");
-      assert.equal(label("current"), "Current Claude login");
-      assert.equal(lookups, 2);
+      assert.equal(label("snapshot"), "was@example.test", "a later login does not move the row");
       assert.equal(requests.list(10).some((record) => "accountLabel" in record), false, "the in-memory records are not enriched in place");
       assert.equal(fs.readFileSync(path.join(home, "logs", "requests.jsonl"), "utf8"), persisted);
-      assert.doesNotMatch(persisted, /@example\.test|test-claude-token|test-gpt-token|test-workspace|test-google-token|test-project/);
+      assert.doesNotMatch(persisted, /claude@example\.test|google@example\.test|codex@example\.test|today@example\.test|test-claude-token|test-gpt-token|test-workspace|test-google-token|test-project/);
     } finally { extra.close(); }
   });
 });

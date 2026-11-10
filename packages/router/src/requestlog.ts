@@ -30,8 +30,13 @@ export type RequestRecord = {
   provider: string;
   /** Actual responder's configured label or 1-based ordinal; never a credential id or token. */
   credential?: string;
-  /** Actual responder's durable owner id; never an email or token. */
+  /** Actual responder's durable owner id; never a token. `current` is the app or terminal login. */
   account?: string;
+  /**
+   * The email of the `current` login as it was when this request ran. Snapshotted at request time
+   * because the login can be switched later; a row that has none names no person.
+   */
+  accountEmail?: string;
   effort?: string;
   upstreamRequestId?: string;
   messageId?: string;

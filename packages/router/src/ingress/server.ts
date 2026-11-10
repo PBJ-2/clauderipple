@@ -23,6 +23,7 @@ import { CLAUDE_CODE_IDENTITY, nativeAnthropicHeaders, type ClaudeCodeCredential
 import { ToolTranslation, ToolTranslationError } from "./tools.ts";
 import { ClaudeAccountAuthPool } from "../providers/anthropic-account-pool.ts";
 import { ObservedClaudeCodeAuth } from "../providers/anthropic-observed.ts";
+import { loginEmailWithin } from "../providers/anthropic-identity.ts";
 import type { ChatGptAdapter } from "../providers/chatgpt/index.ts";
 import type { Credential } from "../pool.ts";
 import {
@@ -57,9 +58,14 @@ type IngressDeps = {
    * or the first one configured (null name), or — with none configured — Codex's own login alone.
    */
   chatgpt?: (name: string | null) => ChatGptAdapter;
+  /** The current Claude login's identity, snapshotted into a row it answers (`accountEmail`). */
+  claudeIdentity?: () => Promise<{ email: string } | null>;
   /** While engaged (a network switch, tether.ts), new model calls wait here instead of starting. */
   hold?: HoldGate;
 };
+
+/** What the request has been answered on so far, so a row written by any exit names it. */
+type Served = { account?: string; accountEmail?: string };
 
 /**
  * The request body as JSON text. Codex signed in to ChatGPT compresses what it sends with zstd
@@ -269,6 +275,7 @@ export class OpenAiIngress {
     }
     let record: Omit<RequestRecord, "id" | "at" | "ms" | "status" | "ok" | "usage" | "stopReason" | "note"> = { kind: "messages", source: "-", target: "-", provider: "-", stream: false };
     let completed = false;
+    const served: Served = {};
     const finish = (status: number, bytes: number, extra: Omit<Outcome, "status" | "bytes"> = {}): void => {
       if (completed) return;
       completed = true;
@@ -284,7 +291,10 @@ export class OpenAiIngress {
       this.deps.log.info(`OPENAI ${tagged}`);
       if (isCall) {
         const entry: RequestRecord = { ...record, id: requestId(), at: new Date(started).toISOString(), ms, status, ok: status >= 200 && status < 400 };
-        if (extra.account) entry.account = extra.account;
+        if (extra.account) {
+          entry.account = extra.account;
+          if (extra.account === served.account && served.accountEmail) entry.accountEmail = served.accountEmail;
+        }
         if (extra.usage) entry.usage = extra.usage;
         if (extra.stopReason) entry.stopReason = extra.stopReason;
         if (extra.note) entry.note = extra.note;
@@ -424,7 +434,7 @@ export class OpenAiIngress {
       wire.stream = stream;
       record = { kind: "messages", source: requested, target: route.model, provider: route.provider, ...(route.effort ? { effort: route.effort } : {}), stream };
       const kindNote = `openai-ingress ${path === "/v1/responses" ? "responses" : "chat"}`;
-      const outcome = await this.forward(res, provider, wire, route.model, path === "/v1/chat/completions", stream, compaction, translation, (done) => { terminal = { ...done, note: kindNote }; });
+      const outcome = await this.forward(res, provider, wire, route.model, path === "/v1/chat/completions", stream, compaction, translation, served, (done) => { terminal = { ...done, note: kindNote }; });
       finish(outcome.status, outcome.bytes, { ...(outcome.account ? { account: outcome.account } : {}), ...(outcome.usage ? { usage: outcome.usage } : {}), ...(outcome.stopReason ? { stopReason: outcome.stopReason } : {}), note: `${kindNote}${outcome.note ? `; ${outcome.note}` : ""}` });
     } catch (error) {
       if (completed) return; // already recorded (e.g. client closed after the terminal event)
@@ -444,7 +454,7 @@ export class OpenAiIngress {
     }
   }
 
-  private async forward(res: http.ServerResponse, provider: AnthropicCompatibleProvider | AnthropicProvider, wire: Json, model: string, chat: boolean, stream: boolean, compaction: boolean, translation: ToolTranslation, onTerminal?: (outcome: Outcome) => void): Promise<Outcome> {
+  private async forward(res: http.ServerResponse, provider: AnthropicCompatibleProvider | AnthropicProvider, wire: Json, model: string, chat: boolean, stream: boolean, compaction: boolean, translation: ToolTranslation, served: Served, onTerminal?: (outcome: Outcome) => void): Promise<Outcome> {
     const native = provider.type === "anthropic";
     const upstream = new URL(native ? (this.deps.nativeUpstream ?? "https://api.anthropic.com") : provider.url);
     const protocol = upstream.protocol === "https:" ? "https:" : "http:";
@@ -459,6 +469,12 @@ export class OpenAiIngress {
       if (!credential) return { status: 401, bytes: sendJson(res, 401, openAiError("Claude login unavailable — connect a Claude subscription", "authentication_error")), note: "Claude OAuth unavailable" };
       poolCredential = credential;
       authentication = credential.headers;
+      if (credential.ownerId) {
+        served.account = credential.ownerId;
+        const email = credential.ownerId === "current" && this.deps.claudeIdentity ? await loginEmailWithin(this.deps.claudeIdentity) : undefined;
+        if (email) served.accountEmail = email;
+        else delete served.accountEmail;
+      }
     } else if (native) {
       try {
         authentication = nativeAnthropicHeaders(provider);

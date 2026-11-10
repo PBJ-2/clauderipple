@@ -57,7 +57,7 @@ import { nativeAnthropicHeaders, type ClaudeCodeCredentialReaders } from "./prov
 import { ClaudeAccountAuthPool } from "./providers/anthropic-account-pool.ts";
 import { ClaudeModelCatalog } from "./providers/anthropic-models.ts";
 import { ClaudeUsage, claudeLimitResetMs } from "./providers/anthropic-usage.ts";
-import { ClaudeCurrentIdentity } from "./providers/anthropic-identity.ts";
+import { ClaudeCurrentIdentity, loginEmailWithin } from "./providers/anthropic-identity.ts";
 import { dropForeignThinking, ThinkingOrigins } from "./thinking.ts";
 
 const MAX_BODY = 64 * 1024 * 1024;
@@ -239,6 +239,8 @@ export type ProxyDeps = {
   observedClaudeCodeAuth?: ObservedClaudeCodeAuth;
   /** Test seam for Claude Code's keychain and credential-file readers. */
   claudeCodeCredentialReaders?: ClaudeCodeCredentialReaders;
+  /** Test seam for the current login's profile lookup (`/api/oauth/profile`), which names its email. */
+  claudeProfileFetch?: (url: string, init: RequestInit) => Promise<Response>;
   /** Where agent definitions are read from. Defaults to `~/.claude/agents`; tests inject a tmp dir. */
   agentDir?: string;
   /** TLS dialer for absolute-form proxy requests. Production uses node:tls; integration tests inject a local CA. */
@@ -607,6 +609,7 @@ export class Proxy {
     });
     this.claudeIdentity = new ClaudeCurrentIdentity(this.claudeAccounts, {
       upstream: () => this.deps.config().upstream,
+      ...(deps.claudeProfileFetch ? { fetch: deps.claudeProfileFetch } : {}),
       warn: (message) => deps.log.warn(message),
     });
     this.opencodeUsage = new OpenCodeUsage({ warn: (message) => deps.log.warn(message) });
@@ -1012,12 +1015,20 @@ export class Proxy {
     // stays on the account that holds the server-side thread; an unknown id keeps the old key.
     const continued = cacheRequest ? this.continuedConversation(json!) : undefined;
     const affinity = cacheRequest ? (continued ?? (!sideRequest ? requestConversationKey(json!, record.session, subagent ? agentId : undefined) : undefined)) ?? conversationKey(cacheRequest) : undefined;
+    // The current login's email as of this turn, read before the pool's first pick (see the Claude pool).
+    let loginEmail: string | undefined;
+    /** Names the account that answers; the email snapshot is only ever the current login's. */
+    const setRecordAccount = (ownerId: string, email?: string): void => {
+      record.account = ownerId;
+      if (email) record.accountEmail = email;
+      else delete record.accountEmail;
+    };
     const recordCredential = (name: string, using: Credential, credentials: readonly Credential[], retry = false, pinned = false): void => {
       // count_tokens is answered locally by the translated adapters: no key was actually sent.
       const type = cfg.providers[name]?.type;
       if (pathname === "/v1/messages/count_tokens" && (type === "openai-compatible" || type === "google")) return;
       record.credential = this.credentialLabel(name, using, credentials);
-      if (using.ownerId) record.account = using.ownerId;
+      if (using.ownerId) setRecordAccount(using.ownerId, using.ownerId === "current" ? loginEmail : undefined);
       const first = this.pool.pick(name, credentials);
       const reason = pinned ? "account-pin" : retry ? "retry" : !first ? "all-unavailable" : first.id !== using.id ? "affinity" : "configured-order";
       const states = this.pool.report(name, credentials).map((row, i) => `${this.credentialLabel(name, credentials[i]!, credentials)}:${row.paused ? "paused" : row.state}`).join(", ");
@@ -1304,6 +1315,7 @@ export class Proxy {
           delete record.effort;
           delete record.credential;
           delete record.account;
+          delete record.accountEmail;
           const configured = cfg.providers[route.provider];
           if (!configured) {
             finish("500", 0, `unknown provider ${route.provider}`, true, { ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "unknown-provider" });
@@ -1560,6 +1572,8 @@ export class Proxy {
               break;
             }
             const credentials = await this.claudeAccounts.credentials();
+            loginEmail = credentials.some((credential) => credential.ownerId === "current")
+              ? await loginEmailWithin(() => this.claudeIdentity.identify()) : undefined;
             // With no account of the pool usable, the app's own sign-in still is: the turn goes out on
             // it, as it did before the provider was added. A pool whose only stored account lost its
             // grant refused every main-chat turn with this 401 until the provider was deleted, the
@@ -1578,7 +1592,7 @@ export class Proxy {
             if (ownSignIn) {
               target = { protocol: "https:", host: cfg.upstream, port: this.deps.upstreamPort ?? 443, agent: this.deps.upstreamAgent ?? this.agentFor(route.provider, "https:"), extraHeaders: {} };
               ownLogin = true;
-              record.account = "current";
+              setRecordAccount("current", await loginEmailWithin(() => this.claudeIdentity.identifyWith({ authorization: String(clientAuth) })));
               const routeEffort = effortOf(json);
               if (routeEffort) record.effort = routeEffort;
               tag = `CLAUDE ${route.tag} account=app (no usable pool account)`;
@@ -1698,7 +1712,7 @@ export class Proxy {
           // An un-routed native Messages turn goes out on the app's own sign-in, and its answer is the
           // only statement of that login's unified limits when the usage endpoint refuses (2026-11-05).
           ownLogin = isMessages && typeof req.headers.authorization === "string";
-          if (ownLogin) record.account = "current";
+          if (ownLogin) setRecordAccount("current", await loginEmailWithin(() => this.claudeIdentity.identifyWith({ authorization: String(req.headers.authorization) })));
           // Passthrough stays byte-exact unless another model's thinking would get the turn refused.
           if (json) {
             const removed = this.thinkingOrigins.dropKnownForeign(json, "anthropic");

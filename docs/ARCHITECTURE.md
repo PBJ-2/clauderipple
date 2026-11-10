@@ -1210,7 +1210,8 @@ old records and `RequestLog.summary()` remain compatible. No prompt, auth or rea
 text is added. Source: `requestlog.ts`, `proxy.ts`, provider adapter outcomes.
 
 - `usage.cacheWrite`: native/Anthropic numeric cache creation tokens, including explicit 0; absent/non-number is omitted, as is a translated adapter's synthetic 0.
-- `account`: the answering account's durable opaque owner id, after in-turn retries; `/api/requests` resolves `accountLabel` at read time, never an email or token in the file. API-key pools keep their configured `credential` label.
+- `account`: the answering account's durable opaque owner id, after in-turn retries; `/api/requests` resolves `accountLabel` at read time, never a token in the file. API-key pools keep their configured `credential` label.
+- `account: "current"` (the app or terminal login) is the one slot whose owner id names no person, so its email is snapshotted into `accountEmail` when the request runs (from `/api/oauth/profile`, bounded to 1.5 s; absent when unknown). `/api/requests` names a `current` row only by that snapshot, never by today's login, so a login switch does not move old rows. Rows written before the snapshot name no account.
 - `upstreamRequestId`: the final forwarded native Anthropic response's `request-id` header (passthrough or account pool).
 - `messageId`: the Anthropic message id delivered by a translated adapter or forwarded compatible response; not a generated id from a non-streaming error.
 - `upstreamCalled`: `false` only for a known pre-model-API exit; omitted when a search backend was attempted or the call state is unknown.
