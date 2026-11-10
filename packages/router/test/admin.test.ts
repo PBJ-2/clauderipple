@@ -16,7 +16,7 @@ import { MiniMaxUsage } from "../src/providers/minimax-usage.ts";
 import { RequestLog } from "../src/requestlog.ts";
 import { PRESETS } from "../src/presets.ts";
 import { saveClaudeAuthFile, saveClaudeOAuthFile } from "../src/providers/anthropic-token-file.ts";
-import { listClaudeAccounts, markClaudeAccountNeedsReauth, readClaudeAccountsFile, readClaudeOAuthAccounts, saveClaudeOAuthAccount, setPreferredClaudeAccount, subjectHash } from "../src/providers/anthropic-accounts.ts";
+import { listClaudeAccounts, markClaudeAccountNeedsReauth, readClaudeAccountsFile, readClaudeOAuthAccounts, saveClaudeOAuthAccount, setCurrentClaudeAccountPaused, setPreferredClaudeAccount, subjectHash } from "../src/providers/anthropic-accounts.ts";
 import { PinnedAgentSync, syncAgentFiles } from "../src/agents.ts";
 import { ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
 import type { ModOptions } from "../src/admin.ts";
@@ -219,7 +219,12 @@ test("mod-options numbers a pinned worker's account as the limits do", async () 
       assert.equal(paused.status, 200);
       const after = await read();
       assert.deepEqual([after.first, after.second], [3, 2], "a paused account leaves the limits' numbering and follows the numbered ones");
-    }, { agentDir });
+      setCurrentClaudeAccountPaused(home, true);
+      const noCurrent = await read();
+      assert.deepEqual([noCurrent.first, noCurrent.second], [2, 1], "pausing the app login leaves no gap or replacement by its cached identity");
+      assert.deepEqual(noCurrent.accounts?.map((account) => account.number), [1, 2]);
+      assert.equal(noCurrent.accounts?.[0]?.label, accountLabel(home, second.id));
+    }, { agentDir, claudeIdentity: async () => ({ email: "current@example.test", subjectHash: subjectHash("current")! }) });
   } finally {
     fs.rmSync(agentDir, { recursive: true, force: true });
   }
@@ -989,6 +994,87 @@ test("Claude account admin endpoints expose no secrets and rename or remove only
     const missing = await fetch(`${base()}:${port}/api/claude-accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" });
     assert.equal(missing.status, 404);
   });
+});
+
+test("the current Claude login can be paused and resumed, but no other account field is writable", async () => {
+  const observed = new ObservedClaudeCodeAuth();
+  observed.observe(["authorization", "Bearer current-login-token"]);
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const endpoint = `${base()}:${port}/api/claude-accounts`;
+    const patch = (body: unknown) => fetch(`${endpoint}/current`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const current = async () => (await (await fetch(endpoint)).json() as { current: { paused: boolean; state: string; inUse: boolean } }).current;
+    assert.deepEqual(await current(), { id: "current", label: "Current Claude login", source: "observed", external: true, paused: false, preferred: false, state: "ready", inUse: true });
+    assert.equal((await patch({ paused: true })).status, 200);
+    assert.equal((await current()).paused, true);
+    assert.equal((await current()).state, "paused");
+    assert.equal((await current()).inUse, false);
+    for (const invalid of [null, [], true, {}, { paused: null }, { paused: 1 }, { paused: "true" }]) {
+      const response = await patch(invalid);
+      assert.equal(response.status, 400);
+      assert.deepEqual(await response.json(), { error: "expected {paused: boolean}" });
+    }
+    for (const change of [{ label: "mine" }, { preferred: true }, { clearCooldown: true }, { paused: false, other: true }]) {
+      const response = await patch(change);
+      assert.equal(response.status, 409);
+      assert.deepEqual(await response.json(), { error: "the current Claude login is managed by Claude Code or Claude Desktop" });
+    }
+    const malformed = await fetch(`${endpoint}/current`, { method: "PATCH", headers: { "content-type": "application/json" }, body: "{" });
+    assert.equal(malformed.status, 400);
+    assert.deepEqual(await malformed.json(), { error: "invalid JSON" });
+    assert.equal((await fetch(`${endpoint}/current`, { method: "DELETE" })).status, 409);
+    assert.equal((await current()).paused, true, "rejected edits never resume the login");
+    assert.equal((await patch({ paused: false })).status, 200);
+    assert.equal((await current()).paused, false);
+    assert.equal((await current()).state, "ready");
+    assert.equal((await current()).inUse, true);
+  }, { observedClaudeCodeAuth: observed });
+});
+
+// A shared machine's login need not be stored to exclude it from workers, probes and plan figures.
+test("a paused current Claude login is unavailable to workers and probes and leaves the limits' numbering", async () => {
+  const observed = new ObservedClaudeCodeAuth();
+  observed.observe(["authorization", "Bearer current-login-token"]);
+  const cfg = makeCfg({ providers: { anthropic: { type: "anthropic", auth: "claude-code", accountPool: true } } });
+  const quota = { at: Date.now(), rate_limits: { primary: { used_percent: 81, window_minutes: 300 } } };
+  let usage: Record<string, typeof quota> = { current: quota };
+  await withAdmin(cfg, async ({ port, home }) => {
+    const usable = async () => (await (await fetch(`${base()}:${port}/api/mod-options`)).json() as ModOptions).providers[0]!.usable;
+    const probe = async () => (await (await fetch(`${base()}:${port}/api/providers/probe`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "anthropic", auth: "claude-code" }),
+    })).json()) as { ok: boolean; auth: string };
+    const limits = async () => (await (await fetch(`${base()}:${port}/api/limits`)).json() as { providers: LimitsProvider[] }).providers;
+    const status = async () => (await (await fetch(`${base()}:${port}/api/status`)).json()) as { claude: { accounts: { id: string; inUse?: boolean }[] } };
+    assert.equal(await usable(), true);
+    assert.equal((await probe()).ok, true);
+    setCurrentClaudeAccountPaused(home, true);
+    assert.equal(await usable(), false);
+    const missing = await probe();
+    assert.equal(missing.ok, false);
+    assert.equal(missing.auth, "missing");
+    assert.deepEqual(await limits(), []);
+    const paused = await status();
+    assert.deepEqual(paused.claude.accounts, [], "the band must not fall back to cached usage of the paused login");
+    const own = saveClaudeOAuthAccount(home, { accessToken: "own-access", refreshToken: "own-refresh", expiresAt: Date.now() + 3_600_000, accountId: "own" });
+    usage = { current: quota, [own.id]: { ...quota, rate_limits: { primary: { used_percent: 15, window_minutes: 300 } } } };
+    assert.equal(await usable(), true);
+    assert.equal((await probe()).ok, true);
+    const numbered = await limits();
+    assert.deepEqual(numbered[0]!.accounts.map((a) => [a.account, a.inUse, a.windows[0]!.used_percent]), [[0, true, 15]]);
+    // Like a paused stored preference, choosing the current login does not put it back in rotation.
+    const preferred = await fetch(`${base()}:${port}/api/claude-accounts`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ preferred: "current" }) });
+    assert.equal(preferred.status, 200);
+    assert.equal((await status()).claude.accounts.find((a) => a.inUse)?.id, own.id);
+    const patchOwn = (paused: boolean) => fetch(`${base()}:${port}/api/claude-accounts/${own.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ paused }) });
+    assert.equal((await patchOwn(true)).status, 200);
+    assert.equal(await usable(), false, "a paused stored account cannot keep the paused login's provider usable");
+    assert.equal((await probe()).ok, false);
+    assert.deepEqual(await limits(), []);
+    assert.equal((await patchOwn(false)).status, 200);
+
+    setCurrentClaudeAccountPaused(home, false);
+    assert.equal((await status()).claude.accounts.find((a) => a.inUse)?.id, "current");
+    assert.deepEqual((await limits())[0]!.accounts.map((a) => a.account), [0, 1]);
+  }, { observedClaudeCodeAuth: observed, claudeUsage: async () => usage, modelScoresFetch: async () => new Response("{}") });
 });
 
 test("/api/claude-accounts marks a stored copy of the current Claude login, by subject hash or by email", async () => {
@@ -3743,5 +3829,10 @@ test("a Claude login without an account pool reports the app login's limits, wha
     assert.deepEqual(limits.providers[0]!.accounts.map((a) => [a.account, a.inUse, a.windows[0]!.used_percent]), [[0, true, 81], [1, undefined, 15]]);
     const status = await (await fetch(`${base()}:${port}/api/status`)).json() as { claude: { accounts: { id: string; inUse?: boolean }[] } };
     assert.equal(status.claude.accounts.find((a) => a.inUse === true)?.id, "current");
+    setCurrentClaudeAccountPaused(home, true);
+    const paused = await (await fetch(`${base()}:${port}/api/status`)).json() as typeof status;
+    assert.equal(paused.claude.accounts.some((a) => a.id === "current" || a.inUse), false);
+    const pausedLimits = await (await fetch(`${base()}:${port}/api/limits`)).json() as typeof limits;
+    assert.deepEqual(pausedLimits.providers[0]!.accounts.map((a) => [a.account, a.inUse]), [[0, undefined]]);
   }, { claudeUsage: async () => usage });
 });
