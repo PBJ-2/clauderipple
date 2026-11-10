@@ -256,3 +256,36 @@ for (const outcome of ["failed", "no-helper"] as const) test(`${outcome} produce
   assert.ok(notices[0]?.kind === "notice");
   assert.equal(notices[0].text, "Claude 앱에 모델이나 추론 강도 설정을 적용하지 못했습니다. Claude 앱에서 직접 변경해 주세요.");
 });
+
+test("desktop session records are cached per file: edits, removals and new records show up, symlinks never do", t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-app-settings-cache-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const dir = path.join(root, "claude-code-sessions", "account", "org"); fs.mkdirSync(dir, { recursive: true });
+  const write = (name: string, value: unknown) => fs.writeFileSync(path.join(dir, `${name}.json`), JSON.stringify(value));
+  write("local_a", { cliSessionId: "cli-a", model: "opus" });
+  write("local_b", { cliSessionId: "cli-b", model: "sonnet" });
+  let now = 0; const reader = new DesktopSettings(root, () => now);
+  const tick = () => { now += 3001; };
+  assert.equal(reader.appSettingsFor("cli-a")?.model, "opus");
+  assert.equal(reader.appSettingsFor("cli-b")?.model, "sonnet");
+  tick(); // nothing changed: both still answer from the cache
+  assert.equal(reader.appSettingsFor("cli-a")?.model, "opus");
+  assert.equal(reader.appSettingsFor("cli-b")?.model, "sonnet");
+  write("local_a", { cliSessionId: "cli-a", model: "haiku" }); // same CLI id, new content
+  tick();
+  assert.equal(reader.appSettingsFor("cli-a")?.model, "haiku");
+  assert.equal(reader.appSettingsFor("cli-b")?.model, "sonnet", "an untouched record is unaffected");
+  write("local_c", { cliSessionId: "cli-b" }); // a second record claims cli-b: ambiguous, even though local_b is cached
+  tick();
+  assert.equal(reader.appSettingsFor("cli-b"), undefined);
+  fs.unlinkSync(path.join(dir, "local_c.json")); // the clash ends with the record
+  tick();
+  assert.equal(reader.appSettingsFor("cli-b")?.model, "sonnet");
+  fs.unlinkSync(path.join(dir, "local_b.json"));
+  tick();
+  assert.equal(reader.appSettingsFor("cli-b"), undefined, "a removed record is forgotten");
+  fs.symlinkSync(path.join(dir, "local_a.json"), path.join(dir, "local_link.json"));
+  write("local_d", { cliSessionId: "cli-a", sessionId: "local_other" }); // names another app session: skipped
+  tick();
+  assert.equal(reader.appSettingsFor("cli-a")?.appSessionId, "local_a", "a symlinked or mismatched record never claims the id");
+});
