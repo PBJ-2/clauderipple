@@ -11,7 +11,7 @@ const token = "remote-test-token-not-a-real-pairing-token";
 
 function stubSessions(decide: (session: string, id: string, decision: string) => Promise<boolean> | boolean = () => true) {
   return {
-    list: () => [], groups: () => undefined, has: () => false, pollDesktop: async () => {}, pollQueued: () => {}, watchAttached: () => {},
+    list: () => [], groups: () => undefined, has: () => false, pollDesktop: async () => {}, pollQueued: () => {}, tailUnwatched: () => {}, watchAttached: () => {},
     decide: (session: string, id: string, decision: "allow" | "allow_always" | "deny") => decide(session, id, decision),
   };
 }

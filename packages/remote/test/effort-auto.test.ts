@@ -116,7 +116,7 @@ function fakeRouter(writable: boolean) {
 
 async function hostWith(t: TestContext, router: ReturnType<typeof fakeRouter>) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-effort-auto-"));
-  const sessions = { list: () => [], groups: () => undefined, watchAttached: () => {}, pollDesktop: async () => {}, pollQueued: () => {}, prepareRefresh: () => true } as unknown as ServerOptions["sessions"];
+  const sessions = { list: () => [], groups: () => undefined, watchAttached: () => {}, pollDesktop: async () => {}, pollQueued: () => {}, tailUnwatched: () => {}, prepareRefresh: () => true } as unknown as ServerOptions["sessions"];
   const server = new HostServer({ listen: "127.0.0.1", port: 0, token, webDir, sessions, router, hostName: "test", version: "1", recentCli: async () => [] });
   await server.listen();
   t.after(async () => { await server.close(); fs.rmSync(dir, { recursive: true, force: true }); });

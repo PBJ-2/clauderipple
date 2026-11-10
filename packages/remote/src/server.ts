@@ -242,6 +242,8 @@ export class HostServer {
         this.timers.push(setInterval(() => void this.checkRouter(), 15_000));
         this.timers.push(setInterval(() => this.pollDesktop(), 3000));
         this.timers.push(setInterval(() => { if (!this.refreshing) this.opts.sessions.pollQueued(); }, 1000));
+        // Attached sessions whose transcript watch is down: a 1 s tail instead of the 3 s poll (no-op with no phone).
+        this.timers.push(setInterval(() => this.opts.sessions.tailUnwatched(), 1000));
         void this.checkRouter();
         resolve();
       });

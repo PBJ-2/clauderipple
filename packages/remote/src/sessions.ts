@@ -325,6 +325,8 @@ export function nextAttention(current: Attention | null, from: SessionState, to:
 
 /** Mac sessions the host asks the router about for the first time in one desktop poll. */
 const FIRST_SIGHTS_PER_POLL = 4;
+/** An attached bridged session whose transcript watch is down is tailed on this cadence, not on the 3 s poll. */
+const UNARMED_TAIL_MS = 1000;
 /** A turn is under way: a queued message waits. */
 const BUSY = new Set<SessionState>(["starting", "running", "waiting"]);
 /** The SDK's model key without the `@effort` a routed model carries. */
@@ -388,6 +390,10 @@ export class Sessions {
   private attached = new Set<string>();
   private detachedWatches = new Set<string>();
   private transcriptWatches = new Map<string, { close: (() => void) | null; timer: ReturnType<typeof setTimeout> | null }>();
+  /** Time attached bridged sessions spent without a transcript watch, and what the last log line reported. */
+  private unarmedMs = 0;
+  private unarmedLogAt = 0;
+  private unarmedLoggedMs = 0;
   /** The last state seen per non-bridged Mac session, for the away-alert transitions. The first
    * sight of a session only seeds it: a host start must not push for turns that ended before it. */
   private macStates = new Map<string, { state: SessionState; permission: boolean }>();
@@ -829,7 +835,7 @@ export class Sessions {
         const state = process ? this.bridgeState(process, bridgeId) : r.environmentBridgeId ? this.environmentState(r) : "stopped";
         if (!r.environmentBridgeId || r.state !== "error") this.setState(r, state, undefined, !!process);
         if (bridgeId) this.ensureBridge(r.id, bridgeId);
-        else this.closeBridge(r.id);
+        else this.closeBridge(r.id, false, this.attached.has(r.id));
       } catch (error) { this.bridgeFailure(r.id, error); }
     }
     await Promise.all(reads);
@@ -865,7 +871,9 @@ export class Sessions {
     const record = this.records.get(id);
     const desktopId = record?.sdkSessionId ?? id;
     if (this.shuttingDown || this.detachedWatches.has(id) || this.transcriptWatches.has(id) || (record && !record.desktopBridge && !this.canTailHandoff(record)) || !this.desktop?.has(desktopId)) return;
-    if (record?.desktopBridge && !this.desktop.liveProcess(desktopId)?.bridgeSessionId) return;
+    // Without a bridge id only an attached session is watched: a phone reads the transcript, and the 3 s
+    // poll made each append wait for it (2026-11-10). An unattached one still waits for its bridge.
+    if (record?.desktopBridge && !this.attached.has(id) && !this.desktop.liveProcess(desktopId)?.bridgeSessionId) return;
     const entry = { close: null as (() => void) | null, timer: null as ReturnType<typeof setTimeout> | null };
     this.transcriptWatches.set(id, entry);
     const changed = () => {
@@ -894,6 +902,31 @@ export class Sessions {
     if (entry.timer) clearTimeout(entry.timer);
     entry.close?.();
   }
+
+  /**
+   * An attached bridged session with no live transcript watch (none armed, or it failed) is tailed every
+   * UNARMED_TAIL_MS rather than on the 3 s poll. The time spent that way is counted and logged once a minute,
+   * so the fast path can be checked on the host log.
+   */
+  tailUnwatched(): void {
+    const now = this.now();
+    if (now - this.unarmedLogAt >= 60_000) {
+      if (this.unarmedMs > this.unarmedLoggedMs) (this.opts.log ?? console.error)(`[desktop watch] ${Math.round((this.unarmedMs - this.unarmedLoggedMs) / 1000)} s of attached-session time without a transcript watch in the last minute (${Math.round(this.unarmedMs / 1000)} s total)`);
+      this.unarmedLogAt = now;
+      this.unarmedLoggedMs = this.unarmedMs;
+    }
+    if (this.shuttingDown) return;
+    for (const id of this.attached) {
+      const r = this.records.get(id);
+      if (!r?.desktopBridge || this.transcriptWatches.has(id)) continue;
+      this.unarmedMs += UNARMED_TAIL_MS;
+      try { this.tailBridge(r); }
+      catch (error) { (this.opts.log ?? console.error)(`[desktop tail] ${id}: ${String(error)}`); }
+    }
+  }
+
+  /** Milliseconds attached bridged sessions have spent without a transcript watch, as counted by tailUnwatched. */
+  unarmedWatchMs(): number { return this.unarmedMs; }
 
   private tailDesktop(id: string): void {
     const r = this.records.get(id);
@@ -2272,8 +2305,9 @@ export class Sessions {
     return connection;
   }
 
-  private closeBridge(id: string, preserveRunning = false): void {
-    this.unwatchDesktop(id);
+  private closeBridge(id: string, preserveRunning = false, keepWatch = false): void {
+    // keepWatch: the transcript watch of a phone-attached session outlives its bridge (see watchDesktop).
+    if (!keepWatch) this.unwatchDesktop(id);
     const connection = this.bridges.get(id);
     if (!connection) return;
     // A stream reconnect is still the same worker: durable replies may settle its writes later.

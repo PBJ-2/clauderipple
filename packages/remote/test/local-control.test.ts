@@ -31,7 +31,7 @@ async function fixture(t: import("node:test").TestContext, relay?: string, liste
   const local = new LocalControl({ dir, config: cfg, version: "test", hostPublicKey: "public-key", inbox, settingsJobs, phones: () => host.phones(), rotate: token => host.rotateToken(token) });
   host = new HostServer({
     listen, port: 0, token: cfg.token, webDir: fileURLToPath(new URL("../web", import.meta.url)),
-    sessions: { list: () => [], groups: () => undefined, pollDesktop: async () => {}, pollQueued: () => {}, watchAttached: () => {} } as never,
+    sessions: { list: () => [], groups: () => undefined, pollDesktop: async () => {}, pollQueued: () => {}, tailUnwatched: () => {}, watchAttached: () => {} } as never,
     router: { status: async () => ({ ok: true, proxyEnv: {} }), models: async () => [] },
     hostName: "test", version: "test", recentCli: async () => [], log: line => logs.push(line), local,
     pushDevices: () => push.devices(), clearPush: () => { for (const id of push.devices()) push.unsubscribe(id); },

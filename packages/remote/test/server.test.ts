@@ -780,7 +780,7 @@ test("many sessions with full queues still arrive chunked, in order and exact", 
 });
 
 test("a message past the chunk bound is not split; the existing too_large answer stands", async t => {
-  const sessions = { list: () => [], groups: () => undefined, watchAttached: () => {}, pollDesktop: async () => {}, pollQueued: () => {}, prepareRefresh: () => true } as never;
+  const sessions = { list: () => [], groups: () => undefined, watchAttached: () => {}, pollDesktop: async () => {}, pollQueued: () => {}, tailUnwatched: () => {}, prepareRefresh: () => true } as never;
   const server = new HostServer({ listen: "127.0.0.1", port: 0, token, webDir, sessions, router,
     hostName: "x".repeat(CHUNK_MESSAGE_MAX + 1), version: "0", recentCli: async () => [] });
   await server.listen();
