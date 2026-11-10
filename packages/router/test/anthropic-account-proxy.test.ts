@@ -339,15 +339,16 @@ test("every account keeps the client's beta flags alongside its own OAuth flags 
   }
 });
 
-test("a slot on a Claude API key sends the key alone: no sign-in, no OAuth beta", async () => {
+test("a slot on a Claude API key sends the key alone: no sign-in, no sign-in betas", async () => {
   const key: Config["providers"][string] = { type: "anthropic", auth: "api-key", apiKey: "sk-ant-test", models: [{ id: "claude-opus-5" }] };
-  const rig = await nativeRig(() => ({ status: 200 }), key, "claude-code-20250219,oauth-2025-04-20");
+  const rig = await nativeRig(() => ({ status: 200 }), key, "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14");
   try {
     assert.equal(await rig.send(), 200);
     assert.equal(rig.seen.length, 1);
     assert.equal(rig.seen[0]!.apiKey, "sk-ant-test");
     assert.equal(rig.seen[0]!.authorization, undefined, "the caller's sign-in never reaches the key's bill");
-    assert.equal(rig.seen[0]!.beta, "claude-code-20250219", "the OAuth beta belongs to a sign-in");
+    // A key on a subscription's API credit refuses claude-code-* with billing_error 400 (2026-11-10).
+    assert.equal(rig.seen[0]!.beta, "interleaved-thinking-2025-05-14", "the OAuth and Claude Code betas belong to a sign-in");
     assert.equal(rig.seen[0]!.body.model, "claude-opus-5");
     assert.doesNotMatch(JSON.stringify(rig.requests.list(20)), /sk-ant-test/);
   } finally {
