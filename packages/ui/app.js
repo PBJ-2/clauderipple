@@ -4240,9 +4240,10 @@ async function openClients() {
   const first = !currentConfig;
   if (first) setClientsLoading("loading");
   const loaded = await loadClients();
-  if (!first) return;
+  // A read that lands clears the hold whenever it was set: a first read that failed after the config
+  // came in leaves currentConfig behind, so the retry is not "first" yet must still free the page.
   if (loaded) setClientsLoading(null);
-  else {
+  else if (first || $("#view-clients").classList.contains("is-unloaded")) {
     clientsLoaded = false;
     setClientsLoading("failed");
   }
