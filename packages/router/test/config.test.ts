@@ -6,6 +6,169 @@ import path from "node:path";
 import { ConfigStore, DEFAULTS, PROCESS_PRIORITIES, fastSwitches, providerFor, validate } from "../src/config.ts";
 import type { AnthropicCompatibleProvider, Config, GoogleProvider, OpenAiCompatibleProvider, ProcessPriority, Provider } from "../src/config.ts";
 import { Logger } from "../src/log.ts";
+import { buildModelScores } from "../src/model-scores.ts";
+
+function readConfigFixture(t: { after: (fn: () => void) => void }, input: unknown): { cfg: Config; errors: string[]; file: string } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cr-config-validation-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "config.json");
+  fs.writeFileSync(file, JSON.stringify(input));
+  let errors: string[] = ["not called"];
+  const cfg = new ConfigStore(file, (_c, e) => { errors = e; }).get();
+  return { cfg, errors, file };
+}
+
+const splitProviders: Config["providers"] = {
+  responses: {
+    type: "openai-compatible", preset: "opencode-go", wire: "responses", url: "https://example.test/v1",
+    headers: { authorization: "Bearer test-key" }, models: [{ id: "response-model" }],
+  },
+  chat: {
+    type: "openai-compatible", preset: "opencode-go-chat", wire: "chat", url: "https://example.test/v1",
+    headers: { authorization: "Bearer test-key" }, models: [{ id: "chat-model" }],
+  },
+  other: { type: "chatgpt" },
+};
+
+for (const [label, settings, expected] of [
+  ["both classifier stages", { provider: "responses", model: "response-model", effort: "high", stage1: { provider: "chat", model: "chat-model", effort: "low" } },
+    { provider: "opencode-go", model: "response-model", effort: "high", stage1: { provider: "opencode-go", model: "chat-model", effort: "low" } }],
+  ["first stage only", { stage1: { provider: "chat", model: "chat-model" } }, { stage1: { provider: "opencode-go", model: "chat-model" } }],
+  ["native first stage", { provider: "responses", model: "response-model", stage1: "native" }, { provider: "opencode-go", model: "response-model", stage1: "native" }],
+  ["unrelated first stage", { provider: "chat", model: "chat-model", stage1: { provider: "other", model: "other-model" } },
+    { provider: "opencode-go", model: "chat-model", stage1: { provider: "other", model: "other-model" } }],
+  ["unrelated targets", { provider: "other", model: "other-model", stage1: { provider: "other", model: "first-model" } },
+    { provider: "other", model: "other-model", stage1: { provider: "other", model: "first-model" } }],
+] as const) {
+  test(`split-provider migration follows ${label} and every other provider reference`, (t) => {
+    const input = {
+      providers: splitProviders,
+      webSearch: { provider: "chat", model: "chat-model", maxResults: 4 },
+      autoModeClassifier: settings,
+      direct: [{ prefix: "chat-", provider: "chat" }],
+      routes: { slot: { provider: "responses", model: "response-model", fallbacks: [{ provider: "chat", model: "chat-model" }, { provider: "other", model: "other-model" }] } },
+    };
+    const { cfg, errors, file } = readConfigFixture(t, input);
+    assert.deepEqual(errors, []);
+    assert.deepEqual(cfg.autoModeClassifier, expected);
+    assert.deepEqual(cfg.webSearch, { ...input.webSearch, provider: "opencode-go" });
+    assert.equal(cfg.direct[0]?.provider, "opencode-go");
+    assert.deepEqual(cfg.routes.slot, { ...input.routes.slot, provider: "opencode-go", fallbacks: [{ provider: "opencode-go", model: "chat-model" }, { provider: "other", model: "other-model" }] });
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), input, "migration never rewrites the source file");
+  });
+}
+
+for (const [label, fields, expected] of [
+  ["null search", { webSearch: null }, "webSearch must be an object"],
+  ["string search", { webSearch: "chat" }, "webSearch must be an object"],
+  ["missing search provider", { webSearch: { model: "chat-model" } }, "webSearch: missing provider"],
+  ["unknown search provider", { webSearch: { provider: "missing", model: "chat-model" } }, 'webSearch: unknown provider "missing"'],
+  ["null classifier", { autoModeClassifier: null }, "autoModeClassifier must be an object"],
+  ["string classifier", { autoModeClassifier: "chat" }, "autoModeClassifier must be an object"],
+  ["invalid first stage", { autoModeClassifier: { stage1: null } }, 'autoModeClassifier.stage1 must be an object or "native"'],
+  ["missing main provider", { autoModeClassifier: { model: "chat-model" } }, "autoModeClassifier: unknown provider"],
+  ["unknown first-stage provider", { autoModeClassifier: { stage1: { provider: "missing", model: "chat-model" } } }, "autoModeClassifier.stage1: unknown provider"],
+] as const) {
+  test(`split-provider migration leaves ${label} for validation`, (t) => {
+    const { cfg, errors } = readConfigFixture(t, { providers: splitProviders, ...fields });
+    assert.ok(errors.includes(expected), errors.join("; "));
+    for (const [field, value] of Object.entries(fields)) assert.deepEqual(cfg[field as "webSearch" | "autoModeClassifier"], value);
+  });
+}
+
+for (const wire of ["chat", "responses", "anthropic", "google"] as const) {
+  test(`split-provider migration preserves explicit ${wire} model overrides`, (t) => {
+    const model = { id: "custom-model", wire, url: "https://custom.test/endpoint", authHeader: "x-api-key" as const, effortLevels: [], contextWindow: 123456 };
+    const { cfg, errors } = readConfigFixture(t, {
+      providers: { ...splitProviders, chat: { ...splitProviders.chat, models: [model] } },
+    });
+    assert.deepEqual(errors, []);
+    assert.deepEqual(cfg.providers["opencode-go"]?.models?.find(entry => entry.id === model.id), model);
+  });
+}
+
+for (const overrides of [{ wire: "invalid" }, { wire: null }, { url: "invalid" }, { url: null }, { authHeader: "invalid" }, { authHeader: null }]) {
+  test(`split-provider migration does not hide invalid model overrides ${JSON.stringify(overrides)}`, (t) => {
+    const { errors } = readConfigFixture(t, {
+      providers: { ...splitProviders, chat: { ...splitProviders.chat, models: [{ id: "custom-model", ...overrides }] } },
+    });
+    assert.ok(errors.some(error => error.includes("models must be entries")), errors.join("; "));
+  });
+}
+
+for (const provider of [
+  { type: "anthropic-compatible", url: "https://example.test", caps: { thinking: "enabled", cacheControl: false } },
+  { type: "openai-compatible", url: "https://example.test", wire: "responses" },
+  { type: "openai-compatible", url: "https://example.test" },
+  { type: "google", auth: "antigravity", defaultEffort: "high" },
+  { type: "chatgpt", auth: "borrow-codex", fast: { main: true } },
+  { type: "anthropic", auth: "claude-code", accountPool: true },
+] satisfies Provider[]) {
+  test(`a URL-only model override preserves ${provider.type}${"wire" in provider ? `/${provider.wire}` : ""}`, () => {
+    const configured: Provider = { ...provider, models: [{ id: "custom-20261101", url: "https://custom.test" }] };
+    assert.deepEqual(validate({ ...DEFAULTS, providers: { p: configured } }), []);
+    const expected = { ...configured, url: "https://custom.test" };
+    assert.deepEqual(providerFor(configured, "custom-20261101"), expected);
+    assert.deepEqual(providerFor(configured, "custom"), expected, "snapshot-insensitive lookup keeps the same format");
+    assert.deepEqual(configured, { ...provider, models: [{ id: "custom-20261101", url: "https://custom.test" }] }, "the provider is not mutated");
+  });
+}
+
+for (const type of ["anthropic-compatible", "openai-compatible"] as const) {
+  test(`auth-only model overrides preserve ${type} format and reauthorize the pool`, () => {
+    const provider: Provider = {
+      type, url: "https://example.test", headers: { authorization: "Bearer test-key", extra: "kept" },
+      credentials: [{ id: "default", headers: { authorization: "Bearer test-key", extra: "kept" } }],
+      models: [{ id: "custom", authHeader: "x-api-key" }],
+    };
+    const headers = { "x-api-key": "test-key", extra: "kept" };
+    assert.deepEqual(providerFor(provider, "custom"), { ...provider, headers, credentials: [{ id: "default", headers }] });
+  });
+}
+
+for (const [wire, type] of [["chat", "openai-compatible"], ["responses", "openai-compatible"], ["anthropic", "anthropic-compatible"], ["google", "google"]] as const) {
+  test(`an explicit ${wire} model override still selects ${type}`, () => {
+    const provider: Provider = { type: "anthropic-compatible", url: "https://example.test", models: [{ id: "custom", wire }] };
+    const folded = providerFor(provider, "custom");
+    assert.equal(folded.type, type);
+    if (wire === "chat" || wire === "responses") assert.equal((folded as OpenAiCompatibleProvider).wire, wire);
+  });
+}
+
+for (const [label, extraModels] of [
+  ["null list", null], ["object list", {}], ["string list", "model"],
+  ["null entry", [null]], ["array entry", [[]]], ["string entry", ["model"]],
+  ["missing model", [{ name: "Model" }]], ["numeric model", [{ model: 3, name: "Model" }]],
+  ["blank model", [{ model: " ", name: "Model" }]], ["missing name", [{ model: "model" }]],
+  ["numeric name", [{ model: "model", name: 3 }]], ["invalid description", [{ model: "model", name: "Model", description: null }]],
+  ["invalid window", [{ model: "model", name: "Model", contextWindow: "100000" }]],
+  ["zero window", [{ model: "model", name: "Model", contextWindow: 0 }]],
+  ["non-finite window", [{ model: "model", name: "Model", contextWindow: Infinity }]],
+] as const) {
+  test(`validate rejects cli.extraModels with ${label}`, () => {
+    const cfg = { ...DEFAULTS, cli: { extraModels: extraModels as unknown as Config["cli"]["extraModels"] } };
+    assert.ok(validate(cfg).some(error => error.startsWith("cli.extraModels")), label);
+  });
+}
+
+test("valid CLI picker entries remain usable by the model catalogue", () => {
+  const cfg: Config = {
+    ...DEFAULTS,
+    providers: { p: { type: "chatgpt", models: [{ id: "custom" }] } },
+    cli: { extraModels: [{ model: "custom", name: "Custom", description: "A model", contextWindow: 100000 }] },
+  };
+  assert.deepEqual(validate(cfg), []);
+  assert.equal(buildModelScores(cfg, null).models[0]?.model, "custom");
+});
+
+test("a rejected CLI picker reload keeps the last usable model catalogue", (t) => {
+  const { file, cfg } = readConfigFixture(t, { cli: { extraModels: [{ model: "custom", name: "Custom" }] } });
+  const store = new ConfigStore(file);
+  fs.writeFileSync(file, JSON.stringify({ cli: { extraModels: null } }));
+  fs.utimesSync(file, new Date(2_000_000_000_000), new Date(2_000_000_000_000));
+  assert.deepEqual(store.get(), cfg);
+  assert.doesNotThrow(() => buildModelScores(store.get(), null));
+});
 
 test("validate accepts only the four process priority settings", () => {
   assert.deepEqual(PROCESS_PRIORITIES, ["below-normal", "normal", "above-normal", "high"]);
