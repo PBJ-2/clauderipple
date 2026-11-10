@@ -3829,6 +3829,39 @@ test("GET /api/limits lists every Claude account with usage, in a stable order, 
   });
 });
 
+test("GET /api/limits names each account by the id /api/status lists it under, and marks a refused Claude reading stale", async () => {
+  const now = Date.now();
+  const cfg = makeCfg({ providers: {
+    anthropic: { type: "anthropic", auth: "claude-code", accountPool: true },
+    chatgpt: { type: "chatgpt" },
+  } });
+  const quota = (used: number, extra: Record<string, unknown> = {}) => ({ at: now, rate_limits: { primary: { used_percent: used, window_minutes: 300 } }, ...extra });
+  let usage: Awaited<ReturnType<NonNullable<AdminDeps["claudeUsage"]>>> = {};
+  await withAdmin(cfg, async ({ port, home }) => {
+    const work = saveClaudeOAuthAccount(home, { accessToken: "work-access", refreshToken: "work-refresh", expiresAt: now + 3_600_000, accountId: "work", email: "work@example.com" });
+    usage = { current: quota(81), [work.id]: quota(15, { stale: true, failed_at: now, failed_status: 429 }) };
+    const limits = await (await fetch(`${base()}:${port}/api/limits`)).json() as { providers: LimitsProvider[] };
+    const claude = limits.providers.find((p) => p.type === "anthropic")!;
+    // The refused refresh keeps its last reading, marked stale; the login's reading is current.
+    assert.deepEqual(claude.accounts.map((a) => [a.id, a.stale ?? false]), [["current", false], [work.id, true]]);
+    assert.deepEqual(limits.providers.find((p) => p.type === "chatgpt")!.accounts.map((a) => a.id), ["a", "b"]);
+    const status = await (await fetch(`${base()}:${port}/api/status`)).json() as { claude: { accounts: { id: string }[] } };
+    assert.ok(claude.accounts.every((a) => status.claude.accounts.some((s) => s.id === a.id)), "every id is one /api/status lists");
+  }, {
+    credentials: () => ({}),
+    claudeUsage: async () => usage,
+    chatgpt: () => ({
+      quota: {}, auth: {},
+      accounts: () => ({
+        chatgpt: [
+          { id: "a", label: "A", paused: false, state: "ready", quota: { at: now, rate_limits: { primary: { used_percent: 23, window_minutes: 300 } } }, active: false, inUse: false },
+          { id: "b", label: "B", paused: false, state: "ready", quota: { at: now, rate_limits: { primary: { used_percent: 7, window_minutes: 300 } } }, active: true, inUse: true },
+        ] as never,
+      }),
+    }),
+  });
+});
+
 test("a Claude login without an account pool reports the app login's limits, whatever a stored account prefers", async () => {
   const now = Date.now();
   const cfg = makeCfg({ providers: { anthropic: { type: "anthropic", auth: "claude-code" } } });

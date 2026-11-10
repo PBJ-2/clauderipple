@@ -342,10 +342,13 @@ async function claudeAccountUsage(deps: AdminDeps): Promise<{ id: string; label:
 export type LimitsWindow = { kind: "five_hour" | "seven_day" | "scoped" | "window"; label?: string; used_percent: number; window_minutes?: number; reset_at?: number; exhaust_at?: number; projected_percent?: number };
 /**
  * One account's windows. `account` is the account's own index, stable while others come and go, so
- * the mod's "Claude 1"/"Claude 2" do not swap. `label` is the name the owner gave it (absent for the
- * Claude app login); `inUse` marks the account the router serves new turns with now.
+ * the mod's "Claude 1"/"Claude 2" do not swap. `id` is the account's id as `/api/status` lists it
+ * (Claude's app login is "current"), so a reader joins the two by id, never by position. `label` is the
+ * name the owner gave it (absent for the Claude app login); `inUse` marks the account the router serves
+ * new turns with now. `stale` is set while the reading is kept from before a refused refresh: its
+ * figures are the last ones read, not the current ones.
  */
-export type LimitsAccount = { account: number; label?: string; inUse?: true; windows: LimitsWindow[]; at: number };
+export type LimitsAccount = { account: number; id?: string; label?: string; inUse?: true; stale?: true; windows: LimitsWindow[]; at: number };
 export type LimitsProvider = { provider: string; type: string; title: string; accounts: LimitsAccount[] };
 
 /** A `{used_percent, window_minutes, reset_at}` snapshot window as `/api/limits` reads it, or null. */
@@ -424,7 +427,8 @@ async function anthropicLimitAccounts(deps: AdminDeps, name: string): Promise<Li
     const windows = claudeLimitWindows(quota);
     if (!windows.length) return;
     const at = typeof quota.at === "number" ? quota.at : Date.now();
-    out.push({ account, ...(owner.label ? { label: owner.label } : {}), ...(owner.id === inUse ? { inUse: true as const } : {}), windows, at });
+    // A refused refresh keeps the last reading and marks it stale (anthropic-usage.ts), so the figures say so.
+    out.push({ account, id: owner.id, ...(owner.label ? { label: owner.label } : {}), ...(owner.id === inUse ? { inUse: true as const } : {}), ...(quota.stale === true ? { stale: true as const } : {}), windows, at });
   });
   return out;
 }
@@ -442,7 +446,7 @@ function chatgptLimitAccounts(accounts: ChatGptAccountStatus[]): LimitsAccount[]
       const win = limitWindowFrom(w);
       if (win) windows.push({ kind: windowKind(win.window_minutes), used_percent: win.used_percent, ...(win.window_minutes !== undefined ? { window_minutes: win.window_minutes } : {}), ...(win.reset_at !== undefined ? { reset_at: win.reset_at } : {}) });
     }
-    if (windows.length) out.push({ account: index, ...(account.label ? { label: account.label } : {}), ...(account.inUse ? { inUse: true as const } : {}), windows, at: quota.at });
+    if (windows.length) out.push({ account: index, id: account.id, ...(account.label ? { label: account.label } : {}), ...(account.inUse ? { inUse: true as const } : {}), windows, at: quota.at });
   });
   return out;
 }
@@ -482,7 +486,7 @@ async function googleLimitAccounts(deps: AdminDeps, name: string): Promise<Limit
     // Scoped is a display kind, not a third-party marker: Argon's own weekly quota is scoped too.
     const windows: LimitsWindow[] = googleWindowsFromGroups(quotient).filter((w) => thirdParty || w.kind !== "scoped" || w.label !== "3P");
     // Each account is judged at its own read time: one account's lookup can fail while another's succeeds.
-    if (windows.length) out.push({ account: index, ...(account.label ? { label: account.label } : {}), ...(account.inUse ? { inUse: true as const } : {}), windows, at: readingTime(quotient) });
+    if (windows.length) out.push({ account: index, id: account.id, ...(account.label ? { label: account.label } : {}), ...(account.inUse ? { inUse: true as const } : {}), windows, at: readingTime(quotient) });
   });
   return out;
 }
