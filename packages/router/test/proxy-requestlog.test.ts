@@ -16,13 +16,14 @@ import { ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
 import { saveChatGptAccount } from "../src/providers/chatgpt/accounts.ts";
 import { saveGoogleAccount } from "../src/providers/google/accounts.ts";
 import { setCurrentClaudeAccountPaused } from "../src/providers/anthropic-accounts.ts";
-import { RequestLog } from "../src/requestlog.ts";
+import { RequestLog, type RequestRecord } from "../src/requestlog.ts";
 import { createCa, createLeaf } from "../src/x509.ts";
 
 const noClaudeCodeCredentialReaders = { keychain: () => null, credentialsFile: () => null };
 
-async function rig(options: { respond?: (res: http.ServerResponse, req: http.IncomingMessage) => void; healthLimit?: number; profiles?: Record<string, string> } = {}) {
-  // The current login's email per bearer token, as `/api/oauth/profile` would name it.
+async function rig(options: { respond?: (res: http.ServerResponse, req: http.IncomingMessage) => void; healthLimit?: number; profiles?: Record<string, string>; profileWait?: Promise<void> } = {}) {
+  // The current login's email per bearer token, as `/api/oauth/profile` would name it. `profileWait`
+  // holds each answer until it resolves, to show what a slow lookup does to the turn and its row.
   const profiles = options.profiles ?? {};
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-log-metadata-"));
   const ca = createCa({ cn: "request log test" });
@@ -100,6 +101,7 @@ async function rig(options: { respond?: (res: http.ServerResponse, req: http.Inc
   const health = new UpstreamHealth(() => options.healthLimit ?? 100, (n) => trips.push(n));
   const claudeProfileFetch = async (_url: string, init: RequestInit): Promise<Response> => {
     const token = String((init.headers as Record<string, string>).authorization ?? "").replace(/^Bearer\s+/i, "");
+    if (options.profileWait) await options.profileWait;
     const email = profiles[token];
     return email ? new Response(JSON.stringify({ account: { uuid: `uuid-${token}`, email } }), { status: 200 }) : new Response("{}", { status: 404 });
   };
@@ -455,6 +457,41 @@ test("a Claude row keeps the email of the login that answered after the login is
     const unknown = (await r.send("claude-pool")).record;
     assert.equal(unknown.account, "current");
     assert.equal(unknown.accountEmail, undefined);
+  } finally { await r.stop(); }
+});
+
+/** The first `current` row once the router has written it; rows are written after the turn, so this waits for them. */
+async function currentRow(r: { requests: RequestLog }): Promise<RequestRecord> {
+  for (let i = 0; i < 150; i += 1) {
+    const row = r.requests.list(5).find((record) => record.account === "current");
+    if (row) return row;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error("no current row was written");
+}
+
+test("a Claude turn goes upstream while its profile lookup is still unanswered, and its row is written without an email", async () => {
+  const r = await rig({ profiles: { "test-native": "never@example.test" }, profileWait: new Promise<void>(() => {}) });
+  try {
+    r.observed.observe(["authorization", "Bearer test-native", "anthropic-version", "2023-06-01"]);
+    const started = Date.now();
+    const { text } = await r.send("claude-pool");
+    assert.match(text, /HTTP\/1\.1 200/, "the turn is answered");
+    assert.equal(r.seenAuth.includes("Bearer test-native"), true, "the upstream request was sent");
+    assert.ok(Date.now() - started < 1_000, "the turn did not wait for the 1.5 s bound the lookup would have hit");
+    const row = await currentRow(r);
+    assert.equal(row.ok, true);
+    assert.equal(row.accountEmail, undefined, "an unanswered lookup names nobody");
+  } finally { await r.stop(); }
+});
+
+test("a profile lookup that answers after the response still names the login in its row", async () => {
+  const r = await rig({ profiles: { "test-native": "late@example.test" }, profileWait: new Promise<void>((resolve) => setTimeout(resolve, 60)) });
+  try {
+    r.observed.observe(["authorization", "Bearer test-native", "anthropic-version", "2023-06-01"]);
+    await r.send("claude-pool");
+    const row = await currentRow(r);
+    assert.equal(row.accountEmail, "late@example.test", "the lookup answered within the wait given when the row is final");
   } finally { await r.stop(); }
 });
 

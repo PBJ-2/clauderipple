@@ -8,6 +8,7 @@
 
 import crypto from "node:crypto";
 import type { Credential } from "../pool.ts";
+import type { RequestRecord } from "../requestlog.ts";
 import { subjectHash } from "./anthropic-accounts.ts";
 
 export type ClaudeLoginIdentity = { email: string; subjectHash: string };
@@ -22,23 +23,48 @@ export function claudeIdentityFromBody(body: unknown): ClaudeLoginIdentity | nul
   return hash ? { email, subjectHash: hash } : null;
 }
 
+/** How long a finished row waits for a lookup still in flight; past it the row is written without the email. */
+const FINAL_WAIT_MS = 500;
+
 /**
- * The login's email for a request's log row, read within `ms`. Past the bound the row keeps no
- * email rather than holding the turn, so it then names no person; a lookup that fails names none.
+ * The email of the login that answers one request, looked up in the background. It starts when the
+ * account is picked and nothing waits on it there, so the turn never waits on the profile endpoint.
+ * A lookup that fails leaves no email.
  */
-export async function loginEmailWithin(lookup: () => Promise<{ email: string } | null>, ms = 1_500): Promise<string | undefined> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const identity = await Promise.race([
-      lookup(),
-      new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), ms); }),
-    ]);
-    return identity?.email;
-  } catch {
-    return undefined;
-  } finally {
-    clearTimeout(timer);
+export class LoginEmailWatch {
+  settled = false;
+  email: string | undefined;
+  readonly done: Promise<void>;
+
+  constructor(lookup: () => Promise<{ email: string } | null>) {
+    this.done = Promise.resolve()
+      .then(lookup)
+      .then((identity) => { this.email = identity?.email; }, () => { /* no name */ })
+      .then(() => { this.settled = true; });
   }
+}
+
+/**
+ * Writes one request's row. A `current` row takes the email only if the lookup has answered by the
+ * time the row is final, or within FINAL_WAIT_MS of that; past it the row is written without an email
+ * and names no person. Every other row is written at once.
+ */
+export function writeLoginRow(write: (record: RequestRecord) => void, record: RequestRecord, watch: LoginEmailWatch | undefined): void {
+  if (!watch || record.account !== "current") {
+    write(record);
+    return;
+  }
+  const attach = (): void => {
+    if (watch.email) record.accountEmail = watch.email;
+    write(record);
+  };
+  if (watch.settled) {
+    attach();
+    return;
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  void Promise.race([watch.done, new Promise<void>((resolve) => { timer = setTimeout(resolve, FINAL_WAIT_MS); })])
+    .then(() => { clearTimeout(timer); attach(); });
 }
 
 type IdentitySource = { credentials(): Promise<Credential[]> };
@@ -48,10 +74,15 @@ type IdentityOptions = {
   upstream: () => string;
   fetch?: FetchLike;
   now?: () => number;
+  /** How long a failed lookup is kept before it is asked again (ten minutes). */
   ttlMs?: number;
+  /** How long a successful lookup is kept: the token's life (a day). */
+  successTtlMs?: number;
   timeoutMs?: number;
   warn?: (message: string) => void;
 };
+
+const DAY_MS = 24 * 60 * 60_000;
 
 /** The account's own auth header, the value a new token changes. Null when there is none to send. */
 function authHeaderValue(headers: Record<string, string>): string | null {
@@ -63,7 +94,8 @@ function authHeaderValue(headers: Record<string, string>): string | null {
 }
 
 /**
- * The current login's identity, asked at most once per `ttlMs` (ten minutes) per token. The cache
+ * The current login's identity, asked once per token: a success is kept for the token's life, a failure
+ * for `ttlMs` (ten minutes). The cache
  * is keyed on a hash of the auth header rather than on time alone, so a fresh login asks again
  * immediately; a failure is cached the same way and retried when the cache expires, never on every
  * poll of the dashboard.
@@ -101,8 +133,10 @@ export class ClaudeCurrentIdentity {
     if (!auth) return null;
     const key = crypto.createHash("sha256").update(auth).digest("hex");
     const now = (this.opts.now ?? Date.now)();
+    // A token's identity does not change, so a success lasts the token's life (a day here); a failure
+    // is retried after ten minutes.
     const hit = this.cache.get(key);
-    if (hit && now - hit.at < (this.opts.ttlMs ?? 10 * 60_000)) return hit.value;
+    if (hit && now - hit.at < (hit.value ? this.opts.successTtlMs ?? DAY_MS : this.opts.ttlMs ?? 10 * 60_000)) return hit.value;
     const value = await this.fetchProfile(headers);
     this.cache.delete(key);
     this.cache.set(key, { at: now, value });

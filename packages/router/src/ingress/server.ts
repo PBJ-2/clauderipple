@@ -23,7 +23,7 @@ import { CLAUDE_CODE_IDENTITY, nativeAnthropicHeaders, type ClaudeCodeCredential
 import { ToolTranslation, ToolTranslationError } from "./tools.ts";
 import { ClaudeAccountAuthPool } from "../providers/anthropic-account-pool.ts";
 import { ObservedClaudeCodeAuth } from "../providers/anthropic-observed.ts";
-import { loginEmailWithin } from "../providers/anthropic-identity.ts";
+import { LoginEmailWatch, writeLoginRow } from "../providers/anthropic-identity.ts";
 import type { ChatGptAdapter } from "../providers/chatgpt/index.ts";
 import type { Credential } from "../pool.ts";
 import {
@@ -65,7 +65,7 @@ type IngressDeps = {
 };
 
 /** What the request has been answered on so far, so a row written by any exit names it. */
-type Served = { account?: string; accountEmail?: string };
+type Served = { account?: string; watch?: LoginEmailWatch | undefined };
 
 /**
  * The request body as JSON text. Codex signed in to ChatGPT compresses what it sends with zstd
@@ -293,14 +293,11 @@ export class OpenAiIngress {
         const entry: RequestRecord = { ...record, id: requestId(), at: new Date(started).toISOString(), ms, status, ok: status >= 200 && status < 400 };
         // An exit that carries no account (a client that left mid-stream, say) still names the one that answered.
         const account = extra.account ?? served.account;
-        if (account) {
-          entry.account = account;
-          if (account === served.account && served.accountEmail) entry.accountEmail = served.accountEmail;
-        }
+        if (account) entry.account = account;
         if (extra.usage) entry.usage = extra.usage;
         if (extra.stopReason) entry.stopReason = extra.stopReason;
         if (extra.note) entry.note = extra.note;
-        this.deps.requests.add(entry);
+        writeLoginRow((row) => this.deps.requests.add(row), entry, account === served.account ? served.watch : undefined);
       }
     };
     // Codex closes the socket the moment it reads `response.completed`, often before Anthropic's
@@ -474,9 +471,8 @@ export class OpenAiIngress {
       authentication = credential.headers;
       if (credential.ownerId) {
         served.account = credential.ownerId;
-        const email = credential.ownerId === "current" && this.deps.claudeIdentity ? await loginEmailWithin(this.deps.claudeIdentity) : undefined;
-        if (email) served.accountEmail = email;
-        else delete served.accountEmail;
+        // Picked, not awaited: the row takes the login's email when it is written.
+        served.watch = credential.ownerId === "current" && this.deps.claudeIdentity ? new LoginEmailWatch(this.deps.claudeIdentity) : undefined;
       }
     } else if (native) {
       try {
