@@ -251,6 +251,8 @@ export type ProxyDeps = {
   claudeCodeCredentialReaders?: ClaudeCodeCredentialReaders;
   /** Test seam for the current login's profile lookup (`/api/oauth/profile`), which names its email. */
   claudeProfileFetch?: (url: string, init: RequestInit) => Promise<Response>;
+  /** Test seam for the durable key of the local Claude login (`ClaudeAccountAuthPool`), read from `~/.claude.json` by default. */
+  claudeLoginKey?: () => string | undefined;
   /** Where agent definitions are read from. Defaults to `~/.claude/agents`; tests inject a tmp dir. */
   agentDir?: string;
   /** TLS dialer for absolute-form proxy requests. Production uses node:tls; integration tests inject a local CA. */
@@ -613,6 +615,7 @@ export class Proxy {
       log: deps.log,
       ...(deps.observedClaudeCodeAuth ? { observed: deps.observedClaudeCodeAuth } : {}),
       ...(deps.claudeCodeCredentialReaders ? { credentialReaders: deps.claudeCodeCredentialReaders } : {}),
+      ...(deps.claudeLoginKey ? { loginKey: deps.claudeLoginKey } : {}),
     });
     this.claudeUsage = new ClaudeUsage(this.claudeAccounts, {
       upstream: () => this.deps.config().upstream,
@@ -876,6 +879,8 @@ export class Proxy {
     // The background lookup of the current login's email, when the login answers this request. Nothing
     // waits on it; the row takes the email when it is written (writeLoginRow).
     let loginWatch: LoginEmailWatch | undefined;
+    /** The pool credential (its id) the watch above was started for; undefined when it was not for one. */
+    let loginWatchFor: string | undefined;
     let record: Omit<RequestRecord, "at" | "id" | "ms" | "status" | "ok" | "usage" | "stopReason" | "note"> = {
       kind: pathname === "/v1/messages/count_tokens" ? "count_tokens" : pathname === "/v1/messages" ? "messages" : "other",
       source: "-",
@@ -1053,7 +1058,16 @@ export class Proxy {
       else delete record.credential;
       if (using.ownerId) setRecordAccount(using.ownerId);
       // Picked, not awaited: the lookup runs while the turn goes upstream.
-      if (using.ownerId === "current") loginWatch ??= new LoginEmailWatch(() => this.claudeIdentity.identify());
+      // The email is looked up for the credential that answers, the one whose token this is. A retry onto
+      // another credential replaces the watch its refused predecessor started, and a credential that is not
+      // the login drops it, so the row names the login that finally answered.
+      if (using.ownerId !== "current") {
+        loginWatch = undefined;
+        loginWatchFor = undefined;
+      } else if (loginWatchFor !== using.id) {
+        loginWatch = new LoginEmailWatch(() => this.claudeIdentity.identifyWith(using.headers));
+        loginWatchFor = using.id;
+      }
       const first = this.pool.pick(name, credentials);
       const reason = pinned ? "account-pin" : retry ? "retry" : !first ? "all-unavailable" : first.id !== using.id ? "affinity" : "configured-order";
       const states = this.pool.report(name, credentials).map((row, i) => `${this.credentialLabel(name, credentials[i]!, credentials)}:${row.paused ? "paused" : row.state}`).join(", ");
@@ -1341,6 +1355,9 @@ export class Proxy {
           delete record.credential;
           delete record.account;
           delete record.accountEmail;
+          // The email watch belongs to the attempt that answers: a new route starts without the last one's.
+          loginWatch = undefined;
+          loginWatchFor = undefined;
           const configured = cfg.providers[route.provider];
           if (!configured) {
             finish("500", 0, `unknown provider ${route.provider}`, true, { ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "unknown-provider" });
@@ -1617,6 +1634,7 @@ export class Proxy {
               ownLogin = true;
               setRecordAccount("current");
               loginWatch = new LoginEmailWatch(() => this.claudeIdentity.identifyWith(loginHeaders(req.headers)));
+              loginWatchFor = undefined;
               const routeEffort = effortOf(json);
               if (routeEffort) record.effort = routeEffort;
               tag = `CLAUDE ${route.tag} account=app (no usable pool account)`;
@@ -1739,6 +1757,7 @@ export class Proxy {
           if (ownLogin) {
             setRecordAccount("current");
             loginWatch = new LoginEmailWatch(() => this.claudeIdentity.identifyWith(loginHeaders(req.headers)));
+            loginWatchFor = undefined;
           }
           // Passthrough stays byte-exact unless another model's thinking would get the turn refused.
           if (json) {

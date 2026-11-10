@@ -21,7 +21,7 @@ import { createCa, createLeaf } from "../src/x509.ts";
 
 const noClaudeCodeCredentialReaders = { keychain: () => null, credentialsFile: () => null };
 
-async function rig(options: { respond?: (res: http.ServerResponse, req: http.IncomingMessage) => void; healthLimit?: number; profiles?: Record<string, string>; profileWait?: Promise<void> } = {}) {
+async function rig(options: { respond?: (res: http.ServerResponse, req: http.IncomingMessage) => void; healthLimit?: number; profiles?: Record<string, string>; profileWait?: Promise<void>; refuse?: (req: http.IncomingMessage) => number | undefined } = {}) {
   // The current login's email per bearer token, as `/api/oauth/profile` would name it. `profileWait`
   // holds each answer until it resolves, to show what a slow lookup does to the turn and its row.
   const profiles = options.profiles ?? {};
@@ -42,6 +42,8 @@ async function rig(options: { respond?: (res: http.ServerResponse, req: http.Inc
       const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
       seen.push(body);
       seenAuth.push(req.headers.authorization);
+      const refused = options.refuse?.(req);
+      if (refused !== undefined) { res.writeHead(refused, { "content-type": "application/json" }).end('{"error":{"message":"refused"}}'); return; }
       if (options.respond) { options.respond(res, req); return; }
       if ((body.tools as { type?: string }[] | undefined)?.some((tool) => tool.type === "image_generation")) {
         if (imageStatus !== 200) {
@@ -105,7 +107,9 @@ async function rig(options: { respond?: (res: http.ServerResponse, req: http.Inc
     const email = profiles[token];
     return email ? new Response(JSON.stringify({ account: { uuid: `uuid-${token}`, email } }), { status: 200 }) : new Response("{}", { status: 404 });
   };
-  const proxy = new Proxy({ config: () => cfg, home, requests, claudeCodeCredentialReaders: noClaudeCodeCredentialReaders, observedClaudeCodeAuth: observed, agentDir: path.join(home, "agents"), certs: new CertStore(home), log: new Logger(path.join(home, "router.log"), 1e6, 1, false), health, upstreamPort: (native.address() as net.AddressInfo).port, upstreamAgent: agent, claudeProfileFetch });
+  const proxy = new Proxy({ config: () => cfg, home, requests, claudeCodeCredentialReaders: noClaudeCodeCredentialReaders, observedClaudeCodeAuth: observed, agentDir: path.join(home, "agents"), certs: new CertStore(home), log: new Logger(path.join(home, "router.log"), 1e6, 1, false), health, upstreamPort: (native.address() as net.AddressInfo).port, upstreamAgent: agent, claudeProfileFetch,
+    // Each login is its own durable key, as a switch of the app's login is: the rest of a refused login must not follow to the next.
+    claudeLoginKey: () => { const authorization = observed.getFresh()?.authorization; return authorization ? `login:${authorization}` : undefined; } });
   await proxy.listen();
   const send = async (model: string, extra: Record<string, unknown> = {}, pathname = "/v1/messages", beforeSend?: (socket: tls.TLSSocket) => void, headers: Record<string, string> = {}) => {
     const socket = net.connect(port, "127.0.0.1");
@@ -492,6 +496,29 @@ test("a profile lookup that answers after the response still names the login in 
     await r.send("claude-pool");
     const row = await currentRow(r);
     assert.equal(row.accountEmail, "late@example.test", "the lookup answered within the wait given when the row is final");
+  } finally { await r.stop(); }
+});
+
+test("an in-turn retry onto another login's token names the login that answered, not the refused one", async () => {
+  // The first token is refused while the app's login is switched to the second; the retry goes out on the
+  // second, so the row must carry that login's email and not the one the first lookup started with.
+  let r!: Awaited<ReturnType<typeof rig>>;
+  r = await rig({
+    profiles: { "test-native": "first@example.test", "test-second": "second@example.test" },
+    refuse: (req) => {
+      if (req.headers.authorization !== "Bearer test-native") return undefined;
+      r.observed.observe(["authorization", "Bearer test-second", "anthropic-version", "2023-06-01"]);
+      return 429;
+    },
+  });
+  try {
+    r.observed.observe(["authorization", "Bearer test-native", "anthropic-version", "2023-06-01"]);
+    const { text } = await r.send("claude-pool");
+    assert.match(text, /HTTP\/1\.1 200/);
+    assert.deepEqual(r.seenAuth, ["Bearer test-native", "Bearer test-second"], "the retry went out on the second login");
+    const row = await currentRow(r);
+    assert.equal(row.account, "current");
+    assert.equal(row.accountEmail, "second@example.test");
   } finally { await r.stop(); }
 });
 

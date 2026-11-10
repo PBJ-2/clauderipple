@@ -58,8 +58,11 @@ type IngressDeps = {
    * or the first one configured (null name), or — with none configured — Codex's own login alone.
    */
   chatgpt?: (name: string | null) => ChatGptAdapter;
-  /** The current Claude login's identity, snapshotted into a row it answers (`accountEmail`). */
-  claudeIdentity?: () => Promise<{ email: string } | null>;
+  /**
+   * The identity of the login whose auth headers answered a request, snapshotted into its row (`accountEmail`).
+   * Called with the headers of the credential that answered, so the email is that token's.
+   */
+  claudeIdentity?: (headers: Record<string, string>) => Promise<{ email: string } | null>;
   /** While engaged (a network switch, tether.ts), new model calls wait here instead of starting. */
   hold?: HoldGate;
 };
@@ -476,7 +479,8 @@ export class OpenAiIngress {
       if (credential.ownerId) {
         served.account = credential.ownerId;
         // Picked, not awaited: the row takes the login's email when it is written.
-        served.watch = credential.ownerId === "current" && this.deps.claudeIdentity ? new LoginEmailWatch(this.deps.claudeIdentity) : undefined;
+        const identity = this.deps.claudeIdentity;
+        served.watch = credential.ownerId === "current" && identity ? new LoginEmailWatch(() => identity(credential.headers)) : undefined;
       }
     } else if (native) {
       try {
