@@ -893,6 +893,9 @@ export class TetherController {
     // A call in flight on a dead network cannot finish anyway; give it a short chance, no more.
     const waitUntil = this.now() + FAILOVER_IDLE_WAIT_MS;
     while (this.deps.activity().inFlight > 0 && this.now() < waitUntil) await this.sleep(1_000);
+    // A pin/stop/settings change during the wait cancels the join, just as it cancels a return.
+    const current = this.deps.settings();
+    if (this.stopped || this.pinned || !current.enabled || current.hotspotSsid !== settings.hotspotSsid) return;
     // Waiting that long gives the OS or the person time to join another network; joining the
     // hotspot now would evict it. The change is handled (reset, settle) and the next tick judges
     // the network that arrived. A lost address has nothing to evict: the hotspot join stays right.
