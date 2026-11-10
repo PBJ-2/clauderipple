@@ -103,7 +103,12 @@ async function rig() {
   const log = new Logger(path.join(home, "router.log"), 1e6, 1, false);
   const requests = new RequestLog(path.join(home, "requests.jsonl"));
   const agent = new https.Agent({ ca: ca.certPem, lookup: (_host, _options, cb) => cb(null, [{ address: "127.0.0.1", family: 4 }]) });
-  const proxy = new Proxy({ config: () => cfg, home, log, requests, certs: new CertStore(home), agentDir: path.join(home, "agents"), health: new UpstreamHealth(() => 100, () => {}), upstreamPort: (origin.address() as net.AddressInfo).port, upstreamAgent: agent });
+  // The app's own login (the Bearer these requests send) names its email, as `/api/oauth/profile` would.
+  const claudeProfileFetch = async (_url: string, init: RequestInit): Promise<Response> => {
+    const token = String((init.headers as Record<string, string>).authorization ?? "").replace(/^Bearer\s+/i, "");
+    return token === "original" ? new Response(JSON.stringify({ account: { uuid: "uuid-original", email: "original@example.test" } }), { status: 200 }) : new Response("{}", { status: 404 });
+  };
+  const proxy = new Proxy({ config: () => cfg, home, log, requests, certs: new CertStore(home), agentDir: path.join(home, "agents"), health: new UpstreamHealth(() => 100, () => {}), upstreamPort: (origin.address() as net.AddressInfo).port, upstreamAgent: agent, claudeProfileFetch });
   await proxy.listen();
   const admin = await startAdmin({ config: () => cfg, configFile: path.join(home, "config.json"), log, requests, stats: () => proxy.stats, health: () => 0, version: "test", compactPick: (session, model) => model === null ? proxy.compactPicks.clear(session) : proxy.compactPicks.set(session, model) });
   const pick = (body: unknown, headers: Record<string, string> = {}) => new Promise<{ status: number }>((resolve, reject) => {
@@ -243,6 +248,22 @@ for (const scenario of ['success', 'refusal', 'started-stream'] as const) test(`
       }
     }
     assert.equal(r.proxy.stats.inFlight, 0);
+  } finally { await r.stop(); }
+});
+
+test("a failed native compaction on the app's login keeps that login's email on its row", async () => {
+  const r = await rig();
+  try {
+    await r.pick({ session: "main", model: "claude-haiku-5-5" }); r.failNative(500);
+    assert.match(await r.send(), /core summary/);
+    // The failed attempt's row is written as the answer arrives for its email; poll for it.
+    let failed = r.requests.list(10).find((record) => record.account === "current" && record.ok === false);
+    for (let i = 0; i < 100 && !failed?.accountEmail; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      failed = r.requests.list(10).find((record) => record.account === "current" && record.ok === false);
+    }
+    assert.ok(failed, "the failed attempt is recorded under the login");
+    assert.equal(failed.accountEmail, "original@example.test");
   } finally { await r.stop(); }
 });
 

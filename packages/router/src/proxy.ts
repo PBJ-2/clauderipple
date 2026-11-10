@@ -1178,8 +1178,9 @@ export class Proxy {
           const failure = `${override.label}: ${note ?? status}`;
           log.warn(`${failure}; falling back to original destination`);
           if (override.purpose === "compaction") {
-            this.deps.requests.add({ ...record, id: crypto.randomUUID(), at: new Date(t0).toISOString(), ms: Date.now() - t0,
-              status: Number.isFinite(Number(status)) ? Number(status) : status, ok: false, note: `${failure}; fallback` });
+            // The failed attempt's own row: written like every row, so a login that answered it keeps its email.
+            this.rows.write((row) => this.deps.requests.add(row), { ...record, id: crypto.randomUUID(), at: new Date(t0).toISOString(), ms: Date.now() - t0,
+              status: Number.isFinite(Number(status)) ? Number(status) : status, ok: false, note: `${failure}; fallback` }, loginWatch);
           }
           body = originalBody;
           json = structuredClone(originalJson);
