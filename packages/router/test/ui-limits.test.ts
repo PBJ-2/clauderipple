@@ -254,7 +254,11 @@ test("window bars expose true percentages, reset times and unknown windows", () 
     assert.equal(findAll(missing, hasClass("limits-fill")).length, 0);
     assert.equal(findAll(missing, (node) => node.attrs.role === "progressbar")[0]!.attrs["aria-valuenow"], undefined);
   }
-  assert.match(text(ui.limitsWindowRow("5 hours", { usedPercent: 0, resetAt: now - 1 }, false, now)), /0%.*resets in 0h 0m/);
+  const passedDate = new Date(now - 1).toLocaleString(undefined, { weekday: "short", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+  const passed = ui.limitsWindowRow("5 hours", { usedPercent: 0, resetAt: now - 1 }, false, now);
+  assert.match(text(passed), /0%.*Its reset time \(.*\) has passed\./);
+  assert.ok(text(passed).includes(t("limits.passed", { date: passedDate })));
+  assert.doesNotMatch(text(passed), /resets in/);
   assert.match(text(ui.limitsWindowRow("Weekly", { usedPercent: 5 }, true, now)), /5%.*Reset time unknown/);
 });
 
@@ -384,9 +388,24 @@ test("each gauge's accessible name says which account it measures", () => {
   assert.deepEqual(names, ["Work · 5 hours", "Work · Weekly"]);
 });
 
+test("no countdown reads 0 or less: a passed reset says so, and a cooled-off cooling account shows no countdown", () => {
+  const ui = limitsUi(async () => ({}));
+  // Just before, at, and just after the reset: the countdown is never "0h 0m", and a passed reset has its wording.
+  for (const offset of [-60_000, -1, 0, 1, 59_999]) {
+    const row = ui.limitsWindowRow("5 hours", { usedPercent: 40, resetAt: now + offset }, false, now);
+    assert.doesNotMatch(text(row), /resets in 0h 0m/, `offset ${offset}`);
+    assert.equal(findAll(row, (node) => node.attrs.text === t("limits.passed", { date: new Date(now + offset).toLocaleString(undefined, { weekday: "short", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }) })).length, offset <= 0 ? 1 : 0, `offset ${offset}`);
+  }
+  // A cooling account whose countdown has run out names no "0s" countdown.
+  const row = ui.limitsAccountRow({ type: "chatgpt", title: "GPT" }, { account: 0, id: "a", label: "Cooled", state: "cooling", cooldownSeconds: 0, at: now, windows: [] }, now);
+  assert.doesNotMatch(text(row), /available again in/);
+  const cooling = ui.limitsAccountRow({ type: "chatgpt", title: "GPT" }, { account: 0, id: "a", label: "Cooling", state: "cooling", cooldownSeconds: 90, at: now, windows: [] }, now);
+  assert.match(text(cooling), /available again in/);
+});
+
 test("the pace and exhaust wording and the time units are the mod's, verbatim in every language", () => {
   const modSource = fs.readFileSync(path.join(uiDir, "../mod/hooks/i18n.ts"), "utf8");
-  const keys = ["limits.paceProjected", "limits.exhaust", "units.minutes", "units.hours", "units.days", "units.hourMin", "units.dayHour"];
+  const keys = ["limits.paceProjected", "limits.exhaust", "limits.passed", "units.minutes", "units.hours", "units.days", "units.hourMin", "units.dayHour"];
   const blocks: Record<string, string> = { en: "const EN = {", ko: "const KO: Record", zh: "const ZH: Record", ja: "const JA: Record", es: "const ES: Record", pt: "const PT: Record" };
   for (const [lang, marker] of Object.entries(blocks)) {
     const start = modSource.indexOf(marker);

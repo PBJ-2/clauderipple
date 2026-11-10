@@ -390,8 +390,11 @@ function limitsNoteTone(window, exhaustLeft) {
 function limitsReset(window, weekly, now) {
   if (!window || !Number.isFinite(window.resetAt)) return t("limits.resetUnknown");
   const reset = new Date(window.resetAt);
+  // A reset that has passed has no time left to count down; the mod says so with its date instead.
+  if (window.resetAt <= now) return t("limits.passed", { date: reset.toLocaleString(undefined, { weekday: "short", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }) });
   if (weekly) return t("limits.resetsAt", { time: reset.toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false }) });
-  const minutes = Math.max(0, Math.ceil((window.resetAt - now) / 60_000));
+  // Ceiled from a positive span, so the countdown is at least one minute and never reads 0.
+  const minutes = Math.ceil((window.resetAt - now) / 60_000);
   return t("limits.resetsIn", { hours: Math.floor(minutes / 60), minutes: minutes % 60 });
 }
 
@@ -455,7 +458,9 @@ function limitsAccountName(entry, account) {
 function limitsAccountRow(entry, account, now) {
   const badges = [];
   if (account.inUse) badges.push(badge("first", t("limits.active")));
-  if (account.paused || (account.state && account.state !== "ready")) badges.push(chatgptStateBadge(account));
+  // A cooling account with no time left would read "available again in 0s"; once its countdown is over it shows as ready.
+  const cooledOff = account.state === "cooling" && !(account.cooldownSeconds > 0);
+  if (account.paused || (account.state && account.state !== "ready" && !cooledOff)) badges.push(chatgptStateBadge(account));
   if (entry.stale || account.stale || (account.quota && account.quota.stale)) badges.push(badge("warn", t("limits.stale")));
   const fetched = Number.isFinite(account.at) && account.at > 0 ? t("limits.fetchedAt", { time: new Date(account.at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: false }) }) : t("limits.notFetched");
   const name = limitsAccountName(entry, account);
