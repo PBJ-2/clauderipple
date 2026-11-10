@@ -55,7 +55,7 @@ function limitsUi(api: (path: string) => Promise<unknown>, status: Record<string
   const card = el("div"), desktop = el("div");
   const build = new Function("api", "el", "t", "$", "status", "config", `
     let currentConfig = config;
-    const stateFor = () => null, chevronIcon = () => null, openProvider = () => {}, refreshProviderUsage = () => {}, chatgptLoginButton = () => el("button", { text: "Sign in" }), chatgptLoginMessage = "", providerLabel = (name) => name, providerTitle = (name) => name, providerHue = () => "#000";
+    const stateFor = () => null, chevronIcon = () => null, openProvider = () => {}, refreshProviderUsage = () => {}, chatgptLoginButton = () => el("button", { text: "Sign in" }), chatgptLoginMessage = "", providerLabel = (name) => name, providerTitle = (name) => name, offline = () => false, providerHue = () => "#000";
     const APP = null, clientsLoaded = false, modState = {}, updateState = {}, renderDiagnostics = () => {}, modRedraw = () => {}, versionRow = () => null, autoUpdateRow = () => null, priorityRow = () => null;
     let loadedUiRevision = null;
     ${block("function badge(", "/** A titled group")}
@@ -68,6 +68,8 @@ function limitsUi(api: (path: string) => Promise<unknown>, status: Record<string
     return { refreshHealth, renderHealthProviders, limitsAccountRow, limitsWindowRow, limitsUsageWindow, settleLimits: () => limitsRead ?? Promise.resolve(), providerLimits, limitsSnapshotPeek: () => limitsSnapshot };
   `) as (...args: unknown[]) => LimitsUi;
   const ui = build(async (path: string) => {
+    // The config a status poll may re-read answers with the config this screen was given, or fails while it has none.
+    if (path === "/api/config") { if (!config) throw new Error("config not loaded"); return config; }
     const response = await api(path);
     return path === "/api/status" ? { settings: {}, ...status, ...(response && typeof response === "object" ? response : {}) } : response;
   }, el, t, (selector: string) => selector === "#health-providers" ? card : selector === "#health-desktop" ? desktop : el("div"), status, config);

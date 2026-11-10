@@ -728,6 +728,7 @@ async function refreshHealth() {
   );
   $("#health-requests").replaceChildren(el("div", { class: "stat-value", text: t("health.requestsFmt", Object.fromEntries(Object.entries(status.stats || {}).map(([key, value]) => [key, typeof value === "number" ? value.toLocaleString() : value]))) }));
   renderHealthProviders();
+  if (providerNamesStale()) void refreshProviderConfig();
   renderDiagnostics();
   if (clientsLoaded) renderClients();
   if (modState.settings) renderModNotice();
@@ -1330,15 +1331,36 @@ function providerState(name) {
   const verdict = providerConnection(name);
   return badge(verdict.level, verdict.text);
 }
+/**
+ * Whether the config this page holds names other providers than the router's live list does (one was
+ * added or removed since the config was read). Status follows the live list, so this asks for a re-read.
+ */
+function providerNamesStale() {
+  if (offline() || !status || !status.providers) return false;
+  if (!currentConfig) return true;
+  const saved = currentConfig.providers || {};
+  return Object.keys(status.providers).some((name) => !saved[name]) || Object.keys(saved).some((name) => !status.providers[name]);
+}
+let providerConfigRead = null;
+/** Reads the config again for the names and labels Status shows; one read at a time, and the list redraws with it. */
+function refreshProviderConfig() {
+  if (providerConfigRead) return providerConfigRead;
+  providerConfigRead = api("/api/config").then((config) => { currentConfig = config; }, () => { /* the live names stand */ })
+    .finally(() => { providerConfigRead = null; if (status) renderHealthProviders(); });
+  return providerConfigRead;
+}
 function renderHealthProviders() {
   const box = $("#health-providers");
-  const providers = Object.entries((currentConfig && currentConfig.providers) || (status && status.providers) || {});
-  if (!providers.length) {
+  // The router's live list decides which providers show: one added or removed elsewhere appears or goes on the
+  // next poll. The config supplies each provider's label and preset; one it does not have yet is drawn from the status.
+  const names = status && status.providers ? Object.keys(status.providers) : Object.keys((currentConfig && currentConfig.providers) || {});
+  if (!names.length) {
     box.replaceChildren(hint(t("health.noProviders")));
     return;
   }
-  box.replaceChildren(...providers.map(([name, provider]) => {
+  box.replaceChildren(...names.map((name) => {
     const live = status && status.providers && status.providers[name];
+    const provider = (currentConfig && currentConfig.providers && currentConfig.providers[name]) || live || {};
     const lines = [];
     const limits = providerLimits(name);
     // Older routers and a never-read limits list keep the text lines; gauges replace them only where they show figures.
@@ -2053,7 +2075,8 @@ async function toggleCodex(enabled) {
 void Promise.all([loadCatalogs(), refreshHealth()]);
 setInterval(refreshHealth, 5000);
 // Status names providers by the names people know (the one the user typed, a preset's name), which only
-// the config carries; read it once here unless another page already has. The 5-second poll redraws with it.
+// the config carries; read it once here unless another page already has. refreshHealth reads it again when
+// the router's live provider list names other providers than it does.
 if (!offline()) void api("/api/config").then((config) => { if (!currentConfig) { currentConfig = config; if (status) renderHealthProviders(); } }, () => { /* the status names stand */ });
 // The open accounts tab follows the router (each refresher returns at once when its list is not shown).
 setInterval(() => {
