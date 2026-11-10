@@ -191,10 +191,7 @@
     </header>
     <div id="logs-requests-panel" role="tabpanel" aria-labelledby="logs-requests-tab">
       <section class="section">
-        <div class="logs-header-row">
-          <div><h2 class="section-title" data-i18n="logs.usage">Usage</h2><span class="small" id="logs-range-caption"></span></div>
-          <label class="logs-filter"><span data-i18n="logs.provider">Provider</span><select id="logs-provider"><option value="" data-i18n="logs.all">All</option></select></label>
-        </div>
+        <!-- One toolbar for what the numbers and the list below cover: the period, then the provider. -->
         <div class="logs-period-row">
           <div class="segmented logs-period" id="logs-period" role="radiogroup" data-i18n-title="logs.period"></div>
           <div class="logs-custom" id="logs-custom" hidden>
@@ -202,9 +199,13 @@
             <span class="logs-custom-dash" aria-hidden="true">–</span>
             <input type="date" id="logs-to" data-i18n-title="logs.customTo" />
           </div>
+          <label class="logs-filter"><span data-i18n="logs.provider">Provider</span><select id="logs-provider"><option value="" data-i18n="logs.all">All</option></select></label>
+        </div>
+        <div class="logs-header-row">
+          <div><h2 class="section-title" data-i18n="logs.usage">Usage</h2><span class="small" id="logs-range-caption"></span></div>
         </div>
         <div class="group logs-summary" id="logs-summary"></div>
-        <div class="small logs-cost-note" id="logs-cost-note" hidden></div>
+        <div class="logs-cost-note" id="logs-cost-note" hidden></div>
       </section>
       <section class="section">
         <div class="logs-header-row"><h2 class="section-title" data-i18n="logs.byModel">Usage by model</h2></div>
@@ -225,8 +226,18 @@
 
   <section id="view-about" class="view">
     <header class="page-header"><div><h1 data-i18n="about.title">About</h1></div></header>
+    <!-- Who this is first: the mark, the name, the licence and the trademark notice (keep the notice). -->
     <section class="section">
-      <div class="group" id="health-details"></div>
+      <div class="group about-card">
+        <div class="about-id">
+          <img class="about-mark" src="favicon.svg" alt="" width="44" height="44" />
+          <div><h2 class="about-name">ClaudeRipple</h2><p class="about-license" data-i18n="about.license">License: GPL-3.0</p></div>
+        </div>
+        <p class="about-body" data-i18n="about.body">ClaudeRipple is an independent open-source project, not affiliated with Anthropic or OpenAI. Claude and Claude Code are trademarks of Anthropic, PBC.</p>
+      </div>
+    </section>
+    <section class="section">
+      <div class="group about-details" id="health-details"></div>
     </section>
     <section class="section narrow-only">
       <div class="group">
@@ -235,9 +246,6 @@
           <div class="cell-value"><select class="lang-select" id="lang-about" data-i18n-title="lang.label"></select></div>
         </div>
       </div>
-    </section>
-    <section class="section">
-      <div class="group about-text"><p data-i18n="about.body">ClaudeRipple is an independent open-source project, not affiliated with Anthropic or OpenAI. Claude and Claude Code are trademarks of Anthropic, PBC.</p><p class="small" data-i18n="about.license">License: GPL-3.0</p></div>
     </section>
   </section>
 </main>

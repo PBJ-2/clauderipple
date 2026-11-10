@@ -38,7 +38,7 @@ function load(configuredProviders: Record<string, unknown> = {}): Builders {
     sourceBetween(app, "function totalInputOf", "async function refreshRequests"),
   ].join("\n");
   class Node_ {
-    tag: string; className = ""; textContent = ""; attrs: Record<string, string> = {}; children: Node_[] = [];
+    tag: string; className = ""; textContent = ""; attrs: Record<string, string> = {}; children: Node_[] = []; style: Record<string, string> = {};
     constructor(tag: string) { this.tag = tag; }
     setAttribute(key: string, value: string): void { this.attrs[key] = String(value); }
     addEventListener(): void {}
@@ -55,7 +55,8 @@ function load(configuredProviders: Record<string, unknown> = {}): Builders {
     $: (selector: string) => selector === "#requests-table tbody" ? tbody : { closest: () => scroll, hidden: false },
     currentConfig: null, configuredProviders,
     timeOf: () => "12:00", formatSeconds: () => "1s", formatNumber: (n: number) => String(n),
-    providerClass: () => "provider-chatgpt", providerLabel: (name: string) => name,
+    // The row names a provider as Status does, with its vendor's dot.
+    providerClass: () => "provider-chatgpt", providerLabel: (name: string) => name, providerTitle: (name: string) => name, providerHue: () => "#10a37f",
     requestRows: [], expandedRequestId: null, rows: () => rows,
   };
   return new Function(...Object.keys(stubs), `${code}; return { requestRow, requestDetail, render(records, expanded) { requestRows = records; expandedRequestId = expanded; renderRequests(records); return rows(); } };`)(...Object.values(stubs)) as Builders;
@@ -121,7 +122,9 @@ test("each request row names the account that answered in the provider badge", (
   const second = { ...BASE, id: "req-2", account: "second-account", accountLabel: "second@example.test" };
   const rows = render([first, second], first.id);
   const models = rows[0]!.children.find((cell) => cell.className === "c-model")!.children[0]!;
-  assert.equal(models.children.at(-1)!.textContent, "first@example.test");
+  // The badge is the vendor's dot, then the name.
+  assert.deepEqual(models.children.at(-1)!.children.map((n) => n.className), ["vendor-dot", "provider-badge-name"]);
+  assert.equal(models.children.at(-1)!.children[1]!.textContent, "first@example.test");
   assert.equal(models.children.at(-1)!.attrs.title, "chatgpt", "the provider is named on hover");
   assert.ok(texts(rows[1]!).includes("Account"));
   assert.ok(texts(rows[1]!).includes("first@example.test"));

@@ -914,7 +914,8 @@ function versionRow() {
   // An install that ran and failed is not "the latest version": the reason stays in reach, and the
   // button is the retry (G-D07). The router's own text is shown, as it is the only detail there is.
   const failed = status.autoUpdate && status.autoUpdate.lastError && !status.autoUpdate.running && !updateState.busy;
-  if (failed && button) note = `${t("update.lastFailed")} ${shortError(status.autoUpdate.lastError)}`;
+  // A failure reads in the warning colour, so it is not taken for the version's ordinary note.
+  if (failed && button) note = el("span", { class: "cell-sub warn-text", text: `${t("update.lastFailed")} ${shortError(status.autoUpdate.lastError)}` });
   const row = cell(el("span", { class: "cell-label", text: `${t("health.version")} ${status.version}` }), button, note);
   row.id = "health-version-row";
   return row;
@@ -2126,19 +2127,40 @@ function remoteGetApp() {
     externalLink(remotePlayUrl(), "btn secondary compact", [t("phone.promo.googlePlayShort")]),
   ])]);
 }
+/** One figure of the phone host's state, as Status draws its tiles: a small label over the value. */
+function phoneTile(label, value, sub) {
+  return el("div", { class: "stat-tile" }, [
+    el("div", { class: "stat-label", text: label }),
+    el("div", { class: "stat-value" }, [value]),
+    ...(Array.isArray(sub) ? sub : [sub]).filter(Boolean).map((line) => typeof line === "string" ? el("p", { class: "stat-sub", text: line }) : line),
+  ]);
+}
 function renderPhoneStatus(data) {
-  const rows = [cell(t("phone.host"), badge(data.hostRunning ? "ok" : "warn", t(data.hostRunning ? "phone.running" : "phone.stopped")))];
-  if (data.hostRunning) rows.push(cell(t("phone.mode"), el("span", { text: t(data.mode === "relay" ? "phone.relayStatus" : data.mode === "direct" ? "phone.directStatus" : "phone.localStatus") }), `${data.bind}:${data.port} · ${data.version}`),
-    cell(t("phone.notifications"), badge(data.pushReady ? "ok" : "warn", t(data.pushReady ? "phone.ready" : "phone.needsRelay"))));
-  else rows.push(el("div", { class: "cell-note" }, [hint(t("phone.install")), el("code", { text: data.hint })]));
-  $("#phone-status").replaceChildren(...rows);
+  const host = phoneTile(t("phone.host"), badge(data.hostRunning ? "ok" : "warn", t(data.hostRunning ? "phone.running" : "phone.stopped")),
+    data.hostRunning ? null : [el("p", { class: "stat-sub", text: t("phone.install") }), el("code", { class: "phone-install", text: data.hint })]);
+  const tiles = [host];
+  if (data.hostRunning) tiles.push(
+    phoneTile(t("phone.mode"), el("span", { text: t(data.mode === "relay" ? "phone.relayStatus" : data.mode === "direct" ? "phone.directStatus" : "phone.localStatus") }), `${data.bind}:${data.port} · ${data.version}`),
+    phoneTile(t("phone.notifications"), badge(data.pushReady ? "ok" : "warn", t(data.pushReady ? "phone.ready" : "phone.needsRelay"))),
+  );
+  $("#phone-status").replaceChildren(...tiles);
   if (!data.hostRunning) return;
+  // A phone is one line: its id, when it was last seen and whether it gets notifications, its state on the right.
   $("#phone-phones").replaceChildren(...(data.phones.length ? data.phones.map(phone => cell(
-    el("span", { class: "cell-label mono", text: phone.clientId.length > 12 ? `${phone.clientId.slice(0, 12)}…` : phone.clientId, title: phone.clientId }),
-    badge(phone.connected ? "ok" : "", t(phone.connected ? "phone.connected" : "phone.offline")),
-    [phone.lastSeen ? t("phone.lastSeen", { time: new Date(phone.lastSeen).toLocaleString(CURRENT_LANG) }) : t("phone.unknownSeen"), t(phone.push ? "phone.pushOn" : "phone.pushOff")],
+    el("span", { class: "cell-label mono phone-id", text: phone.clientId.length > 12 ? `${phone.clientId.slice(0, 12)}…` : phone.clientId, title: phone.clientId }),
+    phone.connected ? badge("ok", t("phone.connected")) : el("span", { class: "tag", text: t("phone.offline") }),
+    `${phone.lastSeen ? t("phone.lastSeen", { time: new Date(phone.lastSeen).toLocaleString(CURRENT_LANG) }) : t("phone.unknownSeen")} · ${t(phone.push ? "phone.pushOn" : "phone.pushOff")}`,
+    "phone-row",
   )) : [el("div", { class: "cell-note", text: t("phone.empty") })]));
   $("#phone-restart").hidden = !data.restartRequired;
+  phoneSyncSave();
+}
+/** The access choice saved now; Save stays off until a different one is picked, so pressing it always changes something. */
+function phoneSavedMode() { return phoneSnapshot && phoneSnapshot.settings && phoneSnapshot.settings.relay ? "relay" : "local"; }
+function phoneSyncSave() {
+  const save = $("#phone-save");
+  const picked = $('#phone-content input[name="phone-mode"]:checked');
+  if (save && picked && !phoneBusy) save.disabled = picked.value === phoneSavedMode();
 }
 function phoneSettings(data) {
   // The phone app pairs through the Relay only, so phone access is on (Relay) or off. A custom
@@ -2147,9 +2169,10 @@ function phoneSettings(data) {
   const selected = saved.relay ? "relay" : "local";
   const choices = ["relay", "local"].map(value => {
     const radio = el("input", { type: "radio", name: "phone-mode", value, checked: value === selected });
+    radio.addEventListener("change", phoneSyncSave);
     return el("label", { class: "cell phone-choice" }, [radio, el("span", { class: "cell-text" }, [el("span", { class: "cell-label", text: t(`phone.choice.${value}`) }), el("span", { class: "cell-sub", text: t(`phone.help.${value}`) })])]);
   });
-  const save = el("button", { class: "btn", type: "button", text: t("common.save") });
+  const save = el("button", { class: "btn", type: "button", id: "phone-save", text: t("common.save"), disabled: "" });
   save.addEventListener("click", async () => {
     if (phoneBusy) return;
     const mode = $('#phone-content input[name="phone-mode"]:checked').value;
@@ -2160,7 +2183,7 @@ function phoneSettings(data) {
       toast(t(result.restartRequired ? "phone.restartRequired" : "common.saved"));
       await refreshPhone();
     } catch (error) { toast(t("common.saveFailed"), true, error.message); }
-    finally { phoneBusy = false; save.disabled = false; }
+    finally { phoneBusy = false; phoneSyncSave(); }
   });
   return section(t("phone.settings"), [...choices, cell(t("phone.apply"), save)]);
 }
@@ -2193,8 +2216,10 @@ function phoneControls(data) {
   });
   const phones = section(t("phone.phones"), []);
   $(".group", phones).id = "phone-phones";
-  return [section(t("phone.pairing"), [cell(t("phone.scan"), qr, t("phone.scanHelp")), el("div", { id: "phone-qr", class: "phone-qr" })], [t("phone.qrWarning"), !data.reachableFromPhone ? t("phone.unreachable") : null]),
-    phoneSettings(data), phoneRestart(), phones, phonePaired(data) ? remoteGetApp() : null, section(null, [rotate], t("phone.sharedKey"))].filter(Boolean);
+  // What is paired first, then how to pair another and get the app for it; the access setting, the
+  // restart it may need and the key reset come last, as the rarer things to change.
+  return [phones, section(t("phone.pairing"), [cell(t("phone.scan"), qr, t("phone.scanHelp")), el("div", { id: "phone-qr", class: "phone-qr" })], [t("phone.qrWarning"), !data.reachableFromPhone ? t("phone.unreachable") : null]),
+    phonePaired(data) ? remoteGetApp() : null, phoneSettings(data), phoneRestart(), section(null, [rotate], t("phone.sharedKey"))].filter(Boolean);
 }
 async function refreshPhone(rebuild = false) {
   if (!phoneActive() || offline()) return;
@@ -2205,8 +2230,9 @@ async function refreshPhone(rebuild = false) {
     // Pairing the first phone (or unpairing the last) swaps the pitch for its one-row form, so it rebuilds too.
     if (rebuild || !phoneSnapshot || phoneSnapshot.hostRunning !== data.hostRunning || phonePaired(phoneSnapshot) !== phonePaired(data)) {
       hidePhoneQr();
+      // The host, how phones reach it and whether notifications go out: three tiles in one surface.
       const state = section(t("phone.status"), []);
-      $(".group", state).id = "phone-status";
+      Object.assign($(".group", state), { id: "phone-status", className: "group stat-tiles phone-tiles" });
       $("#phone-content").replaceChildren(...(phonePaired(data) ? [] : [remotePromo(data)]), state, ...(data.hostRunning ? phoneControls(data) : []));
     }
     phoneSnapshot = data;
@@ -2535,9 +2561,10 @@ function macTetherCard(tt, setupOk) {
   const rename = el("button", { class: "btn secondary compact", type: "button", "data-key": "mac-rename", text: t(name ? "mac.ssid.change" : "mac.ssid.set") });
   rename.disabled = macSetup.running || !setupOk;
   rename.addEventListener("click", () => openMacRename(name));
+  // What is true now first, as on the card above it; then the switch and the hotspot's name.
   const rows = [
-    cell(el("label", { class: "cell-label", text: t("mac.tether.switch") }), enabled, t("mac.tether.switchHelp")),
     macStateRow(tone, t(`mac.net.${network}`), I18N.en[`mac.tstate.${tt.state}`] ? t(`mac.tstate.${tt.state}`) : tt.state, side),
+    cell(el("label", { class: "cell-label", text: t("mac.tether.switch") }), enabled, t("mac.tether.switchHelp")),
     // No "keep this network" pin here: beside the switch above it read as the same thing twice
     // (2026-10-20). The API keeps `pin` for the CLI.
     cell(t("mac.ssid.label"), [el("span", { class: name ? "mac-ssid" : "mac-ssid empty", text: name || t("mac.ssid.none") }), rename]),
@@ -5470,6 +5497,13 @@ function modGroups(choices) {
   return groups;
 }
 function modGroupLabel(group) { return group.billing ? `${group.name} · ${t(`mod.billing.${group.billing}`)}` : group.name; }
+/** A group's head in the models list: its vendor's hue as a dot (Claude's own models take Claude's), then its name and billing. */
+function modGroupHead(group) {
+  const key = group.name === "Claude" ? "anthropic" : group.name;
+  const dot = el("span", { class: "vendor-dot", "aria-hidden": "true" });
+  dot.style.color = providerHue(key, modProviderInfo(key));
+  return el("span", { class: "tick-name" }, [dot, el("span", { text: modGroupLabel(group) })]);
+}
 
 // ---- Accounts: a provider with pinned workers lists one account at a time
 //
@@ -5545,7 +5579,7 @@ function modTickRows() {
       return el("label", { class: "model-check", title: choice.model || choice.label }, [input, el("span", { text: choice.label }), other, off]);
     };
     const listed = group.items.filter(modListed);
-    if (!tabs) return el("div", { class: "tick-group" }, [el("div", { class: "tick-head", text: modGroupLabel(group) }), el("div", { class: "model-checklist" }, listed.map(box))]);
+    if (!tabs) return el("div", { class: "tick-group" }, [el("div", { class: "tick-head" }, [modGroupHead(group)]), el("div", { class: "model-checklist" }, listed.map(box))]);
     // Every account's list is drawn in the same place and only the picked one is visible, so the
     // block keeps the tallest list's height and switching accounts moves nothing below it.
     const shown = modAccountTab(group, tabs);
@@ -5561,7 +5595,7 @@ function modTickRows() {
       return panel;
     });
     return el("div", { class: "tick-group" }, [
-      el("div", { class: "tick-head has-tabs" }, [el("span", { text: modGroupLabel(group) }), tabList]),
+      el("div", { class: "tick-head has-tabs" }, [modGroupHead(group), tabList]),
       el("div", { class: "account-panels" }, panels),
     ]);
   });
@@ -6230,13 +6264,16 @@ function renderProviderFilter(summary, records) {
   for (const model of (summary && Array.isArray(summary.models) ? summary.models : [])) if (model.provider) knownRequestProviders.add(model.provider);
   for (const record of records) if (record.provider) knownRequestProviders.add(record.provider);
   if (requestProvider) knownRequestProviders.add(requestProvider);
-  const names = [...knownRequestProviders].sort();
+  // Listed by the names people know them by, as the rows below name them.
+  const names = [...knownRequestProviders].map((name) => [name, logsProviderTitle(name)]).sort((a, b) => a[1].localeCompare(b[1]) || a[0].localeCompare(b[0]));
   // Rebuilt only when the list changes, so the 3-second refresh does not close an open menu.
-  const key = names.map((name) => `${name}\t${providerLabel(name)}`).join("\n");
+  const key = names.map(([name, title]) => `${name}\t${title}`).join("\n");
   const select = $("#logs-provider");
   if (key !== renderedProviderNames) {
     renderedProviderNames = key;
-    select.replaceChildren(el("option", { value: "", text: t("logs.all") }), ...names.map((name) => el("option", { value: name, text: providerLabel(name) })));
+    // Two providers of one kind would read the same ("ChatGPT"): their keys tell them apart.
+    const twice = new Set(names.map(([, title]) => title).filter((title, index, all) => all.indexOf(title) !== index));
+    select.replaceChildren(el("option", { value: "", text: t("logs.all") }), ...names.map(([name, title]) => el("option", { value: name, text: twice.has(title) && title !== name ? `${title} (${name})` : title })));
   }
   if (select.value !== requestProvider) select.value = requestProvider;
 }
@@ -6257,7 +6294,7 @@ function modelUsageRow(entry) {
     el("span", { class: "model", text: entry.model, title: entry.model }),
     // A WebSearch side request is counted apart from the model's own turns; the router marks it.
     entry.purpose === "web-search" ? el("span", { class: "purpose-tag", text: t("logs.webSearch"), title: t("logs.webSearchHelp") }) : null,
-    el("span", { class: `provider-badge ${providerClass(entry.provider)}`, text: providerLabel(entry.provider) }),
+    providerBadge(entry.provider, logsProviderTitle(entry.provider)),
   ]);
   // The labels show only where a narrow window drops the header row.
   return el("tr", {}, [
@@ -6268,7 +6305,8 @@ function modelUsageRow(entry) {
     modelCostCell(entry),
     el("td", { class: "c-dur", "data-label": t("logs.th.avg"), title: rate === null ? undefined : t("logs.modelRateHelp") }, [
       formatSeconds(entry.avgMs),
-      rate === null ? null : el("span", { class: "rate-pill", text: t("logs.rateApprox", { value: rateValue(rate) }) }),
+      // An empty pill keeps the column's figures lined up where a row has no rate.
+      el("span", { class: "rate-pill", ...(rate === null ? { "aria-hidden": "true" } : { text: t("logs.rateApprox", { value: rateValue(rate) }) }) }),
     ]),
   ]);
 }
@@ -6318,6 +6356,18 @@ function rateValue(rate) {
 function formatRate(rate) {
   return t("logs.rate", { value: rateValue(rate) });
 }
+/** A provider as people know it ("Claude", "OpenCode Go"), as Status names it: the config this page holds, else the one the Logs view read. */
+function logsProviderEntry(name) {
+  const providers = (currentConfig && currentConfig.providers) || configuredProviders || {};
+  return providers[name];
+}
+function logsProviderTitle(name) { return providerTitle(name, logsProviderEntry(name)); }
+/** A provider's mark on a row: its vendor's hue as a dot, then a name (the provider's, or the account's). */
+function providerBadge(name, text, title) {
+  const dot = el("span", { class: "vendor-dot", "aria-hidden": "true" });
+  dot.style.color = providerHue(name, logsProviderEntry(name));
+  return el("span", { class: `provider-badge ${providerClass(name)}`, ...(title ? { title } : {}) }, [dot, el("span", { class: "provider-badge-name", text })]);
+}
 function requestAccount(record) {
   // The current login has a name only when its row snapshotted the email; an older row says just that it was the login.
   if (record.account === "current") return record.accountLabel || t("providers.anthropicCurrent");
@@ -6336,7 +6386,7 @@ function requestDetail(record) {
     [t("logs.detail.cacheWrite"), record.usage && record.usage.cacheWrite ? formatNumber(record.usage.cacheWrite) : t("logs.none")],
   ];
   const account = requestAccount(record);
-  if (account) details.push([t("logs.provider"), providerLabel(record.provider)], [t("logs.detail.account"), account]);
+  if (account) details.push([t("logs.provider"), logsProviderTitle(record.provider)], [t("logs.detail.account"), account]);
   // Both tiers side by side: the ChatGPT sign-in often serves `default` for a request made on
   // `priority` (#54), so the served tier cannot be the FAST badge's basis; the requested one is.
   if (record.requestedTier || record.servedTier) details.push([t("logs.detail.tier"), `${record.requestedTier || t("logs.none")} / ${record.servedTier || t("logs.none")}`]);
@@ -6355,9 +6405,9 @@ function requestRow(record) {
     el("span", { class: "model", text: record.target }),
     source && source !== record.target ? el("span", { class: "small", text: `(${source})` }) : null,
     record.purpose === "web-search" ? el("span", { class: "purpose-tag", text: t("logs.webSearch"), title: t("logs.webSearchHelp") }) : null,
-    // The account says more than the provider's id, which is often an address of its own: the
-    // badge keeps the provider's colour and names it on hover and in the detail.
-    el("span", { class: `provider-badge ${providerClass(record.provider)}`, text: account || providerLabel(record.provider), ...(account ? { title: providerLabel(record.provider) } : {}) }),
+    // The account says more than the provider's name, which the dot's hue already carries: the
+    // badge names the provider on hover and in the detail.
+    providerBadge(record.provider, account || logsProviderTitle(record.provider), account ? logsProviderTitle(record.provider) : undefined),
     // The requested tier, not the served one: the ChatGPT sign-in answers `default` to a Fast request (#54).
     record.requestedTier === "priority" ? el("span", { class: "fast-tag", text: "FAST", title: t("logs.fastHelp") }) : null,
   ].filter(Boolean));
@@ -6365,9 +6415,10 @@ function requestRow(record) {
   // which read as a two-token request (2026-09-23). The split is in the detail row.
   const totalInput = record.usage ? totalInputOf(record.usage) : 0;
   const rate = outputRateOf(record);
+  // A row without usage keeps an empty pill, so its dash lines up with the figures above it.
   const input = record.usage
     ? el("span", { class: "token-cell", text: formatNumber(totalInput) }, [el("span", { class: "cache-pill", text: t("logs.cacheHit", { percent: Math.round(record.usage.cached / Math.max(1, totalInput) * 100) }) })])
-    : el("span", { class: "no-usage", text: t("common.notAvailable") });
+    : el("span", { class: "no-usage", text: t("common.notAvailable") }, [el("span", { class: "cache-pill", "aria-hidden": "true" })]);
   const status = record.resent
     ? el("span", { class: "status-text resent", text: `${t("logs.status.resent")} ${record.status}`, title: t("logs.status.resentHelp") })
     : el("span", { class: `status-text ${record.ok ? "ok" : "bad"}`, text: `${record.ok ? t("logs.status.ok") : t("logs.status.error")} ${record.status}` });
@@ -6380,7 +6431,7 @@ function requestRow(record) {
     el("td", { class: record.usage ? "c-out" : "c-out no-usage", text: record.usage ? formatNumber(record.usage.output) : t("common.notAvailable") }),
     el("td", { class: "c-dur", title: rate === null ? undefined : t("logs.rateHelp") }, [
       formatSeconds(record.ms),
-      rate === null ? null : el("span", { class: "rate-pill", text: formatRate(rate) }),
+      el("span", { class: "rate-pill", ...(rate === null ? { "aria-hidden": "true" } : { text: formatRate(rate) }) }),
     ]),
     el("td", { class: "c-status" }, [status]),
   );

@@ -645,28 +645,62 @@ label.check input { margin-top: 2px; }
 
 /* ---- Phone --------------------------------------------------------------------------- */
 
-.phone-choice { cursor: pointer; }
-.phone-choice input { flex: 0 0 auto; }
-.phone-qr:not(:empty) { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 12px; padding: 16px; }
-.phone-qr-image { display: block; flex: 0 0 240px; width: 240px; height: 240px; padding: 8px; background: #fff; border-radius: 8px; }
+/* The host's state as Status's tiles; a phone as one dense row; the access choice as radio rows whose
+   Save wakes only when the choice differs from what is saved. */
+.phone-tiles .stat-value { font-weight: 500; }
+.phone-tiles .stat-sub { font-size: var(--fs-cap); font-variant-numeric: tabular-nums; }
+.phone-row .cell-label { font-size: var(--fs-sub); }
+.phone-row .cell-sub { font-size: var(--fs-cap); }
+.phone-row .cell-value .tag { font-size: var(--fs-cap); line-height: 18px; }
+.phone-row .cell-value .badge { font-size: var(--fs-foot); color: var(--label); }
+.phone-choice { cursor: pointer; align-items: flex-start; }
+.phone-choice input { flex: 0 0 auto; margin-top: 4px; }
+.phone-choice .cell-label { font-size: var(--fs-sub); }
+.phone-choice .cell-sub { font-size: var(--fs-cap); }
+.phone-choice:has(input:checked) .cell-label { font-weight: 600; }
+/* The QR on white, its two buttons stacked beside it; on a phone they go under it. */
+.phone-qr:not(:empty) { position: relative; display: grid; grid-template-columns: 240px auto; grid-template-rows: auto auto 1fr; justify-content: center; align-items: start; gap: 8px 16px; padding: 16px; }
+.phone-qr:not(:empty)::before { content: ""; position: absolute; top: 0; left: 16px; right: 0; height: 1px; background: var(--separator); }
+.phone-qr-image { display: block; grid-row: 1 / span 3; width: 240px; height: 240px; padding: 8px; background: #fff; border-radius: 10px; box-shadow: 0 0 0 1px var(--group-edge); }
+.phone-qr .btn { justify-self: stretch; }
 #phone-content .cell-value input { width: 280px; max-width: 100%; }
 #phone-content code { display: block; margin-top: 6px; overflow-wrap: anywhere; }
+#phone-content code.phone-install { padding: 6px 8px; border-radius: 6px; background: var(--fill); color: var(--label); font-size: var(--fs-cap); }
 #phone-content > .section:first-child { margin-top: 0; }
+#phone-content .cell-button.destructive { font-size: var(--fs-sub); }
+@media (max-width: 720px) {
+  /* Stacked tiles are divided by a hairline across, not the side-by-side rule. */
+  .phone-tiles .stat-tile + .stat-tile::before { top: 0; bottom: auto; left: 16px; right: 0; width: auto; height: 1px; }
+  .phone-tiles .stat-tile { padding: 11px 16px 12px; }
+  /* A row's buttons go under its words rather than over them. */
+  #phone-content .cell:has(.btn) { flex-wrap: wrap; row-gap: 8px; }
+  #phone-content .cell:has(.btn) > .cell-value { flex: 1 1 100%; max-width: none; justify-content: flex-start; }
+}
+@media (max-width: 520px) {
+  .phone-qr:not(:empty) { grid-template-columns: minmax(0, 240px); grid-template-rows: none; }
+  .phone-qr-image { grid-row: auto; }
+}
 
 /* Ripple Remote, until a phone is paired: the connection card's shape in the accent, like the
    laptop setup card. The QR below pairs from inside the app, so the store has its own button here. */
-.conn-card.remote-promo { --tone: var(--accent-fill); --tint: var(--accent-soft); margin-bottom: 12px; padding-bottom: 20px; }
+/* The violet is the icon and the eyebrow only: the card is the plain surface, its ticks graphite, and
+   the store buttons read as store badges in ink rather than two violet slabs. */
+.conn-card.remote-promo { --tone: var(--accent-fill); --tint: transparent; margin-bottom: 28px; padding-bottom: 20px; }
 .remote-promo:lang(ko) { word-break: keep-all; overflow-wrap: anywhere; }
-.remote-promo .conn-icon svg { stroke-width: 1.9; }
-.remote-eyebrow { margin: 0 0 3px; color: var(--accent); font-size: var(--fs-foot); font-weight: 600; }
-.remote-points { display: grid; gap: 8px; margin: 18px 0 0; padding: 0 0 0 60px; list-style: none; }
-.remote-points li { position: relative; padding-left: 22px; color: var(--label-2); font-size: var(--fs-sub); line-height: 1.45; }
-.remote-points li::before { content: ""; position: absolute; left: 2px; top: 0.42em; width: 9px; height: 5px; border-left: 2px solid var(--accent); border-bottom: 2px solid var(--accent); transform: rotate(-45deg); }
+.remote-promo .conn-icon { width: 40px; height: 40px; box-shadow: 0 0 0 4px var(--accent-soft); }
+.remote-promo .conn-icon svg { width: 20px; height: 20px; stroke-width: 1.9; }
+.remote-promo .conn-title { font-size: 18px; }
+.remote-promo .conn-lead { color: var(--label-2); font-size: var(--fs-sub); }
+.remote-eyebrow { margin: 0 0 3px; color: var(--accent); font-size: var(--fs-cap); font-weight: 600; letter-spacing: 0.01em; }
+.remote-points { display: grid; gap: 7px; margin: 16px 0 0; padding: 0 0 0 56px; list-style: none; }
+.remote-points li { position: relative; padding-left: 22px; color: var(--label-2); font-size: var(--fs-foot); line-height: 1.5; }
+.remote-points li::before { content: ""; position: absolute; left: 2px; top: 0.45em; width: 8px; height: 4px; border-left: 1.8px solid var(--label); border-bottom: 1.8px solid var(--label); transform: rotate(-45deg); }
 .remote-points strong { color: var(--label); font-weight: 600; }
-.remote-get { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin: 20px 0 0 60px; }
-.btn.large.remote-store { width: auto; gap: 8px; }
+.remote-get { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 18px 0 0 56px; }
+.btn.large.remote-store { width: auto; gap: 8px; min-height: 36px; padding: 6px 16px; background: var(--label); color: var(--bg); font-size: var(--fs-sub); }
+.btn.large.remote-store:hover { filter: none; opacity: 0.88; }
 .remote-store-icon { width: 18px; height: 18px; stroke-width: 2; }
-.remote-next { margin: 16px 0 0 60px; padding-top: 14px; border-top: 1px solid var(--separator); color: var(--label-2); font-size: var(--fs-foot); line-height: 1.45; }
+.remote-next { margin: 16px 0 0 56px; padding-top: 12px; border-top: 1px solid var(--separator); color: var(--label-2); font-size: var(--fs-foot); line-height: 1.45; }
 
 /* ---- Providers ----------------------------------------------------------------------- */
 
@@ -826,9 +860,11 @@ label.check input { margin-top: 2px; }
 
 /* ---- Logs ---------------------------------------------------------------------------- */
 
-.logs-header-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 0 4px 8px; }
+/* The mod's pane in table form: figures in tabular numerals lined up on the right, graphite text,
+   a provider named with its vendor's dot, and colour only where a request failed. */
+.logs-header-row { display: flex; align-items: baseline; justify-content: space-between; gap: 4px 12px; flex-wrap: wrap; margin: 0 4px 8px; }
 .logs-header-row .section-title { display: inline; }
-.logs-header-row .small { margin-left: 8px; }
+.logs-header-row .small { margin-left: 8px; font-size: var(--fs-cap); }
 .logs-summary { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); }
 /* The cost chip is a seventh when the router prices requests; its note stands under the chips. Seven
    in a row only in a wide window (the labels would be cut), else four and three. */
@@ -843,63 +879,87 @@ label.check input { margin-top: 2px; }
   .logs-summary.with-cost .logs-chip:nth-child(5)::before { display: block; }
   .logs-summary.with-cost .logs-chip:nth-child(n + 5) { border-top: 0; }
 }
-.logs-cost-note { margin: 8px 4px 0; }
-.logs-cost-note > div + div { margin-top: 2px; }
-.logs-chip { position: relative; min-width: 0; padding: 14px 16px; }
+.logs-cost-note { margin: 8px 16px 0; color: var(--label-2); font-size: var(--fs-cap); line-height: 1.5; }
+.logs-cost-note > div + div { margin-top: 1px; }
+/* The figures read as Status's tiles: a small grey label over a figure, a quieter line under it. */
+.logs-chip { position: relative; min-width: 0; padding: 12px 16px 13px; }
 .logs-chip + .logs-chip::before { content: ""; position: absolute; left: 0; top: 14px; bottom: 14px; width: 1px; background: var(--separator); }
-.logs-chip .label { display: block; color: var(--label-2); font-size: var(--fs-foot); margin-bottom: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.logs-chip .value { display: block; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.logs-chip .sub { display: block; margin-top: 1px; color: var(--label-2); font-size: var(--fs-cap); white-space: nowrap; }
-.logs-filter { display: inline-flex; align-items: center; gap: 8px; color: var(--label-2); font-size: var(--fs-foot); }
-.logs-filter select { width: auto; min-width: 130px; min-height: 28px; }
+.logs-chip .label { display: block; margin-bottom: 4px; color: var(--label-2); font-size: var(--fs-cap); font-weight: 500; letter-spacing: 0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.logs-chip .value { display: block; color: var(--label); font-size: 19px; font-weight: 600; line-height: 1.25; letter-spacing: -0.015em; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.logs-chip .sub { display: block; margin-top: 2px; color: var(--label-2); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* A compacted figure ("78.9억") carries the whole number on hover. */
+.logs-chip .value[title] { cursor: help; }
+.logs-filter { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; color: var(--label-2); font-size: var(--fs-foot); }
+.logs-filter select { width: auto; min-width: 140px; max-width: 220px; min-height: 28px; }
 .logs-table-card { overflow-x: auto; }
-.logs-table-card table { min-width: 860px; }
-/* The usage period: a segmented control, and two date fields beside it for a custom range. */
-.logs-period-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0 0 10px; }
+.logs-table-card table { min-width: 880px; }
+/* What the page covers: the period as a segmented control (two date fields beside it for a custom
+   range), the provider at the row's end. */
+.logs-period-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0 0 22px; }
 .logs-custom { display: inline-flex; align-items: center; gap: 6px; }
 .logs-custom input { width: auto; min-height: 28px; padding: 3px 8px; font-size: var(--fs-foot); font-variant-numeric: tabular-nums; }
 .logs-custom-dash { color: var(--label-3); }
-#models-table { min-width: 660px; }
+#models-table { min-width: 700px; }
 
-table { width: 100%; border-collapse: collapse; font-size: var(--fs-sub); }
-th { padding: 10px 12px 8px; color: var(--label-2); font-size: var(--fs-foot); font-weight: 500; text-align: left; white-space: nowrap; border-bottom: 1px solid var(--separator); }
+table { width: 100%; border-collapse: collapse; font-size: var(--fs-foot); }
+th { padding: 9px 12px 7px; color: var(--label-2); font-size: var(--fs-cap); font-weight: 500; text-align: left; white-space: nowrap; border-bottom: 1px solid var(--separator); }
 th:first-child, td:first-child { padding-left: 16px; }
-td { padding: 9px 12px; vertical-align: middle; border-bottom: 1px solid var(--separator); font-variant-numeric: tabular-nums; }
+th:last-child, td:last-child { padding-right: 16px; }
+td { padding: 8px 12px; vertical-align: middle; border-bottom: 1px solid var(--separator); font-variant-numeric: tabular-nums; }
 tr:last-child td { border-bottom: 0; }
+/* Figures line up on the right, under their heading. */
+#models-table th:nth-child(n + 2), #requests-table th:nth-child(n + 4):not(:last-child),
+td.c-count, td.c-in, td.c-out, td.c-cost, td.c-dur { text-align: right; white-space: nowrap; }
+td.c-count, td.c-out, td.c-cost { color: var(--label); }
+/* A heading over a figure with a pill after it stands over the figure, not over the pill. */
+#models-table th:nth-child(3), #requests-table th:nth-child(4) { padding-right: calc(18px + 6.4 * 11px); }
+#models-table th:nth-child(6), #requests-table th:nth-child(6) { padding-right: calc(18px + 7.6 * 11px); }
+/* A cost with caveats on hover is underlined in dots; the rate explains itself on hover too. */
+td.c-cost[title] { cursor: help; text-decoration: underline dotted var(--label-3); text-underline-offset: 3px; }
+td.c-dur[title] { cursor: help; }
 #requests-table tbody tr.request-row { cursor: pointer; }
-#requests-table tbody tr.request-row:hover td { background: var(--fill); background: color-mix(in srgb, var(--fill) 55%, transparent); }
+#requests-table tbody tr.request-row:hover td, #models-table tbody tr:hover td { background: var(--fill); background: color-mix(in srgb, var(--fill) 50%, transparent); }
 #requests-table td.c-time { color: var(--label-2); white-space: nowrap; }
-.request-models { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.request-models .model { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
-.request-models .small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-/* The provider is read as a name, not a colour: one quiet label for every provider. */
-.provider-badge { flex: 0 0 auto; padding: 1px 7px; border-radius: 5px; background: var(--fill); color: var(--label-2); font-size: var(--fs-cap); font-weight: 500; white-space: nowrap; }
-/* Says what kind of side request a row is; the provider badge beside it stays the plain one. */
-.purpose-tag { flex: 0 0 auto; padding: 1px 7px; border-radius: 5px; border: 1px solid var(--separator); color: var(--label-2); font-size: var(--fs-cap); font-weight: 500; white-space: nowrap; }
-/* A request made on the Fast tier: the accent as an outline and ink only, never a fill. */
-.fast-tag { flex: 0 0 auto; padding: 1px 7px; border-radius: 5px; border: 1px solid var(--accent); color: var(--accent); font-size: var(--fs-cap); font-weight: 600; letter-spacing: 0.02em; white-space: nowrap; }
+#requests-table td.c-effort { color: var(--label-2); }
+.request-models { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.request-models .model { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--label); font-weight: 500; }
+.request-models .small { font-size: var(--fs-cap); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* The provider as Status names it: its vendor's hue as a dot, then the provider's or the account's name. */
+.provider-badge { display: inline-flex; align-items: center; gap: 5px; flex: 0 1 auto; min-width: 0; max-width: 220px; color: var(--label-2); font-size: var(--fs-cap); white-space: nowrap; }
+.provider-badge .vendor-dot { width: 6px; height: 6px; }
+.provider-badge-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.provider-badge[title] { cursor: default; }
+/* What kind of side request a row is, as a plain tag; a Fast request is the one point of violet. */
+.purpose-tag, .fast-tag { flex: 0 0 auto; padding: 0 7px; border-radius: 999px; font-size: 11px; font-weight: 500; line-height: 16px; white-space: nowrap; }
+.purpose-tag { background: var(--fill); color: var(--label-2); }
+.fast-tag { box-shadow: inset 0 0 0 1px var(--accent-line); color: var(--accent); font-weight: 600; letter-spacing: 0.03em; }
 .token-cell { white-space: nowrap; }
-.cache-pill { margin-left: 6px; color: var(--label-2); font-size: var(--fs-cap); }
+/* The cache's share and the rate ride after their figure at a set width, so the figures stay in line. */
+.cache-pill, .rate-pill { display: inline-block; margin-left: 6px; color: var(--label-2); font-size: 11px; text-align: left; white-space: nowrap; }
+.cache-pill { min-width: 6.4em; }
+.rate-pill { min-width: 7.6em; }
 #requests-table td.c-dur, #models-table td.c-dur, #models-table td.c-cost { white-space: nowrap; }
-.rate-pill { margin-left: 6px; color: var(--label-2); font-size: var(--fs-cap); }
 .no-usage { color: var(--label-3); }
-.status-text { font-weight: 500; white-space: nowrap; }
-.status-text.ok { color: var(--ok); }
-.status-text.bad { color: var(--bad); }
-.status-text.resent { color: var(--label-2); font-weight: 400; }
-.request-detail td { padding: 0; background: var(--fill); background: color-mix(in srgb, var(--fill) 45%, transparent); }
-.request-detail-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px 16px; padding: 14px 16px; }
-.request-detail-grid .detail-label { display: block; margin-bottom: 2px; color: var(--label-2); font-size: var(--fs-cap); }
-.request-detail-grid .detail-value { font-family: var(--mono); font-size: var(--fs-foot); word-break: break-word; }
+/* A request that went through reads as quietly as the rest of its row; a failure is the one in red. */
+.status-text { white-space: nowrap; }
+.status-text.ok { color: var(--label-2); }
+.status-text.bad { color: var(--bad); font-weight: 600; }
+.status-text.resent { color: var(--label-3); }
+.request-detail td { padding: 0; background: var(--fill); background: color-mix(in srgb, var(--fill) 40%, transparent); }
+.request-detail-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px 20px; padding: 12px 16px 14px; }
+.request-detail-grid .detail-label { display: block; margin-bottom: 2px; color: var(--label-2); font-size: 11px; font-weight: 500; }
+.request-detail-grid .detail-value { color: var(--label); font-family: var(--mono); font-size: var(--fs-cap); word-break: break-word; }
 .request-note { grid-column: 1 / -1; }
 
 .raw-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 0 4px 8px; }
+.raw-toolbar .small { font-size: var(--fs-cap); }
+.raw-toolbar label.check { font-size: var(--fs-foot); color: var(--label-2); }
 pre#logbox {
   margin: 0;
-  height: 62vh;
-  padding: 14px 16px;
+  height: 64vh;
+  padding: 12px 16px;
   overflow: auto;
-  font: 12.5px/1.6 var(--mono);
+  font: 12px/1.65 var(--mono);
   white-space: pre-wrap;
   word-break: break-all;
 }
@@ -907,25 +967,57 @@ pre#logbox {
 .tag-ERR { color: var(--bad); }
 .tag-WARN { color: var(--warn); }
 
+/* A phone: the figures, the period and the provider each take the width; the dates share a line. */
+@media (max-width: 720px) {
+  .logs-filter { flex: 1 1 100%; margin-left: 0; }
+  .logs-filter select { flex: 1 1 auto; max-width: none; }
+  .logs-period-row { margin-bottom: 18px; }
+  .logs-chip { padding: 11px 14px 12px; }
+  .logs-chip .value { font-size: 17px; }
+}
+
 /* ---- ClaudeRipple mod ---------------------------------------------------------------- */
 
 /* One long page of cards, each card a heading over the usual grouped lists. */
 a.cell { color: inherit; text-decoration: none; }
 #mod-notice:not([hidden]) + #mod-content { margin-top: 28px; }
-.mod-card + .mod-card { margin-top: 48px; }
-.mod-card-head { margin: 0 4px 12px; }
-.mod-card-head h2 { font-size: 20px; font-weight: 700; letter-spacing: -0.015em; line-height: 1.25; }
-.mod-card-head .hint { margin-top: 3px; font-size: var(--fs-sub); }
+/* A card is a heading the size of Status's provider names over its rows, not a second page title. */
+.mod-card + .mod-card { margin-top: 40px; }
+.mod-card-head { margin: 0 4px 10px; }
+.mod-card-head h2 { font-size: 16px; font-weight: 650; letter-spacing: -0.01em; line-height: 1.3; }
+.mod-card-head .hint { margin-top: 3px; font-size: var(--fs-foot); line-height: 1.5; }
 .mod-card-head + .section, .mod-card-head + .group { margin-top: 0; }
+.mod-card .section + .section { margin-top: 18px; }
+.mod-card .section-title { color: var(--label-2); font-size: var(--fs-foot); }
+/* Rows say what a setting is in the body size and how it works in a quieter line. */
+.mod-card .cell-label { font-size: var(--fs-sub); }
+.mod-card .cell-sub { font-size: var(--fs-cap); }
+.mod-card .group-footer { font-size: var(--fs-cap); line-height: 1.55; }
+/* On a phone a choice keeps its whole word ("모든 서브에이전트" was cut to "모든 서브에이…"):
+   the buttons size to their words and the control wraps when they do not fit. */
+@media (max-width: 720px) {
+  .mod-card .cell.wide .segmented { flex-wrap: wrap; }
+  .mod-card .cell.wide .segmented button { flex: 1 1 auto; overflow: visible; text-overflow: clip; }
+  .mode-tabs { display: flex; }
+}
 .group-footer.warn-text, .cell-note.warn-text, .cell-sub.warn-text { color: var(--warn); }
 .mod-card .cell-value select { width: 320px; max-width: 100%; }
 .mod-card .cell-value select.narrow { width: 160px; }
 .text-field { width: 320px; }
 
 /* The models to use: one block per provider, its billing beside the name, a checkbox for each model. */
-.tick-group + .tick-group { border-top: 1px solid var(--separator); }
-.tick-head { padding: 12px 16px 0; color: var(--label-2); font-size: var(--fs-foot); font-weight: 500; }
+.tick-group { position: relative; }
+.tick-group + .tick-group::before { content: ""; position: absolute; top: 0; left: 16px; right: 0; height: 1px; background: var(--separator); }
+.tick-head { padding: 11px 16px 0; color: var(--label-2); font-size: var(--fs-cap); font-weight: 500; }
+.tick-name { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.tick-name > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tick-name .vendor-dot { width: 7px; height: 7px; }
 .tick-group .model-check .model-effort-tag { margin-left: auto; }
+/* The models are ticks on the card, not grey tiles in it: a row each, a hover the only fill. */
+.tick-group .model-checklist { gap: 0 8px; padding: 4px 8px 8px; }
+.tick-group .model-check { padding: 6px 8px; border-radius: 7px; background: transparent; font-size: var(--fs-foot); }
+.tick-group .model-check:hover { background: var(--fill); }
+.tick-group .model-check:has(input:not(:checked)) > span:first-of-type { color: var(--label-2); }
 /* A provider with pinned workers: its account tabs at the head's right, one account's models below.
    The lists share one cell, so the block is as tall as the longest and switching moves nothing. */
 .tick-head.has-tabs { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px 0 16px; }
@@ -943,10 +1035,14 @@ a.cell { color: inherit; text-decoration: none; }
 .rung-row > .cell-value { flex-shrink: 0; max-width: 100%; }
 .mod-card .cell-value select.rung-model { width: 300px; }
 /* Saved worker sets: tabs browse, the separate control activates. Numbering is dispatch order. */
-.mode-on { display: inline-block; margin-left: 8px; padding: 1px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: var(--fs-cap); font-weight: 600; vertical-align: 1px; }
-.mode-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 18px 0 12px; }
-.mode-tabs button { padding: 8px 12px; border: 1px solid var(--separator); border-radius: 8px; background: var(--fill); color: var(--label-2); max-width: 100%; overflow-wrap: anywhere; }
-.mode-tabs button.active { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+/* The set in use carries the accent's outlined tag, the one point of violet among the tabs. */
+.mode-on { display: inline-block; margin-left: 7px; padding: 0 6px; border-radius: 999px; box-shadow: inset 0 0 0 1px var(--accent-line); color: var(--accent); font-size: 11px; font-weight: 600; line-height: 16px; vertical-align: 1px; }
+/* Saved worker sets as a segmented control: the open one raised, the rest flat. */
+.mode-tabs { display: inline-flex; flex-wrap: wrap; gap: 2px; max-width: 100%; margin: 20px 0 14px; padding: 2px; border-radius: 9px; background: var(--fill); }
+.mode-tabs button { min-height: 28px; padding: 3px 14px; border: 0; border-radius: 7px; background: transparent; color: var(--label); font-size: var(--fs-foot); font-weight: 500; max-width: 100%; overflow-wrap: anywhere; cursor: pointer; }
+.mode-tabs button:hover:not(.active):not(:disabled) { background: var(--fill); }
+.mode-tabs button.active { background: var(--segment-on); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12), 0 0 0 0.5px rgba(0, 0, 0, 0.04); font-weight: 600; }
+.mode-tabs button[data-key="mode-add"] { color: var(--label-2); }
 .rung-list { min-width: 0; width: 100%; text-align: left; }
 .rung-list ol { margin: 0 0 8px; padding-left: 22px; }
 .rung-item { padding: 3px 0 6px; }
@@ -965,7 +1061,8 @@ a.cell { color: inherit; text-decoration: none; }
   .compact-at, .compact-at .segmented { flex-wrap: nowrap; }
   .compact-at .text-field { width: 112px; }
 }
-.offer-row { background: var(--accent-soft); }
+/* A one-time note: an accent rule at its edge rather than a violet ground. */
+.offer-row { box-shadow: inset 3px 0 0 var(--accent); }
 .offer-row .cell-label { font-size: var(--fs-sub); }
 
 /* The lean is a slider with a tick for each of its five stops, like a System Settings slider. */
@@ -1004,13 +1101,17 @@ a.cell { color: inherit; text-decoration: none; }
 .mac-card .notice { margin-bottom: 10px; }
 .mac-card .details { margin: 12px 4px 0; }
 .mac-card .details .group { margin-top: 8px; }
-.mac-state { min-height: 58px; }
-.mac-dot { width: 10px; height: 10px; flex: 0 0 auto; border-radius: 50%; background: var(--label-3); }
-.mac-dot.on { background: var(--accent-fill); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent-fill) 18%, transparent); }
-.mac-dot.ok { background: var(--ok-dot); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok-dot) 18%, transparent); }
-.mac-dot.warn { background: var(--warn-dot); box-shadow: 0 0 0 4px color-mix(in srgb, var(--warn-dot) 18%, transparent); }
-.mac-dot.bad { background: var(--bad-dot); box-shadow: 0 0 0 4px color-mix(in srgb, var(--bad-dot) 18%, transparent); }
-.mac-side { flex: 0 1 auto; min-width: 0; color: var(--label-2); font-size: var(--fs-foot); font-variant-numeric: tabular-nums; text-align: right; }
+/* What is true now leads each card: a dot and a word, why under it, the machine's facts on the right. */
+.mac-state { min-height: 54px; gap: 12px; }
+.mac-state .cell-label.strong { font-size: var(--fs-sub); }
+.mac-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--label-3); }
+.mac-dot.on { background: var(--accent-fill); box-shadow: 0 0 0 3px var(--accent-soft); }
+.mac-dot.ok { background: var(--ok-dot); }
+.mac-dot.warn { background: var(--warn-dot); }
+.mac-dot.bad { background: var(--bad-dot); }
+.mac-side { flex: 0 1 auto; min-width: 0; color: var(--label-2); font-size: var(--fs-cap); font-variant-numeric: tabular-nums; text-align: right; }
+.mac-card .details > summary { font-size: var(--fs-foot); }
+.mac-card .conn-detail-rows .row .v { font-size: 11.5px; }
 .mac-ssid { color: var(--label); font-weight: 500; }
 .mac-ssid.empty { color: var(--label-3); font-weight: 400; }
 .mac-time { width: auto; min-width: 112px; font-variant-numeric: tabular-nums; }
@@ -1020,9 +1121,20 @@ a.cell { color: inherit; text-decoration: none; }
 
 /* The language menu lives in the sidebar; on a phone the sidebar is a tab bar, so About carries it. */
 .narrow-only { display: none; }
-.about-text { padding: 14px 16px; font-size: var(--fs-sub); line-height: 1.5; }
-.about-text p { margin: 0; }
-.about-text p + p { margin-top: 6px; }
+/* Who this is: the mark, the name and licence beside it, the trademark notice under a hairline. */
+.about-card { padding: 16px 16px 14px; }
+.about-id { display: flex; align-items: center; gap: 14px; }
+.about-mark { width: 44px; height: 44px; flex: 0 0 auto; padding: 6px; border-radius: 11px; background: var(--accent-soft); }
+.about-name { font-size: 17px; font-weight: 650; letter-spacing: -0.01em; }
+.about-license { margin: 2px 0 0; color: var(--label-2); font-size: var(--fs-cap); }
+.about-body { margin: 14px 0 0; padding-top: 12px; border-top: 1px solid var(--separator); color: var(--label-2); font-size: var(--fs-foot); line-height: 1.55; }
+:lang(ko) .about-body { word-break: keep-all; overflow-wrap: anywhere; }
+/* The version, its updates and what is running: the same dense rows as the other settings. */
+.about-details .cell-label { font-size: var(--fs-sub); }
+.about-details .cell-sub { font-size: var(--fs-cap); }
+.about-details .cell-sub.mono { font-size: 11.5px; color: var(--label-2); }
+.about-details > .row .k { font-size: var(--fs-sub); }
+.about-details > .row .v { font-size: var(--fs-foot); }
 
 /* ---- Sheets -------------------------------------------------------------------------- */
 
@@ -1343,8 +1455,14 @@ a.cell { color: inherit; text-decoration: none; }
   #requests-table td.c-model { order: 1; flex: 1 1 calc(100% - 110px); min-width: 0; padding-right: 10px; }
   #requests-table td.c-status { order: 2; margin-left: auto; font-size: var(--fs-foot); }
   #requests-table td.c-time, #requests-table td.c-effort, #requests-table td.c-in, #requests-table td.c-out, #requests-table td.c-dur { order: 3; color: var(--label-2); font-size: var(--fs-cap); white-space: nowrap; }
-  #requests-table td.c-time::after, #requests-table td.c-effort::after, #requests-table td.c-in::after, #requests-table td.c-out::after { content: "·"; margin: 0 6px; color: var(--label-3); }  #requests-table .request-models .model { max-width: 60vw; }
+  #requests-table td.c-time::after, #requests-table td.c-effort::after, #requests-table td.c-in::after, #requests-table td.c-out::after { content: "·"; margin: 0 6px; color: var(--label-3); }
+  #requests-table .request-models .model { max-width: 60vw; }
   #requests-table .request-models > .small { display: none; }
+  /* In a list line the figures follow one another: their pills keep no set width, an empty one takes none. */
+  #view-logs .cache-pill, #view-logs .rate-pill { min-width: 0; margin-left: 4px; }
+  #view-logs .cache-pill:empty, #view-logs .rate-pill:empty { display: none; }
+  #requests-table .request-models { flex-wrap: wrap; row-gap: 3px; }
+  #requests-table .provider-badge { max-width: 100%; }
   #requests-table tr.request-detail { position: relative; display: block; }
   #requests-table tr.request-detail td { display: block; }
   .request-detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
