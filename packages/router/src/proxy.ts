@@ -61,6 +61,16 @@ import { ClaudeCurrentIdentity, loginEmailWithin } from "./providers/anthropic-i
 import { dropForeignThinking, ThinkingOrigins } from "./thinking.ts";
 
 const MAX_BODY = 64 * 1024 * 1024;
+
+/** The headers a client sent that identify its login, for the profile lookup that names it. */
+function loginHeaders(headers: http.IncomingHttpHeaders): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const name of ["authorization", "anthropic-version", "anthropic-beta"]) {
+    const value = headers[name];
+    if (typeof value === "string") out[name] = value;
+  }
+  return out;
+}
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "host", "content-length"]);
 // The caller's own Anthropic credentials. A routed request authenticates as the provider, so these
 // are dropped rather than forwarded: the provider header replaces only the one it happens to share
@@ -1031,10 +1041,11 @@ export class Proxy {
       const type = cfg.providers[name]?.type;
       if (pathname === "/v1/messages/count_tokens" && (type === "openai-compatible" || type === "google")) return;
       const label = this.credentialLabel(name, using, credentials);
-      // A provider that names its keys keeps the label of the key that answered, as a snapshot: the
-      // dashboard shows it after the keys are renamed or removed. A single key has no name to keep.
+      // The label of the credential that answered is kept as a snapshot, so the dashboard shows it after
+      // the keys are renamed or removed. A lone unnamed key would read `#1` on every row, so it is not kept.
       const named = cfg.providers[name];
-      if (named && "credentials" in named && (named.credentials?.length ?? 0) > 0) record.credential = label;
+      const keyed = !!named && "credentials" in named && (named.credentials?.length ?? 0) > 0;
+      if (keyed || credentials.length > 1) record.credential = label;
       else delete record.credential;
       if (using.ownerId) setRecordAccount(using.ownerId, using.ownerId === "current" ? loginEmail : undefined);
       const first = this.pool.pick(name, credentials);
@@ -1600,7 +1611,7 @@ export class Proxy {
             if (ownSignIn) {
               target = { protocol: "https:", host: cfg.upstream, port: this.deps.upstreamPort ?? 443, agent: this.deps.upstreamAgent ?? this.agentFor(route.provider, "https:"), extraHeaders: {} };
               ownLogin = true;
-              setRecordAccount("current", await loginEmailWithin(() => this.claudeIdentity.identifyWith({ authorization: String(clientAuth) })));
+              setRecordAccount("current", await loginEmailWithin(() => this.claudeIdentity.identifyWith(loginHeaders(req.headers))));
               const routeEffort = effortOf(json);
               if (routeEffort) record.effort = routeEffort;
               tag = `CLAUDE ${route.tag} account=app (no usable pool account)`;
@@ -1720,7 +1731,7 @@ export class Proxy {
           // An un-routed native Messages turn goes out on the app's own sign-in, and its answer is the
           // only statement of that login's unified limits when the usage endpoint refuses (2026-11-05).
           ownLogin = isMessages && typeof req.headers.authorization === "string";
-          if (ownLogin) setRecordAccount("current", await loginEmailWithin(() => this.claudeIdentity.identifyWith({ authorization: String(req.headers.authorization) })));
+          if (ownLogin) setRecordAccount("current", await loginEmailWithin(() => this.claudeIdentity.identifyWith(loginHeaders(req.headers))));
           // Passthrough stays byte-exact unless another model's thinking would get the turn refused.
           if (json) {
             const removed = this.thinkingOrigins.dropKnownForeign(json, "anthropic");
