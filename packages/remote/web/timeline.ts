@@ -24,7 +24,9 @@ export function controlCommand(text: string): ControlCommand | null {
 }
 
 export type Item =
-  | { type: "user"; key: string; ver: string; text: string; images?: ImagePart[]; files?: SessionFile[]; at: number; queued?: "pending" | "sending"; /** the host refused it, in the host's own words: it will not go out by itself */ error?: string }
+  | { type: "user"; key: string; ver: string; text: string; images?: ImagePart[]; files?: SessionFile[]; at: number; queued?: "pending" | "sending" | "uploading" | "failed"; /** the host refused it, in the host's own words: it will not go out by itself */ error?: string;
+      /** a message the phone is still holding: its photos as they are on the phone, its upload's chunks so far, and the phone's id for it */
+      clientMsgId?: string; previews?: string[]; progress?: { sent: number; total: number } }
   | { type: "control"; key: string; ver: string; command: ControlCommand; state: "running" | "done" | "failed"; at: number }
   | { type: "assistant"; key: string; ver: string; text: Text; images?: ImagePart[]; files?: SessionFile[]; streaming: boolean; tools: ToolView[]; model: string; at: number }
   | { type: "thinking"; key: string; ver: string; text: Text; streaming: boolean; msg: string; at: number }
@@ -49,7 +51,9 @@ export interface SessionView {
 
 /** A message this phone is holding for the host. `error` is the host's reason for refusing it: the
  * words stay, and it is not sent again on its own until the person retries or takes them back. */
-export interface Outgoing { clientMsgId: string; text: string; at: number; state: "pending" | "sending"; error?: string }
+export interface Outgoing { clientMsgId: string; text: string; at: number; state: "pending" | "sending" | "uploading" | "failed"; error?: string;
+  /** photos as the phone draws them, and how many of the upload's chunks have gone (of `total`) */
+  previews?: string[]; sent?: number; total?: number }
 
 /**
  * Reduce a session's loaded events (ascending seq; gaps allowed, duplicates ignored) and the
@@ -214,7 +218,9 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
   }
   for (const o of outbox) {
     if (seenUser.has(o.clientMsgId)) continue;
-    put({ type: "user", key: `u${o.clientMsgId}`, ver: `${o.state}${o.error ? `:${o.error}` : ""}`, text: o.text, at: o.at, queued: o.state, ...(o.error ? { error: o.error } : {}) });
+    // The version carries the upload's progress too, so a row redraws as its chunks go.
+    put({ type: "user", key: `u${o.clientMsgId}`, ver: `${o.state}${o.sent ?? ""}/${o.total ?? ""}${o.error ? `:${o.error}` : ""}`, text: o.text, at: o.at, queued: o.state, clientMsgId: o.clientMsgId,
+      ...(o.error ? { error: o.error } : {}), ...(o.previews?.length ? { previews: o.previews } : {}), ...(o.sent !== undefined ? { progress: { sent: o.sent, total: o.total ?? 0 } } : {}) });
   }
   if (state !== "running" && state !== "starting") finishStream();
   const open = items.filter((i): i is Extract<Item, { type: "permission" }> => i.type === "permission" && i.decision === null);

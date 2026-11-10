@@ -323,6 +323,26 @@ for (const size of [4 * 1024 * 1024, ATTACHMENT_CAP - 2, ATTACHMENT_CAP - 1, ATT
   });
 }
 
+test("attachment chunks sent back to back are answered in order and rebuild the blob (the phone's upload window)", async t => {
+  const f = await memoryHost(t);
+  const data = Buffer.alloc(3 * 60_000 + 1_000, 91).toString("base64");
+  const reqIds: string[] = [];
+  for (let offset = 0; offset < data.length; offset += 60_000) {
+    const chunk = data.slice(offset, offset + 60_000);
+    const reqId = `pipe-${offset}`;
+    reqIds.push(reqId);
+    f.peer.receive({ t: "req", reqId, op: { op: "upload", session: f.id, uploadId: "pipelined", offset, data: chunk, done: offset + chunk.length === data.length } });
+  }
+  let last: Extract<HostMsg, { t: "res" }> | null = null;
+  for (const reqId of reqIds) {
+    const response = await f.peer.take("res");
+    assert.equal(response.reqId, reqId, "answers come back in the order they were sent");
+    assert.ok(response.ok, response.ok ? "" : response.error);
+    last = response;
+  }
+  assert.equal(f.sessions.blob(f.id, (last!.data as { blob: string }).blob), data);
+});
+
 test("attachment validation rejects malformed characters, lengths and padding without storing a blob", async t => {
   const f = await memoryHost(t);
   const malformed = ["", "A", "AA", "AAA", "AAAAA", "=AAA", "A=AA", "AA=A", "A===", "====", "AA==AAAA", "AAA=AAAA",
