@@ -279,7 +279,11 @@ export class HostServer {
     if (this.sessionsTimer) clearTimeout(this.sessionsTimer);
     this.sessionsTimer = null;
     // Events still held in a window go out before the sockets close. A phone that misses them replays by seq on reconnect.
-    for (const c of this.clients) for (const session of [...c.batches.keys()]) this.pumpNow(c, session);
+    // The host shuts the sessions (and their logs) down first, so a flush can find its log closed: that window is
+    // dropped here, never the shutdown — the events are on disk and replay on reconnect.
+    for (const c of this.clients) for (const session of [...c.batches.keys()]) {
+      try { this.pumpNow(c, session); } catch { /* log already closed; replayed by seq on reconnect */ }
+    }
     for (const c of this.clients) { c.attached.clear(); c.ws.terminate(); }
     this.syncWatches();
     return Promise.all([this.http, this.localHttp].filter((server): server is http.Server => server !== null)
@@ -582,6 +586,9 @@ export class HostServer {
           const id = await s.orderedSend(msg.session, msg.clientMsgId, msg.text, msg.attachments, msg.behavior);
           // A message the person sends after a Stop is them carrying on: the queue goes on after it.
           s.resumeQueue(msg.session);
+          // The message's own echo may sit in a window; it goes before the ack, so the phone never drops the
+          // optimistic bubble before the real one has arrived.
+          if (c.batches.has(id)) this.pumpNow(c, id);
           this.send(c, { t: "ack", clientMsgId: msg.clientMsgId, session: id });
           if (desktop && id === msg.session) this.attach(c, id, undefined, undefined);
         } catch (e) {
