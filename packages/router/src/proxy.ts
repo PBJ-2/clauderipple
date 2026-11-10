@@ -178,10 +178,16 @@ export function withClientBetas(credential: Record<string, string>, clientBeta: 
   return { ...credential, [name]: merged.join(",") };
 }
 
-/** The client's betas less the OAuth one, which belongs to a sign-in and not to an API key; none left is none sent. */
+/**
+ * The client's betas less the two that belong to a Claude Code sign-in and not to an API key; none
+ * left is none sent. `oauth-*` names the sign-in. `claude-code-*` marks the turn as Claude Code's, and
+ * a key paid from a subscription's monthly API credit answers it with `billing_error` 400, while the
+ * same request without that one flag passes (user report 2026-11-10: Fable and Haiku alike; other
+ * betas were fine). A key on ordinary API billing never needed it either.
+ */
 export function apiKeyBetas(clientBeta: string | string[] | undefined): string | undefined {
   if (clientBeta === undefined) return undefined;
-  const kept = ([] as string[]).concat(clientBeta).join(",").split(",").map((flag) => flag.trim()).filter((flag) => flag && !/^oauth-/.test(flag));
+  const kept = ([] as string[]).concat(clientBeta).join(",").split(",").map((flag) => flag.trim()).filter((flag) => flag && !/^(oauth|claude-code)-/.test(flag));
   return kept.length ? kept.join(",") : undefined;
 }
 

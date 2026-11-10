@@ -1648,7 +1648,9 @@ tight, and nothing at 100 or more.
   workers are always `<model>-<provider>` on a qualified id (`claude-api:claude-opus-5-5`),
   and the dashboard keeps a Claude API key out of the mapping and picker lists, where
   a bare id would run on the sign-in. The key goes as `x-api-key`; the caller's
-  `authorization` and the `oauth-*` beta are dropped. Asked for 2026-10-30: only
+  `authorization` and the `oauth-*` and `claude-code-*` betas are dropped (a key paid
+  from a subscription's monthly API credit answers `claude-code-20250219` with
+  `billing_error` 400; user report 2026-11-10). Asked for 2026-10-30: only
   whoever turns a key on uses it, and through API workers.
 - A native `anthropic` login remains OpenAI-ingress-only unless it explicitly
   sets `accountPool: true` with `auth: "claude-code"` (`isTargetProvider`). The
