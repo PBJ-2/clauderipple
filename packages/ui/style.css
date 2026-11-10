@@ -1246,7 +1246,16 @@ a.cell { color: inherit; text-decoration: none; }
   .toast { bottom: calc(84px + env(safe-area-inset-bottom)); }
 }
 
-/* Nine tabs on a 375pt phone leave 41px each: the longest labels ("프로바이더", "Providers") need a hair less. */
-@media (max-width: 400px) {
-  .nav-btn { font-size: 9.5px; letter-spacing: -0.025em; }
+/* Nine tabs do not fit a phone at a readable size: squeezed into 41px each, "프로바이더" and
+   "클라이언트" ran into one another. Under 560px each tab keeps its label on one line at its own
+   width and the bar scrolls sideways when they do not all fit; the right edge fades so a cut tab reads
+   as "more this way". The open page's tab is scrolled into view (app.js showView). */
+@media (max-width: 560px) {
+  .nav-list { overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 22px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 22px), transparent); }
+  .nav-list::-webkit-scrollbar { display: none; }
+  .nav-list::after { content: ""; flex: 0 0 18px; }
+  .nav-btn { flex: 1 0 auto; width: auto; min-width: 44px; padding: 4px 5px; font-size: 10px; letter-spacing: 0; }
+  .nav-btn span { display: block; overflow: visible; white-space: nowrap; }
+  .nav-btn .nav-long { display: none; }
+  .nav-btn .nav-short { display: block; }
 }

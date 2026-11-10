@@ -327,6 +327,12 @@ function showView(name) {
     button.classList.toggle("active", active);
     // The style showed the current page; a screen reader was told nothing (G-D10).
     if (active) button.setAttribute("aria-current", "page"); else button.removeAttribute("aria-current");
+    // On a phone the tab bar scrolls sideways (style.css, under 560px): the open page's tab is brought into it.
+    const list = button.parentElement;
+    if (active && list && list.scrollWidth > list.clientWidth) {
+      const offset = button.getBoundingClientRect().left - list.getBoundingClientRect().left;
+      list.scrollLeft += offset - (list.clientWidth - button.offsetWidth) / 2;
+    }
   }
   for (const view of $all(".view")) view.classList.toggle("active", view.id === `view-${name}`);
   if (location.hash !== `#${name}`) history.replaceState(null, "", `#${name}`);
