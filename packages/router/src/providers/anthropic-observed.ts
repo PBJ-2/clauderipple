@@ -48,6 +48,8 @@ export class ObservedClaudeCodeAuth {
    */
   private rejected: string | null = null;
   private readonly file: string | null;
+  /** Last successfully saved freshness, independent of the timestamp moved by every use. */
+  private persistedAt = Number.NEGATIVE_INFINITY;
   private cliVersionSeen: string | null = null;
   private cliVersionAt = 0;
 
@@ -58,6 +60,7 @@ export class ObservedClaudeCodeAuth {
         const raw = JSON.parse(fs.readFileSync(this.file, "utf8")) as ObservedClaudeCodeAuthSnapshot;
         if (raw && typeof raw.authorization === "string" && raw.headers && typeof raw.observedAt === "number") {
           this.snapshot = { authorization: raw.authorization, headers: Object.freeze({ ...raw.headers }), observedAt: raw.observedAt };
+          this.persistedAt = raw.observedAt;
           this.recordCliVersion(raw.headers, raw.observedAt);
         }
       } catch {
@@ -85,6 +88,7 @@ export class ObservedClaudeCodeAuth {
       const tmp = `${this.file}.tmp-${process.pid}`;
       fs.writeFileSync(tmp, JSON.stringify(this.snapshot), { mode: 0o600 });
       fs.renameSync(tmp, this.file);
+      this.persistedAt = this.snapshot.observedAt;
     } catch {
       /* best effort */
     }
@@ -107,7 +111,7 @@ export class ObservedClaudeCodeAuth {
     // A 401 already proved this token dead (see forget); the client may keep sending it until it
     // signs in again, which must not make the accounts list flap in and out per request.
     if (this.rejected !== null && bearerToken(authorization) === this.rejected) return;
-    const changed = !this.snapshot || this.snapshot.authorization !== authorization || observedAt - this.snapshot.observedAt > 5 * 60_000;
+    const changed = !this.snapshot || this.snapshot.authorization !== authorization || observedAt - this.persistedAt > 5 * 60_000;
     this.snapshot = {
       authorization,
       headers: Object.freeze({ ...headers }),
@@ -129,7 +133,7 @@ export class ObservedClaudeCodeAuth {
     const snapshot = this.snapshot;
     const token = bearerToken(authorization);
     if (!snapshot || !token || bearerToken(snapshot.authorization) !== token || at < snapshot.observedAt) return;
-    const persistDue = at - snapshot.observedAt > 5 * 60_000;
+    const persistDue = at - this.persistedAt > 5 * 60_000;
     this.snapshot = { ...snapshot, observedAt: at };
     if (persistDue) this.persist();
   }

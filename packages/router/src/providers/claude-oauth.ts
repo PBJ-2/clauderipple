@@ -179,16 +179,14 @@ export class ClaudeOAuthSession {
     this.grant = new Promise<ClaudeOAuthGrant>((resolve, reject) => {
       this.settle = { resolve, reject };
     });
-    this.result = this.grant.then(
-      (grant) => {
-        const account = saveClaudeOAuthAccount(options.home, grant);
-        this.stateSnapshot = { ...this.stateSnapshot, running: false, finishedAt: new Date().toISOString(), ok: true, account };
-      },
-      (error: Error) => {
-        this.stateSnapshot = { ...this.stateSnapshot, running: false, finishedAt: new Date().toISOString(), ok: false, error: error.message };
-        throw error;
-      },
-    );
+    this.result = this.grant.then((grant) => {
+      const account = saveClaudeOAuthAccount(options.home, grant);
+      this.stateSnapshot = { ...this.stateSnapshot, running: false, finishedAt: new Date().toISOString(), ok: true, account };
+    }).catch((error: Error) => {
+      // Saving can fail after a successful exchange; that failure must finish the polled state too.
+      this.stateSnapshot = { ...this.stateSnapshot, running: false, finishedAt: new Date().toISOString(), ok: false, error: error.message };
+      throw error;
+    });
     // Nobody may be awaiting `result` (the GUI polls state instead); do not surface it as unhandled.
     this.result.catch(() => {});
   }

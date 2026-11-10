@@ -212,6 +212,26 @@ test("malformed successful token exchanges reject and finish the attempt instead
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
 
+test("a successful exchange whose account save fails finishes the attempt as failed", async t => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-claude-oauth-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  // A corrupt disposable store deterministically refuses the write without touching any real login.
+  fs.writeFileSync(claudeAccountsPath(home), "not JSON");
+  const session = new ClaudeOAuthSession({ home, manual: true, fetch: tokenEndpoint().fetchImpl });
+  await session.start();
+  await session.submitCode("valid-code");
+  await assert.rejects(session.result, /account store is unreadable/);
+  assert.equal(session.snapshot.running, false);
+  assert.equal(session.snapshot.ok, false);
+  assert.ok(session.snapshot.finishedAt);
+  assert.match(session.snapshot.error!, /account store is unreadable/);
+  assert.equal(session.snapshot.account, null);
+  assert.doesNotMatch(JSON.stringify(session.snapshot), /at-1|rt-1/);
+  session.cancel();
+  assert.equal(session.snapshot.running, false, "the already settled grant cannot be cancelled again");
+  assert.equal(fs.readFileSync(claudeAccountsPath(home), "utf8"), "not JSON");
+});
+
 test("token endpoint errors cannot echo authorization or refresh secrets", async () => {
   const refreshSecret = "refresh-secret-that-must-not-escape";
   const endpoint = tokenEndpoint({

@@ -56,6 +56,21 @@ test("usage is cached per provider and a failed lookup keeps the last good windo
   assert.equal(seen.length, 2);
 });
 
+test("a replaced OpenCode key starts a fresh quota lookup even inside the TTL", async () => {
+  let calls = 0;
+  const usage = new OpenCodeUsage({
+    fetch: async (_url, init) => {
+      calls++;
+      const auth = (init?.headers as Record<string, string>).authorization;
+      return auth === "Bearer old-key" ? new Response(JSON.stringify(measured)) : new Response("refused", { status: 401 });
+    },
+    warn: () => {},
+  });
+  assert.equal((await usage.windows("go", "https://opencode.ai/zen/go/v1", { authorization: "Bearer old-key" })).length, 3);
+  assert.deepEqual(await usage.windows("go", "https://opencode.ai/zen/go/v1", { authorization: "Bearer new-key" }), []);
+  assert.equal(calls, 2);
+});
+
 test("a cached reading keeps the time it was taken, and a failed refresh keeps that time", async () => {
   let fail = false;
   const fetchImpl = (async () => (fail ? new Response("nope", { status: 500 }) : new Response(JSON.stringify(measured), { status: 200 }))) as unknown as typeof fetch;
