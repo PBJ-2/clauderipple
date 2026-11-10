@@ -68,12 +68,12 @@ let adapter = new ChatGptAdapter("chatgpt", config.providers.chatgpt as never, h
 const ingress = new OpenAiIngress({ config: () => config, log, requests, home, claudeCodeCredentialReaders: noClaudeCodeCredentialReaders, chatgpt: () => adapter });
 const port = await ingress.listen();
 
-function codexCall(pathname: string, body: Record<string, unknown> | undefined, session = "sess-1", extra: Record<string, string> = {}): Promise<{ status: number; text: string; headers: http.IncomingHttpHeaders }> {
+function codexCall(pathname: string, body: Record<string, unknown> | undefined, session = "sess-1", extra: Record<string, string> = {}, at = port): Promise<{ status: number; text: string; headers: http.IncomingHttpHeaders }> {
   const data = body ? JSON.stringify(body) : undefined;
   return new Promise((resolve, reject) => {
     const req = http.request({
       host: "127.0.0.1",
-      port,
+      port: at,
       path: pathname,
       method: data ? "POST" : "GET",
       headers: {
@@ -159,6 +159,42 @@ test("every pool account out: Codex's own login answers instead of a failure", a
   assert.equal(hits.at(-1)!.headers["chatgpt-account-id"], "ws-caller");
   assert.equal(requests.list(1)[0]!.account, undefined, "the caller's workspace id is not a local owner id");
   behaviour.clear();
+});
+
+/** Writes the Codex CLI's login as `~/.codex/auth.json` holds it, and returns its access token. */
+function writeCodexLogin(email: string, accountId: string): string {
+  const jwt = (claims: Record<string, unknown>): string => `eyJhbGciOiJub25lIn0.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.sig`;
+  const accessToken = jwt({ exp: Math.floor(Date.now() / 1000) + 3600, "https://api.openai.com/auth": { chatgpt_account_id: accountId } });
+  fs.writeFileSync(path.join(process.env.CODEX_HOME!, "auth.json"), JSON.stringify({ tokens: { access_token: accessToken, id_token: jwt({ email }), account_id: accountId } }));
+  return accessToken;
+}
+
+test("a Codex row keeps the name of the borrowed login that answered, after the Codex login is switched", async () => {
+  const firstToken = writeCodexLogin("first@example.test", "ws-codex-first");
+  // A provider on `auto` with no stored account of its own: the borrowed Codex login is the one that answers.
+  const borrowedHome = fs.mkdtempSync(path.join(os.tmpdir(), "cr-ingress-codex-login-"));
+  const borrowing = new ChatGptAdapter("chatgpt", { ...(config.providers.chatgpt as object), auth: "auto" } as never, borrowedHome, log, new CredentialPool());
+  const borrowingIngress = new OpenAiIngress({ config: () => config, log, requests, home: borrowedHome, claudeCodeCredentialReaders: noClaudeCodeCredentialReaders, chatgpt: () => borrowing });
+  const borrowingPort = await borrowingIngress.listen();
+  try {
+    const first = await codexCall("/v1/responses", turn, "sess-borrow-1", {}, borrowingPort);
+    assert.equal(first.status, 200);
+    assert.equal(hits.at(-1)!.headers.authorization, `Bearer ${firstToken}`, "the borrowed login answered");
+    const firstRow = requests.list(1)[0]!;
+    assert.equal(firstRow.account, "codex");
+    assert.equal(firstRow.borrowedLabel, "first@example.test");
+    assert.doesNotMatch(JSON.stringify(firstRow), /eyJ/, "no token in the row");
+
+    // The Codex CLI signs in as someone else: the owner id stays `codex`, the row keeps the name it answered as.
+    writeCodexLogin("second@example.test", "ws-codex-second");
+    const second = await codexCall("/v1/responses", turn, "sess-borrow-2", {}, borrowingPort);
+    assert.equal(second.status, 200);
+    assert.equal(requests.list(1)[0]!.borrowedLabel, "second@example.test");
+    assert.equal(requests.list(100).find((record) => record.id === firstRow.id)?.borrowedLabel, "first@example.test");
+  } finally {
+    await borrowingIngress.drain(1_000);
+    fs.rmSync(borrowedHome, { recursive: true, force: true });
+  }
 });
 
 test("remote compaction and Codex's catalogue refresh take the same route", async () => {

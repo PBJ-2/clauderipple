@@ -431,6 +431,7 @@ export class Proxy {
         status: 200,
         ...(image.usage ? { usage: image.usage } : {}),
         ...(image.account ? { account: image.account } : {}),
+        ...(image.borrowedLabel ? { borrowedLabel: image.borrowedLabel } : {}),
         note: `${image.size ?? "?"} ${image.quality ?? "?"} ${image.format}, ${req.images?.length ?? 0} reference(s)`,
         ...(meta?.session ? { session: meta.session } : {}),
       };
@@ -439,6 +440,7 @@ export class Proxy {
     } catch (e) {
       // Set by the adapter once an account was tried, so a failed image still names it.
       const failedOn = (e as { account?: unknown } | null)?.account;
+      const failedLabel = (e as { borrowedLabel?: unknown } | null)?.borrowedLabel;
       const record: RequestRecord = {
         kind: "image",
         source: model,
@@ -452,6 +454,7 @@ export class Proxy {
         status: signal?.aborted ? "aborted" : 502,
         note: (e as Error).message.slice(0, 300),
         ...(typeof failedOn === "string" ? { account: failedOn } : {}),
+        ...(typeof failedLabel === "string" ? { borrowedLabel: failedLabel } : {}),
         ...(meta?.session ? { session: meta.session } : {}),
       };
       this.deps.requests.add(record);
@@ -909,7 +912,7 @@ export class Proxy {
     let unwrittenSeen = false;
     // `failed` counts requests that did not get a proper response (vanished, upstream error,
     // provider error). A note alone is not a failure: adapters attach usage notes on success.
-    const finish = (status: string, bytes: number, note?: string, failed: boolean = note !== undefined, extra?: { usage?: RequestUsage; stopReason?: string; resent?: boolean; account?: string; messageId?: string; requestedTier?: string; servedTier?: string; upstreamCalled?: false | undefined; refusal?: RequestRecord["refusal"] }): void => {
+    const finish = (status: string, bytes: number, note?: string, failed: boolean = note !== undefined, extra?: { usage?: RequestUsage; stopReason?: string; resent?: boolean; account?: string; borrowedLabel?: string; messageId?: string; requestedTier?: string; servedTier?: string; upstreamCalled?: false | undefined; refusal?: RequestRecord["refusal"] }): void => {
       if (finished) return;
       finished = true;
       // A translated adapter may have sent 200 before the client left. That is not a
@@ -947,6 +950,7 @@ export class Proxy {
         if (note) completed.note = note;
         if (extra?.resent && !completed.ok) completed.resent = true;
         if (extra?.account !== undefined) completed.account = extra.account;
+        if (extra?.borrowedLabel !== undefined) completed.borrowedLabel = extra.borrowedLabel;
         if (extra?.messageId !== undefined) completed.messageId = extra.messageId;
         if (extra?.requestedTier !== undefined) completed.requestedTier = extra.requestedTier;
         if (extra?.servedTier !== undefined) completed.servedTier = extra.servedTier;
@@ -1044,6 +1048,7 @@ export class Proxy {
     const setRecordAccount = (ownerId: string): void => {
       record.account = ownerId;
       delete record.accountEmail;
+      delete record.borrowedLabel;
     };
     const recordCredential = (name: string, using: Credential, credentials: readonly Credential[], retry = false, pinned = false): void => {
       // count_tokens is answered locally by the translated adapters: no key was actually sent.
@@ -1355,6 +1360,7 @@ export class Proxy {
           delete record.credential;
           delete record.account;
           delete record.accountEmail;
+          delete record.borrowedLabel;
           // The email watch belongs to the attempt that answers: a new route starts without the last one's.
           loginWatch = undefined;
           loginWatchFor = undefined;
@@ -2236,7 +2242,7 @@ export class Proxy {
     json: Record<string, unknown>,
     query: WebSearchQuery,
     settings: NonNullable<Config["webSearch"]>,
-    record: { source?: string; target?: string; provider?: string; account?: string; purpose?: RequestRecord["purpose"] },
+    record: { source?: string; target?: string; provider?: string; account?: string; borrowedLabel?: string; purpose?: RequestRecord["purpose"] },
     finish: (status: string, bytes: number, note?: string, failed?: boolean, extra?: { usage?: RequestUsage }) => void,
     markAttempted: () => void,
   ): Promise<boolean> {
@@ -2294,6 +2300,7 @@ export class Proxy {
       blocks = webSearchBlocks(query, outcome).blocks;
       usage = outcome.usage;
       if (outcome.account) record.account = outcome.account;
+      if (outcome.borrowedLabel !== undefined) record.borrowedLabel = outcome.borrowedLabel;
     } catch (e) {
       this.deps.log.warn(`web search via ${settings.provider}: ${(e as Error).message}`);
       return false;

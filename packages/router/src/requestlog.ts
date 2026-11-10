@@ -37,6 +37,12 @@ export type RequestRecord = {
    * because the login can be switched later; a row that has none names no person.
    */
   accountEmail?: string;
+  /**
+   * The name of the borrowed Codex login (owner `codex`) as it was when it answered. That owner id is
+   * fixed while the login behind it changes with the Codex CLI's sign-in, so the name is kept here like
+   * `accountEmail`; a `codex` row without it names nobody.
+   */
+  borrowedLabel?: string;
   effort?: string;
   upstreamRequestId?: string;
   messageId?: string;

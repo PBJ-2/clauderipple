@@ -68,7 +68,7 @@ type IngressDeps = {
 };
 
 /** What the request has been answered on so far, so a row written by any exit names it. */
-type Served = { account?: string; watch?: LoginEmailWatch | undefined };
+type Served = { account?: string; borrowedLabel?: string | undefined; watch?: LoginEmailWatch | undefined };
 
 /**
  * The request body as JSON text. Codex signed in to ChatGPT compresses what it sends with zstd
@@ -109,7 +109,7 @@ export type IngressStats = {
   lastMessageEndedAt?: number;
 };
 
-type Outcome = { status: number; bytes: number; account?: string; usage?: RequestUsage; stopReason?: string; note?: string };
+type Outcome = { status: number; bytes: number; account?: string; borrowedLabel?: string; usage?: RequestUsage; stopReason?: string; note?: string };
 
 function openAiError(message: string, type = "invalid_request_error", code: string | null = null): Json {
   return { error: { message, type, param: null, code } };
@@ -301,6 +301,9 @@ export class OpenAiIngress {
         // An exit that carries no account (a client that left mid-stream, say) still names the one that answered.
         const account = extra.account ?? served.account;
         if (account) entry.account = account;
+        // The borrowed Codex login's name, as it was when it answered; only for the account that answered.
+        const borrowedLabel = extra.borrowedLabel ?? (account === served.account ? served.borrowedLabel : undefined);
+        if (borrowedLabel) entry.borrowedLabel = borrowedLabel;
         if (extra.usage) entry.usage = extra.usage;
         if (extra.stopReason) entry.stopReason = extra.stopReason;
         if (extra.note) entry.note = extra.note;
@@ -312,7 +315,7 @@ export class OpenAiIngress {
     let terminal: Outcome | null = null;
     res.once("close", () => {
       if (completed || res.writableEnded) return;
-      if (terminal) finish(terminal.status, terminal.bytes, { ...(terminal.account ? { account: terminal.account } : {}), ...(terminal.usage ? { usage: terminal.usage } : {}), ...(terminal.stopReason ? { stopReason: terminal.stopReason } : {}), note: `${terminal.note ?? ""}; client closed after completion`.replace(/^; /, "") });
+      if (terminal) finish(terminal.status, terminal.bytes, { ...(terminal.account ? { account: terminal.account } : {}), ...(terminal.borrowedLabel ? { borrowedLabel: terminal.borrowedLabel } : {}), ...(terminal.usage ? { usage: terminal.usage } : {}), ...(terminal.stopReason ? { stopReason: terminal.stopReason } : {}), note: `${terminal.note ?? ""}; client closed after completion`.replace(/^; /, "") });
       else finish(499, 0, { note: "client closed" });
     });
 
@@ -388,10 +391,10 @@ export class OpenAiIngress {
         record = { kind: "messages", source: requested, target: explicit?.model ?? requested, provider: adapter.name, stream: body.stream === true };
         const outcome = await adapter.passthrough(req, res, path.slice("/v1".length), payload, codexConversation(req, body), {
           bodyEncoded: !renamed,
-          onAccount: (ownerId) => { served.account = ownerId; },
-          onCompleted: (done) => { terminal = { status: done.status, bytes: done.bytes, ...(done.account ? { account: done.account } : {}), ...(done.usage ? { usage: done.usage } : {}), ...(done.note ? { note: done.note } : {}) }; },
+          onAccount: (ownerId, borrowedLabel) => { served.account = ownerId; served.borrowedLabel = borrowedLabel; },
+          onCompleted: (done) => { terminal = { status: done.status, bytes: done.bytes, ...(done.account ? { account: done.account } : {}), ...(done.borrowedLabel ? { borrowedLabel: done.borrowedLabel } : {}), ...(done.usage ? { usage: done.usage } : {}), ...(done.note ? { note: done.note } : {}) }; },
         });
-        finish(outcome.status, outcome.bytes, { ...(outcome.account ? { account: outcome.account } : {}), ...(outcome.usage ? { usage: outcome.usage } : {}), ...(outcome.note ? { note: outcome.note } : {}) });
+        finish(outcome.status, outcome.bytes, { ...(outcome.account ? { account: outcome.account } : {}), ...(outcome.borrowedLabel ? { borrowedLabel: outcome.borrowedLabel } : {}), ...(outcome.usage ? { usage: outcome.usage } : {}), ...(outcome.note ? { note: outcome.note } : {}) });
         return;
       }
       if (path === "/v1/responses/compact") {

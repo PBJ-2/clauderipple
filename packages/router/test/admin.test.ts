@@ -2002,6 +2002,7 @@ test("GET /api/requests resolves account names at read time without changing the
     requests.add({ ...old, id: "current-again", account: "current" });
     requests.add({ ...old, id: "snapshot", provider: "claude", account: "current", accountEmail: "was@example.test" });
     requests.add({ ...old, id: "codex-only", provider: "codex-login", account: "codex" });
+    requests.add({ ...old, id: "codex-snapshot", provider: "borrowed-gpt", account: "codex", borrowedLabel: "earlier@example.test" });
     for (const [provider, account] of [["claude", claude.id], ["claude", "current"], ["gpt", gpt.id], ["google", gemini.id], ["gpt", removed.id]] as const) {
       requests.add({ ...old, id: account, provider, account });
     }
@@ -2033,8 +2034,11 @@ test("GET /api/requests resolves account names at read time without changing the
       assert.equal(label("snapshot"), "was@example.test", "the email that answered is the one kept");
       assert.equal(label(gpt.id), "Work ChatGPT");
       assert.equal(label(gemini.id), "Runtime Google", "the same live summary as the accounts tab");
-      assert.equal(label("borrowed"), "codex@example.test", "a borrowed login is not in the stored-account file");
-      assert.equal(label("codex-only"), "codex@example.test", "a row whose provider is not configured still gets its account's name");
+      // A borrowed Codex row is named by the login it answered as (`borrowedLabel`), never by today's login
+      // (codex@example.test here). A row written before that was kept shows only the owner id.
+      assert.equal(label("codex-snapshot"), "earlier@example.test", "the login that answered keeps its name after a switch");
+      assert.equal(label("borrowed"), "codex", "a borrowed row without a snapshot names no person");
+      assert.equal(label("codex-only"), "codex", "a borrowed row without a snapshot names no person, whatever the provider");
       assert.equal(label(removed.id), removed.id.slice(0, 8));
       assert.deepEqual(records.find((row) => row.id === "old"), old, "an old record gains no fields");
       chatgpt.updateChatGptAccount(home, gpt.id, { label: "Renamed ChatGPT" });
@@ -2048,18 +2052,19 @@ test("GET /api/requests resolves account names at read time without changing the
   });
 });
 
-test("GET /api/requests names a borrowed Codex login's rows when no ChatGPT provider is configured", async () => {
+test("GET /api/requests names a borrowed Codex row by the login it answered as, and never by a login later signed in", async () => {
   await withAdmin(makeCfg({ providers: { claude: { type: "anthropic", auth: "claude-code", accountPool: true } } }), async ({ home }) => {
     const requests = new RequestLog(path.join(home, "logs", "requests.jsonl"));
     const old = { id: "codex-row", at: new Date().toISOString(), ms: 100, status: 200, ok: true, kind: "messages" as const, source: "gpt", target: "gpt", provider: "codex-login", stream: true, account: "codex" };
-    requests.add(old);
+    requests.add({ ...old, borrowedLabel: "answered@example.test" });
+    requests.add({ ...old, id: "codex-before-snapshot" });
+    // Nothing here reads today's Codex login: the snapshot is the only name a Codex row can have.
     const extra = await startAdmin({ config: () => makeCfg({ providers: { claude: { type: "anthropic", auth: "claude-code", accountPool: true } } }), configFile: path.join(home, "extra-config.json"), log: new Logger(null, 1_000_000, 1, false), stats: () => ({ inFlight: 0, messagesInFlight: 0, started: 0, completed: 0, failed: 0 }), health: () => 0, version: "test", requests,
-      chatgpt: () => ({ quota: {}, auth: {}, accounts: () => ({}), borrowedAccounts: () => [
-        { id: "codex", label: "codex@example.test", email: "codex@example.test", source: "codex", expiresAt: Date.now() + 3_600_000, needsReauth: false, paused: false, preferred: false, state: "ready", inUse: true, active: true, quota: null },
-      ] }) });
+      chatgpt: () => ({ quota: {}, auth: {}, accounts: () => ({}) }) });
     try {
       const response = await (await fetch(`${base()}:${extra.port}/api/requests`)).json() as { requests: { id: string; accountLabel?: string }[] };
-      assert.equal(response.requests.find((row) => row.id === "codex-row")?.accountLabel, "codex@example.test");
+      assert.equal(response.requests.find((row) => row.id === "codex-row")?.accountLabel, "answered@example.test");
+      assert.equal(response.requests.find((row) => row.id === "codex-before-snapshot")?.accountLabel, "codex", "only the owner id, never a person");
     } finally { extra.close(); }
   });
 });

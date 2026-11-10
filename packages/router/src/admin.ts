@@ -74,7 +74,7 @@ import { ClaudeOAuthSession, type ClaudeOAuthState } from "./providers/claude-oa
 import { readClaudeAuthFile } from "./providers/anthropic-token-file.ts";
 import { isCurrentClaudeAccountPaused, listClaudeAccounts, listClaudeAccountsWithSubject, removeClaudeAccount, updateClaudeAccount, setCurrentClaudeAccountPaused, setPreferredClaudeAccount } from "./providers/anthropic-accounts.ts";
 import { storedAccountsFor } from "./pinned-accounts.ts";
-import { readChatGptAccounts, removeChatGptAccount, summarize as summarizeChatGptAccount, updateChatGptAccount } from "./providers/chatgpt/accounts.ts";
+import { CODEX_LOGIN_ID, readChatGptAccounts, removeChatGptAccount, summarize as summarizeChatGptAccount, updateChatGptAccount } from "./providers/chatgpt/accounts.ts";
 import { exhaustedForMs, IMAGE_ASPECTS, IMAGE_BACKGROUNDS, IMAGE_FORMATS, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
 import type { GoogleAccountStatus } from "./providers/google/index.ts";
 import { googleWindowsFromGroups, type QuotaGroup } from "./providers/google/usage.ts";
@@ -154,11 +154,6 @@ export type AdminDeps = {
     models?: (name: string) => Promise<ProviderModel[] | null>;
     /** Every chatgpt provider's accounts with rotation state and quota. Absent in tests. */
     accounts?: () => Record<string, ChatGptAccountStatus[]>;
-    /**
-     * The Codex login ClaudeRipple borrows when no chatgpt provider is configured (`codex-login`). It
-     * is not a provider, so the accounts tab does not list it; the request log names its rows with it.
-     */
-    borrowedAccounts?: () => ChatGptAccountStatus[];
     /** Put one resting account back into rotation now. Absent in tests. */
     clearCooldown?: (accountId: string) => void;
   };
@@ -263,10 +258,11 @@ function previewAccounts<T extends { id: string; paused: boolean; preferred: boo
 
 /**
  * Account names are read alongside the log, never written back into a record. A stored account is
- * named by its owner id as it is now, so a rename shows on old rows. The current login is named only
- * by the email snapshotted when it answered (`accountEmail`): today's login is another person after a
- * switch, so a row without a snapshot names nobody. A borrowed login is found under any provider that
- * lists it, so a row whose provider is not configured still gets the name its account has.
+ * named by its owner id as it is now, so a rename shows on old rows. Two owners name a login that can
+ * be switched, and so are named only by what they said when they answered: the current login by the
+ * email snapshotted into `accountEmail`, the borrowed Codex login (`codex`) by the name snapshotted
+ * into `borrowedLabel`. Today's login is another person after a switch, so a row without a snapshot
+ * names nobody and the Codex login is never looked up by today's sign-in.
  */
 function requestAccountNames(deps: AdminDeps): (record: RequestRecord) => string | undefined {
   const cfg = deps.config();
@@ -278,6 +274,7 @@ function requestAccountNames(deps: AdminDeps): (record: RequestRecord) => string
   const byProvider = new Map<string, string>();
   const byOwner = new Map<string, string>();
   const put = (provider: string | undefined, account: { id: string; label?: string; email?: string }): void => {
+    if (account.id === CODEX_LOGIN_ID) return;
     const label = account.label || account.email;
     if (!label) return;
     if (provider) byProvider.set(`${provider}\0${account.id}`, label);
@@ -290,10 +287,10 @@ function requestAccountNames(deps: AdminDeps): (record: RequestRecord) => string
     for (const account of accounts) put(name, account);
   }
   for (const accounts of [...Object.values(chatgpt), ...Object.values(google)]) for (const account of accounts) put(undefined, account);
-  for (const account of deps.chatgpt?.().borrowedAccounts?.() ?? []) put(undefined, account);
   for (const account of [...storedChatgpt, ...storedGoogle, ...claude]) put(undefined, account);
   return (record) => {
     if (!record.account) return undefined;
+    if (record.account === CODEX_LOGIN_ID) return record.borrowedLabel;
     if (record.account === "current") return record.accountEmail;
     return byProvider.get(`${record.provider}\0${record.account}`) ?? byOwner.get(record.account);
   };

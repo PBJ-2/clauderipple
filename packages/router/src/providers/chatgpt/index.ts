@@ -6,7 +6,7 @@ import http from "node:http";
 import type { ChatGptProvider, ProviderModel } from "../../config.ts";
 import type { Logger } from "../../log.ts";
 import { CredentialPool, pinnedCredential, retryAfterMs } from "../../pool.ts";
-import { ChatGptAccountPool, type ChatGptAccountSummary, type ChatGptCredential, type FetchLike } from "./accounts.ts";
+import { CODEX_LOGIN_ID, ChatGptAccountPool, type ChatGptAccountSummary, type ChatGptCredential, type FetchLike } from "./accounts.ts";
 import { SseParser } from "./sse.ts";
 import { fetchWithRetry } from "../retry.ts";
 import { StartInputs } from "../start-input.ts";
@@ -62,9 +62,18 @@ export type ImageRequest = {
   images?: { mediaType: string; data: string }[];
 };
 
-export type ImageResult = { data: Buffer; format: string; account?: string; size?: string; quality?: string; revisedPrompt?: string; usage?: RequestUsage };
+export type ImageResult = { data: Buffer; format: string; account?: string; borrowedLabel?: string; size?: string; quality?: string; revisedPrompt?: string; usage?: RequestUsage };
 
-export type ChatGptOutcome ={ status: number; bytes: number; account?: string; note?: string; usage?: RequestUsage; stopReason?: string; messageId?: string; requestedTier?: string; servedTier?: string; upstreamCalled?: false; refusal?: "no-account"; exhaustion?: ProviderExhaustion | undefined };
+export type ChatGptOutcome ={ status: number; bytes: number; account?: string; borrowedLabel?: string; note?: string; usage?: RequestUsage; stopReason?: string; messageId?: string; requestedTier?: string; servedTier?: string; upstreamCalled?: false; refusal?: "no-account"; exhaustion?: ProviderExhaustion | undefined };
+
+/**
+ * The name a row keeps for the borrowed Codex login when it is the account that answered. Its owner id is
+ * always `codex`, but the login behind that id changes with the Codex CLI's sign-in, so the name is taken
+ * from the credential that answered and written into the row (RequestRecord.borrowedLabel).
+ */
+function borrowedLabelOf(credential: { ownerId: string; label?: string }): { borrowedLabel: string } | undefined {
+  return credential.ownerId === CODEX_LOGIN_ID && credential.label ? { borrowedLabel: credential.label } : undefined;
+}
 
 function anthropicError(status: number, type: string, message: string): { status: number; body: string } {
   return { status, body: JSON.stringify({ type: "error", error: { type, message } }) };
@@ -255,7 +264,7 @@ export function exhaustedForMs(snapshot: Record<string, unknown> | null | undefi
 export type SendResult =
   | { kind: "ok"; upstream: Response; credential: ChatGptCredential }
   /** The last account's refusal (or the first one that was the request's fault), body redacted. */
-  | { kind: "refused"; status: number; text: string; headers: Headers; account: string; retryAfterSeconds?: number }
+  | { kind: "refused"; status: number; text: string; headers: Headers; account: string; borrowedLabel?: string; retryAfterSeconds?: number }
   | { kind: "all-resting"; backMs?: number }
   | { kind: "no-account" }
   | { kind: "unreachable"; error: Error }
@@ -495,6 +504,7 @@ export class ChatGptAdapter {
     return {
       hits: selected,
       account: tokens.ownerId,
+      ...(borrowedLabelOf(tokens) ?? {}),
       ...(prose ? { text: prose } : {}),
       ...(usage ? { usage } : {}),
     };
@@ -511,7 +521,7 @@ export class ChatGptAdapter {
     if (tokens instanceof Error) throw tokens;
     return this.imageOn(tokens, model, req, signal).catch((error: unknown) => {
       // The image was sent on this account, so a failure still names it in the request log.
-      if (error instanceof Error) Object.assign(error, { account: tokens.ownerId });
+      if (error instanceof Error) Object.assign(error, { account: tokens.ownerId, ...(borrowedLabelOf(tokens) ?? {}) });
       throw error;
     });
   }
@@ -608,6 +618,7 @@ export class ChatGptAdapter {
     return {
       data: Buffer.from(image.result as string, "base64"),
       account: tokens.ownerId,
+      ...(borrowedLabelOf(tokens) ?? {}),
       format: str(image.output_format) ?? req.format ?? "png",
       ...(str(image.size) ? { size: str(image.size)! } : {}),
       ...(str(image.quality) ? { quality: str(image.quality)! } : {}),
@@ -889,7 +900,7 @@ export class ChatGptAdapter {
       // A refusal here is a rest, never a pool quarantine: "sign in again" is the store's to say
       // (needsReauth, above), and a quarantine would outlive the new token a sign-in brings.
       const verdict = this.pool.penalise(this.name, credential.id, credentialRefused ? 403 : status, waitMs, text);
-      last = { kind: "refused", status, text: safeText, headers: upstream.headers, account: credential.ownerId, ...(status === 429 && waitMs ? { retryAfterSeconds: Math.ceil(waitMs / 1000) } : {}) };
+      last = { kind: "refused", status, text: safeText, headers: upstream.headers, account: credential.ownerId, ...(borrowedLabelOf(credential) ?? {}), ...(status === 429 && waitMs ? { retryAfterSeconds: Math.ceil(waitMs / 1000) } : {}) };
       if (!verdict.retryable) return last;
       tried.add(credential.ownerId);
     }
@@ -915,9 +926,10 @@ export class ChatGptAdapter {
     conversation: string | undefined,
     /**
      * `onCompleted` fires at `response.completed`: Codex hangs up right after it, and that is a finished turn.
-     * `onAccount` fires as soon as an account answers, so a turn the client drops mid-stream still names it.
+     * `onAccount` fires as soon as an account answers, so a turn the client drops mid-stream still names it,
+     * and with the borrowed Codex login's name when that is the account (see borrowedLabelOf).
      */
-    opts: { bodyEncoded?: boolean; onCompleted?: (outcome: ChatGptOutcome) => void; onAccount?: (ownerId: string) => void } = {},
+    opts: { bodyEncoded?: boolean; onCompleted?: (outcome: ChatGptOutcome) => void; onAccount?: (ownerId: string, borrowedLabel?: string) => void } = {},
   ): Promise<ChatGptOutcome> {
     const ac = new AbortController();
     const onClose = (): void => ac.abort();
@@ -944,10 +956,12 @@ export class ChatGptAdapter {
 
     let upstream: Response;
     let owner: string | null = null;
+    let ownerBorrowed: { borrowedLabel: string } | undefined;
     if (sent.kind === "ok") {
       upstream = sent.upstream;
       owner = sent.credential.ownerId;
-      opts.onAccount?.(owner);
+      ownerBorrowed = borrowedLabelOf(sent.credential);
+      opts.onAccount?.(owner, ownerBorrowed?.borrowedLabel);
     } else if (sent.kind === "aborted") {
       res.off("close", onClose);
       return { status: 0, bytes: 0, note: "client closed" };
@@ -986,7 +1000,7 @@ export class ChatGptAdapter {
         // A used-up quota (`usage_limit_reached` and its kin) is definite: the client is told so.
         const exhaustion = providerExhaustion(sent.status, sent.text, sent.retryAfterSeconds === undefined ? undefined : sent.retryAfterSeconds * 1000);
         res.writeHead(sent.status, { "content-type": sent.headers.get("content-type") ?? "application/json", ...(sent.retryAfterSeconds ? { "retry-after": String(sent.retryAfterSeconds) } : {}), ...(exhaustion ? exhaustionHeaders(exhaustion) : {}) }).end(text);
-        return { status: sent.status, bytes: Buffer.byteLength(text), account: sent.account, note: `upstream ${sent.status}`, exhaustion };
+        return { status: sent.status, bytes: Buffer.byteLength(text), account: sent.account, ...(sent.borrowedLabel ? { borrowedLabel: sent.borrowedLabel } : {}), note: `upstream ${sent.status}`, exhaustion };
       }
     }
 
@@ -1025,7 +1039,7 @@ export class ChatGptAdapter {
                 const cached = u.input_tokens_details?.cached_tokens ?? 0;
                 usage = { input: (u.input_tokens ?? 0) - cached, cached, output: u.output_tokens ?? 0 };
               }
-              opts.onCompleted?.({ status: upstream.status, bytes, ...(usage ? { usage } : {}), ...(owner ? { account: owner } : {}), note: `codex passthrough account=${owner ? owner.slice(0, 8) : "caller"}` });
+              opts.onCompleted?.({ status: upstream.status, bytes, ...(usage ? { usage } : {}), ...(owner ? { account: owner } : {}), ...(ownerBorrowed ?? {}), note: `codex passthrough account=${owner ? owner.slice(0, 8) : "caller"}` });
             }
           }
         }
@@ -1033,12 +1047,12 @@ export class ChatGptAdapter {
     } catch (e) {
       if (!ac.signal.aborted) this.log.warn(`chatgpt ${this.name}: codex passthrough interrupted: ${(e as Error).message}`);
       res.destroy();
-      return { status: upstream.status, bytes, ...(owner ? { account: owner } : {}), note: "stream interrupted" };
+      return { status: upstream.status, bytes, ...(owner ? { account: owner } : {}), ...(ownerBorrowed ?? {}), note: "stream interrupted" };
     } finally {
       res.off("close", onClose);
     }
     if (!res.writableEnded) res.end();
-    return { status: upstream.status, bytes, ...(usage ? { usage } : {}), ...(owner ? { account: owner } : {}), note: `codex passthrough account=${owner ? owner.slice(0, 8) : "caller"}` };
+    return { status: upstream.status, bytes, ...(usage ? { usage } : {}), ...(owner ? { account: owner } : {}), ...(ownerBorrowed ?? {}), note: `codex passthrough account=${owner ? owner.slice(0, 8) : "caller"}` };
   }
 
   /**
@@ -1166,6 +1180,7 @@ export class ChatGptAdapter {
       return { status: err.status, bytes: err.body.length, note,
         ...(sent.kind === "no-account" ? { upstreamCalled: false as const, refusal: "no-account" as const } : {}),
         ...(sent.kind === "refused" ? { account: sent.account } : {}),
+        ...(sent.kind === "refused" && sent.borrowedLabel ? { borrowedLabel: sent.borrowedLabel } : {}),
         ...(sent.kind === "refused" && upstreamReq.service_tier !== undefined ? { requestedTier: upstreamReq.service_tier } : {}),
         ...(exhaustion ? { exhaustion } : {}),
       };
@@ -1281,6 +1296,7 @@ export class ChatGptAdapter {
       // A stream has already sent 200; the record still says the turn failed.
       status: failure ? failedStatus : 200,
       account: credential.ownerId,
+      ...(borrowedLabelOf(credential) ?? {}),
       exhaustion,
       bytes,
       note: failure
