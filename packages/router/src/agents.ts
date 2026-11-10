@@ -194,9 +194,10 @@ export type AccountsFor = (provider: Provider) => readonly PinnedAccount[];
  * The short name an account is *shown* by: its description, its title prefix and its dashboard
  * entry. An email label keeps its local part, so the worker reads `… · mambo20211 · ` rather than
  * carrying a whole address. Never part of the file name or the model id — those are the stable
- * account id prefix, so a relabel cannot move a saved ladder rung to another account.
+ * account id prefix, so a relabel cannot move a saved ladder rung to another account. The mod
+ * settings' account tabs carry the same name (admin.ts numberPinnedAccounts).
  */
-function accountDisplayName(account: PinnedAccount): string {
+export function accountDisplayName(account: PinnedAccount): string {
   const label = (account.label ?? "").trim();
   if (label.includes("@")) return label.slice(0, label.indexOf("@")) || label;
   if (label) return label;

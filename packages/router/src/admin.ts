@@ -36,7 +36,7 @@ import type { Config, Provider, ProviderCredential, ProviderModel } from "./conf
 import { withFileLock, writeJsonAtomic } from "./locked-file.ts";
 import { adminPort, headerValueProblem, homeDir, searchProviderFor, ssidProblem, validate } from "./config.ts";
 export { adminPort } from "./config.ts";
-import { agentRenames, generatedAgents } from "./agents.ts";
+import { accountDisplayName, agentRenames, generatedAgents } from "./agents.ts";
 import { isJudgeOnlyModel } from "./model-policy.ts";
 import { ModSettingsInputError, readModSettings, validateSettings, validateSettingsSchema, writeAutoCompactWindow, writeModSettings } from "./mod-settings.ts";
 import { billingOf, claudeChoices, fillLadder, ladderNeedsFill } from "../../mod/hooks/ladder.ts";
@@ -788,7 +788,8 @@ export type ModOptions = {
   /**
    * `accounts`, only on a provider with pinned workers: its accounts numbered as the limits number
    * them, then any stored account the limits leave out (paused, waiting for a sign-in) after them,
-   * so every pinned worker has one. `label` is the account's name and email, when known.
+   * so every pinned worker has one. `label` is the account's name and email, when known; `name` is
+   * the short name its tab shows.
    */
   providers: { name: string; type: Provider["type"]; usable: boolean; billing: Billing; reason?: string; exhaustedAt?: number; exhaustedUntil?: number; models?: Record<string, ModelUnavailable>; accounts?: ModAccount[] }[];
   zen: { configured: boolean; model: string | null };
@@ -797,8 +798,14 @@ export type ModOptions = {
   claudeEfforts: Effort[];
 };
 
-/** One account of a provider with pinned workers, as the mod settings' account tabs show it. */
-export type ModAccount = { number: number; label?: string };
+/**
+ * One account of a provider with pinned workers, as the mod settings' account tabs show it.
+ * `name` is the short name the account's pinned workers already go by (agents.ts
+ * accountDisplayName: an email's local part), so a tab and a worker's "Runs on …" agree. `current`
+ * marks the Claude app login, which the dashboard names in its own language as the Status screen
+ * does; it has no pinned workers and often shares its email with a stored account.
+ */
+export type ModAccount = { number: number; label?: string; name?: string; current?: true };
 
 /** An account's name and its email beside it when the name is not already the email. */
 function accountTitle(account: { label?: string; email?: string }): string | undefined {
@@ -830,7 +837,8 @@ async function numberPinnedAccounts(deps: AdminDeps, cfg: Config, agents: ModOpt
     const all = [...numbered, ...storedAccountsFor(provider, homeDir()).filter((a) => !ids.has(a.id))];
     out.set(name, all.map((account, index) => {
       const label = accountTitle(account);
-      return { number: index + 1, ...(label ? { label } : {}) };
+      const short = accountDisplayName({ id: account.id, label: account.label ?? "", ...(account.email ? { email: account.email } : {}) });
+      return { number: index + 1, ...(label ? { label } : {}), ...(short ? { name: short } : {}), ...(account.id === "current" ? { current: true as const } : {}) };
     }));
     for (const agent of agents) {
       if (agent.provider !== name || agent.account === undefined) continue;

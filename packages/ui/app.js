@@ -5627,6 +5627,8 @@ function modGroupHead(group) {
 // (preferred account, else the saved order). Accounts 2… list their pinned workers. The numbers are
 // the limits' "Claude n"/"GPT n" (/api/mod-options `accounts`). The pinned workers of account 1, and
 // of an account no longer stored, are not listed; they stay valid where a setting already names them.
+// An account is shown by its name, not its number (modAccountNames): "Account 2" says nothing about
+// whose it is, and the number stays on the tab's tooltip.
 
 /** The account tab a provider group shows, kept while the page is open; never saved. @type {Map<string, number>} */
 const modAccountTabs = new Map();
@@ -5634,11 +5636,47 @@ const modAccountTabs = new Map();
 function modAccountOf(choice) { return choice.pinned ? choice.accountNumber : 1; }
 /** Whether a choice is listed at all: an ordinary worker, or a pinned one on account 2 or later. */
 function modListed(choice) { return !choice.pinned || choice.accountNumber > 1; }
+/**
+ * What each of a provider's accounts is called wherever a model's account is said: its tab, the
+ * worker menus, a checkbox's accessible name. That is the account's own short name, the one its
+ * pinned workers' "Runs on …" carries; the Claude app login is named as the Status screen names it.
+ * Accounts whose short names match take their full label (name and email) instead, and an account
+ * with no name at all keeps "Account n"; a label the router made up for an unnamed account ("Claude
+ * account 2", counted from the stored ones) is no name, as on the Status screen. Names still alike
+ * after that lead with their number, where a tab cut short keeps it, so no two ever read the same.
+ * @returns {Map<number, string>}
+ */
+function modAccountNames(provider) {
+  const info = modProviderInfo(provider);
+  const accounts = info && Array.isArray(info.accounts) ? info.accounts : [];
+  const clashing = (names) => {
+    const seen = new Map();
+    for (const name of names) if (name) seen.set(name.toLowerCase(), (seen.get(name.toLowerCase()) || 0) + 1);
+    return (name) => Boolean(name) && seen.get(name.toLowerCase()) > 1;
+  };
+  const own = (value) => {
+    const text = String(value || "").trim();
+    return LIMITS_PLACEHOLDER.test(text) ? "" : text;
+  };
+  let names = accounts.map((account) => account.current ? t("providers.anthropicCurrentLogin") : own(account.name));
+  let clash = clashing(names);
+  names = names.map((name, at) => clash(name) && own(accounts[at].label) || name);
+  names = names.map((name, at) => name || t("mod.accountTab", { n: accounts[at].number }));
+  // A number makes two names differ from each other, but may make one match a third: look again.
+  for (let pass = 0; pass <= accounts.length; pass += 1) {
+    clash = clashing(names);
+    if (!names.some(clash)) break;
+    names = names.map((name, at) => clash(name) ? `${accounts[at].number} · ${name}` : name);
+  }
+  return new Map(accounts.map((account, at) => [account.number, names[at]]));
+}
+/** One account's name (modAccountNames); an account the provider no longer lists keeps its number. */
+function modAccountName(provider, number) { return modAccountNames(provider).get(number) || t("mod.accountTab", { n: number }); }
 /** A choice's name where its account is not otherwise shown (a pick no longer offered, a hidden pin). */
 function modChoiceName(choice) {
   if (!choice.pinned || !choice.accountNumber && !choice.accountName) return choice.label;
-  const account = choice.accountNumber > 1 || !choice.accountName ? t("mod.accountTab", { n: choice.accountNumber }) : choice.accountName;
-  return `${choice.label} · ${account}`;
+  // A pin whose account has no number (no longer stored) still has the name it was made with.
+  return `${choice.label} · ${choice.accountNumber ? modAccountName(choice.provider, choice.accountNumber) : choice.accountName}`;
 }
 /** A worker group's account tabs (`{number, label}`), or null when it has one account to show. */
 function modAccountTabsOf(group) {
@@ -5683,9 +5721,11 @@ function modTickRows() {
   const onCount = choices.filter(modTicked).length;
   return modGroups(choices).map((group) => {
     const tabs = modAccountTabsOf(group);
+    const names = tabs ? modAccountNames(group.items[0].provider) : new Map();
+    const accountName = (number) => names.get(number) || t("mod.accountTab", { n: number });
     const box = (choice) => {
       const on = modTicked(choice);
-      const account = tabs ? ` · ${t("mod.accountTab", { n: modAccountOf(choice) })}` : "";
+      const account = tabs ? ` · ${accountName(modAccountOf(choice))}` : "";
       const input = el("input", { type: "checkbox", "data-key": `tick:${modTickKey(choice)}`, "aria-label": `${choice.label} · ${group.name}${account}`, checked: on });
       if (on && onCount === 1) input.disabled = true;
       input.addEventListener("change", () => modTick(choice, input.checked));
@@ -5700,11 +5740,16 @@ function modTickRows() {
     // block keeps the tallest list's height and switching accounts moves nothing below it.
     const shown = modAccountTab(group, tabs);
     const id = (number) => `mod-account-${group.name}-${number}`;
-    const tabList = el("div", { class: "segmented account-tabs", role: "tablist", "aria-label": group.name }, tabs.map((tab) => el("button", {
-      type: "button", role: "tab", class: tab.number === shown ? "active" : "", "aria-selected": String(tab.number === shown), "aria-controls": id(tab.number),
-      "data-key": `account-tab:${group.name}:${tab.number}`, text: t("mod.accountTab", { n: tab.number }), ...(tab.label ? { title: tab.label } : {}),
-      onclick: () => { if (tab.number !== shown) { modAccountTabs.set(group.name, tab.number); modRefresh(); } },
-    })));
+    const tabList = el("div", { class: "segmented account-tabs", role: "tablist", "aria-label": group.name }, tabs.map((tab) => {
+      // The tab says whose account it is; its number (the limits' "GPT n") and whole label are on the tooltip.
+      const name = accountName(tab.number);
+      const title = [t("mod.accountTab", { n: tab.number }), tab.label && !LIMITS_PLACEHOLDER.test(String(tab.label).trim()) ? tab.label : ""].filter(Boolean).join(" · ");
+      return el("button", {
+        type: "button", role: "tab", class: tab.number === shown ? "active" : "", "aria-selected": String(tab.number === shown), "aria-controls": id(tab.number),
+        "data-key": `account-tab:${group.name}:${tab.number}`, text: name, ...(title !== name ? { title } : {}),
+        onclick: () => { if (tab.number !== shown) { modAccountTabs.set(group.name, tab.number); modRefresh(); } },
+      });
+    }));
     const panels = tabs.map((tab) => {
       const panel = el("div", { class: `model-checklist${tab.number === shown ? "" : " account-hidden"}`, id: id(tab.number), role: "tabpanel" }, listed.filter((choice) => modAccountOf(choice) === tab.number).map(box));
       if (tab.number !== shown) { panel.inert = true; panel.setAttribute("aria-hidden", "true"); }
@@ -5740,10 +5785,16 @@ function modPickSelect(key, step, shown, label, onPick) {
   const picked = step ? modTargetValue(step.target) : "";
   // An unlisted pinned worker (account 1's, see modListed) is offered only where it is the pick already.
   const choices = modChoices().filter((choice) => choice.value === "general-purpose" || modTicked(choice) && (modListed(choice) || choice.value === picked));
+  // One read of a provider's account names for the whole menu, however many options name one.
+  const named = new Map();
+  const accountName = (provider, number) => {
+    if (!named.has(provider)) named.set(provider, modAccountNames(provider));
+    return named.get(provider).get(number) || t("mod.accountTab", { n: number });
+  };
   const entries = (list) => list.flatMap((choice) => {
     // A closed menu shows the option alone, not its group: a pinned worker names its account there.
     const number = modListed(choice) ? modAccountOf(choice) : null;
-    const name = modListed(choice) ? (number && number > 1 ? `${choice.label} · ${t("mod.accountTab", { n: number })}` : choice.label) : modChoiceName(choice);
+    const name = modListed(choice) ? (number && number > 1 ? `${choice.label} · ${accountName(choice.provider, number)}` : choice.label) : modChoiceName(choice);
     return modLadderOf(choice).map((effort) => ({ value: `${choice.value}|${effort}`, label: `${name} · ${modEffortName(effort)}${choice.usable ? "" : t("mod.unavailableNow")}` }));
   });
   // A provider with account tabs gets one group per account, named as its tab is.
@@ -5752,7 +5803,7 @@ function modPickSelect(key, step, shown, label, onPick) {
     const whole = all.find((entry) => entry.name === group.name);
     const tabs = whole ? modAccountTabsOf(whole) : null;
     if (!tabs) return [{ group: modGroupLabel(group), items: entries(group.items) }];
-    return tabs.map((tab) => ({ group: `${modGroupLabel(group)} · ${t("mod.accountTab", { n: tab.number })}`, items: entries(group.items.filter((choice) => modAccountOf(choice) === tab.number)) }));
+    return tabs.map((tab) => ({ group: `${modGroupLabel(group)} · ${accountName(whole.items[0].provider, tab.number)}`, items: entries(group.items.filter((choice) => modAccountOf(choice) === tab.number)) }));
   });
   const current = step ? `${picked}|${shown}` : "";
   const items = [...(step ? [] : [{ value: "", label: "—" }]), ...groups];

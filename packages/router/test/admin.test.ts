@@ -215,6 +215,12 @@ test("mod-options numbers a pinned worker's account as the limits do", async () 
       assert.deepEqual([before.first, before.second, before.bare], [2, 3, undefined], "the app login is account 1; an ordinary worker has no number");
       assert.deepEqual(before.accounts?.map((account) => account.number), [1, 2, 3]);
       assert.equal(before.accounts?.[1]?.label, accountLabel(home, first.id));
+      // A tab is named, not numbered: each account carries the short name its pinned workers go by,
+      // and the app login is marked so the dashboard can call it "Current Claude login".
+      assert.deepEqual(before.accounts?.[0], { number: 1, label: "current@example.test", name: "current", current: true });
+      assert.deepEqual(before.accounts?.slice(1).map((account) => [account.name, account.current]), [["first", undefined], ["second", undefined]]);
+      const pinnedFirst = (await (await fetch(`${base()}:${port}/api/mod-options`)).json() as ModOptions).agents.find((agent) => agent.name === `claude-opus-5-5-${first.id.slice(0, 8)}`);
+      assert.equal(pinnedFirst?.account, before.accounts?.[1]?.name, "the tab and the worker's own account name agree");
       const paused = await fetch(`${base()}:${port}/api/claude-accounts/${first.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ paused: true }) });
       assert.equal(paused.status, 200);
       const after = await read();
@@ -224,6 +230,7 @@ test("mod-options numbers a pinned worker's account as the limits do", async () 
       assert.deepEqual([noCurrent.first, noCurrent.second], [2, 1], "pausing the app login leaves no gap or replacement by its cached identity");
       assert.deepEqual(noCurrent.accounts?.map((account) => account.number), [1, 2]);
       assert.equal(noCurrent.accounts?.[0]?.label, accountLabel(home, second.id));
+      assert.deepEqual([noCurrent.accounts?.[0]?.name, noCurrent.accounts?.[0]?.current], ["second", undefined], "a stored account in first place is not the app login");
     }, { agentDir, claudeIdentity: async () => ({ email: "current@example.test", subjectHash: subjectHash("current")! }) });
   } finally {
     fs.rmSync(agentDir, { recursive: true, force: true });
