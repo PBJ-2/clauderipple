@@ -310,7 +310,7 @@ test("ChatGPT figures join by account id, so a pause between the two reads moves
 
 test("an older limits read that lands after a newer status does not show an account the status removed or paused", async () => {
   // The read was taken while all four accounts were listed. The status read after it has the login paused
-  // (the status leaves it out), "Work" removed, "Spare" in use, and "Held" listed as paused.
+  // (the status lists it as paused), "Work" removed, "Spare" in use, and "Held" listed as paused.
   const oldLimits = { providers: [{ type: "anthropic", provider: "claude", title: "Claude", accounts: [
     { ...current, inUse: false },
     { account: 1, id: "work", label: "Work", at: now, windows: [five] },
@@ -325,7 +325,9 @@ test("an older limits read that lands after a newer status does not show an acco
   await ui.refresh();
   assert.equal(findAll(ui.card, hasClass("limits-account")).length, 4);
 
+  // The router's real shape: a paused login and a paused account keep their rows with no figures and paused: true.
   statusNow = { providers: connected, claude: { accounts: [
+    { id: "current", label: "Current Claude login", quota: {}, paused: true },
     { id: "spare", label: "Spare", quota: {}, inUse: true },
     { id: "held", label: "Held", quota: {}, paused: true },
   ] } };

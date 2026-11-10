@@ -117,7 +117,7 @@ export class RouterClient {
   async figures(sessionId: string, mainModel: string, contextWindow: number | null): Promise<Figures> {
     const [reqs, status, windows] = await Promise.all([
       this.get<{ requests: RequestRecord[] }>(`/api/requests?kind=messages&n=400&session=${encodeURIComponent(sessionId)}`).catch(() => ({ requests: [] })),
-      this.get<{ claude?: { accounts?: { inUse?: boolean; quota?: { rate_limits?: { primary?: Window; secondary?: Window } } }[] } }>("/api/status").catch(() => ({})),
+      this.get<{ claude?: { accounts?: { inUse?: boolean; paused?: boolean; quota?: { rate_limits?: { primary?: Window; secondary?: Window } } }[] } }>("/api/status").catch(() => ({})),
       // Sessions already throttle figures. Do not keep a second model-only cache: the same id
       // can be rerouted, or its catalogue window can change, without changing the session model.
       this.get<unknown>("/api/context-windows").catch(() => null),
@@ -180,7 +180,7 @@ export function groupModels(opts: ModOptions, levels: EffortLevels): ProviderGro
  * main request's input over its resolved model window (or the caller's measured window). Unknown stays null.
  * `route` is where that same latest request went (the router's target, not the model asked for).
  */
-export function computeFigures(records: RequestRecord[], mainModel: string, window: number | null | ((route: Figures["route"], source: string) => number | null), status: { claude?: { accounts?: { inUse?: boolean; quota?: { rate_limits?: { primary?: Window; secondary?: Window } } }[] } }, now: number): Figures {
+export function computeFigures(records: RequestRecord[], mainModel: string, window: number | null | ((route: Figures["route"], source: string) => number | null), status: { claude?: { accounts?: { inUse?: boolean; paused?: boolean; quota?: { rate_limits?: { primary?: Window; secondary?: Window } } }[] } }, now: number): Figures {
   const main = base(mainModel);
   let read = 0, all = 0;
   let effort: Effort | null = null;
@@ -212,9 +212,9 @@ export function computeFigures(records: RequestRecord[], mainModel: string, wind
   }
   const value = typeof window === "function" ? window(route, source) : window;
   const contextWindow = typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
-  // The account the router serves with now; a router without the flag lists the login first.
+  // The account the router serves with now; a router without the flag lists the login first. A paused account has no figures, so it is never the stand-in.
   const accounts = status.claude?.accounts ?? [];
-  const windows = (accounts.find((account) => account.inUse === true) ?? accounts[0])?.quota?.rate_limits;
+  const windows = (accounts.find((account) => account.inUse === true) ?? accounts.find((account) => account.paused !== true))?.quota?.rate_limits;
   const five = [windows?.primary, windows?.secondary].find((w) => w?.window_minutes === 300);
   return {
     effort,

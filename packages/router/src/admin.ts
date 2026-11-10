@@ -298,12 +298,16 @@ function firstClaudeProvider(cfg: Config): string | undefined {
 }
 
 /**
- * One row per Claude account with a known usage, current login first. Labels only: the status is
- * polled every few seconds and has no use for an email address. `inUse` marks the account the pool
- * serves with now (a preferred stored account), which the mod reads for the plan windows; a router
- * without the flag leaves the mod on the login.
+ * One row per Claude account, current login first: each with a known usage, the one in use, and every
+ * paused one. Labels only: the status is polled every few seconds and has no use for an email address.
+ * `inUse` marks the account the pool serves with now (a preferred stored account), which the mod reads
+ * for the plan windows; a router without the flag leaves the mod on the login.
+ *
+ * `paused` comes from the live pool state (the account file and the current login's pause file), never
+ * from the usage cache, which keeps a paused account's last figures for a while. A paused row carries no
+ * figures, so no reader can take what the cache kept from before the pause for a current reading.
  */
-async function claudeAccountUsage(deps: AdminDeps): Promise<{ id: string; label: string; quota: Record<string, unknown>; inUse?: boolean }[]> {
+async function claudeAccountUsage(deps: AdminDeps): Promise<{ id: string; label: string; quota: Record<string, unknown>; inUse?: boolean; paused?: true }[]> {
   let usage: Record<string, Record<string, unknown>>;
   try {
     usage = (await deps.claudeUsage?.()) ?? {};
@@ -311,11 +315,19 @@ async function claudeAccountUsage(deps: AdminDeps): Promise<{ id: string; label:
     return [];
   }
   const inUse = claudeInUseId(deps, firstClaudeProvider(deps.config()));
-  const rows: { id: string; label: string; quota: Record<string, unknown>; inUse?: boolean }[] = [];
+  const rows: { id: string; label: string; quota: Record<string, unknown>; inUse?: boolean; paused?: true }[] = [];
   // The account in use is listed even while its usage is unknown, with no windows, so no reader
   // takes another account's figures for the one that is actually spending.
-  if (!isCurrentClaudeAccountPaused(homeDir()) && (usage.current || inUse === "current")) rows.push({ id: "current", label: "Current Claude login", quota: usage.current ?? {}, ...(inUse === "current" ? { inUse: true } : {}) });
+  // A paused login is flagged only while there is one, as `/api/claude-accounts` lists the current login;
+  // it never carries figures, so the cache's reading of it is not shown.
+  if (isCurrentClaudeAccountPaused(homeDir())) {
+    if (claudeAuthStore(deps).describeSource() !== null) rows.push({ id: "current", label: "Current Claude login", quota: {}, paused: true });
+  } else if (usage.current || inUse === "current") rows.push({ id: "current", label: "Current Claude login", quota: usage.current ?? {}, ...(inUse === "current" ? { inUse: true } : {}) });
   for (const account of listClaudeAccounts(homeDir())) {
+    if (account.paused) {
+      rows.push({ id: account.id, label: account.label, quota: {}, paused: true });
+      continue;
+    }
     const quota = usage[account.id];
     if (quota || inUse === account.id) rows.push({ id: account.id, label: account.label, quota: quota ?? {}, ...(inUse === account.id ? { inUse: true } : {}) });
   }
