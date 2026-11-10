@@ -5,6 +5,7 @@ import {
   claudeSupportsEffort,
   chatToAnthropic,
   responsesEventsToChatChunks,
+  responsesToChatCompletion,
   responsesToAnthropic,
 } from "../src/ingress/translate.ts";
 
@@ -192,6 +193,56 @@ test("Anthropic SSE maps to Responses and Chat stream events with usage", () => 
   const chat = responsesEventsToChatChunks(events, mapper);
   assert.ok(chat.some((chunk) => JSON.stringify(chunk).includes('"content":"ok"')));
   assert.ok(chat.some((chunk) => JSON.stringify(chunk).includes('"finish_reason":"tool_calls"')));
+});
+
+const initialUsage = { input_tokens: 10, cache_read_input_tokens: 90, cache_creation_input_tokens: 20, output_tokens: 1 };
+
+for (const scenario of [
+  { name: "message_start alone includes cache creation", deltas: [], input: 120, cached: 90, output: 1 },
+  { name: "repeated full usage is not added twice (JSON response path)", deltas: [initialUsage], input: 120, cached: 90, output: 1 },
+  { name: "output-only deltas are cumulative and preserve input counters", deltas: [{ output_tokens: 2 }, { output_tokens: 7 }], input: 120, cached: 90, output: 7 },
+  { name: "partial uncached input update preserves both cache counters", deltas: [{ input_tokens: 12 }], input: 122, cached: 90, output: 1 },
+  { name: "partial cache-read update preserves uncached and cache-created input", deltas: [{ cache_read_input_tokens: 80 }], input: 110, cached: 80, output: 1 },
+  { name: "partial cache-creation update preserves uncached and cache-read input", deltas: [{ cache_creation_input_tokens: 30 }], input: 130, cached: 90, output: 1 },
+  { name: "explicit zero replaces uncached input", deltas: [{ input_tokens: 0 }], input: 110, cached: 90, output: 1 },
+  { name: "explicit zero replaces cache-read input", deltas: [{ cache_read_input_tokens: 0 }], input: 30, cached: 0, output: 1 },
+  { name: "explicit zero replaces cache-created input", deltas: [{ cache_creation_input_tokens: 0 }], input: 100, cached: 90, output: 1 },
+  { name: "explicit zero replaces output", deltas: [{ output_tokens: 0 }], input: 120, cached: 90, output: 0 },
+  { name: "absent usage and empty usage preserve all counters", deltas: [undefined, {}], input: 120, cached: 90, output: 1 },
+]) {
+  test(`ingress accounting: ${scenario.name}`, () => {
+    const mapper = new ResponsesEventMapper("claude-sonnet-5");
+    const events = [
+      { type: "message_start", message: { usage: initialUsage } },
+      ...scenario.deltas.map((usage) => ({ type: "message_delta", ...(usage === undefined ? {} : { usage }) })),
+      { type: "message_stop" },
+    ].flatMap((event) => mapper.feed(event));
+    const expected = {
+      input_tokens: scenario.input,
+      input_tokens_details: { cached_tokens: scenario.cached },
+      output_tokens: scenario.output,
+      total_tokens: scenario.input + scenario.output,
+    };
+    assert.deepEqual(mapper.usage, expected);
+    assert.deepEqual(mapper.response("completed").usage, expected);
+    const completed = events.find((event) => event.type === "response.completed")!;
+    assert.deepEqual((completed.response as { usage: unknown }).usage, expected);
+    const chatUsage = {
+      prompt_tokens: scenario.input,
+      prompt_tokens_details: { cached_tokens: scenario.cached },
+      completion_tokens: scenario.output,
+      total_tokens: scenario.input + scenario.output,
+    };
+    assert.deepEqual(responsesToChatCompletion(mapper).usage, chatUsage);
+    assert.deepEqual(responsesEventsToChatChunks(events, mapper).at(-1)?.usage, chatUsage);
+  });
+}
+
+test("ingress accounting: absent initial counters default to zero", () => {
+  const mapper = new ResponsesEventMapper("claude-sonnet-5");
+  mapper.feed({ type: "message_start", message: { usage: { output_tokens: 1 } } });
+  mapper.feed({ type: "message_delta", usage: { output_tokens: 4 } });
+  assert.deepEqual(mapper.usage, { input_tokens: 0, input_tokens_details: { cached_tokens: 0 }, output_tokens: 4, total_tokens: 4 });
 });
 
 test("borrowed login: system is the identity line only, client instructions become the first user block", () => {
