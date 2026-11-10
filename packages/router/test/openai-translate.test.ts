@@ -178,6 +178,57 @@ test("OpenAI-shaped SSE error becomes an Anthropic error event", () => {
   assert.equal(((events[1]?.data.error as { type: string }) ?? {}).type, "rate_limit_error");
 });
 
+for (const shape of ["response.failed", "nested-error", "flat-error", "compat-error"] as const) {
+  test(`Responses ${shape} maps an explicit context overflow to Claude Code's compaction contract`, () => {
+    const mapper = new OpenAiStreamMapper("test");
+    mapper.redactError = (message) => message.replaceAll("fixture-credential", "[REDACTED]");
+    const error = { code: "context_length_exceeded", message: "Request rejected: fixture-credential" };
+    const frame = shape === "response.failed" ? { type: shape, response: { error } }
+      : shape === "flat-error" ? { type: "error", ...error }
+      : shape === "nested-error" ? { type: "error", error } : { error };
+    const events = mapper.feed(frame, "responses");
+    assert.deepEqual(mapper.failure, {
+      type: "invalid_request_error", code: error.code, message: "prompt is too long: Request rejected: [REDACTED]",
+    });
+    assert.equal(mapper.isFinished, true);
+    assert.deepEqual(events.map((event) => event.event), ["message_start", "error"]);
+    assert.deepEqual(events.at(-1)?.data.error, { type: mapper.failure.type, message: mapper.failure.message });
+    assert.deepEqual(mapper.finish(), []);
+    assert.deepEqual(mapper.feed({ type: "response.completed" }, "responses"), []);
+  });
+}
+
+test("an explicit overflow after content closes its block without a successful message stop", () => {
+  const mapper = new OpenAiStreamMapper("test");
+  mapper.feed({ type: "response.output_item.added", item: { type: "message", id: "msg_1" } }, "responses");
+  mapper.feed({ type: "response.output_text.delta", item_id: "msg_1", delta: "partial" }, "responses");
+  const events = mapper.feed({ type: "response.failed", response: { error: { code: "context_length_exceeded" } } }, "responses");
+  assert.deepEqual(events.map((event) => event.event), ["content_block_stop", "error"]);
+  assert.equal(mapper.failure?.type, "invalid_request_error");
+  assert.equal(mapper.failure?.message, "prompt is too long: upstream response failed");
+  assert.equal(mapper.completed, false);
+});
+
+test("context-like prose or a nonmatching code does not trigger overflow classification", () => {
+  for (const code of [undefined, "invalid_request_error", "CONTEXT_LENGTH_EXCEEDED", 400]) {
+    const mapper = new OpenAiStreamMapper("test");
+    const message = "Your input exceeds the context window; context_length_exceeded";
+    const events = mapper.feed({ type: "response.failed", response: { error: { code, message } } }, "responses");
+    assert.equal(mapper.failure?.type, "api_error");
+    assert.equal(mapper.failure?.message, message);
+    assert.equal(events.some((event) => event.event === "message_stop"), false);
+  }
+});
+
+test("typed streaming rate limits and overloads keep their existing classification", () => {
+  for (const [code, type] of [["rate_limit_exceeded", "rate_limit_error"], ["server_is_overloaded", "overloaded_error"]]) {
+    const mapper = new OpenAiStreamMapper("test");
+    mapper.feed({ type: "response.failed", response: { error: { code, message: "try later" } } }, "responses");
+    assert.equal(mapper.failure?.type, type);
+    assert.equal(mapper.failure?.message, "try later");
+  }
+});
+
 test("responses SSE mapper associates interleaved tool arguments by item_id", () => {
   const mapper = new OpenAiStreamMapper("test");
   const events = [

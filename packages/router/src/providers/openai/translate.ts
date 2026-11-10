@@ -864,7 +864,7 @@ export class OpenAiStreamMapper {
       if (response?.incomplete_details?.reason === "max_output_tokens") this.finishReason = "length";
       this.sawCompletion = true;
     } else if (type === "response.failed" || type === "error") {
-      const error = (type === "error" ? ev.error : (ev.response as { error?: unknown } | undefined)?.error) as { message?: unknown; code?: unknown } | undefined;
+      const error = (type === "error" ? ev.error ?? ev : (ev.response as { error?: unknown } | undefined)?.error) as { message?: unknown; code?: unknown } | undefined;
       return [...out, ...this.fail(typeof error?.message === "string" ? error.message : "upstream response failed", typeof error?.code === "string" ? error.code : undefined)];
     }
     out.push(...this.flushResponses());
@@ -906,10 +906,13 @@ export class OpenAiStreamMapper {
     this.finished = true;
     // A vendor's error text can echo the credential it was sent; the client, the non-streamed body
     // and the request log all take `failure.message`, so it is cleaned once, here.
-    const message = this.redactError(rawMessage);
+    let message = this.redactError(rawMessage);
+    // Match ChatGPT's Claude Code compaction contract, but only for the explicit vendor code.
+    const contextOverflow = code === "context_length_exceeded";
     // `overloaded_error` is the one mid-stream error Claude Code retries on its own (CLI 2.1.278
     // matches `"type":"overloaded_error"` in the message); `api_error` ends the turn for good.
-    const type = code === "rate_limit_exceeded" ? "rate_limit_error" : code === "server_is_overloaded" ? "overloaded_error" : "api_error";
+    const type = contextOverflow ? "invalid_request_error" : code === "rate_limit_exceeded" ? "rate_limit_error" : code === "server_is_overloaded" ? "overloaded_error" : "api_error";
+    if (contextOverflow) message = `prompt is too long: ${message}`;
     this.failure = { type, message, ...(code ? { code } : {}) };
     return [...this.start(), ...this.closeBlock(), { event: "error", data: { type: "error", error: { type, message } } }];
   }
