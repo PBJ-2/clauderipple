@@ -2155,18 +2155,36 @@ function renderPhoneStatus(data) {
   $("#phone-restart").hidden = !data.restartRequired;
   phoneSyncSave();
 }
+// The loopback addresses a saved bind may name (packages/remote/src/config.ts resolveBind): any other bind
+// lets phones on the network reach this computer directly.
+const PHONE_LOOPBACK_BINDS = ["127.0.0.1", "::1", "localhost"];
+/**
+ * The phone-access choice that the saved settings already are, as Save would write it: "relay" (a Relay
+ * address, this computer only), "local" (no Relay, this computer only), or null. A direct bind (a LAN or
+ * Tailscale address) matches neither, so neither choice is pre-selected and any pick is a change to save.
+ */
+function phoneModeOf(settings) {
+  if (!settings) return null;
+  const bind = typeof settings.bind === "string" ? settings.bind : "127.0.0.1";
+  if (!PHONE_LOOPBACK_BINDS.includes(bind)) return null;
+  return settings.relay ? "relay" : "local";
+}
 /** The access choice saved now; Save stays off until a different one is picked, so pressing it always changes something. */
-function phoneSavedMode() { return phoneSnapshot && phoneSnapshot.settings && phoneSnapshot.settings.relay ? "relay" : "local"; }
+function phoneSavedMode() { return phoneModeOf(phoneSnapshot && phoneSnapshot.settings); }
 function phoneSyncSave() {
   const save = $("#phone-save");
   const picked = $('#phone-content input[name="phone-mode"]:checked');
-  if (save && picked && !phoneBusy) save.disabled = picked.value === phoneSavedMode();
+  if (save && !phoneBusy) save.disabled = !picked || picked.value === phoneSavedMode();
+}
+/** What Save posts for a choice: Relay keeps the saved Relay address (or the default), and either choice binds this computer only. */
+function phoneSettingsBody(mode, settings, defaultRelay) {
+  return mode === "relay" ? { relay: settings.relay || defaultRelay, bind: "local" } : { relay: "off", bind: "local" };
 }
 function phoneSettings(data) {
   // The phone app pairs through the Relay only, so phone access is on (Relay) or off. A custom
   // relay address stays in the host's config file; the dashboard keeps whichever one is saved.
   const saved = data.settings;
-  const selected = saved.relay ? "relay" : "local";
+  const selected = phoneModeOf(saved);
   const choices = ["relay", "local"].map(value => {
     const radio = el("input", { type: "radio", name: "phone-mode", value, checked: value === selected });
     radio.addEventListener("change", phoneSyncSave);
@@ -2175,11 +2193,13 @@ function phoneSettings(data) {
   const save = el("button", { class: "btn", type: "button", id: "phone-save", text: t("common.save"), disabled: "" });
   save.addEventListener("click", async () => {
     if (phoneBusy) return;
-    const mode = $('#phone-content input[name="phone-mode"]:checked').value;
+    const picked = $('#phone-content input[name="phone-mode"]:checked');
+    if (!picked) return;
     phoneBusy = true; save.disabled = true;
     hidePhoneQr();
     try {
-      const result = await phonePost("settings", mode === "relay" ? { relay: saved.relay || data.defaultRelay, bind: "local" } : { relay: "off", bind: "local" });
+      // The settings are read again at save time, so a Relay address saved since this form was drawn is kept.
+      const result = await phonePost("settings", phoneSettingsBody(picked.value, (phoneSnapshot && phoneSnapshot.settings) || saved, data.defaultRelay));
       toast(t(result.restartRequired ? "phone.restartRequired" : "common.saved"));
       await refreshPhone();
     } catch (error) { toast(t("common.saveFailed"), true, error.message); }
