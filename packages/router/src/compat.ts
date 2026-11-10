@@ -140,13 +140,12 @@ const BILLING_BLOCK = /^x-anthropic-billing-header:/;
 // request` for the whole request (issue #92, CLI 2.1.308+).
 
 /**
- * Fold those extensions into shapes an Anthropic-compatible vendor accepts: `system`/`developer`
- * messages become `user` (text byte-for-byte, adjacent user messages left unmerged so no cached
- * byte moves), extension blocks leave their message, and the tool definitions they carried come
- * back in `lifted` for the caller's tools loop to treat exactly like declared ones.
+ * Deferred definitions follow the explicit tools without moving their cached prefix. Explicit
+ * names win, then the first addition of each name wins. Removals do not erase declarations: the
+ * stateless history may still contain calls to them. Shared by compatible and translated wires.
  */
-function foldMessageExtensions(messages: unknown, tools: unknown): { messages: unknown; lifted: unknown[]; changes: string[] } {
-  if (!Array.isArray(messages)) return { messages, lifted: [], changes: [] };
+export function deferredToolDefinitions(messages: unknown, tools: unknown): { name: string; [key: string]: unknown }[] {
+  if (!Array.isArray(messages)) return [];
   const names = new Set<string>();
   if (Array.isArray(tools)) {
     for (const tool of tools) {
@@ -154,7 +153,34 @@ function foldMessageExtensions(messages: unknown, tools: unknown): { messages: u
       if (source && typeof source.name === "string") names.add(source.name);
     }
   }
-  const lifted: unknown[] = [];
+  const lifted: { name: string; [key: string]: unknown }[] = [];
+  for (const message of messages) {
+    const source = record(message);
+    if (!Array.isArray(source?.content)) continue;
+    for (const block of source.content) {
+      const item = record(block);
+      if (item?.type !== "tool_addition") continue;
+      const definition = record(record(item.tool)?.definition);
+      const name = typeof definition?.name === "string" ? definition.name : undefined;
+      if (!definition || !name || names.has(name)) continue;
+      names.add(name);
+      const liftedTool: { name: string; [key: string]: unknown } = { ...definition, name };
+      delete liftedTool.eager_input_streaming;
+      lifted.push(liftedTool);
+    }
+  }
+  return lifted;
+}
+
+/**
+ * Fold those extensions into shapes an Anthropic-compatible vendor accepts: `system`/`developer`
+ * messages become `user` (text byte-for-byte, adjacent user messages left unmerged so no cached
+ * byte moves), extension blocks leave their message, and the tool definitions they carried come
+ * back in `lifted` for the caller's tools loop to treat exactly like declared ones.
+ */
+function foldMessageExtensions(messages: unknown, tools: unknown): { messages: unknown; lifted: unknown[]; changes: string[] } {
+  if (!Array.isArray(messages)) return { messages, lifted: [], changes: [] };
+  const lifted = deferredToolDefinitions(messages, tools);
   const kept: unknown[] = [];
   let folded = 0;
   let additions = 0;
@@ -174,16 +200,6 @@ function foldMessageExtensions(messages: unknown, tools: unknown): { messages: u
         if (item?.type === "tool_addition") {
           touched = true;
           additions++;
-          const definition = record(record(item.tool)?.definition);
-          const name = typeof definition?.name === "string" ? definition.name : undefined;
-          // A name already declared top-level is left where it is: the caller's tools keep their
-          // prefix, and the definition the provider already has is the same one.
-          if (definition && name && !names.has(name)) {
-            names.add(name);
-            const liftedTool = { ...definition };
-            delete liftedTool.eager_input_streaming;
-            lifted.push(liftedTool);
-          }
           continue;
         }
         if (item?.type === "tool_removal") {
