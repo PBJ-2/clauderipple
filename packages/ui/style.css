@@ -997,9 +997,20 @@ a.cell { color: inherit; text-decoration: none; }
 
 /* The language menu lives in the sidebar; on a phone the sidebar is a tab bar, so About carries it. */
 .narrow-only { display: none; }
-.about-text { padding: 14px 16px; font-size: var(--fs-sub); line-height: 1.5; }
-.about-text p { margin: 0; }
-.about-text p + p { margin-top: 6px; }
+/* Who this is: the mark, the name and licence beside it, the trademark notice under a hairline. */
+.about-card { padding: 16px 16px 14px; }
+.about-id { display: flex; align-items: center; gap: 14px; }
+.about-mark { width: 44px; height: 44px; flex: 0 0 auto; padding: 6px; border-radius: 11px; background: var(--accent-soft); }
+.about-name { font-size: 17px; font-weight: 650; letter-spacing: -0.01em; }
+.about-license { margin: 2px 0 0; color: var(--label-2); font-size: var(--fs-cap); }
+.about-body { margin: 14px 0 0; padding-top: 12px; border-top: 1px solid var(--separator); color: var(--label-2); font-size: var(--fs-foot); line-height: 1.55; }
+:lang(ko) .about-body { word-break: keep-all; overflow-wrap: anywhere; }
+/* The version, its updates and what is running: the same dense rows as the other settings. */
+.about-details .cell-label { font-size: var(--fs-sub); }
+.about-details .cell-sub { font-size: var(--fs-cap); }
+.about-details .cell-sub.mono { font-size: 11.5px; color: var(--label-2); }
+.about-details > .row .k { font-size: var(--fs-sub); }
+.about-details > .row .v { font-size: var(--fs-foot); }
 
 /* ---- Sheets -------------------------------------------------------------------------- */
 

@@ -878,7 +878,8 @@ function versionRow() {
   // An install that ran and failed is not "the latest version": the reason stays in reach, and the
   // button is the retry (G-D07). The router's own text is shown, as it is the only detail there is.
   const failed = status.autoUpdate && status.autoUpdate.lastError && !status.autoUpdate.running && !updateState.busy;
-  if (failed && button) note = `${t("update.lastFailed")} ${shortError(status.autoUpdate.lastError)}`;
+  // A failure reads in the warning colour, so it is not taken for the version's ordinary note.
+  if (failed && button) note = el("span", { class: "cell-sub warn-text", text: `${t("update.lastFailed")} ${shortError(status.autoUpdate.lastError)}` });
   const row = cell(el("span", { class: "cell-label", text: `${t("health.version")} ${status.version}` }), button, note);
   row.id = "health-version-row";
   return row;
