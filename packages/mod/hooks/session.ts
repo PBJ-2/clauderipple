@@ -89,6 +89,8 @@ function limitItemFromWindow(w: unknown, owner: LimitOwner, now: number): LimitI
   // past, or not before the reset, is no forecast: the router's reading is older than the clock.
   const exhaust = typeof o.exhaust_at === 'number' && Number.isFinite(o.exhaust_at) ? o.exhaust_at * (o.exhaust_at < 1e12 ? 1000 : 1) : NaN
   const exhausts = Number.isFinite(exhaust) && exhaust > now && !(Number.isFinite(reset) && exhaust >= reset)
+  // The pace projection (2026-11-10): the share the window reaches at its reset at its average pace.
+  const projected = typeof o.projected_percent === 'number' && Number.isFinite(o.projected_percent) ? o.projected_percent : NaN
   return {
     ...owner,
     kind: kind as LimitKind,
@@ -97,6 +99,7 @@ function limitItemFromWindow(w: unknown, owner: LimitOwner, now: number): LimitI
     percent: Math.round(used * 10) / 10,
     ...(Number.isFinite(reset) ? { resetsAt: new Date(reset).toISOString() } : {}),
     ...(exhausts ? { exhaustsAt: exhaust } : {}),
+    ...(Number.isFinite(projected) ? { projectedPercent: projected } : {}),
   }
 }
 

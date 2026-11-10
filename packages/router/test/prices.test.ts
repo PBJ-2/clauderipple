@@ -34,10 +34,21 @@ test("Claude ids take their official rate with a dated, account or effort suffix
   assert.deepEqual(priceOf("anthropic", "claude-opus-5-5", 300_000), { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5, cacheReadOfficial: true, cacheWriteOfficial: true });
 });
 
+test("Fable and the earlier Claude models take the official page's rates (2026-11-10), not AA's", () => {
+  // Fable 5.2 showed no cost: it was missing from the table and AA had no match.
+  assert.deepEqual(priceOf("anthropic", "claude-fable-5-2", 1), { input: 8, output: 40, cacheRead: 0.2, cacheWrite: 10, cacheReadOfficial: true, cacheWriteOfficial: true });
+  assert.deepEqual(priceOf("anthropic", "claude-fable-5-1-f952fac6", 1), { input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5, cacheReadOfficial: true, cacheWriteOfficial: true });
+  assert.deepEqual(priceOf("anthropic", "claude-fable-5", 1), { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5, cacheReadOfficial: true, cacheWriteOfficial: true });
+  assert.deepEqual(priceOf("anthropic", "claude-opus-4-20250514", 1), { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75, cacheReadOfficial: true, cacheWriteOfficial: true });
+  assert.deepEqual(priceOf("anthropic", "claude-haiku-4-5", 1), { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25, cacheReadOfficial: true, cacheWriteOfficial: true });
+  setAaPriceDataset(aa([{ base: "claude-opus-5", priceIn: 99, priceOut: 99 }]));
+  assert.deepEqual(priceOf("anthropic", "claude-opus-5", 1), { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25, cacheReadOfficial: true, cacheWriteOfficial: true });
+});
+
 test("a Claude model outside the table falls through to AA, and is unpriced when AA has no match", () => {
-  assert.equal(priceOf("anthropic", "claude-opus-5", 1), null);
-  setAaPriceDataset(aa([{ base: "claude-opus-5", priceIn: 5, priceOut: 25 }]));
-  assert.deepEqual(priceOf("anthropic", "claude-opus-5", 1), { input: 5, output: 25, cacheRead: 5, cacheWrite: 5, cacheReadOfficial: false, cacheWriteOfficial: false });
+  assert.equal(priceOf("anthropic", "claude-opus-9", 1), null);
+  setAaPriceDataset(aa([{ base: "claude-opus-9", priceIn: 5, priceOut: 25 }]));
+  assert.deepEqual(priceOf("anthropic", "claude-opus-9", 1), { input: 5, output: 25, cacheRead: 5, cacheWrite: 5, cacheReadOfficial: false, cacheWriteOfficial: false });
 });
 
 test("a request's cost is input x input rate + cached x cache-read rate + cache-write x cache-write rate + output x output rate, per MTok", () => {

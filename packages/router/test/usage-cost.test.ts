@@ -152,6 +152,67 @@ test("an image is billed per image: it costs nothing and is neither unpriced nor
   });
 });
 
+test("a stored hour flushed while its model was unpriced is priced at read time, its requests counted as estimated", () => {
+  withDir((dir) => {
+    const hour = Math.floor(Date.parse("2026-10-20T10:00:00.000Z") / HOUR);
+    // The line an hour writes when its three Fable 5.2 requests had no price: a cost of 0, all three unpriced.
+    fs.writeFileSync(path.join(dir, "usage-hourly.jsonl"), JSON.stringify({ h: hour, p: "anthropic", m: "claude-fable-5-2", count: 3, ok: 3, failed: 0, input: 1_000, cached: 0, cacheWrite: 0, output: 100, ms: 300, cost: 0, unpriced: 3, estimated: 0 }) + "\n");
+    setAaPriceDataset(null);
+    const log = new RequestLog(path.join(dir, "requests.jsonl"));
+    const summary = log.usage(FROM, TO);
+    // Official rates at the base tier: 1,000 x 8 + 100 x 40 = 12,000 per MTok = 0.012 USD. Each request is estimated.
+    near(summary.providers["anthropic"]!.costUsd, 0.012);
+    assert.equal(summary.providers["anthropic"]!.unpricedRequests, 0);
+    assert.equal(summary.providers["anthropic"]!.estimatedRequests, 3);
+    near(summary.total.costUsd, 0.012);
+    assert.equal(summary.total.unpricedRequests, 0);
+    assert.equal(summary.total.estimatedRequests, 3);
+    assert.equal(summary.total.count, 3);
+  });
+});
+
+test("a stored hour whose model is still unpriced stays unpriced", () => {
+  withDir((dir) => {
+    const hour = Math.floor(Date.parse("2026-10-20T10:00:00.000Z") / HOUR);
+    fs.writeFileSync(path.join(dir, "usage-hourly.jsonl"), JSON.stringify({ h: hour, p: "chatgpt", m: "mystery-model", count: 1, ok: 1, failed: 0, input: 10, cached: 0, cacheWrite: 0, output: 5, ms: 50, cost: 0, unpriced: 1, estimated: 0 }) + "\n");
+    setAaPriceDataset(aa([{ base: "gpt-5-5", priceIn: 5, priceOut: 30 }]));
+    const log = new RequestLog(path.join(dir, "requests.jsonl"));
+    const total = log.usage(FROM, TO).total;
+    assert.equal(total.costUsd, 0);
+    assert.equal(total.unpricedRequests, 1);
+    assert.equal(total.estimatedRequests, 0);
+  });
+});
+
+test("a stored hour that is already priced is read as stored, not priced again", () => {
+  withDir((dir) => {
+    const hour = Math.floor(Date.parse("2026-10-20T10:00:00.000Z") / HOUR);
+    // The stored cost (0.5) differs from the official figure (0.012), so a second pricing would show.
+    fs.writeFileSync(path.join(dir, "usage-hourly.jsonl"), JSON.stringify({ h: hour, p: "anthropic", m: "claude-fable-5-2", count: 3, ok: 3, failed: 0, input: 1_000, cached: 0, cacheWrite: 0, output: 100, ms: 300, cost: 0.5, unpriced: 0, estimated: 0 }) + "\n");
+    setAaPriceDataset(null);
+    const log = new RequestLog(path.join(dir, "requests.jsonl"));
+    const total = log.usage(FROM, TO).total;
+    near(total.costUsd, 0.5);
+    assert.equal(total.unpricedRequests, 0);
+    assert.equal(total.estimatedRequests, 0);
+  });
+});
+
+test("a stored hour mixing priced and unpriced requests of one model stays as stored, since its tokens cannot be split", () => {
+  withDir((dir) => {
+    setAaPriceDataset(aa([{ base: "gpt-5-5", priceIn: 5, priceOut: 30 }]));
+    const hour = Math.floor(Date.parse("2026-10-20T10:00:00.000Z") / HOUR);
+    // Three GPT-5.5 requests: one priced when it arrived (cost 0.008), two unpriced before the AA data loaded.
+    fs.writeFileSync(path.join(dir, "usage-hourly.jsonl"), JSON.stringify({ h: hour, p: "openai", m: "gpt-5.5", count: 3, ok: 3, failed: 0, input: 1_000, cached: 0, cacheWrite: 0, output: 100, ms: 300, cost: 0.008, unpriced: 2, estimated: 0 }) + "\n");
+    const log = new RequestLog(path.join(dir, "requests.jsonl"));
+    const total = log.usage(FROM, TO).total;
+    // Not 0.016 (the priced request would be counted twice) and not 0.008 plus the unpriced tokens: left as stored.
+    near(total.costUsd, 0.008);
+    assert.equal(total.unpricedRequests, 2);
+    assert.equal(total.estimatedRequests, 0);
+  });
+});
+
 test("a request is estimated only when a cache component it used is not official", () => {
   withDir((dir) => {
     setAaPriceDataset(aa([{ base: "kimi-k3", priceIn: 1.5, priceOut: 6 }, { base: "gpt-5-5", priceIn: 5, priceOut: 30 }]));

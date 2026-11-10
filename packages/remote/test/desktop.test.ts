@@ -681,3 +681,22 @@ test("a tail seeded from a handoff skips a later copy of a seeded worker launch 
   f.desktop.tail(id, offset, body => events.push(body));
   assert.deepEqual(events.filter(e => e.kind === "subagent").map(e => e.kind === "subagent" && [e.toolUseId, e.status]), [["worker-1", "done"]]);
 });
+
+test("processHasSession answers every session from one tokenization of the listing, exactly as per-line matching would", () => {
+  const ids = ["11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222", "33333333-3333-3333-3333-333333333333", "44444444-4444-4444-4444-444444444444", "55555555-5555-5555-5555-555555555555"];
+  const legacy = (output: string, id: string): boolean => output.split("\n").some(line => {
+    const args = line.trim().split(/\s+/).map(arg => arg.replace(/^"|"$/g, ""));
+    return args.some((arg, i) => arg === `--resume=${id}` || arg === `--session-id=${id}` || ((arg === "--session-id" || arg === "--resume") && args[i + 1] === id));
+  });
+  const outputs = [
+    `1 claude --resume=${ids[0]}\n2 claude --session-id ${ids[1]} --model x\n3 claude "--resume=${ids[2]}"\n4 claude --prompt ${ids[3]}`,
+    `1 claude --resume\n${ids[0]}\n2 claude --session-id=${ids[1]}x\n3 claude --model ${ids[2]} --resume ${ids[4]}`,
+    `  5 claude   --resume   ${ids[0]}  \n6 claude --resume ${ids[1]} --resume=${ids[2]}\n7 claude --other=--resume=${ids[3]}`,
+    `1 claude --resume "${ids[4]}"\n2 claude --resume=`,
+    "",
+  ];
+  for (const output of outputs) for (const id of ids) assert.equal(processHasSession(output, id), legacy(output, id), `${JSON.stringify(output)} / ${id}`);
+  // A new listing replaces the memoized one.
+  assert.equal(processHasSession(`1 claude --resume=${ids[0]}`, ids[0]!), true);
+  assert.equal(processHasSession(`1 claude --resume=${ids[1]}`, ids[0]!), false);
+});

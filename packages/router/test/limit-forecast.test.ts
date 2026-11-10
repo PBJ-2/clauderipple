@@ -1,173 +1,153 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { LimitForecaster, forecastLimits, type ForecastProviders } from "../src/limit-forecast.ts";
+import { paceExhaustAt, paceProjectedPercent, forecastLimits, type ForecastAccount, type ForecastWindow } from "../src/limit-forecast.ts";
 
 const MIN = 60_000;
-const BASE = 1_800_000_000_000; // epoch ms
-const FAR_RESET = BASE / 1000 + 10 * 24 * 3600; // a reset ten days out, in epoch seconds
+const HOUR = 60 * MIN;
+const NOW = 1_800_000_000_000; // the reading's time, epoch ms
+const NOW_S = NOW / 1000;
+const WEEK_MINUTES = 10080;
+const FIVE_HOUR_MINUTES = 300;
 
-/** A forecaster on a clock the test sets. */
-function clocked(): { forecaster: LimitForecaster; at: (ms: number) => void } {
-  let now = BASE;
-  return { forecaster: new LimitForecaster(() => now), at: (ms) => (now = ms) };
+/** A window of `minutes` length, at `used` percent, whose reset falls `leftMs` after NOW. */
+function win(used: number, minutes: number, leftMs: number): ForecastWindow {
+  return { used_percent: used, window_minutes: minutes, reset_at: NOW_S + leftMs / 1000 };
 }
 
-test("no forecast while the samples span less than 15 minutes", () => {
-  const { forecaster, at } = clocked();
-  forecaster.observe("w", { at: BASE, used_percent: 0 });
-  forecaster.observe("w", { at: BASE + 10 * MIN, used_percent: 5 });
-  at(BASE + 10 * MIN);
-  assert.equal(forecaster.exhaustAt("w", { used_percent: 5, reset_at: FAR_RESET }), undefined);
+test("the real case: a weekly window at 54% with 57.6 h to its reset gets no forecast", () => {
+  // The window has run 110.4 h; 54% is a pace that never reaches 100% before the reset.
+  assert.equal(paceExhaustAt(win(54, WEEK_MINUTES, 57.6 * HOUR), NOW), undefined);
 });
 
-test("no forecast when the window rose less than 2 percentage points", () => {
-  const { forecaster, at } = clocked();
-  for (let m = 0; m <= 30; m += 5) forecaster.observe("w", { at: BASE + m * MIN, used_percent: 10 + m / 60 });
-  at(BASE + 30 * MIN);
-  // 30 minutes at 1/60 point a minute rose 0.5 points.
-  assert.equal(forecaster.exhaustAt("w", { used_percent: 10.5, reset_at: FAR_RESET }), undefined);
+test("a scoped Fable weekly at 2% with the same reset gets no forecast", () => {
+  assert.equal(paceExhaustAt(win(2, WEEK_MINUTES, 57.6 * HOUR), NOW), undefined);
 });
 
-test("a steady rise gives the moment the window reaches 100%", () => {
-  const { forecaster, at } = clocked();
-  // 10% at the start, then 0.5 points a minute: 25% at minute 30, so 100% comes 150 minutes later.
-  for (let m = 0; m <= 30; m += 5) forecaster.observe("w", { at: BASE + m * MIN, used_percent: 10 + 0.5 * m });
-  at(BASE + 30 * MIN);
-  assert.equal(forecaster.exhaustAt("w", { used_percent: 25, reset_at: FAR_RESET }), Math.round((BASE + 180 * MIN) / 1000));
+test("a genuinely fast week gets its forecast at the computed moment", () => {
+  // 80% after 72 h of 168: the pace is 80/72 per hour, so 20 more points take 18 h.
+  const exhaust = paceExhaustAt(win(80, WEEK_MINUTES, 96 * HOUR), NOW);
+  assert.equal(exhaust, Math.round(NOW_S + 18 * 3600));
 });
 
-test("no forecast once the window would reach 100% only after its reset", () => {
-  const { forecaster, at } = clocked();
-  for (let m = 0; m <= 30; m += 5) forecaster.observe("w", { at: BASE + m * MIN, used_percent: 10 + 0.5 * m });
-  at(BASE + 30 * MIN);
-  // The forecast is minute 180; a reset at minute 100 comes first.
-  assert.equal(forecaster.exhaustAt("w", { used_percent: 25, reset_at: (BASE + 100 * MIN) / 1000 }), undefined);
-  // A reset later than the forecast leaves it in place.
-  assert.equal(forecaster.exhaustAt("w", { used_percent: 25, reset_at: (BASE + 200 * MIN) / 1000 }), Math.round((BASE + 180 * MIN) / 1000));
+test("a five-hour window at 60% after one hour runs out in 40 minutes", () => {
+  assert.equal(paceExhaustAt(win(60, FIVE_HOUR_MINUTES, 4 * HOUR), NOW), Math.round(NOW_S + 40 * 60));
 });
 
-test("no forecast at or above 100%", () => {
-  const { forecaster, at } = clocked();
-  for (let m = 0; m <= 30; m += 5) forecaster.observe("w", { at: BASE + m * MIN, used_percent: 10 + 0.5 * m });
-  at(BASE + 30 * MIN);
-  assert.equal(forecaster.exhaustAt("w", { used_percent: 100, reset_at: FAR_RESET }), undefined);
+test("a weekly window is too early for a forecast at 16 h, and has one at 17 h", () => {
+  assert.equal(paceExhaustAt(win(80, WEEK_MINUTES, 152 * HOUR), NOW), undefined, "16 h into the window");
+  // 17 h: the pace is 80/17 per hour, so 20 more points take 4.25 h.
+  assert.equal(paceExhaustAt(win(80, WEEK_MINUTES, 151 * HOUR), NOW), Math.round(NOW_S + 4.25 * 3600), "17 h into the window");
 });
 
-test("a drop in used_percent clears the window's samples, so no forecast follows until new samples arrive", () => {
-  const { forecaster, at } = clocked();
-  for (let m = 0; m <= 30; m += 5) forecaster.observe("w", { at: BASE + m * MIN, used_percent: 10 + 0.5 * m });
-  at(BASE + 30 * MIN);
-  assert.ok(forecaster.exhaustAt("w", { used_percent: 25, reset_at: FAR_RESET }) !== undefined, "forecast before the reset");
-  // The window reset at minute 35: 3%. That one reading is the start of a new series.
-  forecaster.observe("w", { at: BASE + 35 * MIN, used_percent: 3, reset_at: FAR_RESET });
-  at(BASE + 35 * MIN);
-  assert.equal(forecaster.exhaustAt("w", { used_percent: 3, reset_at: FAR_RESET }), undefined);
+test("a weekly window at exactly 10% of its length (16.8 h) is old enough", () => {
+  // 16.8 h elapsed is 1008 min, so the reset is 9072 min out (whole minutes keep the arithmetic exact).
+  assert.notEqual(paceExhaustAt(win(80, WEEK_MINUTES, 9072 * MIN), NOW), undefined);
 });
 
-test("a change of reset_at clears the samples too", () => {
-  const { forecaster, at } = clocked();
-  for (let m = 0; m <= 30; m += 5) forecaster.observe("w", { at: BASE + m * MIN, used_percent: 10 + 0.5 * m, reset_at: FAR_RESET });
-  // The same used_percent trend, but a new reset_at at minute 31: the old series must not carry into it.
-  forecaster.observe("w", { at: BASE + 31 * MIN, used_percent: 25.5, reset_at: FAR_RESET + 3600 });
-  at(BASE + 31 * MIN);
-  assert.equal(forecaster.exhaustAt("w", { used_percent: 25.5, reset_at: FAR_RESET + 3600 }), undefined);
+test("a five-hour window is too early at 29 min and has a forecast at 31 min", () => {
+  assert.equal(paceExhaustAt(win(60, FIVE_HOUR_MINUTES, (300 - 29) * MIN), NOW), undefined, "29 min into the window");
+  assert.notEqual(paceExhaustAt(win(60, FIVE_HOUR_MINUTES, (300 - 31) * MIN), NOW), undefined, "31 min into the window");
 });
 
-test("a reading at the same time as the last one adds nothing, and an earlier one is ignored", () => {
-  const { forecaster, at } = clocked();
-  for (let m = 0; m <= 30; m += 5) forecaster.observe("w", { at: BASE + m * MIN, used_percent: 10 + 0.5 * m });
-  at(BASE + 30 * MIN);
-  const expected = forecaster.exhaustAt("w", { used_percent: 25, reset_at: FAR_RESET });
-  forecaster.observe("w", { at: BASE + 30 * MIN, used_percent: 40 }); // same time: skipped
-  forecaster.observe("w", { at: BASE + 10 * MIN, used_percent: 40 }); // earlier: skipped
-  assert.equal(forecaster.exhaustAt("w", { used_percent: 25, reset_at: FAR_RESET }), expected);
+test("a thirty-day window needs a full day before its average is trusted", () => {
+  const thirtyDays = 43200;
+  // 23 h into the window is too early; 25 h is not. The 10% floor (3 days) is above a full day, so the day applies.
+  assert.equal(paceExhaustAt(win(20, thirtyDays, (30 * 24 - 23) * HOUR), NOW), undefined);
+  assert.notEqual(paceExhaustAt(win(20, thirtyDays, (30 * 24 - 25) * HOUR), NOW), undefined);
 });
 
-test("samples older than three hours are dropped, so a window read long ago forecasts nothing", () => {
-  const { forecaster, at } = clocked();
-  for (let m = 0; m <= 30; m += 5) forecaster.observe("w", { at: BASE + m * MIN, used_percent: 10 + 0.5 * m });
-  at(BASE + 30 * MIN + 4 * 60 * MIN);
-  assert.equal(forecaster.exhaustAt("w", { used_percent: 25, reset_at: FAR_RESET }), undefined);
+test("no forecast without reset_at or window_minutes", () => {
+  assert.equal(paceExhaustAt({ used_percent: 60, window_minutes: FIVE_HOUR_MINUTES }, NOW), undefined);
+  assert.equal(paceExhaustAt({ used_percent: 60, reset_at: NOW_S + 4 * 3600 }, NOW), undefined);
 });
 
-test("forecastLimits sets exhaust_at on the windows that have one, and leaves the others as they were", () => {
-  const { forecaster, at } = clocked();
-  // One account: a five-hour window that rises, and a scoped window that stays flat at 40%.
-  const readAt = (ms: number, fiveHourUsed: number): ForecastProviders => [{
-    provider: "claude",
-    accounts: [{
-      id: "acct-0",
-      at: ms,
-      windows: [
-        { kind: "five_hour", used_percent: fiveHourUsed, reset_at: FAR_RESET },
-        { kind: "scoped", label: "Opus", used_percent: 40 },
-      ],
-    }],
-  }];
-  for (let m = 0; m <= 30; m += 5) forecastLimits(forecaster, readAt(BASE + m * MIN, 10 + 0.5 * m));
-  at(BASE + 30 * MIN);
-  const last = readAt(BASE + 30 * MIN, 25);
-  forecastLimits(forecaster, last);
-  const [fiveHour, scoped] = last[0]!.accounts[0]!.windows;
-  assert.equal(fiveHour!.exhaust_at, Math.round((BASE + 180 * MIN) / 1000));
-  assert.equal("exhaust_at" in scoped!, false, "a flat window has no forecast field at all");
+test("no forecast at 0% or at 100%", () => {
+  assert.equal(paceExhaustAt(win(0, WEEK_MINUTES, 96 * HOUR), NOW), undefined);
+  assert.equal(paceExhaustAt(win(100, WEEK_MINUTES, 96 * HOUR), NOW), undefined);
 });
 
-test("a reading less than a minute after the window's last stored sample is skipped", () => {
-  const { forecaster } = clocked();
-  forecaster.observe("t", { at: BASE, used_percent: 0 });
-  forecaster.observe("t", { at: BASE + 30_000, used_percent: 5 });
-  forecaster.observe("t", { at: BASE + 59_000, used_percent: 6 });
-  forecaster.observe("t", { at: BASE + 60_000, used_percent: 10 });
-  assert.deepEqual(forecaster.samples("t").map((s) => [s.at, s.used_percent]), [[BASE, 0], [BASE + 60_000, 10]]);
+test("no forecast when the reset is not after the reading", () => {
+  assert.equal(paceExhaustAt(win(80, WEEK_MINUTES, 0), NOW), undefined, "reset at the reading");
+  assert.equal(paceExhaustAt(win(80, WEEK_MINUTES, -HOUR), NOW), undefined, "reset before the reading");
 });
 
-test("windows that differ only in window_minutes keep separate series", () => {
-  const { forecaster, at } = clocked();
-  // Two windows of one kind and no label on one account: a five-hour one that rises and a weekly one that stays at 90%.
-  const readAt = (ms: number, fiveHourUsed: number): ForecastProviders => [{
-    provider: "claude",
-    accounts: [{
-      id: "acct-0",
-      at: ms,
-      windows: [
-        { kind: "window", window_minutes: 300, used_percent: fiveHourUsed, reset_at: FAR_RESET },
-        { kind: "window", window_minutes: 10080, used_percent: 90, reset_at: FAR_RESET + 1 },
-      ],
-    }],
-  }];
-  for (let m = 0; m <= 30; m += 5) forecastLimits(forecaster, readAt(BASE + m * MIN, 10 + 0.5 * m));
-  at(BASE + 30 * MIN);
-  const last = readAt(BASE + 30 * MIN, 25);
-  forecastLimits(forecaster, last);
-  const [fiveHour, weekly] = last[0]!.accounts[0]!.windows;
-  // Had the weekly readings shared the five-hour series, every rise would look like a reset and no forecast would follow.
-  assert.equal(fiveHour!.exhaust_at, Math.round((BASE + 180 * MIN) / 1000));
-  assert.equal("exhaust_at" in weekly!, false);
+test("no forecast when the window would reach 100% at or after its reset", () => {
+  // 84 h into a week at 50% is a pace that reaches 100% exactly when the reset comes.
+  assert.equal(paceExhaustAt(win(50, WEEK_MINUTES, 84 * HOUR), NOW), undefined, "exactly at the reset");
+  // At 51% the same week runs out at 80.7 h, before the 84 h reset.
+  const exhaust = paceExhaustAt(win(51, WEEK_MINUTES, 84 * HOUR), NOW);
+  assert.ok(exhaust !== undefined && exhaust < NOW_S + 84 * 3600, "before the reset");
 });
 
-test("the series follows the account's id, so removing the first of two accounts leaves the second with its own samples only", () => {
-  const withRemoval = clocked();
-  const alone = clocked();
-  // "a" is listed first and rises slowly; "b" rises steadily from 30%. From minute 35 "a" is gone and "b" is the first account.
-  const readings = (ms: number, accounts: { id: string; used: number }[]): ForecastProviders => [{
-    provider: "claude",
-    accounts: accounts.map(({ id, used }) => ({ id, at: ms, windows: [{ kind: "five_hour", used_percent: used, reset_at: FAR_RESET }] })),
-  }];
-  let afterRemoval: ForecastProviders = [];
-  let bAlone: ForecastProviders = [];
-  for (let m = 0; m <= 60; m += 5) {
-    const ms = BASE + m * MIN;
-    const a = { id: "a", used: 5 + 0.2 * m };
-    const b = { id: "b", used: 30 + 0.5 * m };
-    withRemoval.at(ms);
-    alone.at(ms);
-    afterRemoval = readings(ms, m <= 30 ? [a, b] : [b]);
-    forecastLimits(withRemoval.forecaster, afterRemoval);
-    bAlone = readings(ms, [b]);
-    forecastLimits(alone.forecaster, bAlone);
-  }
-  const exhaustOf = (providers: ForecastProviders) => providers[0]!.accounts[0]!.windows[0]!.exhaust_at;
-  assert.notEqual(exhaustOf(bAlone), undefined);
-  assert.equal(exhaustOf(afterRemoval), exhaustOf(bAlone));
+test("a forecast is judged at the reading's own time, not the clock's", () => {
+  // The same window read two hours ago: 70 h elapsed, so 80% runs out 17.5 h after that reading.
+  const older = NOW - 2 * HOUR;
+  const windows: ForecastWindow[] = [win(80, WEEK_MINUTES, 96 * HOUR)];
+  const accounts: ForecastAccount[] = [{ at: older, windows }];
+  forecastLimits([{ accounts }]);
+  assert.equal(windows[0]!.exhaust_at, Math.round(older / 1000 + 17.5 * 3600));
+});
+
+test("forecastLimits sets exhaust_at only on the windows with a forecast, and no others have the field", () => {
+  const fast = win(60, FIVE_HOUR_MINUTES, 4 * HOUR);
+  const weekly = win(54, WEEK_MINUTES, 57.6 * HOUR);
+  // A window that carries a stale exhaust_at from an earlier reading loses it: nothing is forecast now.
+  const stale: ForecastWindow = { ...win(2, WEEK_MINUTES, 57.6 * HOUR), exhaust_at: NOW_S + 60 };
+  const providers = [{ accounts: [{ at: NOW, windows: [fast, weekly, stale] }] }];
+  forecastLimits(providers);
+  const [a, b, c] = providers[0]!.accounts[0]!.windows;
+  assert.equal(a!.exhaust_at, Math.round(NOW_S + 40 * 60));
+  assert.equal("exhaust_at" in b!, false, "the weekly at 54% has no field at all");
+  assert.equal("exhaust_at" in c!, false, "a stale field is removed");
+});
+
+test("the projection: a weekly window at 54% after 110.4 h of 168 is projected at 82% for its reset", () => {
+  // 54% over 110.4 h is 0.489 points an hour; 168 h at that pace is 82.2%.
+  assert.equal(paceProjectedPercent(win(54, WEEK_MINUTES, 57.6 * HOUR), NOW), 82);
+});
+
+test("the projection: a five-hour window at 60% after one hour is projected at 300%, with an exhaust moment", () => {
+  const window = win(60, FIVE_HOUR_MINUTES, 4 * HOUR);
+  assert.equal(paceProjectedPercent(window, NOW), 300);
+  assert.equal(paceExhaustAt(window, NOW), Math.round(NOW_S + 40 * 60));
+});
+
+test("the projection is too early at 29 min of a five-hour window, and has one at 31 min", () => {
+  assert.equal(paceProjectedPercent(win(60, FIVE_HOUR_MINUTES, (300 - 29) * MIN), NOW), undefined, "29 min into the window");
+  // 60% over 31 min of 300 is 60/1860 a second, so 18000 s at that pace is 580.6%.
+  assert.equal(paceProjectedPercent(win(60, FIVE_HOUR_MINUTES, (300 - 31) * MIN), NOW), 581, "31 min into the window");
+});
+
+test("the projection is absent at 0% and without reset_at or window_minutes", () => {
+  assert.equal(paceProjectedPercent(win(0, WEEK_MINUTES, 57.6 * HOUR), NOW), undefined);
+  assert.equal(paceProjectedPercent({ used_percent: 60, window_minutes: FIVE_HOUR_MINUTES }, NOW), undefined);
+  assert.equal(paceProjectedPercent({ used_percent: 60, reset_at: NOW_S + 4 * 3600 }, NOW), undefined);
+});
+
+test("the projection is absent once the reset has passed", () => {
+  assert.equal(paceProjectedPercent(win(80, WEEK_MINUTES, 0), NOW), undefined, "reset at the reading");
+});
+
+test("the projection may exceed 100, and the exhaust moment is set with it", () => {
+  // 80% after 72 h of 168: 186.7% at the reset, and 100% in 18 h.
+  const window = win(80, WEEK_MINUTES, 96 * HOUR);
+  assert.equal(paceProjectedPercent(window, NOW), 187);
+  assert.equal(paceExhaustAt(window, NOW), Math.round(NOW_S + 18 * 3600));
+});
+
+test("forecastLimits sets projected_percent with exhaust_at, and removes a stale one", () => {
+  const fast = win(60, FIVE_HOUR_MINUTES, 4 * HOUR);
+  const weekly = win(54, WEEK_MINUTES, 57.6 * HOUR);
+  // A window that carries a stale projection from an earlier reading loses it, and gets the one now due.
+  const stale: ForecastWindow = { ...win(2, WEEK_MINUTES, 57.6 * HOUR), projected_percent: 999 };
+  const early: ForecastWindow = { ...win(60, FIVE_HOUR_MINUTES, 4.9 * HOUR), exhaust_at: NOW_S + 60, projected_percent: 999 };
+  const providers = [{ accounts: [{ at: NOW, windows: [fast, weekly, stale, early] }] }];
+  forecastLimits(providers);
+  const [a, b, c, d] = providers[0]!.accounts[0]!.windows;
+  assert.equal(a!.projected_percent, 300);
+  assert.equal(b!.projected_percent, 82);
+  assert.equal(c!.projected_percent, 3, "2% over 110.4 h of a week");
+  assert.equal("exhaust_at" in c!, false, "a stale exhaust_at is removed");
+  assert.equal("projected_percent" in d!, false, "too early for a pace: no field at all");
+  assert.equal("exhaust_at" in d!, false, "too early for a pace: no field at all");
 });

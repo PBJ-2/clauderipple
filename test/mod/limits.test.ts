@@ -10,7 +10,7 @@ registerHooks({ resolve(specifier, context, next) {
 const { claudeScopedFrom, CLAUDE_USAGE_STALE_MS, COST_MODELS, costFromSummary, localMidnight, routerLimitItems } = await import('../../packages/mod/hooks/session.ts')
 const { t } = await import('../../packages/mod/hooks/i18n.ts')
 const { chatgptProviders, gptLimitsFrom } = await import('../../packages/mod/hooks/modes.ts')
-const { providerDisplayName, costFigure, costText, exhaustLeft, exhaustSentence, exhaustShort, exhaustShortWidest, limitItemTone, bandLimitGroups, limitAccountLabel, limitGroupAccount, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTip, narrowLimitGroups, resetMoment, resetShort, timeLeft } = await import('../../packages/mod/hooks/ui/view.ts')
+const { providerDisplayName, costFigure, costText, exhaustLeft, exhaustSentence, exhaustShort, exhaustShortWidest, limitItemTone, bandLimitGroups, limitAccountLabel, limitGroupAccount, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTip, narrowLimitGroups, paceLabel, paceLevel, resetMoment, resetShort, timeLeft } = await import('../../packages/mod/hooks/ui/view.ts')
 const { barArt } = await import('../../packages/mod/hooks/ui/art.ts')
 
 const NOW = Date.parse('2026-10-15T00:00:00Z')
@@ -260,7 +260,7 @@ test('the groups name and order every provider; Claude first, accounts numbered 
   assert.deepEqual(groups.map(g => limitGroupName(g, (accounts.get(g.provider) ?? 1) > 1)), ['Claude', 'Go', 'GPT 1', 'GPT 2', 'Gemini'])
 })
 
-test('narrowing drops scoped windows, then secondary accounts, then trailing groups', () => {
+test('narrowing drops later providers\' scoped windows, then secondary accounts, then whole groups, and Claude\'s Fable last', () => {
   const group = (provider: string, account: number, kinds: string[]) => ({
     key: provider + '#' + account, provider, account,
     items: kinds.map((kind, i) => ({ provider, account, kind, label: kind === 'scoped' ? 'S' : '', percent: i })),
@@ -269,15 +269,16 @@ test('narrowing drops scoped windows, then secondary accounts, then trailing gro
   const measure = (gs: readonly { items: unknown[] }[]) => gs.reduce((n, g) => n + g.items.length, 0) + gs.length
   // Everything fits: unchanged.
   assert.deepEqual(narrowLimitGroups(base, 100, measure)?.map(g => g.key), ['anthropic#0', 'chatgpt#0', 'google-gemini#0', 'opencode-go#0'])
-  // The scoped windows go first, then a trailing group.
+  // The trailing group goes; Gemini's scoped window goes first and returns only if it fits (here it does not, see the refill test).
   const narrowed = narrowLimitGroups(base, 11, measure)
   assert.deepEqual(narrowed?.map(g => g.key), ['anthropic#0', 'chatgpt#0', 'google-gemini#0'])
-  assert.deepEqual(narrowed?.[0]?.items.map(i => i.kind), ['five_hour', 'seven_day'])
+  assert.deepEqual(narrowed?.[0]?.items.map(i => i.kind), ['five_hour', 'seven_day', 'scoped'])
   // Scoped windows go one group at a time from the back: Gemini's before Claude's Fable.
   const one = narrowLimitGroups(base, 13, measure)
   assert.deepEqual(one?.map(g => g.items.some(i => i.kind === 'scoped')), [true, false, false, false])
-  // Down to Claude alone; and null when not even that fits.
+  // Down to Claude alone, Fable still there; and null when not even Claude's main windows fit.
   assert.deepEqual(narrowLimitGroups(base, 4, measure)?.map(g => g.key), ['anthropic#0'])
+  assert.deepEqual(narrowLimitGroups(base, 4, measure)?.[0]?.items.map(i => i.kind), ['five_hour', 'seven_day', 'scoped'])
   assert.equal(narrowLimitGroups(base, 1, measure), null)
   // Claude's group stays to the last even as a stored account (account 1) the row shows for being in use.
   const stored = [group('anthropic', 1, ['five_hour']), group('chatgpt', 0, ['seven_day']), group('chatgpt', 1, ['seven_day'])]
@@ -287,6 +288,90 @@ test('narrowing drops scoped windows, then secondary accounts, then trailing gro
   // use (account 1) outlasts MiniMax after it (2026-11-09).
   const band = [group('anthropic', 0, ['seven_day']), group('google-gemini', 1, ['five_hour', 'seven_day']), group('minimax', 0, ['five_hour', 'seven_day'])]
   assert.deepEqual(narrowLimitGroups(band, 6, measure)?.map(g => g.key), ['anthropic#0', 'google-gemini#1'])
+})
+
+test('narrowing keeps Claude\'s Fable until every later provider is gone (the owner, 2026-11-10)', () => {
+  const group = (provider: string, account: number, kinds: string[]) => ({
+    key: provider + '#' + account, provider, account,
+    items: kinds.map((kind, i) => ({ provider, account, kind, label: kind === 'scoped' ? 'S' : '', percent: i })),
+  })
+  const measure = (gs: readonly { items: unknown[] }[]) => gs.reduce((n, g) => n + g.items.length, 0) + gs.length
+  // Claude [weekly, Fable], GPT, Gemini [main, 3P], MiniMax: 8 windows in 4 groups, 12 cells.
+  const all = [group('anthropic', 0, ['seven_day', 'scoped']), group('chatgpt', 0, ['seven_day']), group('google-gemini', 0, ['five_hour', 'seven_day', 'scoped']), group('minimax', 0, ['five_hour', 'seven_day'])]
+  assert.deepEqual(narrowLimitGroups(all, 12, measure)?.map(g => g.items.length), [2, 1, 3, 2])
+  // Gemini's 3P goes first.
+  const no3p = narrowLimitGroups(all, 11, measure)
+  assert.deepEqual(no3p?.map(g => g.key), ['anthropic#0', 'chatgpt#0', 'google-gemini#0', 'minimax#0'])
+  assert.deepEqual(no3p?.map(g => g.items.map(i => i.kind)), [['seven_day', 'scoped'], ['seven_day'], ['five_hour', 'seven_day'], ['five_hour', 'seven_day']])
+  // Then MiniMax, the last group, then Gemini, then GPT; Claude's Fable outlasts all of them.
+  assert.deepEqual(narrowLimitGroups(all, 10, measure)?.map(g => g.key), ['anthropic#0', 'chatgpt#0', 'google-gemini#0'])
+  assert.deepEqual(narrowLimitGroups(all, 7, measure)?.map(g => g.key), ['anthropic#0', 'chatgpt#0'])
+  assert.deepEqual(narrowLimitGroups(all, 4, measure)?.map(g => g.key), ['anthropic#0'])
+  assert.deepEqual(narrowLimitGroups(all, 4, measure)?.[0]?.items.map(i => i.kind), ['seven_day', 'scoped'])
+  // A budget that fits only Claude's weekly: Fable goes, weekly stays.
+  assert.deepEqual(narrowLimitGroups(all, 2, measure)?.map(g => [g.key, g.items.map(i => i.kind)]), [['anthropic#0', ['seven_day']]])
+  // Null when not even Claude's weekly fits.
+  assert.equal(narrowLimitGroups(all, 1, measure), null)
+})
+
+test('the first group keeps its place as last whether or not it is Claude\'s', () => {
+  const group = (provider: string, kinds: string[]) => ({
+    key: provider + '#0', provider, account: 0,
+    items: kinds.map((kind, i) => ({ provider, account: 0, kind, label: kind === 'scoped' ? 'S' : '', percent: i })),
+  })
+  const measure = (gs: readonly { items: unknown[] }[]) => gs.reduce((n, g) => n + g.items.length, 0) + gs.length
+  // No Claude windows: GPT is index 0, so its scoped window goes only after Gemini's whole group.
+  const gpt = [group('chatgpt', ['seven_day', 'scoped']), group('google-gemini', ['seven_day', 'scoped'])]
+  assert.deepEqual(narrowLimitGroups(gpt, 5, measure)?.map(g => [g.key, g.items.some(i => i.kind === 'scoped')]), [['chatgpt#0', true], ['google-gemini#0', false]])
+  assert.deepEqual(narrowLimitGroups(gpt, 4, measure)?.map(g => [g.key, g.items.some(i => i.kind === 'scoped')]), [['chatgpt#0', true]])
+  assert.deepEqual(narrowLimitGroups(gpt, 2, measure)?.map(g => [g.key, g.items.map(i => i.kind)]), [['chatgpt#0', ['seven_day']]])
+})
+
+test('Claude\'s Fable is dropped only when Claude\'s own group is all that is left and it does not fit with Fable', () => {
+  const group = (provider: string, account: number, kinds: string[]) => ({
+    key: provider + '#' + account, provider, account,
+    items: kinds.map((kind, i) => ({ provider, account, kind, label: kind === 'scoped' ? 'S' : '', percent: i })),
+  })
+  const measure = (gs: readonly { items: unknown[] }[]) => gs.reduce((n, g) => n + g.items.length, 0) + gs.length
+  // The five providers of the owner's band (2026-11-10), in the router's order.
+  const all = [group('anthropic', 0, ['seven_day', 'scoped']), group('chatgpt', 0, ['seven_day']), group('google-gemini', 0, ['five_hour', 'seven_day', 'scoped']), group('opencode-go', 0, ['five_hour', 'seven_day', 'window']), group('minimax', 0, ['five_hour', 'seven_day'])]
+  for (let budget = 1; budget <= 30; budget++) {
+    const out = narrowLimitGroups(all, budget, measure)
+    if (!out || out[0]?.items.some(i => i.kind === 'scoped')) continue
+    // Fable is gone: nothing but Claude's group may be left, and Claude with Fable must not fit.
+    assert.equal(out.length, 1, 'budget ' + budget)
+    assert.ok(measure([all[0]!]) > budget, 'budget ' + budget)
+  }
+})
+
+test('refill: a dropped scoped window comes back when the row still fits, and stays out when it does not (2026-11-10)', () => {
+  const group = (provider: string, account: number, kinds: string[]) => ({
+    key: provider + '#' + account, provider, account,
+    items: kinds.map((kind, i) => ({ provider, account, kind, label: kind === 'scoped' ? 'S' : '', percent: i })),
+  })
+  const measure = (gs: readonly { items: unknown[] }[]) => gs.reduce((n, g) => n + g.items.length, 0) + gs.length
+  // The owner's five providers: Gemini's scoped 3P window (Argon) is the one that drops first after Claude's.
+  const all = [group('anthropic', 0, ['seven_day', 'scoped']), group('chatgpt', 0, ['seven_day']), group('google-gemini', 0, ['five_hour', 'seven_day', 'scoped']), group('opencode-go', 0, ['five_hour', 'seven_day', 'window']), group('minimax', 0, ['five_hour', 'seven_day'])]
+  // 13 cells: MiniMax goes, and then Gemini's 3P fits again beside the rest.
+  const roomy = narrowLimitGroups(all, 13, measure)
+  assert.deepEqual(roomy?.map(g => g.key), ['anthropic#0', 'chatgpt#0', 'google-gemini#0', 'opencode-go#0'])
+  assert.deepEqual(roomy?.[2]?.items.map(i => i.kind), ['five_hour', 'seven_day', 'scoped'])
+  // 12 cells: the same window needs 13, so it stays out and Gemini keeps its main windows.
+  const tight = narrowLimitGroups(all, 12, measure)
+  assert.deepEqual(tight?.map(g => g.key), ['anthropic#0', 'chatgpt#0', 'google-gemini#0', 'opencode-go#0'])
+  assert.deepEqual(tight?.[2]?.items.map(i => i.kind), ['five_hour', 'seven_day'])
+  // 9 cells: Go is gone as a group and Gemini's 3P is back; at 8 it is not.
+  assert.deepEqual(narrowLimitGroups(all, 9, measure)?.[2]?.items.map(i => i.kind), ['five_hour', 'seven_day', 'scoped'])
+  assert.deepEqual(narrowLimitGroups(all, 8, measure)?.map(g => g.key), ['anthropic#0', 'chatgpt#0', 'google-gemini#0'])
+  assert.deepEqual(narrowLimitGroups(all, 8, measure)?.[2]?.items.map(i => i.kind), ['five_hour', 'seven_day'])
+  // Whatever the budget, the row fits it; a dropped group never comes back (MiniMax below 15, Go below 12).
+  for (let budget = 1; budget <= 30; budget++) {
+    const out = narrowLimitGroups(all, budget, measure)
+    if (!out) continue
+    assert.ok(measure(out) <= budget, 'budget ' + budget)
+    if (budget <= 14) assert.ok(!out.some(g => g.key === 'minimax#0'), 'minimax at ' + budget)
+    if (budget <= 11) assert.ok(!out.some(g => g.key === 'opencode-go#0'), 'go at ' + budget)
+  }
 })
 
 /** Several Claude accounts as `GET /api/limits` lists them (2026-11-04), and two GPT accounts. */
@@ -391,6 +476,77 @@ test('exhaust_at is read in seconds or ms into exhaustsAt; a stale, late or unre
   // A window whose reset has passed restarts at 0%: its old forecast goes with it.
   const passed = routerLimitItems(forecastBody([win({ reset_at: at - 60, exhaust_at: at + 600 })]), NOW)
   assert.deepEqual(passed.map(i => [i.percent, i.exhaustsAt]), [[0, undefined]])
+})
+
+// 2026-11-10: the router projects a window's share at its reset at its average pace (`projected_percent`).
+test('projected_percent is read into projectedPercent; unreadable or passed-reset windows have none', () => {
+  const at = NOW / 1000
+  const reset = at + 5 * 3600
+  const win = (extra: Record<string, unknown>) => ({ kind: 'seven_day', used_percent: 54, window_minutes: 10080, reset_at: reset, ...extra })
+  const items = routerLimitItems(forecastBody([
+    win({ projected_percent: 82 }),
+    win({ projected_percent: 'lots' }),
+    win({ projected_percent: Number.NaN }),
+    win({ projected_percent: Number.POSITIVE_INFINITY }),
+    win({}),
+  ]), NOW)
+  assert.deepEqual(items.map(i => i.projectedPercent), [82, undefined, undefined, undefined, undefined])
+  assert.equal('projectedPercent' in items[1]!, false, 'a non-number is no projection at all')
+  // A window whose reset has passed restarts at 0%: its old projection goes with it.
+  const passed = routerLimitItems(forecastBody([win({ reset_at: at - 60, projected_percent: 82 })]), NOW)
+  assert.deepEqual(passed.map(i => [i.percent, i.projectedPercent]), [[0, undefined]])
+  assert.equal('projectedPercent' in passed[0]!, false)
+})
+
+test('the pace label: an exhaust forecast wins; under 95 comfortable, 95 to 100 tight, otherwise none', () => {
+  const base = { provider: 'claude', account: 0, kind: 'seven_day' as const, label: '', percent: 54, resetsAt: new Date(NOW + 3 * 86_400_000).toISOString() }
+  const at = (projectedPercent?: number, exhaustMinutes?: number) => ({
+    ...base,
+    ...(projectedPercent !== undefined ? { projectedPercent } : {}),
+    ...(exhaustMinutes !== undefined ? { exhaustsAt: NOW + exhaustMinutes * 60_000 } : {}),
+  })
+  // The exhaust sentence keeps its own line; the pace label is not said beside it.
+  assert.equal(paceLevel(at(190, 130), NOW), null)
+  assert.equal(paceLabel(at(190, 130), NOW, 'en'), '')
+  assert.equal(exhaustSentence(at(190, 130), NOW, 'en'), 'At this pace it runs out in 2h 10m')
+  // Under 95 projected: comfortable.
+  assert.equal(paceLevel(at(54), NOW), 'comfortable')
+  assert.equal(paceLabel(at(54), NOW, 'en'), 'projected 54%')
+  assert.equal(paceLevel(at(94), NOW), 'comfortable')
+  assert.equal(paceLabel(at(94.4), NOW, 'en'), 'projected 94%')
+  // 95 to 100: tight, the figure rounded.
+  assert.equal(paceLevel(at(95), NOW), 'tight')
+  assert.equal(paceLabel(at(95.4), NOW, 'en'), 'projected 95%')
+  assert.equal(paceLabel(at(99.4), NOW, 'en'), 'projected 99%')
+  // Rounded to 100 without an exhaust moment (it lands right at the reset): still tight.
+  assert.equal(paceLevel(at(100), NOW), 'tight')
+  assert.equal(paceLabel(at(100), NOW, 'en'), 'projected 100%')
+  // Past 100 with no exhaust moment (an old reading) says nothing; no projection says nothing.
+  assert.equal(paceLevel(at(101), NOW), null)
+  assert.equal(paceLabel(at(101), NOW, 'en'), '')
+  assert.equal(paceLabel(at(187), NOW, 'en'), '')
+  assert.equal(paceLabel(at(), NOW, 'en'), '')
+  // A passed exhaust moment is no exhaust forecast, so the pace speaks again.
+  assert.equal(paceLabel(at(54, -1), NOW, 'en'), 'projected 54%')
+})
+
+test('a pace label goes quiet once its window has reset or when no reset is given, since no time left sits beside it', () => {
+  const item = (resetMinutes: number) => ({ provider: 'claude', account: 0, kind: 'five_hour' as const, label: '', percent: 54, projectedPercent: 54, resetsAt: new Date(NOW + resetMinutes * 60_000).toISOString() })
+  assert.equal(paceLevel(item(1), NOW), 'comfortable')
+  assert.equal(paceLabel(item(1), NOW, 'en'), 'projected 54%')
+  assert.equal(paceLevel(item(0), NOW), null)
+  assert.equal(paceLabel(item(-1), NOW, 'en'), '')
+  const noReset = { provider: 'claude', account: 0, kind: 'five_hour' as const, label: '', percent: 54, projectedPercent: 54 }
+  assert.equal(paceLevel(noReset, NOW), null)
+  assert.equal(paceLabel(noReset, NOW, 'en'), '')
+})
+
+test('the pace label reads in Korean as the owner set it (2026-11-10)', () => {
+  const item = (projectedPercent: number) => ({ provider: 'claude', account: 0, kind: 'seven_day' as const, label: '', percent: 56, projectedPercent, resetsAt: new Date(NOW + 2 * 86_400_000 + 9 * 3_600_000).toISOString() })
+  assert.equal(paceLabel(item(84), NOW, 'ko'), '예상 사용률 84%')
+  assert.equal(paceLabel(item(97), NOW, 'ko'), '예상 사용률 97%')
+  // The line the pane draws after the reset: the time left, then the label after " · ".
+  assert.equal(t('ko', 'limits.left', { time: timeLeft(2 * 86_400_000 + 9 * 3_600_000, 'ko') }) + ' · ' + paceLabel(item(84), NOW, 'ko'), '2일 9시간 남음 · 예상 사용률 84%')
 })
 
 test('a forecast makes the tone at least amber, red within the hour; no forecast keeps the share\'s tone', () => {
@@ -534,6 +690,7 @@ test('the cost tile names a provider as the limits pane does, and keeps the id w
 test('every language says the forecast and the cost, with the placeholders the code fills', () => {
   for (const lang of ['en', 'ko', 'zh', 'ja', 'es', 'pt'] as const) {
     assert.match(t(lang, 'limits.exhaust', { time: 'T' }), /T/, lang)
+    assert.match(t(lang, 'limits.paceProjected', { percent: 'P' }), /P/, lang)
     for (const key of ['cost.title', 'cost.today', 'cost.week', 'cost.providers', 'cost.models', 'cost.note', 'cost.unavailable']) assert.notEqual(t(lang, key), key, lang + ' ' + key)
     assert.match(t(lang, 'cost.unpriced', { count: 7 }), /7/, lang)
     assert.match(t(lang, 'cost.estimated', { count: 7 }), /7/, lang)

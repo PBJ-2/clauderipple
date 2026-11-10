@@ -2986,8 +2986,8 @@ function claudePreferButton(name, id, disabled) {
 }
 
 /**
- * The same pool controls for stored logins and API keys; borrowed logins omit these.
- * @param {{preferred?: boolean, paused?: boolean, state?: string, cooldownSeconds?: number}} account
+ * The same pool controls for stored logins and API keys; the external Claude login only pauses.
+ * @param {{preferred?: boolean, paused?: boolean, state?: string, cooldownSeconds?: number, external?: boolean}} account
  * @param {(change: {preferred?: boolean, paused?: boolean, clearCooldown?: true}) => Promise<unknown>} patch
  */
 function accountPoolActions(account, patch) {
@@ -3002,9 +3002,9 @@ function accountPoolActions(account, patch) {
     });
     actions.push(button);
   };
-  add(t(account.preferred ? "providers.preferClear" : "providers.preferAction"), { preferred: !account.preferred });
+  if (!account.external) add(t(account.preferred ? "providers.preferClear" : "providers.preferAction"), { preferred: !account.preferred });
   add(t(account.paused ? "providers.chatgptResume" : "providers.chatgptPause"), { paused: !account.paused });
-  if (account.state === "cooling" || account.cooldownSeconds > 0) add(t("providers.chatgptClearCooldown"), { clearCooldown: true });
+  if (!account.external && (account.state === "cooling" || account.cooldownSeconds > 0)) add(t("providers.chatgptClearCooldown"), { clearCooldown: true });
   return actions;
 }
 
@@ -3059,7 +3059,11 @@ function renderClaudeAccountRows(target, data, name, generation) {
       } catch (error) { removeOld.disabled = false; toast(t("common.actionFailed"), true, error.message); }
     });
   }
-  const currentActions = [choosable && leader !== "current" ? claudePreferButton(name, null, false) : null, removeOld].filter(Boolean);
+  const currentActions = [data.current && choosable && leader !== "current" && !data.current.paused ? claudePreferButton(name, null, false) : null,
+    ...(data.current ? accountPoolActions(data.current, async (change) => {
+      await api("/api/claude-accounts/current", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(change) });
+      await refreshClaudeAccountPanel(name);
+    }) : []), removeOld].filter(Boolean);
   const currentRow = data.current ? el("article", { class: "cell account-card current" }, [
     el("div", { class: "cell-text account-card-copy" }, [
       el("strong", { text: t("providers.anthropicCurrentLogin") }), data.current.email ? el("span", { class: "small", text: data.current.email }) : null,
@@ -3067,7 +3071,7 @@ function renderClaudeAccountRows(target, data, name, generation) {
       duplicates.length ? hint(t("providers.anthropicOldSignIn")) : null,
       currentActions.length ? el("div", { class: "account-card-actions" }, currentActions) : null,
     ]),
-    el("div", { class: "account-card-badges" }, accountPoolBadges({ ...data.current, preferred: choosable && leader === "current" })),
+    el("div", { class: "account-card-badges" }, accountPoolBadges({ ...data.current, preferred: choosable && leader === "current" && !data.current.paused })),
   ]) : null;
   if (currentRow && preferredIndex < 0) rows.push(currentRow);
   for (const account of stored) {

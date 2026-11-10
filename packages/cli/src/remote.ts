@@ -8,6 +8,7 @@
 import fs from "node:fs";
 import { defaultAgentDir } from "../../router/src/agents.ts";
 import { ConfigStore, adminPort, configPath, homeDir } from "../../router/src/config.ts";
+import { writeJsonAtomic } from "../../router/src/locked-file.ts";
 import {
   DEFAULT_REMOTE_PORT, REMOTE_DIR, SETTINGS_BACKUP_SUFFIX, SshConnectError, assetLines, hostProblem, inspectRemote, planAgents, portProblem,
   readLocalAssets, remoteCaPath, remoteProxyUrl, runRemoteScript, script, settingsGuardLine, settingsWriteLines, spawnSsh,
@@ -113,9 +114,7 @@ function updateHosts(configFile: string, mutate: (hosts: HostEntry[]) => HostEnt
   const hosts = mutate(Array.isArray(remote.hosts) ? (remote.hosts as HostEntry[]) : []);
   if (hosts.length > 0) raw.remote = { ...remote, hosts };
   else delete raw.remote;
-  const tmp = `${configFile}.tmp-${process.pid}-${Date.now()}`;
-  fs.writeFileSync(tmp, JSON.stringify(raw, null, 2) + "\n");
-  fs.renameSync(tmp, configFile);
+  writeJsonAtomic(configFile, raw);
 }
 
 // ---- the router ----------------------------------------------------------------------------
