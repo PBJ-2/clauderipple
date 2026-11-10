@@ -1261,7 +1261,12 @@ is neither unpriced nor estimated. A `count_tokens` call and a record without to
 too, and are not unpriced. A request with tokens and no price is `unpricedRequests`. Hourly lines
 written before this carry no `cost`: they are priced at read time from their token totals at the
 base tier, and every request in such an hour counts as estimated (an hour does not keep
-per-request prompt sizes, so the tier is a guess). An image hour costs nothing. The AA dataset is
+per-request prompt sizes, so the tier is a guess). An image hour costs nothing. A stored hour whose
+requests were all unpriced when it was flushed (no `cost`, no estimate, `unpricedRequests` above zero)
+is priced the same way at read time once its model has a price, so an hour flushed before a price
+existed does not stay unpriced; its requests count as estimated. A stored hour that mixes priced and
+unpriced requests of one model (a price that arrived mid-hour) is read as stored, because its tokens
+cannot be split between the two. Stored lines are never rewritten on disk. The AA dataset is
 loaded from the disk cache at startup (`loadAaPricesFrom`), and every dataset the score catalog
 loads or fetches is pushed to the price registry (`onDataset`), so a refreshed price reaches later
 costs without a restart.
