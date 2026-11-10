@@ -343,6 +343,49 @@ async function loadCatalogs() {
 // ---- Status -------------------------------------------------------------------------
 
 let limitsSnapshot = null;
+// Set when a read fails after a snapshot exists: its figures stay on screen, marked stale.
+let limitsSnapshotStale = false;
+// The read in flight, so a poll never starts another behind a slow provider.
+let limitsRead = null;
+// The mod's EXHAUST_URGENT_MS: an exhaust forecast this close is red.
+const LIMITS_EXHAUST_URGENT_MS = 60 * 60_000;
+
+/** The time left as the mod's limits pane writes it ("2h 10m", "2d 5h", "45m"), in the same units. */
+function limitsTimeLeft(ms) {
+  const minutes = Math.max(1, Math.ceil(ms / 60_000));
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor((minutes % 1440) / 60);
+  const rest = minutes % 60;
+  if (days > 0) return hours > 0 ? t("units.dayHour", { d: days, h: hours }) : t("units.days", { n: days });
+  if (hours > 0) return rest > 0 ? t("units.hourMin", { h: hours, m: rest }) : t("units.hours", { n: hours });
+  return t("units.minutes", { n: rest });
+}
+
+/** Milliseconds until a window runs out at its pace, or null: no forecast, or that moment has passed. */
+function limitsExhaustLeft(window, now) {
+  if (!window || !Number.isFinite(window.exhaustAt) || window.exhaustAt <= now) return null;
+  return window.exhaustAt - now;
+}
+
+/**
+ * The mod's paceLevel: a window with no exhaust forecast says where its pace takes it at the reset,
+ * comfortable under 95% and tight from 95 to 100. Nothing when an exhaust forecast applies, the reset is
+ * missing or has passed, there is no projection, or the projection is above 100.
+ */
+function limitsPaceLevel(window, now) {
+  if (!window || limitsExhaustLeft(window, now) !== null) return null;
+  if (!Number.isFinite(window.resetAt) || window.resetAt <= now) return null;
+  if (!Number.isFinite(window.projectedPercent)) return null;
+  if (window.projectedPercent < 95) return "comfortable";
+  return window.projectedPercent <= 100 ? "tight" : null;
+}
+
+/** The mod's limitItemTone for an exhaust note: the share's tone, at least amber, red within the hour. */
+function limitsNoteTone(window, exhaustLeft) {
+  const share = window.usedPercent >= 95 ? "bad" : window.usedPercent >= 80 ? "warn" : "ink";
+  if (exhaustLeft === null || share === "bad") return share;
+  return exhaustLeft <= LIMITS_EXHAUST_URGENT_MS ? "bad" : "warn";
+}
 
 function limitsReset(window, weekly, now) {
   if (!window || !Number.isFinite(window.resetAt)) return t("limits.resetUnknown");
@@ -352,82 +395,132 @@ function limitsReset(window, weekly, now) {
   return t("limits.resetsIn", { hours: Math.floor(minutes / 60), minutes: minutes % 60 });
 }
 
-function limitsWindowRow(label, window, weekly, now) {
+/**
+ * One window's row. The reset comes first; with no exhaust forecast the pace follows it as a label, muted
+ * when comfortable and amber when tight, as the mod's pane puts it. An exhaust forecast is a warning line
+ * under the row instead. A window whose reset has passed keeps its last share, so it is marked stale.
+ * `accountName` puts whose gauge it is into the accessible name.
+ */
+function limitsWindowRow(label, window, weekly, now, accountName = "") {
   const known = window && Number.isFinite(window.usedPercent);
   const percent = known ? `${Math.round(window.usedPercent * 10) / 10}%` : t("limits.unknown");
   const reset = limitsReset(window, weekly, now);
+  const name = accountName ? `${accountName} · ${label}` : label;
+  const exhaustLeft = known ? limitsExhaustLeft(window, now) : null;
+  const note = exhaustLeft === null ? "" : t("limits.exhaust", { time: limitsTimeLeft(exhaustLeft) });
+  const level = note ? null : limitsPaceLevel(window, now);
+  const pace = level ? t("limits.paceProjected", { percent: Math.round(window.projectedPercent) }) : "";
+  const passed = Boolean(known) && Number.isFinite(window.resetAt) && window.resetAt <= now;
   const track = el("div", {
     class: `limits-track${known ? "" : " unknown"}`, role: "progressbar", tabindex: "0",
-    "aria-label": label, "aria-valuemin": "0", "aria-valuemax": "100",
+    "aria-label": name, "aria-valuemin": "0", "aria-valuemax": "100",
     ...(known ? { "aria-valuenow": Math.max(0, Math.min(100, window.usedPercent)) } : {}),
-    "aria-valuetext": `${percent} · ${reset}`, title: `${label} · ${percent} · ${reset}`,
+    "aria-valuetext": [percent, reset, pace, note].filter(Boolean).join(" · "), title: [name, percent, reset].join(" · "),
   });
   if (known) {
     const fill = el("span", { class: "limits-fill", "aria-hidden": "true" });
     fill.style.width = `${Math.max(0, Math.min(100, window.usedPercent))}%`;
     track.appendChild(fill);
   }
+  const parts = [el("span", { text: reset })];
+  if (passed) parts.push(el("span", { class: "warn-text", text: t("limits.stale") }));
+  if (pace) parts.push(level === "tight" ? el("span", { class: "warn-text", text: pace }) : el("span", { text: pace }));
+  const foot = el("div", { class: "limits-window-foot" }, parts.flatMap((part, index) => (index ? [el("span", { text: " · " }), part] : [part])));
+  const tone = note ? limitsNoteTone(window, exhaustLeft) : "ink";
   return el("div", { class: "limits-window" }, [
     el("div", { class: "limits-window-head" }, [el("span", { text: label }), el("span", { text: percent })]),
     track,
-    el("div", { class: "limits-window-foot", text: reset }),
+    foot,
+    note ? el("div", { class: tone === "ink" ? "limits-window-note" : `limits-window-note ${tone}-text`, text: note }) : null,
   ]);
 }
 
-/** The API's reset is in epoch seconds; the date helpers read milliseconds. */
+/** The API's reset and exhaust moments are in epoch seconds; the date helpers read milliseconds. */
 function limitsUsageWindow(account, kind) {
   const window = (account.windows || []).find((candidate) => candidate.kind === kind);
-  return window && { usedPercent: window.used_percent, ...(Number.isFinite(window.reset_at) ? { resetAt: window.reset_at * 1000 } : {}) };
+  return window && {
+    usedPercent: window.used_percent,
+    ...(Number.isFinite(window.reset_at) ? { resetAt: window.reset_at * 1000 } : {}),
+    ...(Number.isFinite(window.exhaust_at) ? { exhaustAt: window.exhaust_at * 1000 } : {}),
+    ...(Number.isFinite(window.projected_percent) ? { projectedPercent: window.projected_percent } : {}),
+  };
 }
 
 function limitsAccountName(entry, account) {
-  return account.label || account.email || (entry.type === "anthropic" && account.account === 0 ? t("providers.anthropicCurrentLogin") : `${entry.title} ${account.account + 1}`);
+  if (account.label || account.email) return account.label || account.email;
+  if (entry.type === "anthropic" && account.account === 0) return t("providers.anthropicCurrentLogin");
+  return account.account === null || account.account === undefined ? entry.title : `${entry.title} ${account.account + 1}`;
 }
 
 function limitsAccountRow(entry, account, now) {
   const badges = [];
   if (account.inUse) badges.push(badge("first", t("limits.active")));
   if (account.paused || (account.state && account.state !== "ready")) badges.push(chatgptStateBadge(account));
-  if (entry.stale || (account.quota && account.quota.stale)) badges.push(badge("warn", t("limits.stale")));
+  if (entry.stale || account.stale || (account.quota && account.quota.stale)) badges.push(badge("warn", t("limits.stale")));
   const fetched = Number.isFinite(account.at) && account.at > 0 ? t("limits.fetchedAt", { time: new Date(account.at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: false }) }) : t("limits.notFetched");
+  const name = limitsAccountName(entry, account);
   return el("div", { class: "limits-account" }, [
     el("div", { class: "limits-account-head" }, [
-      el("strong", { text: limitsAccountName(entry, account) }),
+      el("strong", { text: name }),
       el("div", { class: "limits-badges" }, [...badges, el("span", { class: "limits-fetched", text: fetched })]),
     ]),
     el("div", { class: "limits-windows" }, [
-      limitsWindowRow(t("limits.fiveHour"), limitsUsageWindow(account, "five_hour"), false, now),
-      limitsWindowRow(t("limits.weekly"), limitsUsageWindow(account, "seven_day"), true, now),
+      limitsWindowRow(t("limits.fiveHour"), limitsUsageWindow(account, "five_hour"), false, now, name),
+      limitsWindowRow(t("limits.weekly"), limitsUsageWindow(account, "seven_day"), true, now, name),
     ]),
   ]);
 }
 
-/** Claude rows come from limits. ChatGPT keeps all status accounts; only those in rotation are numbered. */
+/**
+ * Claude rows come from limits. ChatGPT keeps all status accounts; only those in rotation are numbered.
+ * The status and the limits are two reads, so an account paused or removed between them must not hand its
+ * figures to the next row: each row takes the figures listed under its own id, and none while it is paused
+ * or waiting for a sign-in (the limits leave those out).
+ */
 function providerLimits(name) {
   if (!limitsSnapshot || !Array.isArray(limitsSnapshot.providers)) return null;
   const provider = (currentConfig && currentConfig.providers && currentConfig.providers[name]) || (status && status.providers && status.providers[name]);
   if (!provider || provider.limits === false || (provider.type !== "anthropic" && provider.type !== "chatgpt")) return null;
   if (provider.type === "anthropic" && provider.auth !== "claude-code" && !provider.authSource) return null;
   const entry = { ...(limitsSnapshot.providers.find((item) => item.provider === name) || { type: provider.type, title: provider.type === "anthropic" ? "Claude" : "GPT", accounts: [] }),
-    stale: provider.type === "chatgpt" && Boolean(status && status.chatgpt && status.chatgpt.staleReason && status.chatgpt.staleReason[name]),
+    stale: limitsSnapshotStale || (provider.type === "chatgpt" && Boolean(status && status.chatgpt && status.chatgpt.staleReason && status.chatgpt.staleReason[name])),
   };
   const accounts = provider.type === "chatgpt" && status && status.chatgpt && status.chatgpt.accounts && status.chatgpt.accounts[name];
   if (!accounts) return entry.accounts.length ? entry : null;
   let number = 0;
   const rows = accounts.map((account) => {
     const index = account.state !== "paused" && account.state !== "needs-login" ? number++ : null;
-    const figures = index === null ? null : entry.accounts.find((item) => item.account === index);
-    return { ...account, account: index, windows: [], at: 0, ...figures };
+    const figures = index === null || account.id === undefined ? null : entry.accounts.find((item) => item.id === account.id);
+    return { ...account, account: index, windows: figures ? figures.windows : [], at: figures ? figures.at : 0, ...(figures && figures.stale ? { stale: true } : {}) };
   });
   return rows.length ? { ...entry, accounts: rows } : null;
 }
 
+/**
+ * Reads /api/limits beside the status read, never ahead of it. A read still running is not doubled behind
+ * a slow provider, and a failed read keeps the last reading on screen, marked stale, instead of dropping
+ * its gauges. The screen is redrawn when the read lands.
+ */
+function refreshLimits() {
+  if (limitsRead) return limitsRead;
+  limitsRead = api("/api/limits").then((body) => {
+    limitsSnapshot = body;
+    limitsSnapshotStale = false;
+  }, () => {
+    limitsSnapshotStale = limitsSnapshot !== null;
+  }).finally(() => {
+    limitsRead = null;
+    if (status) renderHealthProviders();
+  });
+  return limitsRead;
+}
+
 async function refreshHealth() {
+  // The status is what the screen waits for; the limits are read beside it and fill their gauges when they land.
+  const statusRead = api("/api/status");
+  void refreshLimits();
   try {
-    const [fresh, limits] = await Promise.allSettled([api("/api/status"), api("/api/limits")]);
-    limitsSnapshot = limits.status === "fulfilled" ? limits.value : null;
-    if (fresh.status === "rejected") throw fresh.reason;
-    status = fresh.value;
+    status = await statusRead;
   } catch (error) {
     $("#health-desktop").replaceChildren(cell(t("health.connection"), badge("bad", t("health.disconnected"))));
     // Inside the app a router that does not answer is a state with a way out, not an error.
@@ -1054,7 +1147,7 @@ function renderHealthProviders() {
     const live = status && status.providers && status.providers[name];
     const lines = [];
     const limits = providerLimits(name);
-    // Older routers and failed limit reads keep the text lines instead of an empty set of gauges.
+    // Older routers and a never-read limits list keep the text lines; once gauges exist they show the same figures.
     const quota = limits ? null : quotaLine(name);
     if (quota) lines.push(el("span", { class: "cell-sub", text: quota }));
     // Claude subscription accounts, one line each: the current login and every account added here.
@@ -1067,7 +1160,8 @@ function renderHealthProviders() {
         .map(({ account, text }) => el("div", { text: `${claudeAccountLabel(account)} · ${text}` }));
       if (usage.length) lines.push(el("div", { class: "cell-sub account-usage" }, usage));
     }
-    const pool = limits ? null : credentialLine(name);
+    // A cooldown or quarantine is not in the gauges, so it stays beside them.
+    const pool = credentialLine(name);
     if (pool) lines.push(pool);
     if (live && live.needsLogin && provider.type === "chatgpt") {
       lines.push(el("div", { class: "cell-actions" }, [

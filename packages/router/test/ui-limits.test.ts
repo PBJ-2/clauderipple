@@ -43,8 +43,11 @@ type LimitsUi = {
   refreshHealth(): Promise<void>;
   renderHealthProviders(): void;
   limitsAccountRow(entry: unknown, account: unknown, now: number): Element;
-  limitsWindowRow(label: string, window: unknown, weekly: boolean, now: number): Element;
+  limitsWindowRow(label: string, window: unknown, weekly: boolean, now: number, accountName?: string): Element;
   limitsUsageWindow(account: unknown, kind: string): unknown;
+  settleLimits(): Promise<unknown>;
+  providerLimits(name: string): { accounts: Record<string, unknown>[] } | null;
+  limitsSnapshotPeek(): unknown;
 };
 function limitsUi(api: (path: string) => Promise<unknown>, status: Record<string, unknown> = {}) {
   const card = el("div"), desktop = el("div");
@@ -60,15 +63,17 @@ function limitsUi(api: (path: string) => Promise<unknown>, status: Record<string
     ${block("function providerConnection(", "let statusModBusy")}
     ${block("function claudeAccountLabel(", '/** "5h 14%')}
     ${block("function chatgptQuotaText(", "async function patchChatgptAccount(")}
-    return { refreshHealth, renderHealthProviders, limitsAccountRow, limitsWindowRow, limitsUsageWindow };
+    return { refreshHealth, renderHealthProviders, limitsAccountRow, limitsWindowRow, limitsUsageWindow, settleLimits: () => limitsRead ?? Promise.resolve(), providerLimits, limitsSnapshotPeek: () => limitsSnapshot };
   `) as (...args: unknown[]) => LimitsUi;
   const ui = build(async (path: string) => {
     const response = await api(path);
     return path === "/api/status" ? { settings: {}, ...status, ...(response && typeof response === "object" ? response : {}) } : response;
   }, el, t, (selector: string) => selector === "#health-providers" ? card : selector === "#health-desktop" ? desktop : el("div"), status);
-  return { ...ui, card, desktop, refresh: () => ui.refreshHealth() };
+  // A poll draws the status at once and the gauges when the limits read lands; tests wait for both.
+  return { ...ui, card, desktop, refresh: async () => { await ui.refreshHealth(); await ui.settleLimits(); } };
 }
-const now = Date.parse("2026-10-21T12:00:00Z");
+// The render path reads the real clock, so the fixtures' resets must be ahead of it.
+const now = Date.now();
 const five = { kind: "five_hour", used_percent: 23, window_minutes: 300, reset_at: (now + 255 * 60_000) / 1000 };
 const weekly = { kind: "seven_day", used_percent: 125, window_minutes: 10080, reset_at: (now + 86400_000) / 1000 };
 const current = { account: 0, inUse: true, at: now, windows: [weekly, five] };
@@ -107,7 +112,7 @@ test("ChatGPT accounts keep saved order, states and empty accounts without shift
     { id: "c", label: "Last", state: "cooling", cooldownSeconds: 90, quota: { stale: true } },
   ];
   const ui = limitsUi(async (path) => path === "/api/limits" ? { providers: [
-    { type: "chatgpt", provider: "gpt", title: "GPT", accounts: [{ account: 2, at: now, windows: [weekly] }, current] },
+    { type: "chatgpt", provider: "gpt", title: "GPT", accounts: [{ account: 2, id: "c", at: now, windows: [weekly] }, { ...current, id: "a" }] },
   ] } : {}, { providers: connected, chatgpt: { accounts: { gpt: accounts } } });
   await ui.refresh();
   const rows = findAll(ui.card.children[1]!, hasClass("limits-account"));
@@ -147,7 +152,7 @@ test("ChatGPT's provider-level refresh failure marks its retained figures stale"
   assert.doesNotMatch(text(ui.card.children[0]!), /Stale/);
 });
 
-test("a failed limit read falls back to the old lines, including after a successful read", async () => {
+test("a failed limit read shows the text lines until one succeeds, then keeps the last gauges marked stale", async () => {
   let fail = true;
   const quota = { rate_limits: { primary: five } };
   const ui = limitsUi(async (path) => {
@@ -158,10 +163,12 @@ test("a failed limit read falls back to the old lines, including after a success
     providers: connected, claude: { accounts: [{ id: "current", quota }] },
     chatgpt: { quota: { gpt: quota } }, credentials: { gpt: [{ label: "Stored", state: "quarantined" }] },
   });
-  for (const failed of [true, false, true]) {
+  // [this read fails, gauges shown, stale mark shown]
+  for (const [failed, gauges, stale] of [[true, 0, 0], [false, 1, 0], [true, 1, 1], [false, 1, 0]] as const) {
     fail = failed;
     await ui.refresh();
-    assert.equal(findAll(ui.card, hasClass("provider-block")).length, failed ? 0 : 1);
+    assert.equal(findAll(ui.card, hasClass("provider-block")).length, gauges);
+    assert.equal(findAll(ui.card, (node) => node.attrs.text === t("limits.stale")).length, stale);
     assert.match(text(ui.card.children[0]!), /23%/);
     assert.match(text(ui.card.children[1]!), /23%.*Stored: rejected/);
     assert.equal(ui.card.children.length, 3);
@@ -265,5 +272,130 @@ test("every dashboard language names the limit windows, freshness and resets", (
     for (const key of keys) assert.ok(dict[`limits.${key}`], `${lang}: limits.${key}`);
     assert.match(dict["limits.resetsIn"]!, /\{hours\}/, lang);
     assert.match(dict["limits.resetsIn"]!, /\{minutes\}/, lang);
+  }
+});
+
+test("ChatGPT figures join by account id, so a pause between the two reads moves no numbers", async () => {
+  // The limits were read while "p" was in rotation; the status says it is paused now.
+  const accounts = [
+    { id: "a", label: "First", state: "ready" },
+    { id: "p", label: "Paused now", state: "paused", paused: true },
+    { id: "b", label: "Second", state: "ready" },
+  ];
+  const ui = limitsUi(async (path) => path === "/api/limits" ? { providers: [
+    { type: "chatgpt", provider: "gpt", title: "GPT", accounts: [
+      { account: 0, id: "a", at: now, windows: [five] },
+      { account: 1, id: "p", at: now, windows: [weekly] },
+      { account: 2, id: "b", label: "Second", at: now, windows: [{ ...weekly, used_percent: 40 }] },
+    ] },
+  ] } : {}, { providers: connected, chatgpt: { accounts: { gpt: accounts } } });
+  await ui.refresh();
+  const rows = findAll(ui.card.children[1]!, hasClass("limits-account"));
+  assert.deepEqual(rows.map((row) => row.children[0]!.children[0]!.attrs.text), ["First", "Paused now", "Second"]);
+  assert.match(text(rows[0]!), /23%/);
+  assert.doesNotMatch(text(rows[1]!), /125%|40%|23%/, "a paused account takes no figures");
+  assert.match(text(rows[2]!), /40%/);
+  assert.doesNotMatch(text(rows[2]!), /23%|125%/, "the second account keeps its own figures, not the next position's");
+});
+
+test("a Claude account whose refresh was refused says its figures are stale, and only that account's", async () => {
+  const ui = limitsUi(async (path) => path === "/api/limits" ? { providers: [
+    { type: "anthropic", provider: "claude", title: "Claude", accounts: [
+      { ...current, stale: true },
+      { account: 1, label: "Fresh", at: now, windows: [five] },
+    ] },
+  ] } : {}, { providers: connected });
+  await ui.refresh();
+  const rows = findAll(ui.card.children[0]!, hasClass("limits-account"));
+  assert.equal(rows.length, 2);
+  assert.match(text(rows[0]!), /Stale/);
+  assert.match(text(rows[0]!), /23%/, "the last reading stays on the gauge");
+  assert.doesNotMatch(text(rows[1]!), /Stale/);
+});
+
+test("the status draws at once and the gauges follow when the limits read lands, without clearing them meanwhile", async () => {
+  const paths: string[] = [];
+  const claudeLimits = { providers: [{ type: "anthropic", provider: "claude", title: "Claude", accounts: [current] }] };
+  let reply: Promise<unknown> | null = null;
+  const ui = limitsUi(async (path) => {
+    paths.push(path);
+    if (path === "/api/status") return {};
+    return reply ?? claudeLimits;
+  }, { providers: connected, claude: { accounts: [{ id: "current", quota: { rate_limits: { primary: five } } }] } });
+  let release: (value: unknown) => void = () => {};
+  reply = new Promise((resolve) => { release = resolve; });
+  await ui.refreshHealth();
+  assert.equal(findAll(ui.card, hasClass("provider-block")).length, 0, "no gauges until the limits land");
+  assert.match(text(ui.card), /23%/, "the status lines are already drawn");
+  await ui.refreshHealth();
+  assert.equal(paths.filter((path) => path === "/api/limits").length, 1, "a poll does not start a second read behind a slow one");
+  release(claudeLimits);
+  await ui.settleLimits();
+  assert.equal(findAll(ui.card, hasClass("provider-block")).length, 1);
+  reply = new Promise(() => {});
+  await ui.refreshHealth();
+  assert.equal(findAll(ui.card, hasClass("provider-block")).length, 1, "a poll keeps the gauges it already shows");
+  assert.match(text(ui.card), /Current Claude login.*23%/);
+});
+
+test("a cooling or quarantined Claude account keeps its line beside the gauges", async () => {
+  const ui = limitsUi(async (path) => path === "/api/limits" ? { providers: [
+    { type: "anthropic", provider: "claude", title: "Claude", accounts: [current] },
+  ] } : {}, {
+    providers: connected, claude: { accounts: [{ id: "current", quota: { rate_limits: { primary: five } } }] },
+    credentials: { claude: [{ id: "x", label: "Stored", state: "cooling", cooldownSeconds: 90 }, { id: "y", label: "Bad", state: "quarantined" }] },
+  });
+  await ui.refresh();
+  assert.equal(findAll(ui.card, hasClass("provider-block")).length, 1);
+  assert.ok(text(ui.card.children[0]!).includes(`Stored: ${t("pool.cooling", { seconds: 90 })}`));
+  assert.ok(text(ui.card.children[0]!).includes(`Bad: ${t("pool.quarantined")}`));
+});
+
+test("a gauge's pace and exhaust forecast read as the mod's pane reads them", () => {
+  const ui = limitsUi(async () => ({}));
+  const pace = (percent: number) => t("limits.paceProjected", { percent });
+  const node = (row: Element, value: string) => findAll(row, (candidate) => candidate.attrs.text === value)[0];
+  const row = (window: Record<string, unknown>) => ui.limitsWindowRow("5 hours", { usedPercent: 40, resetAt: now + 255 * 60_000, ...window }, false, now);
+  // Under 95 the label is muted; 95 to 100 is amber; above 100 says nothing.
+  assert.equal(node(row({ projectedPercent: 84 }), pace(84))!.attrs.class, undefined);
+  assert.equal(node(row({ projectedPercent: 95 }), pace(95))!.attrs.class, "warn-text");
+  assert.equal(node(row({ projectedPercent: 100 }), pace(100))!.attrs.class, "warn-text");
+  assert.equal(node(row({ projectedPercent: 101 }), pace(101)), undefined);
+  // Nothing without a reset still ahead, or without a projection.
+  assert.equal(findAll(row({ projectedPercent: 84, resetAt: now - 1 }), (candidate) => candidate.attrs.text === pace(84)).length, 0);
+  assert.equal(findAll(row({ projectedPercent: 84, resetAt: undefined }), (candidate) => candidate.attrs.text === pace(84)).length, 0);
+  assert.equal(findAll(row({ projectedPercent: undefined }), (candidate) => candidate.attrs.text === pace(84)).length, 0);
+  // A passed reset keeps its last share, so the foot says it is stale.
+  assert.equal(node(row({ resetAt: now - 1 }), t("limits.stale"))!.attrs.class, "warn-text");
+  // An exhaust forecast replaces the pace with a warning line: amber, red within the hour.
+  const exhaustNote = (usedPercent: number, minutes: number) => row({ usedPercent, projectedPercent: 120, exhaustAt: now + minutes * 60_000 });
+  const later = exhaustNote(90, 130);
+  assert.equal(node(later, pace(120)), undefined, "no pace beside an exhaust forecast");
+  assert.equal(node(later, t("limits.exhaust", { time: "2h 10m" }))!.attrs.class, "limits-window-note warn-text");
+  assert.equal(node(exhaustNote(50, 30), t("limits.exhaust", { time: "30m" }))!.attrs.class, "limits-window-note bad-text");
+  // The exhaust moment has passed: no warning, and the pace may return.
+  assert.equal(findAll(row({ projectedPercent: 84, exhaustAt: now - 1 }), (candidate) => candidate.attrs.text === pace(84)).length, 1);
+});
+
+test("each gauge's accessible name says which account it measures", () => {
+  const ui = limitsUi(async () => ({}));
+  const row = ui.limitsAccountRow({ type: "anthropic", title: "Claude" }, { account: 1, label: "Work", at: now, windows: [five, weekly] }, now);
+  const names = findAll(row, (candidate) => candidate.attrs.role === "progressbar").map((bar) => bar.attrs["aria-label"]);
+  assert.deepEqual(names, ["Work · 5 hours", "Work · Weekly"]);
+});
+
+test("the pace and exhaust wording and the time units are the mod's, verbatim in every language", () => {
+  const modSource = fs.readFileSync(path.join(uiDir, "../mod/hooks/i18n.ts"), "utf8");
+  const keys = ["limits.paceProjected", "limits.exhaust", "units.minutes", "units.hours", "units.days", "units.hourMin", "units.dayHour"];
+  const blocks: Record<string, string> = { en: "const EN = {", ko: "const KO: Record", zh: "const ZH: Record", ja: "const JA: Record", es: "const ES: Record", pt: "const PT: Record" };
+  for (const [lang, marker] of Object.entries(blocks)) {
+    const start = modSource.indexOf(marker);
+    assert.ok(start > 0, `the mod's i18n has ${marker}`);
+    const body = modSource.slice(start, modSource.indexOf("\n}", start));
+    for (const key of keys) {
+      const match = body.match(new RegExp(`'${key.replaceAll(".", "\\.")}': '([^']*)'`));
+      assert.ok(match, `${lang} ${key} in the mod`);
+      assert.equal(dictionaries[lang]![key], match[1], `${lang} ${key} matches the mod`);
+    }
   }
 });

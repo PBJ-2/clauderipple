@@ -429,6 +429,7 @@ label.check input { margin-top: 2px; }
 .limits-window-head { display: flex; justify-content: space-between; gap: 4px 12px; flex-wrap: wrap; margin-bottom: 5px; }
 .limits-window-head, .limits-window-foot { font-size: var(--fs-foot); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .limits-window-foot { margin-top: 5px; color: var(--label-2); }
+.limits-window-note { margin-top: 4px; font-size: var(--fs-foot); overflow-wrap: anywhere; }
 .limits-track { position: relative; height: 8px; border-radius: 4px; background: var(--fill-press); }
 .limits-fill { display: block; height: 100%; border-radius: 0 4px 4px 0; background: var(--accent-fill); }
 .limits-track.unknown { background: repeating-linear-gradient(135deg, var(--fill-press) 0 4px, transparent 4px 8px); }
