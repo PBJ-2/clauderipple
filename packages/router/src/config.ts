@@ -8,6 +8,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { CompatibleCaps } from "./compat.ts";
+import { tightenToOwnerOnly } from "./locked-file.ts";
 import { PRESETS } from "./presets.ts";
 import { hostProblem, portProblem } from "./remote-host.ts";
 import { ingressOnly } from "./targets.ts";
@@ -1040,6 +1041,8 @@ export class ConfigStore {
       this.mtimeMs = -1;
       return;
     }
+    // Before the mtime check: a chmod leaves the mtime alone, so a looser mode is seen on every read.
+    tightenToOwnerOnly(this.file, st.mode);
     if (st.mtimeMs === this.mtimeMs) return;
     try {
       const parsed = JSON.parse(fs.readFileSync(this.file, "utf8")) as Partial<Config>;

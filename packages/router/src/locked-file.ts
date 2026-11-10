@@ -104,3 +104,18 @@ export function writeJsonAtomic(file: string, value: unknown): { directoryDurabl
     }
   }
 }
+
+/**
+ * A secret-bearing file written before writeJsonAtomic, or replaced by an editor under a 022 umask,
+ * can sit at 0644 until its next save. A load that sees group or other bits on it tightens it to
+ * 0600. It only ever tightens, and does nothing on Windows, which has no owner-only POSIX mode. A
+ * file another user owns refuses the chmod; the load carries on as before, since it never needed it.
+ */
+export function tightenToOwnerOnly(file: string, mode: number): void {
+  if (process.platform === "win32" || (mode & 0o077) === 0) return;
+  try {
+    fs.chmodSync(file, 0o600);
+  } catch {
+    /* not ours to change: the file is read as it was before this check */
+  }
+}
