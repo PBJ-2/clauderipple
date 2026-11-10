@@ -189,6 +189,18 @@ function providerDisplayName(name, provider = currentConfig && currentConfig.pro
   const others = Object.entries((currentConfig && currentConfig.providers) || {}).filter(([key]) => key !== name);
   return title !== name && others.some(([key, other]) => providerTitle(key, other) === title) ? `${title} (${name})` : title;
 }
+/**
+ * A saved provider's name field: the name it was given, else the name the pages show for it (its
+ * preset's or its service's), never its key — the field used to open on "opencode-go".
+ */
+function providerFormName(key, provider) {
+  return provider && typeof provider.label === "string" && provider.label.trim() ? provider.label.trim() : providerTitle(key, provider);
+}
+/** The name a form saves: a field left on the shown name of a provider that had none saves none, as leaving its key did. */
+function typedProviderName(typed, key, provider) {
+  const value = typed.trim();
+  return provider && !(typeof provider.label === "string" && provider.label.trim()) && value === providerTitle(key, provider) ? key : value;
+}
 /** The vendor's hue as a dot before a provider's name, as on the Status screen. */
 function vendorDot(name, provider) {
   const dot = el("span", { class: "vendor-dot", "aria-hidden": "true" });
@@ -4407,7 +4419,7 @@ function anthropicSourceText(source) {
 function openAnthropicProviderForm(options) {
   let formActive = true;
   const existing = options.provider;
-  const displayName = options.name ? providerLabel(options.name, existing) : options.auth === "api-key" ? "Claude API" : t("providers.anthropic");
+  const displayName = options.name ? providerFormName(options.name, existing) : options.auth === "api-key" ? "Claude API" : t("providers.anthropic");
   const nameInput = el("input", { value: displayName, maxlength: "60" });
   const auth = el("select", {}, [selectOption("claude-code", t("providers.anthropicAuthClaudeCode")), selectOption("api-key", t("providers.anthropicAuthApiKey"))]);
   auth.value = (existing && existing.auth) || options.auth || "claude-code";
@@ -4495,7 +4507,7 @@ function openAnthropicProviderForm(options) {
     const providerName = existing ? options.name : uniqueName(typedName, next.providers);
     const checkedModels = withSavedModelFields(form.querySelector(".model-picker").selected(), existing && next.providers[options.name]);
     const provider = { type: "anthropic", auth: auth.value, ...(auth.value === "claude-code" && accountPool ? { accountPool: true } : {}), ...(auth.value === "api-key" && (keyInput.value || (existing && existing.apiKey)) ? { apiKey: keyInput.value || existing.apiKey } : {}), limits: limitsInput.checked, models: checkedModels };
-    next.providers[providerName] = applyProviderLabel(provider, providerName, typedName);
+    next.providers[providerName] = applyProviderLabel(provider, providerName, existing ? typedProviderName(typedName, options.name, existing) : typedName);
     // accountPool makes these models native Claude routing targets. Without it this remains the
     // historical OpenAI ingress provider, and routing deliberately ignores it.
     saveButton.disabled = true;
@@ -4524,7 +4536,7 @@ function tickedAfterListing(firstListing, tickedIds, listedIds) {
 function openGrokProviderForm(options) {
   let formActive = true;
   const existing = options.provider;
-  const nameInput = el("input", { value: options.name ? providerLabel(options.name, existing) : t("providers.grok"), maxlength: "60" });
+  const nameInput = el("input", { value: options.name ? providerFormName(options.name, existing) : t("providers.grok"), maxlength: "60" });
   const result = el("div", { class: "probe-result" });
   const probeButton = el("button", { class: "btn secondary", type: "button", text: t("providers.check") });
   let foundModels = modelsOf(existing);
@@ -4604,7 +4616,7 @@ function openGrokProviderForm(options) {
       ...(append.value.trim() ? { instructionsAppend: append.value.trim() } : {}),
       models: checkedModels,
     };
-    applyProviderLabel(next.providers[providerName], providerName, typedName);
+    applyProviderLabel(next.providers[providerName], providerName, existing ? typedProviderName(typedName, options.name, existing) : typedName);
     applyPickerSelections(next, providerPickerSelections(next, providerName, saved, checkedModels, pickerInput.checked), true);
     saveButton.disabled = true;
     try { const out = await configRequest(next); currentConfig = next; selectedProviderName = providerName; providerDetailTab = "overview"; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); configSaved(out, t("common.saved")); await offerPickerOn(pickerInput.checked && checkedModels.length > 0); }
@@ -4619,7 +4631,7 @@ function openGrokProviderForm(options) {
 function openGoogleProviderForm(options) {
   let formActive = true;
   const existing = options.provider;
-  const nameInput = el("input", { value: options.name ? providerLabel(options.name, existing) : t("providers.google"), maxlength: "60" });
+  const nameInput = el("input", { value: options.name ? providerFormName(options.name, existing) : t("providers.google"), maxlength: "60" });
   const keyInput = el("input", { type: "password", autocomplete: "off", placeholder: existing && existing.apiKey ? t("providers.keySaved") : t("providers.keyPlaceholder") });
   const showKey = el("button", { class: "eye-button", type: "button", text: t("common.show") });
   showKey.addEventListener("click", () => { const show = keyInput.type === "password"; keyInput.type = show ? "text" : "password"; showKey.textContent = show ? t("common.hide") : t("common.show"); });
@@ -4717,7 +4729,7 @@ function openGoogleProviderForm(options) {
       ...(append.value.trim() ? { instructionsAppend: append.value.trim() } : {}),
       models: checkedModels,
     };
-    applyProviderLabel(next.providers[providerName], providerName, typedName);
+    applyProviderLabel(next.providers[providerName], providerName, existing ? typedProviderName(typedName, options.name, existing) : typedName);
     // Same rule as the other provider forms: read after the provider is updated, so an unticked
     // model is already undeclared and falls out of the picker on its own.
     applyPickerSelections(next, providerPickerSelections(next, providerName, saved, checkedModels, pickerInput.checked), true);
@@ -4739,7 +4751,7 @@ function openProviderForm(options) {
   const isAnthropic = options.kind === "anthropic" || (existing && existing.type === "anthropic");
   const isOpenAi = !isChatgpt && !isAnthropic && ((existing && existing.type === "openai-compatible") || (preset && preset.kind === "openai-compatible"));
   const isCustom = options.kind === "custom";
-  const displayName = (options.name && providerLabel(options.name, existing)) || (preset && preset.name) || (isChatgpt ? t("providers.chatgpt") : isAnthropic ? t("providers.anthropic") : t("providers.customName"));
+  const displayName = (options.name && providerFormName(options.name, existing)) || (preset && preset.name) || (isChatgpt ? t("providers.chatgpt") : isAnthropic ? t("providers.anthropic") : t("providers.customName"));
   if (isAnthropic) { openAnthropicProviderForm(options); return; }
   if (options.kind === "google" || (existing && existing.type === "google")) { openGoogleProviderForm(options); return; }
   if (options.kind === "grok" || (existing && existing.type === "grok")) { openGrokProviderForm(options); return; }
@@ -5019,7 +5031,7 @@ function openProviderForm(options) {
       ? ["type", "auth", "defaultEffort", "identity", "limits", "instructionsAppend", "fast", "models"]
       : ["type", "url", "identity", "limits", "instructionsAppend", "preset", "sessionHeader", "wire", "headers", "models"]);
     const kept = saved ? Object.fromEntries(Object.entries(saved).filter(([key]) => !formKeys.has(key))) : {};
-    next.providers[providerName] = applyProviderLabel({ ...kept, ...provider }, providerName, typedName);
+    next.providers[providerName] = applyProviderLabel({ ...kept, ...provider }, providerName, existing ? typedProviderName(typedName, options.name, existing) : typedName);
     // A pooled provider's first key is `headers` and `credentials[0]` at once (the 계정 tab), so a
     // key changed here must change both, or the pool keeps sending the old one.
     const pooled = next.providers[providerName].credentials;
