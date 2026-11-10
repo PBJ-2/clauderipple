@@ -1,24 +1,36 @@
 /* ClaudeRipple settings — the System Settings idiom: a sidebar, inset grouped lists (label left,
    control right), sheets for add/edit, one tint used like a system accent. Colours are tokens so
-   light and dark are both first-class; status colours are for status only. */
+   light and dark are both first-class; status colours are for status only.
+
+   The palette is the mod's (packages/mod/hooks/ui/art.ts): warm graphite rather than a cool grey,
+   the dark theme the mod's own capsule water (#262523 → #1a1917), and violet kept for points — a
+   switch that is on, the tag on the account in use, a focus ring — never a ground or a broad fill.
+   Amber and red are for warnings only, so a warning stands out because nothing else shouts. */
 
 :root {
   color-scheme: light dark;
-  --bg: #f5f5f7;
-  --sidebar: #ececf0;
+  --bg: #f6f5f2;
+  --sidebar: #edebe6;
   --group: #ffffff;
-  --group-edge: rgba(0, 0, 0, 0.05);
-  --label: #1d1d1f;
-  --label-2: #6e6e73;
-  --label-3: #8e8e93;
-  --separator: rgba(60, 60, 67, 0.13);
-  --fill: rgba(120, 120, 128, 0.12);
-  --fill-hover: rgba(120, 120, 128, 0.2);
-  --fill-press: rgba(120, 120, 128, 0.28);
-  --nav-selected: rgba(0, 0, 0, 0.075);
+  --group-edge: rgba(40, 32, 20, 0.07);
+  --label: #1f1e1c;
+  --label-2: #67645e;
+  --label-3: #8c8880;
+  --separator: rgba(60, 50, 35, 0.11);
+  --fill: rgba(120, 110, 95, 0.11);
+  --fill-hover: rgba(120, 110, 95, 0.18);
+  --fill-press: rgba(120, 110, 95, 0.26);
+  --nav-selected: rgba(40, 32, 20, 0.07);
   --field: #ffffff;
-  --field-edge: rgba(60, 60, 67, 0.2);
+  --field-edge: rgba(60, 50, 35, 0.2);
   --segment-on: #ffffff;
+  /* A sheet or modal surface: the group's white here, a step above the group in the dark. */
+  --sheet: #ffffff;
+  /* A meter (a usage bar): a hairline track and graphite ink, amber and red only past their thresholds. */
+  --meter-track: rgba(120, 110, 95, 0.16);
+  --meter-fill: #4a4742;
+  /* An outlined tag in the accent: the one point of violet in a row. */
+  --accent-line: rgba(106, 86, 214, 0.42);
   --accent: #6a56d6;
   --accent-fill: #6a56d6;
   --accent-on: #ffffff;
@@ -44,21 +56,25 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #1c1c1e;
-    --sidebar: #252528;
-    --group: #2c2c2e;
-    --group-edge: rgba(255, 255, 255, 0.05);
-    --label: #f5f5f7;
-    --label-2: #a1a1a6;
-    --label-3: #7c7c82;
-    --separator: rgba(255, 255, 255, 0.1);
-    --fill: rgba(120, 120, 128, 0.24);
-    --fill-hover: rgba(120, 120, 128, 0.32);
-    --fill-press: rgba(120, 120, 128, 0.4);
-    --nav-selected: rgba(255, 255, 255, 0.09);
-    --field: rgba(255, 255, 255, 0.05);
-    --field-edge: rgba(255, 255, 255, 0.13);
-    --segment-on: #636366;
+    --bg: #1a1917;
+    --sidebar: #1f1e1c;
+    --group: #262523;
+    --group-edge: rgba(255, 250, 240, 0.06);
+    --label: #f2f0eb;
+    --label-2: #b3afa6;
+    --label-3: #8a867d;
+    --separator: rgba(255, 250, 240, 0.09);
+    --fill: rgba(200, 190, 170, 0.12);
+    --fill-hover: rgba(200, 190, 170, 0.18);
+    --fill-press: rgba(200, 190, 170, 0.25);
+    --nav-selected: rgba(255, 250, 240, 0.08);
+    --field: rgba(255, 250, 240, 0.04);
+    --field-edge: rgba(255, 250, 240, 0.13);
+    --segment-on: #4a4844;
+    --sheet: #201f1d;
+    --meter-track: rgba(255, 250, 240, 0.1);
+    --meter-fill: #d6d3cb;
+    --accent-line: rgba(168, 152, 255, 0.5);
     --accent: #a898ff;
     --accent-fill: #6f5ce0;
     --accent-on: #ffffff;
@@ -71,7 +87,7 @@
     --bad: #ff6961;
     --bad-dot: #ff453a;
     --sheet-shadow: 0 24px 64px rgba(0, 0, 0, 0.5), 0 0 0 0.5px rgba(255, 255, 255, 0.12);
-    --hud: rgba(44, 44, 46, 0.88);
+    --hud: rgba(38, 37, 35, 0.9);
     --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='14' viewBox='0 0 10 14'%3E%3Cpath d='M2 5l3-3 3 3M2 9l3 3 3-3' fill='none' stroke='%23a1a1a6' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   }
 }
@@ -817,12 +833,11 @@ a.cell { color: inherit; text-decoration: none; }
   max-height: min(820px, calc(100vh - 48px));
   overflow: auto;
   overscroll-behavior: contain;
-  background: var(--group);
+  background: var(--sheet);
   border-radius: 14px;
   box-shadow: var(--sheet-shadow);
   animation: sheet-in 0.2s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
-@media (prefers-color-scheme: dark) { .modal { background: #262628; } }
 #modal-content { padding: 22px 24px 24px; }
 .modal h1 { font-size: 19px; font-weight: 700; margin: 0 40px 6px 0; line-height: 1.3; }
 .modal h1 + .hint { margin-bottom: 4px; font-size: var(--fs-sub); }
@@ -836,10 +851,9 @@ a.cell { color: inherit; text-decoration: none; }
   margin: 22px -24px -24px;
   padding: 14px 24px;
   background: inherit;
-  background: var(--group);
+  background: var(--sheet);
   border-top: 1px solid var(--separator);
 }
-@media (prefers-color-scheme: dark) { .modal .actions.end { background: #262628; } }
 @keyframes fade-in { from { opacity: 0; } }
 @keyframes sheet-in { from { opacity: 0; transform: translateY(10px) scale(0.985); } }
 @media (prefers-reduced-motion: reduce) { .modal, .modal-backdrop { animation: none; } .toast, .switch span, .switch span::after { transition: none; } }
