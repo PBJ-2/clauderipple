@@ -285,6 +285,56 @@ test("marker only scans the first five user messages", () => {
   assert.equal(markerOverride(msgs, cfg.aliases), null);
 });
 
+test("decide scans each eligible user message only once, with or without a marker", () => {
+  for (const markerAt of [0, 4, 5, -1]) {
+    let reads = 0;
+    const request = {
+      messages: [
+        { role: "assistant", content: "[[ripple: sol]] is quoted prose" },
+        ...Array.from({ length: 7 }, (_, i) => ({
+          role: "user",
+          get content() {
+            reads++;
+            return i === markerAt ? "[[ripple: luna@high]] task" : "ordinary text";
+          },
+        })),
+      ],
+    };
+    const decision = decide("gpt-5.6-sol@medium", request, cfg, "turn");
+    const found = markerAt >= 0 && markerAt < 5;
+    assert.equal(decision.route?.model, found ? "gpt-5.6-luna" : "gpt-5.6-sol");
+    assert.equal(decision.route?.effort, found ? "high" : "medium");
+    assert.equal(reads, found ? markerAt + 1 : 5, `one scan, marker at ${markerAt}`);
+  }
+});
+
+test("marker alias effort is overridden by explicit marker effort, but not the requested effort", () => {
+  const configured: Config = { ...cfg, aliases: { luna: "gpt-5.6-luna@low" } };
+  for (const [text, effort] of [["[[ripple: luna]] task", "low"], ["[[ripple: luna@high]] task", "high"]]) {
+    const request = body(text!);
+    assert.deepEqual(markerOverride(request, configured.aliases), { model: "gpt-5.6-luna", effort });
+    assert.equal(decide("gpt-5.6-sol@medium", request, configured, "turn").route?.effort, effort);
+  }
+});
+
+test("a reused marker result preserves slot precedence and qualified account pins", () => {
+  const configured: Config = {
+    ...cfg,
+    providers: {
+      ...cfg.providers,
+      anthropic: { type: "anthropic", auth: "claude-code", accountPool: true, models: [{ id: "claude-opus-5-5" }] },
+    },
+    aliases: { pinned: "anthropic#3f2a9c1b:claude-opus-5-5@low" },
+  };
+  const request = body("[[ripple: pinned@high]] task");
+  const slot = decide("claude-opus-4-8", request, configured, "turn").route!;
+  assert.deepEqual([slot.provider, slot.model, slot.accountPin, slot.effort], ["chatgpt", "gpt-6-astra", undefined, undefined]);
+  for (const model of ["gpt-5.6-sol", "anthropic:claude-opus-5-5", "claude-sonnet-5-5"]) {
+    const route = decide(model, request, configured, "turn").route!;
+    assert.deepEqual([route.provider, route.model, route.accountPin, route.effort], ["anthropic", "claude-opus-5-5", "3f2a9c1b", "high"], model);
+  }
+});
+
 test("rewriteBody sets model, effort and clamps ultra", () => {
   const j = rewriteBody({ model: "claude-opus-4-8", output_config: { effort: "ultra" } }, resolve("claude-opus-4-8", body("hi"), cfg)!, cfg.effortClamp);
   assert.equal(j.model, "gpt-6-astra");

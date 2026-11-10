@@ -177,7 +177,11 @@ function scanMarker(body: unknown): { name: string; effort?: string } | null {
 }
 
 export function markerOverride(body: unknown, aliases: Record<string, string>): { model: string; effort?: string } | null {
-  const hit = scanMarker(body);
+  return resolveMarker(scanMarker(body), aliases);
+}
+
+/** Resolve the same scan result used for routing and refusal diagnostics. */
+function resolveMarker(hit: ReturnType<typeof scanMarker>, aliases: Record<string, string>): { model: string; effort?: string } | null {
   if (!hit) return null;
   const target = aliases[hit.name] ?? hit.name;
   const [model, suffix] = target.split("@");
@@ -226,7 +230,7 @@ export function decide(model: unknown, body: unknown, cfg: Config, kind: Request
 
   const marker = scanMarker(body);
   const aliased = marker ? cfg.aliases[marker.name] : undefined;
-  const ov = markerOverride(body, cfg.aliases);
+  const ov = resolveMarker(marker, cfg.aliases);
   // The model the request names in the end: the marker's (through its alias), else the requested one.
   const effective = ov?.model ?? base;
   const hasDirect = (id: string): boolean => cfg.direct.some((d) => id.startsWith(d.prefix));
