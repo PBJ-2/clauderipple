@@ -9,6 +9,7 @@ import { Logger } from "../src/log.ts";
 import { ClaudeAccountAuthPool } from "../src/providers/anthropic-account-pool.ts";
 import { saveClaudeOAuthAccount } from "../src/providers/anthropic-accounts.ts";
 import { ClaudeCodeAuthStore, ClaudeCodeCredentialStore } from "../src/providers/anthropic.ts";
+import { ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
 import { RequestLog } from "../src/requestlog.ts";
 import type { Config } from "../src/config.ts";
 
@@ -205,6 +206,41 @@ test("Responses reject previous_response_id to remain stateless", async () => {
   const response = await call("/v1/responses", { ...input, previous_response_id: "resp_old" });
   assert.equal(response.status, 400);
   assert.match(response.text, /previous_response_id unsupported/);
+});
+
+test("an ingress turn on the current Claude login snapshots that login's email", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-ingress-current-"));
+  const nativeSeen: http.IncomingHttpHeaders[] = [];
+  const native = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      nativeSeen.push(req.headers);
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ id: "msg_native", type: "message", role: "assistant", content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } }));
+    });
+  });
+  const nativePort = await listen(native);
+  const observed = new ObservedClaudeCodeAuth();
+  observed.observe(["authorization", "Bearer ingress-login", "anthropic-version", "2023-06-01"]);
+  const nativeConfig: Config = {
+    ...config,
+    providers: { claude: { type: "anthropic", auth: "claude-code", accountPool: true, models: [{ id: "claude-sonnet-5" }] } },
+    routes: { "claude-sonnet-5": { provider: "claude", model: "claude-sonnet-5" } },
+  };
+  const nativeIngress = new OpenAiIngress({ config: () => nativeConfig, log, requests, home, observedClaudeCodeAuth: observed, claudeCodeCredentialReaders: noClaudeCodeCredentialReaders, nativeUpstream: `http://127.0.0.1:${nativePort}`, claudeIdentity: async () => ({ email: "ingress@example.test" }) });
+  const nativeIngressPort = await nativeIngress.listen();
+  try {
+    const response = await call("/v1/responses", input, nativeIngressPort);
+    assert.equal(response.status, 200);
+    assert.equal(nativeSeen[0]!.authorization, "Bearer ingress-login");
+    const row = requests.list(1)[0]!;
+    assert.equal(row.account, "current");
+    assert.equal(row.accountEmail, "ingress@example.test");
+    assert.doesNotMatch(JSON.stringify(row), /ingress-login/, "no token in the row");
+  } finally {
+    await nativeIngress.drain(1);
+    await new Promise<void>((resolve) => native.close(() => resolve()));
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("native ingress uses one added Claude account without enabling failover", async () => {
