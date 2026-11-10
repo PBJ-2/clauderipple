@@ -191,7 +191,7 @@ export interface SubagentContext {
   state?: Map<string, SubagentState>;
   /** What a subagent's own transcript reports: the model that answered, its steps, its description
    * (meta.json), and its confirmed terminal state, if any. */
-  resolve?: (toolUseId: string, input: RecordValue) => { model: string | null; steps: number; description: string; terminal: AgentTerminal; bytes?: number };
+  resolve?: (toolUseId: string, input: RecordValue) => { model: string | null; effort?: string; steps: number; description: string; terminal: AgentTerminal; bytes?: number };
 }
 
 /**
@@ -295,7 +295,7 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
         const running = state?.get(toolUseId);
         if (running && resolve) {
           const info = resolve(toolUseId, running.input);
-          bodies.push({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: info.model ?? running.model, status: status === "completed" ? "done" : status === "killed" || status === "stopped" ? "stopped" : "failed", steps: info.steps });
+          bodies.push({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: info.model ?? running.model, ...effortField(info), status: status === "completed" ? "done" : status === "killed" || status === "stopped" ? "stopped" : "failed", steps: info.steps });
         }
         state?.delete(toolUseId);
       }
@@ -319,7 +319,7 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
         }
         if (running && resolve && !launched) {
           const info = resolve(b.tool_use_id, running.input);
-          bodies.push({ kind: "subagent", toolUseId: b.tool_use_id, sub: `sub-${b.tool_use_id}`, description: running.description, model: info.model ?? running.model, status: b.is_error === true ? "failed" : "done", steps: info.steps });
+          bodies.push({ kind: "subagent", toolUseId: b.tool_use_id, sub: `sub-${b.tool_use_id}`, description: running.description, model: info.model ?? running.model, ...effortField(info), status: b.is_error === true ? "failed" : "done", steps: info.steps });
           state?.delete(b.tool_use_id);
         }
       }
@@ -346,7 +346,7 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
         const info = resolve(b.id, input);
         const running: SubagentState = { description: info.description || summary || str(input.subagent_type) || b.name, model: info.model, steps: info.steps, bytes: info.bytes ?? 0, input };
         state.set(b.id, running);
-        bodies.push({ kind: "subagent", toolUseId: b.id, sub: `sub-${b.id}`, description: running.description, model: running.model, status: "running", steps: running.steps });
+        bodies.push({ kind: "subagent", toolUseId: b.id, sub: `sub-${b.id}`, description: running.description, model: running.model, ...effortField(info), status: "running", steps: running.steps });
       }
     }
     const body = messageContent(message.content, sink, scope);
@@ -448,6 +448,12 @@ function stripModelPrefix(description: string): string {
 function withoutEffort(model: string): string {
   return model.replace(/@[^@]*$/, "");
 }
+/** A worker's effort as its meta.json records it: the `@effort` suffix of its model, else the level in the hook's "Model·effort · " prefix. Empty when neither says so. */
+function effortOf(model: string, description: string): string {
+  return /@([^@\s]+)$/.exec(model)?.[1] ?? /^\S*·(\S*) · /.exec(description)?.[1] ?? "";
+}
+/** The subagent event's effort, only when a real one was recorded. */
+const effortField = (info: { effort?: string }): { effort?: string } => info.effort ? { effort: info.effort } : {};
 
 /** Top-level task lifecycle only; synchronous workers and nested subagents are not background tasks.
  * Also the main turn's start as the app counts it: the person's last message (origin "human"; compaction
@@ -646,7 +652,7 @@ export class DesktopSessions {
         running.model = model;
         running.steps = info.steps;
         running.bytes = info.bytes ?? 0;
-        visit({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model, status: info.terminal ?? "running", steps: info.steps });
+        visit({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model, ...effortField(info), status: info.terminal ?? "running", steps: info.steps });
         if (info.terminal) state.delete(toolUseId);
       }
       return next;
@@ -702,15 +708,16 @@ export class DesktopSessions {
   }
 
   /** What a worker's own transcript reports, for its parent's subagent events. */
-  private subInfo(id: string, toolUseId: string, input: RecordValue): { model: string | null; steps: number; description: string; terminal: AgentTerminal; bytes?: number } {
+  private subInfo(id: string, toolUseId: string, input: RecordValue): { model: string | null; effort?: string; steps: number; description: string; terminal: AgentTerminal; bytes?: number } {
     const source = this.sources.get(id);
     const agentId = source ? this.agentMap(id).get(toolUseId) : undefined;
-    let model = "", steps = 0, description = "", bytes = 0;
+    let model = "", steps = 0, description = "", bytes = 0, effort = "";
     let terminal: AgentTerminal = null;
     if (source && agentId) {
       const dir = this.subagentsDir(source);
       const meta = record(safeRead(path.join(dir, `agent-${agentId}.meta.json`)));
       if (meta) {
+        effort = effortOf(str(meta.model), str(meta.description));
         model = withoutEffort(str(meta.model));
         description = stripModelPrefix(str(meta.description));
       }
@@ -720,7 +727,7 @@ export class DesktopSessions {
       terminal = read.terminal;
       bytes = read.bytes;
     }
-    return { model: model || str(input.model) || null, steps, description, terminal, bytes };
+    return { model: model || str(input.model) || null, ...(effort ? { effort } : {}), steps, description, terminal, bytes };
   }
 
   /** The model that answered, its step count and terminal state, streamed without a full-file buffer. */
@@ -796,7 +803,7 @@ export class DesktopSessions {
       for (const [toolUseId, running] of state) {
         const info = resolve(toolUseId, running.input);
         if (info.terminal) {
-          log.append({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: info.model ?? running.model, status: info.terminal, steps: info.steps });
+          log.append({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: info.model ?? running.model, ...effortField(info), status: info.terminal, steps: info.steps });
           state.delete(toolUseId);
         }
       }
@@ -982,7 +989,7 @@ export class DesktopSessions {
       for (const [toolUseId, running] of state) {
         const info = resolve(toolUseId, running.input);
         if (info.terminal) {
-          log.append({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: info.model ?? running.model, status: info.terminal, steps: info.steps });
+          log.append({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: info.model ?? running.model, ...effortField(info), status: info.terminal, steps: info.steps });
           state.delete(toolUseId);
         }
       }

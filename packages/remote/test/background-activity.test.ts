@@ -9,6 +9,19 @@ const launch = (activity: BackgroundActivity, id: string, tool: string, input: R
   activity.call(id, tool, input); activity.result(id, ok, JSON.stringify(result), 10);
 };
 
+test("a worker's effort is shown only when its record gives one", () => {
+  const activity = new BackgroundActivity();
+  activity.accept({ kind: "subagent", toolUseId: "w1", sub: "sub-w1", description: "Review", model: "claude-haiku-5-5", effort: "high", status: "running", steps: 0 }, text => String(text));
+  activity.accept({ kind: "subagent", toolUseId: "w2", sub: "sub-w2", description: "Plain", model: "claude-haiku-5-5", status: "running", steps: 0 }, text => String(text));
+  assert.deepEqual(activity.active.map(task => [task.sub, task.model, task.effort ?? null]), [
+    ["sub-w1", "claude-haiku-5-5", "high"],
+    ["sub-w2", "claude-haiku-5-5", null],
+  ]);
+  // A later update without an effort keeps the one already recorded.
+  activity.accept({ kind: "subagent", toolUseId: "w1", sub: "sub-w1", description: "Review", model: "claude-haiku-5-5", status: "done", steps: 2 }, text => String(text));
+  assert.equal([...activity.active, ...activity.history].find(task => task.sub === "sub-w1")?.effort, "high");
+});
+
 test("background commands, Monitor, CronCreate/List/Delete and dynamic wakeups retain exact observed lifecycle", () => {
   const activity = new BackgroundActivity();
   launch(activity, "bash", "Bash", { command: "npm test\nsecond command" }, { backgroundTaskId: "shell" });

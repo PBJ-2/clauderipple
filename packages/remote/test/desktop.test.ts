@@ -461,7 +461,7 @@ function subagent(project: string, agentId: string, meta: Record<string, unknown
   fs.writeFileSync(path.join(dir, `agent-${agentId}.jsonl`), records.join(""));
 }
 const assistantTurn = (model: string, stop: string, content: unknown[]): string => line({ isSidechain: true, type: "assistant", message: { model, stop_reason: stop, content } });
-const subagentEvents = (log: { tail: (n?: number) => { events: { kind: string }[] } }) => log.tail(1 << 20).events.filter(e => e.kind === "subagent") as unknown as { toolUseId: string; description: string; model: string | null; status: string; steps: number }[];
+const subagentEvents = (log: { tail: (n?: number) => { events: { kind: string }[] } }) => log.tail(1 << 20).events.filter(e => e.kind === "subagent") as unknown as { toolUseId: string; description: string; model: string | null; effort?: string; status: string; steps: number }[];
 
 test("a Mac session opens a worker with the model its own transcript answered on", t => {
   const f = fixture(t);
@@ -477,11 +477,12 @@ test("a Mac session opens a worker with the model its own transcript answered on
     { type: "tool_use", id: "toolu_one", name: "Agent", input: { description: "Summarize the rules" } },
     { type: "tool_use", id: "toolu_two", name: "Task", input: {} },
   ] } }));
-  assert.deepEqual(subagentEvents(f.desktop.log(id)).map(e => [e.toolUseId, e.model, e.description, e.status]), [
-    ["toolu_one", "deepseek-v4.1-flash", "Summarize the rules", "running"],
-    ["toolu_two", "gpt-6.1-sol", "Long task", "running"],
+  // The effort comes from meta's model suffix (@medium) and the hook's prefix (Sol·medium); both say medium.
+  assert.deepEqual(subagentEvents(f.desktop.log(id)).map(e => [e.toolUseId, e.model, e.description, e.status, e.effort ?? null]), [
+    ["toolu_one", "deepseek-v4.1-flash", "Summarize the rules", "running", "medium"],
+    ["toolu_two", "gpt-6.1-sol", "Long task", "running", "medium"],
     // Its transcript ends on its own answer with no notification line: the worker is done.
-    ["toolu_one", "deepseek-v4.1-flash", "Summarize the rules", "done"],
+    ["toolu_one", "deepseek-v4.1-flash", "Summarize the rules", "done", "medium"],
   ]);
 });
 
