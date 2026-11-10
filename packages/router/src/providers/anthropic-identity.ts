@@ -47,12 +47,12 @@ export class LoginEmailWatch {
 /**
  * Writes one request's row. A `current` row takes the email only if the lookup has answered by the
  * time the row is final, or within FINAL_WAIT_MS of that; past it the row is written without an email
- * and names no person. Every other row is written at once.
+ * and names no person. Every other row is written at once. The promise resolves once the row is written.
  */
-export function writeLoginRow(write: (record: RequestRecord) => void, record: RequestRecord, watch: LoginEmailWatch | undefined): void {
+export function writeLoginRow(write: (record: RequestRecord) => void, record: RequestRecord, watch: LoginEmailWatch | undefined): Promise<void> {
   if (!watch || record.account !== "current") {
     write(record);
-    return;
+    return Promise.resolve();
   }
   const attach = (): void => {
     if (watch.email) record.accountEmail = watch.email;
@@ -60,11 +60,33 @@ export function writeLoginRow(write: (record: RequestRecord) => void, record: Re
   };
   if (watch.settled) {
     attach();
-    return;
+    return Promise.resolve();
   }
   let timer: ReturnType<typeof setTimeout> | undefined;
-  void Promise.race([watch.done, new Promise<void>((resolve) => { timer = setTimeout(resolve, FINAL_WAIT_MS); })])
+  return Promise.race([watch.done, new Promise<void>((resolve) => { timer = setTimeout(resolve, FINAL_WAIT_MS); })])
     .then(() => { clearTimeout(timer); attach(); });
+}
+
+/**
+ * The rows still waiting for their login's email. A request leaves the in-flight count when it
+ * finishes, which can be before its row is written, so a drain and the exit after it wait for these
+ * rows: no row is lost to the process ending. Each wait is bounded by FINAL_WAIT_MS.
+ */
+export class PendingRowWrites {
+  private readonly pending = new Set<Promise<void>>();
+
+  /** Writes one row now, or once its login email is settled; tracked until it is written. */
+  write(write: (record: RequestRecord) => void, record: RequestRecord, watch: LoginEmailWatch | undefined): void {
+    // RequestLog.add does not throw; a writer that did must not leave the drain waiting on it.
+    const done = writeLoginRow(write, record, watch).catch(() => {});
+    this.pending.add(done);
+    void done.then(() => { this.pending.delete(done); });
+  }
+
+  /** Resolves once every row that was waiting for its login email has been written. */
+  async settled(): Promise<void> {
+    while (this.pending.size > 0) await Promise.all([...this.pending]);
+  }
 }
 
 type IdentitySource = { credentials(): Promise<Credential[]> };

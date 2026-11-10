@@ -57,7 +57,7 @@ import { nativeAnthropicHeaders, type ClaudeCodeCredentialReaders } from "./prov
 import { ClaudeAccountAuthPool } from "./providers/anthropic-account-pool.ts";
 import { ClaudeModelCatalog } from "./providers/anthropic-models.ts";
 import { ClaudeUsage, claudeLimitResetMs } from "./providers/anthropic-usage.ts";
-import { ClaudeCurrentIdentity, LoginEmailWatch, writeLoginRow } from "./providers/anthropic-identity.ts";
+import { ClaudeCurrentIdentity, LoginEmailWatch, PendingRowWrites } from "./providers/anthropic-identity.ts";
 import { dropForeignThinking, ThinkingOrigins } from "./thinking.ts";
 
 const MAX_BODY = 64 * 1024 * 1024;
@@ -281,6 +281,8 @@ export class Proxy {
   private draining = false;
   /** Model calls waiting at the hold gate (not yet in `stats`): drain() waits for them too. */
   private held = 0;
+  /** Rows still waiting for their login's email; drain() waits for them, so an exit cannot lose one. */
+  readonly rows = new PendingRowWrites();
   private readonly server: net.Server;
   private readonly httpServer: http.Server;
   private readonly upstreamAgent = new https.Agent({ keepAlive: true, maxSockets: 64 });
@@ -681,6 +683,8 @@ export class Proxy {
       onProgress?.(this.stats.messagesInFlight);
       await new Promise((r) => setTimeout(r, 250));
     }
+    // A finished call's row may still wait for its login's email (at most FINAL_WAIT_MS): it is written first.
+    await this.rows.settled();
     this.close();
   }
 
@@ -957,7 +961,7 @@ export class Proxy {
         if (completed.ok && completed.kind === "messages" && numericStatus >= 200 && numericStatus < 300 && extra?.upstreamCalled !== false && !ownKey) {
           this.modelHealth.success(completed.provider, completed.target);
         }
-        writeLoginRow((row) => this.deps.requests.add(row), completed, loginWatch);
+        this.rows.write((row) => this.deps.requests.add(row), completed, loginWatch);
       }
     };
 

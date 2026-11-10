@@ -495,6 +495,22 @@ test("a profile lookup that answers after the response still names the login in 
   } finally { await r.stop(); }
 });
 
+test("a drain waits for a row still waiting for its login's email, so the row is on disk before the exit", async () => {
+  // The lookup never answers, so the row can only be written once its wait is over: the drain must wait for that.
+  const r = await rig({ profiles: { "test-native": "never@example.test" }, profileWait: new Promise<void>(() => {}) });
+  try {
+    r.observed.observe(["authorization", "Bearer test-native", "anthropic-version", "2023-06-01"]);
+    const { text } = await r.send("claude-pool");
+    assert.match(text, /HTTP\/1\.1 200/);
+    await r.proxy.drain(5_000);
+    const onDisk = fs.readFileSync(path.join(r.home, "requests.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line) as RequestRecord);
+    const row = onDisk.find((record) => record.account === "current");
+    assert.ok(row, "the row is written before the drain ends");
+    assert.equal(row.ok, true);
+    assert.equal(row.accountEmail, undefined, "an unanswered lookup names nobody");
+  } finally { await r.stop(); }
+});
+
 test("a request answered on the app's own sign-in snapshots that login's email", async () => {
   const r = await rig({ profiles: { "app-own-token": "app@example.test" } });
   try {

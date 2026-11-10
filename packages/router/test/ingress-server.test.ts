@@ -243,6 +243,41 @@ test("an ingress turn on the current Claude login snapshots that login's email",
   }
 });
 
+test("an ingress turn on the current Claude login is on disk when the ingress drains, even if its email never comes", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-ingress-drain-row-"));
+  const own = new RequestLog(path.join(home, "requests.jsonl"));
+  const native = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ id: "msg_native", type: "message", role: "assistant", content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } }));
+    });
+  });
+  const nativePort = await listen(native);
+  const observed = new ObservedClaudeCodeAuth();
+  observed.observe(["authorization", "Bearer ingress-login", "anthropic-version", "2023-06-01"]);
+  const nativeConfig: Config = {
+    ...config,
+    providers: { claude: { type: "anthropic", auth: "claude-code", accountPool: true, models: [{ id: "claude-sonnet-5" }] } },
+    routes: { "claude-sonnet-5": { provider: "claude", model: "claude-sonnet-5" } },
+  };
+  // The lookup never answers: the row waits for it, and only a drain that waits for that row keeps it.
+  const nativeIngress = new OpenAiIngress({ config: () => nativeConfig, log, requests: own, home, observedClaudeCodeAuth: observed, claudeCodeCredentialReaders: noClaudeCodeCredentialReaders, nativeUpstream: `http://127.0.0.1:${nativePort}`, claudeIdentity: () => new Promise(() => {}) });
+  const nativeIngressPort = await nativeIngress.listen();
+  try {
+    const response = await call("/v1/responses", input, nativeIngressPort);
+    assert.equal(response.status, 200);
+    await nativeIngress.drain(5_000);
+    const onDisk = fs.readFileSync(path.join(home, "requests.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line) as { account?: string; accountEmail?: string; ok: boolean });
+    const row = onDisk.find((record) => record.account === "current");
+    assert.ok(row, "the row is written before the drain ends");
+    assert.equal(row.ok, true);
+    assert.equal(row.accountEmail, undefined, "an unanswered lookup names nobody");
+  } finally {
+    await new Promise<void>((resolve) => native.close(() => resolve()));
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("native ingress uses one added Claude account without enabling failover", async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-ingress-claude-account-"));
   const nativeSeen: http.IncomingHttpHeaders[] = [];

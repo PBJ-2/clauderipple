@@ -23,7 +23,7 @@ import { CLAUDE_CODE_IDENTITY, nativeAnthropicHeaders, type ClaudeCodeCredential
 import { ToolTranslation, ToolTranslationError } from "./tools.ts";
 import { ClaudeAccountAuthPool } from "../providers/anthropic-account-pool.ts";
 import { ObservedClaudeCodeAuth } from "../providers/anthropic-observed.ts";
-import { LoginEmailWatch, writeLoginRow } from "../providers/anthropic-identity.ts";
+import { LoginEmailWatch, PendingRowWrites } from "../providers/anthropic-identity.ts";
 import type { ChatGptAdapter } from "../providers/chatgpt/index.ts";
 import type { Credential } from "../pool.ts";
 import {
@@ -191,6 +191,8 @@ export class OpenAiIngress {
   private draining = false;
   /** Model calls waiting at the hold gate (not yet in `stats`): drain() waits for them too. */
   private held = 0;
+  /** Rows still waiting for their login's email; drain() waits for them, so an exit cannot lose one. */
+  readonly rows = new PendingRowWrites();
 
   constructor(deps: IngressDeps) {
     this.deps = deps;
@@ -239,6 +241,8 @@ export class OpenAiIngress {
       onProgress?.(this.stats.messagesInFlight);
       await new Promise((resolveP) => setTimeout(resolveP, 250));
     }
+    // A finished call's row may still wait for its login's email (at most FINAL_WAIT_MS): it is written first.
+    await this.rows.settled();
     for (const socket of this.sockets) socket.destroy();
   }
 
@@ -297,7 +301,7 @@ export class OpenAiIngress {
         if (extra.usage) entry.usage = extra.usage;
         if (extra.stopReason) entry.stopReason = extra.stopReason;
         if (extra.note) entry.note = extra.note;
-        writeLoginRow((row) => this.deps.requests.add(row), entry, account === served.account ? served.watch : undefined);
+        this.rows.write((row) => this.deps.requests.add(row), entry, account === served.account ? served.watch : undefined);
       }
     };
     // Codex closes the socket the moment it reads `response.completed`, often before Anthropic's
