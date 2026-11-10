@@ -42,7 +42,7 @@ function block(from: string, to: string): string {
 type LimitsUi = {
   refreshHealth(): Promise<void>;
   renderHealthProviders(): void;
-  limitsAccountRow(entry: unknown, account: unknown, now: number): Element;
+  limitsAccountRow(entry: unknown, account: unknown, now: number, credential?: unknown): Element;
   limitsWindowRow(label: string, window: unknown, now: number, accountName?: string): Element;
   limitsUsageWindow(window: unknown): unknown;
   settleLimits(): Promise<unknown>;
@@ -55,7 +55,7 @@ function limitsUi(api: (path: string) => Promise<unknown>, status: Record<string
   const card = el("div"), desktop = el("div");
   const build = new Function("api", "el", "t", "$", "status", "config", `
     let currentConfig = config;
-    const stateFor = () => null, chevronIcon = () => null, openProvider = () => {}, chatgptLoginButton = () => el("button", { text: "Sign in" }), chatgptLoginMessage = "", providerLabel = (name) => name;
+    const stateFor = () => null, chevronIcon = () => null, openProvider = () => {}, chatgptLoginButton = () => el("button", { text: "Sign in" }), chatgptLoginMessage = "", providerLabel = (name) => name, providerTitle = (name) => name, providerHue = () => "#000";
     const APP = null, clientsLoaded = false, modState = {}, updateState = {}, renderDiagnostics = () => {}, modRedraw = () => {}, versionRow = () => null, autoUpdateRow = () => null, priorityRow = () => null;
     let loadedUiRevision = null;
     ${block("function badge(", "/** A titled group")}
@@ -271,7 +271,38 @@ test("an account label stays text and its timestamp is the figures' time", () =>
   const row = ui.limitsAccountRow({ type: "chatgpt", title: "GPT" }, { ...current, label: "<img src=x onerror=alert(1)>" }, now);
   assert.match(text(row), /<img src=x/);
   assert.equal(findAll(row, (node) => node.tag === "img").length, 0);
-  assert.ok(text(row).includes(t("limits.fetchedAt", { time: new Date(now).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: false }) })));
+  // The figures' time is on the name's tooltip, not a line on every account; a stale account spells it out.
+  const fetched = t("limits.fetchedAt", { time: new Date(now).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: false }) });
+  assert.ok(String(row.children[0]!.children[0]!.attrs.title).endsWith(fetched));
+  assert.ok(!text(row).includes(fetched));
+  const stale = ui.limitsAccountRow({ type: "chatgpt", title: "GPT", stale: true }, current, now);
+  assert.ok(text(stale).includes(fetched));
+});
+
+test("an account's state is said once: a paused account has no 'no usage' line, and a pool cooldown sits on its own row", () => {
+  const ui = limitsUi(async () => ({}));
+  const paused = ui.limitsAccountRow({ type: "chatgpt", title: "GPT" }, { id: "p", label: "Paused", state: "paused", paused: true, account: null, windows: [], at: 0 }, now);
+  assert.match(text(paused), /Paused/);
+  assert.doesNotMatch(text(paused), /No usage snapshot yet/);
+  const unread = ui.limitsAccountRow({ type: "chatgpt", title: "GPT" }, { id: "w", label: "Waiting", state: "ready", account: 1, windows: [], at: 0 }, now);
+  assert.match(text(unread), /No usage snapshot yet/);
+  const cooling = ui.limitsAccountRow({ type: "anthropic", title: "Claude" }, { ...current, id: "x", label: "Stored" }, now, { id: "x", state: "cooling", cooldownSeconds: 90 });
+  assert.ok(text(cooling).includes(t("pool.coolingFor", { duration: t("time.minutes", { m: 2 }) })));
+  const rejected = ui.limitsAccountRow({ type: "anthropic", title: "Claude" }, { ...current, id: "y", label: "Bad" }, now, { id: "y", state: "quarantined" });
+  assert.ok(text(rejected).includes(t("pool.quarantined")));
+});
+
+test("a pool entry drawn as its own account row leaves the provider's pool line", async () => {
+  const ui = limitsUi(async (path) => path === "/api/limits" ? { providers: [
+    { type: "anthropic", provider: "claude", title: "Claude", accounts: [current] },
+  ] } : {}, {
+    providers: connected, claude: { accounts: [{ id: "current", quota: {} }] },
+    credentials: { claude: [{ id: "current", label: "Current Claude session", state: "ready" }, { id: "x", label: "Stored", state: "cooling", cooldownSeconds: 90 }] },
+  });
+  await ui.refresh();
+  const header = ui.card.children[0]!.children[0]!;
+  assert.doesNotMatch(text(header), new RegExp(`${t("providers.anthropicCurrentLogin")}: `), "the login's state is not repeated above its own row");
+  assert.ok(text(header).includes(`Stored: ${t("pool.cooling", { seconds: 90 })}`), "an account with no row keeps its line");
 });
 
 test("every dashboard language names the limit windows, freshness and resets", () => {
@@ -533,12 +564,18 @@ test("the Claude login is named in the dashboard's language, whatever label the 
   assert.doesNotMatch(text(ui.card), /Current Claude session/);
 });
 
-test("the window grid wraps by the room the account has, never a fixed pair of columns", () => {
+test("the windows read as a table that folds on a narrow card, never a fixed pair of window columns", () => {
   const css = fs.readFileSync(path.join(uiDir, "style.css"), "utf8");
   const rule = css.match(/\.limits-windows \{([^}]*)\}/);
   assert.ok(rule, "the window grid has its rule");
-  assert.match(rule[1]!, /grid-template-columns: repeat\(auto-fit, minmax\(min\(100%, 200px\), 1fr\)\)/);
+  // A line per window: name, bar, figure, reset — the columns line up across accounts.
+  assert.match(rule[1]!, /grid-template-columns: [\d.]+em minmax\(48px, 1fr\) [\d.]+em minmax\(0, [\d.]+fr\)/);
   assert.doesNotMatch(rule[1]!, /repeat\(2/, "no fixed two-column grid is left in the window grid");
+  // On a narrow card (the provider's own width, not the window's) the reset drops under the bar.
+  const narrow = css.match(/@container \(max-width: 780px\) \{([\s\S]*?)\n\}/);
+  assert.ok(narrow, "the narrow card has its rules");
+  assert.match(narrow[1]!, /\.limits-window-foot \{ grid-column: 2 \/ -1; \}/);
+  assert.match(css, /\.provider-limits \{[^}]*container-type: inline-size/);
 });
 
 test("the 5-hour and weekly window names are the mod's, verbatim in every language", () => {

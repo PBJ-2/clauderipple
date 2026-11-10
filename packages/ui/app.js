@@ -140,6 +140,38 @@ function uniqueName(name, providers, url) {
 function providerLabel(name, provider = currentConfig && currentConfig.providers && currentConfig.providers[name]) {
   return (provider && typeof provider.label === "string" && provider.label.trim()) || name;
 }
+/**
+ * A provider's name where a person scans a list of them (the Status screen): the name the user typed,
+ * else its preset's name ("OpenCode Go", without a "(local)" aside), else the service its type is
+ * ("Claude", "ChatGPT", "Gemini"), else a placeholder key ("provider") gives way to its host. The key
+ * itself is the last resort: it is a slug the user may never have chosen.
+ */
+const PROVIDER_TYPE_TITLES = { anthropic: "Claude", chatgpt: "ChatGPT", google: "Gemini", grok: "Grok" };
+function providerTitle(name, provider) {
+  const label = provider && typeof provider.label === "string" && provider.label.trim();
+  if (label) return label;
+  const preset = provider && provider.preset && presetById(provider.preset);
+  if (preset && preset.name) return preset.name.replace(/\s*\([^)]*\)\s*$/, "");
+  if (provider && PROVIDER_TYPE_TITLES[provider.type]) return PROVIDER_TYPE_TITLES[provider.type];
+  if (/^provider(?:-\d+)?$/.test(name) && provider && provider.url) {
+    try { return new URL(provider.url).hostname.replace(/^(?:api[\w-]*|www)\./, ""); } catch { /* not a URL: the key stays */ }
+  }
+  return name;
+}
+/**
+ * The vendor's hue for a provider's dot, as the mod's band colours them (packages/mod/hooks/ui/theme.ts
+ * providerColor): a known vendor keeps its own, any other a fixed pick from a palette with no status
+ * red, green or amber in it, so a dot is never read as a result.
+ */
+const PROVIDER_HUES = { anthropic: "#d97757", chatgpt: "#10a37f", google: "#4285f4", deepseek: "#4d6bfe", "opencode-go": "#9333ea", "opencode-zen": "#9333ea", minimax: "#e5484d", grok: "#a8a29e", "xai-grok": "#a8a29e" };
+const PROVIDER_PALETTE = ["#0891b2", "#db2777", "#7c3aed", "#0d9488", "#c026d3", "#4f46e5", "#0284c7", "#be185d"];
+function providerHue(name, provider) {
+  const known = PROVIDER_HUES[name] || (provider && (PROVIDER_HUES[provider.preset] || PROVIDER_HUES[provider.type]));
+  if (known) return known;
+  let hash = 0;
+  for (const char of name) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return PROVIDER_PALETTE[hash % PROVIDER_PALETTE.length];
+}
 // The typed name is kept only when it says something the key does not; typing the key back clears it.
 function applyProviderLabel(provider, key, typedName) {
   const label = typedName.trim().slice(0, 60);
@@ -414,23 +446,28 @@ function limitsWindowRow(label, window, now, accountName = "") {
   const level = note ? null : limitsPaceLevel(window, now);
   const pace = level ? t("limits.paceProjected", { percent: Math.round(window.projectedPercent) }) : "";
   const passed = Number.isFinite(window.resetAt) && window.resetAt <= now;
+  // The bar and its figure take the mod's limitItemTone: amber from 80%, red from 95% or within the hour of running out.
+  const tone = limitsNoteTone(window, exhaustLeft);
   const track = el("div", {
-    class: "limits-track", role: "progressbar", tabindex: "0",
+    class: "limits-track meter", role: "progressbar", tabindex: "0",
     "aria-label": name, "aria-valuemin": "0", "aria-valuemax": "100",
     "aria-valuenow": Math.max(0, Math.min(100, window.usedPercent)),
     "aria-valuetext": [percent, reset, pace, note].filter(Boolean).join(" · "), title: [name, percent, reset].join(" · "),
   });
-  const fill = el("span", { class: "limits-fill", "aria-hidden": "true" });
+  const fill = el("span", { class: "limits-fill meter-fill", "aria-hidden": "true" });
   fill.style.width = `${Math.max(0, Math.min(100, window.usedPercent))}%`;
   track.appendChild(fill);
   const parts = [el("span", { text: reset })];
   if (passed) parts.push(el("span", { class: "warn-text", text: t("limits.stale") }));
   if (pace) parts.push(level === "tight" ? el("span", { class: "warn-text", text: pace }) : el("span", { text: pace }));
-  const foot = el("div", { class: "limits-window-foot" }, parts.flatMap((part, index) => (index ? [el("span", { text: " · " }), part] : [part])));
-  const tone = note ? limitsNoteTone(window, exhaustLeft) : "ink";
-  return el("div", { class: "limits-window" }, [
-    el("div", { class: "limits-window-head" }, [el("span", { text: label }), el("span", { text: percent })]),
-    track,
+  const foot = el("div", { class: "limits-window-foot" }, parts.flatMap((part, index) => (index ? [el("span", { class: "sep", text: " · " }), part] : [part])));
+  // One line of a table: the window's name, its bar and figure, then when it resets; an exhaust warning runs under the bar.
+  return el("div", { class: `limits-window${tone === "ink" ? "" : ` tone-${tone}`}` }, [
+    el("div", { class: "limits-window-head" }, [
+      el("span", { class: "limits-window-name", text: label, title: label }),
+      track,
+      el("span", { class: "limits-window-figure", text: percent }),
+    ]),
     foot,
     note ? el("div", { class: tone === "ink" ? "limits-window-note" : `limits-window-note ${tone}-text`, text: note }) : null,
   ]);
@@ -498,24 +535,40 @@ function limitsAccountName(entry, account) {
   return account.account === null || account.account === undefined ? entry.title : `${entry.title} ${account.account + 1}`;
 }
 
-function limitsAccountRow(entry, account, now) {
+/**
+ * One account: its name with its state beside it, then a line per window. `credential` is the pool's entry
+ * for the same account, so a cooldown or a rejected sign-in sits on the account's own row rather than in a
+ * second list of the same accounts under the provider's name. The time of the figures is on the name's
+ * tooltip; it is spelt out only where it matters, beside a stale mark.
+ */
+function limitsAccountRow(entry, account, now, credential) {
   const badges = [];
   if (account.inUse) badges.push(badge("first", t("limits.active")));
   // A cooling account with no time left would read "available again in 0s"; once its countdown is over it shows as ready.
   const cooledOff = account.state === "cooling" && !(account.cooldownSeconds > 0);
-  if (account.paused || (account.state && account.state !== "ready" && !cooledOff)) badges.push(chatgptStateBadge(account));
-  if (entry.stale || account.stale || (account.quota && account.quota.stale)) badges.push(badge("warn", t("limits.stale")));
-  const fetched = Number.isFinite(account.at) && account.at > 0 ? t("limits.fetchedAt", { time: new Date(account.at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: false }) }) : t("limits.notFetched");
+  const stated = account.paused || (account.state && account.state !== "ready" && !cooledOff);
+  if (stated) badges.push(chatgptStateBadge(account));
+  // The pool's word on the account, unless the account's own state already says it.
+  else if (credential && credential.state === "quarantined") badges.push(badge("bad", t("pool.quarantined")));
+  else if (credential && credential.state === "cooling" && credential.cooldownSeconds > 0) badges.push(badge("warn", t("pool.coolingFor", { duration: durationText(credential.cooldownSeconds) })));
+  const read = Number.isFinite(account.at) && account.at > 0;
+  const fetched = read ? t("limits.fetchedAt", { time: new Date(account.at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: false }) }) : t("limits.notFetched");
+  if (entry.stale || account.stale || (account.quota && account.quota.stale)) {
+    badges.push(badge("warn", t("limits.stale")));
+    if (read) badges.push(el("span", { class: "limits-fetched", text: fetched }));
+  }
   const name = limitsAccountName(entry, account);
   const windows = (account.windows || []).map(limitsUsageWindow).filter(Boolean);
   // One gauge per window the router reported; a window it did not report has no gauge, and an account with none has none.
   const gauges = windows.map((window, index) => limitsWindowRow(limitsWindowName(windows, index), window, now, name));
+  // An account with no figures says why only when no state above already does ("paused" needs no "no usage yet" after it).
+  const empty = !gauges.length && !stated ? el("span", { class: "limits-empty", text: fetched }) : null;
   return el("div", { class: "limits-account" }, [
     el("div", { class: "limits-account-head" }, [
-      el("strong", { text: name }),
-      el("div", { class: "limits-badges" }, [...badges, el("span", { class: "limits-fetched", text: fetched })]),
+      el("strong", { text: name, title: `${name} · ${fetched}` }),
+      badges.length ? el("div", { class: "limits-badges" }, badges) : null,
     ]),
-    gauges.length ? el("div", { class: "limits-windows" }, gauges) : null,
+    gauges.length ? el("div", { class: "limits-windows" }, gauges) : empty,
   ]);
 }
 
@@ -596,7 +649,7 @@ async function refreshHealth() {
   try {
     status = await statusRead;
   } catch (error) {
-    $("#health-desktop").replaceChildren(cell(t("health.connection"), badge("bad", t("health.disconnected"))));
+    $("#health-desktop").replaceChildren(el("div", { class: "stat-value" }, [badge("bad", t("health.disconnected"))]));
     // Inside the app a router that does not answer is a state with a way out, not an error.
     if (APP && error.body && error.body.routerDown) setRouterDown(true);
     return;
@@ -607,13 +660,13 @@ async function refreshHealth() {
     if (loadedUiRevision === null) loadedUiRevision = status.uiRevision;
     else if (loadedUiRevision !== status.uiRevision && $("#modal-backdrop").hidden) location.reload();
   }
+  // The two overview tiles: whether Claude Desktop goes through the router, and how many requests it has handled.
   const desktop = $("#health-desktop");
-  desktop.replaceChildren(cell(
-    t("health.connection"),
-    status.settings.pointsAtRouter ? badge("ok", t("health.connected")) : badge("bad", t("health.notConnected")),
-    status.settings.pointsAtRouter ? t("health.connectedHelp") : t("health.notConnectedHelp"),
-  ));
-  $("#health-requests").replaceChildren(el("div", { class: "row" }, [el("span", { class: "k", text: t("health.requests") }), el("span", { class: "v", text: t("health.requestsFmt", Object.fromEntries(Object.entries(status.stats || {}).map(([key, value]) => [key, typeof value === "number" ? value.toLocaleString() : value]))) })]));
+  desktop.replaceChildren(
+    el("div", { class: "stat-value" }, [status.settings.pointsAtRouter ? badge("ok", t("health.connected")) : badge("bad", t("health.notConnected"))]),
+    el("p", { class: "stat-sub", text: status.settings.pointsAtRouter ? t("health.connectedHelp") : t("health.notConnectedHelp") }),
+  );
+  $("#health-requests").replaceChildren(el("div", { class: "stat-value", text: t("health.requestsFmt", Object.fromEntries(Object.entries(status.stats || {}).map(([key, value]) => [key, typeof value === "number" ? value.toLocaleString() : value]))) }));
   renderHealthProviders();
   renderDiagnostics();
   if (clientsLoaded) renderClients();
@@ -1162,8 +1215,9 @@ async function startChatgptLogin(onChange, adding) {
  * Which of a provider's credentials are resting, and until when. Absent for a provider with one
  * credential: a row that can only ever say "ready" is noise. Ids and labels only — never a key.
  */
-function credentialLine(name) {
-  const pool = (status && status.credentials && status.credentials[name]) || [];
+function credentialLine(name, shown) {
+  // An account drawn as its own row below carries its state there (limitsAccountRow); the line keeps the rest.
+  const pool = ((status && status.credentials && status.credentials[name]) || []).filter((c) => !(shown && c.id !== undefined && shown.has(c.id)));
   if (!pool.length) return null;
   const parts = pool.map((c) => {
     // The router names the Claude login in English ("Current Claude session") and an account nobody named "Claude account"; the screen says them in its language.
@@ -1240,8 +1294,9 @@ function renderHealthProviders() {
         .map(({ account, text }) => el("div", { text: `${claudeAccountLabel(account)} · ${text}` }));
       if (usage.length) lines.push(el("div", { class: "cell-sub account-usage" }, usage));
     }
-    // A cooldown or quarantine is not in the gauges, so it stays beside them.
-    const pool = credentialLine(name);
+    // A cooldown or quarantine is not in the gauges: an account with a row says it on that row, any other stays in the line.
+    const shown = limits ? new Set(limits.accounts.map((account) => account.id).filter((id) => id !== undefined)) : null;
+    const pool = credentialLine(name, shown);
     if (pool) lines.push(pool);
     if (live && live.needsLogin && provider.type === "chatgpt") {
       lines.push(el("div", { class: "cell-actions" }, [
@@ -1249,8 +1304,11 @@ function renderHealthProviders() {
         chatgptLoginMessage ? el("span", { class: "small", text: chatgptLoginMessage }) : null,
       ]));
     }
-    // The row opens the provider's own page; a button inside it keeps its own click.
-    const row = cell(el("span", { class: "cell-label", text: providerLabel(name, provider) }), [providerState(name, provider), chevronIcon()], lines, "provider-status link");
+    // The row opens the provider's own page; a button inside it keeps its own click. The dot is the vendor's hue, as on the mod's band.
+    const dot = el("span", { class: "vendor-dot", "aria-hidden": "true" });
+    dot.style.color = providerHue(name, provider);
+    const title = el("span", { class: "cell-label provider-title" }, [dot, el("span", { text: providerTitle(name, provider) })]);
+    const row = cell(title, [providerState(name, provider), chevronIcon()], lines, "provider-status link");
     row.tabIndex = 0;
     const open = (event) => { if (!event.target.closest("button, a")) openProvider(name, provider); };
     row.addEventListener("click", open);
@@ -1258,7 +1316,9 @@ function renderHealthProviders() {
     // Only the header opens the provider; the accounts below take the card's full width.
     if (!limits) return row;
     const now = Date.now();
-    return el("div", { class: "provider-block" }, [row, el("div", { class: "provider-limits" }, limits.accounts.map((account) => limitsAccountRow(limits, account, now)))]);
+    const credentials = (status && status.credentials && status.credentials[name]) || [];
+    const credentialOf = (account) => (account.id === undefined ? undefined : credentials.find((c) => c.id === account.id));
+    return el("div", { class: "provider-block" }, [row, el("div", { class: "provider-limits" }, limits.accounts.map((account) => limitsAccountRow(limits, account, now, credentialOf(account))))]);
   }));
 }
 
@@ -1929,6 +1989,9 @@ async function toggleCodex(enabled) {
 }
 void Promise.all([loadCatalogs(), refreshHealth()]);
 setInterval(refreshHealth, 5000);
+// Status names providers by the names people know (the one the user typed, a preset's name), which only
+// the config carries; read it once here unless another page already has. The 5-second poll redraws with it.
+if (!offline()) void api("/api/config").then((config) => { if (!currentConfig) { currentConfig = config; if (status) renderHealthProviders(); } }, () => { /* the status names stand */ });
 // The open accounts tab follows the router (each refresher returns at once when its list is not shown).
 setInterval(() => {
   if (document.visibilityState !== "visible" || !$("#modal-backdrop").hidden || !selectedProviderName) return;

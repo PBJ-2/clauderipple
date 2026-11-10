@@ -28,14 +28,17 @@
     <header class="page-header"><div><h1 data-i18n="health.title">Status</h1><p class="page-subtitle" data-i18n="health.subtitle"></p></div></header>
     <!-- Drawn only inside the ClaudeRipple app, which can repair or switch the connection (window.rippleApp). -->
     <div class="conn" id="health-connection" hidden></div>
-    <section class="section" id="health-desktop-section">
-      <div class="section-head"><h2 class="section-title" data-i18n="health.desktop">Claude Desktop connection</h2></div>
-      <div class="group" id="health-desktop"></div>
-    </section>
-    <section class="section">
-      <div class="section-head"><h2 class="section-title" data-i18n="health.providers">Providers</h2></div>
-      <div class="group" id="health-providers"></div>
-    </section>
+    <!-- The overview: two tiles in one surface. Inside the app the connection card above replaces the first. -->
+    <div class="section group stat-tiles">
+      <section class="stat-tile" id="health-desktop-section">
+        <h2 class="stat-label" data-i18n="health.desktop">Claude Desktop connection</h2>
+        <div id="health-desktop"></div>
+      </section>
+      <section class="stat-tile">
+        <h2 class="stat-label" data-i18n="health.requests">Requests (since router start)</h2>
+        <div id="health-requests"></div>
+      </section>
+    </div>
     <!-- What is in the way and what to do about it; drawn only when the router reports something. -->
     <section class="section" id="health-diagnostics-section" hidden>
       <div class="section-head">
@@ -46,8 +49,8 @@
       <p class="group-footer" data-i18n="health.diagnosticsHelp"></p>
     </section>
     <section class="section">
-      <div class="section-head"><h2 class="section-title" data-i18n="health.requestCount">Request count</h2></div>
-      <div class="group" id="health-requests"></div>
+      <div class="section-head"><h2 class="section-title" data-i18n="health.providers">Providers</h2></div>
+      <div class="group" id="health-providers"></div>
     </section>
   </section>
 

@@ -423,35 +423,116 @@ label.check input { margin-top: 2px; }
 .toast.error > div:first-child { color: var(--bad); font-weight: 500; }
 .toast-raw { margin-top: 4px; color: var(--label-2); font: 12px/1.4 var(--mono); word-break: break-word; }
 
+/* ---- Shared components: meter, tag, vendor dot, stat tiles ------------------------------ */
+/* The mod's drawn language in page form: thin meters in graphite ink, small pill tags, a vendor's
+   hue as a dot, figures in tabular numerals. Built on the tokens above so any page can use them. */
+
+/* A share of something as a thin bar. Amber and red come from the row's tone (`.tone-warn`, `.tone-bad`). */
+.meter { position: relative; height: 4px; border-radius: 2px; background: var(--meter-track); overflow: hidden; }
+.meter-fill { display: block; height: 100%; border-radius: 2px; background: var(--meter-fill); }
+.tone-warn .meter-fill { background: var(--warn-dot); }
+.tone-bad .meter-fill { background: var(--bad-dot); }
+.meter:focus-visible { outline-offset: 3px; border-radius: 2px; }
+
+/* A small pill that names a state. Plain is grey; `.accent` is outlined in violet (the one point in a
+   row); `.warn` and `.bad` are tinted. `.tag` is the class to use; a `.badge` in a tag row reads as one. */
+.tag {
+  display: inline-flex; align-items: center; gap: 0; max-width: 100%;
+  padding: 1px 7px; border-radius: 999px;
+  background: var(--fill); color: var(--label-2);
+  font-size: 11px; font-weight: 500; line-height: 16px; white-space: nowrap;
+}
+.tag.accent { background: transparent; box-shadow: inset 0 0 0 1px var(--accent-line); color: var(--accent); font-weight: 600; }
+.tag.warn { background: var(--tint-warn); color: var(--warn); }
+.tag.bad { background: var(--tint-bad); color: var(--bad); }
+
+/* A provider's identity: its vendor's hue (set as the element's colour by app.js providerHue). */
+.vendor-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: currentColor; }
+
+/* Figures side by side in one surface, a hairline between them; stacked on a phone. A hidden tile takes no column. */
+.stat-tiles { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
+.stat-tile { position: relative; min-width: 0; padding: 13px 16px 14px; }
+.stat-tile:not([hidden]) + .stat-tile::before { content: ""; position: absolute; top: 14px; bottom: 14px; left: 0; width: 1px; background: var(--separator); }
+.stat-label { margin: 0 0 5px; color: var(--label-2); font-size: var(--fs-cap); font-weight: 500; letter-spacing: 0.01em; }
+.stat-value { color: var(--label); font-size: var(--fs-sub); font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.stat-value .badge { color: var(--label); font-size: inherit; font-weight: inherit; }
+.stat-value .badge.bad { color: var(--bad); }
+.stat-sub { margin: 3px 0 0; color: var(--label-2); font-size: var(--fs-foot); line-height: 1.45; }
+
 /* ---- Status view --------------------------------------------------------------------- */
 
-.provider-status .cell-text strong { font-weight: 500; }
-.provider-status .account-usage { display: grid; gap: 1px; }
+/* Wider than a settings page: an account's windows read as one line each, a table across. */
+#view-health { max-width: 880px; }
 
-/* The provider's header opens its settings; each account below has one 0–100% scale per window. */
+/* A provider: its header row opens its page; its accounts follow, one row each. Providers are
+   divided by full-width rules, accounts within one by inset hairlines. */
+#health-providers > * + *::before { left: 0; }
+.provider-status { min-height: 46px; padding-top: 11px; padding-bottom: 11px; }
+.provider-status .cell-text { gap: 3px; }
+.provider-title { display: inline-flex; align-items: center; gap: 10px; font-size: var(--fs-sub); font-weight: 600; }
+.provider-status .cell-sub, .provider-status .cell-actions, .provider-status .account-usage { margin-left: 18px; }
+.provider-status .cell-sub { font-size: var(--fs-cap); }
+.provider-status .account-usage { display: grid; gap: 1px; }
+.provider-status .cell-value .badge { font-size: var(--fs-foot); }
+/* No row-wide grey on hover: the header is one line of a larger card, so it answers with its chevron. */
+.provider-status.link:hover { background: transparent; }
+.provider-status .chevron { transition: transform 0.15s ease, color 0.15s ease; }
+.provider-status.link:hover .chevron { color: var(--label-2); transform: translateX(2px); }
+.provider-status.link:hover .provider-title > span:last-child { text-decoration: underline; text-decoration-color: var(--label-3); text-underline-offset: 3px; }
+
 .provider-block { position: relative; }
 .group > * + .provider-block::before { content: ""; position: absolute; top: 0; left: 16px; right: 0; height: 1px; background: var(--separator); }
 .provider-block:first-child > .cell { border-radius: var(--radius) var(--radius) 0 0; }
-.provider-limits { padding: 0 16px 14px; }
-.limits-account { padding: 12px 14px 14px; min-width: 0; border-radius: 10px; background: var(--fill); }
-.limits-account + .limits-account { margin-top: 8px; }
-.limits-account-head { display: flex; justify-content: space-between; align-items: baseline; gap: 6px 16px; flex-wrap: wrap; }
-.limits-account-head strong { font-size: var(--fs-sub); font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
-.limits-badges { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; min-width: 0; }
-.limits-badges .badge { font-size: var(--fs-cap); white-space: normal; overflow-wrap: anywhere; }
-/* Windows wrap by the room they have: one column on a phone, more as the account's box widens, a row of three or more still full. */
-.limits-windows { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: 0 24px; }
-.limits-window { margin-top: 12px; }
-.limits-window-head { display: flex; justify-content: space-between; gap: 4px 12px; flex-wrap: wrap; margin-bottom: 5px; }
-.limits-window-head, .limits-window-foot { font-size: var(--fs-foot); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-.limits-window-foot { margin-top: 5px; color: var(--label-2); }
-.limits-window-note { margin-top: 4px; font-size: var(--fs-foot); overflow-wrap: anywhere; }
-.limits-track { position: relative; height: 8px; border-radius: 4px; background: var(--fill-press); }
-.limits-fill { display: block; height: 100%; border-radius: 0 4px 4px 0; background: var(--accent-fill); }
-.limits-fetched { color: var(--label-2); font-size: var(--fs-cap); }
+.provider-limits { container-type: inline-size; padding-bottom: 4px; }
+
+/* An account: its name and state on the left, its windows as a table on the right. */
+.limits-account { position: relative; display: grid; grid-template-columns: minmax(0, 188px) minmax(0, 1fr); gap: 6px 20px; min-width: 0; padding: 10px 16px 10px 34px; }
+.limits-account::before { content: ""; position: absolute; top: 0; left: 34px; right: 0; height: 1px; background: var(--separator); }
+.limits-account-head { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; min-width: 0; }
+.limits-account-head strong { max-width: 100%; overflow: hidden; color: var(--label); font-size: var(--fs-foot); font-weight: 500; line-height: 20px; text-overflow: ellipsis; white-space: nowrap; }
+.limits-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; max-width: 100%; }
+/* State badges read as tags here: the in-use mark outlined in the accent, a pause grey, a warning tinted. */
+.limits-badges .badge { display: inline-flex; max-width: 100%; padding: 1px 7px; border-radius: 999px; background: var(--fill); color: var(--label-2); font-size: 11px; font-weight: 500; line-height: 16px; white-space: normal; overflow-wrap: anywhere; }
+.limits-badges .badge::before { display: none; }
+.limits-badges .badge.first { background: transparent; box-shadow: inset 0 0 0 1px var(--accent-line); color: var(--accent); font-weight: 600; }
+.limits-badges .badge.warn { background: var(--tint-warn); color: var(--warn); }
+.limits-badges .badge.bad { background: var(--tint-bad); color: var(--bad); }
+.limits-fetched { color: var(--label-2); font-size: 11px; }
+.limits-empty { align-self: center; color: var(--label-2); font-size: var(--fs-cap); }
+
+/* The windows: a line each — name, bar, figure, then when it resets (and the pace) — in columns
+   that line up across accounts. An exhaust warning runs under the bar. */
+.limits-windows { display: grid; grid-template-columns: 6.5em minmax(48px, 1fr) 4em minmax(0, 1.4fr); column-gap: 12px; row-gap: 2px; align-items: center; min-width: 0; font-size: var(--fs-cap); font-variant-numeric: tabular-nums; }
+.limits-window, .limits-window-head { display: contents; }
+.limits-window + .limits-window .limits-window-head > * { margin-top: 6px; }
+.limits-window-name { min-width: 0; overflow: hidden; color: var(--label-2); line-height: 20px; text-overflow: ellipsis; white-space: nowrap; }
+.limits-window-figure { color: var(--label); font-size: var(--fs-foot); font-weight: 600; line-height: 20px; text-align: right; }
+.limits-window + .limits-window .limits-window-foot { margin-top: 6px; }
+.limits-window-foot { min-width: 0; color: var(--label-2); line-height: 1.4; overflow-wrap: anywhere; }
+.limits-window-foot .sep { color: var(--label-3); }
+.limits-window-note { grid-column: 2 / -1; font-size: var(--fs-cap); line-height: 1.4; overflow-wrap: anywhere; }
+.tone-warn .limits-window-figure { color: var(--warn); }
+.tone-bad .limits-window-figure { color: var(--bad); }
+
+/* A card too narrow for the reset beside the figure: it drops under the bar. */
+@container (max-width: 780px) {
+  .limits-windows { grid-template-columns: 6.5em minmax(0, 1fr) 4em; }
+  .limits-window-foot { grid-column: 2 / -1; }
+  .limits-window + .limits-window .limits-window-foot { margin-top: 0; }
+}
+/* Narrower (a phone, a narrow window): the account's name goes over its windows. */
+@container (max-width: 600px) {
+  .limits-account { grid-template-columns: minmax(0, 1fr); }
+  .limits-account-head { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+  .limits-windows { grid-template-columns: 4.8em minmax(0, 1fr) 4em; }
+}
+@container (max-width: 380px) {
+  .limits-account { padding-left: 16px; }
+  .limits-account::before { left: 16px; }
+}
 @media (forced-colors: active) {
-  .limits-track { border: 1px solid CanvasText; }
-  .limits-fill { background: Highlight; forced-color-adjust: none; }
+  .meter { border: 1px solid CanvasText; }
+  .meter-fill { background: Highlight; forced-color-adjust: none; }
 }
 
 /* ---- Model mapping ------------------------------------------------------------------- */
@@ -1092,6 +1173,8 @@ a.cell { color: inherit; text-decoration: none; }
   .provider-detail-actions { justify-content: flex-start; }
   .provider-tabs { display: flex; }
   .provider-tabs button { flex: 1 1 0; }
+  .stat-tiles { grid-auto-flow: row; grid-auto-columns: auto; }
+  .stat-tile + .stat-tile::before { top: 0; bottom: auto; left: 16px; right: 0; width: auto; height: 1px; }
   .logs-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .logs-chip:nth-child(n)::before { display: block; }
   .logs-chip:nth-child(odd)::before, .logs-summary.with-cost .logs-chip:nth-child(5)::before { display: none; }
