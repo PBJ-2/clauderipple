@@ -538,6 +538,27 @@ test("a drain waits for a row still waiting for its login's email, so the row is
   } finally { await r.stop(); }
 });
 
+test("a drain waits for an image still being generated, so its row is on disk before the exit", async () => {
+  // The backend holds its answer, as an image takes a while there.
+  const r = await rig({ respond: (res) => {
+    setTimeout(() => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end([
+        { type: "response.created", response: {} },
+        { type: "response.output_item.done", item: { id: "ig_1", type: "image_generation_call", output_format: "png", quality: "low", size: "1536x1024", result: Buffer.from("PNGDATA").toString("base64") } },
+        { type: "response.completed", response: { usage: { input_tokens: 10, output_tokens: 2 } } },
+      ].map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""));
+    }, 300);
+  } });
+  try {
+    const pending = r.proxy.generateImage({ prompt: "a boat" }, undefined, { session: "session-drain" });
+    await r.proxy.drain(5_000);
+    const onDisk = fs.readFileSync(path.join(r.home, "requests.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line) as RequestRecord);
+    assert.ok(onDisk.some((record) => record.kind === "image" && record.ok === true && record.session === "session-drain"), "the image row is written before the drain ends");
+    assert.equal((await pending).data.toString(), "PNGDATA");
+  } finally { await r.stop(); }
+});
+
 test("a request answered on the app's own sign-in snapshots that login's email", async () => {
   const r = await rig({ profiles: { "app-own-token": "app@example.test" } });
   try {

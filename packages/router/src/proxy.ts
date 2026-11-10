@@ -285,6 +285,8 @@ export class Proxy {
   private held = 0;
   /** Rows still waiting for their login's email; drain() waits for them, so an exit cannot lose one. */
   readonly rows = new PendingRowWrites();
+  /** Images being generated (`/api/image`): not on this server's sockets, but drain() waits for them. */
+  private imagesInFlight = 0;
   private readonly server: net.Server;
   private readonly httpServer: http.Server;
   private readonly upstreamAgent = new https.Agent({ keepAlive: true, maxSockets: 64 });
@@ -410,6 +412,16 @@ export class Proxy {
    * the dashboard's usage and request list show the subscription's image traffic.
    */
   async generateImage(req: ImageRequest, signal?: AbortSignal, meta?: { session?: string }): Promise<ImageResult> {
+    // Counted for drain(): the image's row is written when its answer arrives, so the exit waits for it.
+    this.imagesInFlight++;
+    try {
+      return await this.recordedImage(req, signal, meta);
+    } finally {
+      this.imagesInFlight--;
+    }
+  }
+
+  private async recordedImage(req: ImageRequest, signal?: AbortSignal, meta?: { session?: string }): Promise<ImageResult> {
     const first = Object.entries(this.deps.config().providers).find(([, p]) => p.type === "chatgpt");
     if (!first || first[1].type !== "chatgpt") throw new Error("image generation needs a ChatGPT provider; add one in the dashboard");
     const model = first[1].models?.[0]?.id;
@@ -685,7 +697,7 @@ export class Proxy {
     if (released) this.deps.log.info(`drain: released ${released} model call(s) held for a network switch`);
     this.server.close();
     const t0 = Date.now();
-    while ((this.stats.messagesInFlight > 0 || this.held > 0) && Date.now() - t0 < maxMs) {
+    while ((this.stats.messagesInFlight > 0 || this.held > 0 || this.imagesInFlight > 0) && Date.now() - t0 < maxMs) {
       onProgress?.(this.stats.messagesInFlight);
       await new Promise((r) => setTimeout(r, 250));
     }
