@@ -205,7 +205,7 @@ async function runHost(): Promise<void> {
     log,
     // A Claude app turn that closed on a wrap_up question pushes that question, not its result.
     onEvent: (id, event) => {
-      server?.onEvent(id);
+      server?.onEvent(id, event);
       const push = sessions?.pushEvent(id, event) ?? event;
       void notifier.onEvent(id, push);
       void expoNotifier.onEvent(id, push);

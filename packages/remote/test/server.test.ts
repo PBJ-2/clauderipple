@@ -1991,3 +1991,117 @@ test("the context window the SDK reports for a model is kept for Mac sessions on
   await f.create();
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.dir, "context-windows.json"), "utf8")), { x: 1000 });
 });
+
+/** The `events` frames for one session that the peer has been sent since the last call. */
+function eventFrames(peer: MemoryPeer, session: string): Extract<HostMsg, { t: "events" }>[] {
+  return peer.frames.splice(0).filter((m): m is Extract<HostMsg, { t: "events" }> => m.t === "events" && m.session === session);
+}
+
+test("a burst of ordinary events leaves as one frame per 80 ms window, in seq order, with none lost", { timeout: TEST_TIMEOUT }, async t => {
+  const f = await memoryHost(t);
+  f.peer.receive({ t: "attach", session: f.id });
+  await f.peer.take("events");
+  const log = f.sessions.log(f.id);
+  const start = log.lastSeq;
+  for (let i = 0; i < 30; i++) f.server.onEvent(f.id, log.append({ kind: "delta", msg: "burst", text: String(i) }));
+  assert.deepEqual(eventFrames(f.peer, f.id), [], "nothing leaves inside the window");
+  t.mock.timers.tick(80);
+  const frames = eventFrames(f.peer, f.id);
+  assert.equal(frames.length, 1, "the burst is one frame");
+  assert.deepEqual(frames[0]!.events.map(e => e.seq), Array.from({ length: 30 }, (_, i) => start + 1 + i));
+  assert.deepEqual(frames[0]!.events.map(e => (e.kind === "delta" ? e.text : "")), Array.from({ length: 30 }, (_, i) => String(i)));
+});
+
+test("continuous writes cannot starve delivery: each window ends on schedule with every event once", { timeout: TEST_TIMEOUT }, async t => {
+  const f = await memoryHost(t);
+  f.peer.receive({ t: "attach", session: f.id });
+  await f.peer.take("events");
+  const log = f.sessions.log(f.id);
+  const start = log.lastSeq;
+  const seqs: number[] = [];
+  for (let i = 0; i < 20; i++) {
+    f.server.onEvent(f.id, log.append({ kind: "delta", msg: "stream", text: String(i) }));
+    t.mock.timers.tick(20);
+    seqs.push(...eventFrames(f.peer, f.id).flatMap(frame => frame.events.map(e => e.seq)));
+  }
+  t.mock.timers.tick(80);
+  seqs.push(...eventFrames(f.peer, f.id).flatMap(frame => frame.events.map(e => e.seq)));
+  assert.deepEqual(seqs, Array.from({ length: 20 }, (_, i) => start + 1 + i));
+});
+
+test("a permission request and its decision leave at once, after the window they follow; the next delta waits again", { timeout: TEST_TIMEOUT }, async t => {
+  const f = await memoryHost(t);
+  f.peer.receive({ t: "attach", session: f.id });
+  await f.peer.take("events");
+  const log = f.sessions.log(f.id);
+  const start = log.lastSeq;
+  f.server.onEvent(f.id, log.append({ kind: "delta", msg: "before", text: "a" }));
+  f.server.onEvent(f.id, log.append({ kind: "delta", msg: "before", text: "b" }));
+  f.server.onEvent(f.id, log.append({ kind: "permission", id: "p1", tool: "Bash", title: "", summary: "ls", input: "{}", canAlways: false }));
+  const asked = eventFrames(f.peer, f.id);
+  assert.equal(asked.length, 1, "the request is sent with no tick");
+  assert.deepEqual(asked[0]!.events.map(e => e.seq), [start + 1, start + 2, start + 3], "the window it follows goes first, in order");
+  f.server.onEvent(f.id, log.append({ kind: "delta", msg: "after", text: "c" }));
+  assert.deepEqual(eventFrames(f.peer, f.id), [], "an ordinary delta waits for its window again");
+  f.server.onEvent(f.id, log.append({ kind: "permission_decided", id: "p1", decision: "allow" }));
+  const decided = eventFrames(f.peer, f.id);
+  assert.deepEqual(decided.flatMap(frame => frame.events.map(e => e.seq)), [start + 4, start + 5], "the decision goes at once, behind the delta it follows");
+});
+
+test("closing the host sends the window it holds before the phone's socket closes", { timeout: TEST_TIMEOUT }, async t => {
+  const f = await memoryHost(t);
+  f.peer.receive({ t: "attach", session: f.id });
+  await f.peer.take("events");
+  const log = f.sessions.log(f.id);
+  const start = log.lastSeq;
+  f.server.onEvent(f.id, log.append({ kind: "delta", msg: "held", text: "a" }));
+  f.server.onEvent(f.id, log.append({ kind: "delta", msg: "held", text: "b" }));
+  assert.deepEqual(eventFrames(f.peer, f.id), [], "the window has not closed");
+  await f.server.close();
+  assert.deepEqual(eventFrames(f.peer, f.id).flatMap(frame => frame.events.map(e => e.seq)), [start + 1, start + 2], "flushed before the close");
+  assert.equal(f.peer.readyState, 3);
+});
+
+test("a detach cancels the window with nothing sent late, and a fresh attach gets the held events from the tail", { timeout: TEST_TIMEOUT }, async t => {
+  const f = await memoryHost(t);
+  f.peer.receive({ t: "attach", session: f.id });
+  await f.peer.take("events");
+  const log = f.sessions.log(f.id);
+  const start = log.lastSeq;
+  f.server.onEvent(f.id, log.append({ kind: "delta", msg: "detached", text: "a" }));
+  f.server.onEvent(f.id, log.append({ kind: "delta", msg: "detached", text: "b" }));
+  f.peer.receive({ t: "detach", session: f.id });
+  t.mock.timers.tick(80);
+  assert.deepEqual(eventFrames(f.peer, f.id), [], "the cancelled window sends nothing");
+  f.peer.receive({ t: "attach", session: f.id });
+  const tail = await f.peer.take("events");
+  assert.deepEqual(tail.events.slice(-2).map(e => e.seq), [start + 1, start + 2], "the tail carries what the window held, last");
+  assert.equal(tail.events.at(-1)?.seq, log.lastSeq);
+});
+
+test("a reconnect that held a window replays exactly by seq, and a dropped phone gets nothing after it dropped", { timeout: TEST_TIMEOUT }, async t => {
+  const f = await memoryHost(t);
+  f.peer.receive({ t: "attach", session: f.id });
+  await f.peer.take("events");
+  const log = f.sessions.log(f.id);
+  f.server.onEvent(f.id, log.append({ kind: "notice", code: "resumed" }));
+  t.mock.timers.tick(80);
+  assert.equal(eventFrames(f.peer, f.id).length, 1, "a notice on its own waits for the window too");
+  const epoch = log.epoch;
+  const start = log.lastSeq;
+  f.peer.receive({ t: "attach", session: f.id, epoch, afterSeq: start });
+  await f.peer.take("events");
+  f.server.onEvent(f.id, log.append({ kind: "delta", msg: "lost", text: "a" }));
+  f.server.onEvent(f.id, log.append({ kind: "delta", msg: "lost", text: "b" }));
+  f.server.onEvent(f.id, log.append({ kind: "delta", msg: "lost", text: "c" }));
+  f.peer.terminate();
+  t.mock.timers.tick(80);
+  const phone = new MemoryPeer();
+  f.server.connected(phone);
+  phone.receive({ t: "hello", token, clientId: "memory-phone-2" });
+  await phone.take("ready");
+  phone.receive({ t: "attach", session: f.id, epoch, afterSeq: start });
+  const replay = await phone.take("events");
+  assert.deepEqual(replay.events.map(e => e.seq), [start + 1, start + 2, start + 3], "exactly the held events, once, by seq");
+  assert.equal(eventFrames(f.peer, f.id).length, 0, "the dropped phone received nothing after it dropped");
+});

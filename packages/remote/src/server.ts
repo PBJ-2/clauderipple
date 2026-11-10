@@ -17,7 +17,7 @@ import type { RecentSource } from "./folders.ts";
 import { diffScope, diffView } from "./diff.ts";
 import { gitInfo } from "./worktree.ts";
 import { ATTACHMENT_CAP, CHUNK_MESSAGE_MAX, FRAME_CAP, PING_MS, SLOW_STALE_MS, STALE_MS } from "./protocol.ts";
-import type { BlobChunk, ClientMsg, HostInfo, HostMsg, ProviderGroup, ReqOp, RippleStatus } from "./protocol.ts";
+import type { BlobChunk, ClientMsg, HostInfo, HostMsg, ProviderGroup, ReqOp, RippleStatus, SessionEvent } from "./protocol.ts";
 import { SEEN_MS, SLOW_VISIBLE_MS, VISIBLE_MS } from "./push.ts";
 import type { Notifier } from "./push.ts";
 import { OutcomeUnknownError } from "./receipts.ts";
@@ -29,6 +29,10 @@ import type { Sessions } from "./sessions.ts";
 const HIGH_WATER = 1024 * 1024;
 /** A reconnecting client further behind than this many frames gets the tail instead of a replay. */
 const CATCHUP_FRAMES = 4;
+/** Ordinary events wait this long for company, so a burst of them is one `events` frame, not one per event. */
+const BATCH_MS = 80;
+/** Sent at once, with nothing held back: a permission request the phone must answer, and the decision that clears it. */
+const URGENT_EVENTS: ReadonlySet<SessionEvent["kind"]> = new Set(["permission", "permission_decided"]);
 /** `/api/limits` makes the router read each provider's quota; once a minute is plenty for percentages. */
 const LIMITS_MS = 60_000;
 const BLOB_CHUNK_CHARS = 60_000;
@@ -98,6 +102,8 @@ interface Client {
   pumping: Set<string>;
   pendingTail: Set<string>;
   retries: Map<string, ReturnType<typeof setTimeout>>;
+  /** session → the timer of the window holding its ordinary events (BATCH_MS) */
+  batches: Map<string, ReturnType<typeof setTimeout>>;
   /** The session list waiting for a backed-up connection to drain. */
   sessionsRetry: ReturnType<typeof setTimeout> | null;
   features: ReturnType<typeof clientFeatures>;
@@ -272,6 +278,8 @@ export class HostServer {
     for (const t of this.timers) clearInterval(t);
     if (this.sessionsTimer) clearTimeout(this.sessionsTimer);
     this.sessionsTimer = null;
+    // Events still held in a window go out before the sockets close. A phone that misses them replays by seq on reconnect.
+    for (const c of this.clients) for (const session of [...c.batches.keys()]) this.pumpNow(c, session);
     for (const c of this.clients) { c.attached.clear(); c.ws.terminate(); }
     this.syncWatches();
     return Promise.all([this.http, this.localHttp].filter((server): server is http.Server => server !== null)
@@ -282,14 +290,34 @@ export class HostServer {
 
   // ---- session events in, frames out ---------------------------------------------------------
 
-  /** Called for every appended event: push it to every client attached to that session. */
-  onEvent(session: string): void {
+  /**
+   * Called for every appended event: push it to every client attached to that session. An ordinary event waits
+   * up to BATCH_MS, so a burst leaves as one frame. A permission request or decision, or a call that names no
+   * event, goes now; whatever the window held goes first, because pump sends from the client's cursor in seq order.
+   */
+  onEvent(session: string, event?: SessionEvent): void {
     const snapshot = this.opts.sessions.summaryOf(session)?.origin === "desktop";
+    const urgent = !event || URGENT_EVENTS.has(event.kind);
     for (const c of this.clients) {
       if (!c.authed || !c.attached.has(session)) continue;
       if (snapshot) this.attach(c, session, undefined, undefined);
-      else this.pump(c, session);
+      else if (urgent) this.pumpNow(c, session);
+      else this.pumpLater(c, session);
     }
+  }
+
+  /** Schedules one send of the session's unsent events at the end of its window (at most one window per client and session). */
+  private pumpLater(c: Client, session: string): void {
+    if (c.batches.has(session)) return;
+    c.batches.set(session, setTimeout(() => this.pumpNow(c, session), BATCH_MS));
+  }
+
+  /** Cancels the session's window, if one is open, and sends everything the client is owed, in order. */
+  private pumpNow(c: Client, session: string): void {
+    const timer = c.batches.get(session);
+    if (timer) clearTimeout(timer);
+    c.batches.delete(session);
+    this.pump(c, session);
   }
 
   /** Session list changed (state, pending count, a new one). Coalesced; lists are small but frequent. */
@@ -411,7 +439,7 @@ export class HostServer {
 
   /** A phone connected, directly or through the relay; it must say hello with the token within 10 s. */
   connected(ws: Peer): void {
-    const c: Client = { ws, authed: false, clientId: "", visibleAt: 0, lastRx: Date.now(), attached: new Map(), pumping: new Set(), pendingTail: new Set(), retries: new Map(), sessionsRetry: null, features: new Set() };
+    const c: Client = { ws, authed: false, clientId: "", visibleAt: 0, lastRx: Date.now(), attached: new Map(), pumping: new Set(), pendingTail: new Set(), retries: new Map(), batches: new Map(), sessionsRetry: null, features: new Set() };
     this.clients.add(c);
     const helloTimer = setTimeout(() => { if (!c.authed) ws.close(4001, "hello"); }, 10_000);
     ws.on("message", (data) => {
@@ -426,6 +454,8 @@ export class HostServer {
       clearTimeout(helloTimer);
       for (const timer of c.retries.values()) clearTimeout(timer);
       c.retries.clear();
+      for (const timer of c.batches.values()) clearTimeout(timer);
+      c.batches.clear();
       c.pendingTail.clear();
       if (c.sessionsRetry) clearTimeout(c.sessionsRetry);
       c.sessionsRetry = null;
@@ -500,6 +530,9 @@ export class HostServer {
         const retry = c.retries.get(msg.session);
         if (retry) clearTimeout(retry);
         c.retries.delete(msg.session);
+        const batch = c.batches.get(msg.session);
+        if (batch) clearTimeout(batch);
+        c.batches.delete(msg.session);
         this.syncWatches();
         return;
       }
