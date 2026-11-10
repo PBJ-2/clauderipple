@@ -154,6 +154,11 @@ export type AdminDeps = {
     models?: (name: string) => Promise<ProviderModel[] | null>;
     /** Every chatgpt provider's accounts with rotation state and quota. Absent in tests. */
     accounts?: () => Record<string, ChatGptAccountStatus[]>;
+    /**
+     * The Codex login ClaudeRipple borrows when no chatgpt provider is configured (`codex-login`). It
+     * is not a provider, so the accounts tab does not list it; the request log names its rows with it.
+     */
+    borrowedAccounts?: () => ChatGptAccountStatus[];
     /** Put one resting account back into rotation now. Absent in tests. */
     clearCooldown?: (accountId: string) => void;
   };
@@ -285,6 +290,7 @@ function requestAccountNames(deps: AdminDeps): (record: RequestRecord) => string
     for (const account of accounts) put(name, account);
   }
   for (const accounts of [...Object.values(chatgpt), ...Object.values(google)]) for (const account of accounts) put(undefined, account);
+  for (const account of deps.chatgpt?.().borrowedAccounts?.() ?? []) put(undefined, account);
   for (const account of [...storedChatgpt, ...storedGoogle, ...claude]) put(undefined, account);
   return (record) => {
     if (!record.account) return undefined;

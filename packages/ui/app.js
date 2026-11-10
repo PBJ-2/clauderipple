@@ -5848,8 +5848,8 @@ function requestAccount(record) {
   if (record.account === "current") return record.accountLabel || t("providers.anthropicCurrent");
   // The same naming as the accounts list (claudeAccountLabel): the router's generic default name is translated.
   if (record.account) return record.accountLabel === "Claude account" ? t("providers.claudeAccountDefault") : record.accountLabel || record.account.slice(0, 8);
-  const provider = ((currentConfig && currentConfig.providers) || configuredProviders || {})[record.provider];
-  return provider && provider.credentials && provider.credentials.length ? record.credential || "" : "";
+  // An API key's label is kept on its row when the request runs; the keys configured now do not decide it.
+  return record.credential || "";
 }
 function requestDetail(record) {
   const details = [

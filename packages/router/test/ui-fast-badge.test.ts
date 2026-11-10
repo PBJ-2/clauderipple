@@ -136,7 +136,8 @@ test("a lone account is still named on its row and in its detail; old OAuth reco
   const known = { ...BASE, account: "current", accountLabel: "current@example.test" };
   assert.ok(texts(render([known])[0]!).includes("current@example.test"), "one account in the log is still named, so it is never mistaken for the provider's name");
   assert.ok(texts(requestDetail(known)).includes("current@example.test"));
-  assert.ok(!texts(requestDetail({ ...BASE, credential: "#2" })).includes("Account"));
+  // A row keeps the credential label it was written with (the router writes one only for a provider that names its keys).
+  assert.ok(texts(requestDetail({ ...BASE, credential: "#2" })).includes("#2"));
   assert.ok(!texts(requestDetail(BASE)).includes("Account"));
   assert.ok(texts(requestDetail({ ...BASE, account: "removed-account" })).includes("removed-"));
 });
@@ -166,6 +167,14 @@ test("API-key pools show their existing credential labels without adding an acco
   assert.ok(texts(render([first, second])[0]!).includes("Work key"));
   assert.ok(texts(requestDetail(first)).includes("Work key"));
   assert.ok(texts(render([first])[0]!).includes("Work key"));
+});
+
+test("an API key's label stays on its row after the provider's keys change in the config", () => {
+  // The provider no longer lists any keys, so the label can only come from the row itself.
+  const { render, requestDetail } = load({ api: { type: "anthropic", auth: "api-key" } });
+  const row = { ...BASE, provider: "api", credential: "Work key" };
+  assert.ok(texts(render([row])[0]!).includes("Work key"));
+  assert.ok(texts(requestDetail(row)).includes("Work key"));
 });
 
 test("every dashboard language words the badge's tooltip and the tier line", () => {

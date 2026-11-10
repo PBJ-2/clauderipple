@@ -328,6 +328,7 @@ proxy
         refresh: (name) => proxy.chatgptFetchRateLimits(name),
         models: (name) => proxy.chatgptFetchModels(name),
         accounts: () => proxy.chatgptAccounts(),
+        borrowedAccounts: () => proxy.chatgptForCodex(null).accountStatus(),
         clearCooldown: (id) => proxy.chatgptClearCooldown(id),
       }),
       google: () => ({

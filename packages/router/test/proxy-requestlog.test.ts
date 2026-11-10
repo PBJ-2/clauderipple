@@ -398,6 +398,7 @@ test("proxy generateImage records the image traffic, with usage on success and a
     assert.equal(failed.ok, false);
     assert.equal(failed.status, 502);
     assert.equal(failed.session, "session-1");
+    assert.equal(failed.account, "legacy", "a failed image still names the account it was sent on");
     assert.match(failed.note!, /HTTP 500/);
     assert.equal(failed.usage, undefined);
     assert.equal(r.requests.list(10).length, 2, "one record per call, nothing else");
@@ -409,6 +410,7 @@ test("proxy generateImage records the image traffic, with usage on success and a
     const abortRecord = r.requests.list(1)[0]!;
     assert.equal(abortRecord.kind, "image");
     assert.equal(abortRecord.ok, false);
+    assert.equal(abortRecord.account, "legacy");
     assert.equal(abortRecord.status, "aborted");
   } finally { await r.stop(); }
 });

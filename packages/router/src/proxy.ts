@@ -423,6 +423,8 @@ export class Proxy {
       this.deps.requests.add(record);
       return image;
     } catch (e) {
+      // Set by the adapter once an account was tried, so a failed image still names it.
+      const failedOn = (e as { account?: unknown } | null)?.account;
       const record: RequestRecord = {
         kind: "image",
         source: model,
@@ -435,6 +437,7 @@ export class Proxy {
         ok: false,
         status: signal?.aborted ? "aborted" : 502,
         note: (e as Error).message.slice(0, 300),
+        ...(typeof failedOn === "string" ? { account: failedOn } : {}),
         ...(meta?.session ? { session: meta.session } : {}),
       };
       this.deps.requests.add(record);
@@ -1027,12 +1030,17 @@ export class Proxy {
       // count_tokens is answered locally by the translated adapters: no key was actually sent.
       const type = cfg.providers[name]?.type;
       if (pathname === "/v1/messages/count_tokens" && (type === "openai-compatible" || type === "google")) return;
-      record.credential = this.credentialLabel(name, using, credentials);
+      const label = this.credentialLabel(name, using, credentials);
+      // A provider that names its keys keeps the label of the key that answered, as a snapshot: the
+      // dashboard shows it after the keys are renamed or removed. A single key has no name to keep.
+      const named = cfg.providers[name];
+      if (named && "credentials" in named && (named.credentials?.length ?? 0) > 0) record.credential = label;
+      else delete record.credential;
       if (using.ownerId) setRecordAccount(using.ownerId, using.ownerId === "current" ? loginEmail : undefined);
       const first = this.pool.pick(name, credentials);
       const reason = pinned ? "account-pin" : retry ? "retry" : !first ? "all-unavailable" : first.id !== using.id ? "affinity" : "configured-order";
       const states = this.pool.report(name, credentials).map((row, i) => `${this.credentialLabel(name, credentials[i]!, credentials)}:${row.paused ? "paused" : row.state}`).join(", ");
-      log.info(`KEY ${name} credential=${record.credential} conversation=${affinity ?? "-"} reason=${reason} candidates=[${states}]`);
+      log.info(`KEY ${name} credential=${label} conversation=${affinity ?? "-"} reason=${reason} candidates=[${states}]`);
     };
     const search = kind === "web-search" ? webSearchQuery(json!) : null;
     let searchAttempted = false;

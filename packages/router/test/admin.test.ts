@@ -2048,6 +2048,22 @@ test("GET /api/requests resolves account names at read time without changing the
   });
 });
 
+test("GET /api/requests names a borrowed Codex login's rows when no ChatGPT provider is configured", async () => {
+  await withAdmin(makeCfg({ providers: { claude: { type: "anthropic", auth: "claude-code", accountPool: true } } }), async ({ home }) => {
+    const requests = new RequestLog(path.join(home, "logs", "requests.jsonl"));
+    const old = { id: "codex-row", at: new Date().toISOString(), ms: 100, status: 200, ok: true, kind: "messages" as const, source: "gpt", target: "gpt", provider: "codex-login", stream: true, account: "codex" };
+    requests.add(old);
+    const extra = await startAdmin({ config: () => makeCfg({ providers: { claude: { type: "anthropic", auth: "claude-code", accountPool: true } } }), configFile: path.join(home, "extra-config.json"), log: new Logger(null, 1_000_000, 1, false), stats: () => ({ inFlight: 0, messagesInFlight: 0, started: 0, completed: 0, failed: 0 }), health: () => 0, version: "test", requests,
+      chatgpt: () => ({ quota: {}, auth: {}, accounts: () => ({}), borrowedAccounts: () => [
+        { id: "codex", label: "codex@example.test", email: "codex@example.test", source: "codex", expiresAt: Date.now() + 3_600_000, needsReauth: false, paused: false, preferred: false, state: "ready", inUse: true, active: true, quota: null },
+      ] }) });
+    try {
+      const response = await (await fetch(`${base()}:${extra.port}/api/requests`)).json() as { requests: { id: string; accountLabel?: string }[] };
+      assert.equal(response.requests.find((row) => row.id === "codex-row")?.accountLabel, "codex@example.test");
+    } finally { extra.close(); }
+  });
+});
+
 test("GET /api/requests takes a comma-separated kind list", async () => {
   await withAdmin(makeCfg(), async ({ home }) => {
     const requests = new RequestLog(path.join(home, "logs", "requests.jsonl"));

@@ -509,6 +509,14 @@ export class ChatGptAdapter {
   async generateImage(model: string, req: ImageRequest, signal?: AbortSignal): Promise<ImageResult> {
     const tokens = await this.anyCredential();
     if (tokens instanceof Error) throw tokens;
+    return this.imageOn(tokens, model, req, signal).catch((error: unknown) => {
+      // The image was sent on this account, so a failure still names it in the request log.
+      if (error instanceof Error) Object.assign(error, { account: tokens.ownerId });
+      throw error;
+    });
+  }
+
+  private async imageOn(tokens: ChatGptCredential, model: string, req: ImageRequest, signal?: AbortSignal): Promise<ImageResult> {
     const id = crypto.randomUUID();
     const tool = {
       type: "image_generation",
