@@ -9,6 +9,7 @@ import { PermissionQueue } from "../src/permissions.ts";
 import { FRAME_CAP } from "../src/protocol.ts";
 import { BackgroundActivity } from "../src/background-activity.ts";
 import { reduce } from "../web/timeline.ts";
+import { activityOverview } from "../web/activity.ts";
 import { BridgeClient, DESKTOP_BUSY } from "../src/bridge-client.ts";
 import { fileSymlinks } from "../../../test/capabilities.ts";
 import { signatureOf } from "./narration-signature.ts";
@@ -484,6 +485,31 @@ test("a Mac session opens a worker with the model its own transcript answered on
     // Its transcript ends on its own answer with no notification line: the worker is done.
     ["toolu_one", "deepseek-v4.1-flash", "Summarize the rules", "done", "medium"],
   ]);
+});
+
+test("a Mac session's worker effort reaches the background list, the timeline and the overview row, and is never guessed", t => {
+  const f = fixture(t);
+  subagent(f.project, "effort", { toolUseId: "toolu_effort", model: "gpt-6.1-sol@high", description: "Sol·high · Review the diff" }, [
+    assistantTurn("gpt-6.1-sol", "tool_use", [{ type: "tool_use", id: "t", name: "Read", input: {} }]),
+  ]);
+  subagent(f.project, "plain", { toolUseId: "toolu_plain", model: "gpt-6.1-sol", description: "Plain task" }, [
+    assistantTurn("gpt-6.1-sol", "tool_use", [{ type: "tool_use", id: "t", name: "Read", input: {} }]),
+  ]);
+  const launch = (tid: string, agentId: string): string => [
+    line({ type: "assistant", message: { id: `m-${tid}`, model: "gpt-6.1-sol", content: [{ type: "tool_use", id: tid, name: "Agent", input: { description: tid, run_in_background: true } }] } }),
+    line({ type: "user", toolUseResult: { isAsync: true, agentId }, message: { content: [{ type: "tool_result", tool_use_id: tid, content: "Async agent launched successfully" }] } }),
+  ].join("");
+  fs.writeFileSync(path.join(f.project, `${id}.jsonl`), line(user) + launch("toolu_effort", "effort") + launch("toolu_plain", "plain"));
+  f.desktop.list();
+  // The raw-transcript scanner: the task list a Desktop-bridged session's summary carries.
+  const taskList = f.desktop.backgroundTaskList(id);
+  assert.deepEqual(taskList.map(task => [task.sub, task.effort ?? null]), [["sub-toolu_effort", "high"], ["sub-toolu_plain", null]]);
+  // The timeline reduction of the same session's events.
+  const view = reduce(f.desktop.log(id).tail(1 << 20).events);
+  assert.deepEqual(view.items.flatMap(item => item.type === "subagent" ? [[item.sub, item.effort ?? null]] : []), [["sub-toolu_effort", "high"], ["sub-toolu_plain", null]]);
+  // The overview row the phone's sheet and the web both read.
+  const rows = activityOverview(view.items, taskList, f.desktop.backgroundTaskHistory(id)).active;
+  assert.deepEqual(rows.map(task => [task.sub, task.model, task.effort ?? null]), [["sub-toolu_effort", "gpt-6.1-sol", "high"], ["sub-toolu_plain", "gpt-6.1-sol", null]]);
 });
 
 test("a Mac session's worker status follows its result, its notification, a queued notification, and agentEnded", t => {

@@ -666,14 +666,26 @@ export class DesktopSessions {
    * parent tracker: a later continuation must be allowed to make that worker active again. */
   private backgroundState(id: string): { active: BackgroundTask[]; history: BackgroundTask[] } {
     const tracker = this.scan(id);
-    const active: BackgroundTask[] = [], history = tracker?.history ?? [];
     const source = this.sources.get(id);
-    for (const task of tracker?.list ?? []) {
+    // The scanner reads the launch lines only, so a worker's effort comes from its own meta.json.
+    const withEffort = (task: BackgroundTask): BackgroundTask => {
+      const effort = source && task.kind === "agent" ? this.recordedEffort(source, task.id) : undefined;
+      return effort ? { ...task, effort } : task;
+    };
+    const active: BackgroundTask[] = [], history = (tracker?.history ?? []).map(withEffort);
+    for (const task of (tracker?.list ?? []).map(withEffort)) {
       const state = source && task.kind === "agent" ? agentStatus(path.join(this.subagentsDir(source), `agent-${task.id}.jsonl`)) : null;
       if (state) history.unshift({ ...task, state });
       else active.push(task);
     }
     return { active, history: history.slice(0, 40) };
+  }
+
+  /** A worker's effort as its own meta.json records it (the same record subInfo reads), by agent id. Undefined when the record does not say. */
+  private recordedEffort(source: Source, agentId: string): string | undefined {
+    if (!/^[\w-]+$/.test(agentId)) return undefined;
+    const meta = record(safeRead(path.join(this.subagentsDir(source), `agent-${agentId}.meta.json`)));
+    return effortOf(str(meta?.model), str(meta?.description)) || undefined;
   }
   turnStartedAt(id: string): number | null { return this.scan(id)?.turnStartedAt ?? null; }
   plan(id: string): PlanStep[] { return this.scan(id)?.plan ?? []; }
