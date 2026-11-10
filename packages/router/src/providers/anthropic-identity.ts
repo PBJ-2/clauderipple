@@ -69,7 +69,8 @@ function authHeaderValue(headers: Record<string, string>): string | null {
  * poll of the dashboard.
  */
 export class ClaudeCurrentIdentity {
-  private cached: { key: string; at: number; value: ClaudeLoginIdentity | null } | null = null;
+  // A few tokens at once: the pool's copy and a client's own sign-in may differ, and one entry would ask again on each turn.
+  private readonly cache = new Map<string, { at: number; value: ClaudeLoginIdentity | null }>();
   private readonly source: IdentitySource;
   private readonly opts: IdentityOptions;
 
@@ -100,11 +101,15 @@ export class ClaudeCurrentIdentity {
     if (!auth) return null;
     const key = crypto.createHash("sha256").update(auth).digest("hex");
     const now = (this.opts.now ?? Date.now)();
-    if (this.cached && this.cached.key === key && now - this.cached.at < (this.opts.ttlMs ?? 10 * 60_000)) {
-      return this.cached.value;
-    }
+    const hit = this.cache.get(key);
+    if (hit && now - hit.at < (this.opts.ttlMs ?? 10 * 60_000)) return hit.value;
     const value = await this.fetchProfile(headers);
-    this.cached = { key, at: now, value };
+    this.cache.delete(key);
+    this.cache.set(key, { at: now, value });
+    if (this.cache.size > 8) {
+      const oldest = this.cache.keys().next().value;
+      if (oldest !== undefined) this.cache.delete(oldest);
+    }
     return value;
   }
 

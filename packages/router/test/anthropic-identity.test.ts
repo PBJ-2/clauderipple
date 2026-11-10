@@ -129,3 +129,20 @@ test("no current login means no request at all", async () => {
   const broken = new ClaudeCurrentIdentity({ credentials: async () => { throw new Error("unreadable"); } }, { upstream: () => "api.example.test" });
   assert.equal(await broken.identify(), null);
 });
+
+test("a request's own login and the pool's copy each stay cached, so alternating between them asks once each", async () => {
+  let calls = 0;
+  const identity = new ClaudeCurrentIdentity(currentLogin(() => "pool-token"), {
+    upstream: () => "api.example.test",
+    now: () => 1_000_000,
+    fetch: async () => {
+      calls += 1;
+      return new Response(JSON.stringify(PROFILE), { status: 200 });
+    },
+  });
+  for (let turn = 0; turn < 4; turn += 1) {
+    assert.equal((await identity.identifyWith({ authorization: "Bearer client-token" }))?.email, "Person@example.test");
+    assert.equal((await identity.identify())?.email, "Person@example.test");
+  }
+  assert.equal(calls, 2, "one lookup per token, not one per turn");
+});
