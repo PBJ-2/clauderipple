@@ -413,10 +413,16 @@ export type LimitItem = {
   percent: number
   resetsAt?: string
   /**
-   * When, at the pace it is being used (epoch ms), the window reaches 100% before it resets: the
-   * router's `exhaust_at`. Absent for a window that is no risk or has too little data to tell.
+   * When, at the window's average pace since it started (epoch ms), the window reaches 100% before it
+   * resets: the router's `exhaust_at`. Absent for a window that is no risk, or too early in it to tell.
    */
   exhaustsAt?: number
+  /**
+   * The used percent the window reaches at its reset at its average pace since it started: the router's
+   * `projected_percent` (may exceed 100). Absent for a window too early in it to tell, or at 0%, and for a
+   * window whose reset has passed. Read by the pace label only when there is no exhaust forecast and the reset is still ahead.
+   */
+  projectedPercent?: number
 }
 
 /** What a stretch of requests cost at public API prices, from one bucket of `GET /api/requests/summary`. */

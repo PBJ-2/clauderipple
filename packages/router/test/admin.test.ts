@@ -11,11 +11,12 @@ import { backfillContextWindows, effortLevelsForModel, googleHealth, measureUnse
 import type { ImageRequest } from "../src/providers/chatgpt/index.ts";
 import type { GoogleAccountStatus } from "../src/providers/google/index.ts";
 import type { QuotaGroup } from "../src/providers/google/usage.ts";
-import type { OpenCodeWindow } from "../src/providers/opencode-usage.ts";
+import { OpenCodeUsage, type OpenCodeWindow } from "../src/providers/opencode-usage.ts";
+import { MiniMaxUsage } from "../src/providers/minimax-usage.ts";
 import { RequestLog } from "../src/requestlog.ts";
 import { PRESETS } from "../src/presets.ts";
 import { saveClaudeAuthFile, saveClaudeOAuthFile } from "../src/providers/anthropic-token-file.ts";
-import { listClaudeAccounts, markClaudeAccountNeedsReauth, readClaudeAccountsFile, readClaudeOAuthAccounts, saveClaudeOAuthAccount, setPreferredClaudeAccount, subjectHash } from "../src/providers/anthropic-accounts.ts";
+import { listClaudeAccounts, markClaudeAccountNeedsReauth, readClaudeAccountsFile, readClaudeOAuthAccounts, saveClaudeOAuthAccount, setCurrentClaudeAccountPaused, setPreferredClaudeAccount, subjectHash } from "../src/providers/anthropic-accounts.ts";
 import { PinnedAgentSync, syncAgentFiles } from "../src/agents.ts";
 import { ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
 import type { ModOptions } from "../src/admin.ts";
@@ -218,7 +219,12 @@ test("mod-options numbers a pinned worker's account as the limits do", async () 
       assert.equal(paused.status, 200);
       const after = await read();
       assert.deepEqual([after.first, after.second], [3, 2], "a paused account leaves the limits' numbering and follows the numbered ones");
-    }, { agentDir });
+      setCurrentClaudeAccountPaused(home, true);
+      const noCurrent = await read();
+      assert.deepEqual([noCurrent.first, noCurrent.second], [2, 1], "pausing the app login leaves no gap or replacement by its cached identity");
+      assert.deepEqual(noCurrent.accounts?.map((account) => account.number), [1, 2]);
+      assert.equal(noCurrent.accounts?.[0]?.label, accountLabel(home, second.id));
+    }, { agentDir, claudeIdentity: async () => ({ email: "current@example.test", subjectHash: subjectHash("current")! }) });
   } finally {
     fs.rmSync(agentDir, { recursive: true, force: true });
   }
@@ -228,6 +234,19 @@ function accountLabel(home: string, id: string): string | undefined {
   const account = listClaudeAccounts(home).find((entry) => entry.id === id);
   if (!account) return undefined;
   return account.email && account.email !== account.label ? `${account.label} · ${account.email}` : account.label;
+}
+
+for (const existing of [false, true]) {
+  test(`PUT /api/config writes ${existing ? "an existing 0644" : "a fresh"} config owner-only`, { skip: process.platform === "win32" }, async () => {
+    const cfg = makeCfg();
+    await withAdmin(cfg, async ({ port, configFile }) => {
+      if (existing) fs.chmodSync(configFile, 0o644);
+      else fs.unlinkSync(configFile);
+      const res = await fetch(`${base()}:${port}/api/config`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(cfg) });
+      assert.equal(res.status, 200);
+      assert.equal(fs.statSync(configFile).mode & 0o777, 0o600);
+    });
+  });
 }
 
 test("PUT /api/config persists credential control flags and refuses invalid or duplicate preferences", async () => {
@@ -988,6 +1007,87 @@ test("Claude account admin endpoints expose no secrets and rename or remove only
     const missing = await fetch(`${base()}:${port}/api/claude-accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" });
     assert.equal(missing.status, 404);
   });
+});
+
+test("the current Claude login can be paused and resumed, but no other account field is writable", async () => {
+  const observed = new ObservedClaudeCodeAuth();
+  observed.observe(["authorization", "Bearer current-login-token"]);
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const endpoint = `${base()}:${port}/api/claude-accounts`;
+    const patch = (body: unknown) => fetch(`${endpoint}/current`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const current = async () => (await (await fetch(endpoint)).json() as { current: { paused: boolean; state: string; inUse: boolean } }).current;
+    assert.deepEqual(await current(), { id: "current", label: "Current Claude login", source: "observed", external: true, paused: false, preferred: false, state: "ready", inUse: true });
+    assert.equal((await patch({ paused: true })).status, 200);
+    assert.equal((await current()).paused, true);
+    assert.equal((await current()).state, "paused");
+    assert.equal((await current()).inUse, false);
+    for (const invalid of [null, [], true, {}, { paused: null }, { paused: 1 }, { paused: "true" }]) {
+      const response = await patch(invalid);
+      assert.equal(response.status, 400);
+      assert.deepEqual(await response.json(), { error: "expected {paused: boolean}" });
+    }
+    for (const change of [{ label: "mine" }, { preferred: true }, { clearCooldown: true }, { paused: false, other: true }]) {
+      const response = await patch(change);
+      assert.equal(response.status, 409);
+      assert.deepEqual(await response.json(), { error: "the current Claude login is managed by Claude Code or Claude Desktop" });
+    }
+    const malformed = await fetch(`${endpoint}/current`, { method: "PATCH", headers: { "content-type": "application/json" }, body: "{" });
+    assert.equal(malformed.status, 400);
+    assert.deepEqual(await malformed.json(), { error: "invalid JSON" });
+    assert.equal((await fetch(`${endpoint}/current`, { method: "DELETE" })).status, 409);
+    assert.equal((await current()).paused, true, "rejected edits never resume the login");
+    assert.equal((await patch({ paused: false })).status, 200);
+    assert.equal((await current()).paused, false);
+    assert.equal((await current()).state, "ready");
+    assert.equal((await current()).inUse, true);
+  }, { observedClaudeCodeAuth: observed });
+});
+
+// A shared machine's login need not be stored to exclude it from workers, probes and plan figures.
+test("a paused current Claude login is unavailable to workers and probes and leaves the limits' numbering", async () => {
+  const observed = new ObservedClaudeCodeAuth();
+  observed.observe(["authorization", "Bearer current-login-token"]);
+  const cfg = makeCfg({ providers: { anthropic: { type: "anthropic", auth: "claude-code", accountPool: true } } });
+  const quota = { at: Date.now(), rate_limits: { primary: { used_percent: 81, window_minutes: 300 } } };
+  let usage: Record<string, typeof quota> = { current: quota };
+  await withAdmin(cfg, async ({ port, home }) => {
+    const usable = async () => (await (await fetch(`${base()}:${port}/api/mod-options`)).json() as ModOptions).providers[0]!.usable;
+    const probe = async () => (await (await fetch(`${base()}:${port}/api/providers/probe`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "anthropic", auth: "claude-code" }),
+    })).json()) as { ok: boolean; auth: string };
+    const limits = async () => (await (await fetch(`${base()}:${port}/api/limits`)).json() as { providers: LimitsProvider[] }).providers;
+    const status = async () => (await (await fetch(`${base()}:${port}/api/status`)).json()) as { claude: { accounts: { id: string; inUse?: boolean }[] } };
+    assert.equal(await usable(), true);
+    assert.equal((await probe()).ok, true);
+    setCurrentClaudeAccountPaused(home, true);
+    assert.equal(await usable(), false);
+    const missing = await probe();
+    assert.equal(missing.ok, false);
+    assert.equal(missing.auth, "missing");
+    assert.deepEqual(await limits(), []);
+    const paused = await status();
+    assert.deepEqual(paused.claude.accounts, [], "the band must not fall back to cached usage of the paused login");
+    const own = saveClaudeOAuthAccount(home, { accessToken: "own-access", refreshToken: "own-refresh", expiresAt: Date.now() + 3_600_000, accountId: "own" });
+    usage = { current: quota, [own.id]: { ...quota, rate_limits: { primary: { used_percent: 15, window_minutes: 300 } } } };
+    assert.equal(await usable(), true);
+    assert.equal((await probe()).ok, true);
+    const numbered = await limits();
+    assert.deepEqual(numbered[0]!.accounts.map((a) => [a.account, a.inUse, a.windows[0]!.used_percent]), [[0, true, 15]]);
+    // Like a paused stored preference, choosing the current login does not put it back in rotation.
+    const preferred = await fetch(`${base()}:${port}/api/claude-accounts`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ preferred: "current" }) });
+    assert.equal(preferred.status, 200);
+    assert.equal((await status()).claude.accounts.find((a) => a.inUse)?.id, own.id);
+    const patchOwn = (paused: boolean) => fetch(`${base()}:${port}/api/claude-accounts/${own.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ paused }) });
+    assert.equal((await patchOwn(true)).status, 200);
+    assert.equal(await usable(), false, "a paused stored account cannot keep the paused login's provider usable");
+    assert.equal((await probe()).ok, false);
+    assert.deepEqual(await limits(), []);
+    assert.equal((await patchOwn(false)).status, 200);
+
+    setCurrentClaudeAccountPaused(home, false);
+    assert.equal((await status()).claude.accounts.find((a) => a.inUse)?.id, "current");
+    assert.deepEqual((await limits())[0]!.accounts.map((a) => a.account), [0, 1]);
+  }, { observedClaudeCodeAuth: observed, claudeUsage: async () => usage, modelScoresFetch: async () => new Response("{}") });
 });
 
 test("/api/claude-accounts marks a stored copy of the current Claude login, by subject hash or by email", async () => {
@@ -3603,6 +3703,78 @@ test("GET /api/limits lists a MiniMax plan's five-hour and weekly windows", asyn
   });
 });
 
+test("GET /api/limits forecasts a window whose average pace reaches 100% before its reset, and no other", async () => {
+  const now = Date.now();
+  const nowS = Math.floor(now / 1000);
+  const cfg = makeCfg({ providers: {
+    mini: { type: "anthropic-compatible", preset: "minimax", url: "https://api.minimax.io/anthropic", credentials: [{ id: "key-a", label: "A", headers: { "x-api-key": "hidden-a" } }] },
+  } });
+  await withAdmin(cfg, async ({ port }) => {
+    const body = (await (await fetch(`${base()}:${port}/api/limits`)).json()) as { providers: LimitsProvider[] };
+    const [fiveHour, weekly] = body.providers[0]!.accounts[0]!.windows;
+    // 60% after one hour of a five-hour window: 40 more minutes to 100%, well before its reset.
+    assert.ok(Math.abs(fiveHour!.exhaust_at! - (nowS + 2400)) <= 5, `five-hour exhaust_at ${fiveHour!.exhaust_at}`);
+    // The projection is the share at the reset at the average pace: 60% after an hour of five is 300%.
+    assert.equal(fiveHour!.projected_percent, 300);
+    // 54% with 57.6 h to the reset of a week: the average pace never reaches 100% in time, so no field.
+    assert.equal("exhaust_at" in weekly!, false);
+    // ...but it is 54% after 110.4 h of 168, so the week is projected at 82% for its reset.
+    assert.equal(weekly!.projected_percent, 82);
+  }, {
+    minimaxUsage: async (name: string, credentialId?: string) => name === "mini" && credentialId === "key-a" ? [
+      { kind: "five_hour", used_percent: 60, window_minutes: 300, reset_at: nowS + 4 * 3600 },
+      { kind: "seven_day", used_percent: 54, window_minutes: 10080, reset_at: nowS + Math.round(57.6 * 3600) },
+    ] : [],
+  });
+});
+
+test("GET /api/limits judges a cached reading at the time it was taken, so a later poll does not move exhaust_at", async (t) => {
+  const start = Date.parse("2026-11-10T00:00:00Z");
+  let clock = start;
+  t.mock.method(Date, "now", () => clock);
+  const startS = start / 1000;
+  // 60% of the five-hour window after one hour: 40 more minutes at that pace, so exhaust_at is 2400 s after the reading.
+  const resetS = startS + 4 * 3600;
+  let opencodeFetches = 0;
+  const opencode = new OpenCodeUsage({
+    fetch: (async () => {
+      opencodeFetches++;
+      return Response.json({ usage: { rolling: { status: "ok", percent: 60, resetsAt: new Date(resetS * 1000).toISOString() } } });
+    }) as unknown as typeof fetch,
+    now: () => clock,
+    ttlMs: 300_000,
+    warn: () => {},
+  });
+  const minimax = new MiniMaxUsage({
+    fetch: (async () => Response.json({
+      model_remains: [{ model_name: "general", end_time: resetS * 1000, current_interval_remaining_percent: 40, weekly_end_time: (startS + 6 * 86400) * 1000, current_weekly_remaining_percent: 99 }],
+      base_resp: { status_code: 0, status_msg: "success" },
+    })) as unknown as typeof fetch,
+    now: () => clock,
+    ttlMs: 300_000,
+    warn: () => {},
+  });
+  const cfg = makeCfg({ providers: {
+    go: { type: "openai-compatible", url: "https://opencode.ai/zen/go/v1", preset: "opencode-go" },
+    mini: { type: "anthropic-compatible", preset: "minimax", url: "https://api.minimax.io/anthropic" },
+  } });
+  await withAdmin(cfg, async ({ port }) => {
+    const limits = async () => (await (await fetch(`${base()}:${port}/api/limits`)).json()) as { providers: LimitsProvider[] };
+    const exhaustOf = (body: { providers: LimitsProvider[] }) => body.providers.map((p) => [p.provider, p.accounts[0]!.windows[0]!.exhaust_at]);
+    const first = await limits();
+    assert.deepEqual(exhaustOf(first), [["go", startS + 2400], ["mini", startS + 2400]]);
+    clock = start + 4 * 60_000;
+    const later = await limits();
+    assert.deepEqual(exhaustOf(later), exhaustOf(first), "the cached reading keeps its exhaust_at four minutes later");
+    assert.equal(opencodeFetches, 1, "the second poll is served from the cache");
+    // The internal read time never reaches the response.
+    assert.equal(later.providers.every((p) => p.accounts.every((a) => a.windows.every((w) => !("read_at" in w)))), true);
+  }, {
+    opencodeUsage: (name: string) => opencode.windows(name, "https://opencode.ai/zen/go/v1", { authorization: "Bearer key" }),
+    minimaxUsage: (name: string) => minimax.windows(name, "https://api.minimax.io/anthropic", { "x-api-key": "key" }),
+  });
+});
+
 test("GET /api/limits and /api/status follow the Claude account the pool is using now", async () => {
   const now = Date.now();
   const cfg = makeCfg({ providers: { anthropic: { type: "anthropic", auth: "claude-code", accountPool: true } } });
@@ -3732,5 +3904,10 @@ test("a Claude login without an account pool reports the app login's limits, wha
     assert.deepEqual(limits.providers[0]!.accounts.map((a) => [a.account, a.inUse, a.windows[0]!.used_percent]), [[0, true, 81], [1, undefined, 15]]);
     const status = await (await fetch(`${base()}:${port}/api/status`)).json() as { claude: { accounts: { id: string; inUse?: boolean }[] } };
     assert.equal(status.claude.accounts.find((a) => a.inUse === true)?.id, "current");
+    setCurrentClaudeAccountPaused(home, true);
+    const paused = await (await fetch(`${base()}:${port}/api/status`)).json() as typeof status;
+    assert.equal(paused.claude.accounts.some((a) => a.id === "current" || a.inUse), false);
+    const pausedLimits = await (await fetch(`${base()}:${port}/api/limits`)).json() as typeof limits;
+    assert.deepEqual(pausedLimits.providers[0]!.accounts.map((a) => [a.account, a.inUse]), [[0, undefined]]);
   }, { claudeUsage: async () => usage });
 });

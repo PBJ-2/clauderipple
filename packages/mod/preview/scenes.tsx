@@ -378,7 +378,8 @@ const SCENES: Scene[] = [
   { name: 'flat-limits-pane-accounts', columns: PANE, skin: 'flat', draw: (el, f) => renderLimits(el, f, { items: LIMITS_ACCOUNTS }, noop) },
   { name: 'band-limits-accounts-94', columns: 94, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 32, resetsAt: '2026-10-16T09:00:00', save: false }, extras: ['context', 'limits'], limits: LIMITS_ACCOUNTS }) },
   // Every readable provider (2026-10-15): Claude, GPT, Gemini and OpenCode Go in one row, at the
-  // two real widths. Narrow, the scoped windows go first, then a later provider's group.
+  // two real widths. Narrow, the later providers' scoped windows go first, then a later provider's
+  // group, and Claude's Fable last; the windows that fit again come back after the groups.
   { name: 'band-limits-all-100', columns: 100, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS_ALL }) },
   { name: 'band-limits-all-140', columns: 140, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS_ALL }) },
   { name: 'band-limits-all-94', columns: 94, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS_ALL }) },

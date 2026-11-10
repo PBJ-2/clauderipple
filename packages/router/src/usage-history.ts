@@ -71,6 +71,7 @@ export type UsageSummary = {
  * `purpose` splits a model's web searches out of its own turns; lines from before it existed keep
  * the old shape (see `modelRowOf`).
  * A line from before costs existed has no `cost`: it is kept in memory as `legacy` and priced when a summary is read.
+ * A stored line whose requests were all unpriced when it was flushed is priced when a summary is read too (see `totalsOf`).
  */
 type HourBucket = BucketTotals & { h: number; p: string; m: string; purpose?: "web-search"; conversations?: ConversationTotals; legacy?: true };
 
@@ -172,21 +173,44 @@ function recordCost(record: RequestRecord): Priced {
 }
 
 /**
- * A legacy hour's cost, priced now from its token totals at the base tier. The hour does not keep
- * per-request prompt sizes, so the tier is a guess, and every request in it counts as estimated (or as
- * unpriced, when the model has no price). An image hour (target `image`) costs nothing, as in recordCost.
+ * An hour's token totals priced now at the base tier, with `requests` of its requests counted as
+ * estimated. The hour does not keep per-request prompt sizes, so the tier is a guess. Null when the
+ * model has no price.
+ */
+function priceHour(bucket: HourBucket, requests: number): Priced | null {
+  const price = priceOf(bucket.p, bucket.m, 0);
+  if (!price) return null;
+  const charge = chargeOf(price, { input: bucket.input, cached: bucket.cached, cacheWrite: bucket.cacheWrite, output: bucket.output });
+  return { cost: charge.usd, unpriced: 0, estimated: requests };
+}
+
+/**
+ * A legacy hour's cost, priced now: every request in it counts as estimated (or as unpriced, when the
+ * model has no price). An image hour (target `image`) costs nothing, as in recordCost.
  */
 function legacyCost(bucket: HourBucket): Priced {
   if (bucket.m === "image" || !accounted(bucket)) return NOTHING;
-  const price = priceOf(bucket.p, bucket.m, 0);
-  if (!price) return { cost: 0, unpriced: bucket.count, estimated: 0 };
-  const charge = chargeOf(price, { input: bucket.input, cached: bucket.cached, cacheWrite: bucket.cacheWrite, output: bucket.output });
-  return { cost: charge.usd, unpriced: 0, estimated: bucket.count };
+  return priceHour(bucket, bucket.count) ?? { cost: 0, unpriced: bucket.count, estimated: 0 };
 }
 
-/** The totals a bucket contributes to a summary: a legacy line is priced here, a stored one is read as stored. */
+/**
+ * The totals a bucket contributes to a summary.
+ *
+ * A legacy line is priced here. A stored line is read as stored, except one whose requests were all
+ * unpriced when it was flushed (cost and estimate both zero, unpriced above zero): once its model has a
+ * price, it is priced here as a legacy hour is, its unpriced requests counted as estimated. Without this an
+ * hour flushed before its model had a price (or before the AA data loaded) stayed unpriced forever,
+ * while the requests added after that point were priced when they arrived.
+ *
+ * A stored line with any priced request (cost or estimated above zero) holds priced and unpriced
+ * requests of one model, which happens when the price arrives mid-hour. Its tokens are summed across
+ * both, so they cannot be split, and it stays as stored. Pricing it again would count its priced cost twice.
+ */
 function totalsOf(bucket: HourBucket): BucketTotals {
-  return bucket.legacy ? { ...bucket, ...legacyCost(bucket) } : bucket;
+  if (bucket.legacy) return { ...bucket, ...legacyCost(bucket) };
+  const whollyUnpriced = bucket.unpriced > 0 && bucket.cost === 0 && bucket.estimated === 0 && bucket.m !== "image" && accounted(bucket);
+  const priced = whollyUnpriced ? priceHour(bucket, bucket.unpriced) : null;
+  return priced ? { ...bucket, ...priced } : bucket;
 }
 
 /** The same counting rules as `RequestLog.summary`, for one record. */

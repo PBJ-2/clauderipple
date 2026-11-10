@@ -1564,8 +1564,9 @@ export class Proxy {
             // it, as it did before the provider was added. A pool whose only stored account lost its
             // grant refused every main-chat turn with this 401 until the provider was deleted, the
             // current login having aged out of the observed source unseen (#88, 2026-10-24).
+            // An explicit pause rules out that login on the client's Bearer as well.
             const clientAuth = req.headers.authorization;
-            const ownSignIn = credentials.length === 0 && typeof clientAuth === "string" && /^Bearer\s+\S+$/i.test(clientAuth);
+            const ownSignIn = credentials.length === 0 && !this.claudeAccounts.currentPaused() && typeof clientAuth === "string" && /^Bearer\s+\S+$/i.test(clientAuth);
             if (credentials.length === 0 && !ownSignIn) {
               const out = JSON.stringify({ type: "error", error: { type: "authentication_error", message: "ClaudeRipple: no usable Claude account; sign in or reauthenticate an account" } });
               res.writeHead(401, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);

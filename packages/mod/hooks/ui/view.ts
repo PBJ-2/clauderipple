@@ -667,19 +667,27 @@ export function limitGroupNumbered(groups: readonly LimitGroup[]): (group: Limit
 }
 
 /**
- * The groups that fit `budget`, narrowing in this order: the scoped windows (Fable, 3P, …) go
- * first, one group's at a time from the last group back, so Claude's own Fable is the last of them
- * to go (all of them going at once hid Fable for Gemini's two 3P windows, 2026-10-15); then a later
- * provider's secondary accounts (the last one first), then a later provider's whole group —
- * Claude's own group (the first) stays to the last, even when it is a stored account (account 1…)
- * the row shows for being in use. Null when even that does not fit (no row).
+ * The groups that fit `budget`, narrowing in this order: first the scoped windows (3P, …) of every
+ * group but the first, one group's at a time from the last group back (all of them going at once
+ * hid Fable for Gemini's two 3P windows, 2026-10-15); then a later provider's secondary accounts
+ * (the last one first); then a later provider's whole group, last first; only then the first
+ * group's own scoped windows (Claude's Fable). The owner wants Claude's Fable on the band over later
+ * providers (2026-11-10). Claude's group (the first) stays to the last, even when it is a stored
+ * account (account 1…) the row shows for being in use; index 0 is the first group whether or not
+ * it is Claude's. Then the refill: the scoped windows dropped above come back into the groups still
+ * drawn, Claude's group first and the rest from first to last, each window only while the row still
+ * fits (so Gemini's 3P returns when the groups dropped after it leave room). A dropped group or
+ * secondary account never returns. Null when even that does not fit (no row).
  * `width` measures a set of groups the way the row draws it.
  */
 export function narrowLimitGroups(groups: readonly LimitGroup[], budget: number, width: (gs: readonly LimitGroup[]) => number): LimitGroup[] | null {
   let out = [...groups]
-  for (let i = out.length - 1; i >= 0 && width(out) > budget; i--) {
-    if (!out[i]!.items.some(item => item.kind === 'scoped')) continue
-    out = out.map((g, j) => j === i ? { ...g, items: g.items.filter(item => item.kind !== 'scoped') } : g).filter(g => g.items.length > 0)
+  // A group left with no window goes too. Index 0 is passed only by the last step below.
+  const dropScoped = (at: number) => {
+    out = out.map((g, j) => j === at ? { ...g, items: g.items.filter(item => item.kind !== 'scoped') } : g).filter(g => g.items.length > 0)
+  }
+  for (let i = out.length - 1; i >= 1 && width(out) > budget; i--) {
+    if (out[i]!.items.some(item => item.kind === 'scoped')) dropScoped(i)
   }
   // A secondary account is one whose provider already shows an earlier group, not any account
   // numbered past 0: the band keeps one group a provider (bandLimitGroups), and Gemini's account in
@@ -690,7 +698,29 @@ export function narrowLimitGroups(groups: readonly LimitGroup[], budget: number,
     out = out.filter((_, i) => i !== at)
   }
   while (width(out) > budget && out.length > 1) out = out.slice(0, -1)
+  // Only now the first group's own scoped windows: Claude's Fable outlasts every later provider.
+  if (width(out) > budget && out.length) dropScoped(0)
   if (!out.length || width(out) > budget) return null
+  return refillScoped(groups, out, budget, width)
+}
+
+/**
+ * The scoped windows `shown` lacks, put back into the groups it still draws while the row fits: the
+ * first group's first (Claude's Fable), then the others from first to last, each window in its own
+ * order and added only if the row still fits with it. A window that does not fit stays out, and no
+ * group or account is added back.
+ */
+function refillScoped(groups: readonly LimitGroup[], shown: LimitGroup[], budget: number, width: (gs: readonly LimitGroup[]) => number): LimitGroup[] {
+  let out = shown
+  for (let at = 0; at < out.length; at++) {
+    const original = groups.find(g => g.key === out[at]!.key)
+    if (!original) continue
+    for (const item of original.items) {
+      if (item.kind !== 'scoped' || out[at]!.items.includes(item)) continue
+      const next = out.map((g, j) => j !== at ? g : { ...g, items: original.items.filter(i => i === item || g.items.includes(i)) })
+      if (width(next) <= budget) out = next
+    }
+  }
   return out
 }
 
@@ -742,6 +772,40 @@ export function exhaustShortWidest(lang: Lang): string[] {
 export function exhaustSentence(item: Pick<LimitItem, 'exhaustsAt'>, now: number, lang: Lang): string {
   const left = exhaustLeft(item, now)
   return left === null ? '' : t(lang, 'limits.exhaust', { time: timeLeft(left, lang) })
+}
+
+// ---- Pace ----------------------------------------------------------------------------------------
+//
+// Every window with a reset still ahead says how its pace is going (2026-11-10). A window with no exhaust
+// forecast says where its pace takes it at the reset: under 95% is comfortable, 95 to 100 tight (amber
+// in the pane). Above 100 the pace says nothing here, since a window that reaches 100% has its exhaust
+// forecast. The pane puts the pace as a short label after the time left, not as a line of its own.
+
+/** A window's pace when no exhaust forecast applies: comfortable under 95% projected at its reset, tight from 95 to 100. */
+export type PaceLevel = 'comfortable' | 'tight'
+
+/**
+ * The pace of a window, or null: an exhaust forecast applies, no projection, more than 100, or no reset
+ * still ahead. A passed or missing reset has no time left to put the pace beside; the pane redraws
+ * across a reset before the limits are read again, and the old window's projection says nothing about
+ * the new one.
+ */
+export function paceLevel(item: Pick<LimitItem, 'exhaustsAt' | 'projectedPercent' | 'resetsAt'>, now: number): PaceLevel | null {
+  if (exhaustLeft(item, now) !== null) return null
+  const reset = item.resetsAt ? Date.parse(item.resetsAt) : NaN
+  if (!Number.isFinite(reset) || reset <= now) return null
+  const projected = item.projectedPercent
+  if (typeof projected !== 'number' || !Number.isFinite(projected)) return null
+  if (projected < 95) return 'comfortable'
+  // A projection that rounds to 100 without an exhaust moment (it lands right at the reset) is tight
+  // too; past 100 the exhaust moment has passed (an old reading), and the pace says nothing.
+  return projected <= 100 ? 'tight' : null
+}
+
+/** The pace as a label after the time left: "projected 84%", or '' when the pace says nothing. */
+export function paceLabel(item: Pick<LimitItem, 'exhaustsAt' | 'projectedPercent' | 'resetsAt'>, now: number, lang: Lang): string {
+  if (paceLevel(item, now) === null) return ''
+  return t(lang, 'limits.paceProjected', { percent: Math.round(item.projectedPercent!) })
 }
 
 // ---- Cost ----------------------------------------------------------------------------------------

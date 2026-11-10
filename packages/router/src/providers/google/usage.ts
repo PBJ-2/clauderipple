@@ -41,7 +41,12 @@ export type QuotaBucket = {
   remainingFraction: number;
 };
 
-export type QuotaGroup = { displayName: string; buckets: QuotaBucket[] };
+/**
+ * A quota group. `read_at` (epoch milliseconds) is set on the snapshot's groups only: when the request
+ * that gave them was sent. Every group of one account carries the same time; an account whose later
+ * lookups all fail keeps the time of its last good one. Internal: `/api/limits` strips it.
+ */
+export type QuotaGroup = { displayName: string; buckets: QuotaBucket[]; read_at?: number };
 
 /**
  * Parse the `retrieveUserQuotaSummary` body into groups. A group or bucket missing the fields the
@@ -311,6 +316,8 @@ export class GoogleUsage {
     // Each host keeps its own count, so every host is read; a host that fails leaves its last good
     // numbers on screen but voids its own evidence.
     await Promise.all(credentials.map(async (credential) => {
+      // Each account keeps its own read time: one account's lookup can fail while another's succeeds.
+      const readAt = (this.opts.now ?? Date.now)();
       const fetched = await Promise.all(hosts.map(async (host) => [host, await this.fetchOne(credential, host)] as const));
       const shown = new Map<string, QuotaGroup[]>();
       const proven = new Map<string, HostEvidence>();
@@ -319,7 +326,7 @@ export class GoogleUsage {
         shown.set(host, answer.groups);
         if (answer.strict) proven.set(host, { observedAt: (this.opts.now ?? Date.now)(), groups: answer.strict });
       }
-      if (shown.size > 0) this.last.set(credential.ownerId, mergeHostGroups([...shown.values()]));
+      if (shown.size > 0) this.last.set(credential.ownerId, mergeHostGroups([...shown.values()]).map((g) => ({ ...g, read_at: readAt })));
       if (proven.size > 0) this.evidence.set(credential.ownerId, { projectId: credential.projectId, hosts: proven });
       // The displayed numbers stay but prove nothing when no host answered.
       else this.evidence.delete(credential.ownerId);

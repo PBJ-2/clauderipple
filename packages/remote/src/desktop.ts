@@ -122,14 +122,28 @@ export interface DesktopOptions {
   userId?: (id: string, uuid: string, text: string) => string | undefined;
 }
 
+/** The ids a process listing names through session flags, tokenized once per listing: the host asks
+ * about every session against the same snapshot, and a listing is hundreds of KB. */
+let flagged: { output: string; ids: Set<string> } | null = null;
+function sessionFlagIds(output: string): Set<string> {
+  if (flagged?.output === output) return flagged.ids;
+  const ids = new Set<string>();
+  for (const line of output.split("\n")) {
+    const args = line.trim().split(/\s+/).map(arg => arg.replace(/^"|"$/g, ""));
+    args.forEach((arg, i) => {
+      if (arg.startsWith("--resume=")) ids.add(arg.slice("--resume=".length));
+      else if (arg.startsWith("--session-id=")) ids.add(arg.slice("--session-id=".length));
+      else if ((arg === "--session-id" || arg === "--resume") && args[i + 1] !== undefined) ids.add(args[i + 1]!);
+    });
+  }
+  flagged = { output, ids };
+  return ids;
+}
+
 /** Match session flags, not UUIDs appearing in a prompt or another flag's value. */
 export function processHasSession(output: string, id: string): boolean {
   if (!UUID.test(id)) return false;
-  return output.split("\n").some(line => {
-    const args = line.trim().split(/\s+/).map(arg => arg.replace(/^"|"$/g, ""));
-    return args.some((arg, i) => arg === `--resume=${id}` || arg === `--session-id=${id}` ||
-      ((arg === "--session-id" || arg === "--resume") && args[i + 1] === id));
-  });
+  return sessionFlagIds(output).has(id);
 }
 
 function object(value: unknown): RecordValue | null {

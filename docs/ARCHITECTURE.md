@@ -1262,21 +1262,36 @@ is neither unpriced nor estimated. A `count_tokens` call and a record without to
 too, and are not unpriced. A request with tokens and no price is `unpricedRequests`. Hourly lines
 written before this carry no `cost`: they are priced at read time from their token totals at the
 base tier, and every request in such an hour counts as estimated (an hour does not keep
-per-request prompt sizes, so the tier is a guess). An image hour costs nothing. The AA dataset is
+per-request prompt sizes, so the tier is a guess). An image hour costs nothing. A stored hour whose
+requests were all unpriced when it was flushed (no `cost`, no estimate, `unpricedRequests` above zero)
+is priced the same way at read time once its model has a price, so an hour flushed before a price
+existed does not stay unpriced; its requests count as estimated. A stored hour that mixes priced and
+unpriced requests of one model (a price that arrived mid-hour) is read as stored, because its tokens
+cannot be split between the two. Stored lines are never rewritten on disk. The AA dataset is
 loaded from the disk cache at startup (`loadAaPricesFrom`), and every dataset the score catalog
 loads or fetches is pushed to the price registry (`onDataset`), so a refreshed price reaches later
 costs without a restart.
 
-**Limit forecast (`limit-forecast.ts`, 2026-11-09).** Each `GET /api/limits` read records one
-sample per window (`at` is the account snapshot's time), keyed by (provider, account, kind, label,
-window_minutes). A reading less than a minute after the window's last stored sample is skipped, so
-frequent polling does not multiply the samples. A window whose `used_percent` fell, or whose
-`reset_at` changed, starts a new series. The rate is the least-squares slope of
-`used_percent` over the samples of the last 60 minutes; a forecast needs those samples to span
-at least 15 minutes and to rise at least 2 points, and the rate to be positive. Then
-`exhaust_at = latest sample + (100 − used_percent) / rate` (epoch seconds), emitted only while the
-window is below 100% and only when `exhaust_at` falls before `reset_at`. Samples are kept for three
-hours and are not persisted: a router restart starts every window fresh.
+**Limit forecast (`limit-forecast.ts`, rule revised 2026-11-10).** A window's `exhaust_at` is the
+moment it reaches 100% at its average pace since the window started, computed from the current
+reading alone (no sample history, nothing persisted, so a restart changes nothing). With
+`elapsed = now − (reset_at − window_minutes·60)` and `rate = used_percent / elapsed`:
+`exhaust_at = now + (100 − used_percent) / rate` (epoch seconds). `now` is the account snapshot's
+`at`, so a cached snapshot is judged at its own time. No forecast (the field is absent) when the
+window is at 0% or 100%, `reset_at` or `window_minutes` is missing, the reset is not after `now`,
+`elapsed` is less than min(24 h, 10% of the window), or `exhaust_at` is not before `reset_at`.
+The 10% floor keeps the average from being read before it holds a full day and night (5 h window:
+30 min; weekly: 16.8 h; 30-day: 24 h). The earlier rule fitted the last hour's slope: one busy hour
+extrapolated around the clock overstated weekly windows (a 52% → 54% hour projected 35+ hours of
+use), and integer percents doubled small rises (a real ~1 point rise read as 2).
+
+The same pace gives a window's **projection** (`projected_percent`, 2026-11-10): the used percent it
+reaches at its reset, `used_percent × window_minutes·60 / elapsed` (that is, rate × window length),
+rounded to an integer. It has the same preconditions as `exhaust_at` (reset and length present, reset
+after `now`, `elapsed` at least min(24 h, 10% of the window)) and needs `used_percent` above 0. It may
+exceed 100, and then `exhaust_at` is set too. The field is absent when none of this holds. The mod
+reads it as a pace sentence only where there is no exhaust forecast: under 80 comfortable, 80 to 99
+tight, and nothing at 100 or more.
 
 - **Server-side threads ("tether").** The first request of a session carries
   `thread: {type:"create"}` and the full history; later turns carry
@@ -1449,8 +1464,9 @@ hours and are not persisted: a router restart starts every window fresh.
     to the in-use Claude account (the first when none is marked).
     Login account PATCH bodies accept boolean `preferred`/`paused` and `clearCooldown: true`;
     Claude's existing PUT preference API remains supported. External Codex/current-Claude logins
-    retain their existing ownership restrictions. Compatible credentials persist boolean flags on
-    their `config.json` entries via PUT `/api/config` (validated, at most one preferred per provider);
+    still cannot be renamed or removed; the current Claude login also accepts a pause.
+    Compatible credentials persist boolean flags on their `config.json` entries via PUT `/api/config`
+    (validated, at most one preferred per provider);
     `/api/status.credentials[name]` reports each entry's flags and selection, including a declared
     single key. POST `/api/credentials/clear-cooldown` with `{provider, id}` clears one key's runtime
     health. Cooldown clearing also works while an entry is paused, without resuming it.
@@ -1641,9 +1657,12 @@ hours and are not persisted: a router restart starts every window fresh.
   router logs it when it reads the config (`targetWarnings`). With the pool, Claude
   Desktop/Code Messages requests stay unmodified except for the routed model and
   selected identity. The runtime pool is ordered current observed/env/Claude Code
-  login first, then ClaudeRipple-owned accounts. When none of them is usable, a
-  turn that carries the client's own `Bearer` goes out on it unchanged, as a
-  passthrough would; only a turn without one is refused with 401 (#88,
+  login first, then ClaudeRipple-owned accounts. Pausing the current login writes
+  `<home>/claude-current-paused` (0600), independently of the external credential and the
+  account file, and excludes it from the pool until resumed, across restarts.
+  When none of them is usable, a turn that carries the client's own `Bearer` goes out
+  on it unchanged, as a passthrough would; a paused current login also rules out this
+  fallback, so it is refused with 401 just like a turn without a Bearer (#88,
   2026-10-24: the observed login aged out unseen behind the pool, and one revoked
   stored account stopped every main-chat turn). A conversation is sticky to the
   account that answered so its prompt-cache prefix survives, including across that

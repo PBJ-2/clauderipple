@@ -19,6 +19,9 @@
 //
 // A window the router expects to run out before its reset (`exhaustsAt`, 2026-11-09) is at least
 // amber, red within the hour, and says under its reset how long until it runs out at its pace.
+// Any other window with a projection (`projectedPercent`, 2026-11-10) adds a label after its time
+// left ("2일 9시간 남음 · 예상 사용률 84%"): comfortable in the muted tone, tight (95 to 100%) in amber.
+// No time left (the reset passed, or none is given), no label.
 // After the windows a cost tile says what the requests cost at public API prices (see costDrawn).
 //
 // The pane redraws when the limits are read again (once a minute at most) and as the minute
@@ -38,7 +41,7 @@ import type { Look } from './look'
 import { canDraw, textButton } from './parts'
 import type { Els } from './parts'
 import { chOf, displayWidth, limitTone, providerColor, svgDoc, textTone } from './theme'
-import { costFigure, exhaustSentence, providerDisplayName, limitGroupAccount, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTone, resetMoment, timeLeft } from './view'
+import { costFigure, exhaustSentence, paceLabel, paceLevel, providerDisplayName, limitGroupAccount, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTone, resetMoment, timeLeft } from './view'
 import type { Frame, LimitGroup, LimitsActions, LimitsView } from './view'
 
 // ---- What each window says -----------------------------------------------------------------------
@@ -235,14 +238,19 @@ function linesOf(text: string, cells: number): number {
  * Lines the reset takes under a window's bar, in `cells` (the tile's room less the name's). In a
  * narrow pane the date wraps and the time left drops to a line of its own: counted as one line, the
  * water stopped short of the last tiles and the page showed white beneath them (2026-11-07, four
- * accounts in a pane a phone's width).
+ * accounts in a pane a phone's width). The pace label (`pace`, '' for none) follows the time left in
+ * the same group, so the group is one unit that wraps as a row: beside the date when it fits, else
+ * on a line of its own, the time left and the label each wrapping as they must.
  */
-function whenLines(reset: Reset, cells: number, lang: Lang, now: number): number {
+function whenLines(reset: Reset, cells: number, lang: Lang, now: number, pace: string): number {
   if (reset.kind === 'none') return linesOf(t(lang, 'limits.noReset'), cells)
   if (reset.kind === 'passed') return linesOf(t(lang, 'limits.passed', { date: resetMoment(reset.at, lang) }), cells) + linesOf(t(lang, 'limits.stale'), cells)
   const on = t(lang, 'limits.resetsOn', { date: resetMoment(reset.at, lang) })
   const left = t(lang, 'limits.left', { time: timeLeft(reset.at - now, lang) })
-  return chOf(on) + 2 + chOf(left) <= cells ? 1 : linesOf(on, cells) + linesOf(left, cells)
+  if (!pace) return chOf(on) + 2 + chOf(left) <= cells ? 1 : linesOf(on, cells) + linesOf(left, cells)
+  const label = ' · ' + pace
+  const group = chOf(left) + chOf(label) <= cells ? 1 : linesOf(left, cells) + linesOf(label, cells)
+  return chOf(on) + 2 + chOf(left) + chOf(label) <= cells ? 1 : linesOf(on, cells) + group
 }
 
 /** One window: its name, bar and figure on a line; when it resets and the time left under them. */
@@ -254,13 +262,26 @@ function windowDrawn(el: Els, frame: Frame, group: LimitGroup, item: LimitItem, 
   const tone = limitItemTone(item, frame.now)
   const reset = resetOf(item, frame.now)
   const label = windowName(item, group, L)
-  const exhaust = exhaustSentence(item, frame.now, L)
+  const note = exhaustSentence(item, frame.now, L)
+  // With no exhaust forecast, the pace says where the window lands at its reset: a label after the
+  // time left, muted when comfortable, amber when tight.
+  const level = note ? null : paceLevel(item, frame.now)
+  const pace = level ? paceLabel(item, frame.now, L) : ''
+  const paceStyle = level === 'tight' ? figureWord(k, 'warn') : k.mute
   // A passed reset leaves a share that may be the old window's, so its figure is quiet.
   const figure = reset.kind === 'passed' ? k.sub : figureWord(k, tone)
+  const leftText = reset.kind === 'ahead' ? t(L, 'limits.left', { time: timeLeft(reset.at - frame.now, L) }) : ''
   const when: RenderNode[] = reset.kind === 'ahead'
     ? [
         <Box key="on" flexShrink={1} minWidth={0}><Text {...k.sub} wrap="wrap">{t(L, 'limits.resetsOn', { date: resetMoment(reset.at, L) })}</Text></Box>,
-        <Box key="left" flexShrink={0}><Text bold {...k.ink}>{t(L, 'limits.left', { time: timeLeft(reset.at - frame.now, L) })}</Text></Box>,
+        pace
+          ? (
+            <Box key="left" flexDirection="row" flexWrap="wrap" flexShrink={1} minWidth={0}>
+              <Box key="time" flexShrink={0}><Text bold {...k.ink}>{leftText}</Text></Box>
+              <Box key="pace" flexShrink={1} minWidth={0}><Text {...paceStyle} wrap="wrap">{' · ' + pace}</Text></Box>
+            </Box>
+          )
+          : <Box key="left" flexShrink={0}><Text bold {...k.ink}>{leftText}</Text></Box>,
       ]
     : reset.kind === 'passed'
       ? [
@@ -287,14 +308,14 @@ function windowDrawn(el: Els, frame: Frame, group: LimitGroup, item: LimitItem, 
         <Box key="when" flexDirection="row" flexWrap="wrap" justifyContent="space-between" columnGap={2} paddingLeft={name + 1} width="100%" minWidth={0}>
           {when}
         </Box>
-        {exhaust ? (
-          <Box key="exhaust" paddingLeft={name + 1} width="100%" minWidth={0}>
-            <Text {...figureWord(k, tone)} wrap="wrap">{exhaust}</Text>
+        {note ? (
+          <Box key="note" paddingLeft={name + 1} width="100%" minWidth={0}>
+            <Text {...figureWord(k, tone)} wrap="wrap">{note}</Text>
           </Box>
         ) : null}
       </Box>
     ),
-    rows: 1.2 + whenLines(reset, whenCells, L, frame.now) * 1.05 + (exhaust ? linesOf(exhaust, whenCells) * 1.05 : 0),
+    rows: 1.2 + whenLines(reset, whenCells, L, frame.now, pace) * 1.05 + (note ? linesOf(note, whenCells) * 1.05 : 0),
   }
 }
 
@@ -513,7 +534,10 @@ function limitsText(el: Els, frame: Frame, view: LimitsView, actions: LimitsActi
             {save ? <Box key="save" paddingLeft={2}><Text dimColor wrap="wrap">{save}</Text></Box> : null}
             {group.items.map((item, i) => {
               const level = limitItemTone(item, frame.now)
-              const exhaust = exhaustSentence(item, frame.now, L)
+              const note = exhaustSentence(item, frame.now, L)
+              // With no exhaust forecast, the pace says where the window lands at its reset: a label after the time left, muted when comfortable, amber when tight.
+              const paceLvl = note ? null : paceLevel(item, frame.now)
+              const pace = paceLvl ? paceLabel(item, frame.now, L) : ''
               const reset = resetOf(item, frame.now)
               const filled = Math.round((Math.max(0, Math.min(100, item.percent)) / 100) * TEXT_BAR)
               const when = reset.kind === 'ahead'
@@ -534,11 +558,11 @@ function limitsText(el: Els, frame: Frame, view: LimitsView, actions: LimitsActi
                     </Box>
                   </Box>
                   <Box key="when" paddingLeft={name + 2}>
-                    <Text color={reset.kind === 'passed' ? tone.warn : undefined} dimColor={reset.kind !== 'passed'} wrap="wrap">{when}</Text>
+                    <Text color={reset.kind === 'passed' ? tone.warn : undefined} dimColor={reset.kind !== 'passed'} wrap="wrap">{when}{pace ? <Text color={paceLvl === 'tight' ? tone.warn : undefined} dimColor={paceLvl !== 'tight'}>{' · ' + pace}</Text> : null}</Text>
                   </Box>
-                  {exhaust ? (
-                    <Box key="exhaust" paddingLeft={name + 2}>
-                      <Text color={colorOf(level)} wrap="wrap">{exhaust}</Text>
+                  {note ? (
+                    <Box key="note" paddingLeft={name + 2}>
+                      <Text color={colorOf(level)} wrap="wrap">{note}</Text>
                     </Box>
                   ) : null}
                 </Box>

@@ -33,7 +33,7 @@ import { AutoUpdater } from "./autoupdate.ts";
 export { parseUpdateCheck, type UpdateCheck } from "./cli-control.ts";
 import { fileURLToPath } from "node:url";
 import type { Config, Provider, ProviderCredential, ProviderModel } from "./config.ts";
-import { withFileLock } from "./locked-file.ts";
+import { withFileLock, writeJsonAtomic } from "./locked-file.ts";
 import { adminPort, headerValueProblem, homeDir, searchProviderFor, ssidProblem, validate } from "./config.ts";
 export { adminPort } from "./config.ts";
 import { agentRenames, generatedAgents } from "./agents.ts";
@@ -60,7 +60,7 @@ import { measureModel, ollamaApiBase, ollamaModelFacts, refusedByPlan, type Meas
 import { catalogEntry, catalogueWindow } from "./catalog.ts";
 import { ModelScoreCatalog, buildModelScores } from "./model-scores.ts";
 import { setAaPriceDataset } from "./prices.ts";
-import { LimitForecaster, forecastLimits } from "./limit-forecast.ts";
+import { forecastLimits } from "./limit-forecast.ts";
 import { ClaudeCodeAuthStore, nativeAnthropicHeaders, type ClaudeCodeCredentialReaders } from "./providers/anthropic.ts";
 import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
 import { fetchClaudeModels, newClaudeReleases, type ClaudeModel } from "./providers/anthropic-models.ts";
@@ -72,7 +72,7 @@ import { desktopClaudeCodeDirs } from "../../cli/src/claude-auth.ts";
 import { statusModEnabled, syncModelSlots } from "../../cli/src/settings.ts";
 import { ClaudeOAuthSession, type ClaudeOAuthState } from "./providers/claude-oauth.ts";
 import { readClaudeAuthFile } from "./providers/anthropic-token-file.ts";
-import { listClaudeAccounts, listClaudeAccountsWithSubject, removeClaudeAccount, updateClaudeAccount, setPreferredClaudeAccount } from "./providers/anthropic-accounts.ts";
+import { isCurrentClaudeAccountPaused, listClaudeAccounts, listClaudeAccountsWithSubject, removeClaudeAccount, updateClaudeAccount, setCurrentClaudeAccountPaused, setPreferredClaudeAccount } from "./providers/anthropic-accounts.ts";
 import { storedAccountsFor } from "./pinned-accounts.ts";
 import { readChatGptAccounts, removeChatGptAccount, summarize as summarizeChatGptAccount, updateChatGptAccount } from "./providers/chatgpt/accounts.ts";
 import { exhaustedForMs, IMAGE_ASPECTS, IMAGE_BACKGROUNDS, IMAGE_FORMATS, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
@@ -304,7 +304,7 @@ function claudePoolReports(deps: AdminDeps, name: string | undefined): Credentia
  */
 function claudeInUseId(deps: AdminDeps, name: string | undefined): string | undefined {
   const provider = name ? deps.config().providers[name] : undefined;
-  if (provider?.type === "anthropic" && provider.accountPool !== true) return "current";
+  if (provider?.type === "anthropic" && provider.accountPool !== true) return isCurrentClaudeAccountPaused(homeDir()) ? undefined : "current";
   try {
     return claudePoolReports(deps, name).find((row) => row.inUse === true)?.id;
   } catch {
@@ -338,7 +338,7 @@ async function claudeAccountUsage(deps: AdminDeps): Promise<{ id: string; label:
   const rows: { id: string; label: string; quota: Record<string, unknown>; inUse?: boolean }[] = [];
   // The account in use is listed even while its usage is unknown, with no windows, so no reader
   // takes another account's figures for the one that is actually spending.
-  if (usage.current || inUse === "current") rows.push({ id: "current", label: "Current Claude login", quota: usage.current ?? {}, ...(inUse === "current" ? { inUse: true } : {}) });
+  if (!isCurrentClaudeAccountPaused(homeDir()) && (usage.current || inUse === "current")) rows.push({ id: "current", label: "Current Claude login", quota: usage.current ?? {}, ...(inUse === "current" ? { inUse: true } : {}) });
   for (const account of listClaudeAccounts(homeDir())) {
     const quota = usage[account.id];
     if (quota || inUse === account.id) rows.push({ id: account.id, label: account.label, quota: quota ?? {}, ...(inUse === account.id ? { inUse: true } : {}) });
@@ -358,10 +358,12 @@ async function claudeAccountUsage(deps: AdminDeps): Promise<{ id: string; label:
 
 /** One window the limits row reads. `reset_at` is epoch seconds, as the other readers use. */
 /**
- * `exhaust_at` (epoch seconds) is present only when the window's recent rate of use reaches 100% before
- * its reset; see limit-forecast.ts for the rule.
+ * `exhaust_at` (epoch seconds) is present only when the window's average pace since it started reaches
+ * 100% before its reset. `projected_percent` (an integer, may exceed 100) is the used percent the window
+ * reaches at its reset at that pace; present only when used_percent is above 0 and the pace is trusted
+ * (the same preconditions as `exhaust_at`). See limit-forecast.ts for the rule.
  */
-export type LimitsWindow = { kind: "five_hour" | "seven_day" | "scoped" | "window"; label?: string; used_percent: number; window_minutes?: number; reset_at?: number; exhaust_at?: number };
+export type LimitsWindow = { kind: "five_hour" | "seven_day" | "scoped" | "window"; label?: string; used_percent: number; window_minutes?: number; reset_at?: number; exhaust_at?: number; projected_percent?: number };
 /**
  * One account's windows. `account` is the account's own index, stable while others come and go, so
  * the mod's "Claude 1"/"Claude 2" do not swap. `label` is the name the owner gave it (absent for the
@@ -369,14 +371,6 @@ export type LimitsWindow = { kind: "five_hour" | "seven_day" | "scoped" | "windo
  */
 export type LimitsAccount = { account: number; label?: string; inUse?: true; windows: LimitsWindow[]; at: number };
 export type LimitsProvider = { provider: string; type: string; title: string; accounts: LimitsAccount[] };
-/** A row with its account's stable id (the credential or account id), the forecast's series key. The response never carries it. */
-type IdentifiedAccount = LimitsAccount & { id: string };
-type IdentifiedProvider = Omit<LimitsProvider, "accounts"> & { accounts: IdentifiedAccount[] };
-
-/** The response shape of a provider: the id only keys the forecast, and the index shifts when an account goes. */
-function withoutIdentity(provider: IdentifiedProvider): LimitsProvider {
-  return { ...provider, accounts: provider.accounts.map(({ id: _id, ...account }) => account) };
-}
 
 /** A `{used_percent, window_minutes, reset_at}` snapshot window as `/api/limits` reads it, or null. */
 function limitWindowFrom(w: unknown): { used_percent: number; window_minutes?: number; reset_at?: number } | null {
@@ -423,7 +417,7 @@ function claudeLimitWindows(quota: Record<string, unknown>): LimitsWindow[] {
  */
 function claudeNumberedAccounts(): { id: string; label?: string; email?: string }[] {
   const stored = listClaudeAccounts(homeDir()).filter((a) => !a.paused && !a.needsReauth && a.expiresAt > Date.now());
-  return [{ id: "current" }, ...stored.map((a) => ({ id: a.id, label: a.label, ...(a.email ? { email: a.email } : {}) }))];
+  return [...(isCurrentClaudeAccountPaused(homeDir()) ? [] : [{ id: "current" }]), ...stored.map((a) => ({ id: a.id, label: a.label, ...(a.email ? { email: a.email } : {}) }))];
 }
 
 /** A ChatGPT or Google provider's accounts as the limits number them: paused and needs-login left out. */
@@ -438,7 +432,7 @@ function numberedAccounts<T extends { state: string }>(accounts: readonly T[]): 
  * one's usage is not known yet no entry is marked, so no reader takes another account's figures
  * for the one that is actually spending.
  */
-async function anthropicLimitAccounts(deps: AdminDeps, name: string): Promise<IdentifiedAccount[]> {
+async function anthropicLimitAccounts(deps: AdminDeps, name: string): Promise<LimitsAccount[]> {
   let usage: Record<string, Record<string, unknown>>;
   try {
     usage = (await deps.claudeUsage?.()) ?? {};
@@ -447,22 +441,22 @@ async function anthropicLimitAccounts(deps: AdminDeps, name: string): Promise<Id
   }
   const inUse = claudeInUseId(deps, name);
   const owners = claudeNumberedAccounts();
-  const out: IdentifiedAccount[] = [];
+  const out: LimitsAccount[] = [];
   owners.forEach((owner, account) => {
     const quota = usage[owner.id];
     if (!quota) return;
     const windows = claudeLimitWindows(quota);
     if (!windows.length) return;
     const at = typeof quota.at === "number" ? quota.at : Date.now();
-    out.push({ id: owner.id, account, ...(owner.label ? { label: owner.label } : {}), ...(owner.id === inUse ? { inUse: true as const } : {}), windows, at });
+    out.push({ account, ...(owner.label ? { label: owner.label } : {}), ...(owner.id === inUse ? { inUse: true as const } : {}), windows, at });
   });
   return out;
 }
 
 /** Every ChatGPT account's windows, paused and needs-login accounts left out and unnumbered. */
-function chatgptLimitAccounts(accounts: ChatGptAccountStatus[]): IdentifiedAccount[] {
+function chatgptLimitAccounts(accounts: ChatGptAccountStatus[]): LimitsAccount[] {
   const kept = numberedAccounts(accounts);
-  const out: IdentifiedAccount[] = [];
+  const out: LimitsAccount[] = [];
   kept.forEach((account, index) => {
     const quota = account.quota;
     if (!quota || typeof quota.at !== "number") return;
@@ -472,41 +466,54 @@ function chatgptLimitAccounts(accounts: ChatGptAccountStatus[]): IdentifiedAccou
       const win = limitWindowFrom(w);
       if (win) windows.push({ kind: windowKind(win.window_minutes), used_percent: win.used_percent, ...(win.window_minutes !== undefined ? { window_minutes: win.window_minutes } : {}), ...(win.reset_at !== undefined ? { reset_at: win.reset_at } : {}) });
     }
-    if (windows.length) out.push({ id: account.id, account: index, ...(account.label ? { label: account.label } : {}), ...(account.inUse ? { inUse: true as const } : {}), windows, at: quota.at });
+    if (windows.length) out.push({ account: index, ...(account.label ? { label: account.label } : {}), ...(account.inUse ? { inUse: true as const } : {}), windows, at: quota.at });
   });
   return out;
 }
 
+/**
+ * When the reading these items came from was taken: the oldest `read_at` a reader stamped on them, or
+ * now when none carries one (a reader that answered nothing, or a test double). The forecast judges a
+ * cached reading at this time, so a reading kept since an earlier poll is not counted as fresh.
+ */
+function readingTime(items: readonly { read_at?: number }[]): number {
+  let oldest: number | undefined;
+  for (const item of items) if (item.read_at !== undefined && (oldest === undefined || item.read_at < oldest)) oldest = item.read_at;
+  return oldest ?? Date.now();
+}
+
+/** The windows as `/api/limits` sends them: a reader's internal `read_at` is stripped. */
+function withoutReadAt<T extends { read_at?: number }>(windows: readonly T[]): Omit<T, "read_at">[] {
+  return windows.map(({ read_at: _readAt, ...w }) => w);
+}
+
 /** Every Antigravity account's windows (Gemini, Argon and selected third-party ones), paused left out. */
-async function googleLimitAccounts(deps: AdminDeps, name: string): Promise<IdentifiedAccount[]> {
+async function googleLimitAccounts(deps: AdminDeps, name: string): Promise<LimitsAccount[]> {
   const google = deps.google?.();
   if (!google) return [];
   const statuses = google.accounts()[name] ?? [];
   const groups = (await google.usage?.(name)) ?? {};
   const kept = numberedAccounts(statuses);
-  const at = Date.now();
   // The third-party (Claude and GPT) windows only when this provider has such a model selected:
   // beside Gemini's own they made four figures, two of them a pool nobody here spends (2026-10-20).
   const provider = deps.config().providers[name];
   const models = provider && "models" in provider && Array.isArray(provider.models) ? provider.models : [];
   const thirdParty = models.some((m) => /^(claude-|gpt-oss(-|$))/i.test(typeof m === "string" ? m : m.id));
-  const out: IdentifiedAccount[] = [];
+  const out: LimitsAccount[] = [];
   kept.forEach((account, index) => {
     const quotient = groups[account.id];
     if (!quotient || !quotient.length) return;
     // Scoped is a display kind, not a third-party marker: Argon's own weekly quota is scoped too.
     const windows: LimitsWindow[] = googleWindowsFromGroups(quotient).filter((w) => thirdParty || w.kind !== "scoped" || w.label !== "3P");
-    if (windows.length) out.push({ id: account.id, account: index, ...(account.label ? { label: account.label } : {}), ...(account.inUse ? { inUse: true as const } : {}), windows, at });
+    // Each account is judged at its own read time: one account's lookup can fail while another's succeeds.
+    if (windows.length) out.push({ account: index, ...(account.label ? { label: account.label } : {}), ...(account.inUse ? { inUse: true as const } : {}), windows, at: readingTime(quotient) });
   });
   return out;
 }
 
-/** Each `/api/limits` read is a sample of every window; in memory only, so a restart starts fresh. */
-const limitForecasts = new LimitForecaster();
-
 /** Every provider whose quota can be read, in one shape, for `GET /api/limits`. */
 async function buildLimits(deps: AdminDeps): Promise<{ providers: LimitsProvider[] }> {
-  const providers: IdentifiedProvider[] = [];
+  const providers: LimitsProvider[] = [];
   const chatgpt = deps.chatgpt?.();
   const accounts = chatgpt?.accounts?.() ?? {};
   for (const [name, p] of Object.entries(deps.config().providers)) {
@@ -522,31 +529,25 @@ async function buildLimits(deps: AdminDeps): Promise<{ providers: LimitsProvider
       if (rows.length) providers.push({ provider: name, type: "google", title: "Gemini", accounts: rows });
     } else if (p.type === "openai-compatible" && isOpenCodeGo(p)) {
       const credentials = p.credentials?.length ? p.credentials : [undefined];
-      const rows = await Promise.all(credentials.map(async (credential, account): Promise<IdentifiedAccount> => ({
-        id: credential?.id ?? name,
-        account,
-        ...(credential?.label !== undefined ? { label: credential.label } : {}),
-        windows: ((await deps.opencodeUsage?.(name, credential?.id)) ?? []).map((w) => ({ ...w })),
-        at: Date.now(),
-      })));
+      const rows = await Promise.all(credentials.map(async (credential, account): Promise<LimitsAccount> => {
+        const windows = (await deps.opencodeUsage?.(name, credential?.id)) ?? [];
+        return { account, ...(credential?.label !== undefined ? { label: credential.label } : {}), windows: withoutReadAt(windows), at: readingTime(windows) };
+      }));
       if (rows.some((row) => row.windows.length)) providers.push({ provider: name, type: "opencode-go", title: "Go", accounts: rows });
     } else if (p.type === "anthropic-compatible" && isMiniMaxPlan(p)) {
       const credentials = p.credentials?.length ? p.credentials : [undefined];
-      const rows = await Promise.all(credentials.map(async (credential, account): Promise<IdentifiedAccount> => ({
-        id: credential?.id ?? name,
-        account,
-        ...(credential?.label !== undefined ? { label: credential.label } : {}),
-        windows: ((await deps.minimaxUsage?.(name, credential?.id)) ?? []).map((w) => ({ ...w })),
-        at: Date.now(),
-      })));
+      const rows = await Promise.all(credentials.map(async (credential, account): Promise<LimitsAccount> => {
+        const windows = (await deps.minimaxUsage?.(name, credential?.id)) ?? [];
+        return { account, ...(credential?.label !== undefined ? { label: credential.label } : {}), windows: withoutReadAt(windows), at: readingTime(windows) };
+      }));
       if (rows.some((row) => row.windows.length)) providers.push({ provider: name, type: "minimax", title: "MiniMax", accounts: rows });
     } else if (p.type === "grok") {
       const windows = (await deps.grokUsage?.(name)) ?? [];
-      if (windows.length) providers.push({ provider: name, type: "grok", title: "Grok", accounts: [{ id: name, account: 0, windows: windows.map((w) => ({ ...w })), at: Date.now() }] });
+      if (windows.length) providers.push({ provider: name, type: "grok", title: "Grok", accounts: [{ account: 0, windows: withoutReadAt(windows), at: readingTime(windows) }] });
     }
   }
-  forecastLimits(limitForecasts, providers);
-  return { providers: providers.map(withoutIdentity) };
+  forecastLimits(providers);
+  return { providers };
 }
 
 /** One discovered/offered model. Exactly the config shape, so a preset's per-model override
@@ -790,7 +791,7 @@ async function numberPinnedAccounts(deps: AdminDeps, cfg: Config, agents: ModOpt
       numbered = claudeNumberedAccounts();
       // The app login's own email, for the first tab's title; the lookup is cached for minutes.
       const identity = await deps.claudeIdentity?.().catch(() => null);
-      if (identity) numbered[0] = { id: "current", email: identity.email };
+      if (identity && numbered[0]?.id === "current") numbered[0] = { id: "current", email: identity.email };
     } else if (provider.type === "chatgpt") numbered = numberedAccounts(chatgpt[name] ?? []);
     else if (provider.type === "google") numbered = numberedAccounts(google[name] ?? []);
     const ids = new Set(numbered.map((a) => a.id));
@@ -897,9 +898,9 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
         : !!(p.apiKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
     } else if (p.type === "anthropic") {
       // Stored accounts serve the turn when Claude Code's own login is not seen; the pool refreshes a
-      // due token before each turn, so only an account that must sign in again is out.
+      // due token before each turn, so only an account that must sign in again, or is paused, is out.
       usable = p.auth === "api-key" ? !!(p.apiKey || process.env.ANTHROPIC_API_KEY)
-        : claudeAuthStore(deps).describeSource() !== null || listClaudeAccounts(homeDir()).some(a => !a.needsReauth);
+        : (claudeAuthStore(deps).describeSource() !== null && !isCurrentClaudeAccountPaused(homeDir())) || listClaudeAccounts(homeDir()).some(a => !a.paused && !a.needsReauth);
     } else if (p.type === "openai-compatible" && isOpenCodeGo(p)) {
       usageOut = await spentWindowsOut(deps.opencodeUsage, name, p.credentials, now);
       if (usageOut) usable = false;
@@ -1248,10 +1249,7 @@ function writeConfigFile(configFile: string, config: Config): void {
 }
 
 function writeConfigFileLocked(configFile: string, config: Config): void {
-  const tmp = `${configFile}.tmp-${process.pid}-${Date.now()}`;
-  fs.mkdirSync(path.dirname(configFile), { recursive: true });
-  fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + "\n");
-  fs.renameSync(tmp, configFile);
+  writeJsonAtomic(configFile, config);
 }
 
 /** The disk fingerprint also detects CLI edits and background measurements, without persisting API metadata. */
@@ -1331,9 +1329,10 @@ async function probeClaudeCodeAuth(deps: AdminDeps): Promise<{ ok: boolean; auth
   // Our own accounts are reported separately: a Claude Desktop session can outrank them, and without
   // this the screen would answer a finished sign-in with the source it was already showing.
   const accounts = listClaudeAccounts(homeDir());
-  const hasUsableAccount = accounts.some((account) => !account.needsReauth && account.expiresAt > Date.now());
+  const hasUsableAccount = accounts.some((account) => !account.paused && !account.needsReauth && account.expiresAt > Date.now());
+  const currentUsable = source !== null && !isCurrentClaudeAccountPaused(homeDir());
   const signedIn = accounts.length > 0 ? "oauth" : readClaudeAuthFile(homeDir())?.source ?? null;
-  return { ok: source !== null || hasUsableAccount, auth: source !== null || hasUsableAccount ? "ok" : "missing", source, signedIn, accountCount: accounts.length, models: await claudeModelList(deps) };
+  return { ok: currentUsable || hasUsableAccount, auth: currentUsable || hasUsableAccount ? "ok" : "missing", source, signedIn, accountCount: accounts.length, models: await claudeModelList(deps) };
 }
 
 /** The reasoning levels a `GET /v1beta/models` entry says the model takes, or none to offer. */
@@ -2747,16 +2746,17 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           };
         });
         const currentReport = reports.find((row) => row.id === "current");
+        const currentPaused = isCurrentClaudeAccountPaused(homeDir());
         sendJson(res, 200, {
           current: source ? {
             id: "current",
             label: "Current Claude login",
             source,
             external: true,
-            paused: false,
+            paused: currentPaused,
             preferred: false,
-            state: currentReport?.state ?? "needs-login",
-            inUse: currentReport?.inUse === true,
+            state: currentPaused ? "paused" : currentReport?.state ?? "needs-login",
+            inUse: !currentPaused && currentReport?.inUse === true,
             ...(currentReport?.cooldownSeconds !== undefined ? { cooldownSeconds: currentReport.cooldownSeconds } : {}),
             ...(identity ? { email: identity.email } : {}),
             ...(usage.current ? { quota: usage.current } : {}),
@@ -2793,6 +2793,27 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           id = decodeURIComponent(pathname.slice("/api/claude-accounts/".length));
         } catch {
           sendJson(res, 400, { error: "invalid account id" });
+          return;
+        }
+        if (id === "current" && method === "PATCH") {
+          let change: unknown;
+          try {
+            change = JSON.parse((await readBody(req)).toString("utf8"));
+          } catch {
+            sendJson(res, 400, { error: "invalid JSON" });
+            return;
+          }
+          if (change && typeof change === "object" && !Array.isArray(change) && Object.keys(change).some((key) => key !== "paused")) {
+            sendJson(res, 409, { error: "the current Claude login is managed by Claude Code or Claude Desktop" });
+            return;
+          }
+          if (!change || typeof change !== "object" || Array.isArray(change) || !("paused" in change) || typeof change.paused !== "boolean") {
+            sendJson(res, 400, { error: "expected {paused: boolean}" });
+            return;
+          }
+          setCurrentClaudeAccountPaused(homeDir(), change.paused);
+          deps.log.info(`admin: current Claude login ${change.paused ? "paused" : "resumed"}`);
+          sendJson(res, 200, { ok: true });
           return;
         }
         const validId = id === "legacy" || /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);

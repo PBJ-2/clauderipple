@@ -66,6 +66,30 @@ test("usage is cached per account and a failed lookup keeps the last good groups
   assert.equal(seen.length, 3, "an unreadable CLI summary also tries the IDE UA");
 });
 
+test("each account keeps the time of its own last good lookup", async () => {
+  let now = 1_000_000;
+  let failSecond = false;
+  const fetchImpl = (async (_url: string, init?: RequestInit) => {
+    const project = (JSON.parse(init?.body as string) as { project: string }).project;
+    if (project === "proj-2" && failSecond) return new Response("nope", { status: 500 });
+    return new Response(JSON.stringify(measured), { status: 200 });
+  }) as unknown as typeof fetch;
+  const accounts = [
+    { ownerId: "acct-1", accessToken: "tok", projectId: "proj-1" },
+    { ownerId: "acct-2", accessToken: "tok2", projectId: "proj-2" },
+  ];
+  const usage = new GoogleUsage({ credentials: async () => accounts } as never, { fetch: fetchImpl, now: () => now, ttlMs: 300_000, warn: () => {} });
+  const readTimes = (groups: { read_at?: number }[] | undefined) => [...new Set((groups ?? []).map((g) => g.read_at))];
+  let shown = await usage.snapshot();
+  assert.deepEqual(readTimes(shown["acct-1"]), [1_000_000]);
+  assert.deepEqual(readTimes(shown["acct-2"]), [1_000_000]);
+  now = 1_000_000 + 300_001;
+  failSecond = true;
+  shown = await usage.snapshot();
+  assert.deepEqual(readTimes(shown["acct-1"]), [now], "the first account was read again");
+  assert.deepEqual(readTimes(shown["acct-2"]), [1_000_000], "the second account's failed lookup keeps its own earlier time");
+});
+
 // hasRemainingQuota: cached, positive-only evidence from the last successful lookup.
 const NOW = Date.parse("2026-10-15T00:00:00Z");
 const FUTURE = "2026-10-15T03:00:00Z";

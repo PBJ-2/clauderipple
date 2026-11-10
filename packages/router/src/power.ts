@@ -10,7 +10,7 @@
 //        until the router restarts.
 
 import fs from "node:fs";
-import path from "node:path";
+import { writeJsonAtomic } from "./locked-file.ts";
 import type { AwakeMode } from "./config.ts";
 import type { AwakeStatus } from "./awake.ts";
 import type { TetherStatus } from "./tether.ts";
@@ -104,9 +104,6 @@ export function persistPowerChange(configFile: string, change: PowerChange): boo
       ...(tether.hotspotSsid !== undefined ? { hotspotSsid: tether.hotspotSsid } : {}),
     };
   }
-  fs.mkdirSync(path.dirname(configFile), { recursive: true });
-  const tmp = `${configFile}.tmp-${process.pid}-${Date.now()}`;
-  fs.writeFileSync(tmp, JSON.stringify(raw, null, 2) + "\n");
-  fs.renameSync(tmp, configFile);
+  writeJsonAtomic(configFile, raw);
   return true;
 }

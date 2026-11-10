@@ -15,6 +15,7 @@ import { Proxy } from "../src/proxy.ts";
 import { ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
 import { saveChatGptAccount } from "../src/providers/chatgpt/accounts.ts";
 import { saveGoogleAccount } from "../src/providers/google/accounts.ts";
+import { setCurrentClaudeAccountPaused } from "../src/providers/anthropic-accounts.ts";
 import { RequestLog } from "../src/requestlog.ts";
 import { createCa, createLeaf } from "../src/x509.ts";
 
@@ -434,6 +435,26 @@ test("with no usable pool account, a Claude pool turn goes out on the app's own 
     assert.equal(record.provider, "claude");
     assert.equal(record.status, 200);
     assert.equal(record.refusal, undefined);
+    assert.equal(r.seenAuth.at(-1), "Bearer app-own-token");
+  } finally { await r.stop(); }
+});
+
+// The #88 fallback carries the app login too; it must not spend a login the user paused.
+test("a paused current Claude login refuses the app's Bearer instead of the empty-pool fallback", async () => {
+  const r = await rig();
+  try {
+    setCurrentClaudeAccountPaused(r.home, true);
+    const { text, record } = await r.send("claude-pool", {}, "/v1/messages", undefined, { authorization: "Bearer app-own-token" });
+    assert.match(text, /^HTTP\/1\.1 401/);
+    assert.equal(record.provider, "claude");
+    assert.equal(record.refusal, "no-account");
+    assert.equal(record.upstreamCalled, false);
+    assert.deepEqual(r.seenAuth, []);
+    assert.equal(r.seen.length, 0);
+
+    setCurrentClaudeAccountPaused(r.home, false);
+    const resumed = await r.send("claude-pool", {}, "/v1/messages", undefined, { authorization: "Bearer app-own-token" });
+    assert.equal(resumed.record.status, 200);
     assert.equal(r.seenAuth.at(-1), "Bearer app-own-token");
   } finally { await r.stop(); }
 });

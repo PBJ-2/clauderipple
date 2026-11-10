@@ -8,11 +8,29 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
 const scripts = path.resolve(import.meta.dirname, "../../../scripts");
 const read = (name: string): string => fs.readFileSync(path.join(scripts, name), "utf8");
+
+test("install writes a fresh starter config owner-only", { skip: process.platform === "win32" }, t => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-starter-config-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  for (const name of ["ca.pem", "ca.key", "leaf.pem", "leaf.key"]) fs.writeFileSync(path.join(home, name), "test");
+  const settings = path.join(home, "settings.json");
+  // A foreign proxy stops install before it can register or start a real supervisor.
+  fs.writeFileSync(settings, JSON.stringify({ env: { HTTPS_PROXY: "http://127.0.0.1:1" } }));
+  const env: NodeJS.ProcessEnv = { ...process.env, CLAUDERIPPLE_HOME: home, CLAUDE_SETTINGS_PATH: settings };
+  delete env.NODE_OPTIONS;
+  const result = spawnSync(process.execPath, [path.resolve(import.meta.dirname, "../src/index.ts"), "install"], { env, encoding: "utf8", timeout: 30_000 });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /starter config written/);
+  assert.match(result.stderr, /HTTPS_PROXY/);
+  assert.equal(fs.statSync(path.join(home, "config.json")).mode & 0o777, 0o600);
+});
 
 test("the pinned-Node cmd wrapper switches to UTF-8 before non-ASCII paths, without a BOM", () => {
   const ps1 = read("install.ps1");
