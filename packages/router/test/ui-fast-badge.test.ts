@@ -148,6 +148,17 @@ test("current and stored Claude accounts, even with the same label, are distinct
   assert.ok(texts(render([first, second])[0]!).includes("same@example.test"));
 });
 
+test("a current-login row names the login only by the email it snapshotted", () => {
+  const { render, requestDetail } = load();
+  const old = { ...BASE, provider: "claude", account: "current" };
+  const badge = render([old])[0]!;
+  assert.ok(texts(badge).includes("Current login"), "a row with no snapshot says only that it was the login");
+  assert.ok(!texts(badge).some((text) => text.includes("@")), "today's login is not named on an old row");
+  assert.ok(texts(requestDetail(old)).includes("Current login"));
+  const snapped = { ...old, id: "req-2", accountLabel: "was@example.test" };
+  assert.ok(texts(render([snapped])[0]!).includes("was@example.test"));
+});
+
 test("API-key pools show their existing credential labels without adding an account id", () => {
   const { render, requestDetail } = load({ api: { credentials: [{ id: "a" }, { id: "b" }] } });
   const first = { ...BASE, provider: "api", credential: "Work key" };

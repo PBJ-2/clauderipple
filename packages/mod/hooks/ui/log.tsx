@@ -11,7 +11,7 @@ import { GREET_SIZE, action, actions as actions_, speak } from './parts'
 import type { Els } from './parts'
 import { cacheTone, providerColor, textTone } from './theme'
 import type { Frame, LogActions, LogView } from './view'
-import { cachePercent, clockTime, effortLabel, modelOf, outputRate, promptTokens, rateText, seconds } from './view'
+import { cachePercent, clockTime, effortLabel, limitAccountLabel, modelOf, outputRate, promptTokens, rateText, seconds } from './view'
 
 /**
  * The router's answer to a thread continue on a model without server-side threads: answered here at
@@ -25,6 +25,8 @@ function entry(el: Els, frame: Frame, record: StatusRequest, mineOnly: boolean):
   const tone = textTone(frame.appearance)
   const cache = cachePercent(record.usage)
   const rate = outputRate(record)
+  // The same shortening as the limits pane: an email's local part, a placeholder name left out.
+  const account = limitAccountLabel(record.accountLabel)
   if (record.resent && STATELESS_SWITCH.test(record.note ?? '')) {
     return (
       <Box key={record.at + '-' + displayText(record.target, DISPLAY.name)} flexDirection="row" flexWrap="wrap" columnGap={1}>
@@ -48,7 +50,7 @@ function entry(el: Els, frame: Frame, record: StatusRequest, mineOnly: boolean):
           {modelOf(record)}
         </Text>
         <Text color={providerColor(record.provider)}>{record.provider}</Text>
-        {record.accountLabel ? <Text dimColor>{displayText(record.accountLabel, 80)}</Text> : null}
+        {account ? <Text dimColor>{account}</Text> : null}
         {record.resent ? (
           <Text dimColor>{t(frame.lang, 'log.resent', { status: String(record.status) })}</Text>
         ) : (

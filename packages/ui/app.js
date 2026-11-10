@@ -5846,7 +5846,8 @@ function formatRate(rate) {
 function requestAccount(record) {
   // The current login has a name only when its row snapshotted the email; an older row says just that it was the login.
   if (record.account === "current") return record.accountLabel || t("providers.anthropicCurrent");
-  if (record.account) return record.accountLabel || record.account.slice(0, 8);
+  // The same naming as the accounts list (claudeAccountLabel): the router's generic default name is translated.
+  if (record.account) return record.accountLabel === "Claude account" ? t("providers.claudeAccountDefault") : record.accountLabel || record.account.slice(0, 8);
   const provider = ((currentConfig && currentConfig.providers) || configuredProviders || {})[record.provider];
   return provider && provider.credentials && provider.credentials.length ? record.credential || "" : "";
 }
