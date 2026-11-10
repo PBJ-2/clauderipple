@@ -86,6 +86,7 @@
 
   <section id="view-clients" class="view">
     <header class="page-header"><div><h1 data-i18n="clients.title">Clients</h1><p class="page-subtitle" data-i18n="clients.subtitle"></p></div></header>
+    <p class="load-status" id="clients-status" role="status" hidden></p>
 
     <section class="section">
       <div class="section-head"><h2 class="section-title" data-i18n="clients.desktop.title">Claude Desktop</h2><span class="small" id="client-picker-msg" role="status"></span></div>
@@ -203,19 +204,23 @@
         </div>
         <div class="logs-header-row">
           <div><h2 class="section-title" data-i18n="logs.usage">Usage</h2><span class="small" id="logs-range-caption"></span></div>
+          <span class="load-status" id="logs-updating" role="status" hidden><span class="spinner" aria-hidden="true"></span><span data-i18n="common.loading">Loading…</span></span>
         </div>
         <div class="group logs-summary" id="logs-summary"></div>
+        <div class="group empty-card" id="logs-usage-error" role="alert" hidden data-i18n="common.loadFailed">Could not load.</div>
         <div class="logs-cost-note" id="logs-cost-note" hidden></div>
       </section>
       <section class="section">
         <div class="logs-header-row"><h2 class="section-title" data-i18n="logs.byModel">Usage by model</h2></div>
         <div class="group logs-table-card"><table id="models-table"><thead><tr><th data-i18n="logs.th.models">Model</th><th data-i18n="logs.th.count">Requests</th><th data-i18n="logs.th.input">Input</th><th data-i18n="logs.th.output">Output</th><th data-i18n="logs.th.cost">Cost</th><th data-i18n="logs.th.avg">Avg. duration</th></tr></thead><tbody></tbody></table></div>
         <div class="group empty-card" id="models-empty" hidden data-i18n="logs.modelsEmpty">No usage in this period.</div>
+        <div class="group empty-card" id="models-error" role="alert" hidden data-i18n="common.loadFailed">Could not load.</div>
       </section>
       <section class="section">
         <div class="logs-header-row"><div><h2 class="section-title" data-i18n="logs.recent">Recent requests</h2><span class="small" data-i18n="logs.recentNote">Last 200</span></div></div>
         <div class="group logs-table-card"><table id="requests-table"><thead><tr><th data-i18n="logs.th.time">Time</th><th data-i18n="logs.th.models">Model</th><th data-i18n="logs.th.effort">effort</th><th data-i18n="logs.th.input">Input</th><th data-i18n="logs.th.output">Output</th><th data-i18n="logs.th.duration">Duration</th><th data-i18n="logs.th.status">Status</th></tr></thead><tbody></tbody></table></div>
         <div class="group empty-card" id="requests-empty" hidden data-i18n="logs.empty">No requests yet.</div>
+        <div class="group empty-card" id="requests-error" role="alert" hidden data-i18n="common.loadFailed">Could not load.</div>
       </section>
     </div>
     <div id="logs-raw-panel" role="tabpanel" aria-labelledby="logs-raw-tab" hidden>

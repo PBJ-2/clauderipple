@@ -899,6 +899,33 @@ label.check input { margin-top: 2px; }
 .logs-custom { display: inline-flex; align-items: center; gap: 6px; }
 .logs-custom input { width: auto; min-height: 28px; padding: 3px 8px; font-size: var(--fs-foot); font-variant-numeric: tabular-nums; }
 .logs-custom-dash { color: var(--label-3); }
+/* Loading. A read in flight shows bars in the shape of its figures, shimmering quietly; figures from an
+   earlier selection stay readable but dimmed until their read lands; a failed read says so in red. */
+.logs-header-row .load-status { margin-left: auto; }
+.is-updating { opacity: 0.45; transition: opacity 0.2s ease; }
+.skeleton-bar { display: block; height: 0.9em; border-radius: 6px; background: linear-gradient(90deg, var(--fill) 0%, var(--fill-hover) 50%, var(--fill) 100%); background-size: 200% 100%; animation: skeleton-shimmer 1.6s ease-in-out infinite; }
+.skeleton-label { width: 56%; height: 0.75em; }
+.skeleton-value { width: 40%; height: 1.15em; margin-top: 6px; }
+.skeleton-w0 { width: 72%; }
+.skeleton-w1 { width: 46%; }
+.skeleton-w2 { width: 88%; }
+.skeleton-row td { padding-top: 15px; padding-bottom: 15px; }
+@keyframes skeleton-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+@media (prefers-reduced-motion: reduce) { .skeleton-bar { animation: none; } .is-updating { transition: none; } }
+#logs-usage-error, #models-error, #requests-error { color: var(--bad); }
+
+/* First loads on every page: a region whose read has not landed shows bars in the shape of its rows,
+   a failed read says so in red, and a status line names a read in flight. */
+.skeleton-lines { display: grid; gap: 12px; padding: 14px 16px; }
+.skeleton-lines .skeleton-bar { display: block; height: 1em; }
+.skeleton-stat { display: block; width: 58%; height: 1.5em; }
+.load-failed { padding: 12px 16px; color: var(--bad); font-size: var(--fs-foot); line-height: 1.45; }
+.load-status { display: inline-flex; align-items: center; gap: 8px; color: var(--label-2); font-size: var(--fs-cap); }
+.load-status.load-failed { padding: 0; color: var(--bad); }
+.stat-tile .load-failed { padding: 0; }
+.load-status .spinner { width: 12px; height: 12px; border-width: 1.5px; }
+#view-clients.is-unloaded .section { opacity: 0.45; pointer-events: none; transition: opacity 0.2s ease; }
+@media (prefers-reduced-motion: reduce) { #view-clients.is-unloaded .section { transition: none; } }
 #models-table { min-width: 700px; }
 
 table { width: 100%; border-collapse: collapse; font-size: var(--fs-foot); }

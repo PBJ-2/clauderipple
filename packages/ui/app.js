@@ -382,7 +382,7 @@ function showView(name) {
   if (name === "mac") queueMicrotask(() => void loadMac());
   if (name === "slots" && !slotsLoaded) void loadSlots();
   if (name === "providers" && !providersLoaded) void loadProviders();
-  if (name === "clients" && !clientsLoaded) void loadClients();
+  if (name === "clients" && !clientsLoaded) void openClients();
   if (name === "logs") queueMicrotask(() => void refreshRequests());
   // Read again on every visit: the bar's ⚙ panel saves the same settings.
   if (name === "mod") queueMicrotask(() => void loadMod());
@@ -712,13 +712,27 @@ function refreshLimits() {
   return limitsRead;
 }
 
+// Whether a status has been drawn: until one has, the tiles and the provider list show a skeleton or a failure line.
+let statusDrawn = false;
+/** Before the first status: bars where the two tiles and the provider list will be. */
+function showHealthLoading() {
+  if (statusDrawn) return;
+  $("#health-desktop").replaceChildren(el("span", { class: "skeleton-bar skeleton-stat", "aria-hidden": "true" }));
+  $("#health-requests").replaceChildren(el("span", { class: "skeleton-bar skeleton-stat", "aria-hidden": "true" }));
+  $("#health-providers").replaceChildren(skeletonLines(2));
+}
 async function refreshHealth() {
   // The status is what the screen waits for; the limits are read beside it and fill their gauges when they land.
   const statusRead = api("/api/status");
   void refreshLimits();
   try {
     status = await statusRead;
+    statusDrawn = true;
   } catch (error) {
+    if (!statusDrawn) {
+      $("#health-requests").replaceChildren(loadFailedLine("p"));
+      $("#health-providers").replaceChildren(loadFailedLine());
+    }
     $("#health-desktop").replaceChildren(el("div", { class: "stat-value" }, [badge("bad", t("health.disconnected"))]));
     // Inside the app a router that does not answer is a state with a way out, not an error.
     if (APP && error.body && error.body.routerDown) setRouterDown(true);
@@ -2082,6 +2096,7 @@ async function toggleCodex(enabled) {
   catch (error) { toast(t("common.actionFailed"), true, error.message); }
   finally { codexBusy = false; $("#client-codex-msg").textContent = ""; void renderCodexClient(); }
 }
+showHealthLoading();
 void Promise.all([loadCatalogs(), refreshHealth()]);
 setInterval(refreshHealth, 5000);
 // Status names providers by the names people know (the one the user typed, a preset's name), which only
@@ -2290,9 +2305,19 @@ async function refreshPhone(rebuild = false) {
     }
     phoneSnapshot = data;
     renderPhoneStatus(data);
-  } catch (error) { toast(t("common.loadFailed"), true, error.message); }
+  } catch (error) {
+    toast(t("common.loadFailed"), true, error.message);
+    // With nothing drawn yet the page says the read failed; the 5-second refresh reads again.
+    if (!phoneSnapshot) $("#phone-content").replaceChildren(el("div", { class: "group" }, [loadFailedLine()]));
+  }
 }
-async function loadPhone() { phoneGeneration++; hidePhoneQr(); await refreshPhone(true); }
+async function loadPhone() {
+  phoneGeneration++;
+  hidePhoneQr();
+  // Until a status has landed, the page holds bars where its tiles will be.
+  if (!phoneSnapshot) $("#phone-content").replaceChildren(el("div", { class: "group" }, [skeletonLines(3)]));
+  await refreshPhone(true);
+}
 $("#phone-refresh").addEventListener("click", () => void loadPhone());
 setInterval(() => { if (!phoneBusy) void refreshPhone(); }, 5000);
 
@@ -4200,6 +4225,28 @@ function renderProviderWorkspace() {
   renderProviderDetail();
 }
 
+/** The Clients page's first read: its switches hold still, dimmed, until the config and status are in; a failure says so and they stay still. */
+function setClientsLoading(state) {
+  $("#view-clients").classList.toggle("is-unloaded", state === "loading" || state === "failed");
+  const line = $("#clients-status");
+  line.hidden = state === null;
+  line.classList.toggle("load-failed", state === "failed");
+  if (state === "failed") line.replaceChildren(t("common.loadFailed"));
+  else if (state === "loading") line.replaceChildren(el("span", { class: "spinner", "aria-hidden": "true" }), el("span", { text: t("common.loading") }));
+  else line.replaceChildren();
+}
+/** Opens the Clients page's data. A first read holds the page still behind a loading line; a failure says so, and the next visit reads again. */
+async function openClients() {
+  const first = !currentConfig;
+  if (first) setClientsLoading("loading");
+  const loaded = await loadClients();
+  if (!first) return;
+  if (loaded) setClientsLoading(null);
+  else {
+    clientsLoaded = false;
+    setClientsLoading("failed");
+  }
+}
 async function loadClients() {
   clientsLoaded = true;
   try {
@@ -4208,11 +4255,18 @@ async function loadClients() {
     pickerContextWindows = await api("/api/context-windows");
     if (!status) status = await api("/api/status");
     renderClients();
-  } catch (error) { toast(t("common.loadFailed"), true, error.message); }
+    return true;
+  } catch (error) { toast(t("common.loadFailed"), true, error.message); return false; }
 }
 
 async function loadProviders() {
   providersLoaded = true;
+  // Before the first config the rail and the detail hold bars, not the "no provider selected" text.
+  const first = !currentConfig;
+  if (first) {
+    $("#providers-list").replaceChildren(skeletonLines(4));
+    $("#provider-detail").replaceChildren(skeletonLines(3));
+  }
   try {
     await loadCatalogs();
     currentConfig = await api("/api/config");
@@ -4223,7 +4277,15 @@ async function loadProviders() {
     void Promise.all(Object.entries(currentConfig.providers || {}).map(([name, provider]) => probeProvider(name, provider, () => {
       if ($("#view-providers").classList.contains("active")) renderProviderWorkspace();
     })));
-  } catch (error) { toast(t("common.loadFailed"), true, error.message); }
+  } catch (error) {
+    toast(t("common.loadFailed"), true, error.message);
+    // A first read that failed leaves the page in its failure state, and the next visit reads again.
+    if (first) {
+      providersLoaded = false;
+      $("#providers-list").replaceChildren(loadFailedLine());
+      $("#provider-detail").replaceChildren(loadFailedLine());
+    }
+  }
 }
 $("#providers-search").addEventListener("input", (event) => { providerSearch = event.target.value; renderProviderRail(); });
 $("#providers-add").addEventListener("click", openProviderChooser);
@@ -6105,7 +6167,19 @@ let usageTo = ""; // custom end (inclusive), a local "YYYY-MM-DD"
 let lastSummary = null;
 let configuredProviders = null; // provider names from /api/config, fetched once for this view
 let renderedProviderNames = "";
-let requestsGeneration = 0;
+// Each read applies only its own newest answer. The 3-second refresh starts another read while a slow
+// one (the 7-day aggregation) is still in flight, so a read is never thrown away for being superseded
+// by the poll: that discarded every answer slower than the poll, and the page stayed empty.
+let summarySeq = 0;
+let summaryApplied = 0;
+let requestsSeq = 0;
+let requestsApplied = 0;
+// Which selection the drawn figures belong to (null: nothing drawn yet), and which selection's latest
+// read failed while nothing for it is drawn. paintUsage and paintRequests turn these into what shows.
+let usageDrawnKey = null;
+let usageFailedKey = null;
+let requestsDrawnKey = null;
+let requestsFailedKey = null;
 (function restoreUsage() {
   try {
     const saved = JSON.parse(localStorage.getItem(USAGE_STORE) || "null");
@@ -6149,7 +6223,14 @@ function showLogsPanel(name) {
 }
 $("#logs-requests-tab").addEventListener("click", () => showLogsPanel("requests"));
 $("#logs-raw-tab").addEventListener("click", () => showLogsPanel("raw"));
-$("#logs-provider").addEventListener("change", (event) => { requestProvider = event.target.value; saveUsage(); void refreshRequests(); });
+$("#logs-provider").addEventListener("change", (event) => {
+  requestProvider = event.target.value;
+  saveUsage();
+  // The usage figures do not depend on the provider, so they are filtered at once; the requests are marked updating until their read lands.
+  paintUsage();
+  paintRequests();
+  void refreshRequests();
+});
 
 // ---- Usage period: local calendar days, so "today" starts at this machine's midnight.
 function isDay(value) { return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(dayStart(value).valueOf()); }
@@ -6492,30 +6573,146 @@ function renderRequests(records) {
   $("#requests-empty").hidden = records.length !== 0;
   scroll.scrollLeft = left;
 }
+/** A region whose first read has not landed: a few bars in the shape of its rows (every page uses it). */
+function skeletonLines(count) {
+  return el("div", { class: "skeleton-lines", "aria-hidden": "true" }, Array.from({ length: count }, (_, row) => el("span", { class: `skeleton-bar skeleton-w${row % 3}` })));
+}
+/** A region whose first read failed: the one line, in red, where its content would be. */
+function loadFailedLine(tag = "div") { return el(tag, { class: "load-failed", role: "alert", text: t("common.loadFailed") }); }
+/** The selection the usage figures cover: the period, and for a custom one its dates. */
+function usageKey() { return usagePeriod === "custom" ? `custom|${usageFrom}|${usageTo}` : usagePeriod; }
+/**
+ * What an area shows for a selection: "current" (its own figures, which stay when a later read fails),
+ * "dimmed" (an earlier selection's figures while this one's read is in flight), "failed" (its latest read
+ * failed and nothing for it is drawn), or "skeleton" (nothing has landed yet).
+ */
+function readState(drawnKey, failedKey, key) {
+  if (drawnKey === key) return "current";
+  if (failedKey === key) return "failed";
+  return drawnKey === null ? "skeleton" : "dimmed";
+}
+/** Placeholder bars in the shape of the summary chips, drawn until the first usage read lands. */
+function skeletonChips() {
+  return Array.from({ length: 6 }, () => el("div", { class: "logs-chip skeleton-chip", "aria-hidden": "true" }, [el("span", { class: "skeleton-bar skeleton-label" }), el("span", { class: "skeleton-bar skeleton-value" })]));
+}
+/** Table rows of placeholder bars, one per column, drawn until a table's first read lands. */
+function skeletonRows(columns, count) {
+  return Array.from({ length: count }, (_, row) => el("tr", { class: "skeleton-row", "aria-hidden": "true" }, Array.from({ length: columns }, (__, column) => el("td", {}, [el("span", { class: `skeleton-bar skeleton-w${(row + column) % 3}` })]))));
+}
+/**
+ * The usage summary and the model table. Figures for this selection show as they are; figures for an
+ * earlier selection stay readable but dimmed while this one's read is in flight; before anything has
+ * landed a skeleton holds the place; and a failed read with nothing for this selection says so.
+ */
+function paintUsage() {
+  const state = readState(usageDrawnKey, usageFailedKey, usageKey());
+  const failed = state === "failed";
+  const figures = state === "current" || state === "dimmed";
+  const summary = $("#logs-summary");
+  const card = $("#models-table").closest(".logs-table-card");
+  const tbody = $("#models-table tbody");
+  summary.hidden = failed;
+  $("#logs-usage-error").hidden = !failed;
+  $("#models-error").hidden = !failed;
+  if (figures) {
+    renderSummary(lastSummary);
+    renderModelUsage(lastSummary);
+  } else if (failed) {
+    summary.replaceChildren();
+    $("#logs-cost-note").hidden = true;
+    tbody.replaceChildren();
+    card.hidden = true;
+    $("#models-empty").hidden = true;
+  } else {
+    summary.classList.remove("with-cost");
+    summary.replaceChildren(...skeletonChips());
+    $("#logs-cost-note").hidden = true;
+    tbody.replaceChildren(...skeletonRows(6, 3));
+    card.hidden = false;
+    $("#models-empty").hidden = true;
+  }
+  const updating = state === "dimmed";
+  summary.classList.toggle("is-updating", updating);
+  card.classList.toggle("is-updating", updating);
+  paintLoadingLine();
+}
+/** The recent requests for the chosen provider, in the same states as the usage figures. */
+function paintRequests() {
+  const provider = requestProvider;
+  const state = readState(requestsDrawnKey, requestsFailedKey, provider);
+  const failed = state === "failed";
+  const figures = state === "current" || state === "dimmed";
+  const scroll = $("#requests-table").closest(".logs-table-card");
+  const tbody = $("#requests-table tbody");
+  $("#requests-error").hidden = !failed;
+  if (figures) {
+    renderRequests(requestRows);
+  } else if (failed) {
+    tbody.replaceChildren();
+    scroll.hidden = true;
+    $("#requests-empty").hidden = true;
+  } else {
+    tbody.replaceChildren(...skeletonRows(7, 5));
+    scroll.hidden = false;
+    $("#requests-empty").hidden = true;
+  }
+  scroll.classList.toggle("is-updating", state === "dimmed");
+  paintLoadingLine();
+}
+/** The one line that says a read is in flight: shown while an area waits for its selection's figures, and not while a failure is what shows. */
+function paintLoadingLine() {
+  const pending = (state) => state === "dimmed" || state === "skeleton";
+  const busy = pending(readState(usageDrawnKey, usageFailedKey, usageKey())) || pending(readState(requestsDrawnKey, requestsFailedKey, requestProvider));
+  $("#logs-updating").hidden = !busy;
+}
 async function refreshRequests() {
   if (logsPanel !== "requests") return;
-  // A period or provider picked while an older refresh is in flight must not be painted over by it.
-  const generation = ++requestsGeneration;
+  // A period or provider picked while an older read is in flight is not painted over by it: each read
+  // applies only if it is newer than the last applied one, and the selection it asked for is still the one shown.
   const provider = requestProvider;
+  const usage = usageKey();
   const range = usageRange();
   // A custom range with an unusable date waits for the fields instead of falling back to the hour.
   if (usagePeriod === "custom" && !range) return;
   $("#logs-range-caption").textContent = usageCaption(range, lastSummary && lastSummary.earliest);
   const summaryPath = range ? `/api/requests/summary?from=${range.from}&to=${range.to}` : "/api/requests/summary?since=3600";
   const suffix = provider ? `&provider=${encodeURIComponent(provider)}` : "";
-  const [records, summary] = await Promise.allSettled([api(`/api/requests?n=200${suffix}&kind=messages,image`), api(summaryPath), loadConfiguredProviders()]);
-  if (generation !== requestsGeneration) return;
-  // Each half keeps its last good contents when its own call fails.
-  if (summary.status === "fulfilled") {
-    lastSummary = summary.value;
-    $("#logs-range-caption").textContent = usageCaption(range, lastSummary.earliest);
-    renderSummary(lastSummary);
-    renderModelUsage(lastSummary);
-  }
-  if (records.status === "fulfilled") {
-    requestRows = Array.isArray(records.value.requests) ? records.value.requests : [];
-    renderRequests(requestRows);
-  }
+  const summarySeqNow = ++summarySeq;
+  const requestsSeqNow = ++requestsSeq;
+  paintUsage();
+  paintRequests();
+  // The configured providers are read once; a row's provider name needs them, so no answer is drawn before they are in.
+  const configured = loadConfiguredProviders();
+  // Each half is drawn as its own read lands, so a fast request list does not wait for the slow usage.
+  const usageRead = api(summaryPath).then(async (summary) => {
+    await configured;
+    if (summarySeqNow < summaryApplied || usage !== usageKey()) return;
+    summaryApplied = summarySeqNow;
+    lastSummary = summary;
+    usageDrawnKey = usage;
+    usageFailedKey = null;
+    $("#logs-range-caption").textContent = usageCaption(range, summary.earliest);
+    paintUsage();
+  }, () => {
+    if (summarySeqNow < summaryApplied || usage !== usageKey()) return;
+    // Figures already drawn for this selection stay, as before; nothing drawn for it means the failure shows.
+    usageFailedKey = usage;
+    paintUsage();
+  });
+  const requestsRead = api(`/api/requests?n=200${suffix}&kind=messages,image`).then(async (body) => {
+    await configured;
+    if (requestsSeqNow < requestsApplied || provider !== requestProvider) return;
+    requestsApplied = requestsSeqNow;
+    requestRows = Array.isArray(body.requests) ? body.requests : [];
+    requestsDrawnKey = provider;
+    requestsFailedKey = null;
+    paintRequests();
+  }, () => {
+    if (requestsSeqNow < requestsApplied || provider !== requestProvider) return;
+    requestsFailedKey = provider;
+    paintRequests();
+  });
+  await Promise.all([usageRead, requestsRead]);
   renderProviderFilter(lastSummary, requestRows);
 }
 async function refreshLogs() {
