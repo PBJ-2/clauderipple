@@ -97,7 +97,13 @@ test("Status replaces subscription text lines with per-account gauges, leaving o
   assert.equal(findAll(ui.card, hasClass("provider-block")).length, 2);
   assert.equal(findAll(ui.card.children[0]!.children[0]!, hasClass("limits-account")).length, 0, "the clickable header holds no gauges");
   assert.match(text(ui.card), /Current Claude login/);
-  assert.match(text(ui.card), /GPT 1/);
+  // GPT's only account has no label: no made-up "GPT 1" name, its windows stand under the provider, and the
+  // gauges are named by the provider for a screen reader.
+  assert.doesNotMatch(text(ui.card), /GPT 1/);
+  const gpt = findAll(ui.card.children[1]!, hasClass("limits-account"))[0]!;
+  assert.ok(hasClass("unnamed")(gpt));
+  assert.equal(findAll(gpt, (node) => node.tag === "strong").length, 0);
+  assert.deepEqual(findAll(gpt, (node) => node.attrs.role === "progressbar").map((bar) => bar.attrs["aria-label"]), ["GPT · Weekly", "GPT · 5-hour"]);
   assert.equal(findAll(ui.card, (node) => node.attrs.text === "Active").length, 1);
   assert.match(text(ui.card.children[0]!), /23%/);
   assert.doesNotMatch(text(ui.card.children[1]!), /used/);
@@ -290,6 +296,29 @@ test("an account's state is said once: a paused account has no 'no usage' line, 
   assert.ok(text(cooling).includes(t("pool.coolingFor", { duration: t("time.minutes", { m: 2 }) })));
   const rejected = ui.limitsAccountRow({ type: "anthropic", title: "Claude" }, { ...current, id: "y", label: "Bad" }, now, { id: "y", state: "quarantined" });
   assert.ok(text(rejected).includes(t("pool.quarantined")));
+});
+
+test("a countdown under an hour is minutes alone, in every language's own minutes unit", () => {
+  const ui = limitsUi(async () => ({}));
+  const row = ui.limitsWindowRow("5-hour", { usedPercent: 10, resetAt: now + 34 * 60_000 - 1 }, now);
+  assert.ok(text(row).includes("resets in 34m"));
+  assert.doesNotMatch(text(row), /0h/);
+  assert.ok(text(ui.limitsWindowRow("5-hour", { usedPercent: 10, resetAt: now + 61 * 60_000 }, now)).includes("resets in 1h 1m"));
+  for (const [lang, dict] of Object.entries(dictionaries)) {
+    const minutesOnly = dict["limits.resetsIn"]!.replace(/\{hours\}[^{]*?(?=\{minutes\})/, "");
+    assert.ok(!minutesOnly.includes("{hours}") && minutesOnly.includes("{minutes}"), `${lang} drops the hour part cleanly`);
+  }
+});
+
+test("a provider's only account keeps its own label as its name; several unnamed accounts stay numbered", () => {
+  const ui = limitsUi(async () => ({}));
+  const one = (account: Record<string, unknown>) => ui.limitsAccountRow({ type: "minimax", title: "MiniMax", accounts: [account] }, account, now);
+  assert.ok(hasClass("unnamed")(one({ account: 0, at: now, windows: [five] })));
+  assert.equal(findAll(one({ account: 0, label: "work@example.test", at: now, windows: [five] }), (node) => node.attrs.text === "work@example.test").length, 1);
+  const pair = [{ account: 0, at: now, windows: [five] }, { account: 1, at: now, windows: [five] }];
+  assert.ok(text(ui.limitsAccountRow({ type: "minimax", title: "MiniMax", accounts: pair }, pair[1], now)).includes("MiniMax 2"));
+  const login = { id: "current", account: 0, at: now, windows: [five] };
+  assert.ok(text(ui.limitsAccountRow({ type: "anthropic", title: "Claude", accounts: [login] }, login, now)).includes(t("providers.anthropicCurrentLogin")));
 });
 
 test("a pool entry drawn as its own account row leaves the provider's pool line", async () => {

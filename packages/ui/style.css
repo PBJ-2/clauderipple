@@ -491,6 +491,9 @@ label.check input { margin-top: 2px; }
 .limits-account-head { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; min-width: 0; }
 .limits-account-head strong { max-width: 100%; overflow: hidden; color: var(--label); font-size: var(--fs-foot); font-weight: 500; line-height: 20px; text-overflow: ellipsis; white-space: nowrap; }
 .limits-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; max-width: 100%; }
+/* A provider's only, unnamed account: no name column, its windows under the provider's own name. */
+.limits-account.unnamed { grid-template-columns: minmax(0, 1fr); }
+.limits-account.unnamed > .limits-account-head { flex-direction: row; flex-wrap: wrap; align-items: center; }
 /* State badges read as tags here: the in-use mark outlined in the accent, a pause grey, a warning tinted. */
 .limits-badges .badge { display: inline-flex; max-width: 100%; padding: 1px 7px; border-radius: 999px; background: var(--fill); color: var(--label-2); font-size: 11px; font-weight: 500; line-height: 16px; white-space: normal; overflow-wrap: anywhere; }
 .limits-badges .badge::before { display: none; }
@@ -505,7 +508,8 @@ label.check input { margin-top: 2px; }
 .limits-windows { display: grid; grid-template-columns: 6.5em minmax(48px, 1fr) 4em minmax(0, 1.4fr); column-gap: 12px; row-gap: 2px; align-items: center; min-width: 0; font-size: var(--fs-cap); font-variant-numeric: tabular-nums; }
 .limits-window, .limits-window-head { display: contents; }
 .limits-window + .limits-window .limits-window-head > * { margin-top: 6px; }
-.limits-window-name { min-width: 0; overflow: hidden; color: var(--label-2); line-height: 20px; text-overflow: ellipsis; white-space: nowrap; }
+/* A window's name is never cut: a long scoped label ("Argon weekly") wraps within its column. */
+.limits-window-name { min-width: 0; color: var(--label-2); line-height: 16px; padding: 2px 0; overflow-wrap: break-word; }
 .limits-window-figure { color: var(--label); font-size: var(--fs-foot); font-weight: 600; line-height: 20px; text-align: right; }
 .limits-window + .limits-window .limits-window-foot { margin-top: 6px; }
 .limits-window-foot { min-width: 0; color: var(--label-2); line-height: 1.4; overflow-wrap: anywhere; }

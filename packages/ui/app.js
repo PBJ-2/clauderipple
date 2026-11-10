@@ -433,7 +433,11 @@ function limitsReset(window, weekly, now) {
   if (weekly) return t("limits.resetsAt", { time: reset.toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false }) });
   // Ceiled from a positive span, so the countdown is at least one minute and never reads 0.
   const minutes = Math.ceil((window.resetAt - now) / 60_000);
-  return t("limits.resetsIn", { hours: Math.floor(minutes / 60), minutes: minutes % 60 });
+  const hours = Math.floor(minutes / 60);
+  // Under an hour the countdown is minutes alone ("34분 후 초기화", not "0시간 34분 후 초기화"): the
+  // sentence's hour figure and its unit are dropped, its own minutes unit and wording kept.
+  if (hours === 0) return t("limits.resetsIn").replace(/\{hours\}[^{]*?(?=\{minutes\})/, "").split("{minutes}").join(String(minutes));
+  return t("limits.resetsIn", { hours, minutes: minutes % 60 });
 }
 
 /**
@@ -542,6 +546,18 @@ function limitsAccountName(entry, account) {
 }
 
 /**
+ * Whether an account's row needs a name: a provider's only account, with no label of its own, would
+ * read as a made-up one ("Go 1" under "OpenCode Go"), so its windows stand under the provider instead.
+ * The Claude login has a name of its own; a provider with several accounts numbers them apart.
+ */
+function limitsAccountNamed(entry, account) {
+  if (!Array.isArray(entry.accounts) || entry.accounts.length !== 1) return true;
+  if (entry.type === "anthropic" && account.id === "current") return true;
+  const label = limitsDisplay(account.label || account.email || "", 120);
+  return Boolean(label && !LIMITS_PLACEHOLDER.test(label));
+}
+
+/**
  * One account: its name with its state beside it, then a line per window. `credential` is the pool's entry
  * for the same account, so a cooldown or a rejected sign-in sits on the account's own row rather than in a
  * second list of the same accounts under the provider's name. The time of the figures is on the name's
@@ -563,18 +579,20 @@ function limitsAccountRow(entry, account, now, credential) {
     badges.push(badge("warn", t("limits.stale")));
     if (read) badges.push(el("span", { class: "limits-fetched", text: fetched }));
   }
-  const name = limitsAccountName(entry, account);
+  const named = limitsAccountNamed(entry, account);
+  const name = named ? limitsAccountName(entry, account) : "";
   const windows = (account.windows || []).map(limitsUsageWindow).filter(Boolean);
   // One gauge per window the router reported; a window it did not report has no gauge, and an account with none has none.
-  const gauges = windows.map((window, index) => limitsWindowRow(limitsWindowName(windows, index), window, now, name));
+  // A nameless row's gauges are named by their provider, so a screen reader still hears whose they are.
+  const gauges = windows.map((window, index) => limitsWindowRow(limitsWindowName(windows, index), window, now, name || entry.title || ""));
   // An account with no figures says why only when no state above already does ("paused" needs no "no usage yet" after it).
   const empty = !gauges.length && !stated ? el("span", { class: "limits-empty", text: fetched }) : null;
-  return el("div", { class: "limits-account" }, [
-    el("div", { class: "limits-account-head" }, [
-      el("strong", { text: name, title: `${name} · ${fetched}` }),
+  return el("div", { class: named ? "limits-account" : "limits-account unnamed" }, [
+    named || badges.length ? el("div", { class: "limits-account-head" }, [
+      named ? el("strong", { text: name, title: `${name} · ${fetched}` }) : null,
       badges.length ? el("div", { class: "limits-badges" }, badges) : null,
-    ]),
-    gauges.length ? el("div", { class: "limits-windows" }, gauges) : empty,
+    ]) : null,
+    gauges.length ? el("div", { class: "limits-windows", ...(named ? {} : { title: fetched }) }, gauges) : empty,
   ]);
 }
 
