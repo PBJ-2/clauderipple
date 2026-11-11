@@ -233,6 +233,28 @@ test('spawn titles name the model that runs, replacing a guessed prefix', async 
   assert.equal(titleName('deepseek-ai/deepseek-v4.1-flash-1017@high'), 'deepseek-v4.1-flash-1017')
   assert.equal(spawnTitle('Opus5.5·high · Fix routing', 'gpt-6.1-sol@medium', 'medium', models), 'Sol·medium · Fix routing')
   assert.equal(spawnTitle('Fix routing', 'claude-opus-5-5', undefined), 'Opus5.5 · Fix routing')
+  // A pinned worker names its model after the pin and its account by the dashboard's name, never the id.
+  const { bareTitle, pinnedAccountName } = await import('../../packages/mod/hooks/workers.ts')
+  assert.equal(titleName('anthropic#f952fac6:claude-haiku-5-5@high'), 'Haiku5.5')
+  const file = '---\nname: claude-haiku-5-5-f952fac6\ndescription: claude-haiku-5-5 via anthropic. Runs on mambo20211 (account f952fac6). Set effort.\nmodel: anthropic#f952fac6:claude-haiku-5-5@high\n---\nBody'
+  assert.equal(pinnedAccountName('anthropic#f952fac6:claude-haiku-5-5@high', [file]), 'mambo20211')
+  assert.equal(pinnedAccountName('anthropic#deadbeef:claude-haiku-5-5', [file]), undefined)
+  assert.equal(pinnedAccountName('claude-haiku-5-5', [file]), undefined)
+  const pinnedTitle = spawnTitle('Fix routing', 'anthropic#f952fac6:claude-haiku-5-5@high', 'high', [], 'mambo20211')
+  assert.equal(pinnedTitle, 'Haiku5.5·mambo20211·high · Fix routing')
+  assert.equal(bareTitle(pinnedTitle), 'Fix routing', 'the next spawn replaces it, not stacks')
+  assert.equal(bareTitle('Haiku5.5·Work-account · Fix routing'), 'Fix routing')
+  assert.equal(spawnTitle('Fix routing', 'anthropic#f952fac6:claude-haiku-5-5', undefined, [], 'Work account'), 'Haiku5.5·Work-account · Fix routing')
+  // An account name's middle dot is closed up too, Korean kept, so a retitle replaces rather than stacks.
+  const dotted = spawnTitle('Review parser', 'anthropic#f952fac6:claude-opus-5-5', 'high', [], '업무·개인')
+  assert.equal(dotted, 'Opus5.5·업무-개인·high · Review parser')
+  assert.equal(spawnTitle(dotted, 'anthropic#f952fac6:claude-opus-5-5', 'high', [], '업무·개인'), dotted)
+  // Titles with an account and no effort strip; a parent's own heading is never taken for a prefix.
+  assert.equal(bareTitle('Opus5.5·Work-account · Review parser'), 'Review parser')
+  assert.equal(bareTitle('Sol·Work-account·high · Review parser'), 'Review parser')
+  assert.equal(bareTitle('UI·UX · Review navigation'), 'UI·UX · Review navigation')
+  assert.equal(bareTitle('iOS·Android · Fix notifications'), 'iOS·Android · Fix notifications')
+  assert.equal(spawnTitle('iOS·Android · Fix notifications', 'claude-opus-5-5', undefined), 'Opus5.5 · iOS·Android · Fix notifications')
 })
 
 test('fill gives empty lists one ticked model, preserving existing ordered lists even when unticked', () => {

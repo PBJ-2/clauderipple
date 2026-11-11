@@ -8,7 +8,7 @@ import { rungOf, workerLadderLine } from './ladder'
 import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, jevEffortRequest, jevFailure, jevUsage, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, shouldJudge } from './judge'
-import { AUTO_DESCRIPTION, NATIVE_AGENTS, TIER_MARKERS, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderFallbackModels, ladderPick, liveProviders, markerDomain, modelReason, readMarker, routerModelOptions, resolveClaudeModel, ruleReason, spawnModel, spawnTitle, titleName, takesOver, tierOf, userSaid, withoutReason, withoutRouting, workerRule, zenJev } from './workers'
+import { AUTO_DESCRIPTION, NATIVE_AGENTS, TIER_MARKERS, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderFallbackModels, ladderPick, liveProviders, markerDomain, modelReason, readMarker, routerModelOptions, resolveClaudeModel, pinnedAccountName, pinnedAccountNames, ruleReason, spawnModel, spawnTitle, titleName, takesOver, tierOf, userSaid, withoutReason, withoutRouting, workerRule, zenJev } from './workers'
 import { MARKER, agentFilePaths, agentModel, definedModel, delegationPin as parseDelegationPin, fixSpawn, humanText, pinInstruction, pinSaid } from './worker'
 import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom, modeKey, modeOver, quotaWindows, resetProvider, routingSettings } from './modes'
 import type { QuotaWindow } from './modes'
@@ -2652,10 +2652,12 @@ export const register: Register = on => {
       // The title names what really runs: the model set above, else the worker file's, else the one
       // the agent's own definition asks for, else the parent's.
       if (!e.fork && !('workflow' in e && e.workflow) && !NATIVE_AGENTS.includes(e.subagentType) && input.description?.trim()) {
-        const file = (await workerFiles($)).get(input.subagentType)
+        const files = await workerFiles($)
+        const file = files.get(input.subagentType)
         const model = input.model ?? (file ? agentModel(file) : undefined) ?? await definitionModel($, input.subagentType) ?? e.parentModel
         const effort = chosen?.effort ?? /@([a-z]+)$/.exec(model)?.[1]
-        input = { ...input, description: spawnTitle(input.description, model, effort, await read($, routerModels)) }
+        // A pinned worker's title names its account as the dashboard does, never the pin.
+        input = { ...input, description: spawnTitle(input.description, model, effort, await read($, routerModels), pinnedAccountName(model, files.values()), pinnedAccountNames(files.values())) }
       }
     } catch (error) { await report($, 'agent.spawn title', error) }
     // A Claude worker's pick effort is held for its first step until the record below is stored (#140).

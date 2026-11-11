@@ -11,6 +11,7 @@ const LABELS: Record<string, string> = {
 
 interface ModOptions {
   models: { model: string; provider: string; name: string; judgeOnly: boolean }[];
+  agents?: { provider?: string; account?: string; accountPin?: string }[];
   providers: { name: string; type: string; usable: boolean }[];
   claudeEfforts?: string[];
 }
@@ -61,6 +62,15 @@ export class RouterClient {
   async models(): Promise<ProviderGroup[]> {
     const [opts, levels] = await Promise.all([this.get<ModOptions>("/api/mod-options"), this.get<EffortLevels>("/api/effort-levels")]);
     return groupModels(opts, levels);
+  }
+
+  /** Pinned workers' account display names by `<provider>#<pin>`, as the dashboard shows them. */
+  async workerAccounts(): Promise<Record<string, string>> {
+    const out: Record<string, string> = {};
+    for (const a of (await this.get<ModOptions>("/api/mod-options")).agents ?? []) {
+      if (a.provider && a.accountPin && a.account) out[`${a.provider}#${a.accountPin}`] = a.account;
+    }
+    return out;
   }
 
   /** The router's own `GET /api/limits` body, unvalidated: `rippleStatus` reads it at the boundary. */

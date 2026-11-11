@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { readJson, writeFileAtomic } from "./fsutil.ts";
 import { FRAME_CAP, INLINE_CAP } from "./protocol.ts";
 import { changeCount, toolInput } from "./tool-details.ts";
+import { workerLabelFor } from "./worker-labels.ts";
 import type { BlobRef, EventBody, SessionEvent, Text } from "./protocol.ts";
 
 export interface EventLogOptions {
@@ -208,6 +209,11 @@ export class EventLog {
   append(body: EventBody): SessionEvent {
     this.assertOpen();
     const event: SessionEvent = { ...structuredClone(body), seq: this.lastSeq + 1, at: this.now() };
+    // A pinned worker's id is plumbing; the phone and the web UI show the label instead.
+    if (event.kind === "subagent" && event.modelLabel === undefined) {
+      const label = workerLabelFor(event.model);
+      if (label) event.modelLabel = label;
+    }
     const blobs: { id: string; text: string }[] = [];
     function externalize(text: Text): Text {
       if (typeof text !== "string" || text.length <= INLINE_CAP) return text;

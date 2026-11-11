@@ -293,7 +293,8 @@ export function effortLabel(value: string, lang: Lang): string {
 
 /** "claude-opus-5-5[1m]" → "Opus 5.5"; ids it does not know pass through, trimmed. */
 export function modelName(id: string): string {
-  const bare = displayText(id, DISPLAY.name).replace(/\[.*?\]/g, '').replace(/^claude-/, '')
+  // A pinned worker's id ("anthropic#f952fac6:claude-opus-5-5") shows its model, not the pin.
+  const bare = displayText(id, DISPLAY.name).replace(/^[A-Za-z0-9._-]+#[A-Za-z0-9._-]+:/, '').replace(/\[.*?\]/g, '').replace(/^claude-/, '')
   const m = /^(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d{1,2}))?/.exec(bare)
   if (m) return m[1]!.charAt(0).toUpperCase() + m[1]!.slice(1) + ' ' + m[2] + (m[3] ? '.' + m[3] : '')
   // A bare alias ("sonnet") reads as its family's name.
@@ -369,7 +370,8 @@ export function modelOf(record: StatusRequest): string {
   const source = at < 0 ? record.source : record.source.slice(0, at)
   // A hosted id's vendor path ("deepseek-ai/") goes, as on the agent cards: the slot is narrow and
   // the provider is named beside it.
-  const bare = (id: string) => id.replace(/^.*\//, '')
+  // A pinned worker's account pin ("anthropic#f952fac6:") is not shown either.
+  const bare = (id: string) => id.replace(/^[A-Za-z0-9._-]+#[A-Za-z0-9._-]+:/, '').replace(/^.*\//, '')
   // A dated id of the same model (claude-haiku-5-5-20260815 for claude-haiku-5-5) says nothing new.
   return displayText(source.startsWith(record.target) || record.target.startsWith(source) ? bare(record.target) : bare(record.target) + ' (' + bare(source) + ')', DISPLAY.name)
 }
