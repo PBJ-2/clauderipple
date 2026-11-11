@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type os from "node:os";
 import {
-  classifyJoin, classifyNetwork, DISASSOCIATE_JS, HOTSPOT_JOIN_GRACE_MS, NETWORK_SETTLE_MS, parseKnownWifiScan, parsePreferredNetworks, parseWifiDevice, PROBE_TIMEOUT_MS, ProbeWindow,
+  classifyJoin, classifyNetwork, DISASSOCIATE_JS, FAILOVER_IDLE_WAIT_MS, HOTSPOT_JOIN_GRACE_MS, NETWORK_SETTLE_MS, parseKnownWifiScan, parsePreferredNetworks, parseWifiDevice, PROBE_TIMEOUT_MS, ProbeWindow,
   probeRound, readLearnedHotspot, RETURN_DRAIN_WAIT_MS, RETURN_FORCE_AFTER_MS, RETURN_HOLD_FAILSAFE_MS, RETURN_LOOP_CEILING_MS, RETURN_MIN_RSSI_DBM, RETURN_PROBE_MS, SCAN_KNOWN_JS, inNetwork, ipv4Network, isHotspotAddress, isLinkLocal,
   httpGet, nextReturnPoint, TetherController, wifiIPv4, wifiIPv4Network, writeLearnedHotspot,
   type ProbeGet,
@@ -285,6 +285,54 @@ test("failover waits for a running call, but at most 30s", async () => {
   await r.c.tick();
   assert.equal(r.joins(), 1);
   assert.ok(r.clock.t - before >= 30_000 && r.clock.t - before < 32_000, `waited ${r.clock.t - before}ms`);
+});
+
+for (const drained of [false, true]) {
+  for (const cancel of ["pin", "stop", "disable", "rename"] as const) {
+    test(`failover cancelled by ${cancel} during the wait cannot join after ${drained ? "the call finishes" : "the timeout"}`, async () => {
+      let inFlight = 1;
+      let sleeps = 0;
+      const r = rig({
+        net: { probeOk: () => false },
+        activity: () => ({ inFlight }),
+        onSleep: () => {
+          if (++sleeps !== 3) return;
+          if (cancel === "pin") r.c.setPin(true);
+          if (cancel === "stop") r.c.stop();
+          if (cancel === "disable") r.set({ enabled: false });
+          if (cancel === "rename") r.set({ hotspotSsid: "Other phone" });
+          if (drained) inFlight = 0;
+        },
+      });
+      await r.ticks(2);
+      const before = r.clock.t;
+      await r.c.tick();
+      assert.ok(sleeps >= 3, "the cancellation happened during the failover wait");
+      assert.equal(r.clock.t - before, drained ? 3_000 : FAILOVER_IDLE_WAIT_MS);
+      assert.equal(r.joins(), 0, "no hotspot join was requested");
+      assert.equal(r.returns(), 0);
+      assert.equal(r.c.status().lastSwitch, null, "no switch was recorded");
+      assert.ok(!r.lines.some((line) => /joining hotspot|^WARN /.test(line)), r.lines.join("\n"));
+      if (cancel === "pin") assert.equal(r.c.status().state, "pinned");
+    });
+  }
+}
+
+test("failover still joins when the running call finishes during the wait", async () => {
+  let inFlight = 1;
+  let sleeps = 0;
+  const r = rig({
+    net: { probeOk: (ip) => isHotspotAddress(ip) },
+    activity: () => ({ inFlight }),
+    onSleep: () => { if (++sleeps === 3) inFlight = 0; },
+  });
+  await r.ticks(2);
+  const before = r.clock.t;
+  await r.c.tick();
+  assert.equal(r.clock.t - before, 3_000);
+  assert.equal(r.joins(), 1);
+  assert.equal(r.c.status().state, "on-hotspot");
+  assert.equal(r.c.status().lastSwitch?.ok, true);
 });
 
 test("the schedule is 5, 10, 20, 30, 40, 50 and 60 minutes after landing, then every 10", () => {
