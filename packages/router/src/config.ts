@@ -375,6 +375,10 @@ export function providerFor(provider: Provider, model: string | undefined): Prov
       : {}),
   };
 
+  // An endpoint or auth override alone does not select another protocol. Keep the provider's
+  // adapter and its capabilities unless the model explicitly asks for a different wire.
+  if (entry.wire === undefined) return shared;
+
   // Anthropic Messages needs no translation, so this model is served by the anthropic-compatible
   // adapter instead. The two `caps` shapes do not describe the same things, and only an effort
   // ladder carries over; the rest fall back to the strict defaults `resolveCompatibleCaps` applies,
@@ -765,9 +769,9 @@ function foldSplitProviders(c: Config): Config {
       if (models.some((m) => m.id === model.id)) continue;
       models.push({
         ...model,
-        wire: split.wire,
-        authHeader: split.authHeader,
-        ...("url" in p ? { url: p.url } : {}),
+        wire: model.wire === undefined ? split.wire : model.wire,
+        authHeader: model.authHeader === undefined ? split.authHeader : model.authHeader,
+        ...(model.url === undefined && "url" in p ? { url: p.url } : {}),
         // The merged provider's caps no longer describe this model, so the ladder its own endpoint
         // published travels with it. Inheriting the Responses one would start sending an effort to
         // an endpoint that never accepted one.
@@ -784,9 +788,22 @@ function foldSplitProviders(c: Config): Config {
   // provider the user never removed.
   const moved = new Map(parts.map(([n]) => [n, name] as const).filter(([from, to]) => from !== to));
   const renamed = (of: string): string => moved.get(of) ?? of;
+  const renamedTarget = <T extends { provider?: string }>(target: T): T => {
+    // Migration precedes validation. Leave malformed targets intact so validation still reports them.
+    if (!target || typeof target !== "object" || Array.isArray(target) || typeof target.provider !== "string") return target;
+    return { ...target, provider: renamed(target.provider) };
+  };
+  const classifier = c.autoModeClassifier;
   return {
     ...c,
     providers,
+    ...(c.webSearch !== undefined ? { webSearch: renamedTarget(c.webSearch) } : {}),
+    ...(classifier && typeof classifier === "object" && !Array.isArray(classifier) ? {
+      autoModeClassifier: {
+        ...renamedTarget(classifier),
+        ...(classifier.stage1 && typeof classifier.stage1 === "object" ? { stage1: renamedTarget(classifier.stage1) } : {}),
+      },
+    } : {}),
     direct: c.direct.map((d) => ({ ...d, provider: renamed(d.provider) })),
     routes: Object.fromEntries(Object.entries(c.routes).map(([alias, r]) => [alias, {
       ...r,
@@ -988,6 +1005,13 @@ export function validate(c: Config): string[] {
     }
   }
   if (!(c.listen.port > 0 && c.listen.port < 65536)) errors.push("listen.port out of range");
+  if (!Array.isArray(c.cli.extraModels) || !c.cli.extraModels.every((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+    if (typeof entry.model !== "string" || !entry.model.trim() || typeof entry.name !== "string") return false;
+    if (entry.description !== undefined && typeof entry.description !== "string") return false;
+    if (entry.contextWindow !== undefined && !(typeof entry.contextWindow === "number" && Number.isFinite(entry.contextWindow) && entry.contextWindow > 0)) return false;
+    return true;
+  })) errors.push("cli.extraModels must be a list of entries with a non-empty string model, string name, optional string description and positive finite contextWindow");
   if (c.cli.agentFiles !== undefined && typeof c.cli.agentFiles !== "boolean") errors.push("cli.agentFiles must be true or false");
   if (c.cli.limitWorkerTools !== undefined && typeof c.cli.limitWorkerTools !== "boolean") errors.push("cli.limitWorkerTools must be true or false");
   if (c.listen.openaiPort !== undefined && !(c.listen.openaiPort >= 0 && c.listen.openaiPort < 65536)) errors.push("listen.openaiPort out of range");
