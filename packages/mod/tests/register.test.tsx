@@ -1450,6 +1450,66 @@ for (const [model, target] of [
   }
 })
 
+// #140: a Claude worker's first step runs as soon as its spawn's next() answers, before the spawn hook has
+// stored the worker's record. Each new record is stepped from inside its own write, which is that window.
+function firstStepsBeforeRecord(on: On, engine: Engine) {
+  const stepped = new Set<string>()
+  on('state.set', { plugin: 'ripple', key: 'agents' }, async (_, e, next) => {
+    for (const a of e.value as AgentRec[]) {
+      if (!a.pick || stepped.has(a.id)) continue
+      stepped.add(a.id)
+      await step(engine, 'claude-opus-5-5', 'low', a.id)
+    }
+    return next(e)
+  })
+}
+const REASONED = { messages: [{ role: 'user' as const, text: '솔한테 시켜', toolUses: [] }] }
+
+test('a Claude worker\'s first step carries the effort it was picked at, before its record is stored (#140)', async ($, on) => {
+  boundaries(on, {}, REASONED)
+  http(on)
+  judgeStub(on)
+  const sent = spawnStub(on)
+  const steps = stepStub(on, null)
+  firstStepsBeforeRecord(on, $)
+  await start($)
+  await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: opus@xhigh]]\nModel reason: user "솔한테 시켜"\nReview this.' })
+  expect(sent[0]).toMatchObject({ subagentType: 'ripple:auto', model: 'claude-opus-5-5' })
+  expect(steps.map(s => [s.agentId, s.effort])).toEqual([['worker-1', 'xhigh']])
+})
+
+test('two Claude workers spawned together each keep their own picked effort on their first step (#140)', async ($, on) => {
+  boundaries(on, {}, REASONED)
+  http(on)
+  judgeStub(on)
+  on('agent.spawn', ($, e) => ({ model: e.model ?? 'claude-opus-5-5', agentId: e.prompt.includes('parser') ? 'worker-parser' : 'worker-cache' }))
+  const steps = stepStub(on, null)
+  firstStepsBeforeRecord(on, $)
+  await start($)
+  await Promise.all([
+    $.agent.spawn({ ...SPAWN, description: 'Parser review', prompt: '[[ripple: opus@xhigh]]\nModel reason: user "솔한테 시켜"\nReview the parser.' }),
+    $.agent.spawn({ ...SPAWN, description: 'Cache review', prompt: '[[ripple: sonnet@high]]\nModel reason: user "솔한테 시켜"\nReview the cache.' }),
+  ])
+  expect(steps.find(s => s.agentId === 'worker-parser')?.effort).toBe('xhigh')
+  expect(steps.find(s => s.agentId === 'worker-cache')?.effort).toBe('high')
+})
+
+test('a refused Claude worker leaves its effort behind for no later step (#140)', async ($, on) => {
+  boundaries(on, {}, REASONED)
+  http(on)
+  judgeStub(on)
+  on('agent.spawn', ($, e) => {
+    if (e.prompt.includes('Refused')) throw new Error('refused by the test')
+    return { model: e.model ?? 'claude-opus-5-5', agentId: 'worker-next' }
+  })
+  const steps = stepStub(on, null)
+  await start($)
+  const outcome = await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: opus@xhigh]]\nModel reason: user "솔한테 시켜"\nRefused.' }).then(() => 'started', () => 'failed')
+  expect(outcome).toBe('failed')
+  await step($, 'claude-opus-5-5', 'low', 'worker-unknown')
+  expect(steps.map(s => [s.agentId, s.effort])).toEqual([['worker-unknown', 'low']])
+})
+
 test('a user reason is checked against the last ten human messages and the last two prompts', async ($, on) => {
   const older = 'an older line'
   const tenth = 'the tenth line says Sol'

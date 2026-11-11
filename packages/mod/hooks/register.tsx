@@ -165,6 +165,30 @@ let carriedPick = false
  * workflow's 29 such agents stayed "running" in the pane for good (2026-10-24).
  */
 const endedEarly = new Map<string, { state: 'done' | 'failed'; endedAt: number; outcome: Record<string, unknown> }>()
+/**
+ * The effort a Claude worker was picked at, held from just before its spawn's next() until the spawn
+ * hook has stored its record (#140). The engine sends a rewritten effort only on a step whose new input
+ * is the person's or the prompt, so a worker's FIRST step is the only one that can carry it, and that
+ * step runs as soon as next() answers, before the AgentRec exists. One entry per spawn: `agentId` joins
+ * it to its worker once next() names the worker, so concurrent spawns never share an entry.
+ */
+type PendingEffort = { description: string; type: string; effort: Effort; agentId?: string }
+const pendingEfforts: PendingEffort[] = []
+/** The effort a worker's first step carries while its record is unwritten, from the spawn it belongs to. */
+async function heldEffort($: EngineInterface, agentId: string): Promise<Effort | undefined> {
+  if (!pendingEfforts.length) return undefined
+  const bound = pendingEfforts.find(p => p.agentId === agentId)
+  if (bound) return bound.effort
+  // A step can run before the spawn hook has bound the worker: only its title and type link it to a
+  // spawn then. When two waiting spawns match, neither is chosen, so no effort is guessed.
+  let info: { description: string; type: string } | undefined
+  try { info = (await $.agent.list()).find(x => x.id === agentId) } catch { return undefined }
+  if (!info) return undefined
+  const titled = pendingEfforts.filter(p => p.agentId === undefined && p.description === info.description && p.type === info.type)
+  if (titled.length !== 1) return undefined
+  titled[0]!.agentId = agentId
+  return titled[0]!.effort
+}
 // Serialize settings reads and writes so a slow poll cannot overwrite a queued edit.
 let settingsWork: Promise<void> = Promise.resolve()
 function settingsTask<T>(work: () => Promise<T>): Promise<T> {
@@ -2122,6 +2146,11 @@ async function prepareStep($: EngineInterface, e: TurnStepInput): Promise<TurnSt
   const language = await read($, lang)
   if (e.agentId) {
     const a = (await read($, agents)).find(a => a.id === e.agentId)
+    if (!a) {
+      // A worker's first step, before its spawn hook has stored the record (#140).
+      const held = await heldEffort($, e.agentId)
+      if (held) return { ...e, effort: held }
+    }
     return a?.pick && (a.pick.target.agent === 'general-purpose' || a.type === 'ripple:auto') ? { ...e, effort: a.pick.effort } : e
   }
   const previousModel = await read($, modelIs)
@@ -2629,7 +2658,12 @@ export const register: Register = on => {
         input = { ...input, description: spawnTitle(input.description, model, effort, await read($, routerModels)) }
       }
     } catch (error) { await report($, 'agent.spawn title', error) }
-    const result = await next(input)
+    // A Claude worker's pick effort is held for its first step until the record below is stored (#140).
+    const pending: PendingEffort | undefined = chosen && (chosen.target.agent === 'general-purpose' || input.subagentType === 'ripple:auto') ? { description: input.description, type: input.subagentType, effort: chosen.effort } : undefined
+    const dropPending = () => { if (pending) { const at = pendingEfforts.indexOf(pending); if (at >= 0) pendingEfforts.splice(at, 1) } }
+    if (pending) pendingEfforts.push(pending)
+    const result = await next(input).catch((error: unknown) => { dropPending(); throw error })
+    if (pending && result.agentId) pending.agentId = result.agentId
     try {
       if (result.agentId) {
         const provider = await spawnProvider($, input.subagentType, result.model)
@@ -2643,6 +2677,7 @@ export const register: Register = on => {
         if (early && chosen?.id) await persistWorkerPick($, { ...early.outcome, pick: chosen.id, model: result.model ?? null, cost: 0 })
       }
     } catch (error) { await report($, 'agent.spawn record', error) }
+    finally { dropPending() }
     return result
   })
   on('tool.call', async ($, e, next) => {
