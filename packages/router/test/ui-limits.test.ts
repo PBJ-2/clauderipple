@@ -5,7 +5,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const uiDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "../../ui");
-const source = fs.readFileSync(path.join(uiDir, "app.js"), "utf8");
+// Some block markers below span lines, and a Windows checkout (core.autocrlf) ends lines with CRLF.
+const source = fs.readFileSync(path.join(uiDir, "app.js"), "utf8").replaceAll("\r\n", "\n");
 const i18nSource = fs.readFileSync(path.join(uiDir, "i18n.js"), "utf8");
 const start = i18nSource.indexOf("const I18N = {");
 const end = i18nSource.indexOf("\n};", start);

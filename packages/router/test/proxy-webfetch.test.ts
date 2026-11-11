@@ -96,6 +96,9 @@ async function rig(wire: Wire = "chatgpt") {
     secure.write(`POST ${pathname} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nx-claude-code-session-id: webfetch-session\r\nauthorization: Bearer original-auth\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(raw)}\r\n\r\n${raw}`);
     const text = await result;
     secure.destroy();
+    // A row for the caller's own login is written once its email lookup settles, which can be after
+    // the response: wait for it as a drain does, or there is no row to read yet.
+    await proxy.rows.settled();
     return { text, record: requests.list(1)[0]! };
   }
   return { cfg, seen, native, requests, proxy, send, fail: () => { failure = true; }, disconnect: () => { disconnect = true; }, breakStream: () => { brokenStream = true; }, stop: async () => {
