@@ -20,6 +20,8 @@ import {
 import { ClaudeCodeAuthStore, ClaudeCodeCredentialStore } from "../src/providers/anthropic.ts";
 import { ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
 
+const noClaudeCodeCredentialReaders = { keychain: () => null, credentialsFile: () => null };
+
 function home(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "cr-claude-account-pool-"));
 }
@@ -304,7 +306,7 @@ test("use through the pool keeps the observed current login inside the 12 h guar
     const now = () => time;
     const observed = new ObservedClaudeCodeAuth();
     observed.observe(["authorization", "Bearer current-token"], time);
-    const current = new ClaudeCodeAuthStore(undefined, { observed, home: dir, env: {}, now });
+    const current = new ClaudeCodeAuthStore(undefined, { observed, home: dir, env: {}, now, credentialReaders: noClaudeCodeCredentialReaders });
     const pool = new ClaudeAccountAuthPool({ home: dir, now, current, log: log().logger });
 
     // The last un-routed request is the observation above; from now on the pool answers on it.
@@ -332,7 +334,7 @@ test("a 401 drops the observed current login and the same dead token is not read
     const now = () => time;
     const observed = new ObservedClaudeCodeAuth();
     observed.observe(["authorization", "Bearer current-token"], time);
-    const current = new ClaudeCodeAuthStore(undefined, { observed, home: dir, env: {}, now });
+    const current = new ClaudeCodeAuthStore(undefined, { observed, home: dir, env: {}, now, credentialReaders: noClaudeCodeCredentialReaders });
     const pool = new ClaudeAccountAuthPool({ home: dir, now, current, log: log().logger });
     const credential = pool.peekCredentials()[0]!;
     assert.equal(credential.ownerId, "current");
@@ -412,7 +414,7 @@ test("switching the app's own login does not carry the old account's rest onto t
     let login = "account-a";
     const observed = new ObservedClaudeCodeAuth();
     observed.observe(["authorization", "Bearer token-a"], now());
-    const current = new ClaudeCodeAuthStore(undefined, { observed, home: dir, env: {}, now });
+    const current = new ClaudeCodeAuthStore(undefined, { observed, home: dir, env: {}, now, credentialReaders: noClaudeCodeCredentialReaders });
     const accounts = new ClaudeAccountAuthPool({ home: dir, now, current, loginKey: () => login, log: log().logger });
     const pool = new CredentialPool({ now });
 
