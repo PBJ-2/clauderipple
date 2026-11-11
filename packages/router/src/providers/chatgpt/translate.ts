@@ -11,6 +11,7 @@
 // for a request that is not a conversation at all, from its system prompt (see `conversationKey`).
 
 import crypto from "node:crypto";
+import { deferredToolDefinitions } from "../../compat.ts";
 import { identityLine } from "../../identity.ts";
 import { encodeEnvelope, envelopeFor, isOurSignature, replayableReasoning, type Envelope, type ReplayedReasoning } from "../../reasoning.ts";
 
@@ -323,6 +324,12 @@ export function isServerTool(tool: AnthropicTool): boolean {
   return type !== undefined && type !== "custom";
 }
 
+/** All declarations this stateless request carries, with explicit/first-deferred precedence. */
+export function declaredTools(req: AnthropicRequest): AnthropicTool[] {
+  const lifted = deferredToolDefinitions(req.messages, req.tools);
+  return lifted.length > 0 ? [...(req.tools ?? []), ...lifted] : req.tools ?? [];
+}
+
 /** Names of the tools this request declares that no translated provider can run. */
 export function serverToolNames(tools: AnthropicTool[] | undefined): Set<string> {
   const names = new Set<string>();
@@ -348,7 +355,7 @@ export function droppedServerToolNote(dropped: Set<string>): string {
 
 /** The caller's system text with that line after it, so every translator places it the same way. */
 export function systemWithDroppedToolNote(req: AnthropicRequest): string {
-  return [systemText(req.system), droppedServerToolNote(serverToolNames(req.tools))].filter(Boolean).join("\n\n");
+  return [systemText(req.system), droppedServerToolNote(serverToolNames(declaredTools(req)))].filter(Boolean).join("\n\n");
 }
 
 /**
@@ -358,7 +365,7 @@ export function systemWithDroppedToolNote(req: AnthropicRequest): string {
  */
 export function toolNameRestoreMap(req: AnthropicRequest): Map<string, string> {
   const map = new Map<string, string>();
-  for (const t of req.tools ?? []) {
+  for (const t of declaredTools(req)) {
     if (typeof t.name !== "string" || isServerTool(t)) continue;
     const mangled = toolNameForResponses(t.name);
     if (mangled !== t.name) map.set(mangled, t.name);
@@ -468,8 +475,9 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
     flush();
   }
 
-  const dropped = serverToolNames(req.tools);
-  const tools = (req.tools ?? [])
+  const declarations = declaredTools(req);
+  const dropped = serverToolNames(declarations);
+  const tools = declarations
     .filter((t) => typeof t.name === "string" && !dropped.has(t.name))
     .map((t) => ({ type: "function" as const, name: toolNameForResponses(t.name), description: t.description ?? "", parameters: normalizeSchema(t.input_schema), strict: false as const }));
 

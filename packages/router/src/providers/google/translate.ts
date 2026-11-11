@@ -13,7 +13,7 @@
 
 import crypto from "node:crypto";
 import { clampEffort } from "../../compat.ts";
-import { documentFile, documentText, estimateTokens, normalizeSchema, serverToolNames, systemWithDroppedToolNote, toolNameForResponses, type AnthropicBlock, type AnthropicRequest, type AnthropicTool } from "../chatgpt/translate.ts";
+import { declaredTools, documentFile, documentText, estimateTokens, normalizeSchema, serverToolNames, systemWithDroppedToolNote, toolNameForResponses, type AnthropicBlock, type AnthropicRequest } from "../chatgpt/translate.ts";
 import { identityPrefix, instructionsSuffix } from "../../identity.ts";
 
 // ---- Gemini wire -------------------------------------------------------------------
@@ -388,8 +388,9 @@ function orphanResultParts(block: AnthropicBlock): GeminiPart[] {
 // it, nothing answers, and the turn returns empty with no error. The same rule every translated
 // provider follows.
 function functionTools(req: AnthropicRequest): FunctionDeclaration[] {
-  const dropped = serverToolNames(req.tools);
-  return (req.tools ?? [])
+  const declarations = declaredTools(req);
+  const dropped = serverToolNames(declarations);
+  return declarations
     .filter((tool) => typeof tool.name === "string" && !dropped.has(tool.name))
     .map((tool) => ({
       name: toolNameForResponses(tool.name),
@@ -401,7 +402,7 @@ function functionTools(req: AnthropicRequest): FunctionDeclaration[] {
 /** Whether a `tool_choice` that named a dropped tool would force the model onto something undeclared. */
 function choiceSurvives(req: AnthropicRequest): boolean {
   const choice = req.tool_choice;
-  return choice?.type === "tool" && !!choice.name && !serverToolNames(req.tools).has(choice.name);
+  return choice?.type === "tool" && !!choice.name && !serverToolNames(declaredTools(req)).has(choice.name);
 }
 
 function mapToolChoice(req: AnthropicRequest, tools: FunctionDeclaration[]): GeminiRequest["toolConfig"] | undefined {

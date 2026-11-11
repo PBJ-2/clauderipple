@@ -4,7 +4,7 @@
 
 import crypto from "node:crypto";
 import { clampEffort } from "../../compat.ts";
-import { conversationKey, documentFile, documentResponsePart, documentText, estimateTokens, normalizeSchema, serverToolNames, systemWithDroppedToolNote, toolNameForResponses, type AnthropicBlock, type AnthropicRequest, type AnthropicTool, type ResponsesContentPart } from "../chatgpt/translate.ts";
+import { conversationKey, declaredTools, documentFile, documentResponsePart, documentText, estimateTokens, normalizeSchema, serverToolNames, systemWithDroppedToolNote, toolNameForResponses, type AnthropicBlock, type AnthropicRequest, type AnthropicTool, type ResponsesContentPart } from "../chatgpt/translate.ts";
 import { identityPrefix, instructionsSuffix } from "../../identity.ts";
 import { encodeEnvelope, envelopeFor, replayableReasoning, type Envelope, type ReplayedReasoning } from "../../reasoning.ts";
 
@@ -162,7 +162,7 @@ function functionTools(tools: AnthropicTool[] | undefined): OpenAiTool[] {
 /** A choice that named a dropped tool would force the model onto something no longer declared. */
 function choiceSurvives(req: AnthropicRequest): boolean {
   const choice = req.tool_choice;
-  return choice?.type === "tool" && !!choice.name && !serverToolNames(req.tools).has(choice.name);
+  return choice?.type === "tool" && !!choice.name && !serverToolNames(declaredTools(req)).has(choice.name);
 }
 
 function mapToolChoice(req: AnthropicRequest, tools: OpenAiTool[]): ChatRequest["tool_choice"] | undefined {
@@ -379,7 +379,7 @@ export function toResponsesInput(req: AnthropicRequest, opts?: OpenAiTranslateOp
 
 export function toOpenAiRequest(req: AnthropicRequest, opts: OpenAiTranslateOptions): ChatRequest | ResponsesRequest {
   const effort = mappedEffort(opts);
-  const tools = functionTools(req.tools);
+  const tools = functionTools(declaredTools(req));
   const parallel = !(req.tool_choice?.disable_parallel_tool_use ?? false);
   if (opts.wire === "chat") {
     const out: ChatRequest = {
