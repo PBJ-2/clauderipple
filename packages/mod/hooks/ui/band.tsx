@@ -32,7 +32,7 @@ import type { Lang } from '../i18n'
 import type { RenderChildren, RenderNode } from 'claude-code'
 
 import type { Effort, LimitItem } from '../../types'
-import { AGENTS_W, CELL_PX, DEPTH, countedWidth, ICON_PX, METER_H, METER_W, MUTE, ROW_PX, SUB, TONE, barArt, textPx } from './art'
+import { AGENTS_W, CELL_PX, DEPTH, countedWidth, ICON_PX, METER_H, METER_W, MUTE, ROW_PX, SUB, TONE, barArt, labelPx, textPx } from './art'
 import { lookOf } from './look'
 import type { Word } from './look'
 import type { Sea, Tone } from './art'
@@ -879,16 +879,20 @@ type DrawnControl = { key: string; cells: number; counted?: number; node: Render
 function iconControl(el: Els, frame: Frame, key: string, source: string, artPx: number, alt: string, tip: string, onPress: () => void, label?: string, word?: Word, widestPx = artPx): DrawnControl {
   const { Text } = el
   const pad = label ? 0.5 : 0.25
-  // Exact, not rounded up to whole cells: the host takes fractions, and up to 0.7 of a cell after
-  // each icon read as a gap once the app's type made a cell wider (2026-10-25).
-  const slot = (px: number) => (px + (label ? CELL_PX + chOf(label) * CELL_PX * 1.04 : 0)) / CELL_PX + pad * 2
+  // The word's width is the host's glyphs at its 13 px (labelPx), not the ch estimate: a Hangul
+  // glyph is a full em there, wider than the 1.45 ch counted for it, so a label the estimate fitted
+  // wrapped to a second line in the app (2026-11-11). Exact, not rounded up to whole cells: the host
+  // takes fractions, and up to 0.7 of a cell after each icon read as a gap once the app's type made
+  // a cell wider (2026-10-25).
+  const slot = (px: number) => (px + (label ? CELL_PX + labelPx(label, 13) : 0)) / CELL_PX + pad * 2
   const cells = slot(artPx)
   return {
     key,
     cells,
     counted: slot(widestPx),
     tip,
-    node: lit(el, frame, key, cells, [pic(el, key, source, alt, artPx, 16), label ? <Text key={key + '-word'} {...(word ?? lookOf(frame).sub)}>{label}</Text> : '', press(el, key, cells * CELL_PX, onPress)], pad, tipScope(key)),
+    // One line only: a word that does not fit is cut with the engine's ellipsis, never wrapped.
+    node: lit(el, frame, key, cells, [pic(el, key, source, alt, artPx, 16), label ? <Text key={key + '-word'} wrap="truncate" {...(word ?? lookOf(frame).sub)}>{label}</Text> : '', press(el, key, cells * CELL_PX, onPress)], pad, tipScope(key)),
   }
 }
 

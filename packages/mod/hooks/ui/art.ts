@@ -582,16 +582,19 @@ export function gaugeArt(kind: string): string {
 /** A limit window's share as a horizontal bar, 36 × 6 px on the band (the limits pane draws it
  * wider), with round ends: the track white at low strength, the fill the ring's own teal-to-violet
  * while all is well, amber, then red. Whole percents only, like the ring: the same figure is the
- * same picture. */
+ * same picture. A fill that is anything above 0% draws at least a round end's width, so 7% reads
+ * as a bar (36 px at 7% was 2.5 px, a sliver beside its figure, 2026-11-11); the figure in the
+ * text is still the percent itself. */
 export function barArt(percent: number, tone: Tone | 'ink', W = 36, H = 6): string {
   // Rounded to the integer: neighbouring readings draw byte-identical pictures.
   const share = Math.max(0, Math.min(1, Math.round(percent) / 100))
   const fill = tone === 'ink' ? 'url(#g)' : TONE[tone].hi
+  const width = share > 0 ? Math.min(W, Math.max(W * share, H)) : 0
   return svg(W, H,
     '<defs><linearGradient id="g" x1="0" x2="1" y1="0" y2="0"><stop offset="0" stop-color="#67e8f9"/><stop offset="1" stop-color="#a78bfa"/></linearGradient>' +
     '<clipPath id="c"><rect x="0" y="0" width="' + W + '" height="' + H + '" rx="' + r(H / 2) + '"/></clipPath></defs>' +
     '<rect x="0" y="0" width="' + W + '" height="' + H + '" rx="' + r(H / 2) + '" fill="#fff" fill-opacity=".14"/>' +
-    '<g clip-path="url(#c)"><rect x="0" y="0" width="' + r(W * share) + '" height="' + H + '" fill="' + fill + '"/></g>')
+    '<g clip-path="url(#c)"><rect x="0" y="0" width="' + r(width) + '" height="' + H + '" fill="' + fill + '"/></g>')
 }
 
 export const ICON_PX = 16

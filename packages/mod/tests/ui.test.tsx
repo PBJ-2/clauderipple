@@ -21,7 +21,7 @@ import { renderLimits } from '../hooks/ui/limits'
 import { renderPhoneQueue } from '../hooks/ui/queue'
 import { rippleSource } from '../hooks/ui/parts'
 import { pic } from '../hooks/ui/kit'
-import { CELL_PX, SVG_MAX_PX, svg } from '../hooks/ui/art'
+import { CELL_PX, SVG_MAX_PX, barArt, labelPx, svg } from '../hooks/ui/art'
 import { renderLog } from '../hooks/ui/log'
 import { renderSettings } from '../hooks/ui/settings'
 import { renderSetup } from '../hooks/ui/setup'
@@ -1459,6 +1459,30 @@ test('the band names the mode that is on, cut to a slot of its own that keeps it
     expect(layoutOf(await none.drawn())['fact-mode']).toBeUndefined()
     await none.unmount()
   }
+})
+
+// 2026-11-11: the chip's word stays on one line in the width its Korean glyphs take (the 캐시 유지 chip
+// wrapped to "캐시 유" / "지" in the app: the ch estimate ran narrow), and a share above zero draws a
+// fill a reader can see; the figure in the text is the percent itself.
+test('a chip word stays on one line at its real glyph width, and a small share still draws a bar', async ($, on) => {
+  drawPane(on, 'chip-ko', (el, surface) => renderBand(el, { ...frameOf(surface, 94), lang: 'ko' }, DASH, BAND_ACTIONS))
+  const ui = await mount($, 'chip-ko', 'desktop', 94)
+  const word = await ui.find({ type: 'Text', text: STRINGS.ko['band.warm'] })
+  expect(word, 'the chip word is drawn').toBeDefined()
+  expect(String(word?.props.wrap), 'one line, cut not wrapped').toBe('truncate')
+  const chips: Drawn[] = []
+  walk(await ui.drawn(), n => { if (n.props?.key === 'hv-warm') chips.push(n) })
+  expect(chips.length, 'the chip is drawn').toBe(1)
+  // Inside its padding (0.5 cell either side): the icon, the gap after it, then the word at 13 px.
+  const room = (Number(chips[0]!.props?.width) - 1) * CELL_PX
+  expect(room >= 16 + CELL_PX + labelPx(STRINGS.ko['band.warm'], 13), 'room for the word beside its icon').toBe(true)
+  await ui.unmount()
+  // The fill: none at 0, a whole round end at 7 (2.5 px before), half the bar at 50, all of it at 100.
+  const fill = (percent: number) => Number(/<g clip-path="url\(#c\)"><rect x="0" y="0" width="([\d.]+)"/.exec(barArt(percent, 'violet'))?.[1])
+  expect(fill(0)).toBe(0)
+  expect(fill(7) >= 6 && fill(7) < 36, 'a 7% fill is visible').toBe(true)
+  expect(fill(50)).toBe(18)
+  expect(fill(100)).toBe(36)
 })
 
 test('the desktop band keeps the route and every control in one row at 770 px (Chinese), 830 px (Korean, English, Japanese), 870 px (Spanish, Portuguese)', async ($, on) => {
