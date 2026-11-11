@@ -305,7 +305,11 @@ export function spawnModel(target: TierTarget, effort: Effort, fileModel?: strin
   return resolveClaudeModel(fileModel && target.agent !== 'general-purpose' ? `${baseModel(fileModel)}@${effort}` : target.model)
 }
 /** A prefix this mod (or the retired agent-title hook) put on a title: "Sol·high · ". */
-const TITLE_PREFIX = /^[^\s·]+(?:·[^\s·]+){0,2} · /
+const EFFORT_WORD = 'low|medium|high|xhigh|max'
+// What the title forms are, so a parent's own heading ("UI·UX · Review nav") is left alone:
+// "Sol · ", "Sol·high · ", a Claude title with its account ("Opus5.5·Work-account · ", "…·high · "),
+// and any title with account and effort ("Sol·Work-account·high · ").
+const TITLE_PREFIX = new RegExp(`^(?:[^\\s·]+(?:·(?:${EFFORT_WORD}))?|(?:Opus|Sonnet|Haiku|Fable|Mythos)[\\d.]*·[^\\s·]+(?:·(?:${EFFORT_WORD}))?|[^\\s·]+·[^\\s·]+·(?:${EFFORT_WORD})) · `)
 
 /**
  * The model a title names: a Claude id or alias as its family and version ("Opus5.5"), a routed id
@@ -330,7 +334,7 @@ export function titleName(model: string, models: readonly RouterModel[] = []): s
  * that knows, since it picks. A prefix already there (the parent's guess) is replaced.
  */
 export function spawnTitle(description: string, model: string, effort: string | undefined, models: readonly RouterModel[] = [], account?: string): string {
-  const tag = titleName(model, models) + (account ? '·' + account.replace(/\s+/g, '-') : '') + (effort ? '·' + effort : '')
+  const tag = titleName(model, models) + (account ? '·' + account.replace(/[\s·]+/g, '-') : '') + (effort ? '·' + effort : '')
   return `${tag} · ${bareTitle(description)}`
 }
 

@@ -245,6 +245,16 @@ test('spawn titles name the model that runs, replacing a guessed prefix', async 
   assert.equal(bareTitle(pinnedTitle), 'Fix routing', 'the next spawn replaces it, not stacks')
   assert.equal(bareTitle('Haiku5.5·Work-account · Fix routing'), 'Fix routing')
   assert.equal(spawnTitle('Fix routing', 'anthropic#f952fac6:claude-haiku-5-5', undefined, [], 'Work account'), 'Haiku5.5·Work-account · Fix routing')
+  // An account name's middle dot is closed up too, Korean kept, so a retitle replaces rather than stacks.
+  const dotted = spawnTitle('Review parser', 'anthropic#f952fac6:claude-opus-5-5', 'high', [], '업무·개인')
+  assert.equal(dotted, 'Opus5.5·업무-개인·high · Review parser')
+  assert.equal(spawnTitle(dotted, 'anthropic#f952fac6:claude-opus-5-5', 'high', [], '업무·개인'), dotted)
+  // Titles with an account and no effort strip; a parent's own heading is never taken for a prefix.
+  assert.equal(bareTitle('Opus5.5·Work-account · Review parser'), 'Review parser')
+  assert.equal(bareTitle('Sol·Work-account·high · Review parser'), 'Review parser')
+  assert.equal(bareTitle('UI·UX · Review navigation'), 'UI·UX · Review navigation')
+  assert.equal(bareTitle('iOS·Android · Fix notifications'), 'iOS·Android · Fix notifications')
+  assert.equal(spawnTitle('iOS·Android · Fix notifications', 'claude-opus-5-5', undefined), 'Opus5.5 · iOS·Android · Fix notifications')
 })
 
 test('fill gives empty lists one ticked model, preserving existing ordered lists even when unticked', () => {

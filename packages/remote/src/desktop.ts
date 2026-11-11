@@ -453,9 +453,12 @@ function stripModelPrefix(description: string): string {
 function withoutEffort(model: string): string {
   return model.replace(/@[^@]*$/, "");
 }
-/** A worker's effort as its meta.json records it: the `@effort` suffix of its model, else the level in the hook's "Model·effort · " prefix. Empty when neither says so. */
-function effortOf(model: string, description: string): string {
-  return /@([^@\s]+)$/.exec(model)?.[1] ?? /^\S*·(\S*) · /.exec(description)?.[1] ?? "";
+/** The levels a title's last component can be; anything else there is an account name. */
+const EFFORT_WORDS = new Set(["low", "medium", "high", "xhigh", "max"]);
+/** A worker's effort as its meta.json records it: the `@effort` suffix of its model, else the level ending the hook's "Model·account·effort · " prefix. Empty when neither says so. */
+export function effortOf(model: string, description: string): string {
+  const last = /^\S*·(\S*) · /.exec(description)?.[1]?.split("·").pop() ?? "";
+  return /@([^@\s]+)$/.exec(model)?.[1] ?? (EFFORT_WORDS.has(last) ? last : "");
 }
 /** The subagent event's effort, only when a real one was recorded. */
 const effortField = (info: { effort?: string }): { effort?: string } => info.effort ? { effort: info.effort } : {};

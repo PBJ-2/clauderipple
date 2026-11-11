@@ -422,11 +422,11 @@ function titlePrefix(title: string, suffix: string): string {
 
 /**
  * A pinned worker's title tag: the model's short name, then the account's display name with its
- * spaces closed up ("Work account" → "Work-account"), the form the mod's title prefix reads back
+ * spaces and middle dots closed up ("Work account" → "Work-account"), the form the mod's title prefix reads back
  * (workers.ts TITLE_PREFIX). The mod writes the same tag itself; this is the parent's hint.
  */
 function pinnedTitle(title: string, display: string): string {
-  return `${title}·${display.replace(/\s+/g, "-")}`;
+  return `${title}·${display.replace(/[\s·]+/g, "-")}`;
 }
 
 /**

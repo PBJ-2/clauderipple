@@ -8,6 +8,7 @@ import { setWorkerAccounts, workerLabelFor } from "../src/worker-labels.ts";
 import { EventLog } from "../src/eventlog.ts";
 import { RouterClient } from "../src/router.ts";
 import { BackgroundActivity } from "../src/background-activity.ts";
+import { effortOf } from "../src/desktop.ts";
 
 const ACCOUNTS = { "anthropic#f952fac6": "mambo20211" };
 
@@ -61,4 +62,12 @@ test("account names come from the router's worker files by provider and pin", as
   ] };
   const client = new RouterClient("http://x", async () => ({ ok: true, status: 200, json: async () => body }));
   assert.deepEqual(await client.workerAccounts(), ACCOUNTS);
+});
+
+test("an account in the title is never read as the worker's effort", () => {
+  assert.equal(effortOf("anthropic#f952fac6:claude-opus-5-5", "Opus5.5·Work-account · Review parser"), "");
+  assert.equal(effortOf("anthropic#f952fac6:claude-opus-5-5", "Opus5.5·Work-account·high · Review parser"), "high");
+  assert.equal(effortOf("anthropic#f952fac6:claude-opus-5-5", "Opus5.5·업무-개인·max · Review parser"), "max");
+  assert.equal(effortOf("gpt-6.1-sol", "Sol·medium · Fix"), "medium");
+  assert.equal(effortOf("gpt-6.1-sol@low", "Sol·Work · Fix"), "low", "the model's own @effort wins");
 });
