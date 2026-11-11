@@ -85,7 +85,7 @@ export function parseClaudeCodeCredentials(raw: string | null): ClaudeCodeCreden
 
 export class ClaudeCodeCredentialStore {
   private cached: ClaudeCodeCredentials | null = null;
-  private checkedAt = 0;
+  private checkedAt: number | undefined;
   private readonly read: CredentialReader;
   private readonly now: () => number;
 
@@ -97,13 +97,20 @@ export class ClaudeCodeCredentialStore {
   /** Valid credential or a client-safe error. This deliberately never refreshes it. */
   get(): ClaudeCodeCredentials | Error {
     const now = this.now();
-    if (!this.cached || now - this.checkedAt >= CACHE_MS) {
+    // A missing login is a cached result too: OS credential reads may spawn a synchronous process.
+    if (this.checkedAt === undefined || now < this.checkedAt || now - this.checkedAt >= CACHE_MS) {
       this.cached = parseClaudeCodeCredentials(this.read());
       this.checkedAt = now;
     }
     if (!this.cached) return new Error("Claude Code login unavailable — open Claude Code and sign in");
     if (now >= this.cached.expiresAt) return new Error("Claude Code login expired — open Claude Code once to refresh");
     return this.cached;
+  }
+
+  /** Recheck after an explicit login change without retaining the previous credential. */
+  invalidate(): void {
+    this.cached = null;
+    this.checkedAt = undefined;
   }
 }
 
@@ -127,7 +134,7 @@ export class ClaudeCodeAuthStore {
       keychain: readClaudeCodeKeychain,
       credentialsFile: readClaudeCodeCredentialsFile,
     };
-    this.credentials = credentials ?? new ClaudeCodeCredentialStore(() => readClaudeCodeCredentials(this.credentialReaders));
+    this.credentials = credentials ?? new ClaudeCodeCredentialStore(() => readClaudeCodeCredentials(this.credentialReaders), options.now);
     this.observed = options.observed;
     this.home = options.home ?? (process.env.CLAUDERIPPLE_HOME?.trim() || path.join(os.homedir(), ".clauderipple"));
     this.env = options.env ?? process.env;

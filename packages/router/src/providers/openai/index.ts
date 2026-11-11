@@ -2,6 +2,7 @@
 // Responses SSE out, translated back to Anthropic Messages. It never synthesizes
 // cache figures; the request log reflects cached tokens only when the vendor sends them.
 
+import { createHash } from "node:crypto";
 import http from "node:http";
 import type { OpenAiCompatibleProvider } from "../../config.ts";
 import type { Logger } from "../../log.ts";
@@ -227,7 +228,9 @@ export class OpenAiCompatibleAdapter {
     const upstreamSecrets = new Set<string>();
     const redact = (text: string): string => redactErrorText(text, [...upstreamSecrets], 2000);
     // Same input floor behavior as the ChatGPT adapter: the CLI snapshots message_start before usage arrives.
-    const key = JSON.stringify({ model, wire, system: json.system ?? "", user: json.messages.find((message) => message.role === "user")?.content ?? "" });
+    // Keep the same identity without retaining potentially large system prompts or base64 images
+    // in StartInputs' bounded maps after the request ends.
+    const key = createHash("sha256").update(JSON.stringify({ model, wire, system: json.system ?? "", user: json.messages.find((message) => message.role === "user")?.content ?? "" })).digest("hex");
     const startInput = this.startInputs.start(key, estimateTokens(json));
     const controller = new AbortController();
     const onClose = (): void => controller.abort();
