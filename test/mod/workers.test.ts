@@ -10,7 +10,7 @@ registerHooks({ resolve(specifier, context, next) {
 } })
 const { AUTO_DESCRIPTION, modelReason, ruleReason, withoutRouting, userSaid, readMarker, agentProvider, chatgptUsable,
   ladderPick, markerDomain, workerRule, routerModelOptions, zenJev, spawnModel, takesOver, claudeCandidates, allowed } = await import('../../packages/mod/hooks/workers.ts')
-const { agentModel, delegationPin, pinAllows, pinSaid, PIN_SAID_MAX, rivalProviders, userNamed } = await import('../../packages/mod/hooks/worker.ts')
+const { agentFilePaths, agentModel, definedModel, delegationPin, pinAllows, pinSaid, PIN_SAID_MAX, rivalProviders, userNamed } = await import('../../packages/mod/hooks/worker.ts')
 const candidates: WorkerCandidate[] = [
   { target: { agent: 'deepseek-v4-1-flash' }, model: 'deepseek-v4.1-flash', provider: 'deepseek' },
   { target: { agent: 'gpt-6-1-sol' }, model: 'gpt-6.1-sol', provider: 'chatgpt' },
@@ -515,4 +515,27 @@ test('the ticked models bound the ladder: an unticked rung model falls to the ne
   assert.deepEqual(ladderOptionsFrom(raw, 0).choices.map(c => c.target.agent + (c.target.model ? ':' + c.target.model : '')), ['gpt-6-1-sol', 'gpt-6-astra', 'general-purpose:haiku', 'general-purpose:sonnet', 'general-purpose:opus', 'general-purpose:fable'])
   assert.deepEqual(ladderOptionsFrom(raw, 0, ['gpt-6-astra', 'general-purpose:opus']).choices.map(c => c.target.agent + (c.target.model ? ':' + c.target.model : '')), ['gpt-6-astra', 'general-purpose:opus'])
   assert.equal(Object.hasOwn(ladderOptionsFrom(raw, 0), 'presets'), false)
+})
+
+test("an agent definition the user wrote names its model for the task title", () => {
+  // Hand-written definitions are not in generated-agents.json; their `model:` is still what
+  // Claude Code starts the agent on, so the title reads it from the same files Claude Code does.
+  assert.deepEqual(agentFilePaths('gpt-worker', '/home/u/.claude', '/work/app'), ['/work/app/.claude/agents/gpt-worker.md', '/home/u/.claude/agents/gpt-worker.md'])
+  assert.deepEqual(agentFilePaths('gpt-worker', 'C:\\Users\\u\\.claude', 'E:\\app\\'), ['E:\\app/.claude/agents/gpt-worker.md', 'C:\\Users\\u\\.claude/agents/gpt-worker.md'])
+  assert.deepEqual(agentFilePaths('gpt-worker', '/home/u/.claude'), ['/home/u/.claude/agents/gpt-worker.md'])
+  // A plugin's agent and a path are not files in those folders.
+  assert.deepEqual(agentFilePaths('my-plugin:reviewer', '/home/u/.claude', '/work/app'), [])
+  assert.deepEqual(agentFilePaths('../secrets', '/home/u/.claude', '/work/app'), [])
+
+  const file = (model: string, eol = '\n') => ['---', 'name: gpt-worker', 'description: >-', '  A backend labourer.', `model: ${model}`, 'tools: Read, Edit', '---', 'Do the work.'].join(eol)
+  assert.equal(definedModel(file('gpt-6.1-sol@high')), 'gpt-6.1-sol@high')
+  // Windows editors write CRLF, and YAML allows the value quoted.
+  assert.equal(definedModel(file('gpt-6.1-sol@high', '\r\n')), 'gpt-6.1-sol@high')
+  assert.equal(definedModel(file('"gpt-6.1-sol@high"')), 'gpt-6.1-sol@high')
+  assert.equal(agentModel(file("'opus'", '\r\n')), 'opus')
+  // `inherit` runs on the parent's model, and a definition without the line does too.
+  assert.equal(definedModel(file('inherit')), undefined)
+  assert.equal(definedModel(['---', 'name: reviewer', 'description: Reviews.', '---', 'Review.'].join('\n')), undefined)
+  // A `model:` in the body is not the definition's.
+  assert.equal(definedModel(['---', 'name: reviewer', '---', 'model: gpt-6.1-sol'].join('\n')), undefined)
 })

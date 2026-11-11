@@ -9,7 +9,7 @@ import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, jevEffortRequest, jevFailure, jevUsage, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, shouldJudge } from './judge'
 import { AUTO_DESCRIPTION, NATIVE_AGENTS, TIER_MARKERS, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderFallbackModels, ladderPick, liveProviders, markerDomain, modelReason, readMarker, routerModelOptions, resolveClaudeModel, ruleReason, spawnModel, spawnTitle, titleName, takesOver, tierOf, userSaid, withoutReason, withoutRouting, workerRule, zenJev } from './workers'
-import { MARKER, agentModel, delegationPin as parseDelegationPin, fixSpawn, humanText, pinInstruction, pinSaid } from './worker'
+import { MARKER, agentFilePaths, agentModel, definedModel, delegationPin as parseDelegationPin, fixSpawn, humanText, pinInstruction, pinSaid } from './worker'
 import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom, modeKey, modeOver, quotaWindows, resetProvider, routingSettings } from './modes'
 import type { QuotaWindow } from './modes'
 import type { Spawn, WorkerFix } from './worker'
@@ -647,6 +647,22 @@ async function workerFiles($: EngineInterface): Promise<Map<string, string>> {
     if (file && agentModel(file)) files.set(name, file)
   }
   return files
+}
+/**
+ * The model an agent definition the user wrote starts its agent on. generated-agents.json lists
+ * only the workers ClaudeRipple writes, so a hand-written worker for a routed model
+ * (`model: gpt-6.1-sol@high` in `~/.claude/agents/my-worker.md`) had its task titled with the
+ * parent's model while the router sent it to the model in its file (2026-11-10). The first
+ * definition that exists decides, as in Claude Code: a project's overrides the user's.
+ */
+async function definitionModel($: EngineInterface, subagentType: string): Promise<string | undefined> {
+  const cwd = await $.session.cwd().catch(() => undefined)
+  for (const path of agentFilePaths(subagentType, await claudeHome($), cwd)) {
+    if (!await $.fs.exists(path).catch(() => false)) continue
+    const file = await optionalFile($, path)
+    return file ? definedModel(file) : undefined
+  }
+  return undefined
 }
 /**
  * The provider a started agent runs on, for its card's dot: its worker file's (`via <provider>.`),
@@ -2456,10 +2472,11 @@ export const register: Register = on => {
       if (ours) return { deny: t(language, 'toasts.error', { reason: reason(error) }) }
     }
     try {
-      // The title names what really runs: the model set above, else the worker file's, else the parent's.
+      // The title names what really runs: the model set above, else the worker file's, else the one
+      // the agent's own definition asks for, else the parent's.
       if (!e.fork && !('workflow' in e && e.workflow) && !NATIVE_AGENTS.includes(e.subagentType) && input.description?.trim()) {
         const file = (await workerFiles($)).get(input.subagentType)
-        const model = input.model ?? (file ? agentModel(file) : undefined) ?? e.parentModel
+        const model = input.model ?? (file ? agentModel(file) : undefined) ?? await definitionModel($, input.subagentType) ?? e.parentModel
         const effort = chosen?.effort ?? /@([a-z]+)$/.exec(model)?.[1]
         input = { ...input, description: spawnTitle(input.description, model, effort, await read($, routerModels)) }
       }
