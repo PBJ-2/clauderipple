@@ -7,6 +7,7 @@ import type { PushAvail } from "./pushstate.ts";
 import { clock, duration, esc, folderName, icon, relTime, shortPath, toolIcon } from "./dom.ts";
 import { t, lang, reasonLine } from "./i18n.ts";
 import { activitySummary } from "../src/tool-details.ts";
+import { workerModelLabel } from "./worker-label.ts";
 import { activityOverview, activityStateKey } from "./activity.ts";
 import { emptyQuestionDraft, questionAnswers, questionsComplete, type QuestionDraft } from "./question-answers.ts";
 import type { Key } from "./i18n.ts";
@@ -314,7 +315,7 @@ export function band(ui: UI, view: SessionView): string {
   if (ui.workersOpen) {
     const list = f?.workers ?? [];
     const rows = list.length
-      ? list.map((w) => `<div class="w"><span>${esc(w.model)}</span><span>${esc(t("band.workerLine", { n: w.requests }))}</span></div>`).join("")
+      ? list.map((w) => `<div class="w"><span>${esc(workerModelLabel(w.model) ?? w.model)}</span><span>${esc(t("band.workerLine", { n: w.requests }))}</span></div>`).join("")
       : `<div class="none">${esc(t("band.workersNone"))}</div>`;
     const foot = [f?.fiveHourResetAt ? t("band.resetsAt", { time: clock(f.fiveHourResetAt) }) : "", f ? t("band.updated", { time: clock(f.at) }) : ""].filter(Boolean).join(" · ");
     workers = `<div class="workers"><div class="k" style="font-size:12px;color:var(--muted);font-weight:600;margin-bottom:4px">${esc(t("band.workers"))}</div>${rows}${foot ? `<div class="foot">${esc(foot)}</div>` : ""}</div>`;
@@ -380,7 +381,7 @@ export function item(it: TimelineItem, ui: UI): string {
     }
     case "subagent": {
       const st = t(`sub.${it.status}`);
-      return `<button class="sub" data-act="sub" data-id="${esc(it.sub)}">${stateRing(it.status === "running" ? "running" : it.status === "done" ? "idle" : it.status === "stopped" ? "stopped" : "error", 28)}<div class="body"><div class="k">${esc(t("sub.worker"))}${it.model ? `<span class="model">${esc(it.model)}</span>` : ""}<span>· ${esc(st)} · ${esc(t("sub.steps", { n: it.steps }))}</span></div><div class="d">${esc(it.description)}</div></div>${icon.chevron(18)}</button>`;
+      return `<button class="sub" data-act="sub" data-id="${esc(it.sub)}">${stateRing(it.status === "running" ? "running" : it.status === "done" ? "idle" : it.status === "stopped" ? "stopped" : "error", 28)}<div class="body"><div class="k">${esc(t("sub.worker"))}${it.model ? `<span class="model">${esc(it.modelLabel ?? workerModelLabel(it.model) ?? it.model)}</span>` : ""}<span>· ${esc(st)} · ${esc(t("sub.steps", { n: it.steps }))}</span></div><div class="d">${esc(it.description)}</div></div>${icon.chevron(18)}</button>`;
     }
     case "permission": {
       if (it.decision === null) return `<div class="perm-done open">${icon.shield(16)}<span class="nm">${esc(it.tool)}</span><span class="sm">${esc(it.summary)}</span><span>${esc(t("state.waiting"))}</span></div>`;
@@ -463,7 +464,7 @@ export function tasks(ui: UI, s: SessionSummary | undefined, open: boolean, item
   const note = !s?.backgroundKnown ? `<div class="foot">${esc(t("tasks.visibility"))}</div>` : "";
   const rows = open ? `<div class="tasks-list">${[...active, ...recent].map(task => {
     const state = t(activityStateKey(task));
-    return `<button class="tool" data-act="task-read" data-id="${esc(task.sub ?? task.id)}"${task.sub ? ` data-sub="${esc(task.sub)}"` : ""}><span class="nm">${esc([t(`tasks.kind.${task.kind}`), task.model, state].filter(Boolean).join(" · "))}</span><span style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(task.label)}${task.command && task.command !== task.label ? `<br>${esc(task.command)}` : ""}${task.schedule ? `<br>${esc(task.schedule)}` : ""}${task.nextAt === undefined ? "" : `<br>${esc(clock(task.nextAt))}`}</span></button>`;
+    return `<button class="tool" data-act="task-read" data-id="${esc(task.sub ?? task.id)}"${task.sub ? ` data-sub="${esc(task.sub)}"` : ""}><span class="nm">${esc([t(`tasks.kind.${task.kind}`), task.modelLabel ?? workerModelLabel(task.model), state].filter(Boolean).join(" · "))}</span><span style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(task.label)}${task.command && task.command !== task.label ? `<br>${esc(task.command)}` : ""}${task.schedule ? `<br>${esc(task.schedule)}` : ""}${task.nextAt === undefined ? "" : `<br>${esc(clock(task.nextAt))}`}</span></button>`;
   }).join("")}${note}${s?.activityAt == null ? "" : `<div class="foot">${esc(t("band.updated", { time: clock(s.activityAt) }))}</div>`}</div>` : "";
   const chip = `${esc(t("tasks.summary", counts))}${unread ? ` · ${esc(t("tasks.unread", { n: unread }))}` : ""}${!s?.backgroundKnown ? ` · ${esc(t("tasks.unknown"))}` : ""}`;
   return `${rows}<button class="tasks-chip${unread ? " bad" : ""}" data-act="toggle-tasks" aria-expanded="${open}">${chip}${open ? icon.down(14) : icon.chevron(14)}</button>`;
@@ -555,7 +556,7 @@ export function sheet(ui: UI): string {
   if (s.kind === "diff") return diffSheet(ui, s);
   if (s.kind === "worker") {
     const worker = s.worker;
-    const facts = [worker.model, t(`sub.${worker.status}`), t("sub.steps", { n: worker.steps })].filter(Boolean).join(" · ");
+    const facts = [worker.modelLabel ?? workerModelLabel(worker.model), t(`sub.${worker.status}`), t("sub.steps", { n: worker.steps })].filter(Boolean).join(" · ");
     const back = s.depth > 1 ? `<button class="icon-btn" data-act="worker-back" aria-label="${esc(t("a11y.back"))}">${icon.back(20)}</button>` : "";
     const body = s.items.map(child => item(child, { ...ui, expanded: s.expanded })).join("");
     const error = s.error ? `<div class="foot bad" role="alert">${esc(s.error)}</div><button class="btn ghost" data-act="worker-retry">${esc(t("conn.retryNow"))}</button>` : "";

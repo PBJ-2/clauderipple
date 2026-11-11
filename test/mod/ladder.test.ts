@@ -233,6 +233,18 @@ test('spawn titles name the model that runs, replacing a guessed prefix', async 
   assert.equal(titleName('deepseek-ai/deepseek-v4.1-flash-1017@high'), 'deepseek-v4.1-flash-1017')
   assert.equal(spawnTitle('Opus5.5·high · Fix routing', 'gpt-6.1-sol@medium', 'medium', models), 'Sol·medium · Fix routing')
   assert.equal(spawnTitle('Fix routing', 'claude-opus-5-5', undefined), 'Opus5.5 · Fix routing')
+  // A pinned worker names its model after the pin and its account by the dashboard's name, never the id.
+  const { bareTitle, pinnedAccountName } = await import('../../packages/mod/hooks/workers.ts')
+  assert.equal(titleName('anthropic#f952fac6:claude-haiku-5-5@high'), 'Haiku5.5')
+  const file = '---\nname: claude-haiku-5-5-f952fac6\ndescription: claude-haiku-5-5 via anthropic. Runs on mambo20211 (account f952fac6). Set effort.\nmodel: anthropic#f952fac6:claude-haiku-5-5@high\n---\nBody'
+  assert.equal(pinnedAccountName('anthropic#f952fac6:claude-haiku-5-5@high', [file]), 'mambo20211')
+  assert.equal(pinnedAccountName('anthropic#deadbeef:claude-haiku-5-5', [file]), undefined)
+  assert.equal(pinnedAccountName('claude-haiku-5-5', [file]), undefined)
+  const pinnedTitle = spawnTitle('Fix routing', 'anthropic#f952fac6:claude-haiku-5-5@high', 'high', [], 'mambo20211')
+  assert.equal(pinnedTitle, 'Haiku5.5·mambo20211·high · Fix routing')
+  assert.equal(bareTitle(pinnedTitle), 'Fix routing', 'the next spawn replaces it, not stacks')
+  assert.equal(bareTitle('Haiku5.5·Work-account · Fix routing'), 'Fix routing')
+  assert.equal(spawnTitle('Fix routing', 'anthropic#f952fac6:claude-haiku-5-5', undefined, [], 'Work account'), 'Haiku5.5·Work-account · Fix routing')
 })
 
 test('fill gives empty lists one ticked model, preserving existing ordered lists even when unticked', () => {

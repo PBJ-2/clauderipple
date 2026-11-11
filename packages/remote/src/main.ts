@@ -31,6 +31,7 @@ import type { WsLike } from "./relay.ts";
 import { DesktopProblemAlert, RelayWatch } from "./watch.ts";
 import { OUTAGE_COPY, WATCH_TTL_S, recoveredBody } from "./protocol.ts";
 import { RouterClient } from "./router.ts";
+import { keepWorkerAccountsFresh } from "./worker-labels.ts";
 import { HostServer } from "./server.ts";
 import { LocalControl } from "./local-control.ts";
 import { findClaude, specFor, cliLoginWarning } from "./service.ts";
@@ -134,6 +135,7 @@ async function runHost(): Promise<void> {
   const cfg = configFromArgs(dir);
   const where = resolveBind(cfg.bind);
   const router = new RouterClient(cfg.adminUrl);
+  keepWorkerAccountsFresh(() => router.workerAccounts(), log);
   const permissions = PermissionQueue.deferred(path.join(dir, "permissions.json"));
   let server: HostServer | null = null;
   const claudePath = findClaude(cfg.claudePath);

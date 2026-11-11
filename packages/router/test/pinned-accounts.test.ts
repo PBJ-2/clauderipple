@@ -78,7 +78,7 @@ test("a pinned worker is generated for every stored account of every kind, and r
     // The mod finds a worker's provider in "via <provider>."; without it naming one ran the ladder.
     assert.equal(modAgentProvider(file), model.split("#")[0], `${name}: the mod reads its provider`);
   }
-  assert.match(fs.readFileSync(path.join(dir, `claude-opus-5-5-${claude.id.slice(0, 8)}.md`), "utf8"), /Start the Agent description with "5\.5 · mambo · "/, "the label shows in prose even though it is not in the name");
+  assert.match(fs.readFileSync(path.join(dir, `claude-opus-5-5-${claude.id.slice(0, 8)}.md`), "utf8"), /Start the Agent description with "5\.5·mambo · "/, "the label shows in prose even though it is not in the name");
   assert.match(fs.readFileSync(path.join(dir, `gpt-6-1-sol-${chatgpt.id.slice(0, 8)}.md`), "utf8"), /Runs on gpt-work \(account /, "the description names the account, not a Claude-only word");
   assert.deepEqual(generatedAgents(cfg, dir, manifest, undefined, accountsFor).map((agent) => [agent.name, agent.model, agent.provider, agent.account]), [
     ["claude-opus-5-5", "claude-opus-5-5", "anthropic", undefined],

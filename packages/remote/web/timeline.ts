@@ -30,7 +30,7 @@ export type Item =
   | { type: "control"; key: string; ver: string; command: ControlCommand; state: "running" | "done" | "failed"; at: number }
   | { type: "assistant"; key: string; ver: string; text: Text; images?: ImagePart[]; files?: SessionFile[]; streaming: boolean; tools: ToolView[]; model: string; at: number }
   | { type: "thinking"; key: string; ver: string; text: Text; streaming: boolean; msg: string; at: number }
-  | { type: "subagent"; key: string; ver: string; toolUseId: string; sub: string; description: string; model: string | null; /** the effort the worker ran at, when its record says so */ effort?: string; status: "running" | "done" | "failed" | "stopped"; steps: number }
+  | { type: "subagent"; key: string; ver: string; toolUseId: string; sub: string; description: string; model: string | null; /** what to show for `model`; see SessionEvent subagent */ modelLabel?: string; /** the effort the worker ran at, when its record says so */ effort?: string; status: "running" | "done" | "failed" | "stopped"; steps: number }
   | (PermissionContent & { type: "permission"; key: string; ver: string; id: string; tool: string; title: string; summary: string; input: Text; canAlways: boolean; decision: null | "allow" | "allow_always" | "deny" | "expired"; ruleStatus?: RuleStatus; reason?: string; at: number })
   | { type: "result"; key: string; ver: string; ok: boolean; error?: string; ms: number; model: string; effort: Effort | null; /** which finished turn this is, when the conversation's first page is loaded; absent otherwise */ turn?: number }
   | { type: "notice"; key: string; ver: string; code: string; text?: string }
@@ -167,7 +167,7 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
         // A later event that does not name the effort keeps the one already recorded for this worker.
         const previous = byKey.has(`s${e.toolUseId}`) ? items[byKey.get(`s${e.toolUseId}`)!] : undefined;
         const effort = e.effort ?? (previous?.type === "subagent" ? previous.effort : undefined);
-        put({ type: "subagent", key: `s${e.toolUseId}`, ver: `${e.seq}`, toolUseId: e.toolUseId, sub: e.sub, description: e.description, model: e.model, ...(effort ? { effort } : {}), status: e.status, steps: e.steps });
+        put({ type: "subagent", key: `s${e.toolUseId}`, ver: `${e.seq}`, toolUseId: e.toolUseId, sub: e.sub, description: e.description, model: e.model, ...(e.modelLabel ? { modelLabel: e.modelLabel } : {}), ...(effort ? { effort } : {}), status: e.status, steps: e.steps });
         break;
       }
       case "permission":

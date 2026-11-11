@@ -121,7 +121,8 @@ export class BackgroundActivity {
       const old = [...this.entries.values()].find(task => task.sub === event.sub);
       const model = event.model ?? old?.model;
       const effort = event.effort ?? old?.effort;
-      this.put({ id: old?.id ?? event.toolUseId, kind: "agent", label: event.description, startedAt: old?.startedAt ?? at, sub: event.sub, state: event.status, ...(model ? { model } : {}), ...(effort ? { effort } : {}) });
+      const modelLabel = event.modelLabel ?? old?.modelLabel;
+      this.put({ id: old?.id ?? event.toolUseId, kind: "agent", label: event.description, startedAt: old?.startedAt ?? at, sub: event.sub, state: event.status, ...(model ? { model } : {}), ...(modelLabel ? { modelLabel } : {}), ...(effort ? { effort } : {}) });
     }
     if (event.kind === "background") {
       for (const task of event.tasks) this.put(task);

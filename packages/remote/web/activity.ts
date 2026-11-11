@@ -23,7 +23,8 @@ export function activityOverview(items: readonly TimelineItem[], background: rea
     const previous = tasks.get(worker.sub);
     const model = worker.model ?? previous?.model;
     const effort = worker.effort ?? previous?.effort;
-    tasks.set(worker.sub, { ...previous, id: previous?.id ?? worker.toolUseId, sub: worker.sub, kind: "agent", label: worker.description, startedAt: previous?.startedAt ?? null, state: worker.status === "running" && previous?.state && previous.state !== "running" ? previous.state : worker.status, ...(model ? { model } : {}), ...(effort ? { effort } : {}) });
+    const modelLabel = worker.modelLabel ?? previous?.modelLabel;
+    tasks.set(worker.sub, { ...previous, id: previous?.id ?? worker.toolUseId, sub: worker.sub, kind: "agent", label: worker.description, startedAt: previous?.startedAt ?? null, state: worker.status === "running" && previous?.state && previous.state !== "running" ? previous.state : worker.status, ...(model ? { model } : {}), ...(modelLabel ? { modelLabel } : {}), ...(effort ? { effort } : {}) });
   }
   const all = [...tasks.values()];
   const active = all.filter(task => !task.state || task.state === "running" || task.state === "unknown");

@@ -493,11 +493,11 @@ test("(p1) each stored Claude account gets a pinned worker per model, named and 
   assert.match(file, /\nname: claude-opus-5-5-3f2a9c1b\n/, "the file name is the stable id prefix, not the label");
   assert.match(file, /\nmodel: anthropic#3f2a9c1b:claude-opus-5-5\n/, "the pin is the account's stable id prefix");
   assert.match(file, /Runs on mambo20211 \(account 3f2a9c1b\)/, "the description says which account");
-  assert.match(file, /Start the Agent description with "5\.5 · mambo20211 · "/, "the account label still joins the title");
+  assert.match(file, /Start the Agent description with "5\.5·mambo20211 · "/, "the account label still joins the title, in the form the mod reads back");
   assert.deepEqual(JSON.parse(fs.readFileSync(manifest, "utf8")).agents, ["claude-opus-5-5", "claude-opus-5-5-3f2a9c1b"]);
   assert.deepEqual(generatedAgents(cfg, dir, manifest, undefined, () => accounts), [
     { name: "claude-opus-5-5", model: "claude-opus-5-5", provider: "anthropic" },
-    { name: "claude-opus-5-5-3f2a9c1b", model: "claude-opus-5-5", provider: "anthropic", account: "mambo20211" },
+    { name: "claude-opus-5-5-3f2a9c1b", model: "claude-opus-5-5", provider: "anthropic", account: "mambo20211", accountPin: "3f2a9c1b" },
   ]);
 });
 
@@ -570,7 +570,7 @@ test("(p4) a relabel, or removing an account that shares its label, never rename
   assert.equal(fs.existsSync(path.join(dirA, "claude-opus-5-5-mambo20211.md")), false, "no second worker appears under the label");
   const relabelled = fs.readFileSync(fileA, "utf8");
   assert.match(relabelled, /Runs on mambo20211 \(account aaaaaaaa\)/, "the description follows the label");
-  assert.match(relabelled, /Start the Agent description with "claude-opus-5-5 · mambo20211 · "/, "the title prefix follows the label");
+  assert.match(relabelled, /Start the Agent description with "claude-opus-5-5·mambo20211 · "/, "the title prefix follows the label");
 
   // Dir B: two accounts sharing a label. Removing one leaves the survivor byte-identical.
   const dirB = tmp(); t.after(() => fs.rmSync(dirB, { recursive: true, force: true }));

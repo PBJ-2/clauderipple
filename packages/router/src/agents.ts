@@ -309,7 +309,7 @@ function pinnedTargets(
       taken.add(pinnedName);
       out.set(pinnedName, {
         modelId: `${target.provider}#${pin}:${model}`,
-        title: `${target.title} · ${display}`,
+        title: pinnedTitle(target.title, display),
         provider: target.provider,
         suffix: target.suffix,
         legacy: pinnedName,
@@ -421,6 +421,15 @@ function titlePrefix(title: string, suffix: string): string {
 }
 
 /**
+ * A pinned worker's title tag: the model's short name, then the account's display name with its
+ * spaces closed up ("Work account" → "Work-account"), the form the mod's title prefix reads back
+ * (workers.ts TITLE_PREFIX). The mod writes the same tag itself; this is the parent's hint.
+ */
+function pinnedTitle(title: string, display: string): string {
+  return `${title}·${display.replace(/\s+/g, "-")}`;
+}
+
+/**
  * What marks a file as this router's: a YAML comment in its frontmatter. The note is for a person
  * opening the file; in the description the main chat read it in every request's agent list, eight
  * workers' worth (2026-10-24).
@@ -505,7 +514,7 @@ export function removeGeneratedAgentFiles(dir: string, manifestPath: string, sha
 }
 
 /** `account` is the stored Claude account a pinned worker runs on, shown beside its model. */
-export type GeneratedAgent = { name: string; model: string; provider: string; account?: string };
+export type GeneratedAgent = { name: string; model: string; provider: string; account?: string; accountPin?: string };
 
 /** Owned files that still exist and name a configured worker, not hand-written agents. */
 export function generatedAgents(cfg: Config, dir = defaultAgentDir(), manifestPath = path.join(homeDir(), "generated-agents.json"), log?: AgentLog, accountsFor: AccountsFor = () => []): GeneratedAgent[] {
@@ -526,7 +535,7 @@ export function generatedAgents(cfg: Config, dir = defaultAgentDir(), manifestPa
       name: entry.name,
       model: qualifiedModel(model, cfg)?.model ?? model,
       provider,
-      ...(display ? { account: display } : {}),
+      ...(display ? { account: display, accountPin: pinned!.accountPin } : {}),
     });
   }
   return result.sort((a, b) => a.name.localeCompare(b.name));

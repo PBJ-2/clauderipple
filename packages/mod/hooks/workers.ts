@@ -305,7 +305,7 @@ export function spawnModel(target: TierTarget, effort: Effort, fileModel?: strin
   return resolveClaudeModel(fileModel && target.agent !== 'general-purpose' ? `${baseModel(fileModel)}@${effort}` : target.model)
 }
 /** A prefix this mod (or the retired agent-title hook) put on a title: "Sol·high · ". */
-const TITLE_PREFIX = /^[^\s·]+(?:·[a-z]+)? · /
+const TITLE_PREFIX = /^[^\s·]+(?:·[^\s·]+){0,2} · /
 
 /**
  * The model a title names: a Claude id or alias as its family and version ("Opus5.5"), a routed id
@@ -313,7 +313,8 @@ const TITLE_PREFIX = /^[^\s·]+(?:·[a-z]+)? · /
  * the id.
  */
 export function titleName(model: string, models: readonly RouterModel[] = []): string {
-  const id = baseModel(model).replace(/\[.*?\]/g, '')
+  // A pinned worker's id ("anthropic#f952fac6:claude-opus-5-5") names its model after the pin.
+  const id = baseModel(model).replace(PINNED_PREFIX, '').replace(/\[.*?\]/g, '')
   const claude = /^(?:claude-)?(opus|sonnet|haiku|fable|mythos)(?:-(\d+)(?:-(\d{1,2}))?)?/i.exec(id)
   if (claude) return claude[1]!.charAt(0).toUpperCase() + claude[1]!.slice(1).toLowerCase() + (claude[2] ? claude[2] + (claude[3] ? '.' + claude[3] : '') : '')
   // A hosted id's vendor path ("deepseek-ai/") is dropped: the title has room for the model only.
@@ -328,9 +329,35 @@ export function titleName(model: string, models: readonly RouterModel[] = []): s
  * The app names only Claude models, and for a routed one shows the parent's; the mod is the one
  * that knows, since it picks. A prefix already there (the parent's guess) is replaced.
  */
-export function spawnTitle(description: string, model: string, effort: string | undefined, models: readonly RouterModel[] = []): string {
-  const tag = titleName(model, models) + (effort ? '·' + effort : '')
+export function spawnTitle(description: string, model: string, effort: string | undefined, models: readonly RouterModel[] = [], account?: string): string {
+  const tag = titleName(model, models) + (account ? '·' + account.replace(/\s+/g, '-') : '') + (effort ? '·' + effort : '')
   return `${tag} · ${bareTitle(description)}`
+}
+
+/** The `<provider>#<account pin>:` a pinned worker's model id starts with. */
+const PINNED_PREFIX = /^[A-Za-z0-9._-]+#[A-Za-z0-9._-]+:/
+
+/** The account pin a worker's model id carries, if it is pinned. */
+export function modelPin(model: string): { provider: string; pin: string } | undefined {
+  const m = /^([A-Za-z0-9._-]+)#([A-Za-z0-9._-]+):/.exec(model)
+  return m ? { provider: m[1]!, pin: m[2]! } : undefined
+}
+
+/**
+ * The account display name a generated pinned worker's file states ("Runs on mambo20211 (account
+ * f952fac6)", agents.ts fileContent), found by the pin of a model id. Undefined for an unpinned
+ * model or a pin no worker file names: the title then names only the model, never the pin.
+ */
+export function pinnedAccountName(model: string, files: Iterable<string>): string | undefined {
+  const pin = modelPin(model)?.pin
+  if (!pin) return undefined
+  for (const file of files) {
+    const head = /^---\r?\n([\s\S]*?)\r?\n---/.exec(file)?.[1]
+    const description = head && /^description:\s*(.*)$/m.exec(head)?.[1]
+    const found = description && /\bRuns on (.+?) \(account ([A-Za-z0-9._-]+)\)/.exec(description)
+    if (found && found[2] === pin) return found[1]
+  }
+  return undefined
 }
 
 /** A title without the model tag spawnTitle put in front ("Sol·high · Port it" → "Port it"). */

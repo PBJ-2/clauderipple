@@ -88,3 +88,15 @@ for (const [name, files] of [['no definition', {}], ['a definition without a mod
     expect(sent[0]?.description).toBe('Opus5.5 · Port the parser')
   })
 }
+
+// A worker pinned to a stored account has a qualified model id (provider#pin:model). The task
+// title names the model and the account the dashboard shows, never the id or the pin.
+test("a pinned worker's title names its model and account, not its qualified id", async ($, on) => {
+  const pinned = ['---', 'name: claude-haiku-5-5-f952fac6', 'description: claude-haiku-5-5 via anthropic. Runs on mambo20211 (account f952fac6). Start it.', 'model: anthropic#f952fac6:claude-haiku-5-5@high', '---', 'Do the work.'].join('\n')
+  const { sent } = boundaries(on, {
+    '/home/test/.clauderipple/generated-agents.json': JSON.stringify({ agents: ['claude-haiku-5-5-f952fac6'] }),
+    '/home/test/.claude/agents/claude-haiku-5-5-f952fac6.md': pinned,
+  })
+  await $.agent.spawn({ ...SPAWN, subagentType: 'claude-haiku-5-5-f952fac6' })
+  expect(sent[0]?.description).toBe('Haiku5.5·mambo20211·high · Port the parser')
+})
