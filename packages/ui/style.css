@@ -1047,10 +1047,15 @@ a.cell { color: inherit; text-decoration: none; }
 .tick-group .model-check:has(input:not(:checked)) > span:first-of-type { color: var(--label-2); }
 /* A provider with pinned workers: its account tabs at the head's right, one account's models below.
    The lists share one cell, so the block is as tall as the longest and switching moves nothing. */
-.tick-head.has-tabs { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px 0 16px; }
+.tick-head.has-tabs { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; padding: 8px 10px 0 16px; }
 .tick-head.has-tabs > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.account-tabs { flex: 0 1 auto; }
-.account-tabs button { padding: 3px 12px; }
+/* A tab carries its account's name, so the row can outgrow the head: it then drops under the
+   provider's name, still at the right. A tab never shrinks, or two long names would be cut to the
+   same few letters; tabs wider than the card go onto further lines rather than scroll out of sight
+   (the list is redrawn on a pick, which would scroll it back), and only a name longer than a whole
+   address is cut. */
+.account-tabs { flex: 0 1 auto; flex-wrap: wrap; justify-content: flex-end; margin-left: auto; }
+.account-tabs button { flex: 0 0 auto; max-width: min(22em, 100%); padding: 3px 12px; overflow: hidden; text-overflow: ellipsis; }
 .account-panels { display: grid; }
 .account-panels > .model-checklist { grid-area: 1 / 1; align-content: start; }
 .account-panels > .account-hidden { visibility: hidden; }
