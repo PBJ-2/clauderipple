@@ -660,6 +660,7 @@ export class ChatGptAdapter {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), USAGE_TIMEOUT_MS);
     let res: Response;
+    let body: unknown;
     try {
       res = await fetch(`${(this.cfg.url ?? DEFAULT_BASE).replace(/\/$/, "")}${USAGE_PATH}`, {
         method: "GET",
@@ -671,6 +672,8 @@ export class ChatGptAdapter {
         },
         signal: ac.signal,
       });
+      // Headers do not finish the lookup: the same deadline must bound the JSON body too.
+      if (res.ok) body = await res.json().catch(() => null);
     } catch (e) {
       this.log.warn(`chatgpt ${this.name}: rate-limit fetch failed: ${(e as Error).message}`);
       return null;
@@ -687,7 +690,7 @@ export class ChatGptAdapter {
       this.log.warn(`chatgpt ${this.name}: rate-limit fetch HTTP ${res.status} (account ${tokens.ownerId.slice(0, 8)})`);
       return null;
     }
-    const parsed = rateLimitsFromUsage(await res.json().catch(() => null));
+    const parsed = rateLimitsFromUsage(body);
     if (!parsed) {
       this.log.warn(`chatgpt ${this.name}: rate-limit fetch returned no primary window`);
       return null;
@@ -735,6 +738,7 @@ export class ChatGptAdapter {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), MODELS_TIMEOUT_MS);
     let res: Response;
+    let body: unknown;
     try {
       res = await fetch(`${(this.cfg.url ?? DEFAULT_BASE).replace(/\/$/, "")}${MODELS_PATH}?client_version=${encodeURIComponent(version)}`, {
         method: "GET",
@@ -746,6 +750,8 @@ export class ChatGptAdapter {
         },
         signal: ac.signal,
       });
+      // Keep the original request deadline until the body has finished, not just its headers.
+      if (res.ok) body = await res.json().catch(() => null);
     } catch (e) {
       this.log.warn(`chatgpt ${this.name}: model-catalog fetch failed: ${(e as Error).message}`);
       return null;
@@ -758,7 +764,7 @@ export class ChatGptAdapter {
       this.log.warn(`chatgpt ${this.name}: model-catalog fetch HTTP ${res.status}`);
       return null;
     }
-    const models = parseCodexCatalog(await res.json().catch(() => null));
+    const models = parseCodexCatalog(body);
     if (models.length === 0) {
       this.log.warn(`chatgpt ${this.name}: model catalog returned no listed models`);
       return null;
