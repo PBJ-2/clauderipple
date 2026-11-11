@@ -1668,6 +1668,16 @@ function providerCannotSearch(name, model) {
 // The web search row names a provider as well as a model: one id can be offered by two providers
 // and only one of them may be able to run a search. JSON keeps the two apart whatever they contain.
 function webSearchChoice(provider, model) { return JSON.stringify([provider, model]); }
+
+// `webSearch` is a backend object, or the string "native": no backend, searches that no route
+// target can run go to Claude as sent. Only a Claude model id can be passed on that way (anything
+// else would 404 there), so the router still refuses a search for any other id.
+function webSearchBackendOf(config) {
+  return config && config.webSearch && typeof config.webSearch === "object" ? config.webSearch : null;
+}
+function webSearchPassesToClaude(config, modelId) {
+  return Boolean(config) && config.webSearch === "native" && /^claude-/.test(String(modelId || ""));
+}
 function parseWebSearchChoice(value) {
   if (!value) return null;
   try {
@@ -1682,12 +1692,14 @@ function renderModelSlots() {
   const chosen = (currentConfig.cli && currentConfig.cli.models) || {};
   // With a web search backend set, the search is intercepted before routing and never reaches
   // `smallFast`, so the "no web search here" label there would be false.
-  const searchIntercepted = Boolean(currentConfig.webSearch);
+  const searchBackend = webSearchBackendOf(currentConfig);
+  const searchIntercepted = Boolean(searchBackend);
   const groups = groupedModels(currentConfig);
   const key = JSON.stringify([
     MODEL_SLOTS.map((slot) => chosen[slot] || ""),
     searchIntercepted ? 1 : 0,
-    currentConfig.webSearch ? [currentConfig.webSearch.provider, currentConfig.webSearch.model] : null,
+    currentConfig.webSearch === "native" ? "native" : null,
+    searchBackend ? [searchBackend.provider, searchBackend.model] : null,
     groups.map((group) => [group.name, providerDisplayName(group.name, group.provider), group.models.map((model) => [
       model.id, labelOf(model), providerCannotSearch(group.name, model.id),
       Boolean(currentConfig.providers[group.name] && currentConfig.providers[group.name].type === "anthropic"),
@@ -1705,7 +1717,8 @@ function renderModelSlots() {
       // `smallFast` is what a WebSearch runs on, so an inability to search is fatal there and
       // merely worth knowing everywhere else.
       if (slot === "smallFast" && !searchIntercepted && providerCannotSearch(group.name, model.id)) {
-        option.textContent += ` — ${t("slots.noWebSearch")}`;
+        // With `webSearch: "native"` a Claude id's search is handed to Claude, so it does work.
+        option.textContent += ` — ${t(webSearchPassesToClaude(currentConfig, model.id) ? "slots.webSearchNativeTag" : "slots.noWebSearch")}`;
       }
       select.appendChild(option);
     }
@@ -1729,9 +1742,15 @@ function renderModelSlots() {
 // router knows which models it can actually search with — that comes from `/api/status`, never
 // from a model's name — so an unsearchable model is not offered here at all.
 function renderWebSearchSlot() {
-  const saved = currentConfig.webSearch || null;
+  const saved = webSearchBackendOf(currentConfig);
   const select = el("select", {});
   select.appendChild(el("option", { value: "", text: t("slots.webSearchFollow") }));
+  // `"native"` set in the config file must not read as "follows the small, fast model": say what it does.
+  if (currentConfig.webSearch === "native") {
+    const native = el("option", { value: "native", text: t("slots.webSearchNative") });
+    native.selected = true;
+    select.appendChild(native);
+  }
   let found = false;
   for (const group of groupedModels(currentConfig)) for (const model of group.models) {
     if (providerCannotSearch(group.name, model.id)) continue;
@@ -1749,7 +1768,8 @@ function renderWebSearchSlot() {
     orphan.selected = true;
     select.appendChild(orphan);
   }
-  select.onchange = () => void saveWebSearch(select.value);
+  // Re-picking the shown "native" entry is no change; only a different choice rewrites the setting.
+  select.onchange = () => { if (select.value !== "native") void saveWebSearch(select.value); };
   select.dataset.webSearch = "true";
   select.setAttribute("aria-label", t("slots.webSearch"));
   return cell(t("slots.webSearch"), select, t("slots.webSearchHelp"), "slot-row");
@@ -1760,7 +1780,7 @@ async function saveWebSearch(value) {
   const next = clone(await latestConfig());
   const picked = parseWebSearchChoice(value);
   // `webSearch` is the only setting this row owns; an existing `maxResults` survives the change.
-  const maxResults = (next.webSearch && next.webSearch.maxResults) ?? (currentConfig.webSearch && currentConfig.webSearch.maxResults);
+  const maxResults = (webSearchBackendOf(next) || {}).maxResults ?? (webSearchBackendOf(currentConfig) || {}).maxResults;
   if (picked) next.webSearch = { provider: picked.provider, model: picked.model, ...(maxResults !== undefined ? { maxResults } : {}) };
   else delete next.webSearch;
   try {
@@ -1789,7 +1809,7 @@ async function saveModelSlots() {
     // a session that already had it selected. With a web search backend set the search never
     // reaches `smallFast`, so there is nothing to warn about.
     const savedModels = next.cli.models;
-    const owners = savedModels.smallFast && !next.webSearch ? providersOffering(next, savedModels.smallFast) : [];
+    const owners = savedModels.smallFast && !webSearchBackendOf(next) && !webSearchPassesToClaude(next, savedModels.smallFast) ? providersOffering(next, savedModels.smallFast) : [];
     const warning = owners.length && providerCannotSearch(owners[0], savedModels.smallFast) ? t("slots.noWebSearchWarn") : undefined;
     configSaved(out, t("slots.slotSaved"), warning);
   } catch (error) { toast(t("common.saveFailed"), true, error.message); }

@@ -449,6 +449,31 @@ export type CliModel = {
   contextWindow?: number;
 };
 
+/** A provider and model whose hosted search answers a `WebSearch` (`Config.webSearch`). */
+export interface WebSearchBackend {
+  /**
+   * A key of `providers`. The backend follows how that provider is spoken to: an
+   * `anthropic-compatible` one is handed Anthropic's `web_search` server tool (only where its
+   * preset or caps measured support), an `openai-compatible` one is asked through its Chat
+   * Completions web plugin, and a `chatgpt` provider uses its own hosted search.
+   */
+  provider: string;
+  /** The model that runs the search. Its hosted search does the work, so a small one is enough. */
+  model: string;
+  maxResults?: number;
+}
+
+/** The search backend `webSearch` names, or undefined when it is absent or `"native"`. */
+export function webSearchBackend(cfg: Pick<Config, "webSearch">): WebSearchBackend | undefined {
+  const setting = cfg.webSearch;
+  return setting && typeof setting === "object" ? setting : undefined;
+}
+
+/** Whether `webSearch` is `"native"`: a search no route target can run goes to Anthropic as sent. */
+export function webSearchNative(cfg: Pick<Config, "webSearch">): boolean {
+  return cfg.webSearch === "native";
+}
+
 export type Config = {
   /** Install new versions while idle. Omitted means enabled; hot-reloaded. */
   autoUpdate?: boolean;
@@ -516,19 +541,13 @@ export type Config = {
    * model, so by default it costs Claude quota whatever the session is routed to — a routed setup
    * that still cannot search without a Claude subscription. Set this and the named provider's own
    * hosted search answers instead. Absent, nothing is intercepted and the search behaves as before.
+   *
+   * `"native"` names no backend. It only changes what happens to a search whose route target runs
+   * no server tools (an `openai-compatible` slot, say): instead of being refused it is passed to
+   * Anthropic unchanged, on the app's own login, so one slot can route its other requests away and
+   * still search. Read the setting through `webSearchBackend` / `webSearchNative`, not as an object.
    */
-  webSearch?: {
-    /**
-     * A key of `providers`. The backend follows how that provider is spoken to: an
-     * `anthropic-compatible` one is handed Anthropic's `web_search` server tool (only where its
-     * preset or caps measured support), an `openai-compatible` one is asked through its Chat
-     * Completions web plugin, and a `chatgpt` provider uses its own hosted search.
-     */
-    provider: string;
-    /** The model that runs the search. Its hosted search does the work, so a small one is enough. */
-    model: string;
-    maxResults?: number;
-  };
+  webSearch?: WebSearchBackend | "native";
   health: {
     /** Consecutive upstream connect/DNS failures before the process exits for the supervisor to restart it. */
     maxConsecutiveUpstreamFailures: number;
@@ -797,7 +816,7 @@ function foldSplitProviders(c: Config): Config {
   return {
     ...c,
     providers,
-    ...(c.webSearch !== undefined ? { webSearch: renamedTarget(c.webSearch) } : {}),
+    ...(c.webSearch !== undefined ? { webSearch: c.webSearch === "native" ? c.webSearch : renamedTarget(c.webSearch) } : {}),
     ...(classifier && typeof classifier === "object" && !Array.isArray(classifier) ? {
       autoModeClassifier: {
         ...renamedTarget(classifier),
@@ -844,10 +863,10 @@ export function validate(c: Config): string[] {
       if (!routesRest && !routesStage1) errors.push("autoModeClassifier names no target");
     }
   }
-  if (c.webSearch !== undefined) {
+  if (c.webSearch !== undefined && c.webSearch !== "native") {
     // Hand-edited config.json reaches here as whatever JSON held, not the declared type.
     const target = c.webSearch as { provider?: unknown; model?: unknown; maxResults?: unknown } | null;
-    if (!target || typeof target !== "object" || Array.isArray(target)) errors.push("webSearch must be an object");
+    if (!target || typeof target !== "object" || Array.isArray(target)) errors.push('webSearch must be an object or "native"');
     else {
       if (typeof target.provider !== "string" || !target.provider.trim()) errors.push("webSearch: missing provider");
       else if (!c.providers[target.provider]) errors.push(`webSearch: unknown provider "${target.provider}"`);

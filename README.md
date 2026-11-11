@@ -545,6 +545,19 @@ same ChatGPT provider as the search backend in `config.json`:
 This is opt-in. With no `webSearch` setting, Claude Code's existing search path
 is unchanged.
 
+When a slot is routed to a provider that cannot run server tools (an
+`openai-compatible` one, for example) and no search backend is set, its searches
+are refused rather than answered with invented results. To let only those
+searches go to Anthropic while the slot's other requests stay routed, set:
+
+```jsonc
+{ "webSearch": "native" }
+```
+
+The search is then sent unchanged, with its original Claude model id, on the
+app's own login. A search for a model id that does not start with `claude-` is
+still refused. `webSearch` takes either a backend object or `"native"`, not both.
+
 ### Remote (SSH) sessions
 
 Claude Desktop's Code tab can run a session on a remote Linux host over SSH.

@@ -9,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import tls from "node:tls";
 import { CertStore } from "../src/certs.ts";
-import { DEFAULTS, type Config } from "../src/config.ts";
+import { DEFAULTS, webSearchBackend, type Config } from "../src/config.ts";
 import { UpstreamHealth } from "../src/health.ts";
 import { Logger } from "../src/log.ts";
 import { Proxy } from "../src/proxy.ts";
@@ -118,7 +118,7 @@ for (const wire of ["chatgpt", "chat", "responses", "compatible"] as const) {
       assert.equal(r.native.length, 0);
       assert.equal(r.seen.length, 1);
       const { body, headers, url } = r.seen[0]!;
-      assert.equal(body.model, r.cfg.webSearch!.model);
+      assert.equal(body.model, webSearchBackend(r.cfg)!.model);
       assert.notEqual(headers.authorization, "Bearer original-auth", "routed auth, not caller auth");
       if (wire === "chatgpt" || wire === "responses") {
         assert.ok(Array.isArray(body.input), "ordinary Responses translation");
@@ -129,7 +129,7 @@ for (const wire of ["chatgpt", "chat", "responses", "compatible"] as const) {
       assert.equal(record.purpose, "web-fetch");
       assert.equal(record.provider, "web");
       assert.equal(record.source, "claude-haiku-5-5");
-      assert.equal(record.target, r.cfg.webSearch!.model);
+      assert.equal(record.target, webSearchBackend(r.cfg)!.model);
       assert.equal(record.session, "webfetch-session");
       assert.match(record.note!, /web fetch via web/);
       assert.equal(record.usage?.output, 3);

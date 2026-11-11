@@ -1107,6 +1107,21 @@ must preserve **Data: Artificial Analysis (artificialanalysis.ai)** attribution.
          same way instead of back to the slot's route.
       Every such fallback logs a line and leaves the record note `fallback to Claude (<provider>
       unusable|failed)`. Tests: `packages/router/test/proxy-claude-last-resort.test.ts`.
+    - **`webSearch: "native"` hands such a search to Anthropic as sent (issue #158, 2026-11-11).**
+      `webSearch` is a backend object or the string `"native"` (read through `webSearchBackend` /
+      `webSearchNative`, config.ts; `autoModeClassifier.stage1` is the other `"native"` option).
+      `"native"` names no backend, so nothing is intercepted and `WebFetch` is not overridden. It
+      only changes the guard above: after a route's own search has had its try, a search whose
+      route target runs no server tools and whose requested model id starts with `claude-` is not
+      refused and not rewritten to `CLAUDE_SMALL_MODEL` — the route is dropped (`route = null`)
+      and the request takes the ordinary `PASS` path with its original model id on the app's own
+      login. It is asked for before the Claude last resort, because the user opted in to
+      Anthropic answering with the model Claude Code chose. Only that request loses its route; the
+      slot's other requests keep theirs. A non-`claude-*` id would 404 at Anthropic, so it falls
+      through to the last resort / refusal as before. Unset, nothing changes. Log line `web search
+      passed to Anthropic (webSearch: native): …`, record note `web search passed to Anthropic
+      (webSearch: native)`. The Clients screen drops "no web search here" from a `claude-*` option
+      when it is set. Tests: `packages/router/test/proxy-websearch-native.test.ts`.
     - **The backend is chosen by how the provider is spoken to, not by vendor.**
       `anthropic-compatible` → server tool, `openai-compatible` → web plugin. Anything else refuses
       and leaves the request alone.

@@ -342,6 +342,14 @@ Claude Code 会把 `WebSearch` 作为一个单独的小模型请求来执行。�
 
 这需要手动开启。未设置 `webSearch` 时，Claude Code 现有的搜索路径保持不变。
 
+如果某个槽位被路由到无法运行服务器工具的供应商（例如 `openai-compatible`），且没有设置搜索后端，该槽位的搜索请求会被拒绝，而不是用编造的结果作答。若想让该槽位的其他请求继续走路由，只把搜索请求交给 Anthropic，可设置：
+
+```jsonc
+{ "webSearch": "native" }
+```
+
+搜索请求会以原始的 Claude 模型 ID、使用应用自己的登录原样发送给 Anthropic。模型 ID 不以 `claude-` 开头的请求仍会被拒绝。`webSearch` 只能设为后端对象或 `"native"` 之一。
+
 ### Codex 应用与 Codex CLI
 
 ```bash

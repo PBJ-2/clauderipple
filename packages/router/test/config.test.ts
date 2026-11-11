@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ConfigStore, DEFAULTS, PROCESS_PRIORITIES, fastSwitches, providerFor, validate } from "../src/config.ts";
+import { ConfigStore, DEFAULTS, PROCESS_PRIORITIES, fastSwitches, providerFor, validate, webSearchBackend, webSearchNative } from "../src/config.ts";
 import type { AnthropicCompatibleProvider, Config, GoogleProvider, OpenAiCompatibleProvider, ProcessPriority, Provider } from "../src/config.ts";
 import { Logger } from "../src/log.ts";
 import { buildModelScores } from "../src/model-scores.ts";
@@ -59,8 +59,8 @@ for (const [label, settings, expected] of [
 }
 
 for (const [label, fields, expected] of [
-  ["null search", { webSearch: null }, "webSearch must be an object"],
-  ["string search", { webSearch: "chat" }, "webSearch must be an object"],
+  ["null search", { webSearch: null }, 'webSearch must be an object or "native"'],
+  ["string search", { webSearch: "chat" }, 'webSearch must be an object or "native"'],
   ["missing search provider", { webSearch: { model: "chat-model" } }, "webSearch: missing provider"],
   ["unknown search provider", { webSearch: { provider: "missing", model: "chat-model" } }, 'webSearch: unknown provider "missing"'],
   ["null classifier", { autoModeClassifier: null }, "autoModeClassifier must be an object"],
@@ -225,6 +225,27 @@ test("validate accepts a web search backend and rejects an unusable one", () => 
   assert.match(bad({ provider: "p", model: "m", maxResults: 0 }), /maxResults must be a positive integer/);
   assert.match(bad({ provider: "p", model: "m", maxResults: 2.5 }), /maxResults must be a positive integer/);
   assert.match(bad("p"), /webSearch must be an object/);
+});
+
+test('webSearch "native" is a valid setting that names no backend', (t) => {
+  const providers = { p: { type: "chatgpt" as const } };
+  assert.deepEqual(validate({ ...DEFAULTS, providers, webSearch: "native" }), []);
+  const bad = (webSearch: unknown) => validate({ ...DEFAULTS, providers, webSearch: webSearch as NonNullable<Config["webSearch"]> });
+  for (const value of ["Native", "auto", "", true, 1, ["native"]]) {
+    assert.deepEqual(bad(value), ['webSearch must be an object or "native"'], `${JSON.stringify(value)} is not accepted`);
+  }
+  assert.equal(webSearchNative({ webSearch: "native" }), true);
+  assert.equal(webSearchBackend({ webSearch: "native" }), undefined, "native is not a backend to call");
+  assert.equal(webSearchNative({}), false);
+  assert.equal(webSearchNative({ webSearch: { provider: "p", model: "m" } }), false);
+  assert.deepEqual(webSearchBackend({ webSearch: { provider: "p", model: "m" } }), { provider: "p", model: "m" });
+  assert.equal(webSearchBackend({}), undefined);
+
+  // From a config file: it survives loading (including the split-provider migration) untouched.
+  const { cfg, errors } = readConfigFixture(t, { providers: splitProviders, webSearch: "native" });
+  assert.deepEqual(errors, []);
+  assert.equal(cfg.webSearch, "native");
+  assert.equal(readConfigFixture(t, { providers: splitProviders }).cfg.webSearch, undefined, "unset stays unset");
 });
 
 test("validate reports unknown providers and bad urls", () => {

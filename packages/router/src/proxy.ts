@@ -20,7 +20,7 @@ import net from "node:net";
 import tls from "node:tls";
 import zlib from "node:zlib";
 import type { Duplex } from "node:stream";
-import type { Config, ProviderModel } from "./config.ts";
+import type { Config, ProviderModel, WebSearchBackend } from "./config.ts";
 import type { Logger } from "./log.ts";
 import { exhaustionHeaders, ModelHealth, modelDeprecation, ProviderHealth, providerExhaustion, UpstreamHealth } from "./health.ts";
 import type { HoldGate } from "./hold.ts";
@@ -45,7 +45,7 @@ import { MiniMaxUsage, isMiniMaxPlan, type MiniMaxWindow } from "./providers/min
 import { GrokAdapter } from "./providers/grok/index.ts";
 import type { GrokWindow } from "./providers/grok/usage.ts";
 import { conversationKey, type AnthropicRequest } from "./providers/chatgpt/translate.ts";
-import { adminPort, providerFor, searchProviderFor, terminateHosts } from "./config.ts";
+import { adminPort, providerFor, searchProviderFor, terminateHosts, webSearchBackend, webSearchNative } from "./config.ts";
 import type { CertStore } from "./certs.ts";
 import { chatPickerModels, injectPickerModels, isBootstrapPath } from "./picker.ts";
 import { effortLevelsForModel } from "./admin.ts";
@@ -1046,6 +1046,9 @@ export class Proxy {
     // backend is configured: `cfg.webSearch` decides who answers it, but knowing that this is a
     // search is what lets the guard below refuse a provider that cannot run one. Tying the two
     // together meant an unconfigured router could not tell a search from any other turn.
+    // `webSearch: "native"` names no backend, so nothing is intercepted for it: `searchBackend` is
+    // the object form only, and the native form is read where a refusal would otherwise be written.
+    const searchBackend = webSearchBackend(cfg);
     if (json) {
       record.source = record.target = typeof model === "string" ? model : "-";
       record.stream = json.stream === true;
@@ -1054,7 +1057,7 @@ export class Proxy {
         if (conversation) record.conversation = conversation;
       }
       if (kind === "auto-mode-classifier") record.purpose = "auto-mode-classifier";
-      if (cfg.webSearch && kind === "web-fetch") record.purpose = "web-fetch";
+      if (searchBackend && kind === "web-fetch") record.purpose = "web-fetch";
     }
     // Pool affinity must distinguish workers whose injected first 4000 characters are identical.
     // Capture before routing/sanitizing rewrites the prompt; retries use exactly this same identity.
@@ -1105,25 +1108,25 @@ export class Proxy {
     const markSearchAttempted = (): void => { searchAttempted = true; };
     /** Why the configured search backend did not answer, for the note a Claude fallback leaves. */
     let searchBackendWhy: string | undefined;
-    if (search && cfg.webSearch) {
+    if (search && searchBackend) {
       // A backend whose provider is already spent (a weekly quota, every key cooling) is not asked:
       // the call would fail the same way, and the next option is what answers the search.
-      if (!this.targetUsable(cfg.webSearch, cfg)) {
-        searchBackendWhy = `${cfg.webSearch.provider} unusable`;
-        log.warn(`web search via ${cfg.webSearch.provider}: provider unusable; not asked`);
+      if (!this.targetUsable(searchBackend, cfg)) {
+        searchBackendWhy = `${searchBackend.provider} unusable`;
+        log.warn(`web search via ${searchBackend.provider}: provider unusable; not asked`);
       } else {
-        const served = await this.serveWebSearch(res, json!, search, cfg.webSearch, record, finish, markSearchAttempted);
+        const served = await this.serveWebSearch(res, json!, search, searchBackend, record, finish, markSearchAttempted);
         if (served) return;
-        searchBackendWhy = `${cfg.webSearch.provider} failed`;
+        searchBackendWhy = `${searchBackend.provider} failed`;
         // Fall through on failure: the ordinary path still answers, and a search that quietly
         // returns nothing is worse than one that costs what it always cost.
       }
     }
 
-    const webFetch = !!cfg.webSearch && kind === "web-fetch";
+    const webFetch = !!searchBackend && kind === "web-fetch";
     let fetchRoute: Resolved | null = null;
-    if (webFetch && cfg.webSearch) {
-      const settings = cfg.webSearch;
+    if (webFetch && searchBackend) {
+      const settings = searchBackend;
       if (this.targetUsable(settings, cfg)) {
         const ladder = effortLevels(cfg).providers[settings.provider];
         const levels = ladder?.models?.[settings.model] ?? ladder?.default ?? [];
@@ -1328,7 +1331,7 @@ export class Proxy {
         // backend on this same provider has already had its try above.
         // The same holds for a plan that searches on another of its endpoints (`anthropicSearch`).
         const own = (cfg.providers[route.provider]?.type === "chatgpt" || searchProviderFor(cfg.providers[route.provider], route.model) !== undefined) &&
-          cfg.webSearch?.provider !== route.provider;
+          searchBackend?.provider !== route.provider;
         let ownWhy: string | undefined;
         if (own) {
           // A route whose provider is spent is not asked either; the call would fail the same way.
@@ -1339,9 +1342,20 @@ export class Proxy {
         // Nothing of the configured providers could search. Claude runs Anthropic's own `web_search`
         // server tool on its small model, so it is the last resort before refusing: the request keeps
         // its tool and body, only the model changes. Refused as before only when no Claude is usable.
-        const claude = this.claudeLastResort(cfg);
-        if (claude) {
-          const why = [searchBackendWhy, ownWhy ?? (cfg.webSearch?.provider === route.provider ? undefined : `${route.provider} runs no server tools`)]
+        //
+        // `webSearch: "native"` is asked for before that: the user said searches belong to Anthropic,
+        // on the app's own login and the model Claude Code asked for, so the request goes on as
+        // sent and only the route is dropped — the slot's other requests keep theirs. A model that
+        // is not a Claude id would 404 there, so it falls through to the paths below as before.
+        const native = webSearchNative(cfg) && typeof json.model === "string" && json.model.startsWith("claude-");
+        const claude = native ? null : this.claudeLastResort(cfg);
+        if (native) {
+          unwrittenFallbackNote = "web search passed to Anthropic (webSearch: native)";
+          log.info(`web search passed to Anthropic (webSearch: native): ${route.provider} runs no server tools; ${String(json.model)} sent unchanged`);
+          route = null;
+          record = { ...record, purpose: "web-search" };
+        } else if (claude) {
+          const why = [searchBackendWhy, ownWhy ?? (searchBackend?.provider === route.provider ? undefined : `${route.provider} runs no server tools`)]
             .filter(Boolean).join(", ");
           unwrittenFallbackNote = `fallback to Claude (${why})`;
           log.warn(`web search: ${why}; falling back to Claude (${claude.provider}/${claude.model})`);
@@ -2264,7 +2278,7 @@ export class Proxy {
     res: http.ServerResponse,
     json: Record<string, unknown>,
     query: WebSearchQuery,
-    settings: NonNullable<Config["webSearch"]>,
+    settings: WebSearchBackend,
     record: { source?: string; target?: string; provider?: string; account?: string; borrowedLabel?: string; purpose?: RequestRecord["purpose"] },
     finish: (status: string, bytes: number, note?: string, failed?: boolean, extra?: { usage?: RequestUsage }) => void,
     markAttempted: () => void,

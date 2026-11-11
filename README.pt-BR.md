@@ -561,6 +561,19 @@ selecione o mesmo provedor ChatGPT como backend de busca em `config.json`:
 Isso é opcional. Sem a configuração `webSearch`, o caminho de busca atual do Claude Code
 continua o mesmo.
 
+Se um slot for roteado para um provedor que não executa ferramentas de servidor (por
+exemplo, um `openai-compatible`) e não houver backend de busca, as buscas desse slot são
+recusadas em vez de respondidas com resultados inventados. Para que só essas buscas
+vão para a Anthropic e as demais requisições do slot continuem roteadas, use:
+
+```jsonc
+{ "webSearch": "native" }
+```
+
+A busca é enviada sem alterações, com o id de modelo Claude original, usando o login do
+próprio app. Uma busca cujo id de modelo não comece com `claude-` continua sendo recusada.
+`webSearch` aceita um objeto de backend ou `"native"`, não os dois.
+
 ### App Codex e Codex CLI
 
 ```bash
