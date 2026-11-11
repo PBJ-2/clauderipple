@@ -35,7 +35,7 @@ function anthropicError(status: number, type: string, message: string): { status
 
 /** The HTTP status Anthropic uses for each error type a mapper can report. */
 function failureStatus(failure: { type: string } | undefined): number {
-  return failure?.type === "overloaded_error" ? 529 : failure?.type === "rate_limit_error" ? 429 : 502;
+  return failure?.type === "invalid_request_error" ? 400 : failure?.type === "overloaded_error" ? 529 : failure?.type === "rate_limit_error" ? 429 : 502;
 }
 
 function vendorMessage(text: string): string {
@@ -87,6 +87,12 @@ export function mapHttpError(status: number, text: string, label = "OpenAI-compa
   }
   if (status === 429) return anthropicError(429, "rate_limit_error", message);
   if (status >= 500) return anthropicError(529, "api_error", message);
+  // Keep auth, permission, rate-limit and server statuses above unchanged. Only a typed request
+  // overflow gets the same compaction prefix as ChatGPT; arbitrary provider prose is not evidence.
+  try {
+    const error = (JSON.parse(text) as { error?: { code?: unknown } } | null)?.error;
+    if (error?.code === "context_length_exceeded") return anthropicError(400, "invalid_request_error", `prompt is too long: ${message}`);
+  } catch { /* not a typed JSON error */ }
   return anthropicError(400, "invalid_request_error", message);
 }
 

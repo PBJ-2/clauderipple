@@ -9,7 +9,7 @@ import type { AnthropicRequest } from "../src/providers/chatgpt/translate.ts";
 import { requestKind } from "../src/routing.ts";
 
 const seen: { path: string; headers: http.IncomingHttpHeaders; body: Record<string, unknown> }[] = [];
-let mode: "chat" | "responses" | "error" | "cloudflare" | "cut-responses" | "cut-chat" | "done-chat" | "refuse-reasoning" | "refuse-chat" | "sealed" | "sealed-chat" | "missing-thinking" = "chat";
+let mode: "chat" | "responses" | "error" | "cloudflare" | "cut-responses" | "cut-chat" | "done-chat" | "refuse-reasoning" | "refuse-chat" | "sealed" | "sealed-chat" | "missing-thinking" | "context-http" | "context-failed" | "context-error" = "chat";
 const sse = (records: Record<string, unknown>[]) => records.map((record) => `data: ${JSON.stringify(record)}\n\n`).join("");
 
 const upstream = http.createServer((req, res) => {
@@ -19,6 +19,20 @@ const upstream = http.createServer((req, res) => {
     seen.push({ path: req.url ?? "", headers: req.headers, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown> });
     if (req.headers.authorization === "Bearer hop-first") {
       res.writeHead(429, { "retry-after": "123" }).end('{"error":{"message":"hop-first limited"}}');
+      return;
+    }
+    if (mode === "context-http" || mode === "context-failed" || mode === "context-error") {
+      const error = { code: "context_length_exceeded", message: "Request rejected: fixture-context-credential" };
+      if (mode === "context-http") {
+        const body = JSON.stringify({ error }).replace("fixture-context-credential", "\\u0066ixture-context-credential");
+        res.writeHead(400, { "content-type": "application/json" }).end(body);
+      } else {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.end(sse([
+          { type: "response.created", response: {} },
+          mode === "context-failed" ? { type: "response.failed", response: { error } } : { type: "error", ...error },
+        ]));
+      }
       return;
     }
     if (mode === "missing-thinking") {
@@ -108,6 +122,7 @@ async function listen(server: http.Server): Promise<number> {
 const upstreamPort = await listen(upstream);
 const log = new Logger(null, 1_000_000, 1, false);
 let adapter: OpenAiCompatibleAdapter;
+let handled: ReturnType<OpenAiCompatibleAdapter["handle"]>;
 let configuredEffort = "high";
 let credential: OpenAiCredential | undefined;
 const front = http.createServer((req, res) => {
@@ -116,7 +131,7 @@ const front = http.createServer((req, res) => {
   req.on("end", () => {
     const json = JSON.parse(Buffer.concat(chunks).toString("utf8")) as AnthropicRequest;
     const requestPath = (req.url ?? "/v1/messages").split("?")[0] ?? "/v1/messages";
-    void adapter.handle(req, res, req.url ?? "/v1/messages", json, "vendor-model", configuredEffort, credential, { kind: requestKind(json, requestPath) });
+    handled = adapter.handle(req, res, req.url ?? "/v1/messages", json, "vendor-model", configuredEffort, credential, { kind: requestKind(json, requestPath) });
   });
 });
 const frontPort = await listen(front);
@@ -226,6 +241,92 @@ test("adapter maps a vendor 401 to Anthropic authentication_error", async () => 
   const response = await call(request);
   assert.equal(response.status, 401);
   assert.equal(JSON.parse(response.text).error.type, "authentication_error");
+});
+
+for (const failure of ["context-http", "context-failed", "context-error"] as const) {
+  for (const stream of [true, false]) {
+    test(`${failure} preserves the explicit compaction contract with stream=${stream}`, async () => {
+      mode = failure;
+      const warnings: string[] = [];
+      const capture = { info() {}, warn: (line: string) => warnings.push(line) } as unknown as Logger;
+      adapter = new OpenAiCompatibleAdapter("fake", {
+        type: "openai-compatible", url: `http://127.0.0.1:${upstreamPort}/v1`, wire: "responses",
+        headers: { authorization: "Bearer fixture-context-credential" },
+      }, capture);
+      const before = seen.length;
+      const response = await call({ ...request, stream });
+      const outcome = await handled;
+      const streamed = stream && failure !== "context-http";
+      assert.equal(response.status, streamed ? 200 : 400, "an already-open SSE response keeps HTTP 200");
+      assert.match(response.headers["content-type"] ?? "", streamed ? /text\/event-stream/ : /application\/json/);
+      const error = streamed
+        ? JSON.parse(response.text.split("\n\n").find((frame) => frame.startsWith("event: error\n"))!.split("\ndata: ")[1]!).error
+        : JSON.parse(response.text).error;
+      assert.equal(error.type, "invalid_request_error");
+      assert.match(error.message, /^prompt is too long: /);
+      assert.match(error.message, /Request rejected/);
+      assert.doesNotMatch(response.text, /message_stop|"stop_reason":"end_turn"/);
+      assert.equal(outcome.status, 400);
+      assert.equal(outcome.exhaustion, undefined);
+      assert.equal(seen.length - before, 1, "an overflow is not retried");
+      for (const output of [response.text, JSON.stringify(outcome), ...warnings]) {
+        assert.doesNotMatch(output, /fixture-context-credential|ixture-context-credential/);
+      }
+    });
+  }
+}
+
+test("closing the client still aborts a pending Responses stream without synthesizing an overflow", { timeout: 3000 }, async (t) => {
+  const closed = Promise.withResolvers<void>();
+  const backend = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      res.on("close", () => closed.resolve());
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(sse([{ type: "response.created", response: {} }]));
+      // Stay open until the client cancels; no timers or provider terminal frame.
+    });
+  });
+  const port = await listen(backend);
+  const local = new OpenAiCompatibleAdapter("fake", { type: "openai-compatible", wire: "responses", url: `http://127.0.0.1:${port}` }, log);
+  const outcome = Promise.withResolvers<Awaited<ReturnType<OpenAiCompatibleAdapter["handle"]>>>();
+  const gateway = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      local.handle(req, res, "/v1/messages", request, "vendor-model", undefined).then(outcome.resolve, outcome.reject);
+    });
+  });
+  t.after(() => {
+    gateway.closeAllConnections(); backend.closeAllConnections();
+    gateway.close(); backend.close();
+  });
+  const gatewayPort = await listen(gateway);
+  const controller = new AbortController();
+  const response = await fetch(`http://127.0.0.1:${gatewayPort}`, { method: "POST", body: "{}", signal: controller.signal });
+  const first = await response.body!.getReader().read();
+  assert.equal(response.status, 200);
+  assert.match(new TextDecoder().decode(first.value), /message_start/);
+  controller.abort();
+  const result = await outcome.promise;
+  assert.equal(result.status, 0);
+  assert.equal(result.note, "client closed");
+  await closed.promise;
+});
+
+test("HTTP overflow detection uses only an exact error code and preserves other status mappings", () => {
+  const prose = "Your input exceeds the context window; context_length_exceeded";
+  for (const code of [undefined, "invalid_request_error", "CONTEXT_LENGTH_EXCEEDED", 400]) {
+    const out = mapHttpError(400, JSON.stringify({ error: { code, message: prose } }));
+    assert.equal(out.status, 400);
+    assert.equal(JSON.parse(out.body).error.message, `OpenAI-compatible provider: ${prose}`);
+  }
+  for (const [status, mapped, type] of [[401, 401, "authentication_error"], [403, 403, "permission_error"], [429, 429, "rate_limit_error"], [500, 529, "api_error"]] as const) {
+    const out = mapHttpError(status, JSON.stringify({ error: { code: "context_length_exceeded", message: "rejected" } }));
+    assert.equal(out.status, mapped);
+    assert.equal(JSON.parse(out.body).error.type, type);
+    assert.doesNotMatch(out.body, /prompt is too long/);
+  }
+  assert.equal(JSON.parse(mapHttpError(400, "not JSON").body).error.message, "OpenAI-compatible provider: not JSON");
 });
 
 test("count tokens is local", async () => {
