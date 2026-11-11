@@ -285,11 +285,11 @@ const APP_STOP = "이 세션은 Claude 앱에서 실행 중입니다. Claude 앱
 class EnvironmentModeError extends Error {}
 const MOD_CLAIMED = "Claude 앱에서 메시지를 처리하고 있습니다. 처리가 완료된 후 다시 시도해 주세요.";
 /** A /clear the mod ran in place failed before the app reported its new session. */
-const MOD_CLEAR_FAILED = "Claude 앱에서 대화를 비우지 못했습니다. Claude 앱에서 확인한 뒤 대기 중인 메시지를 다시 보내 주세요.";
+const MOD_CLEAR_FAILED = "Claude 앱에서 대화를 비우지 못했습니다. Claude 앱 상태를 확인한 뒤 대기 중인 메시지를 다시 전송해 주세요.";
 /** The approval the phone can no longer give: the Mac answered it first. */
-const APPROVAL_LOCAL = "Claude 앱에서 이 승인을 이미 처리했습니다. 휴대폰에서는 승인할 수 없습니다.";
+const APPROVAL_LOCAL = "Claude 앱에서 이 승인 요청을 이미 처리했습니다. 휴대폰에서는 승인할 수 없습니다.";
 /** Shown on the phone's session while an approval waits at the Mac (the phone holds none). */
-const APPROVAL_AT_MAC = "승인 요청이 Claude 앱에 표시되었습니다. Claude 앱에서 승인해 주세요.";
+const APPROVAL_AT_MAC = "승인 요청이 컴퓨터의 Claude 앱에 표시되었습니다. Claude 앱에서 승인해 주세요.";
 const APPROVAL_DENIED = "The user denied this from their phone.";
 /** A session id the CLI itself writes: a UUID. The phone never supplies one for a move. */
 const CLI_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

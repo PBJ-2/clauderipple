@@ -174,7 +174,7 @@ const ko = {
   "notice.desktop_handoff_retry": "Claude 앱에 대화를 열지 못했습니다. 잠시 후 다시 시도합니다. 휴대폰의 대화 기록은 유지됩니다.",
   "notice.desktop_handoff_failed": "Claude 앱에 대화를 열지 못했습니다. 컴퓨터에서 Claude 앱을 확인해 주세요. 휴대폰의 대화 기록은 유지됩니다.",
   "notice.desktop_settings_failed": "{text}",
-  "notice.desktop_approval": "승인 요청이 Claude 앱에 표시되었습니다. Claude 앱에서 승인해 주세요.",
+  "notice.desktop_approval": "승인 요청이 컴퓨터의 Claude 앱에 표시되었습니다. Claude 앱에서 승인해 주세요.",
   "perm.reason.cancelled": "{host}에서 요청이 취소되었거나 이미 응답되었습니다.",
   "notice.desktop_resumed": "Claude 앱에서 이 대화를 다시 열면 휴대폰에서 이어 간 내용이 보입니다.",
   "notice.model_changed": "모델이 변경되었습니다: {text}",

@@ -7,7 +7,7 @@ import type { SessionEvent } from "../src/protocol.ts";
 
 const ui = (): UI => ({ now: 1, link: { state: "open", attempt: 0, nextAt: null, lastRx: 1, downSince: null }, host: null, home: undefined, sessions: [], draft: { cwd: null, model: null, effort: null }, models: [], sheet: null, expanded: new Map(), workersOpen: false, permOpen: new Set(), toast: null, pins: [], folded: [], query: "", homeLimit: 60 });
 
-const APPROVAL_LOCAL = "Claude 앱에서 이 승인을 이미 처리했습니다. 휴대폰에서는 승인할 수 없습니다.";
+const APPROVAL_LOCAL = "Claude 앱에서 이 승인 요청을 이미 처리했습니다. 휴대폰에서는 승인할 수 없습니다.";
 const permission = (decided: SessionEvent): string => {
   setLang("ko");
   const events: SessionEvent[] = [{ seq: 1, at: 1, kind: "permission", id: "p", tool: "Bash", title: "", summary: "ls", input: "ls", canAlways: false }, decided];
@@ -41,9 +41,9 @@ test("a bare machine reason the phone does not know is left out rather than show
 });
 
 test("the Claude app's approval notice draws its own sentence in each language", () => {
-  const notice: SessionEvent = { seq: 3, at: 3, kind: "notice", code: "desktop_approval", text: "승인 요청이 Claude 앱에 표시되었습니다. Claude 앱에서 승인해 주세요." };
+  const notice: SessionEvent = { seq: 3, at: 3, kind: "notice", code: "desktop_approval", text: "승인 요청이 컴퓨터의 Claude 앱에 표시되었습니다. Claude 앱에서 승인해 주세요." };
   setLang("ko");
-  assert.ok(item(reduce([notice]).items[0]!, ui()).includes("승인 요청이 Claude 앱에 표시되었습니다. Claude 앱에서 승인해 주세요."));
+  assert.ok(item(reduce([notice]).items[0]!, ui()).includes("승인 요청이 컴퓨터의 Claude 앱에 표시되었습니다. Claude 앱에서 승인해 주세요."));
   setLang("en");
   const english = item(reduce([notice]).items[0]!, ui());
   assert.ok(english.includes("The approval request is shown in the Claude app on your computer. Approve it there."));

@@ -977,7 +977,7 @@ const KO: Record<Key, string> = {
   'toasts.warmStopped': '리플: {reason}',
   'toasts.warmBoundReason': '캐시 유지 중단: 유지 시간 종료',
   'toasts.warmBound': '리플: 설정한 시간이 지나 캐시 유지를 멈췄습니다.',
-  'approval.phone': '휴대폰에서 승인을 기다리는 중',
+  'approval.phone': '휴대폰에서 승인 대기 중',
   'toasts.appEffort': '앱 추론 강도',
   'toasts.appEffortChanged': '앱에서 추론 강도 변경',
   'toasts.autoOff': '리플: 앱에서 추론 강도를 바꿔 자동 선택을 껐습니다.',
