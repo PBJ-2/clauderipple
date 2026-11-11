@@ -4,6 +4,8 @@
 // MiniMax M Plan's `coding_plan/remains`): one request per provider per TTL, one request in
 // flight at a time, and the last good windows kept rather than blanked when a read fails.
 
+import { createHash } from "node:crypto";
+import { credentialHeaderValues, redactErrorText } from "../redact.ts";
 import type { FetchLike } from "./google/antigravity.ts";
 
 /**
@@ -23,14 +25,19 @@ export type UsageCacheOptions = {
   label: string;
 };
 
+type UsageEntry = {
+  identity: string;
+  last: UsageWindow[];
+  at: number;
+  inFlight?: Promise<UsageWindow[]>;
+};
+
 /**
- * Per-provider usage windows, fetched at most once per `ttlMs` per provider. A failed lookup keeps
- * the last good windows rather than blanking them, and only the status code is logged.
+ * Per-provider usage windows, fetched at most once per `ttlMs` per request identity. A failed lookup
+ * keeps only that identity's last good windows; changing its endpoint or headers starts empty.
  */
 export class UsageCache {
-  private readonly last = new Map<string, UsageWindow[]>();
-  private readonly at = new Map<string, number>();
-  private readonly inFlight = new Map<string, Promise<UsageWindow[]>>();
+  private readonly entries = new Map<string, UsageEntry>();
   private readonly opts: UsageCacheOptions;
 
   constructor(opts: UsageCacheOptions) {
@@ -42,21 +49,32 @@ export class UsageCache {
    * `parse` answers the windows the body carries, or null when it carries none.
    */
   windows(name: string, url: string, headers: Record<string, string>, parse: (body: unknown) => UsageWindow[] | null): Promise<UsageWindow[]> {
+    // Keep only a digest, never the credential-bearing request. Header order/casing is immaterial.
+    const identity = createHash("sha256").update(JSON.stringify([
+      url,
+      Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value]).sort(),
+    ])).digest("hex");
+    let entry = this.entries.get(name);
+    if (!entry || entry.identity !== identity) {
+      entry = { identity, last: [], at: Number.NEGATIVE_INFINITY };
+      this.entries.set(name, entry);
+    }
     const now = (this.opts.now ?? Date.now)();
     const ttl = this.opts.ttlMs ?? 5 * 60_000;
-    if (now - (this.at.get(name) ?? Number.NEGATIVE_INFINITY) < ttl) return Promise.resolve(this.last.get(name) ?? []);
-    const running = this.inFlight.get(name);
-    if (running) return running;
-    const task = this.fetchOne(name, url, headers, parse).finally(() => {
-      this.at.set(name, (this.opts.now ?? Date.now)());
-      this.inFlight.delete(name);
+    if (now - entry.at < ttl) return Promise.resolve(entry.last);
+    if (entry.inFlight) return entry.inFlight;
+    // A replaced entry may still finish for its original caller, but cannot mutate its successor.
+    const current = entry;
+    const task = this.fetchOne(name, url, headers, parse, current).finally(() => {
+      current.at = (this.opts.now ?? Date.now)();
+      delete current.inFlight;
     });
-    this.inFlight.set(name, task);
+    current.inFlight = task;
     return task;
   }
 
-  private async fetchOne(name: string, url: string, headers: Record<string, string>, parse: (body: unknown) => UsageWindow[] | null): Promise<UsageWindow[]> {
-    const keep = () => this.last.get(name) ?? [];
+  private async fetchOne(name: string, url: string, headers: Record<string, string>, parse: (body: unknown) => UsageWindow[] | null, entry: UsageEntry): Promise<UsageWindow[]> {
+    const keep = () => entry.last;
     const readAt = (this.opts.now ?? Date.now)();
     try {
       const res = await (this.opts.fetch ?? fetch)(url, {
@@ -72,10 +90,11 @@ export class UsageCache {
       const parsed = parse(await res.json());
       if (!parsed) return keep();
       const windows = parsed.map((w) => ({ ...w, read_at: readAt }));
-      this.last.set(name, windows);
+      entry.last = windows;
       return windows;
     } catch (e) {
-      this.opts.warn?.(`${this.opts.label} ${name}: ${(e as Error).message}`);
+      const detail = redactErrorText((e as Error).message, credentialHeaderValues(Object.entries(headers)), 300);
+      this.opts.warn?.(`${this.opts.label} ${name}: ${detail}`);
       return keep();
     }
   }
