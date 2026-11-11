@@ -40,16 +40,18 @@ try {
   const found = [...out.matchAll(/@@SCENE (\{.*\})\s*$/gm)].map(m => JSON.parse(m[1]))
   if (!found.length || run.status !== 0) {
     process.stderr.write(out.slice(-4000) + '\n')
-    if (!found.length) process.exit(1)
+    process.exitCode = 1
   }
-  const page = readFileSync(join(here, 'page.js'), 'utf8')
-  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Ripple mod preview</title></head><body>
+  if (found.length) {
+    const page = readFileSync(join(here, 'page.js'), 'utf8')
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Ripple mod preview</title></head><body>
 <script>window.SCENES = ${JSON.stringify(found).replace(/</g, '\\u003c')}</script>
 <script>${page}</script></body></html>`
-  mkdirSync(join(here, 'out'), { recursive: true })
-  const file = join(here, 'out', 'index.html')
-  writeFileSync(file, html)
-  console.log(file + '  (' + found.length + ' scenes)')
+    mkdirSync(join(here, 'out'), { recursive: true })
+    const file = join(here, 'out', 'index.html')
+    writeFileSync(file, html)
+    console.log(file + '  (' + found.length + ' scenes)')
+  }
 } finally {
   rmSync(work, { recursive: true, force: true })
 }
