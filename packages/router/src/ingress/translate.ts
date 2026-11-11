@@ -406,8 +406,9 @@ function usageFromAnthropic(value: unknown): OpenAiUsage {
   const usage = object(value);
   const input = typeof usage?.input_tokens === "number" ? usage.input_tokens : 0;
   const cached = typeof usage?.cache_read_input_tokens === "number" ? usage.cache_read_input_tokens : 0;
+  const created = typeof usage?.cache_creation_input_tokens === "number" ? usage.cache_creation_input_tokens : 0;
   const output = typeof usage?.output_tokens === "number" ? usage.output_tokens : 0;
-  return { input_tokens: input + cached, input_tokens_details: { cached_tokens: cached }, output_tokens: output, total_tokens: input + cached + output };
+  return { input_tokens: input + cached + created, input_tokens_details: { cached_tokens: cached }, output_tokens: output, total_tokens: input + cached + created + output };
 }
 
 function id(prefix: string): string {
@@ -441,6 +442,14 @@ export class ResponsesEventMapper {
   }
 
   private sequenceNumber = 0;
+  private anthropicUsage: Json = {};
+
+  private updateUsage(value: unknown): void {
+    // Usage events carry cumulative counters, but may omit unchanged fields. Keep the three
+    // input categories separate until conversion; an explicit zero replaces the previous value.
+    this.anthropicUsage = { ...this.anthropicUsage, ...(object(value) ?? {}) };
+    this.usage = usageFromAnthropic(this.anthropicUsage);
+  }
 
   private number(events: Json[]): Json[] {
     return events.map((event) => structuredClone(event.sequence_number === undefined ? { ...event, sequence_number: this.sequenceNumber++ } : event));
@@ -478,7 +487,7 @@ export class ResponsesEventMapper {
     }
     if (type === "message_start") {
       const message = object(event.message);
-      this.usage = usageFromAnthropic(message?.usage);
+      this.updateUsage(message?.usage);
       return out;
     }
     if (type === "content_block_start") {
@@ -545,7 +554,7 @@ export class ResponsesEventMapper {
       return out;
     }
     if (type === "message_delta") {
-      this.usage = usageFromAnthropic(event.usage);
+      this.updateUsage(event.usage);
       return out;
     }
     if (type === "message_stop") return [...out, ...this.finish(true)];
