@@ -6616,7 +6616,12 @@ function requestRow(record) {
   const rate = outputRateOf(record);
   // A row without usage keeps an empty pill, so its dash lines up with the figures above it.
   const input = record.usage
-    ? el("span", { class: "token-cell", text: formatNumber(totalInput) }, [el("span", { class: "cache-pill", text: t("logs.cacheHit", { percent: Math.round(record.usage.cached / Math.max(1, totalInput) * 100) }) })])
+    ? el("span", { class: "token-cell", text: formatNumber(totalInput) }, [
+      el("span", { class: "cache-pill", text: t("logs.cacheHit", { percent: Math.round(record.usage.cached / Math.max(1, totalInput) * 100) }) }),
+      // Only Anthropic reports what a turn wrote to its cache; the translated providers cache on
+      // their own and report reads alone, so their rows carry no write pill (2026-11-11).
+      record.usage.cacheWrite > 0 ? el("span", { class: "cache-pill cache-write", text: `${t("logs.detail.cacheWrite")} ${formatNumber(record.usage.cacheWrite)}` }) : null,
+    ].filter(Boolean))
     : el("span", { class: "no-usage", text: t("common.notAvailable") }, [el("span", { class: "cache-pill", "aria-hidden": "true" })]);
   const status = record.resent
     ? el("span", { class: "status-text resent", text: `${t("logs.status.resent")} ${record.status}`, title: t("logs.status.resentHelp") })

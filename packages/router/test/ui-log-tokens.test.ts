@@ -98,6 +98,7 @@ test("a request row keeps the cache's share on the input cell and the output on 
   const row = slice("app.js", "function requestRow(", "function renderRequests(");
   assert.ok(row.includes('class: "c-in"'), "the row's input cell is gone");
   assert.ok(row.includes("cache-pill"), "the cache's share no longer rides in the input cell");
+  assert.match(row, /cacheWrite > 0 \? el\("span", \{ class: "cache-pill cache-write", text: `\$\{t\("logs\.detail\.cacheWrite"\)\}/, "a row that wrote to the cache no longer says how much");
   assert.ok(row.includes("c-out"), "the row's output cell is gone");
   assert.equal(row.includes("logs.th.tokens"), false, "the row takes the tokens column again");
   assert.equal(row.includes("logs.th.cache"), false, "the row takes the cache column again");

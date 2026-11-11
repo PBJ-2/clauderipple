@@ -964,6 +964,7 @@ td.c-dur[title] { cursor: help; }
 /* The cache's share and the rate ride after their figure at a set width, so the figures stay in line. */
 .cache-pill, .rate-pill { display: inline-block; margin-left: 6px; color: var(--label-2); font-size: 11px; text-align: left; white-space: nowrap; }
 .cache-pill { min-width: 6.4em; }
+.cache-pill.cache-write { min-width: 0; color: var(--label-3); }
 .rate-pill { min-width: 7.6em; }
 #requests-table td.c-dur, #models-table td.c-dur, #models-table td.c-cost { white-space: nowrap; }
 .no-usage { color: var(--label-3); }
