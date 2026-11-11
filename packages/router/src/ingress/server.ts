@@ -537,7 +537,7 @@ export class OpenAiIngress {
             for (const event of parser.feed(decoder.decode(chunk, { stream: true }))) {
               const mapped = mapper.feed(event);
               if (stream) write(mapped);
-              if (stream && mapped.some((e) => e.type === "response.completed")) {
+              if (stream && mapped.some((e) => e.type === "response.completed" || e.type === "response.incomplete")) {
                 if (chat) { bytes += Buffer.byteLength("data: [DONE]\n\n"); res.write("data: [DONE]\n\n"); }
                 onTerminal?.({ status: 200, bytes, ...(poolCredential?.ownerId ? { account: poolCredential.ownerId } : {}), usage: usage(mapper), stopReason: mapper.output.some((item) => item.type === "function_call" || item.type === "custom_tool_call") ? "tool_use" : "end_turn" });
               }

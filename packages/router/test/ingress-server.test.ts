@@ -16,22 +16,29 @@ import type { Config } from "../src/config.ts";
 const noClaudeCodeCredentialReaders = { keychain: () => null, credentialsFile: () => null };
 const seen: { headers: http.IncomingHttpHeaders; body: Record<string, unknown> }[] = [];
 let upstreamStopReason = "end_turn";
+let upstreamInterrupted = false;
+let onTerminalUpstreamClose: (() => void) | undefined;
 const upstream = http.createServer((req, res) => {
   const chunks: Buffer[] = [];
   req.on("data", (chunk: Buffer) => chunks.push(chunk));
   req.on("end", () => {
     seen.push({ headers: req.headers, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown> });
     const body = seen.at(-1)!.body;
-    if (body.stream === true) {
+    if (body.stream === true || upstreamInterrupted) {
       res.writeHead(200, { "content-type": "text/event-stream" });
-      res.end([
+      const payload = [
         'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":12,"cache_read_input_tokens":8,"output_tokens":0}}}\n\n',
         'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
         'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}\n\n',
         'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
         `event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: upstreamStopReason }, usage: { input_tokens: 12, cache_read_input_tokens: 8, output_tokens: 2 } })}\n\n`,
-        'event: message_stop\ndata: {"type":"message_stop"}\n\n',
-      ].join(""));
+        ...(upstreamInterrupted ? [] : ['event: message_stop\ndata: {"type":"message_stop"}\n\n']),
+      ].join("");
+      if (onTerminalUpstreamClose) {
+        const closed = onTerminalUpstreamClose;
+        res.once("close", closed);
+        res.write(payload);
+      } else res.end(payload);
       return;
     }
     res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ id: "msg_1", type: "message", role: "assistant", content: [{ type: "text", text: "ok" }], stop_reason: upstreamStopReason, usage: { input_tokens: 12, cache_read_input_tokens: 8, output_tokens: 2 } }));
@@ -201,6 +208,87 @@ test("Chat Completions non-stream and stream traverse same provider", async () =
   assert.equal((seen.at(-1)?.body.tools as { name?: string }[] | undefined)?.[0]?.name, "Read");
   assert.equal(requests.list(10)[0]?.note, "openai-ingress chat");
 });
+
+for (const chat of [false, true]) for (const stream of [false, true]) {
+  test(`max_tokens is incomplete without changing HTTP success (${chat ? "Chat" : "Responses"}, ${stream ? "stream" : "JSON"})`, async () => {
+    upstreamStopReason = "max_tokens";
+    try {
+      const response = await call(chat ? "/v1/chat/completions" : "/v1/responses", chat
+        ? { model: "claude-sonnet-5", messages: [{ role: "user", content: "go" }], stream }
+        : { ...input, stream });
+      assert.equal(response.status, 200);
+      if (chat) {
+        if (stream) {
+          assert.match(response.text, /"finish_reason":"length"/);
+          assert.equal(response.text.match(/data: \[DONE\]/g)?.length, 1);
+        } else assert.equal(JSON.parse(response.text).choices[0].finish_reason, "length");
+      } else {
+        const terminal = stream
+          ? response.text.split("\n").filter((line) => line.startsWith("data: ")).map((line) => JSON.parse(line.slice(6))).at(-1).response
+          : JSON.parse(response.text);
+        assert.equal(terminal.status, "incomplete");
+        assert.deepEqual(terminal.incomplete_details, { reason: "max_output_tokens" });
+        if (stream) {
+          assert.match(response.text, /event: response\.incomplete/);
+          assert.doesNotMatch(response.text, /event: response\.completed/);
+        }
+      }
+      assert.equal(requests.list(1)[0]?.status, 200);
+    } finally {
+      upstreamStopReason = "end_turn";
+    }
+  });
+}
+
+for (const chat of [false, true]) {
+  test(`closing after the incomplete terminal event is not an abort (${chat ? "Chat" : "Responses"})`, { timeout: 5000 }, async () => {
+    upstreamStopReason = "max_tokens";
+    const closed = new Promise<void>((resolve) => { onTerminalUpstreamClose = resolve; });
+    try {
+      const body = JSON.stringify(chat ? { model: "claude-sonnet-5", messages: [{ role: "user", content: "go" }], stream: true } : { ...input, stream: true });
+      await new Promise<void>((resolve, reject) => {
+        const req = http.request({ host: "127.0.0.1", port: ingressPort, path: chat ? "/v1/chat/completions" : "/v1/responses", method: "POST", headers: { "content-type": "application/json" } }, (res) => {
+          let received = "";
+          res.on("data", (chunk: Buffer) => {
+            received += chunk.toString("utf8");
+            if (received.includes(chat ? "data: [DONE]" : "event: response.incomplete")) {
+              res.destroy();
+              resolve();
+            }
+          });
+          res.on("error", reject);
+        });
+        req.on("error", reject);
+        req.end(body);
+      });
+      await closed;
+      assert.equal(requests.list(1)[0]?.status, 200);
+      assert.match(requests.list(1)[0]?.note ?? "", /client closed after completion/);
+    } finally {
+      upstreamStopReason = "end_turn";
+      onTerminalUpstreamClose = undefined;
+    }
+  });
+}
+
+for (const chat of [false, true]) for (const stream of [false, true]) {
+  test(`upstream EOF without message_stop fails visibly (${chat ? "Chat" : "Responses"}, ${stream ? "stream" : "JSON"})`, async () => {
+    upstreamInterrupted = true;
+    try {
+      const body = chat ? { model: "claude-sonnet-5", messages: [{ role: "user", content: "go" }], stream } : { ...input, stream };
+      const result = call(chat ? "/v1/chat/completions" : "/v1/responses", body);
+      if (stream) await assert.rejects(result, /aborted|socket hang up/);
+      else {
+        const response = await result;
+        assert.equal(response.status, 502);
+        assert.match(response.text, /ended before message_stop/);
+      }
+      assert.equal(requests.list(1)[0]?.status, 502);
+    } finally {
+      upstreamInterrupted = false;
+    }
+  });
+}
 
 test("Responses reject previous_response_id to remain stateless", async () => {
   const response = await call("/v1/responses", { ...input, previous_response_id: "resp_old" });

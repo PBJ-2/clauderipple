@@ -230,7 +230,7 @@ function restoreCompaction(value: unknown, onIgnored: () => void): string | null
   return `Summary of the earlier conversation: ${payload.summary}`;
 }
 
-function responseItems(value: unknown, onIgnoredCompaction: () => void, translation: ToolTranslation, nativeImages: boolean): AnthropicMessage[] {
+function responseItems(value: unknown, instructions: string[], onIgnoredCompaction: () => void, translation: ToolTranslation, nativeImages: boolean): AnthropicMessage[] {
   if (typeof value === "string") return value ? [{ role: "user", content: [{ type: "text", text: value }] }] : [];
   if (!Array.isArray(value)) return [];
   const messages: AnthropicMessage[] = [];
@@ -273,8 +273,15 @@ function responseItems(value: unknown, onIgnoredCompaction: () => void, translat
       messages.push({ role: "user", content: [{ type: "text", text: COMPACTION_REQUEST }] });
       continue;
     }
-    if (type !== "message") continue;
-    const role = item.role === "assistant" ? "assistant" : "user";
+    const inputRole = string(item.role);
+    // EasyInputMessage omits `type`; unrelated input items must not become messages.
+    if (type !== "message" && !(item.type === undefined && (inputRole === "user" || inputRole === "assistant" || inputRole === "system" || inputRole === "developer"))) continue;
+    if (inputRole === "system" || inputRole === "developer") {
+      const text = contentText(item.content);
+      if (text) instructions.push(text);
+      continue;
+    }
+    const role = inputRole === "assistant" ? "assistant" : "user";
     const content = messageContent(item.content);
     if (content.length) messages.push({ role, content });
   }
@@ -319,10 +326,10 @@ function placeInstructions(prefix: string | undefined, instructions: string[], m
 }
 
 export function responsesToAnthropic(body: Json, targetModel: string, systemPrefix?: string, onIgnoredCompaction: () => void = () => {}, translation = new ToolTranslation(body, !!systemPrefix), nativeImages = false): AnthropicIngressRequest {
-  const instructions = string(body.instructions);
-  const messages = responseItems(body.input, onIgnoredCompaction, translation, nativeImages);
+  const instructions: string[] = typeof body.instructions === "string" ? [body.instructions] : [];
+  const messages = responseItems(body.input, instructions, onIgnoredCompaction, translation, nativeImages);
   endWithUserTurn(messages);
-  const system = placeInstructions(systemPrefix, instructions ? [instructions] : [], messages);
+  const system = placeInstructions(systemPrefix, instructions, messages);
   applyMessageCache(messages);
   const tools = translation.tools;
   const maxTokens = typeof body.max_output_tokens === "number" && Number.isFinite(body.max_output_tokens) ? Math.max(1, Math.floor(body.max_output_tokens)) : undefined;
@@ -422,6 +429,7 @@ export class ResponsesEventMapper {
   readonly model: string;
   readonly output: OutputItem[] = [];
   usage: OpenAiUsage = { input_tokens: 0, input_tokens_details: { cached_tokens: 0 }, output_tokens: 0, total_tokens: 0 };
+  stopReason: string | null = null;
   private blocks = new Map<number, { kind: "text" | "tool"; item: OutputItem; arguments: string }>();
   private emittedCreated = false;
   private completed = false;
@@ -438,7 +446,8 @@ export class ResponsesEventMapper {
   }
 
   response(status: "in_progress" | "completed" = "in_progress"): Json {
-    return { id: this.responseId, object: "response", created_at: this.created, status, model: this.model, output: this.output, usage: this.usage };
+    const incomplete = status === "completed" && this.stopReason === "max_tokens";
+    return { id: this.responseId, object: "response", created_at: this.created, status: incomplete ? "incomplete" : status, model: this.model, output: this.output, usage: this.usage, ...(incomplete ? { incomplete_details: { reason: "max_output_tokens" } } : {}) };
   }
 
   private sequenceNumber = 0;
@@ -554,6 +563,8 @@ export class ResponsesEventMapper {
       return out;
     }
     if (type === "message_delta") {
+      const stopReason = string(object(event.delta)?.stop_reason);
+      if (stopReason) this.stopReason = stopReason;
       this.updateUsage(event.usage);
       return out;
     }
@@ -586,12 +597,13 @@ export class ResponsesEventMapper {
       ];
     }
     if ([...this.blocks.values()].some((state) => state.item.type === "custom_tool_call")) throw new Error("Custom tool response ended before its input was complete");
+    if (!upstreamCompleted) throw new Error("Anthropic upstream ended before message_stop");
     this.completed = true;
     for (const state of this.blocks.values()) {
-      state.item.status = "completed";
+      state.item.status = this.stopReason === "max_tokens" ? "incomplete" : "completed";
     }
     this.blocks.clear();
-    return [{ type: "response.completed", response: this.response("completed") }];
+    return [{ type: this.stopReason === "max_tokens" ? "response.incomplete" : "response.completed", response: this.response("completed") }];
   }
 }
 
@@ -614,7 +626,7 @@ export function responsesToChatCompletion(mapper: ResponsesEventMapper): Json {
     object: "chat.completion",
     created: mapper.created,
     model: mapper.model,
-    choices: [{ index: 0, message: { role: "assistant", content: text || null, ...(toolCalls.length ? { tool_calls: toolCalls.map(({ index: _index, ...call }) => call) } : {}) }, finish_reason: toolCalls.length ? "tool_calls" : "stop" }],
+    choices: [{ index: 0, message: { role: "assistant", content: text || null, ...(toolCalls.length ? { tool_calls: toolCalls.map(({ index: _index, ...call }) => call) } : {}) }, finish_reason: mapper.stopReason === "max_tokens" ? "length" : toolCalls.length ? "tool_calls" : "stop" }],
     usage: { prompt_tokens: mapper.usage.input_tokens, prompt_tokens_details: mapper.usage.input_tokens_details, completion_tokens: mapper.usage.output_tokens, total_tokens: mapper.usage.total_tokens },
   };
 }
@@ -623,6 +635,8 @@ export function responsesToChatCompletion(mapper: ResponsesEventMapper): Json {
 export function responsesEventsToChatChunks(events: Json[], mapper: ResponsesEventMapper): Json[] {
   const chunks: Json[] = [];
   const chatId = `chatcmpl_${mapper.responseId.slice(5)}`;
+  // Chat indexes count tool calls only, not Responses output items or Anthropic content blocks.
+  const toolIndexes = new Map(mapper.output.filter((item) => item.type === "function_call").map((item, index) => [item.id, index]));
   for (const event of events) {
     const type = string(event.type);
     const base = { id: chatId, object: "chat.completion.chunk", created: mapper.created, model: mapper.model };
@@ -630,11 +644,14 @@ export function responsesEventsToChatChunks(events: Json[], mapper: ResponsesEve
     else if (type === "response.output_text.delta") chunks.push({ ...base, choices: [{ index: 0, delta: { content: string(event.delta) ?? "" }, finish_reason: null }] });
     else if (type === "response.output_item.added") {
       const item = object(event.item);
-      if (item?.type === "function_call") chunks.push({ ...base, choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: string(item.call_id) ?? string(item.id), type: "function", function: { name: string(item.name) ?? "tool", arguments: "" } }] }, finish_reason: null }] });
-    } else if (type === "response.function_call_arguments.delta") chunks.push({ ...base, choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: string(event.delta) ?? "" } }] }, finish_reason: null }] });
-    else if (type === "response.completed") {
+      const index = toolIndexes.get(string(item?.id) ?? "");
+      if (item?.type === "function_call" && index !== undefined) chunks.push({ ...base, choices: [{ index: 0, delta: { tool_calls: [{ index, id: string(item.call_id) ?? string(item.id), type: "function", function: { name: string(item.name) ?? "tool", arguments: "" } }] }, finish_reason: null }] });
+    } else if (type === "response.function_call_arguments.delta") {
+      const index = toolIndexes.get(string(event.item_id) ?? "");
+      if (index !== undefined) chunks.push({ ...base, choices: [{ index: 0, delta: { tool_calls: [{ index, function: { arguments: string(event.delta) ?? "" } }] }, finish_reason: null }] });
+    } else if (type === "response.completed" || type === "response.incomplete") {
       const hasTools = mapper.output.some((item) => item.type === "function_call");
-      chunks.push({ ...base, choices: [{ index: 0, delta: {}, finish_reason: hasTools ? "tool_calls" : "stop" }], usage: { prompt_tokens: mapper.usage.input_tokens, prompt_tokens_details: mapper.usage.input_tokens_details, completion_tokens: mapper.usage.output_tokens, total_tokens: mapper.usage.total_tokens } });
+      chunks.push({ ...base, choices: [{ index: 0, delta: {}, finish_reason: mapper.stopReason === "max_tokens" ? "length" : hasTools ? "tool_calls" : "stop" }], usage: { prompt_tokens: mapper.usage.input_tokens, prompt_tokens_details: mapper.usage.input_tokens_details, completion_tokens: mapper.usage.output_tokens, total_tokens: mapper.usage.total_tokens } });
     }
   }
   return chunks;
