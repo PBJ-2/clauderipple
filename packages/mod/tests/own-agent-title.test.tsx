@@ -100,3 +100,13 @@ test("a pinned worker's title names its model and account, not its qualified id"
   await $.agent.spawn({ ...SPAWN, subagentType: 'claude-haiku-5-5-f952fac6' })
   expect(sent[0]?.description).toBe('Haiku5.5·mambo20211·high · Port the parser')
 })
+
+test("a pinned worker with no effort replaces the account-only prefix the router asked the parent to write", async ($, on) => {
+  const pinned = ['---', 'name: claude-opus-5-5-f952fac6', 'description: claude-opus-5-5 via anthropic. Runs on mambo20211 (account f952fac6). Start it.', 'model: anthropic#f952fac6:claude-opus-5-5', '---', 'Do the work.'].join('\n')
+  const { sent } = boundaries(on, {
+    '/home/test/.clauderipple/generated-agents.json': JSON.stringify({ agents: ['claude-opus-5-5-f952fac6'] }),
+    '/home/test/.claude/agents/claude-opus-5-5-f952fac6.md': pinned,
+  })
+  await $.agent.spawn({ ...SPAWN, subagentType: 'claude-opus-5-5-f952fac6', description: '5.5·mambo20211 · Port the parser' })
+  expect(sent[0]?.description).toBe('Opus5.5·mambo20211 · Port the parser')
+})

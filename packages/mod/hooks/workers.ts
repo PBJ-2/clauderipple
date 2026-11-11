@@ -308,8 +308,31 @@ export function spawnModel(target: TierTarget, effort: Effort, fileModel?: strin
 const EFFORT_WORD = 'low|medium|high|xhigh|max'
 // What the title forms are, so a parent's own heading ("UI·UX · Review nav") is left alone:
 // "Sol · ", "Sol·high · ", a Claude title with its account ("Opus5.5·Work-account · ", "…·high · "),
-// and any title with account and effort ("Sol·Work-account·high · ").
+// and any title with account and effort ("Sol·Work-account·high · "). A title the generator
+// writes with an account and no effort ("5.5·Work-account · ", "Sol·Work-account · ") has no shape
+// of its own, so it is recognised by an account the worker files name (`titlePrefix`).
 const TITLE_PREFIX = new RegExp(`^(?:[^\\s·]+(?:·(?:${EFFORT_WORD}))?|(?:Opus|Sonnet|Haiku|Fable|Mythos)[\\d.]*·[^\\s·]+(?:·(?:${EFFORT_WORD}))?|[^\\s·]+·[^\\s·]+·(?:${EFFORT_WORD})) · `)
+
+const closeUp = (account: string): string => account.replace(/[\s·]+/g, '-')
+
+/** TITLE_PREFIX, widened by the accounts the worker files name: "<title>·<account>(·<effort>) · ". */
+function titlePrefix(accounts: readonly string[]): RegExp {
+  const named = accounts.map(closeUp).filter(Boolean).map(a => a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  if (!named.length) return TITLE_PREFIX
+  return new RegExp(`${TITLE_PREFIX.source.slice(0, -4)}|[^\\s·]+·(?:${named.join('|')})(?:·(?:${EFFORT_WORD}))?) · `)
+}
+
+/** Every account display name the generated worker files state ("Runs on X (account PIN)"). */
+export function pinnedAccountNames(files: Iterable<string>): string[] {
+  const names = new Set<string>()
+  for (const file of files) {
+    const head = /^---\r?\n([\s\S]*?)\r?\n---/.exec(file)?.[1]
+    const description = head && /^description:\s*(.*)$/m.exec(head)?.[1]
+    const found = description && /\bRuns on (.+?) \(account [A-Za-z0-9._-]+\)/.exec(description)
+    if (found) names.add(found[1]!)
+  }
+  return [...names]
+}
 
 /**
  * The model a title names: a Claude id or alias as its family and version ("Opus5.5"), a routed id
@@ -333,9 +356,9 @@ export function titleName(model: string, models: readonly RouterModel[] = []): s
  * The app names only Claude models, and for a routed one shows the parent's; the mod is the one
  * that knows, since it picks. A prefix already there (the parent's guess) is replaced.
  */
-export function spawnTitle(description: string, model: string, effort: string | undefined, models: readonly RouterModel[] = [], account?: string): string {
-  const tag = titleName(model, models) + (account ? '·' + account.replace(/[\s·]+/g, '-') : '') + (effort ? '·' + effort : '')
-  return `${tag} · ${bareTitle(description)}`
+export function spawnTitle(description: string, model: string, effort: string | undefined, models: readonly RouterModel[] = [], account?: string, accounts: readonly string[] = []): string {
+  const tag = titleName(model, models) + (account ? '·' + closeUp(account) : '') + (effort ? '·' + effort : '')
+  return `${tag} · ${bareTitle(description, accounts)}`
 }
 
 /** The `<provider>#<account pin>:` a pinned worker's model id starts with. */
@@ -365,8 +388,8 @@ export function pinnedAccountName(model: string, files: Iterable<string>): strin
 }
 
 /** A title without the model tag spawnTitle put in front ("Sol·high · Port it" → "Port it"). */
-export function bareTitle(description: string): string {
-  const bare = description.replace(TITLE_PREFIX, '')
+export function bareTitle(description: string, accounts: readonly string[] = []): string {
+  const bare = description.replace(titlePrefix(accounts), '')
   return bare.trim() ? bare : description
 }
 
