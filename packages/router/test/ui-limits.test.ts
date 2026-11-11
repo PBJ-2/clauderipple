@@ -27,7 +27,15 @@ class Element {
   }
   appendChild(child: Element) { this.children.push(child); }
   replaceChildren(...children: Element[]) { this.children = children; }
-  addEventListener() {}
+  #listeners: Record<string, () => void> = {};
+  addEventListener(name: string, listener: () => void) { this.#listeners[name] = listener; }
+  click() { this.#listeners.click?.(); }
+  querySelector(selector: string) { return findAll(this, hasClass(selector.slice(1)))[0] ?? null; }
+  setAttribute(name: string, value: unknown) { this.attrs[name] = value; }
+  getAttribute(name: string) { return this.attrs[name]; }
+  get dataset() { return { quotaWindows: this.attrs["data-quota-windows"] }; }
+  get title() { return this.attrs.title; }
+  set title(value: unknown) { this.attrs.title = value; }
   set innerHTML(_value: string) { throw new Error("innerHTML is forbidden"); }
 }
 const el = (tag: string, attrs: Record<string, unknown> = {}, children: Element[] = []) => new Element(tag, attrs, children);
@@ -49,33 +57,38 @@ type LimitsUi = {
   settleLimits(): Promise<unknown>;
   providerLimits(name: string): { accounts: Record<string, unknown>[] } | null;
   limitsSnapshotPeek(): unknown;
+  quotaMeters(windows: unknown): Element | null;
+  quotaWindowsText(windows: unknown): string;
+  setQuotaRemaining(remaining: boolean): void;
 };
 const defaultConfig = { providers: { claude: { type: "anthropic", auth: "claude-code" }, gpt: { type: "chatgpt" }, other: { type: "openai-compatible" } } };
 // `config` null is the screen before the config has loaded: the status alone names the providers.
-function limitsUi(api: (path: string) => Promise<unknown>, status: Record<string, unknown> = {}, config: Record<string, unknown> | null = defaultConfig) {
-  const card = el("div"), desktop = el("div");
-  const build = new Function("api", "el", "t", "$", "status", "config", `
+function limitsUi(api: (path: string) => Promise<unknown>, status: Record<string, unknown> = {}, config: Record<string, unknown> | null = defaultConfig, storage = { getItem: (_key: string): string | null => null, setItem: (_key: string, _value: string) => {} }) {
+  const card = el("div"), desktop = el("div"), header = el("div"), meters = el("div");
+  const selectAll = () => [card, desktop, meters].flatMap((root) => findAll(root, (node) => node.attrs["data-quota-windows"] !== undefined));
+  const build = new Function("api", "el", "t", "$", "status", "config", "localStorage", "$all", `
     let currentConfig = config;
     const stateFor = () => null, chevronIcon = () => null, openProvider = () => {}, refreshProviderUsage = () => {}, chatgptLoginButton = () => el("button", { text: "Sign in" }), chatgptLoginMessage = "", providerLabel = (name) => name, providerTitle = (name) => name, providerDisplayName = (name) => name, offline = () => false, providerHue = () => "#000";
+    const svgIcon = () => el("svg", { "aria-hidden": "true" });
     const APP = null, clientsLoaded = false, modState = {}, updateState = {}, renderDiagnostics = () => {}, modRedraw = () => {}, versionRow = () => null, autoUpdateRow = () => null, priorityRow = () => null;
     let loadedUiRevision = null;
     ${block("function badge(", "/** A titled group")}
     ${block("let limitsSnapshot = null;", "// ---- Diagnostics:")}
-    ${block("function quotaLine(", "/**\n * One line a person can read")}
+    ${block("const QUOTA_VIEW_STORE =", "/**\n * One line a person can read")}
     ${block("function credentialLine(", "/**\n * One verdict")}
     ${block("function providerConnection(", "let statusModBusy")}
     ${block("function claudeAccountLabel(", '/** "5h 14%')}
     ${block("function chatgptQuotaText(", "async function patchChatgptAccount(")}
-    return { refreshHealth, renderHealthProviders, limitsAccountRow, limitsWindowRow, limitsUsageWindow, settleLimits: () => limitsRead ?? Promise.resolve(), providerLimits, limitsSnapshotPeek: () => limitsSnapshot };
+    return { refreshHealth, renderHealthProviders, limitsAccountRow, limitsWindowRow, limitsUsageWindow, settleLimits: () => limitsRead ?? Promise.resolve(), providerLimits, limitsSnapshotPeek: () => limitsSnapshot, quotaMeters, quotaWindowsText, setQuotaRemaining };
   `) as (...args: unknown[]) => LimitsUi;
   const ui = build(async (path: string) => {
     // The config a status poll may re-read answers with the config this screen was given, or fails while it has none.
     if (path === "/api/config") { if (!config) throw new Error("config not loaded"); return config; }
     const response = await api(path);
     return path === "/api/status" ? { settings: {}, ...status, ...(response && typeof response === "object" ? response : {}) } : response;
-  }, el, t, (selector: string) => selector === "#health-providers" ? card : selector === "#health-desktop" ? desktop : el("div"), status, config);
+  }, el, t, (selector: string) => selector === "#health-providers" ? card : selector === "#health-desktop" ? desktop : selector === "#health-quota-toggle" ? header : el("div"), status, config, storage, selectAll);
   // A poll draws the status at once and the gauges when the limits read lands; tests wait for both.
-  return { ...ui, card, desktop, refresh: async () => { await ui.refreshHealth(); await ui.settleLimits(); } };
+  return { ...ui, card, desktop, header, meters, refresh: async () => { await ui.refreshHealth(); await ui.settleLimits(); } };
 }
 // The render path reads the real clock, so the fixtures' resets must be ahead of it.
 const now = Date.now();
@@ -83,6 +96,65 @@ const five = { kind: "five_hour", used_percent: 23, window_minutes: 300, reset_a
 const weekly = { kind: "seven_day", used_percent: 125, window_minutes: 10080, reset_at: (now + 86400_000) / 1000 };
 const current = { id: "current", account: 0, inUse: true, at: now, windows: [weekly, five] };
 const connected = { claude: { reachable: true }, gpt: { reachable: true }, other: { reachable: true } };
+
+test("Status's header toggle stays mounted and changes figures, not account states or source data", async () => {
+  const accounts = [
+    { id: "a", label: "Work", inUse: true, stale: true, windows: [{ ...five, used_percent: 93 }] },
+    { id: "b", label: "Spare", inUse: false, paused: true, windows: [{ ...weekly, used_percent: 100 }] },
+  ];
+  const limits = { providers: [{ type: "chatgpt", provider: "gpt", title: "GPT", accounts }] };
+  const status = { providers: connected };
+  const before = JSON.stringify({ status, limits });
+  const ui = limitsUi(async (route) => route === "/api/limits" ? limits : {}, status);
+  await ui.refresh();
+  const button = ui.header.children[0]!;
+  assert.equal(button.attrs.type, "button");
+  assert.equal(text(button), "");
+  assert.equal(button.children[0]!.tag, "svg");
+  assert.equal(findAll(ui.card, hasClass("quota-view-toggle")).length, 0);
+  assert.equal(button.attrs["aria-label"], t("quota.showRemaining"));
+  const markers = () => findAll(ui.card, (node) => node.tag === "strong" || hasClass("badge")(node) || hasClass("limits-window-foot")(node)).map(text);
+  const originalMarkers = markers();
+  const tones = () => findAll(ui.card, hasClass("limits-window")).map((node) => node.attrs.class);
+  const originalTones = tones();
+  const meters = ui.quotaMeters(accounts.flatMap((account) => account.windows))!;
+  ui.meters.appendChild(meters);
+  for (const remaining of [true, false]) {
+    button.click();
+    assert.equal(ui.header.children[0], button, "a poll or toggle must never replace the focused button");
+    assert.equal(ui.header.children.length, 1);
+    assert.equal(button.attrs["aria-pressed"], String(remaining));
+    assert.equal(button.title, t(remaining ? "quota.showUsed" : "quota.showRemaining"));
+    const values = remaining ? [7, 0] : [93, 100];
+    assert.deepEqual(findAll(ui.card, (node) => node.attrs.role === "progressbar").map((node) => node.attrs["aria-valuenow"]), values);
+    assert.deepEqual(findAll(meters, hasClass("meter-fill")).map((node) => node.style.width), values.map((n) => `${n}%`));
+    assert.equal(meters.attrs["aria-label"], ui.quotaWindowsText(accounts.flatMap((account) => account.windows)));
+    assert.deepEqual(markers(), originalMarkers);
+    assert.deepEqual(tones(), originalTones);
+    await ui.refresh();
+    assert.equal(ui.header.children[0], button);
+  }
+  assert.equal(JSON.stringify({ status, limits }), before);
+  const html = fs.readFileSync(path.join(uiDir, "index.html"), "utf8");
+  assert.match(html, /class="section-head health-providers-head"[^\n]*data-i18n="health.providers"[^\n]*id="health-quota-toggle"/);
+});
+
+test("quota display preference persists locally, tolerates blocked storage and filters nonfinite figures", () => {
+  const data = new Map<string, string>();
+  const storage = { getItem: (key: string) => data.get(key) ?? null, setItem: (key: string, value: string) => { data.set(key, value); } };
+  const ui = limitsUi(async () => ({}), {}, defaultConfig, storage);
+  ui.setQuotaRemaining(true);
+  assert.equal(data.get("clauderipple_quota_remaining"), "true");
+  const reloaded = limitsUi(async () => ({}), {}, defaultConfig, storage);
+  assert.match(text(reloaded.quotaMeters([{ used_percent: 93 }])!), /7% remaining/);
+  const blocked = limitsUi(async () => ({}), {}, defaultConfig, { getItem: () => { throw Error("blocked"); }, setItem: () => { throw Error("blocked"); } });
+  assert.doesNotThrow(() => blocked.setQuotaRemaining(true));
+  assert.equal(blocked.quotaMeters([{ used_percent: NaN }, { used_percent: Infinity }]), null);
+  assert.match(text(blocked.quotaMeters([{ used_percent: 125 }])!), /0% remaining/);
+  for (const dict of Object.values(dictionaries)) {
+    for (const key of ["quota.remainingLine", "quota.showUsed", "quota.showRemaining"]) assert.ok(dict[key]);
+  }
+});
 
 test("Status replaces subscription text lines with per-account gauges, leaving other providers alone", async () => {
   const paths: string[] = [];
@@ -616,7 +688,7 @@ test("the windows read as a table that folds on a narrow card, never a fixed pai
   const rule = css.match(/\.limits-windows \{([^}]*)\}/);
   assert.ok(rule, "the window grid has its rule");
   // A line per window: name, bar, figure, reset — the columns line up across accounts.
-  assert.match(rule[1]!, /grid-template-columns: [\d.]+em minmax\(48px, 1fr\) [\d.]+em minmax\(0, [\d.]+fr\)/);
+  assert.match(rule[1]!, /grid-template-columns: [\d.]+em minmax\(48px, 1fr\) minmax\(4em, max-content\) minmax\(0, [\d.]+fr\)/);
   assert.doesNotMatch(rule[1]!, /repeat\(2/, "no fixed two-column grid is left in the window grid");
   // On a narrow card (the provider's own width, not the window's) the reset drops under the bar.
   const narrow = css.match(/@container \(max-width: 780px\) \{([\s\S]*?)\n\}/);

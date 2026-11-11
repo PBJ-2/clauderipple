@@ -463,6 +463,13 @@ label.check input { margin-top: 2px; }
 
 /* Wider than a settings page: an account's windows read as one line each, a table across. */
 #view-health { max-width: 880px; }
+.health-providers-head { justify-content: flex-start; align-items: center; gap: 8px; }
+#health-quota-toggle { display: inline-flex; }
+.quota-view-toggle[aria-pressed="true"] { background: var(--fill); color: var(--label); }
+.quota-view-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (pointer: coarse) {
+  .quota-view-toggle { width: 44px; height: 44px; }
+}
 
 /* A provider: its header row opens its page; its accounts follow, one row each. Providers are
    divided by full-width rules, accounts within one by inset hairlines. */
@@ -505,12 +512,12 @@ label.check input { margin-top: 2px; }
 
 /* The windows: a line each — name, bar, figure, then when it resets (and the pace) — in columns
    that line up across accounts. An exhaust warning runs under the bar. */
-.limits-windows { display: grid; grid-template-columns: 6.5em minmax(48px, 1fr) 4em minmax(0, 1.4fr); column-gap: 12px; row-gap: 2px; align-items: center; min-width: 0; font-size: var(--fs-cap); font-variant-numeric: tabular-nums; }
+.limits-windows { display: grid; grid-template-columns: 6.5em minmax(48px, 1fr) minmax(4em, max-content) minmax(0, 1.4fr); column-gap: 12px; row-gap: 2px; align-items: center; min-width: 0; font-size: var(--fs-cap); font-variant-numeric: tabular-nums; }
 .limits-window, .limits-window-head { display: contents; }
 .limits-window + .limits-window .limits-window-head > * { margin-top: 6px; }
 /* A window's name is never cut: a long scoped label ("Argon weekly") wraps within its column. */
 .limits-window-name { min-width: 0; color: var(--label-2); line-height: 16px; padding: 2px 0; overflow-wrap: break-word; }
-.limits-window-figure { color: var(--label); font-size: var(--fs-foot); font-weight: 600; line-height: 20px; text-align: right; }
+.limits-window-figure { color: var(--label); font-size: var(--fs-foot); font-weight: 600; line-height: 20px; text-align: right; white-space: nowrap; }
 .limits-window + .limits-window .limits-window-foot { margin-top: 6px; }
 .limits-window-foot { min-width: 0; color: var(--label-2); line-height: 1.4; overflow-wrap: anywhere; }
 .limits-window-foot .sep { color: var(--label-3); }
@@ -520,7 +527,7 @@ label.check input { margin-top: 2px; }
 
 /* A card too narrow for the reset beside the figure: it drops under the bar. */
 @container (max-width: 780px) {
-  .limits-windows { grid-template-columns: 6.5em minmax(0, 1fr) 4em; }
+  .limits-windows { grid-template-columns: 6.5em minmax(0, 1fr) minmax(4em, max-content); }
   .limits-window-foot { grid-column: 2 / -1; }
   .limits-window + .limits-window .limits-window-foot { margin-top: 0; }
 }
@@ -528,7 +535,7 @@ label.check input { margin-top: 2px; }
 @container (max-width: 600px) {
   .limits-account { grid-template-columns: minmax(0, 1fr); }
   .limits-account-head { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
-  .limits-windows { grid-template-columns: 4.8em minmax(0, 1fr) 4em; }
+  .limits-windows { grid-template-columns: 4.8em minmax(0, 1fr) minmax(4em, max-content); }
 }
 @container (max-width: 380px) {
   .limits-account { padding-left: 16px; }

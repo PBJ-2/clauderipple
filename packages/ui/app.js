@@ -492,7 +492,8 @@ function limitsReset(window, weekly, now) {
  * `accountName` puts whose gauge it is into the accessible name.
  */
 function limitsWindowRow(label, window, now, accountName = "") {
-  const percent = `${Math.round(window.usedPercent * 10) / 10}%`;
+  const shown = quotaShownPercent(window.usedPercent);
+  const percent = t(quotaRemaining ? "quota.remainingLine" : "quota.line", { window: "", percent: Math.round(shown * 10) / 10 }).trim();
   // A window of a day or more reads its reset as a weekday and clock; a shorter one as the time left.
   const reset = limitsReset(window, window.kind === "seven_day" || window.windowMinutes >= 1440, now);
   const name = accountName ? `${accountName} · ${label}` : label;
@@ -506,11 +507,11 @@ function limitsWindowRow(label, window, now, accountName = "") {
   const track = el("div", {
     class: "limits-track meter", role: "progressbar", tabindex: "0",
     "aria-label": name, "aria-valuemin": "0", "aria-valuemax": "100",
-    "aria-valuenow": Math.max(0, Math.min(100, window.usedPercent)),
+    "aria-valuenow": Math.max(0, Math.min(100, shown)),
     "aria-valuetext": [percent, reset, pace, note].filter(Boolean).join(" · "), title: [name, percent, reset].join(" · "),
   });
   const fill = el("span", { class: "limits-fill meter-fill", "aria-hidden": "true" });
-  fill.style.width = `${Math.max(0, Math.min(100, window.usedPercent))}%`;
+  fill.style.width = `${Math.max(0, Math.min(100, shown))}%`;
   track.appendChild(fill);
   const parts = [el("span", { text: reset })];
   if (passed) parts.push(el("span", { class: "warn-text", text: t("limits.stale") }));
@@ -1224,6 +1225,44 @@ if (APP) {
   void APP.state().then((next) => { shellState = next; renderConnection(); applyOffline(); });
 }
 
+const QUOTA_VIEW_STORE = "clauderipple_quota_remaining";
+let quotaRemaining = false;
+try { quotaRemaining = localStorage.getItem(QUOTA_VIEW_STORE) === "true"; } catch { /* unavailable */ }
+
+/** A display preference only: warnings, forecasts and routing keep the backend's used share. */
+function quotaShownPercent(used) {
+  return quotaRemaining ? Math.max(0, Math.min(100, 100 - used)) : used;
+}
+function setQuotaRemaining(remaining) {
+  quotaRemaining = remaining;
+  try { localStorage.setItem(QUOTA_VIEW_STORE, String(remaining)); } catch { /* unavailable */ }
+  for (const node of $all("[data-quota-windows]")) {
+    const meters = quotaMeters(JSON.parse(node.dataset.quotaWindows));
+    node.replaceChildren(...meters.children);
+    node.setAttribute("aria-label", meters.getAttribute("aria-label"));
+    node.title = meters.title;
+  }
+  renderHealthProviders();
+  refreshProviderUsage();
+}
+/** The header stays mounted across polls, so keyboard focus stays on the same button. */
+function renderQuotaViewToggle() {
+  const host = $("#health-quota-toggle");
+  if (!host) return;
+  let button = host.querySelector(".quota-view-toggle");
+  if (!button) {
+    button = el("button", { class: "icon-btn quota-view-toggle", type: "button" }, [
+      svgIcon("0 0 24 24", ["M4 7h16m-4-4 4 4-4 4", "M20 17H4m4-4-4 4 4 4"]),
+    ]);
+    button.addEventListener("click", () => setQuotaRemaining(!quotaRemaining));
+    host.appendChild(button);
+  }
+  const label = t(quotaRemaining ? "quota.showUsed" : "quota.showRemaining");
+  button.setAttribute("aria-label", label);
+  button.setAttribute("aria-pressed", String(quotaRemaining));
+  button.title = label;
+}
+
 function quotaLine(name) {
   const quota = status && status.chatgpt && status.chatgpt.quota && status.chatgpt.quota[name];
   const primary = quota && quota.rate_limits && quota.rate_limits.primary;
@@ -1374,6 +1413,7 @@ function refreshProviderConfig() {
   return providerConfigRead;
 }
 function renderHealthProviders() {
+  renderQuotaViewToggle();
   const box = $("#health-providers");
   // The router's live list decides which providers show: one added or removed elsewhere appears or goes on the
   // next poll. The config supplies each provider's label and preset; one it does not have yet is drawn from the status.
@@ -3653,8 +3693,8 @@ function chatgptQuotaText(quota) {
 }
 /** The same line for any list of usage windows (`/api/limits` windows included). */
 function quotaWindowsText(windows) {
-  return (windows || []).filter((w) => w && typeof w.used_percent === "number").map((w) => {
-    const line = t("quota.line", { window: quotaWindowName(w), percent: Math.round(w.used_percent) }).trim();
+  return (windows || []).filter((w) => w && Number.isFinite(w.used_percent)).map((w) => {
+    const line = t(quotaRemaining ? "quota.remainingLine" : "quota.line", { window: quotaWindowName(w), percent: Math.round(quotaShownPercent(w.used_percent)) }).trim();
     const reset = quotaFullReset(w);
     return reset ? `${line} · ${reset}` : line;
   }).join(" · ");
@@ -3680,18 +3720,19 @@ function quotaFullReset(w) {
  * The whole line is the group's accessible name. Nothing when no window has a share.
  */
 function quotaMeters(windows) {
-  const shown = (windows || []).filter((w) => w && typeof w.used_percent === "number");
+  const shown = (windows || []).filter((w) => w && Number.isFinite(w.used_percent));
   if (!shown.length) return null;
   const text = quotaWindowsText(shown);
-  return el("div", { class: "account-quota account-meters", role: "img", "aria-label": text, title: text }, shown.map((w) => {
+  return el("div", { class: "account-quota account-meters", "data-quota-windows": JSON.stringify(shown), role: "img", "aria-label": text, title: text }, shown.map((w) => {
     const percent = Math.round(w.used_percent);
+    const figure = Math.round(quotaShownPercent(w.used_percent));
     const fill = el("span", { class: "meter-fill" });
-    fill.style.width = `${Math.max(0, Math.min(100, w.used_percent))}%`;
+    fill.style.width = `${Math.max(0, Math.min(100, quotaShownPercent(w.used_percent)))}%`;
     const reset = quotaFullReset(w);
     return el("span", { class: `account-meter${percent >= 95 ? " tone-bad" : percent >= 80 ? " tone-warn" : ""}`, "aria-hidden": "true" }, [
       el("span", { class: "account-meter-name", text: quotaWindowName(w) }),
       el("span", { class: "meter" }, [fill]),
-      el("span", { class: "account-meter-figure", text: `${percent}%` }),
+      el("span", { class: "account-meter-figure", text: t(quotaRemaining ? "quota.remainingLine" : "quota.line", { window: "", percent: figure }).trim() }),
       reset ? el("span", { class: "account-meter-reset", text: reset }) : null,
     ]);
   }));
