@@ -717,6 +717,7 @@ In daily use by the author, but young. Expect rough edges:
 ## Community
 
 Questions and bug reports are on Discord: [https://discord.gg/R8ZgGSNHjw](https://discord.gg/R8ZgGSNHjw).
+What is planned next: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Not affiliated
 
