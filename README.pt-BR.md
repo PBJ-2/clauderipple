@@ -376,6 +376,18 @@ código QR uma vez. iPhone: [App Store](https://apps.apple.com/br/app/id68230637
 [Google Play](https://play.google.com/store/apps/details?id=com.clauderipple.remote&hl=pt-BR). As sessões do app do Claude funcionam no macOS;
 o app tem uma demonstração para testar sem computador.
 
+## Roteiro
+
+O plano completo, com as issues por trás de cada item, está em [docs/ROADMAP.md](docs/ROADMAP.md) (em inglês). Nesta ordem:
+
+1. **Ver como sua cota é consumida.** Por que uma requisição não aproveitou o cache, do que cada requisição é feita, uma previsão de quando sua cota vai se esgotar, com alertas, alertas de tarefa concluída, uma proteção contra comandos perigosos e descrições de imagens para modelos que não leem imagens.
+2. **Configurações em um só lugar.** Uma página para plugins, servidores MCP, skills e hooks, com os tokens que cada um realmente custa; pacotes populares em um clique; um único arquivo de regras para Claude e Codex.
+3. **Memória.** Cada sessão resumida diariamente em decisões, registros e pendências, e só o que importa trazido de volta ao iniciar uma sessão, ao perguntar sobre o assunto ou logo antes de editar um arquivo.
+4. **Gestão automática de contas.** Usar primeiro a conta cujo limite semanal reinicia antes; segurar uma requisição quando todas as contas estão esgotadas e enviá-la quando uma reiniciar; importar contas de outras ferramentas.
+5. **Economizar tokens, medindo com honestidade.** Primeiro um medidor de custo antes e depois; depois, economias no roteador que não quebram o cache.
+
+Ideias e votos são bem-vindos nas [issues](https://github.com/PBJ-2/clauderipple/issues).
+
 ## Instalação
 
 **macOS**

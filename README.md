@@ -367,6 +367,18 @@ QR code once. iPhone: [App Store](https://apps.apple.com/us/app/id6823063731). A
 Claude app sessions are supported on macOS; the app has a demo you can try without a
 computer.
 
+## Roadmap
+
+The full plan, with the issues behind each item, is in [docs/ROADMAP.md](docs/ROADMAP.md). In order:
+
+1. **See where your limit goes.** Why a request missed the cache, what each request is made of, a limit forecast with alerts, task-finished alerts, a guard against dangerous commands, and image descriptions for models that cannot read images.
+2. **Settings in one place.** One page for plugins, MCP servers, skills and hooks, with the tokens each one really costs; popular bundles in one click; one rules file for Claude and Codex.
+3. **Memory.** Every session distilled daily into decisions, records and open items, and only the few that matter brought back when you start a session, ask about it, or are about to edit a file.
+4. **Accounts handled for you.** Use first the account whose weekly limit resets soonest; hold a request when every account is out and send it when one resets; import accounts from other tools.
+5. **Save tokens, measured honestly.** A before-and-after cost meter first, then savings in the router that do not break the cache.
+
+Ideas and votes are welcome in [issues](https://github.com/PBJ-2/clauderipple/issues).
+
 ## Install
 
 **macOS**
