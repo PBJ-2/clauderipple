@@ -1377,6 +1377,37 @@ test("GET /api/claude-models uses named entries from code and ccd picker surface
   }
 });
 
+test("GET /api/ping answers from memory, and /api/status in picker mode does not wait for or report the unfinished certificate check (#159)", async () => {
+  const cfg = makeCfg();
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-ping-admin-"));
+  const prevHome = process.env.CLAUDERIPPLE_HOME;
+  process.env.CLAUDERIPPLE_HOME = home; // no CA file here: the background check ends without running a command
+  const configFile = path.join(home, "config.json");
+  fs.writeFileSync(configFile, JSON.stringify(cfg));
+  const admin = await startAdmin({
+    config: () => cfg,
+    configFile,
+    log: new Logger(null, 1_000_000, 1, false),
+    stats: () => ({ inFlight: 0, messagesInFlight: 0, started: 0, completed: 0, failed: 0 }),
+    health: () => 0,
+    version: "0.0.0-test",
+    requests: new RequestLog(path.join(home, "logs", "requests.jsonl")),
+    picker: () => ({ enabled: true, hosts: [], last: null }),
+  });
+  try {
+    const ping = await fetch(`${base()}:${admin.port}/api/ping`);
+    assert.equal(ping.status, 200);
+    assert.deepEqual(await ping.json(), { ok: true });
+    assert.equal((await fetch(`${base()}:${admin.port}/api/ping`, { method: "HEAD" })).status, 200);
+    const status = await (await fetch(`${base()}:${admin.port}/api/status`)).json() as { readiness: { problems: string[] } };
+    assert.ok(!status.readiness.problems.includes("picker-ca"), "the first answer is unknown, not 'not trusted'");
+  } finally {
+    admin.close();
+    if (prevHome === undefined) delete process.env.CLAUDERIPPLE_HOME; else process.env.CLAUDERIPPLE_HOME = prevHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("POST /api/image answers with the image bytes, and refuses a bad request before generating", async () => {
   const cfg = makeCfg();
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-image-admin-"));

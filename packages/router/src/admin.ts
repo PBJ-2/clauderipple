@@ -66,7 +66,8 @@ import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
 import { fetchClaudeModels, newClaudeReleases, type ClaudeModel } from "./providers/anthropic-models.ts";
 import { codexEnabled, codexHome } from "../../cli/src/codex.ts";
 import { openBrowser } from "../../cli/src/browser.ts";
-import { caTrusted, currentAppProxy } from "../../cli/src/picker.ts";
+import { caTrustedAsync, currentAppProxy } from "../../cli/src/picker.ts";
+import { PickerTrust } from "./picker-trust.ts";
 import { certPaths } from "../../cli/src/certs.ts";
 import { desktopClaudeCodeDirs } from "../../cli/src/claude-auth.ts";
 import { statusModEnabled, syncModelSlots } from "../../cli/src/settings.ts";
@@ -1130,7 +1131,9 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
   if (deps.health() > 0) problems.push("upstream");
   if (picker.enabled) {
     const trust = pickerTrust();
-    if (!trust.caTrusted) problems.push("picker-ca");
+    // null: the certificate has not been checked yet (the first check runs in the background); that
+    // is not a problem to report.
+    if (trust.caTrusted === false) problems.push("picker-ca");
     if (!trust.appProxy) problems.push("picker-proxy");
   }
   for (const [name, p] of Object.entries(providers)) if (p.reachable === false) problems.push(`provider:${name}`);
@@ -1182,19 +1185,20 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
   };
 }
 
-/** Certificate trust and the app's proxy entry cost a subprocess each; the tray polls every 5s, so remember them for a minute. */
-let pickerTrustMemo: { at: number; value: { caTrusted: boolean; appProxy: boolean } } | null = null;
-function pickerTrust(): { caTrusted: boolean; appProxy: boolean } {
-  const now = Date.now();
-  if (pickerTrustMemo && now - pickerTrustMemo.at < 60_000) return pickerTrustMemo.value;
-  let value = { caTrusted: false, appProxy: false };
+/**
+ * Certificate trust costs a child process (PowerShell on Windows), so it is never run on a request:
+ * the last answer is served and a background check refreshes it once a minute (#159). The app's
+ * proxy entry is two small file reads and stays on the request.
+ */
+const caTrust = new PickerTrust({ check: () => caTrustedAsync(certPaths(homeDir()).caPem) });
+function pickerTrust(): { caTrusted: boolean | null; appProxy: boolean } {
+  let appProxy = false;
   try {
-    value = { caTrusted: caTrusted(certPaths(homeDir()).caPem), appProxy: currentAppProxy().ours };
+    appProxy = currentAppProxy().ours;
   } catch {
     // Unknown counts as not ready; the next poll tries again.
   }
-  pickerTrustMemo = { at: now, value };
-  return value;
+  return { caTrusted: caTrust.get(), appProxy };
 }
 
 /**
@@ -2200,6 +2204,12 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
       if (method !== "GET" && crossSiteOrigin(req)) {
         deps.log.warn(`admin: refused ${method} ${pathname} from origin ${String(req.headers.origin)}`);
         sendJson(res, 403, { error: "cross-site request refused" });
+        return;
+      }
+      // Answering at all, from memory: no file, no child process, no upstream. The Windows launcher's
+      // watchdog asks this every 15 s and restarts a router that stops answering (#159).
+      if (pathname === "/api/ping" && method === "GET") {
+        sendJson(res, 200, { ok: true });
         return;
       }
       if (pathname === "/api/settings-jobs" || pathname === "/api/settings-jobs/claim" || pathname === "/api/settings-jobs/result") {

@@ -15,6 +15,7 @@ import crypto, { X509Certificate } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execBounded } from "./bounded-exec.ts";
 import { windowsPowerShellEnv } from "./windows-powershell.ts";
 import { homeDir } from "../../router/src/config.ts";
 import { withFileLock, writeJsonAtomic } from "../../router/src/locked-file.ts";
@@ -178,6 +179,46 @@ export function caTrusted(caPem: string, opts: { platform?: NodeJS.Platform; run
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * `caTrusted` for a process that must not stop: the router's status route asks it in the background
+ * (#159, a synchronous PowerShell on the router's event loop froze the proxy with it). Every child
+ * runs under a deadline that ends its whole tree. Answers true or false as `caTrusted` does, and
+ * null when a check ran out of time: that says nothing about the certificate, so a caller must not
+ * report it as "not trusted".
+ */
+export async function caTrustedAsync(caPem: string, opts: { platform?: NodeJS.Platform; run?: (command: string, args: string[]) => Promise<string>; timeoutMs?: number } = {}): Promise<boolean | null> {
+  const platform = opts.platform ?? process.platform;
+  const timeoutMs = opts.timeoutMs ?? 20_000;
+  const run = opts.run ?? ((command, args) => execBounded(command, args, { timeoutMs, env: windowsPowerShellEnv(), windowsHide: true }));
+  const timedOut = (error: unknown): boolean => (error as { timedOut?: boolean } | null)?.timedOut === true;
+  try {
+    const cert = new X509Certificate(fs.readFileSync(caPem));
+    const fingerprint = cert.fingerprint.replace(/:/g, "");
+    if (platform === "linux") {
+      const name = nssNickname(caPem);
+      const certutilRun = (args: string[]): Promise<string> => run("certutil", ["-d", `sql:${nssDb()}`, ...args]);
+      const installed = new X509Certificate(await certutilRun(["-L", "-n", name, "-a"]));
+      if (installed.fingerprint256 !== cert.fingerprint256) return false;
+      await certutilRun(["-V", "-n", name, "-u", "L"]);
+      return true;
+    }
+    if (platform === "win32") {
+      const out = await run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `@(Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object { $_.Thumbprint -eq '${fingerprint}' }).Count`]);
+      return Number(out.trim()) > 0;
+    }
+    // The same three checks, in the same order, as caTrusted's macOS branch.
+    const settings = await run("security", ["trust-settings-export", "/dev/stdout"]);
+    if (!settings.toUpperCase().includes(`<KEY>${fingerprint}</KEY>`)) return false;
+    const cn = /(?:^|\n)CN=([^\n]+)/.exec(cert.subject)?.[1] ?? "";
+    const held = await run("security", ["find-certificate", "-a", "-Z", "-c", cn, loginKeychain()]);
+    if (!held.toUpperCase().replace(/\s+/g, " ").includes(`SHA-1 HASH: ${fingerprint}`)) return false;
+    await run("security", ["verify-cert", "-c", caPem, "-p", "basic", "-k", loginKeychain()]);
+    return true;
+  } catch (error) {
+    return timedOut(error) ? null : false;
   }
 }
 
