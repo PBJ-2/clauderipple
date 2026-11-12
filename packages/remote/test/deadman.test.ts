@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { DesktopProblemAlert, RelayWatch } from "../src/watch.ts";
 import type { WatchDeps } from "../src/watch.ts";
-import { WATCH_RENEW_MS, WATCH_TOKENS_MAX, outageBody, recoveredBody } from "../src/protocol.ts";
+import { WATCH_RENEW_MS, WATCH_SETTLE_MS, WATCH_TICK_MS, WATCH_TOKENS_MAX, outageBody, recoveredBody } from "../src/protocol.ts";
 import type { HostControlMsg } from "../src/protocol.ts";
 
 const TOKENS = [
@@ -55,13 +55,97 @@ test("while work is active the watch is sent and renewed each minute; idle work 
   f.setActive(false);
   f.tick();
   assert.deepEqual(f.sent.at(-1), { t: "unwatch" }, "idle work takes the watch away");
-  f.advance(WATCH_RENEW_MS * 3);
-  f.tick();
+  // The timer keeps ticking while the computer is awake (a gap would read as sleep).
+  for (let elapsed = 0; elapsed < WATCH_RENEW_MS * 3; elapsed += WATCH_TICK_MS) { f.advance(WATCH_TICK_MS); f.tick(); }
   assert.equal(f.sent.length, 3, "nothing more is sent until work starts again");
 
   f.setActive(true);
   f.tick();
   assert.deepEqual(f.sent.at(-1), f.sent[0], "work re-arms the watch immediately");
+});
+
+/** Stay awake for `ms`, ticking as the real timer does. */
+function awake(f: ReturnType<typeof fakeWatch>, ms: number): void {
+  for (let elapsed = 0; elapsed < ms; elapsed += WATCH_TICK_MS) { f.advance(WATCH_TICK_MS); f.tick(); }
+}
+
+test("a night of dark wakes is one outage: no re-arming and no recovery notice until the computer stays awake", () => {
+  const f = fakeWatch();
+  f.tick();
+  assert.equal(f.sent.at(-1)?.t, "watch", "work arms the watch before the lid closes");
+
+  // Asleep for 15 minutes; the room alerted 3 minutes in. A dark wake reconnects for 45 seconds.
+  f.advance(15 * 60_000);
+  const firedAt = f.now() - 12 * 60_000;
+  f.tick();
+  f.watch.hello(firedAt);
+  assert.deepEqual(f.recovered, [], "no 'connected again' during a dark wake");
+  assert.equal(f.sent.filter((m) => m.t === "cleared").length, 0, "the room keeps firedAt, so it cannot alert again");
+  assert.equal(f.sent.at(-1)?.t, "unwatch", "a just-woken computer is not trusted with a watch");
+  // The room answers every watch/unwatch with `fired`; the host must not answer back each time.
+  const before = f.sent.length;
+  f.watch.hello(firedAt);
+  f.watch.hello(firedAt);
+  assert.equal(f.sent.length, before, "no frame echoes back to a repeated fired");
+  awake(f, 40_000);
+  assert.equal(f.sent.filter((m) => m.t === "watch").length, 1, "still no watch during the dark wake");
+
+  // Asleep again; the next dark wake hears the same outage.
+  f.advance(14 * 60_000);
+  f.tick();
+  f.watch.hello(firedAt);
+  assert.deepEqual(f.recovered, []);
+  assert.equal(f.sent.filter((m) => m.t === "watch").length, 1);
+
+  // Really back: once it has stayed awake WATCH_SETTLE_MS, one notice, one clear, and work re-arms.
+  awake(f, WATCH_SETTLE_MS);
+  assert.equal(f.recovered.length, 1, "one 'connected again' for the whole night");
+  assert.ok(f.recovered[0]! >= 29, "the minutes count from the alert to the real return");
+  assert.deepEqual(f.sent.filter((m) => m.t === "cleared"), [{ t: "cleared", firedAt }]);
+  assert.equal(f.sent.at(-1)?.t, "watch", "work re-arms once the computer is settled");
+  awake(f, WATCH_RENEW_MS);
+  assert.equal(f.recovered.length, 1, "never twice");
+});
+
+test("a computer that settles while the relay is down keeps the recovery notice for the reconnect", () => {
+  let open = true;
+  const f = fakeWatch({ send: (msg) => { if (open) f.sent.push(msg); return open; } });
+  f.tick();
+  f.advance(15 * 60_000);
+  const firedAt = f.now() - 12 * 60_000;
+  f.tick();
+  f.watch.hello(firedAt);
+  open = false;
+  awake(f, WATCH_SETTLE_MS * 2);
+  assert.deepEqual(f.recovered, [], "nothing is pushed or marked reported while offline");
+  open = true;
+  f.watch.hello(firedAt);
+  assert.equal(f.recovered.length, 1, "the room's fired on reconnect delivers it");
+  assert.deepEqual(f.sent.filter((m) => m.t === "cleared"), [{ t: "cleared", firedAt }]);
+});
+
+test("a short sleep with work active does not re-arm the watch on a dark wake", () => {
+  const f = fakeWatch();
+  f.tick();
+  f.advance(150_000);
+  f.tick();
+  assert.deepEqual(f.sent.at(-1), { t: "unwatch" }, "the watch from before the sleep is taken away");
+  awake(f, WATCH_SETTLE_MS - WATCH_TICK_MS);
+  assert.equal(f.sent.filter((m) => m.t === "watch").length, 1, "not re-armed before the computer settles");
+  awake(f, WATCH_TICK_MS);
+  assert.equal(f.sent.at(-1)?.t, "watch", "re-armed once settled");
+});
+
+test("an outage already reported is cleared at once, even on a dark wake", () => {
+  const f = fakeWatch();
+  f.tick();
+  f.watch.hello(1_000_000);
+  assert.deepEqual(f.recovered.length, 1);
+  f.advance(10 * 60_000);
+  f.tick();
+  f.watch.hello(1_000_000);
+  assert.equal(f.recovered.length, 1);
+  assert.equal(f.sent.filter((m) => m.t === "cleared").length, 2, "the room is told again so it stops repeating");
 });
 
 test("a host that starts idle clears a stale watch left by its previous process", () => {

@@ -9,7 +9,7 @@
 // meets active work in each occurrence while this computer holds it. Both use ExpoNotifier's send
 // path and fixed copy from OUTAGE_COPY.
 import { readJson, writeFileAtomic } from "./fsutil.ts";
-import { WATCH_RENEW_MS, WATCH_TICK_MS, WATCH_TOKENS_MAX, outageMinutes } from "./protocol.ts";
+import { WATCH_RENEW_MS, WATCH_SETTLE_MS, WATCH_TICK_MS, WATCH_TOKENS_MAX, WATCH_WAKE_GAP_MS, outageMinutes } from "./protocol.ts";
 import type { HostControlMsg } from "./protocol.ts";
 
 export interface WatchDeps {
@@ -45,6 +45,12 @@ export class RelayWatch {
   private watching = false;
   /** The relay has answered at least one control frame this process; before that, clear a stale watch. */
   private primed = false;
+  /** The last tick or hello; a gap of WATCH_WAKE_GAP_MS since then means the computer slept. */
+  private lastClockAt: number | null = null;
+  /** When the computer last came back from sleep; null when it has not slept in this process. */
+  private wokeAt: number | null = null;
+  /** An outage the room told us about while the computer had not settled: reported once it has. */
+  private pendingFiredAt: number | null = null;
 
   constructor(deps: WatchDeps) {
     this.deps = deps;
@@ -83,10 +89,18 @@ export class RelayWatch {
   /** One decision point; the timer calls it every WATCH_TICK_MS and tests call it directly. */
   tick(): void {
     const now = this.now();
+    this.clock(now);
+    const settled = this.settled(now);
+    // The clear goes first and only on an open socket: a computer that settles while offline keeps
+    // the notice pending, and the room's next `fired` (on reconnect) delivers it.
+    if (settled && this.pendingFiredAt !== null && this.deps.send({ t: "cleared", firedAt: this.pendingFiredAt })) {
+      this.report(this.pendingFiredAt, true);
+    }
     // `active` already carries the idle tail: Sessions.workActive stays true for WATCH_IDLE_MS after
     // the last observation of a running turn, so its first false means the work has been idle long
-    // enough and the watch must go.
-    if (!this.deps.active()) {
+    // enough and the watch must go. A computer that has just woken is not trusted with a watch yet:
+    // a dark wake renews it and sleeps again a minute later, which the room would report as a new outage.
+    if (!this.deps.active() || !settled) {
       // The first control frame of a process also clears a watch a previous process may have left.
       if ((this.watching || !this.primed) && this.sendUnwatch()) this.primed = true;
       return;
@@ -100,23 +114,56 @@ export class RelayWatch {
 
   /** The relay's hello (`undefined`) or its `fired` frame (`firedAt`): answer on this socket. */
   hello(firedAt?: number): void {
+    const now = this.now();
+    this.clock(now);
+    const settled = this.settled(now);
     if (typeof firedAt === "number" && Number.isFinite(firedAt) && firedAt > 0) {
-      if (firedAt !== this.reportedAt) {
-        const minutes = outageMinutes(this.now() - firedAt);
-        this.reportedAt = firedAt;
-        this.saveReported();
-        try { void Promise.resolve(this.deps.recover(minutes)).catch((error) => this.log(`watch: recovery push failed: ${message(error)}`)); }
-        catch (error) { this.log(`watch: recovery push failed: ${message(error)}`); }
+      // A computer that has just woken may be back for under a minute. The room keeps `firedAt`
+      // (and raises no new alert) until `cleared`, so holding both the notice and the clear until
+      // the computer stays awake turns a night of dark wakes into one "connected again" push.
+      if (firedAt === this.reportedAt || settled) this.report(firedAt);
+      else {
+        if (this.pendingFiredAt !== firedAt) {
+          this.pendingFiredAt = firedAt;
+          this.log("watch: the computer has just woken; the recovery notice waits until it stays awake");
+        }
+        // Nothing to state while the outage stands: the room raises no alert until `cleared`, and
+        // it answers every watch or unwatch with `fired` again, so a frame here would echo forever.
+        return;
       }
-      // Said even for an already reported outage: the room keeps telling until it hears this.
-      this.deps.send({ t: "cleared", firedAt });
     }
     // A new control socket may face a room that still holds whatever the previous one left — an
     // unwatch whose frame died with the old socket looks sent here. So this hello states the
     // current state outright, never "what we believe the room last heard": active renews the
-    // watch, idle takes it away (and clears a stale one from a previous process).
-    const sent = this.deps.active() ? this.sendWatch(this.now()) : this.sendUnwatch();
+    // watch, idle (or a computer that has only just woken) takes it away, and clears a stale one
+    // from a previous process.
+    const sent = this.deps.active() && settled ? this.sendWatch(now) : this.sendUnwatch();
     if (sent) this.primed = true;
+  }
+
+  /** Push the recovery notice once per outage, then tell the room it may forget `firedAt`. */
+  private report(firedAt: number, cleared = false): void {
+    this.pendingFiredAt = null;
+    if (firedAt !== this.reportedAt) {
+      const minutes = outageMinutes(this.now() - firedAt);
+      this.reportedAt = firedAt;
+      this.saveReported();
+      try { void Promise.resolve(this.deps.recover(minutes)).catch((error) => this.log(`watch: recovery push failed: ${message(error)}`)); }
+      catch (error) { this.log(`watch: recovery push failed: ${message(error)}`); }
+    }
+    // Said even for an already reported outage: the room keeps telling until it hears this.
+    if (!cleared) this.deps.send({ t: "cleared", firedAt });
+  }
+
+  /** Notice a sleep: timers that ran WATCH_WAKE_GAP_MS late mean the computer was not running. */
+  private clock(now: number): void {
+    if (this.lastClockAt !== null && now - this.lastClockAt >= WATCH_WAKE_GAP_MS) this.wokeAt = now;
+    this.lastClockAt = now;
+  }
+
+  /** The computer has not slept in this process, or has stayed awake WATCH_SETTLE_MS since it woke. */
+  private settled(now: number): boolean {
+    return this.wokeAt === null || now - this.wokeAt >= WATCH_SETTLE_MS;
   }
 
   private sendWatch(now: number): boolean {

@@ -87,6 +87,15 @@ export const WATCH_TICK_MS = 10_000;
 export const WATCH_RENEW_MS = 60_000;
 export const WATCH_IDLE_MS = 120_000;
 export const WATCH_ALARM_MS = 180_000;
+/**
+ * A sleeping laptop wakes in the dark for under a minute every few minutes (network upkeep, mail,
+ * Power Nap) and sleeps again. A tick that comes this late means the computer was asleep; until it
+ * has stayed awake for WATCH_SETTLE_MS the host neither arms the watch nor sends the recovery
+ * notice, so a night of dark wakes is one "disconnected" push and one "connected again" push when
+ * the computer is really back, not a pair every quarter hour.
+ */
+export const WATCH_WAKE_GAP_MS = 90_000;
+export const WATCH_SETTLE_MS = 120_000;
 /** The room keeps at most this many Expo tokens per host. */
 export const WATCH_TOKENS_MAX = 10;
 /** The relay's own pushes live about an hour: the outage is long past by the time they are stale. */
