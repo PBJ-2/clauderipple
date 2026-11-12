@@ -17,6 +17,7 @@ import type { PushContext } from "./push-content.ts";
 import type { PushEvent } from "./protocol.ts";
 import { attachmentContent, fileImages, messageContent, sessionFileTool, type InputBlock } from "./images.ts";
 import { ATTACHMENT_CAP, ATTACHMENT_COUNT, WATCH_IDLE_MS, type Attachment, type ImagePart, type SessionFile, type SendBehavior } from "./protocol.ts";
+import { artifactOf } from "./artifact.ts";
 import { DesktopSessions, type DesktopProcess, type TurnWrapUp } from "./desktop.ts";
 import { firstSentence, STATUS_CAP } from "./wrap-up.ts";
 import { DesktopSidebar, PHONE_GROUP, type SidebarOptions } from "./sidebar.ts";
@@ -224,6 +225,9 @@ export function summarize(tool: string, input: Record<string, unknown>, cwd: str
       const files = (Array.isArray(input.files) ? input.files : []).filter((f): f is string => typeof f === "string").map(rel);
       return oneLine([...files, str(input.caption)].filter(Boolean).join(", "));
     }
+    // The title is known only from the result; until then the call's own description, never the local file.
+    // A read, list or delete has neither: it says its action and the page it acts on.
+    case "Artifact": return oneLine(str(input.title) || str(input.description) || [str(input.action), str(input.url)].filter(Boolean).join(" "));
     case "AskUserQuestion": return oneLine(str(object(Array.isArray(input.questions) ? input.questions[0] : null)?.question));
     case "ExitPlanMode": return oneLine(str(input.plan));
     case "EnterPlanMode": return "";
@@ -3541,7 +3545,9 @@ export class Sessions {
         }
         for (const b of blocks) {
           if (b.type !== "tool_result" || !b.tool_use_id) continue;
-          const body: EventBody = { kind: "tool_result", toolUseId: b.tool_use_id, ok: !b.is_error, ...messageContent(b.content, data => this.log(r.id).image(data), { cwd: r.cwd, ...(r.sdkSessionId ? { sessionId: r.sdkSessionId } : {}) }) };
+          // The SDK carries a result's structured form beside its blocks; one message answers one call.
+          const artifact = !b.is_error && blocks.filter(x => x.type === "tool_result").length === 1 ? artifactOf(msg.tool_use_result) : undefined;
+          const body: EventBody = { kind: "tool_result", toolUseId: b.tool_use_id, ok: !b.is_error, ...messageContent(b.content, data => this.log(r.id).image(data), { cwd: r.cwd, ...(r.sdkSessionId ? { sessionId: r.sdkSessionId } : {}) }), ...(artifact ? { artifact } : {}) };
           if (parent) this.subLog(r.id, `sub-${parent}`)?.append(body);
           else this.append(r.id, body);
           const sub = live.subs.get(b.tool_use_id);

@@ -1,10 +1,10 @@
 // Events → what the timeline shows. Pure, so the same reduction runs in tests and in the app.
-import type { PermissionContent, RuleStatus, Effort, Figures, ImagePart, SessionFile, SessionEvent, SessionState, Text, ToolCall } from "../src/protocol.ts";
+import type { ArtifactRef, PermissionContent, RuleStatus, Effort, Figures, ImagePart, SessionFile, SessionEvent, SessionState, Text, ToolCall } from "../src/protocol.ts";
 import { WRAP_TOOL, wrapUpFields, type WrapUpReply } from "../src/wrap-up.ts";
 import { stringField, toolInput } from "../src/tool-details.ts";
 import { settingsOutcome } from "../src/settings-notice.ts";
 
-export interface ToolView extends ToolCall { result?: { ok: boolean; text: Text; images?: ImagePart[]; files?: SessionFile[] } }
+export interface ToolView extends ToolCall { result?: { ok: boolean; text: Text; images?: ImagePart[]; files?: SessionFile[]; artifact?: ArtifactRef } }
 
 /**
  * A session command the person sent, drawn as what it does rather than as their words: compaction,
@@ -158,7 +158,8 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
         const item = owner ? items[owner.item] : undefined;
         if (owner && item?.type === "assistant") {
           const tools = item.tools.slice();
-          tools[owner.tool] = { ...tools[owner.tool]!, result: { ok: e.ok, text: e.text, ...(e.images ? { images: e.images } : {}), ...(e.files ? { files: e.files } : {}) } };
+          // An artifact's title is its one-liner: the call itself only knows a description.
+          tools[owner.tool] = { ...tools[owner.tool]!, ...(e.artifact ? { summary: e.artifact.title } : {}), result: { ok: e.ok, text: e.text, ...(e.images ? { images: e.images } : {}), ...(e.files ? { files: e.files } : {}), ...(e.artifact ? { artifact: e.artifact } : {}) } };
           items[owner.item] = { ...item, tools, ver: `${item.ver}r${e.seq}` };
         }
         break;
@@ -248,6 +249,9 @@ export type TimelineItem = Item | ToolGroup | WrapUp | Chapter;
 /** A tool call that draws a "visualize" widget rather than doing work: `show_widget` or `…__show_widget`. */
 export const isWidgetTool = (name: string): boolean => name === "show_widget" || name.endsWith("__show_widget");
 
+/** The Claude app's tool that publishes a page (`claude.ai/artifact/…`). */
+export const ARTIFACT_TOOL = "Artifact";
+
 // The Claude app's Code-tab tools, which draw something of their own there (only its sessions call them).
 const PLAN_TOOL = "mcp__ccd_turn__update_plan";
 const CHAPTER_TOOL = "mcp__ccd_session__mark_chapter";
@@ -323,7 +327,8 @@ export function timelineItems(view: Pick<SessionView, "items" | "state">): Timel
           continue;
         }
         // A widget is something to look at, not activity: it stands on its own instead of folding away.
-        if (isWidgetTool(tool.name)) {
+        // An artifact is a page to open, so it stands on its own too (its card shows once the result names the page).
+        if (isWidgetTool(tool.name) || tool.name === ARTIFACT_TOOL) {
           group = null;
           result.push({ ...item, key: `${item.key}:${tool.id}`, text: "", images: [], files: [], streaming: false, tools: [tool] });
           continue;

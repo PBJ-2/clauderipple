@@ -118,3 +118,10 @@ test("a thinking block and a tool's own detail are drawn from the state kept bes
   assert.ok(item(run, ui([run.key, "b-0"])).includes('<details class="tool-details" data-k="d:b-0">'), "a tool's detail block starts closed");
   assert.ok(item(run, ui([run.key, "b-0", "d:b-0"])).includes('<details class="tool-details" data-k="d:b-0" open>'), "and opens where the person left it");
 });
+
+test("an Artifact call stands on its own between tool runs, as a widget does", () => {
+  const rows = timelineItems({ state: "idle", items: [assistant("a", "", ["Read", "Artifact", "Bash"])] });
+  assert.deepEqual(rows.map(r => r.type), ["toolGroup", "assistant", "toolGroup"]);
+  const card = rows[1];
+  assert.ok(card?.type === "assistant" && card.tools.length === 1 && card.tools[0]?.name === "Artifact" && card.text === "");
+});

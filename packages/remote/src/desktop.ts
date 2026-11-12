@@ -8,6 +8,7 @@ import { EventLog } from "./eventlog.ts";
 import { creationDateToFileTime, parseFileTime, processCommands, processSnapshot, sameFileTime, type ProcessSnapshot } from "./processes.ts";
 import { fileImages, messageContent, sessionFileTool, type ImageSink } from "./images.ts";
 import { narrationBody } from "./narration.ts";
+import { artifactOf } from "./artifact.ts";
 import { PERMISSION_MODES, type BackgroundTask, type EventBody, type Figures, type PermissionMode, type PlanStep, type SessionSummary, type ToolCall } from "./protocol.ts";
 import { WRAP_TOOL, wrapUpFields, type WrapUpFields } from "./wrap-up.ts";
 import { TaskPlan } from "./task-plan.ts";
@@ -312,7 +313,8 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
       const b = object(value);
       if (b?.type === "tool_result" && typeof b.tool_use_id === "string") {
         const converted = messageContent(b.content, sink, scope);
-        bodies.push({ kind: "tool_result", toolUseId: b.tool_use_id, ok: b.is_error !== true, ...converted });
+        const artifact = b.is_error === true ? undefined : artifactOf(r.toolUseResult);
+        bodies.push({ kind: "tool_result", toolUseId: b.tool_use_id, ok: b.is_error !== true, ...converted, ...(artifact ? { artifact } : {}) });
         // A synchronous worker finishes at its tool result; an async one only launches here and ends at its notification.
         const running = state?.get(b.tool_use_id);
         const resultText = typeof converted.text === "string" ? converted.text : "";

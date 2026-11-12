@@ -774,3 +774,32 @@ test("once the sidebar lists a named transcript, the sidebar alone keeps it", t 
   now += 60_000;
   assert.deepEqual(desktop.list().map(s => s.id), [id], "no longer named, and the sidebar no longer lists it");
 });
+
+test("an Artifact call's result carries the published page, and its row reads as the title", () => {
+  const call = line({ type: "assistant", uuid: "a1", message: { id: "m1", content: [{ type: "tool_use", id: "art", name: "Artifact", input: { file_path: "C:\\work\\report.html", description: "Sales report", icon: "chart" } }] } });
+  const result = (toolUseResult: unknown, isError = false) => line({ type: "user", uuid: "u1", toolUseResult, message: { content: [{ type: "tool_result", tool_use_id: "art", is_error: isError, content: "Published" }] } });
+  const published = { artifact_id: "abc", url: "https://claude.ai/artifact/abc", title: "Q3 sales", icon: "chart", version: 2, audience: "private", path: "C:\\work\\report.html" };
+  const events = (text: string) => transcriptEvents(text, "C:\\work", summarize).bodies;
+
+  const [assistant] = events(call);
+  assert.equal(assistant?.kind === "assistant" && assistant.tools[0]?.summary, "Sales report", "never the local path");
+  const [done] = events(result(published));
+  assert.deepEqual(done?.kind === "tool_result" && done.artifact, { title: "Q3 sales", url: "https://claude.ai/artifact/abc", icon: "chart", version: 2 });
+  const rows = reduce([assistant!, done!].map((b, i) => ({ ...b, seq: i + 1, at: 0 }))).items;
+  const item = rows.find(i => i.type === "assistant");
+  assert.equal(item?.type === "assistant" && item.tools[0]?.summary, "Q3 sales");
+  assert.equal(item?.type === "assistant" && item.tools[0]?.result?.artifact?.url, "https://claude.ai/artifact/abc");
+
+  const withoutOptional = events(result({ artifact_id: "abc", url: "https://claude.ai/artifact/abc", title: "T" }))[0];
+  assert.deepEqual(withoutOptional?.kind === "tool_result" && withoutOptional.artifact, { title: "T", url: "https://claude.ai/artifact/abc" });
+  const none = (value: unknown, error = false) => { const body = events(result(value, error))[0]; return body?.kind === "tool_result" && !("artifact" in body); };
+  assert.ok(none({ ...published, url: "http://claude.ai/artifact/abc" }), "plain http");
+  assert.ok(none({ ...published, url: "https://claude.ai.evil.example/artifact/abc" }), "look-alike host");
+  assert.ok(none({ ...published, url: "https://user@claude.ai/artifact/abc" }), "credentials");
+  assert.ok(none({ ...published, url: "javascript:alert(1)" }), "script address");
+  assert.ok(none({ ...published, url: "file:///C:/work/report.html" }), "local file");
+  assert.ok(none({ ...published, title: "  " }), "no title");
+  assert.ok(none({ url: "https://claude.ai/chat/1", title: "WebFetch page" }), "another tool's result");
+  assert.ok(none(published, true), "a failed call");
+  assert.ok(none(undefined), "no structured result");
+});

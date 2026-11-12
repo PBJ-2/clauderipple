@@ -200,6 +200,9 @@ export interface Attachment { blob: string; name: string; mediaType: string }
 export type SendBehavior = "steer" | "interrupt";
 export function defaultEffort(efforts: Effort[]): Effort | null { return efforts.includes("high") ? "high" : efforts[0] ?? null; }
 
+/** A page an `Artifact` tool call published (Claude app sessions). Only an `https://claude.ai/` address travels; older apps ignore the field. */
+export interface ArtifactRef { title: string; url: string; icon?: string; version?: number }
+
 export interface ToolCall { id: string; name: string; files?: SessionFile[]; /** one line a person reads: a command, a path */ summary: string; input?: Text; /** Computed before a large input becomes a blob. Counts describe supplied edits, not unseen file context. */ changes?: { added: number; removed: number } }
 
 export type EventBody = MessageImages & {
@@ -221,7 +224,7 @@ export type EventBody = MessageImages & {
   /** A progress sentence the model wrote between tools: shown, unlike thinking. Its signature never travels. */
   | { kind: "narration"; msg: string; block: number; text: Text }
   | { kind: "assistant"; msg: string; model: string; text: Text; tools: ToolCall[] }
-  | { kind: "tool_result"; toolUseId: string; ok: boolean; text: Text }
+  | { kind: "tool_result"; toolUseId: string; ok: boolean; text: Text; /** the published page of an `Artifact` call; absent on older hosts and for every other tool */ artifact?: ArtifactRef }
   /** A subagent ran; its own log is `sub` and loads only when asked (Paseo #5820). */
   | { kind: "subagent"; toolUseId: string; sub: string; description: string; model: string | null; /** what to show for `model`: a pinned worker's `<provider>#<pin>:<model>` as "Opus 5.5 · account"; absent on older hosts */ modelLabel?: string; /** the effort the worker ran at, when its record says so */ effort?: string; status: "running" | "done" | "failed" | "stopped"; steps: number }
   | ({ kind: "permission"; id: string; tool: string; title: string; summary: string; input: Text; canAlways: boolean } & PermissionContent)
