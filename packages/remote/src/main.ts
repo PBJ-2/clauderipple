@@ -46,6 +46,10 @@ import { ConfigStore, configPath as routerConfigPath, homeDir } from "../../rout
 import { VERSION } from "../../router/src/version.ts";
 import { requestHostUpdate, refreshHostUpdate } from "./host-update.ts";
 import { applyProcessPriority } from "../../router/src/process-priority.ts";
+import { processSnapshot } from "./processes.ts";
+
+/** How long the host waits for the first process list before it starts anyway with an empty one. */
+const PROCESS_PRIME_WAIT_MS = 10_000;
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const out = (s: string): void => { process.stdout.write(s); };
@@ -131,6 +135,10 @@ async function runHost(): Promise<void> {
   if (!process.stderr.isTTY) stampLines(process.stderr);
   const log = (line: string): void => { process.stderr.write(`${line}\n`); };
   applyProcessPriority(new ConfigStore(routerConfigPath()).get().processPriority, { log });
+  // The desktop registry needs the process list to tell a live Claude app session from a closed one
+  // (issue #70). Read it in the background while the rest of the setup runs; it is awaited, bounded,
+  // before the host serves. A PowerShell that hangs costs this wait, not the host (#162).
+  const processesPrimed = processSnapshot.prime(PROCESS_PRIME_WAIT_MS);
   const dir = remoteHome();
   const cfg = configFromArgs(dir);
   const where = resolveBind(cfg.bind);
@@ -245,6 +253,7 @@ async function runHost(): Promise<void> {
     }),
   });
   server = host;
+  await processesPrimed;
   await host.listen();
   // Recovery writes restart notices and stopped states. A competing foreground process
   // must fail to bind before it can append to the running host's session logs.

@@ -16,13 +16,15 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 const PROC_START = "134370764816580794";
 const CREATED_AT = "2026-10-21T17:14:41.6580790Z";
 
-/** A Windows process snapshot that reports the given processes, as PowerShell would. */
-function windowsSnapshot(processes: { pid: number; started?: string }[]): ProcessSnapshot {
-  return new ProcessSnapshot({
+/** A Windows process snapshot that reports the given processes, as PowerShell would, primed the way the host primes it at start. */
+async function windowsSnapshot(processes: { pid: number; started?: string }[]): Promise<ProcessSnapshot> {
+  const snapshot = new ProcessSnapshot({
     platform: "win32",
-    exec: () => JSON.stringify(processes.map(p => ({ ProcessId: p.pid, CommandLine: "claude.exe --model=claude-opus-5", ...(p.started ? { CreationDate: p.started } : {}) }))),
+    exec: () => { throw new Error("Windows never reads the process list synchronously"); },
     execAsync: async () => JSON.stringify(processes.map(p => ({ ProcessId: p.pid, CommandLine: "claude.exe --model=claude-opus-5", ...(p.started ? { CreationDate: p.started } : {}) }))),
   });
+  await snapshot.prime();
+  return snapshot;
 }
 
 /** A Claude desktop registry directory, as the Windows app writes it. */
@@ -49,75 +51,124 @@ test("a Windows CreationDate converts to the FILETIME the desktop registry recor
   assert.equal(parseFileTime("not a filetime"), null);
 });
 
-test("the Windows registry keeps a session whose pid runs with the recorded start time", t => {
+test("the Windows registry keeps a session whose pid runs with the recorded start time", async t => {
   const dir = windowsRegistry(t);
-  const live = liveDesktopProcesses(dir, 0, "win32", windowsSnapshot([{ pid: 42, started: CREATED_AT }]));
+  const live = liveDesktopProcesses(dir, 0, "win32", await windowsSnapshot([{ pid: 42, started: CREATED_AT }]));
   assert.equal(live.get(bridgeId)?.bridgeSessionId, "bridge");
   assert.equal(live.get(bridgeId)?.pid, 42);
   assert.equal(live.get(bridgeId)?.status, "idle");
 });
 
-test("the Windows registry drops a session whose pid is gone or was recycled", t => {
+test("the Windows registry drops a session whose pid is gone or was recycled", async t => {
   const dir = windowsRegistry(t);
   // The pid is not running at all.
-  assert.equal(liveDesktopProcesses(dir, 0, "win32", windowsSnapshot([{ pid: 7, started: CREATED_AT }])).size, 0);
+  assert.equal(liveDesktopProcesses(dir, 0, "win32", await windowsSnapshot([{ pid: 7, started: CREATED_AT }])).size, 0);
   // The pid runs, but it started two milliseconds later: another process took the number.
-  assert.equal(liveDesktopProcesses(dir, 0, "win32", windowsSnapshot([{ pid: 42, started: "2026-10-21T17:14:41.6600790Z" }])).size, 0);
+  assert.equal(liveDesktopProcesses(dir, 0, "win32", await windowsSnapshot([{ pid: 42, started: "2026-10-21T17:14:41.6600790Z" }])).size, 0);
   // Half a millisecond of slack is still the same process.
-  assert.equal(liveDesktopProcesses(dir, 0, "win32", windowsSnapshot([{ pid: 42, started: "2026-10-21T17:14:41.6585790Z" }])).size, 1);
+  assert.equal(liveDesktopProcesses(dir, 0, "win32", await windowsSnapshot([{ pid: 42, started: "2026-10-21T17:14:41.6585790Z" }])).size, 1);
   // The OS cannot tell when the process started, but the pid runs.
-  assert.equal(liveDesktopProcesses(dir, 0, "win32", windowsSnapshot([{ pid: 42 }])).size, 1);
+  assert.equal(liveDesktopProcesses(dir, 0, "win32", await windowsSnapshot([{ pid: 42 }])).size, 1);
 });
 
-test("the Windows registry ignores entries that are not a live desktop session", t => {
+test("the Windows registry ignores entries that are not a live desktop session", async t => {
   const dir = windowsRegistry(t, { entrypoint: "sdk-cli" });
-  assert.equal(liveDesktopProcesses(dir, 0, "win32", windowsSnapshot([{ pid: 42, started: CREATED_AT }])).size, 0);
+  assert.equal(liveDesktopProcesses(dir, 0, "win32", await windowsSnapshot([{ pid: 42, started: CREATED_AT }])).size, 0);
 });
 
 test("the Windows registry sends a phone's message to the Claude app session", async t => {
   const dir = windowsRegistry(t);
-  const registry = liveDesktopProcesses(dir, 0, "win32", windowsSnapshot([{ pid: 42, started: CREATED_AT }]));
+  const registry = liveDesktopProcesses(dir, 0, "win32", await windowsSnapshot([{ pid: 42, started: CREATED_AT }]));
   const f = bridgeFixture(t, { registry: () => registry });
   await f.sessions.send(bridgeId, "phone-uuid", "hello from the phone");
   assert.equal(f.posts.length, 1, "the message went through the Remote Control bridge");
 });
 
-test("the Windows process snapshot is read once and then refreshed in the background", async () => {
+const one = JSON.stringify([{ ProcessId: 42, CommandLine: "claude.exe", CreationDate: CREATED_AT }]);
+
+test("the Windows process snapshot is primed at start and then refreshed in the background, never synchronously", async () => {
   let sync = 0, background = 0, now = 1_000_000;
   const snapshot = new ProcessSnapshot({
     platform: "win32", ttlMs: 5000, now: () => now,
     exec: () => { sync++; return "[]"; },
-    execAsync: async () => { background++; return "[]"; },
+    execAsync: async () => { background++; return one; },
   });
-  assert.deepEqual(snapshot.current(), []);
-  assert.equal(sync, 1, "the first read waits");
+  await snapshot.prime();
+  assert.equal(background, 1, "the startup read ran in the background");
+  assert.equal(snapshot.current().length, 1, "and its result is what the registry sees");
   snapshot.current();
-  assert.equal(sync, 1, "the snapshot is served from memory");
+  assert.equal(background, 1, "the snapshot is served from memory");
   now += 6000;
   snapshot.current();
-  assert.equal(sync, 1, "a stale snapshot is never read on the event loop again");
-  assert.equal(background, 1, "the new one is read in the background");
+  assert.equal(background, 2, "a stale snapshot is read again in the background");
   await tick();
   snapshot.current();
-  assert.equal(background, 1);
+  assert.equal(background, 2);
+  assert.equal(sync, 0, "the host's event loop never waits for PowerShell");
 });
 
-test("a failed first read never blocks the event loop again", async () => {
+test("a Windows snapshot nobody primed serves an empty list and reads in the background, never synchronously", async () => {
   let sync = 0, background = 0;
-  const errors: unknown[] = [];
   const snapshot = new ProcessSnapshot({
     platform: "win32",
-    exec: () => { sync++; throw new Error("CIM unavailable"); },
+    exec: () => { sync++; return one; },
+    execAsync: async () => { background++; return one; },
+  });
+  assert.deepEqual(snapshot.current(), []);
+  assert.equal(background, 1);
+  await tick();
+  assert.equal(snapshot.current().length, 1);
+  assert.equal(sync, 0);
+});
+
+test("prime() gives up waiting after its bound and the late read still fills the snapshot", async () => {
+  let release: (output: string) => void = () => {};
+  const snapshot = new ProcessSnapshot({
+    platform: "win32",
+    execAsync: () => new Promise<string>(resolve => { release = resolve; }),
+  });
+  const started = Date.now();
+  await snapshot.prime(30);
+  assert.ok(Date.now() - started < 1000, "the host starts without the list");
+  assert.deepEqual(snapshot.current(), []);
+  release(one);
+  await tick();
+  assert.equal(snapshot.current().length, 1, "the read that finished late is kept");
+});
+
+test("a read that never settles does not stop later refreshes", async () => {
+  let now = 1_000_000, calls = 0;
+  const errors: unknown[] = [];
+  const snapshot = new ProcessSnapshot({
+    platform: "win32", ttlMs: 1000, readTimeoutMs: 20, now: () => now,
+    execAsync: () => { calls++; return calls === 1 ? new Promise<string>(() => {}) : Promise.resolve(one); },
+    onError: error => errors.push(error),
+  });
+  await snapshot.prime(5);
+  assert.deepEqual(snapshot.current(), []);
+  assert.equal(calls, 1, "a read is still pending: no second one starts yet");
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(errors.length, 1, "the hung read was reported once");
+  now += 2000;
+  snapshot.current();
+  await tick();
+  assert.equal(calls, 2, "the next refresh runs");
+  assert.equal(snapshot.current().length, 1);
+});
+
+test("a failed first read is retried in the background and reported once", async () => {
+  let background = 0;
+  const errors: unknown[] = [];
+  const snapshot = new ProcessSnapshot({
+    platform: "win32", ttlMs: 0,
     execAsync: async () => { background++; throw new Error("CIM unavailable"); },
     onError: error => errors.push(error),
   });
-  assert.deepEqual(snapshot.current(), [], "the first read waits and fails");
-  assert.equal(sync, 1);
-  snapshot.current();
-  assert.equal(sync, 1, "a failed snapshot is never read on the event loop again");
+  await snapshot.prime();
+  assert.deepEqual(snapshot.current(), []);
   await tick();
-  assert.equal(background, 1, "it is read again in the background");
-  assert.equal(errors.length, 1);
+  assert.equal(background, 2, "every later read tries again");
+  assert.equal(errors.length, 1, "a run of failures is reported once");
 });
 
 test("a failed background read keeps the snapshot and is reported once", async () => {
@@ -125,18 +176,18 @@ test("a failed background read keeps the snapshot and is reported once", async (
   const errors: unknown[] = [];
   const snapshot = new ProcessSnapshot({
     platform: "win32", ttlMs: 1000, now: () => now,
-    exec: () => JSON.stringify([{ ProcessId: 42, CommandLine: "claude.exe", CreationDate: CREATED_AT }]),
-    execAsync: async () => { background++; throw new Error("CIM unavailable"); },
+    execAsync: async () => { background++; if (background === 1) return one; throw new Error("CIM unavailable"); },
     onError: error => errors.push(error),
   });
-  assert.equal(snapshot.current().length, 1, "the first read waits and works");
+  await snapshot.prime();
+  assert.equal(snapshot.current().length, 1, "the first read works");
   now += 2000;
   snapshot.current();
   await tick();
   now += 2000;
   snapshot.current();
   await tick();
-  assert.equal(background, 2, "a stale snapshot is read again");
+  assert.equal(background, 3, "a stale snapshot is read again");
   assert.equal(errors.length, 1, "a run of failures is reported once");
   assert.equal(snapshot.current().length, 1, "the last good snapshot is still served");
 });

@@ -56,13 +56,14 @@ test("macOS snapshot runs a blocking ps once, then refreshes in the background",
   assert.deepEqual([sync, async], [1, 1]);
   assert.equal(snapshot.current()[0]?.pid, 43);
 });
-test("desktop registry liveness is off on Linux and reads the Windows registry", t => {
+test("desktop registry liveness is off on Linux and reads the Windows registry", async t => {
   assert.equal(liveDesktopProcesses("/not/a/registry", 0, "linux").size, 0);
   // Windows reads the registry now: the process snapshot behind it decides who is live.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-win-registry-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   fs.writeFileSync(path.join(dir, "42.json"), JSON.stringify({ sessionId: id, pid: 42, entrypoint: "claude-desktop", status: "idle", procStart: "134370764816580794" }));
-  const snapshot = new ProcessSnapshot({ platform: "win32", exec: () => JSON.stringify([{ ProcessId: 42, CommandLine: "claude.exe", CreationDate: "2026-10-21T17:14:41.6580790Z" }]) });
+  const snapshot = new ProcessSnapshot({ platform: "win32", execAsync: async () => JSON.stringify([{ ProcessId: 42, CommandLine: "claude.exe", CreationDate: "2026-10-21T17:14:41.6580790Z" }]) });
+  await snapshot.prime();
   assert.equal(liveDesktopProcesses(dir, 0, "win32", snapshot).get(id)?.pid, 42);
 });
 test("findClaude discovers each Windows name on PATH and honors an explicit binary", () => {

@@ -1,5 +1,6 @@
 // One OS process snapshot for transcript liveness. The desktop registry reads macOS and Windows.
-import { execFile, execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { execBounded } from "../../cli/src/bounded-exec.ts";
 import { windowsPowerShellEnv } from "../../cli/src/windows-powershell.ts";
 export interface ProcessInfo { pid: number; command: string; started?: string }
 export type ProcessExec = (file: string, args: string[]) => string;
@@ -13,9 +14,14 @@ const FILETIME_TOLERANCE = 10_000n;
 const exec: ProcessExec = (file, args) => execFileSync(file, args, {
   encoding: "utf8", maxBuffer: 16 * 1024 * 1024, timeout: 5000, windowsHide: true, env: windowsPowerShellEnv(), stdio: ["ignore", "pipe", "pipe"],
 });
-const execAsync: ProcessExecAsync = (file, args) => new Promise((resolve, reject) => {
-  execFile(file, args, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024, timeout: 5000, windowsHide: true, env: windowsPowerShellEnv() },
-    (error, stdout) => { if (error) reject(error); else resolve(stdout); });
+/**
+ * The background read, bounded by its own deadline that also ends PowerShell's children: with
+ * execFile's `timeout` a WMI helper holding the pipes kept the read alive for minutes (#162).
+ * Windows gets longer than `ps` because Get-CimInstance is slow on a loaded machine.
+ */
+const READ_DEADLINE_MS = 15_000;
+const execAsync: ProcessExecAsync = (file, args) => execBounded(file, args, {
+  timeoutMs: file === "ps" ? 5000 : READ_DEADLINE_MS, windowsHide: true, env: windowsPowerShellEnv(),
 });
 
 /** The PowerShell that reads the Windows process table: pid, command line and start time. */
@@ -92,14 +98,23 @@ export interface ProcessSnapshotOptions {
   execAsync?: ProcessExecAsync;
   /** A background read that failed. Reported once per run of failures. */
   onError?: (error: unknown) => void;
+  /**
+   * The longest a background read may keep later reads from starting, whatever the reader does.
+   * `execAsync` has its own deadline; this one is the snapshot's own guarantee that a reader that
+   * never settles cannot freeze the refresh for good.
+   */
+  readTimeoutMs?: number;
 }
 
 /**
  * The host's view of the running processes. On Windows PowerShell costs hundreds of
  * milliseconds, so the snapshot is refreshed in the background and read from memory: the host's
  * event loop never waits for it again (2026-10-12, one keychain read per request blocked the
- * relay pings). Only the very first read waits, once, so the desktop registry is never empty
- * when it is asked for (issue #70).
+ * relay pings). The first read is `prime()`, which the host awaits once, bounded, before it
+ * starts serving, so the desktop registry is not empty when it is asked for (issue #70).
+ * On Windows nothing reads synchronously, ever: a PowerShell that did not return held the host
+ * for 4+ minutes despite a 5 s timeout (#162), so a first `current()` without `prime()` serves an
+ * empty list and starts a background read.
  *
  * macOS reads the same way. A synchronous `ps` there is ~50 ms, but Sessions.list asks once per
  * closed Claude app session (sessionControls → isOpen), so every list ran dozens of them and
@@ -107,7 +122,8 @@ export interface ProcessSnapshotOptions {
  *
  * The registry is read synchronously — Sessions.list, summary and isOpen all are — so the
  * snapshot cannot be awaited everywhere without making the whole session list asynchronous.
- * One bounded wait at startup is the price; every later read is a map lookup.
+ * One bounded wait at startup is the price; every later read is a map lookup. Off Windows a
+ * `current()` before any `prime()` still reads `ps` synchronously, once (tests, other entry points).
  */
 export class ProcessSnapshot {
   private processes: ProcessInfo[] = [];
@@ -121,6 +137,7 @@ export class ProcessSnapshot {
   private readonly run: ProcessExec;
   private readonly runAsync: ProcessExecAsync;
   private readonly onError: (error: unknown) => void;
+  private readonly readTimeoutMs: number;
   constructor(options: ProcessSnapshotOptions = {}) {
     this.platform = options.platform ?? process.platform;
     this.ttlMs = options.ttlMs ?? 5000;
@@ -128,12 +145,31 @@ export class ProcessSnapshot {
     this.run = options.exec ?? exec;
     this.runAsync = options.execAsync ?? execAsync;
     this.onError = options.onError ?? (error => console.error("[process snapshot]", error instanceof Error ? error.message : String(error)));
+    this.readTimeoutMs = options.readTimeoutMs ?? 20_000;
+  }
+  /**
+   * Reads the first snapshot in the background and resolves when it landed, failed, or `waitMs`
+   * passed, whichever is first; never rejects. A read that outlives the wait keeps running and
+   * fills the snapshot when it lands.
+   */
+  prime(waitMs = 10_000): Promise<void> {
+    this.read = true;
+    this.refresh();
+    const pending = this.pending ?? Promise.resolve();
+    return new Promise<void>(resolve => {
+      const timer = setTimeout(resolve, waitMs);
+      timer.unref?.();
+      void pending.then(() => { clearTimeout(timer); resolve(); });
+    });
   }
   /** The processes known now: what the last read found. */
   current(): ProcessInfo[] {
     if (!this.read) {
-      // The first read is the one the host cannot do without: it waits, once.
       this.read = true;
+      // Windows never waits for PowerShell on the host's own thread; the host primed this before it
+      // started serving, and a caller that did not gets an empty list until the read lands.
+      if (this.platform === "win32") { this.refresh(); return this.processes; }
+      // Elsewhere `ps` is fast, and this is the one read a caller cannot do without: it waits, once.
       try { this.processes = listProcesses(this.platform, this.run); this.at = this.now(); this.failed = false; }
       catch { this.refresh(); }
       return this.processes;
@@ -144,14 +180,22 @@ export class ProcessSnapshot {
   /** Reads a new snapshot in the background; the current one is served until it lands. */
   private refresh(): void {
     if (this.pending) return;
-    this.pending = listProcessesAsync(this.platform, this.runAsync).then(processes => {
+    let timer: NodeJS.Timeout | undefined;
+    const giveUp = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`process snapshot read did not finish within ${this.readTimeoutMs} ms`)), this.readTimeoutMs);
+      timer.unref?.();
+    });
+    const run = listProcessesAsync(this.platform, this.runAsync);
+    run.catch(() => {}); // the race below reports it; a late failure after the give-up is not news
+    // A read that never settles must not hold `pending` forever: once given up on, its late result is ignored.
+    this.pending = Promise.race([run, giveUp]).then(processes => {
       this.processes = processes;
       this.at = this.now();
       this.failed = false;
     }).catch(error => {
       // The snapshot stays as it was; a run of failures is reported once, not every read.
       if (!this.failed) { this.failed = true; this.onError(error); }
-    }).finally(() => { this.pending = null; });
+    }).finally(() => { clearTimeout(timer); this.pending = null; });
   }
 }
 
