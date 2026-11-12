@@ -3475,7 +3475,7 @@ function claudeAccountLabel(account) {
 /** "5h 14% · weekly 10%" under a Claude account, or nothing while its usage is unknown. */
 function claudeQuotaNode(account) {
   const text = chatgptQuotaText(account && account.quota);
-  return text ? quotaMeters([account.quota.rate_limits.primary, account.quota.rate_limits.secondary]) : null;
+  return text ? quotaMeters([account.quota.rate_limits.primary, account.quota.rate_limits.secondary], account.quota.at) : null;
 }
 
 /** "Use first" for an account the pool does not lead with; `null` hands first place back to the current login. */
@@ -3719,8 +3719,15 @@ function quotaFullReset(w) {
  * thin meter and its share, amber from 80% and red from 95% as on Status; a full window keeps its reset.
  * The whole line is the group's accessible name. Nothing when no window has a share.
  */
-function quotaMeters(windows) {
-  const shown = (windows || []).filter((w) => w && Number.isFinite(w.used_percent));
+function quotaMeters(windows, at) {
+  const readAt = Number.isFinite(at) ? at : Date.now();
+  const shown = (windows || []).filter((w) => w && Number.isFinite(w.used_percent)).map((w) => {
+    // Keep Status's server deadline, or anchor a relative reset to the snapshot, never a redraw.
+    const { reset_after_seconds, ...window } = w;
+    const reset = Number.isFinite(w.reset_at) ? Math.round(w.reset_at > 1e12 ? w.reset_at / 1000 : w.reset_at)
+      : typeof reset_after_seconds === "number" ? readAt / 1000 + reset_after_seconds : undefined;
+    return reset === undefined ? window : { ...window, reset_at: reset };
+  });
   if (!shown.length) return null;
   const text = quotaWindowsText(shown);
   return el("div", { class: "account-quota account-meters", "data-quota-windows": JSON.stringify(shown), role: "img", "aria-label": text, title: text }, shown.map((w) => {
@@ -3801,7 +3808,7 @@ function renderChatgptAccountRows(target, data, name, generation) {
       el("div", { class: "cell-text account-card-copy" }, [
         el("strong", { text: account.label }),
         detail ? el("span", { class: "small", text: detail }) : null,
-        quota ? quotaMeters([account.quota.rate_limits.primary, account.quota.rate_limits.secondary]) : null,
+        quota ? quotaMeters([account.quota.rate_limits.primary, account.quota.rate_limits.secondary], account.quota.at) : null,
         help ? hint(help) : null,
         actions.length ? el("div", { class: "account-card-actions" }, actions) : null,
       ]),

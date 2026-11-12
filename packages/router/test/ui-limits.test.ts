@@ -57,7 +57,9 @@ type LimitsUi = {
   settleLimits(): Promise<unknown>;
   providerLimits(name: string): { accounts: Record<string, unknown>[] } | null;
   limitsSnapshotPeek(): unknown;
-  quotaMeters(windows: unknown): Element | null;
+  quotaMeters(windows: unknown, at?: number): Element | null;
+  claudeQuotaNode(account: unknown): Element | null;
+  renderChatgptAccountRows(target: Element, data: unknown, name: string, generation: number): void;
   quotaWindowsText(windows: unknown): string;
   setQuotaRemaining(remaining: boolean): void;
 };
@@ -79,7 +81,11 @@ function limitsUi(api: (path: string) => Promise<unknown>, status: Record<string
     ${block("function providerConnection(", "let statusModBusy")}
     ${block("function claudeAccountLabel(", '/** "5h 14%')}
     ${block("function chatgptQuotaText(", "async function patchChatgptAccount(")}
-    return { refreshHealth, renderHealthProviders, limitsAccountRow, limitsWindowRow, limitsUsageWindow, settleLimits: () => limitsRead ?? Promise.resolve(), providerLimits, limitsSnapshotPeek: () => limitsSnapshot, quotaMeters, quotaWindowsText, setQuotaRemaining };
+    ${block("function claudeQuotaNode(", '/** "Use first"')}
+    ${block("function accountPoolBadges(", "function renderClaudeAccountRows(")}
+    ${block("function renderChatgptAccountRows(", "let googleLoginBusy")}
+    const providerDetailGeneration = 0;
+    return { refreshHealth, renderHealthProviders, limitsAccountRow, limitsWindowRow, limitsUsageWindow, settleLimits: () => limitsRead ?? Promise.resolve(), providerLimits, limitsSnapshotPeek: () => limitsSnapshot, quotaMeters, quotaWindowsText, setQuotaRemaining, claudeQuotaNode, renderChatgptAccountRows };
   `) as (...args: unknown[]) => LimitsUi;
   const ui = build(async (path: string) => {
     // The config a status poll may re-read answers with the config this screen was given, or fails while it has none.
@@ -137,6 +143,116 @@ test("Status's header toggle stays mounted and changes figures, not account stat
   assert.equal(JSON.stringify({ status, limits }), before);
   const html = fs.readFileSync(path.join(uiDir, "index.html"), "utf8");
   assert.match(html, /class="section-head health-providers-head"[^\n]*data-i18n="health.providers"[^\n]*id="health-quota-toggle"/);
+});
+
+test("toggling account meters keeps their original reset instants as the clock advances", (context) => {
+  const fetchedAt = Date.UTC(2026, 10, 12, 13, 28);
+  context.mock.timers.enable({ apis: ["Date"], now: fetchedAt });
+  const windows = Object.freeze([
+    Object.freeze({ used_percent: 100, window_minutes: 300, reset_after_seconds: 600 }),
+    Object.freeze({ used_percent: 100, window_minutes: 10080, reset_at: fetchedAt / 1000 + 3600 }),
+    Object.freeze({ used_percent: 82, window_minutes: 300, reset_after_seconds: 600 }),
+    Object.freeze({ used_percent: 100, window_minutes: 300 }),
+  ]);
+  const before = JSON.stringify(windows);
+  const ui = limitsUi(async () => ({}));
+  const meters = ui.quotaMeters(windows)!;
+  ui.meters.appendChild(meters);
+  const resets = () => findAll(meters, hasClass("account-meter-reset")).map(text);
+  const initialResets = resets();
+  assert.equal(initialResets.length, 2);
+  const expectedReset = t("quota.resetAt", { time: new Date(fetchedAt + 600_000).toLocaleString([], { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) });
+  assert.equal(initialResets[0], expectedReset);
+  const tones = findAll(meters, hasClass("account-meter")).map((node) => node.attrs.class);
+  const stored = String(meters.dataset.quotaWindows);
+  for (const remaining of [true, false, true, false]) {
+    context.mock.timers.tick(300_000);
+    ui.setQuotaRemaining(remaining);
+    assert.deepEqual(resets(), initialResets, "toggling must not move a full window's reset into the future");
+    assert.ok(String(meters.title).includes(expectedReset));
+    assert.equal(meters.attrs["aria-label"], meters.title);
+    assert.deepEqual(findAll(meters, hasClass("account-meter-figure")).map(text), remaining ? ["0% remaining", "0% remaining", "18% remaining", "0% remaining"] : ["100%", "100%", "82%", "100%"]);
+    assert.deepEqual(findAll(meters, hasClass("account-meter")).map((node) => node.attrs.class), tones);
+    assert.equal(meters.dataset.quotaWindows, stored);
+  }
+  const saved = JSON.parse(stored);
+  assert.equal(saved[0].reset_at, fetchedAt / 1000 + 600);
+  assert.equal(saved[2].reset_at, fetchedAt / 1000 + 600, "relative resets are fixed even before a window is full");
+  assert.ok(saved.every((window: Record<string, unknown>) => !("reset_after_seconds" in window)));
+  assert.equal(JSON.stringify(windows), before, "normalization never changes the API response");
+});
+
+test("new account readings establish new reset instants without changing older meters", (context) => {
+  const fetchedAt = Date.UTC(2026, 10, 12, 13, 28);
+  context.mock.timers.enable({ apis: ["Date"], now: fetchedAt });
+  const ui = limitsUi(async () => ({}));
+  const window = Object.freeze({ used_percent: 100, window_minutes: 300, reset_after_seconds: 600 });
+  const first = ui.quotaMeters([window])!;
+  ui.meters.appendChild(first);
+  const originalReset = text(findAll(first, hasClass("account-meter-reset"))[0]!);
+  context.mock.timers.tick(300_000);
+  const next = ui.quotaMeters([window])!;
+  ui.meters.appendChild(next);
+  const nextReset = text(findAll(next, hasClass("account-meter-reset"))[0]!);
+  assert.notEqual(nextReset, originalReset, "a newly received relative duration starts from its own reading time");
+  ui.setQuotaRemaining(true);
+  assert.equal(text(findAll(first, hasClass("account-meter-reset"))[0]!), originalReset);
+  assert.equal(text(findAll(next, hasClass("account-meter-reset"))[0]!), nextReset);
+  assert.equal(JSON.parse(String(next.dataset.quotaWindows))[0].reset_at, (fetchedAt + 900_000) / 1000);
+});
+
+test("account meters prefer the server reset used by Status over a cached relative duration", (context) => {
+  const fetchedAt = Date.UTC(2026, 10, 12, 13, 28);
+  context.mock.timers.enable({ apis: ["Date"], now: fetchedAt + 39 * 60_000 });
+  const ui = limitsUi(async () => ({}));
+  const resetAt = fetchedAt / 1000 + 3600;
+  for (const absolute of [resetAt, resetAt * 1000]) {
+    const window = Object.freeze({ used_percent: 100, window_minutes: 300, reset_at: absolute, reset_after_seconds: 3600 });
+    const before = JSON.stringify(window);
+    const meters = ui.quotaMeters([window], fetchedAt)!;
+    ui.meters.appendChild(meters);
+    assert.equal(JSON.parse(String(meters.dataset.quotaWindows))[0].reset_at, resetAt);
+    const expected = ui.quotaWindowsText([{ ...window, reset_at: resetAt, reset_after_seconds: undefined }]);
+    assert.equal(meters.title, expected, "the account card uses the same absolute deadline as Status");
+    context.mock.timers.tick(300_000);
+    ui.setQuotaRemaining(true);
+    const saved = JSON.parse(String(meters.dataset.quotaWindows));
+    assert.equal(saved[0].reset_at, resetAt);
+    assert.ok(!("reset_after_seconds" in saved[0]));
+    assert.equal(JSON.stringify(window), before);
+    ui.setQuotaRemaining(false);
+  }
+});
+
+test("ChatGPT and Claude cards anchor cached relative resets to the quota snapshot time", (context) => {
+  const fetchedAt = Date.UTC(2026, 10, 12, 13, 28);
+  context.mock.timers.enable({ apis: ["Date"], now: fetchedAt + 39 * 60_000 });
+  const ui = limitsUi(async () => ({}));
+  const resetAt = fetchedAt / 1000 + 3600;
+  for (const absolute of [undefined, resetAt]) {
+    const primary = Object.freeze({ used_percent: 100, window_minutes: 300, reset_after_seconds: 3600, ...(absolute === undefined ? {} : { reset_at: absolute }) });
+    const quota = Object.freeze({ at: fetchedAt, rate_limits: Object.freeze({ primary }) });
+    const account = Object.freeze({ id: "cached", label: "Cached", source: "codex", state: "ready", quota });
+    const before = JSON.stringify(account);
+    const target = el("div");
+    ui.renderChatgptAccountRows(target, { accounts: [account] }, "gpt", 0);
+    const chatgpt = findAll(target, hasClass("account-meters"))[0]!;
+    const claude = ui.claudeQuotaNode(account)!;
+    const expected = ui.quotaWindowsText([{ used_percent: 100, window_minutes: 300, reset_at: resetAt }]);
+    for (const meter of [chatgpt, claude]) {
+      assert.equal(meter.title, expected);
+      assert.equal(JSON.parse(String(meter.dataset.quotaWindows))[0].reset_at, resetAt);
+      ui.meters.appendChild(meter);
+    }
+    context.mock.timers.tick(300_000);
+    ui.setQuotaRemaining(true);
+    for (const meter of [chatgpt, claude]) {
+      assert.equal(JSON.parse(String(meter.dataset.quotaWindows))[0].reset_at, resetAt);
+      assert.equal(meter.attrs["aria-label"], ui.quotaWindowsText([{ used_percent: 100, window_minutes: 300, reset_at: resetAt }]));
+    }
+    assert.equal(JSON.stringify(account), before);
+    ui.setQuotaRemaining(false);
+  }
 });
 
 test("quota display preference persists locally, tolerates blocked storage and filters nonfinite figures", () => {
