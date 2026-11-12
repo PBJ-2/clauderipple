@@ -155,9 +155,20 @@ function taskDefinitionMatchesExceptPriority(value: unknown, expected: { execute
  *    semantics: a non-zero exit — a crash, or the health self-exit 75 — is relaunched; a clean exit
  *    is not, because that is `stop` or the drain half of `restart`, which starts the task again.
  *    A router that keeps dying immediately backs off instead of spinning.
+ *
+ * A router that is alive but no longer answers is never "dead" to that loop (#159: a synchronous
+ * PowerShell froze the event loop and the task stayed Running for 19 minutes). With the watchdog on
+ * (the router's launcher; the host's passes `watchdog: false`) the launcher asks the admin port's
+ * `/api/ping` every 15 s and, after 4 failed answers in a row, ends that one process with `Kill()`:
+ * the exit is non-zero, so the loop above relaunches it exactly as after a crash. Any HTTP answer
+ * counts as alive (an older router has no /api/ping and answers 404), the process under a stream is
+ * still answered by the same loop, a router that has never answered gets 5 minutes to start, and the
+ * port is read from config.json when the router is launched, as the router reads it. A config that
+ * cannot be read switches the probe off for that launch rather than guessing a port.
  */
-export function renderLauncher(opts: { program: string; args: string[]; home: string; env?: Record<string, string> }): string {
+export function renderLauncher(opts: { program: string; args: string[]; home: string; env?: Record<string, string>; watchdog?: boolean }): string {
   const logDir = path.join(opts.home, "logs");
+  const watchdog = opts.watchdog !== false;
   const env = { CLAUDERIPPLE_HOME: opts.home, ...(opts.env ?? {}) };
   const quoteArg = (arg: string): string => ps(`"${arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`);
   // No `$ErrorActionPreference = 'Stop'`: one failed Start-Process (a locked log file, say) would end
@@ -177,6 +188,36 @@ export function renderLauncher(opts: { program: string; args: string[]; home: st
     "    $self.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::Normal",
     "  }",
     "} catch {}",
+    ...(watchdog ? [
+      `$watchdogLog = ${ps(path.join(logDir, "launcher-watchdog.log"))}`,
+      // The admin port the router will bind: config.admin.port, else listen.port + 1, else the defaults
+      // (8790 / 8791) when there is no config. 0 = cannot be told, so there is no probing.
+      "function Get-AdminPort {",
+      "  $file = Join-Path $env:CLAUDERIPPLE_HOME 'config.json'",
+      "  if (-not (Test-Path -LiteralPath $file)) { return 8791 }",
+      "  try {",
+      "    $cfg = Get-Content -Raw -LiteralPath $file -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop",
+      "    if ($cfg.admin -and $cfg.admin.port) { return [int]$cfg.admin.port }",
+      "    if ($cfg.listen -and $cfg.listen.port) { return [int]$cfg.listen.port + 1 }",
+      "    return 8791",
+      "  } catch { return 0 }",
+      "}",
+      // Alive = any HTTP answer, whatever its status. Refused, reset and timed out = no answer.
+      // The proxy is bypassed: in picker mode the system proxy is this very router.
+      "function Test-RouterAnswers([int]$port) {",
+      "  try {",
+      "    $req = [System.Net.WebRequest]::Create(\"http://127.0.0.1:$port/api/ping\")",
+      "    $req.Timeout = 5000",
+      "    $req.Proxy = $null",
+      "    $req.KeepAlive = $false",
+      "    $req.GetResponse().Close()",
+      "    return $true",
+      "  } catch [System.Net.WebException] {",
+      "    if ($null -ne $_.Exception.Response) { $_.Exception.Response.Close(); return $true }",
+      "    return $false",
+      "  } catch { return $false }",
+      "}",
+    ] : []),
     "while ($true) {",
     "  $startedAt = Get-Date",
     // Never `Start-Process -Wait` here (#131). On Windows PowerShell 5.1 -Wait also waits for every
@@ -186,7 +227,25 @@ export function renderLauncher(opts: { program: string; args: string[]; home: st
     // The handle must be held before WaitForExit so ExitCode stays readable after the process ends.
     `  $p = Start-Process -FilePath ${ps(opts.program)} -ArgumentList $routerArgs -WindowStyle Hidden -PassThru -RedirectStandardOutput $out -RedirectStandardError $err`,
     "  $null = $p.Handle",
-    "  $p.WaitForExit()",
+    ...(watchdog ? [
+      "  $adminPort = Get-AdminPort",
+      "  $answered = $false",
+      "  $failures = 0",
+      "  $graceEnd = $startedAt.AddSeconds(300)",
+      "  while (-not $p.WaitForExit(15000)) {",
+      "    if ($adminPort -le 0) { continue }",
+      "    if (Test-RouterAnswers $adminPort) { $answered = $true; $failures = 0 }",
+      "    elseif ($answered -or (Get-Date) -gt $graceEnd) { $failures++ }",
+      "    if ($failures -ge 4) {",
+      // Only the process this launcher started: $p is its handle, so a reused pid cannot be hit.
+      "      try { Add-Content -LiteralPath $watchdogLog -Value \"$((Get-Date).ToString('o')) router pid $($p.Id) did not answer /api/ping on port $adminPort 4 times in a row; ending it so it restarts\" } catch {}",
+      "      try { $p.Kill() } catch {}",
+      "      $failures = 0",
+      "    }",
+      "  }",
+    ] : [
+      "  $p.WaitForExit()",
+    ]),
     "  if ($p.ExitCode -eq 0) { break }",
     "  if (((Get-Date) - $startedAt).TotalSeconds -lt 10) { $quickFailures++ } else { $quickFailures = 0 }",
     "  Start-Sleep -Seconds $(if ($quickFailures -ge 5) { 60 } else { 2 })",
@@ -194,7 +253,7 @@ export function renderLauncher(opts: { program: string; args: string[]; home: st
   ].join("\r\n") + "\r\n";
 }
 
-export function writeLauncher(opts: { program: string; args: string[]; home: string; env?: Record<string, string>; name?: string }): string {
+export function writeLauncher(opts: { program: string; args: string[]; home: string; env?: Record<string, string>; name?: string; watchdog?: boolean }): string {
   const launcher = path.join(opts.home, `${opts.name ?? "clauderipple-router"}.ps1`);
   const logDir = path.join(opts.home, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -299,7 +358,7 @@ export function installAgent(...args: Parameters<typeof installAgentLocked>): st
   return withTaskDefinition(opts.name ?? deps.name ?? taskName(), deps, guarded => installAgentLocked(opts, guarded));
 }
 
-function installAgentLocked(opts: { program: string; args?: string[]; home: string; env?: Record<string, string>; name?: string }, deps: TaskDeps = {}): string {
+function installAgentLocked(opts: { program: string; args?: string[]; home: string; env?: Record<string, string>; name?: string; watchdog?: boolean }, deps: TaskDeps = {}): string {
   const name = opts.name ?? deps.name ?? taskName();
   // Before the launcher and the registration: a same-named task may belong to another home (B01),
   // and a definition that cannot be read must not be replaced as if there were none.

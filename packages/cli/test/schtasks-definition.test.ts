@@ -70,7 +70,8 @@ test("registration and launcher keep router children at Normal priority", () => 
 // #131: `-Wait` on Windows PowerShell 5.1 also waits for the router's detached children (the update
 // installer), which waits for this task to end. The launcher must wait on its own process only.
 test("launcher waits on the router process alone, never with -Wait (#131)", () => {
-  const launcher = renderLauncher({ program: "C:\\node.exe", args: ["C:\\router.js"], home: "C:\\home" });
+  // The host's launcher (watchdog: false) keeps the plain wait; the router's is covered below.
+  const launcher = renderLauncher({ program: "C:\\node.exe", args: ["C:\\router.js"], home: "C:\\home", watchdog: false });
   const lines = launcher.split("\r\n");
   const start = lines.findIndex(line => line.includes("Start-Process -FilePath"));
   assert.ok(start >= 0);
@@ -85,6 +86,49 @@ test("launcher waits on the router process alone, never with -Wait (#131)", () =
   // Redirection to the same log files as before.
   assert.ok(lines.includes(`$out = '${path.join("C:\\home", "logs", "launcher.log")}'`));
   assert.ok(lines.includes(`$err = '${path.join("C:\\home", "logs", "launcher.err.log")}'`));
+});
+
+// #159: a router that is alive but frozen was never restarted, because the launcher only waited for
+// its exit. The router's launcher now probes /api/ping and ends that one process after 4 misses.
+test("the router's launcher probes /api/ping and ends only its own child after four misses", () => {
+  const launcher = renderLauncher({ program: "C:\\node.exe", args: ["C:\\router.js"], home: "C:\\home" });
+  const lines = launcher.split("\r\n").map(line => line.trim());
+  // Same supervision as before: handle held, no -Wait, exit 0 ends the loop, anything else relaunches.
+  assert.doesNotMatch(launcher, /-Wait\b/);
+  const handle = lines.indexOf("$null = $p.Handle");
+  assert.ok(handle > lines.findIndex(line => line.includes("Start-Process -FilePath")));
+  assert.ok(!lines.includes("$p.WaitForExit()"), "the unbounded wait is replaced by a 15 s wait that probes in between");
+  const wait = lines.findIndex(line => line === "while (-not $p.WaitForExit(15000)) {");
+  assert.ok(wait > handle, "the probe loop runs after the handle is held");
+  assert.ok(lines.indexOf("if ($p.ExitCode -eq 0) { break }") > wait, "exit handling follows the probe loop");
+  // The cheapest endpoint, no proxy, and any HTTP answer is alive.
+  assert.match(launcher, /http:\/\/127\.0\.0\.1:\$port\/api\/ping/);
+  assert.match(launcher, /\$req\.Proxy = \$null/);
+  assert.match(launcher, /\$req\.Timeout = 5000/);
+  assert.match(launcher, /if \(\$null -ne \$_\.Exception\.Response\) \{ \$_\.Exception\.Response\.Close\(\); return \$true \}/);
+  // Four misses in a row, a startup allowance for a router that never answered, and only $p is ended.
+  assert.ok(lines.includes("$graceEnd = $startedAt.AddSeconds(300)"));
+  assert.ok(lines.includes("elseif ($answered -or (Get-Date) -gt $graceEnd) { $failures++ }"));
+  assert.ok(lines.includes("if ($failures -ge 4) {"));
+  assert.ok(lines.includes("try { $p.Kill() } catch {}"));
+  assert.ok(lines.includes("if (Test-RouterAnswers $adminPort) { $answered = $true; $failures = 0 }"), "one answer clears the count");
+  assert.doesNotMatch(launcher, /Stop-Process|taskkill|Get-Process|Get-CimInstance/, "no other process is looked up or touched");
+  assert.equal((launcher.match(/\.Kill\(\)/g) ?? []).length, 1);
+  // The port is the router's: config.admin.port, else listen.port + 1; unreadable config = no probing.
+  assert.ok(lines.includes("if ($cfg.admin -and $cfg.admin.port) { return [int]$cfg.admin.port }"));
+  assert.ok(lines.includes("if ($cfg.listen -and $cfg.listen.port) { return [int]$cfg.listen.port + 1 }"));
+  assert.ok(lines.includes("} catch { return 0 }"));
+  assert.ok(lines.includes("if ($adminPort -le 0) { continue }"));
+  assert.ok(lines.includes(`$watchdogLog = '${path.join("C:\\home", "logs", "launcher-watchdog.log")}'`));
+  assert.equal(launcher.charCodeAt(0), 0xFEFF);
+  assert.doesNotMatch(launcher.replace(/\r\n/g, ""), /[\r\n]/);
+});
+
+test("the host's launcher carries no watchdog, and a router launcher differs from it only by the watchdog", () => {
+  const plain = renderLauncher({ program: "C:\\node.exe", args: ["C:\\host.js"], home: "C:\\home", watchdog: false });
+  assert.doesNotMatch(plain, /api\/ping|Kill\(\)|Get-AdminPort/);
+  assert.notEqual(plain, renderLauncher({ program: "C:\\node.exe", args: ["C:\\host.js"], home: "C:\\home" }));
+  assert.equal(renderLauncher({ program: "C:\\node.exe", args: ["C:\\host.js"], home: "C:\\home", watchdog: true }), renderLauncher({ program: "C:\\node.exe", args: ["C:\\host.js"], home: "C:\\home" }));
 });
 
 test("registration failure retains only a task whose sole mismatch is priority", t => {

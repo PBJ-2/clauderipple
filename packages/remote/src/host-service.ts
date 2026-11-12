@@ -59,7 +59,7 @@ export function unit(spec: Spec): string {
 export function renderService(spec: Spec, platform = process.platform): string {
   if (platform === "darwin") return launchd.plist(spec);
   if (platform === "linux") return unit(spec);
-  if (platform === "win32") return windows.renderLauncher({ program: spec.node, args: ["--disable-warning=ExperimentalWarning", spec.script, ...spec.args], home: servicePaths(platform).runtime, env: spec.env });
+  if (platform === "win32") return windows.renderLauncher({ program: spec.node, args: ["--disable-warning=ExperimentalWarning", spec.script, ...spec.args], home: servicePaths(platform).runtime, env: spec.env, watchdog: false });
   throw new Error(`host service is unsupported on ${platform}`);
 }
 
@@ -180,8 +180,9 @@ async function installServiceLocked(spec: Spec, deps: HostServiceDeps): Promise<
     const stopped = task.stopAgent(TASK, { home: p.runtime, ...(deps.taskDeps ? { deps: deps.taskDeps } : {}) });
     if (stopped !== "stopped" && stopped !== "not-loaded") throw new Error(`휴대폰 호스트의 작업을 중지하지 못했습니다. (${stopped})`);
     check();
-    task.installAgent({ name: TASK, program: spec.node, args: ["--disable-warning=ExperimentalWarning", spec.script, ...spec.args], home: p.runtime, env: spec.env }, deps.taskDeps);
-    generation = definitionGeneration(windows.renderLauncher({ program: spec.node, args: ["--disable-warning=ExperimentalWarning", spec.script, ...spec.args], home: p.runtime, env: spec.env }));
+    // The router's launcher probes the router's admin port; the host has none of that config, so it keeps the plain loop.
+    task.installAgent({ name: TASK, program: spec.node, args: ["--disable-warning=ExperimentalWarning", spec.script, ...spec.args], home: p.runtime, env: spec.env, watchdog: false }, deps.taskDeps);
+    generation = definitionGeneration(windows.renderLauncher({ program: spec.node, args: ["--disable-warning=ExperimentalWarning", spec.script, ...spec.args], home: p.runtime, env: spec.env, watchdog: false }));
     check();
     const started = task.startAgent(TASK, { home: p.runtime, ...(deps.taskDeps ? { deps: deps.taskDeps } : {}) });
     if (started !== "started" && started !== "already-running") throw new Error(`휴대폰 호스트의 작업을 시작하지 못했습니다. (${started})`);
