@@ -48,6 +48,7 @@ async function withAdmin(
     claudeOAuthFetch?: (url: string, init: RequestInit) => Promise<Response>;
     openBrowser?: (url: string) => boolean;
     observedClaudeCodeAuth?: ObservedClaudeCodeAuth;
+    claudeCodeCredentialReaders?: NonNullable<AdminDeps["claudeCodeCredentialReaders"]>;
     probeFetch?: (url: string, init: RequestInit) => Promise<Response>;
     measureFetch?: (url: string, init: RequestInit) => Promise<Response>;
     modelCatalog?: () => Promise<unknown>;
@@ -102,6 +103,36 @@ async function withAdmin(
 }
 
 const base = () => `http://127.0.0.1`;
+
+for (const signedIn of [false, true]) {
+  test(`status polls reuse the Claude source cache across admin endpoints (signed in: ${signedIn})`, async () => {
+    let keychainReads = 0;
+    let fileReads = 0;
+    const cfg = makeCfg({ providers: { claude: { type: "anthropic", auth: "claude-code" } } });
+    await withAdmin(cfg, async ({ port }) => {
+      for (let call = 0; call < 5; call++) {
+        const response = await fetch(`${base()}:${port}/api/status`);
+        assert.equal(response.status, 200);
+        const status = await response.json() as { providers: Record<string, { authSource: string | null }> };
+        assert.equal(status.providers.claude?.authSource, signedIn ? "keychain" : null);
+      }
+      for (const endpoint of ["claude-accounts", "claude-oauth", "mod-options", "limits"]) {
+        const response = await fetch(`${base()}:${port}/api/${endpoint}`);
+        assert.equal(response.status, 200);
+        await response.arrayBuffer();
+      }
+      assert.deepEqual([keychainReads, fileReads], [1, signedIn ? 0 : 1], "all polls share one store, including negative results");
+    }, {
+      claudeCodeCredentialReaders: {
+        keychain: () => {
+          keychainReads++;
+          return signedIn ? JSON.stringify({ claudeAiOauth: { accessToken: "fake-keychain", expiresAt: Date.now() + 3_600_000 } }) : null;
+        },
+        credentialsFile: () => { fileReads++; return null; },
+      },
+    });
+  });
+}
 
 for (const kind of ["chatgpt", "claude", "google"]) {
   test(`${kind} account HTTP controls validate, persist one preference, pause, resume and clear cooldown`, async () => {

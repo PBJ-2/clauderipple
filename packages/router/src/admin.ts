@@ -1334,12 +1334,20 @@ function codexState(): { enabled: boolean; codexHome: string; configPath: string
   }
 }
 
+// Keep the 60 s credential cache across polls: a synchronous security spawn cost a median 12.35 ms.
+const claudeAuthStores = new WeakMap<AdminDeps, ClaudeCodeAuthStore>();
+
 function claudeAuthStore(deps: AdminDeps): ClaudeCodeAuthStore {
-  return new ClaudeCodeAuthStore(undefined, {
-    home: homeDir(),
-    ...(deps.observedClaudeCodeAuth ? { observed: deps.observedClaudeCodeAuth } : {}),
-    ...(deps.claudeCodeCredentialReaders ? { credentialReaders: deps.claudeCodeCredentialReaders } : {}),
-  });
+  let store = claudeAuthStores.get(deps);
+  if (!store) {
+    store = new ClaudeCodeAuthStore(undefined, {
+      home: homeDir(),
+      ...(deps.observedClaudeCodeAuth ? { observed: deps.observedClaudeCodeAuth } : {}),
+      ...(deps.claudeCodeCredentialReaders ? { credentialReaders: deps.claudeCodeCredentialReaders } : {}),
+    });
+    claudeAuthStores.set(deps, store);
+  }
+  return store;
 }
 
 async function probeAnthropicApiKey(apiKey: string, probeFetch: (url: string, init: RequestInit) => Promise<Response> = fetchWithTimeout): Promise<{ ok: boolean; auth: ProbeAuth; models: ModelEntry[]; error?: string }> {

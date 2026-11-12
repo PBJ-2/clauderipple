@@ -22,6 +22,8 @@ import { RequestLog, type RequestRecord } from "../src/requestlog.ts";
 import { CLAUDE_SMALL_MODEL } from "../src/targets.ts";
 import { createCa, createLeaf } from "../src/x509.ts";
 
+const noClaudeCodeCredentialReaders = { keychain: () => null, credentialsFile: () => null };
+
 const SEARCH_BODY = {
   model: "gpt-6-luna",
   max_tokens: 1024,
@@ -115,6 +117,7 @@ async function rig(options: Options) {
     config: () => cfg,
     home,
     requests,
+    claudeCodeCredentialReaders: noClaudeCodeCredentialReaders,
     agentDir: path.join(home, "agents"),
     log: new Logger(path.join(home, "router.log"), 1e6, 1, false),
     certs: new CertStore(home),

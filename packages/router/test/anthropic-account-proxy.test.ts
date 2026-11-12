@@ -21,6 +21,8 @@ import { Proxy } from "../src/proxy.ts";
 import { RequestLog } from "../src/requestlog.ts";
 import { createCa, createLeaf } from "../src/x509.ts";
 
+const noClaudeCodeCredentialReaders = { keychain: () => null, credentialsFile: () => null };
+
 function freePort(): Promise<number> {
   return new Promise((resolve) => {
     const server = net.createServer();
@@ -104,6 +106,7 @@ async function nativeRig(reply: (seen: Seen, attempt: number) => Reply, claude: 
     home,
     requests,
     observedClaudeCodeAuth: observed,
+    claudeCodeCredentialReaders: noClaudeCodeCredentialReaders,
     upstreamPort,
     upstreamAgent: new https.Agent({ ca: ca.certPem }),
   });
@@ -390,7 +393,7 @@ test("routed use keeps the current login 12 h after the last un-routed request (
     rig.observed.observe(["authorization", "Bearer current-token", "anthropic-version", "2023-06-01"], Date.now() - 13 * 3_600_000);
     assert.equal(await rig.send(), 200);
     assert.equal(rig.seen[0]?.authorization, "Bearer current-token", "the app's own login still leads the pool");
-    const store = new ClaudeCodeAuthStore(undefined, { observed: rig.observed, home: rig.home, env: {} });
+    const store = new ClaudeCodeAuthStore(undefined, { observed: rig.observed, home: rig.home, env: {}, credentialReaders: noClaudeCodeCredentialReaders });
     assert.equal(store.describeSource(), "observed", "the login is still listed after the routed request");
   } finally {
     await rig.stop();
@@ -434,7 +437,7 @@ test("a 401 on the current login drops it and does not readopt the same token (#
   try {
     assert.equal(await rig.send(), 200, "the turn is answered on the next account");
     assert.deepEqual(rig.seen.map((item) => item.authorization), ["Bearer current-token", "Bearer stored-token"]);
-    const store = new ClaudeCodeAuthStore(undefined, { observed: rig.observed, home: rig.home, env: {} });
+    const store = new ClaudeCodeAuthStore(undefined, { observed: rig.observed, home: rig.home, env: {}, credentialReaders: noClaudeCodeCredentialReaders });
     assert.equal(store.describeSource(), null, "the rejected login is no longer the current one");
     assert.equal(await rig.send("after-signout"), 200);
     assert.equal(rig.seen.at(-1)?.authorization, "Bearer stored-token", "the dead token is not tried again");

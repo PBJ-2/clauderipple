@@ -122,6 +122,77 @@ test("auth store passes its clock to borrowed source caching and preserves sourc
   assert.deepEqual([keychainReads, fileReads, refreshes], [2, 1, 0]);
 });
 
+for (const source of ["keychain", "credentials-file", null] as const) {
+  test(`source descriptions share the borrowed credential cache (${source})`, t => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-source-cache-"));
+    t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+    let now = 0;
+    let keychainReads = 0;
+    let fileReads = 0;
+    const store = new ClaudeCodeAuthStore(undefined, {
+      home, env: {}, now: () => now,
+      credentialReaders: {
+        keychain: () => { keychainReads++; return source === "keychain" ? credential("fake-keychain") : null; },
+        credentialsFile: () => { fileReads++; return source === "credentials-file" ? credential("fake-file") : null; },
+      },
+    });
+    for (let call = 0; call < 100; call++) {
+      assert.equal(store.describeSource(), source);
+      assert.equal(store.get() instanceof Error, source === null);
+    }
+    now = 59_999;
+    assert.equal(store.describeSource(), source);
+    assert.deepEqual([keychainReads, fileReads], [1, source === "keychain" ? 0 : 1]);
+    now = 60_000;
+    assert.equal(store.describeSource(), source);
+    assert.deepEqual([keychainReads, fileReads], [2, source === "keychain" ? 0 : 2]);
+    now--;
+    assert.equal(store.describeSource(), source);
+    assert.equal(keychainReads, 3, "a backwards clock rechecks source metadata too");
+  });
+}
+
+test("source metadata follows expiry, precedence and explicit login invalidation", t => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-source-invalidation-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  let now = 0;
+  let keychain: string | null = credential("fake-keychain", 100);
+  let file: string | null = credential("fake-file");
+  let reads = 0;
+  const credentials = new ClaudeCodeCredentialStore({
+    keychain: () => { reads++; return keychain; },
+    credentialsFile: () => file,
+  }, () => now);
+  const observed = new ObservedClaudeCodeAuth();
+  const env: NodeJS.ProcessEnv = {};
+  const store = new ClaudeCodeAuthStore(credentials, { home, env, observed, now: () => now });
+  assert.equal(store.describeSource(), "keychain");
+  now = 100;
+  assert.equal(store.describeSource(), null, "an expired keychain does not fall through to a file that get() would not use");
+  assert.ok(store.get() instanceof Error);
+  assert.equal(reads, 1, "expiry does not bypass the source TTL");
+  keychain = null;
+  credentials.invalidate();
+  assert.equal(store.describeSource(), "credentials-file");
+  assert.equal(reads, 2);
+  file = null;
+  credentials.invalidate();
+  assert.equal(store.describeSource(), null, "sign-out clears the cached source label");
+  keychain = credential("fake-replacement");
+  credentials.invalidate();
+  assert.equal(store.describeSource(), "keychain", "a new login is visible immediately");
+  assert.equal(reads, 4);
+  env.CLAUDE_CODE_OAUTH_TOKEN = "fake-env";
+  assert.equal(store.describeSource(), "env");
+  observed.observe(["authorization", "Bearer fake-observed"], now);
+  assert.equal(store.describeSource(), "observed");
+  store.forgetObserved("Bearer fake-observed");
+  assert.equal(store.describeSource(), "env");
+  delete env.CLAUDE_CODE_OAUTH_TOKEN;
+  assert.equal(store.describeSource(), "keychain");
+  assert.equal(reads, 4, "higher-precedence sources and observed rejection do not reread the OS");
+});
+
 test("a negative borrowed cache does not mask observed login invalidation or a new sign-in", t => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-provider-login-"));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
