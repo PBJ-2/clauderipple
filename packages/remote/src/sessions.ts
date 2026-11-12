@@ -895,6 +895,10 @@ export class Sessions {
           const status = this.desktop?.liveProcess(r.sdkSessionId!)?.status;
           const state: SessionState = status === "busy" || status === "shell" ? "running" : status === "waiting" ? "waiting" : "idle";
           this.setState(r, state, undefined, BUSY.has(state));
+          // No app process holds this conversation (closed, or the app quit): nothing it started can
+          // still run, as for a host query that ended. Without this a task whose end the transcript
+          // never showed stays "running" on the phone for good.
+          if (!status) this.invalidateActivity(r.id);
         }
         continue;
       }
@@ -1357,7 +1361,10 @@ export class Sessions {
       // A host-run turn that ended can leave an async Agent or a background shell running; the
       // computer is still working then (background-activity.ts). Seeing it active renews the idle
       // tail, so the two quiet minutes start when that background work finishes, not when the turn did.
-      if (!r.desktopBridge && this.hasBackgroundWork(r.id)) return true;
+      // A session handed to the Claude app is the app's to report: its registry status below counts
+      // background work, while the tailed transcript can leave a finished task looking started
+      // forever (a 2026-11-10 handoff kept every night's sleep reporting "PC disconnected").
+      if (!r.desktopBridge && !this.canTailHandoff(r) && this.hasBackgroundWork(r.id)) return true;
       // A tailed or handed-off Claude app conversation keeps its state in the app's registry.
       const process = this.desktop?.liveProcess(r.sdkSessionId ?? r.id);
       if (process && process.status !== "idle") return true;
@@ -1439,7 +1446,8 @@ export class Sessions {
     const log = this.log(r.id);
     const process = r.desktopBridge ? this.desktop?.liveProcess(r.sdkSessionId ?? r.id) : undefined;
     // A handed-off session the app is running (a mod-typed or app-typed turn): its state is the app's.
-    const appRun = !r.desktopBridge && this.canTailHandoff(r) ? this.desktop?.liveProcess(r.sdkSessionId!) : undefined;
+    const tailed = !r.desktopBridge && this.canTailHandoff(r);
+    const appRun = tailed ? this.desktop?.liveProcess(r.sdkSessionId!) : undefined;
     const appState: SessionState | undefined = appRun && appRun.status !== "idle" ? (appRun.status === "waiting" ? "waiting" : "running") : undefined;
     const state = r.environmentBridgeId && r.state === "error" ? r.state : process ? this.bridgeState(process, r.environmentBridgeId ?? process.bridgeSessionId) : r.environmentBridgeId ? this.environmentState(r) : r.desktopBridge ? "stopped" : appState ?? r.state;
     // Remember the last sight of work for workActive's idle tail (called for every record each poll).
@@ -1450,7 +1458,8 @@ export class Sessions {
     const activity = r.desktopBridge ? null : this.taskState(r.id).activity;
     // Background work is work: seeing it active keeps the idle tail moving, so the two quiet
     // minutes start when the background agent finishes (workActive's branch says the same).
-    if (activity?.active.some(task => task.kind !== "schedule")) this.lastBusyAt = this.now();
+    // A session handed to the Claude app counts through the app's registry instead (workObserved).
+    if (!tailed && activity?.active.some(task => task.kind !== "schedule")) this.lastBusyAt = this.now();
     const taskList = r.desktopBridge ? this.desktop?.backgroundTaskList(r.sdkSessionId ?? r.id) ?? [] : activity?.active ?? [];
     const taskHistory = r.desktopBridge ? this.desktop?.backgroundTaskHistory(r.sdkSessionId ?? r.id) ?? [] : activity?.history ?? [];
     const turnStartedAt = working ? this.desktop?.turnStartedAt(r.sdkSessionId ?? r.id) ?? null : null;

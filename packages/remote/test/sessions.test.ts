@@ -2309,6 +2309,29 @@ test("an awaiting mark left by an app-run turn settles once the app is idle, and
   assert.equal(f.sessions.summaryOf(f.id)?.queue, undefined);
 });
 
+test("a background shell the app's transcript never ended is not work once the app holds no process for it", async t => {
+  let now = 1_000_000;
+  const f = await modFixture(t, 500, 500, false, undefined, () => now);
+  const file = path.join(f.projects, "project", `${f.sdkId}.jsonl`);
+  fs.appendFileSync(file, transcriptLine({ type: "assistant", uuid: "app-shell", message: { model: "test", content: [{ type: "tool_use", id: "bg", name: "Bash", input: { command: "sleep 600", run_in_background: true } }] } }) +
+    transcriptLine({ type: "user", uuid: "app-shell-result", toolUseResult: { backgroundTaskId: "shell-1" }, message: { content: [{ type: "tool_result", tool_use_id: "bg", content: "Command running in background with ID: shell-1" }] } }));
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.summaryOf(f.id)?.tasks, 1, "the tailed transcript shows the shell started");
+
+  // The app is open and idle: its registry, not the tail, says whether this computer works.
+  now += WATCH_IDLE_MS;
+  assert.equal(f.sessions.workActive(), false, "an idle app process is not work, whatever the tail left");
+  f.registry.set(f.sdkId, { sessionId: f.sdkId, pid: 42, status: "shell" });
+  assert.equal(f.sessions.workActive(), true, "the app's registry reports its own background shell");
+
+  // The app quits (Cmd-Q): nothing it started can still run, and the phone stops showing it.
+  f.registry.delete(f.sdkId);
+  await f.sessions.pollDesktop();
+  now += WATCH_IDLE_MS;
+  assert.equal(f.sessions.workActive(), false);
+  assert.equal(f.sessions.summaryOf(f.id)?.tasks, 0, "the stale task is no longer shown running");
+});
+
 test("the app's busy and idle show on the phone for a handed-off session the host follows", async t => {
   const f = await modFixture(t, 500, 500);
   f.registry.set(f.sdkId, { sessionId: f.sdkId, pid: 42, status: "busy" });
