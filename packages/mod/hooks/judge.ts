@@ -203,6 +203,11 @@ export function finalEffort(verdict: Verdict, settings: Settings, saving: boolea
   return { effort: result, why: result !== adjusted ? t(lang, 'toasts.saveMode') : adjusted !== verdict.effort ? t(lang, 'toasts.yourSettings') : verdict.why }
 }
 
+/**
+ * Models whose prompt cache survives an effort change. Fable 5.2 was measured on 2026-11-12 with
+ * Claude Code 2.1.321 -p: low→max and high→medium on a resumed session wrote 14 and 17 tokens of
+ * cache against ~60k read (a plain resume without an effort change rewrites ~22k by itself).
+ */
 export function isCacheSafeModel(modelId: string): boolean {
-  return /(?:opus|sonnet|haiku)-5-5(?:$|[^\d])/.test(modelId)
+  return /(?:(?:opus|sonnet|haiku)-5-5|fable-5-2)(?:$|[^\d])/.test(modelId)
 }

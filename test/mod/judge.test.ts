@@ -165,7 +165,7 @@ test('floor wins inverted ceiling, save wins floor, and reasons explain final ch
   assert.deepEqual(finalEffort(verdict, { ...DEFAULTS, floor: 'max', ceiling: 'low' }, true), { effort: 'medium', why: 'save mode' })
 })
 
-test('only the measured 5.5 Claude families are cache-safe', () => {
-  for (const id of ['claude-opus-5-5', 'claude-sonnet-5-5-20261001', 'haiku-5-5']) assert.equal(isCacheSafeModel(id), true)
-  for (const id of ['claude-fable-5-1', 'claude-mythos-5-1', 'claude-opus-4-6', 'gpt-6-1-sol', 'claude-sonnet-5-50', 'sonnet']) assert.equal(isCacheSafeModel(id), false)
+test('only the measured models (5.5 Claude families, Fable 5.2) are cache-safe', () => {
+  for (const id of ['claude-opus-5-5', 'claude-sonnet-5-5-20261001', 'haiku-5-5', 'claude-fable-5-2', 'claude-fable-5-2[1m]']) assert.equal(isCacheSafeModel(id), true)
+  for (const id of ['claude-fable-5-1', 'claude-fable-5-20', 'claude-mythos-5-1', 'claude-opus-4-6', 'gpt-6-1-sol', 'claude-sonnet-5-50', 'sonnet']) assert.equal(isCacheSafeModel(id), false)
 })
