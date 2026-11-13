@@ -83,7 +83,7 @@ export function claudeSessionTemp(scope: SessionFileScope): string[] {
   const slug = scope.cwd.replace(/[^A-Za-z0-9]/g, "-");
   if (process.platform === "win32") {
     // Observed with CLI 2.1.304: C:\\Users\\pbj → C--Users-pbj, under %TEMP%\\claude.
-    // Authorize only the exact host-owned scope. Reparse points in its ancestors and ACLs
+    // Authorize only host-owned scopes of this session id. Reparse points in its ancestors and ACLs
     // writable by another ordinary user fail closed; uid/mode bits cannot prove this on NTFS.
     // The owner may be this user, SYSTEM or Administrators, the same principals the rules below
     // trust: an elevated administrator's new folders belong to Administrators, not the user
@@ -92,23 +92,48 @@ export function claudeSessionTemp(scope: SessionFileScope): string[] {
       // GitHub runners expose TEMP through an 8.3 alias. Use the native long form for ACL and
       // identity checks, while returning the spelling the CLI used in its image references.
       const temp = path.resolve(os.tmpdir());
-      const base = path.join(temp, "claude"), project = path.join(base, slug), session = path.join(project, scope.sessionId);
+      const base = path.join(temp, "claude");
       // The long form resolves a junction too, so TEMP itself is checked as spelled before that.
       if (fs.lstatSync(temp).isSymbolicLink()) return [];
       const nativeTemp = fs.realpathSync.native(temp);
-      const nativeBase = path.join(nativeTemp, "claude"), nativeProject = path.join(nativeBase, slug), nativeSession = path.join(nativeProject, scope.sessionId);
-      const chain = [nativeTemp, nativeBase, nativeProject, nativeSession];
-      if (chain.some(dir => !fs.lstatSync(dir).isDirectory() || fs.lstatSync(dir).isSymbolicLink())) return [];
-      const before = chain.map(dir => fs.lstatSync(dir, { bigint: true }));
-      const quoted = chain.map(dir => `'${dir.replace(/'/g, "''")}'`).join(",");
-      const script = `$ErrorActionPreference='Stop'; $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; foreach($dir in @(${quoted})) { $acl=Get-Acl -LiteralPath $dir; if($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -notin @($sid,'S-1-5-18','S-1-5-32-544')) { exit 1 }; foreach($rule in $acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])) { if($rule.AccessControlType -eq 'Allow' -and ([long]$rule.FileSystemRights -band 852310) -ne 0 -and $rule.IdentityReference.Value -notin @($sid,'S-1-5-18','S-1-5-32-544')) { exit 1 } } }`;
+      const nativeBase = path.join(nativeTemp, "claude");
+      // The Claude app starts its engine from a spare folder (the SDK's prewarm builds
+      // `~\.claude\spares\spare-XXXXXX`), and the CLI names the temp folder after that process
+      // folder rather than the transcript's cwd. Not yet observed on a real Windows CLI. As on POSIX,
+      // the session id is the key: any slug folder holding this exact session's own directory (a real
+      // directory, not a reparse point) is a candidate, and every candidate gets the same checks.
+      const names = [slug];
+      for (const entry of fs.readdirSync(nativeBase, { withFileTypes: true })) {
+        if (!entry.isDirectory() || entry.isSymbolicLink() || entry.name.toLowerCase() === slug.toLowerCase()) continue;
+        try {
+          const own = fs.lstatSync(path.join(nativeBase, entry.name, scope.sessionId));
+          if (own.isDirectory() && !own.isSymbolicLink()) names.push(entry.name);
+        } catch { /* no directory for this session under that slug */ }
+      }
+      // The exact-cwd slug counts only when it exists; a missing one must not sink the others.
+      const candidates = names.flatMap(name => {
+        const nativeProject = path.join(nativeBase, name), nativeSession = path.join(nativeProject, scope.sessionId!);
+        const chain = [nativeTemp, nativeBase, nativeProject, nativeSession];
+        try {
+          if (chain.some(dir => !fs.lstatSync(dir).isDirectory() || fs.lstatSync(dir).isSymbolicLink())) return [];
+          return [{ name, chain, before: chain.map(dir => fs.lstatSync(dir, { bigint: true })) }];
+        } catch { return []; }
+      });
+      if (!candidates.length) return [];
+      // One PowerShell call for every candidate; it prints the index of each chain that passes, and
+      // a chain that fails or cannot be read is simply not printed.
+      // Each chain is one '|'-joined string ('|' cannot occur in a Windows path); nested PowerShell arrays would flatten.
+      const quoted = candidates.map(c => `'${c.chain.join("|").replace(/'/g, "''")}'`).join(",");
+      const script = `$ErrorActionPreference='Stop'; $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; $ok=@($sid,'S-1-5-18','S-1-5-32-544'); $i=0; foreach($line in @(${quoted})) { $pass=$true; try { foreach($dir in $line.Split('|')) { $acl=Get-Acl -LiteralPath $dir; if($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -notin $ok) { $pass=$false; break }; foreach($rule in $acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])) { if($rule.AccessControlType -eq 'Allow' -and ([long]$rule.FileSystemRights -band 852310) -ne 0 -and $rule.IdentityReference.Value -notin $ok) { $pass=$false; break } }; if(-not $pass) { break } } } catch { $pass=$false }; if($pass) { Write-Output "ok:$i" }; $i++ }`;
       const env = windowsPowerShellEnv();
-      execFileSync(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { env, stdio: "ignore", timeout: 5000, windowsHide: true });
-      if (chain.some((dir, i) => {
-        const after = fs.lstatSync(dir, { bigint: true });
-        return after.isSymbolicLink() || !sameIdentity(before[i]!, after);
-      })) return [];
-      return [session];
+      const out = execFileSync(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { env, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 8000, windowsHide: true });
+      const passed = new Set(out.split(/\r?\n/).map(line => /^ok:(\d+)$/.exec(line.trim())?.[1]).filter((v): v is string => v !== undefined).map(Number));
+      return candidates.filter((c, index) => passed.has(index) && !c.chain.some((dir, i) => {
+        try {
+          const after = fs.lstatSync(dir, { bigint: true });
+          return after.isSymbolicLink() || !sameIdentity(c.before[i]!, after);
+        } catch { return true; }
+      })).map(c => path.join(base, c.name, scope.sessionId!));
     } catch { return []; } // Unverifiable ACLs or missing/replaced folders are not trusted roots.
   }
   const uid = process.getuid?.();
