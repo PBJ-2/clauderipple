@@ -1,6 +1,86 @@
 # Changelog
 
-## Unreleased
+## 0.12.34 — 2026-11-13
+
+### Added
+
+- **Every limit window shows how its pace is going, and what requests would cost at API prices.** The
+  router prices each request (Claude from the official table, other models from the Artificial Analysis
+  dataset, images per image) and the dashboard's Logs and the mod's limits pane show the total, the top
+  models and an `≈` for amounts that include an estimated cache price. A window that will reach 100%
+  before its reset says so (amber on the band, red within the hour, with a time such as `~2h`), and
+  a window on course shows its expected share at the reset. Both follow the window's average pace since it
+  started, as the Claude app does, and wait until a full day and night has passed before warning.
+
+- **Status shows every account's limits, with a used/remaining switch** (#135, thanks @RedBoardDev; #139,
+  thanks @BertranK). Each Claude, ChatGPT, Gemini, OpenCode Go, MiniMax and Grok account gets one row and
+  one gauge per window the router reports, with its reset, the time of the reading and a mark for stale,
+  paused or sign-in-needed. The heading switches every gauge between used and remaining. A late read no
+  longer brings back an account you removed or paused, and a window whose reset has passed says so
+  instead of counting down to 0.
+
+- **A MiniMax M Plan shows its five-hour and weekly quota.** The band, the limits pane and the dashboard
+  show it, and a worker ladder no longer hands work to a plan whose window is spent.
+
+- **The request log names the account that answered** (#136, thanks @RedBoardDev). With several accounts
+  in a pool, each row says which one it spent, and it keeps that name after you rename, switch or remove
+  the login. A Logs row also says how much the turn wrote to the cache, not only how much it read.
+
+- **The Claude login on this computer can be paused** (#133, thanks @RedBoardDev). On a shared or work
+  computer signed in as someone else, Pause keeps that login out of the pool, the limits and the mod,
+  without touching the credential or your stored accounts. Resume brings it back.
+
+- **`webSearch: "native"` lets one slot's searches go to Anthropic** (#158, thanks @jinSeong-P). A slot
+  routed to a provider that runs no server tools used to refuse every WebSearch; with this opt-in its
+  searches alone pass to Anthropic while the rest of the slot stays where it is. No search backend is named.
+
+- **A session in the Claude app can be approved, cleared and interrupted from the phone without Remote
+  Control.** A permission prompt is held for the phone while you are away from the computer and goes
+  to the Desktop dialog when you are there; `/clear` runs in place and the phone follows the new
+  transcript; send-now stops the running turn and sends as the next one. An ack says when a message
+  was queued, and a queue wait is no longer stored as an error.
+
+- **An artifact a Claude app session publishes reaches the phone** (#163, thanks @csa906). It shows
+  as its title and page instead of a local file path, and read, list and delete calls say what they did.
+
+- **The phone's activity line, sent files and finished background agents read as in the Code tab.** A
+  group of calls is worded the desktop app's way (verb first, MCP calls by server name, failures and
+  stops in brackets, at most three parts), a file Claude sends is its caption, pictures and file cards,
+  and one that cannot be handed over says why. A background agent's end appears where its notice
+  arrived. A worker's effort now shows in the background-task sheet, the timeline and the overview.
+
+- **The dashboard follows the mod's warm graphite look.** Status, Logs, Providers, Model mapping,
+  Clients, Phone, Laptop, the mod page and About are redrawn to read alike: providers by the names people
+  know with their vendor's dot, one row per account, figures lined up, colour only for a failure, and
+  About starting with the project's name, licence and trademark notice. Phone's Save is enabled only
+  when something changed, and on a phone-width screen the tab bar scrolls instead of squeezing labels
+  together.
+
+### Changed
+
+- **A worker rung picks its model and its effort in two menus.** The one menu listed every model,
+  account and effort together and ran to about 170 lines on a setup with a few accounts; the model menu
+  now has one line per model and account, and the effort menu beside it offers only what that model takes.
+
+- **The mod's account tabs say whose account each is** (#141, thanks @csa906). A tab, the worker menu's
+  options and a checkbox's accessible name carry the account's short name instead of "Account 1".
+
+- **Automatic effort runs on Fable 5.2.** It was paused there because only the 5.5 families were known
+  to keep the prompt cache across an effort change; resumed sessions measured on 2026-11-12 kept it.
+
+- **MiniMax lists M3.1 Flash and M3, and gets thinking as Claude Code sends it.** M2.7, which MiniMax's
+  Anthropic interface no longer serves, is gone from the fallback list. Adaptive thinking is passed as
+  `adaptive` with depth from `effort` instead of a fixed 8192-token budget, which made M3.1 Flash think
+  far longer than asked.
+
+- **Claude Code's side requests fall back to Claude when their provider is spent.** WebSearch, web
+  fetches and small/fast requests (titles, classifiers) whose provider has run out of quota now take a
+  signed-in Claude pool on Haiku 5.5 as a last resort, with a log line and a note on the request. API-key
+  providers are never used for this; workers, main turns and compaction are unchanged.
+
+- **The `ui` worker's description separates design from finishing.** It now says that following a
+  concept fits `standard`, designing from scratch fits `hard`, and installing finished art, restoring a
+  design or filling templates takes no `ui` rung, so sessions stop sending that work to Opus.
 
 ### Fixed
 
@@ -20,6 +100,101 @@
 - **The provider connection check tests the model you chose.** A key limited to certain models was
   reported as rejected because the check used the first model in the provider's list. It now uses the
   model you ticked or entered (on a preset, only if it speaks Chat Completions, as before).
+
+- **On Windows, an update restarts the router, and a router that stops answering is restarted** (#131,
+  thanks @artisthanbohee-del; #159, thanks @fozatudikewaki25702-dev). The launcher's `Start-Process -Wait`
+  also waited for the detached installer an auto-update starts while the installer waited for the
+  router, so the router stayed down until the next logon; the launcher now waits on the router alone.
+  It also asks `/api/ping` every 15 s and, after four misses in a row, stops that one process so the loop
+  starts it again, logging each stop to `logs/launcher-watchdog.log`. `/api/status` no longer runs the
+  certificate check (a synchronous PowerShell call) on the request path.
+
+- **The phone host on Windows no longer waits on PowerShell for its process list** (#162, thanks
+  @Lahai-Roi). The first snapshot was a synchronous read, and one host did not answer for 7-8 minutes
+  after each start; it is now primed in the background and the host waits at most 10 s before listening.
+
+- **OpenCode Go works again when Cloudflare answers 1010** (#132, thanks @stgmt). The preset now sends
+  a User-Agent, never over one you or the caller set, and a 1010 is reported as the request's
+  fingerprint rather than a refused key, so the pool no longer cools a key for it.
+
+- **An Anthropic API key is no longer sent the Claude Code beta flag.** A worker on a native Anthropic
+  provider whose key was paid from a subscription's monthly API credit failed with `billing_error` 400
+  because that flag marks sign-in traffic; the key's other betas still go through.
+
+- **A Claude worker's chosen effort reaches its first step** (#140, thanks @playooab00). The first step
+  ran before the worker's record existed and went out at the model's default or the parent's effort.
+
+- **The ripple bar's chips stay on one line, and a small usage share draws a bar** (#157, thanks
+  @gwanwoo11). "캐시 유지" no longer wraps to a second line, and any share above 0% draws at least a round end.
+
+- **Worker titles name the right model and account.** A pinned worker shows "Opus 5.5 · account"
+  instead of its internal `provider#pin:model` id on the phone and in Desktop's task list; the
+  account is not read as an effort, a heading like "UI·UX" is not stripped as a prefix, and a retitle
+  replaces the prefix instead of stacking. A hand-written worker's title names the model in its own
+  definition (#156, thanks @115dkk). A model two providers spell differently keeps a worker on each.
+
+- **The Status and Logs gauges and rows stay true.** Two providers of one kind (work and personal
+  ChatGPT) read apart on Status, Logs and the mod, and Status follows the router's live provider list on
+  every poll. Logs and first loads show a loading state instead of empty tables, and a slow read
+  lands rather than being discarded by the next poll; Clients is no longer left dimmed after a failed
+  first read. A provider's edit form opens on the name the pages show, a reset reads "34 minutes" rather
+  than "0 hours 34 minutes", and the Claude account switch no longer covers its explanation on a phone.
+  Phone's Save is enabled when the bind is still open to the network and Relay is Off.
+
+- **Request rows keep the account that answered.** A failed image, a Codex turn cut off mid-stream,
+  a retry onto another login, a failed compaction and a borrowed Codex login all keep the name of the
+  account that served them, even after the login changes. The login's email lookup never delays a turn,
+  and a restart waits for rows and images still being written instead of losing them.
+
+- **The limits band keeps Claude's Fable and Gemini windows while room remains,** and a forecast follows
+  an account's id, so removing an account no longer gives the next one its samples.
+
+- **`config.json` is owner-only** (#134, thanks @RedBoardDev). The starter config and every save are
+  written 0600, and an existing 0644 file is tightened on load, since it holds provider API keys.
+
+- **Router and dashboard hardening** (#143, #144, #145, #146, #147, #148, #149, #150, #151, #152, #153,
+  #154, #155, thanks @RedBoardDev). Preview exits non-zero when the tests fail; hotspot failover is
+  cancelled if the network was pinned or tethering changed during the wait; translated usage counts
+  cache creation once and keeps cumulative counters; CONNECT rejects invalid ports and an API-key route
+  counts as available without an OAuth account; a folded legacy provider keeps its web-search and Auto
+  classifier targets and an invalid reload keeps the last good config; concurrent mod syncs no longer
+  publish each other's files; an explicit OpenAI context-length error becomes the "prompt is too long"
+  error Claude Code compacts on; message roles, streamed tool-call indexes and `max_tokens` stops
+  translate correctly and an upstream cut-off without `message_stop` is an error rather than a
+  completion; ChatGPT quota and catalog reads keep their deadline until the body is read; tools
+  declared mid-conversation reach OpenAI, Gemini and ChatGPT; a failed Claude login is settled as
+  failed and a replaced credential no longer inherits an old quota reading; provider caches no longer
+  retain system prompts and images.
+
+- **The dashboard and the phone host use less CPU.** The Logs poll reads only the tail of
+  `router.log` and bounds `n` (#160), the Claude login's source check is cached across polls instead of
+  spawning `security` each time (#161), and the phone host rereads an app session record only when it
+  changed and tokenizes `ps` once (#138, all thanks @RedBoardDev).
+
+- **A sleeping computer's dark wakes no longer ping the phone, and a dead task no longer keeps it "working".**
+  macOS wakes a sleeping laptop for under a minute every few minutes, and each wake sent a
+  "disconnected"/"connected again" pair; the host now waits until the computer has stayed awake for two
+  minutes before arming the watch. A handed-off session's background task whose end never showed no
+  longer counts as work for good, which had kept the disconnect push armed for days.
+
+- **Phone photos upload faster and long bursts of events no longer stutter.** A photo's chunks go six
+  at a time instead of one round trip each, and a phone's message shows its upload state. Ordinary events
+  from a Desktop-bridged session leave in 80 ms windows instead of one frame each, and an attached
+  session keeps its fast transcript watch without a bridge id.
+
+- **Pictures Claude sends from a Claude app session reach the phone, on Windows too.** The app runs its
+  engine from a spare folder, so the session's temp folder was named after that and the host refused the
+  scratchpad as outside the session. Pictures an older log recorded as refused show again when the
+  phone opens the session.
+
+- **A `/clear` typed in the Code tab names the session it left,** so a phone with the old session
+  open follows to the new one.
+
+- **The pricing dataset refreshes again.** Artificial Analysis retired its v1 data endpoints on
+  2026-11-04, so the daily refresh had been failing; it now reads every page of the V2 list and
+  falls back to the free endpoint when the Pro one answers 403. Fable 5.2 and every Claude model on the
+  official pricing page are priced, earlier hours priced late are priced when read, and a restart replays
+  unflushed hours with prices.
 
 ## 0.12.33 — 2026-11-07
 
