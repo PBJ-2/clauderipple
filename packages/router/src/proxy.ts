@@ -332,6 +332,12 @@ export class Proxy {
   private readonly healthConfig = new Map<string, { config: string; credentials: string; keys: Record<string, string> }>();
   /** Agent/session-scoped spawn snapshots survive compaction, never shared by model id. */
   private readonly workerLadders = new Map<string, WorkerLadderRoute>();
+  /**
+   * Where a ladder worker went when its primary could not serve it, by the same session:agentId key.
+   * The worker stays there while that target is still on its current ladder and usable, even after the
+   * primary recovers: going back every cooldown would discard the prompt cache each time (#164).
+   */
+  private readonly ladderSticky = new Map<string, { provider: string; model: string; effort?: string | undefined }>();
 
   /** Latest rate-limit snapshot reported by any chatgpt provider (for the admin GUI). */
   get chatgptRateLimits(): Record<string, Record<string, unknown> | null> {
@@ -1232,8 +1238,9 @@ export class Proxy {
         ? { route: fetchTarget, refusal: override.refusal ?? null }
         : json ? decide(model, json, cfg, kind) : { route: null, refusal: null };
       let resolved = decision.route;
+      const ladderKey = subagent && record.session ? `${record.session}:${agentId}` : undefined;
       if (!fetchTarget && subagent && resolved && json) {
-        resolved = this.workerFallbacks(resolved, json, cfg, typeof model === "string" ? model : "", record.session && `${record.session}:${agentId}`);
+        resolved = this.workerFallbacks(resolved, json, cfg, typeof model === "string" ? model : "", ladderKey);
       }
 
       // A non-Claude model this router cannot route is refused here, by name, instead of being
@@ -1282,9 +1289,10 @@ export class Proxy {
           claudeLast = true;
         }
       }
-      let route = placed ? this.chooseTarget(placed, cfg, log) : null;
+      const why: { reason?: string } = {};
+      let route = placed ? this.chooseTarget(placed, cfg, log, ladderKey, why) : null;
       if (resolved?.ladderPick && route && (route.provider !== resolved.provider || route.model !== resolved.model)) {
-        unwrittenFallbackNote = `ladder pick=${resolved.ladderPick} fallback ${resolved.provider}/${resolved.model} → ${route.provider}/${route.model}: ${this.unavailableReason(resolved) ?? "provider_unusable"}`;
+        unwrittenFallbackNote = `ladder pick=${resolved.ladderPick} fallback ${resolved.provider}/${resolved.model} → ${route.provider}/${route.model}: ${why.reason ?? this.unavailableReason(resolved) ?? "provider_unusable"}`;
       }
       if (claudeLast && resolved && route && route.model === CLAUDE_SMALL_MODEL && route.provider !== resolved.provider &&
           cfg.providers[route.provider]?.type === "anthropic") {
@@ -2365,10 +2373,20 @@ export class Proxy {
     if (!snapshot && Array.isArray(json.messages)) {
       // register.tsx prepends this line to the spawn prompt, not to later history or blocks.
       // Only leading engine reminders may precede it; removing reminders elsewhere can expose prose.
+      // Claude Code 2.1.321 sends each reminder as its own leading text block (#164), so blocks whose
+      // whole text is reminders are skipped and the first other block is the one that is read.
       const content: unknown = json.messages.find(message => message?.role === "user")?.content;
-      const first: unknown = Array.isArray(content) ? content[0] : undefined;
-      const text = typeof content === "string" ? content : first && typeof first === "object" &&
-        "type" in first && first.type === "text" && "text" in first && typeof first.text === "string" ? first.text : "";
+      const blockText = (block: unknown): string | undefined => block && typeof block === "object" &&
+        "type" in block && block.type === "text" && "text" in block && typeof block.text === "string" ? block.text : undefined;
+      let text = "";
+      if (typeof content === "string") text = content;
+      else if (Array.isArray(content)) {
+        const first = content.find(block => {
+          const t = blockText(block);
+          return t === undefined || !onlyReminders(t);
+        });
+        text = blockText(first) ?? "";
+      }
       snapshot = readWorkerLadder(text.replace(/^(?:\s*<system-reminder>[\s\S]*?<\/system-reminder>)+\s*/, ""));
     }
     // Never override an explicit marker/rule that resolved somewhere other than the spawn's model.
@@ -2428,33 +2446,67 @@ export class Proxy {
    * When nothing anywhere is usable the primary is kept: the provider gets to refuse the request
    * rather than the router inventing a refusal, and the answer it gives is what updates the pool.
    */
-  private chooseTarget(resolved: Resolved, cfg: Config, log: Logger): Resolved {
-    if (!resolved.fallbacks?.length) return resolved;
+  private chooseTarget(resolved: Resolved, cfg: Config, log: Logger, ladderKey?: string, why?: { reason?: string }): Resolved {
+    if (!resolved.fallbacks?.length) {
+      // The turn runs on the primary, so a remembered fallback is over: re-ticking it later must not
+      // pull this worker off a primary that is usable. Only the worker's own ladder turn says so: a
+      // side request on the same key (WebFetch's reader) carries no ladder and must not end it.
+      if (resolved.ladderPick && ladderKey) this.ladderSticky.delete(ladderKey);
+      return resolved;
+    }
+    // A ladder worker with a key keeps the fallback it already moved to (#164). The fallback must
+    // still be on the CURRENT ladder (`fallbacks` was filtered against it) and usable; otherwise the
+    // normal selection below runs again and its outcome replaces the remembered one.
+    const sticky = resolved.ladderPick && ladderKey ? this.ladderSticky.get(ladderKey) : undefined;
+    if (sticky) {
+      const f = resolved.fallbacks.find(x => x.provider === sticky.provider && x.model === sticky.model &&
+        (x.effort ?? resolved.effort) === sticky.effort && !(x.provider === resolved.provider && x.model === resolved.model));
+      if (f && this.targetUsable({ ...f, effort: f.effort ?? resolved.effort }, cfg)) {
+        log.info(`LADDER pick=${resolved.ladderPick} ${resolved.provider}/${resolved.model} → ${f.provider}/${f.model} reason=sticky`);
+        if (why) why.reason = "sticky";
+        return this.fallbackRoute(resolved, f);
+      }
+    }
+    const route = this.selectTarget(resolved, cfg, log, why);
+    if (resolved.ladderPick && ladderKey) {
+      this.ladderSticky.delete(ladderKey);
+      if (route !== resolved) {
+        this.ladderSticky.set(ladderKey, { provider: route.provider, model: route.model, effort: route.effort });
+        if (this.ladderSticky.size > 10_000) this.ladderSticky.delete(this.ladderSticky.keys().next().value!);
+      }
+    }
+    return route;
+  }
+
+  private selectTarget(resolved: Resolved, cfg: Config, log: Logger, why?: { reason?: string }): Resolved {
     const reason = this.unavailableReason(resolved);
-    const provider = cfg.providers[resolved.provider];
-    // An ordinary API rate limit is not definite exhaustion. OAuth adapters additionally know
-    // when every account (or the model's quota group) is unavailable without a billing error.
-    const accounts = provider?.type === "chatgpt" || provider?.type === "anthropic" || provider?.type === "google" && provider.auth === "antigravity";
-    if (resolved.ladderPick && !reason && !accounts) return resolved;
+    // A ladder worker is not held on a primary just because nothing has been declared exhausted: an
+    // API key that every credential of is cooling after a 429 would stall it. `targetUsable` below
+    // keeps a primary with any usable credential, and moves one with none to the first usable fallback.
     if (this.targetUsable(resolved, cfg)) return resolved;
-    for (const f of resolved.fallbacks) {
+    for (const f of resolved.fallbacks ?? []) {
       if (f.provider === resolved.provider && f.model === resolved.model) continue;
       if (!this.targetUsable({ ...f, effort: f.effort ?? resolved.effort }, cfg)) continue;
       log.info(`${resolved.ladderPick ? `LADDER pick=${resolved.ladderPick}` : "FAILOVER"} ${resolved.provider}/${resolved.model} → ${f.provider}/${f.model} reason=${reason ?? "provider_unusable"}`);
-      // The tag names the model that answers, not the one that could not: a log line saying `->m1`
-      // for a turn that ran on m2 is the kind of thing that costs an hour to disbelieve.
-      return {
-        provider: f.provider,
-        model: f.model,
-        effort: f.effort ?? resolved.effort,
-        // A fallback to a pinned worker goes out on that worker's account, as a direct pick would.
-        ...(f.accountPin ? { accountPin: f.accountPin } : {}),
-        tag: `${resolved.asked}->${f.model} (failover from ${resolved.provider})`,
-        kind: resolved.kind,
-        asked: resolved.asked,
-      };
+      if (why) why.reason = reason ?? "provider_unusable";
+      return this.fallbackRoute(resolved, f);
     }
     return resolved;
+  }
+
+  private fallbackRoute(resolved: Resolved, f: NonNullable<Resolved["fallbacks"]>[number]): Resolved {
+    // The tag names the model that answers, not the one that could not: a log line saying `->m1`
+    // for a turn that ran on m2 is the kind of thing that costs an hour to disbelieve.
+    return {
+      provider: f.provider,
+      model: f.model,
+      effort: f.effort ?? resolved.effort,
+      // A fallback to a pinned worker goes out on that worker's account, as a direct pick would.
+      ...(f.accountPin ? { accountPin: f.accountPin } : {}),
+      tag: `${resolved.asked}->${f.model} (failover from ${resolved.provider})`,
+      kind: resolved.kind,
+      asked: resolved.asked,
+    };
   }
 
   /** Only configured route fallbacks, not another account or an invented provider. */
@@ -2595,6 +2647,21 @@ export class Proxy {
       this.providerAgents.set(key, a);
     }
     return a;
+  }
+}
+
+/** True when the text is one or more `<system-reminder>…</system-reminder>` elements and whitespace, nothing else. */
+function onlyReminders(text: string): boolean {
+  let at = 0;
+  let found = false;
+  for (;;) {
+    while (at < text.length && /\s/.test(text[at]!)) at++;
+    if (at >= text.length) return found;
+    if (!text.startsWith("<system-reminder>", at)) return false;
+    const end = text.indexOf("</system-reminder>", at);
+    if (end < 0) return false;
+    at = end + "</system-reminder>".length;
+    found = true;
   }
 }
 

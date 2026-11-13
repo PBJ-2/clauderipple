@@ -200,6 +200,13 @@ for (const stream of [false, true]) {
           history.push({ role: "assistant", content: [...own, ...unknown] }, { role: "user", content: "recovered" });
           recover();
           assert.equal((await send(history, model)).status, 200);
+          if (ladder) {
+            // A ladder worker stays on the fallback it moved to (#164): returning to the primary each
+            // time it recovers would discard the prompt cache. Only FAILOVER returns, checked below.
+            assert.equal(seen.at(-1)?.model, "approved");
+            assert.deepEqual(seen.at(-1)?.messages[1]?.content, [text]);
+            return;
+          }
           assert.equal(seen.at(-1)?.model, "primary");
           assert.deepEqual(seen.at(-1)?.messages[1]?.content, primaryOwn);
           assert.deepEqual(seen.at(-1)?.messages[3]?.content, [text, tool, ...unknown]);

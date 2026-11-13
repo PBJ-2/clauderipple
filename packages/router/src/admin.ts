@@ -1630,7 +1630,18 @@ async function probeProvider(body: ProbeRequest, probeFetch: (url: string, init:
   // entered by hand is tested on Responses: one that serves nothing else answered the Chat test 404.
   const responses = openai && body.wire === "responses" && !body.preset;
   const checkUrl = responses ? responsesUrl(body.url) : openai ? chatCompletionsUrl(body.url) : messagesUrl(body.url);
-  const checkModel = presetProbeModel(body.preset) ?? models[0]?.id ?? body.probeModel ?? "test";
+  // The model the operator chose (the UI sends the first ticked or entered one, or the saved
+  // provider's first) goes first: a key limited to certain models answers 403 model_not_allowed on
+  // whatever the catalogue lists first, which read as a rejected key (#164). The preset's own Chat
+  // pick still stands in for a choice the test cannot speak: a preset provider's choice is used only
+  // when it is a Chat model, since the preset's default `probeModel` may be a Responses-only entry.
+  // Without a choice the order is unchanged: preset pick, then the catalogue's head.
+  const preset = body.preset ? PRESETS.find((entry) => entry.id === body.preset) : undefined;
+  const chosenWire = body.probeModel && preset
+    ? (models.find((model) => model.id === body.probeModel) ?? preset.fallbackModels.find((model) => model.id === body.probeModel))?.wire ?? preset.wire ?? "chat"
+    : "chat";
+  const chosen = body.probeModel && chosenWire === "chat" ? body.probeModel : undefined;
+  const checkModel = chosen ?? presetProbeModel(body.preset) ?? models[0]?.id ?? "test";
   // 16 tokens, as on Responses: some vendors refuse a smaller cap outright (B.ai: "max_tokens must be
   // greater than 2", #57), which read as a failed connection though the key and URL were right.
   // Streamed, as every translated turn is: the status arrives with the headers, while a reasoning

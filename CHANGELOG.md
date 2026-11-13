@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A worker's ladder is read when Claude Code sends its reminders as separate blocks** (#164, thanks
+  @Lahai-Roi). Claude Code 2.1.321 puts each `<system-reminder>` in its own leading text block, so the
+  ladder comment in the block after them was never found and no worker ever left its first rung. Leading
+  blocks made only of reminders are now skipped; the first other block is read. Nothing later in the
+  request, and no reminder inside prose, is read or stripped.
+
+- **A ladder worker no longer waits on a first rung whose keys are all cooling after a 429.** A provider
+  answering `429 model_busy` left the worker retrying the same rung until it stalled; a rung with no
+  usable key now hands the worker to the first usable fallback, and one with any usable key keeps it.
+  A worker that moved stays on its fallback while that fallback works, instead of returning to the first
+  rung each time its cooldown ends and discarding the prompt cache; the next worker starts on the first
+  rung again. The log line and the request note say `reason=sticky` for those turns.
+
+- **The provider connection check tests the model you chose.** A key limited to certain models was
+  reported as rejected because the check used the first model in the provider's list. It now uses the
+  model you ticked or entered (on a preset, only if it speaks Chat Completions, as before).
+
 ## 0.12.33 — 2026-11-07
 
 ### Added

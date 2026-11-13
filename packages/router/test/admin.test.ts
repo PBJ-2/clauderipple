@@ -1836,6 +1836,55 @@ test("POST /api/providers/probe discovers OpenAI-compatible models and probes Ch
   }
 });
 
+// A key limited to some models answers 403 model_not_allowed on the catalogue's head, which read as
+// a rejected key (#164). The model the operator chose is tested ahead of the head.
+test("POST /api/providers/probe tests the operator's chosen model ahead of the catalogue's first", async () => {
+  const seen: string[] = [];
+  const upstream = http.createServer((req, res) => {
+    if (req.url === "/v1/models") {
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ data: [{ id: "head-model" }, { id: "allowed-model" }, { id: "deepseek-v4.1-flash" }, { id: "muse-spark-1.3-contributor" }] }));
+      return;
+    }
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      const model = (JSON.parse(Buffer.concat(chunks).toString("utf8")) as { model: string }).model;
+      seen.push(model);
+      if (model === "head-model") res.writeHead(403, { "content-type": "application/json" }).end(JSON.stringify({ error: { code: "model_not_allowed" } }));
+      else res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ choices: [] }));
+    });
+  });
+  await new Promise<void>((resolveP) => upstream.listen(0, "127.0.0.1", resolveP));
+  const address = upstream.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}/v1`;
+  const probe = async (port: number, extra: Record<string, unknown>) => (await (await fetch(`${base()}:${port}/api/providers/probe`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ type: "openai-compatible", url: origin, headers: { authorization: "Bearer secret-key" }, modelsUrl: `${origin}/models`, modelsAuthHeader: "authorization-bearer", ...extra }),
+  })).json()) as { ok: boolean; auth: string };
+  try {
+    await withAdmin(makeCfg(), async ({ port }) => {
+      assert.equal((await probe(port, { probeModel: "allowed-model" })).auth, "ok");
+      assert.equal(seen.at(-1), "allowed-model");
+      assert.equal((await probe(port, {})).auth, "bad-key", "without a choice the catalogue's head is still what is tried");
+      assert.equal(seen.at(-1), "head-model");
+      // A preset's own Chat pick keeps standing in for a choice this test cannot speak (Responses-only).
+      await probe(port, { preset: "opencode-go", probeModel: "muse-spark-1.3-contributor" });
+      assert.notEqual(seen.at(-1), "muse-spark-1.3-contributor");
+      assert.notEqual(seen.at(-1), "head-model");
+      // A Chat model the operator kept ticked is used on a preset too, not only the preset's head pick.
+      await probe(port, { preset: "opencode-go", probeModel: "deepseek-v4.1-flash" });
+      assert.equal(seen.at(-1), "deepseek-v4.1-flash");
+      // One the preset does not name rides its default wire (Responses here), so the Chat pick stands.
+      await probe(port, { preset: "opencode-go", probeModel: "allowed-model" });
+      assert.notEqual(seen.at(-1), "allowed-model");
+    });
+  } finally {
+    await new Promise<void>((resolveP, reject) => upstream.close((error) => (error ? reject(error) : resolveP())));
+  }
+});
+
 // A provider being added is filled the same way, because what the form saves is what the probe
 // returned: Hive's `/models` names its models and nothing else.
 test("POST /api/providers/probe fills a window the vendor did not state from the model's catalogue entry", async () => {

@@ -1361,8 +1361,11 @@ tight, and nothing at 100 or more.
   fallback ids also go into the existing pick log. Explicit model/pin choices that
   did not use the ladder get no snapshot. No tier is inferred from the model id.
   Only a request with the subagent header consumes it, from the first user message's
-  first text block (or string content), at its start after any leading engine reminders;
-  later messages, quoted metadata and later blocks are never scanned. It must match the original
+  string content or its first text block that is not made only of `<system-reminder>`
+  elements (Claude Code 2.1.321 sends each reminder as its own leading block, #164, 2026-11-13),
+  at its start after any leading reminders in that block; a non-text block there means no
+  snapshot. Later messages, quoted metadata, later blocks and reminders in the middle of
+  prose are never scanned or stripped. It must match the original
   requested model and resolved provider/model/effort. The router binds the snapshot
   to session + agent (bounded to 10,000 entries), so later compacted requests retain
   it without sharing another worker's tier. Restart loses this binding; a request
@@ -1374,9 +1377,20 @@ tight, and nothing at 100 or more.
   no ladder reroute. The snapshot preserves spawn order but never authorizes a removed rung.
   Before sending upstream, definite provider exhaustion, model retirement, or an
   OAuth adapter with no usable account/quota group permits the existing `chooseTarget`
-  path to select the first usable remaining entry. Ordinary API-key rate limits do
-  not trigger this worker preflight. The first request that *discovers* exhaustion
+  path to select the first usable remaining entry. Since #164 (2026-11-13) an API-key
+  primary whose credentials are ALL cooling or quarantined (a 429 such as `model_busy`
+  cools the key, §4 Credential pools) counts as unusable too, while one with any usable
+  credential stays. The first request that *discovers* the problem
   still returns the existing non-retryable error; the next request skips it.
+  A worker that moved to a fallback **stays there** while that fallback is still among its
+  CURRENT allowed fallbacks and usable, even after the primary recovers: going back each
+  cooldown (about a minute) would discard the prompt cache every time. The remembered
+  choice is a process-local map keyed by the same `session:agentId` as the snapshot
+  binding, bounded to 10,000 entries (oldest dropped); a request with no key is never
+  sticky and a new worker starts on its primary. A sticky target that became unusable or
+  is no longer on the ladder is dropped and normal selection runs again; its result
+  (a fallback, or the primary) replaces the remembered one. The LADDER log line and
+  request note then read `reason=sticky`. A restart forgets it.
   Fallback ids must still resolve through current config: ambiguous, removed, and
   ingress-only native Claude targets are not invented as outbound providers (§5).
   With no usable fallback the original provider keeps its existing refusal contract.

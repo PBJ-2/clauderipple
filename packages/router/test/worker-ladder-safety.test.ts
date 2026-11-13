@@ -25,14 +25,14 @@ const task = (text: string): Message[] => [{ role: 'user', content: text }];
 async function fixture(run: (f: {
   cfg: Config; proxy: Proxy; home: string; seen: Body[];
   send: (messages: Message[], agent?: string, model?: string) => Promise<number>;
-  behavior: { retired: boolean; exhausted: boolean; rejectThinking: boolean };
+  behavior: { retired: boolean; exhausted: boolean; rejectThinking: boolean; busy: boolean };
 }) => Promise<void>): Promise<void> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cr-ladder-safety-'));
   const ca = createCa({ cn: 'isolated ladder safety' });
   fs.writeFileSync(path.join(home, 'ca.pem'), ca.certPem);
   fs.writeFileSync(path.join(home, 'ca.key'), ca.keyPem);
   const seen: Body[] = [];
-  const behavior = { retired: true, exhausted: false, rejectThinking: false };
+  const behavior = { retired: true, exhausted: false, rejectThinking: false, busy: false };
   const up = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on('data', (c: Buffer) => chunks.push(c));
@@ -41,9 +41,9 @@ async function fixture(run: (f: {
       seen.push(body);
       const primary = body.model === 'primary';
       const foreign = body.messages.some(m => Array.isArray(m.content) && m.content.some(b => b?.type === 'thinking' || b?.type === 'redacted_thinking'));
-      const status = primary && behavior.retired ? 410 : primary && behavior.exhausted && req.headers['x-api-key'] !== 'fresh-test-key' ? 429 : !primary && behavior.rejectThinking && foreign ? 400 : 200;
+      const status = primary && behavior.retired ? 410 : primary && behavior.exhausted && req.headers['x-api-key'] !== 'fresh-test-key' ? 429 : primary && behavior.busy && req.headers['x-api-key'] !== 'good-key' ? 429 : !primary && behavior.rejectThinking && foreign ? 400 : 200;
       res.writeHead(status, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(status !== 200 ? { error: { message: status === 410 ? 'Model primary has been deprecated.' : status === 429 ? 'insufficient_quota' : 'foreign thinking signature' } } : {
+      res.end(JSON.stringify(status !== 200 ? { error: { message: status === 410 ? 'Model primary has been deprecated.' : status === 429 ? (behavior.busy ? 'The model is busy right now.' : 'insufficient_quota') : 'foreign thinking signature' } } : {
         id: 'msg_ok', type: 'message', role: 'assistant', model: body.model, content: [{ type: 'text', text: 'answer' }], usage: {},
       }));
     });
@@ -254,5 +254,98 @@ test('a provider exhaustion advisory cannot override a ready declared credential
     proxy.providerHealth.observe('p', 429, providerExhaustion(429, 'insufficient_quota'));
     assert.equal(await send(task('Continue')), 200);
     assert.equal(seen.at(-1)?.model, 'primary');
+  });
+});
+
+const reminder = (text: string): { type: string; text: string } => ({ type: 'text', text: `<system-reminder>${text}</system-reminder>` });
+
+test('separate leading reminder blocks are skipped and the spawn snapshot in the next block is read (#164)', async () => {
+  await fixture(async ({ send, seen }) => {
+    assert.equal(await send(task('Prime retirement'), 'probe'), 410);
+    assert.equal(await send([{ role: 'user', content: [reminder('one'), { type: 'text', text: ` \n${reminder('two').text}\n ` }, { type: 'text', text: `${snapshot()}\nTask` }] }]), 200);
+    assert.equal(seen.at(-1)?.model, 'approved');
+  });
+});
+
+test('reminder-only blocks followed by prose without the snapshot give no ladder', async () => {
+  await fixture(async ({ send, seen }) => {
+    assert.equal(await send(task('Prime retirement'), 'probe'), 410);
+    assert.equal(await send([{ role: 'user', content: [reminder('one'), reminder('two'), { type: 'text', text: 'Task' }, { type: 'text', text: snapshot() }] }]), 410);
+    assert.equal(seen.at(-1)?.model, 'primary');
+    assert.equal(await send([{ role: 'user', content: [reminder('one'), { type: 'image', source: {} }, { type: 'text', text: snapshot() }] }], 'worker-b'), 410);
+    assert.equal(seen.at(-1)?.model, 'primary');
+  });
+});
+
+test('a reminder in the middle of prose is not stripped to expose the snapshot', async () => {
+  await fixture(async ({ send, seen }) => {
+    assert.equal(await send(task('Prime retirement'), 'probe'), 410);
+    assert.equal(await send([{ role: 'user', content: [{ type: 'text', text: `Task\n${reminder('x').text}\n${snapshot()}` }] }]), 410);
+    assert.equal(await send([{ role: 'user', content: [{ type: 'text', text: `${reminder('a').text} prose ${reminder('b').text}` }, { type: 'text', text: snapshot() }] }], 'worker-b'), 410);
+    assert.equal(seen.at(-1)?.model, 'primary');
+  });
+});
+
+test('a ladder worker whose only key is cooling after an ordinary 429 moves to the fallback (#164)', async () => {
+  await fixture(async ({ send, seen, behavior }) => {
+    behavior.retired = false;
+    behavior.busy = true;
+    assert.equal(await send(task(snapshot())), 429, 'the request that discovers the 429 still returns it');
+    assert.equal(await send(task('Continue')), 200);
+    assert.equal(seen.at(-1)?.model, 'approved');
+  });
+});
+
+test('a ladder worker stays on its primary while one of its keys is usable', async () => {
+  await fixture(async ({ send, seen, behavior, cfg, proxy }) => {
+    behavior.retired = false;
+    behavior.busy = true;
+    const p = cfg.providers.p;
+    if (p?.type !== 'anthropic-compatible') throw new Error('fixture type');
+    p.credentials = [{ id: 'busy', headers: { 'x-api-key': 'busy-key' } }, { id: 'good', headers: { 'x-api-key': 'good-key' } }];
+    proxy.reconcileConfig(cfg);
+    assert.equal(await send(task(snapshot())), 200, 'the pool moves the turn to the healthy key');
+    assert.equal(seen.at(-1)?.model, 'primary');
+    assert.equal(proxy.credentialHealth().p?.find(c => c.id === 'busy')?.state, 'cooling');
+    assert.equal(await send(task('Continue')), 200);
+    assert.equal(seen.at(-1)?.model, 'primary');
+  });
+});
+
+test('a ladder worker that moved to its fallback stays there after the primary recovers, and a new worker starts on the primary', async () => {
+  await fixture(async ({ send, seen, behavior, cfg, proxy, home }) => {
+    behavior.retired = false;
+    behavior.busy = true;
+    assert.equal(await send(task(snapshot())), 429);
+    assert.equal(await send(task('Continue')), 200);
+    assert.equal(seen.at(-1)?.model, 'approved');
+    const p = cfg.providers.p;
+    if (p?.type !== 'anthropic-compatible') throw new Error('fixture type');
+    p.credentials = [{ id: 'good', headers: { 'x-api-key': 'good-key' } }];
+    proxy.reconcileConfig(cfg);
+    assert.equal(await send(task('Continue again')), 200);
+    assert.equal(seen.at(-1)?.model, 'approved', 'no return to the primary while the fallback works');
+    assert.match(fs.readFileSync(path.join(home, 'router.log'), 'utf8'), /LADDER pick=pick-a p\/primary → q\/approved reason=sticky/);
+    assert.equal(await send(task(snapshot()), 'worker-new'), 200);
+    assert.equal(seen.at(-1)?.model, 'primary', 'stickiness is per worker');
+    assert.equal(await send(task('Main session'), ''), 200);
+    assert.equal(seen.at(-1)?.model, 'primary', 'no key, no stickiness');
+  });
+});
+
+test('a sticky fallback that became unusable is replaced by a fresh selection', async () => {
+  await fixture(async ({ send, seen, behavior, cfg, proxy }) => {
+    behavior.retired = false;
+    behavior.busy = true;
+    assert.equal(await send(task(snapshot())), 429);
+    assert.equal(await send(task('Continue')), 200);
+    assert.equal(seen.at(-1)?.model, 'approved');
+    const p = cfg.providers.p;
+    if (p?.type !== 'anthropic-compatible') throw new Error('fixture type');
+    p.credentials = [{ id: 'good', headers: { 'x-api-key': 'good-key' } }];
+    proxy.reconcileConfig(cfg);
+    proxy.providerHealth.observe('q', 429, providerExhaustion(429, 'insufficient_quota'));
+    assert.equal(await send(task('Continue again')), 200);
+    assert.equal(seen.at(-1)?.model, 'primary', 'the unusable sticky target is dropped and the recovered primary is chosen');
   });
 });

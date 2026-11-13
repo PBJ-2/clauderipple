@@ -82,15 +82,18 @@ for (const type of ['anthropic-compatible', 'openai-compatible', 'google'] as co
       try {
         assert.equal(await send(`${line}\nTask`), failure === 'deprecated' ? (type === 'anthropic-compatible' ? 410 : 400) : 429);
         assert.equal(seen.filter(m => m === 'retired').length, 1);
-        assert.equal(await send(`${line}\nTask`), failure === 'rate' ? 429 : 200);
-        if (failure !== 'rate') {
+        // A 429 cools the key, so the pool itself knows the primary is unusable (#164): a ladder worker
+        // no longer waits on it, the same as for a declared exhaustion.
+        assert.equal(await send(`${line}\nTask`), 200);
+        {
           assert.equal(seen.filter(m => m === 'retired').length, 1, 'no request reaches the known unusable model');
           assert.deepEqual(fallbackBodies[0]?.system, [{ type: 'text', text: 'Stable cached prefix', cache_control: { type: 'ephemeral' } }]);
           assert.equal(fallbackBodies[0]?.messages?.flatMap(m => Array.isArray(m.content) ? m.content : []).some(b => b.type === 'thinking'), false, 'the fallback uses its own thinking sanitizer');
           assert.equal(await send('compacted task'), 200, 'agent identity retains its ladder after compaction');
           assert.equal(await send('Task', 'worker-b'), failure === 'deprecated' ? (type === 'anthropic-compatible' ? 410 : 400) : 429, 'another worker never inherits this ladder');
           assert.equal(await send(`${line}\nTask`, ''), failure === 'deprecated' ? (type === 'anthropic-compatible' ? 410 : 400) : 429, 'main-session traffic is not rerouted');
-          assert.match(fs.readFileSync(path.join(home, 'router.log'), 'utf8'), /LADDER.*p\/retired.*q\/next.*(?:billing_exhausted|model_deprecated)/);
+          assert.match(fs.readFileSync(path.join(home, 'router.log'), 'utf8'), failure === 'rate'
+            ? /LADDER.*p\/retired.*q\/next.*provider_unusable/ : /LADDER.*p\/retired.*q\/next.*(?:billing_exhausted|model_deprecated)/);
           const record = requests.list(20).find(r => r.provider === 'q');
           assert.equal(record?.target, 'next');
           assert.equal(record?.effort, 'low');
