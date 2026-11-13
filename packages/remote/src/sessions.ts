@@ -805,8 +805,9 @@ export class Sessions {
     }
     return listed.map(s => {
       const read = s.unread && (this.readAt.get(s.id) ?? 0) >= s.updatedAt ? { ...s, unread: false } : s;
-      const supersedes = takenOver.get(s.id);
-      return supersedes ? { ...read, supersedes } : read;
+      const taken = takenOver.get(s.id);
+      // The sidebar's own record (a /clear typed in the Code tab) rides along in `read.supersedes`.
+      return taken ? { ...read, supersedes: [...new Set([...taken, ...(read.supersedes ?? [])])] } : read;
     });
   }
 

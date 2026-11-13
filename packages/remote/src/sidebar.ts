@@ -13,7 +13,11 @@ const string = (v: unknown): string => typeof v === "string" ? v : "";
 const array = (v: unknown): unknown[] => Array.isArray(v) ? v : [];
 export const UNGROUPED = "sidebar:ungrouped";
 export const PHONE_GROUP = "sidebar:phone";
-export interface SidebarSession { cliSessionId: string; sessionId: string; title: string; unread: boolean; archived: boolean; hidden?: boolean; group: string; order: number; activity: number; created: number }
+export interface SidebarSession { cliSessionId: string; sessionId: string; title: string; unread: boolean; archived: boolean; hidden?: boolean; group: string; order: number; activity: number; created: number;
+  /** CLI ids this app session held before (its `priorCliSessionIds`: a /clear in place, a resume), oldest first, capped at the newest few. */
+  prior: string[] }
+/** How many earlier CLI ids a row names to the phone: the phone only needs the id it has open, and that is the newest or near it. */
+const PRIOR_CAP = 8;
 /** `superseded`: CLI session ids an app session has moved on from (resume, compact, handoff); its row is the one that lists. */
 export interface SidebarSnapshot { groups: { name: string; sessions: string[] }[]; sessions: Map<string, SidebarSession>; superseded: Set<string> }
 export interface SidebarOptions { root?: string; now?: () => number; onError?: (error: unknown) => void }
@@ -101,7 +105,8 @@ export class DesktopSidebar {
       const seen = focused > 0 && active > 0 && focused >= active;
       rows.push({ cliSessionId: string(v.cliSessionId), sessionId, title: string(v.title), unread: unread.has(sessionId) && !seen,
         archived: v.isArchived === true || archived.has(sessionId), group: routine ? "routines" : manual.some(g => g?.id === group) ? group : "sessions",
-        order: 0, activity: number(v.lastActivityAt) || number(v.createdAt), created: number(v.createdAt) });
+        order: 0, activity: number(v.lastActivityAt) || number(v.createdAt), created: number(v.createdAt),
+        prior: array(v.priorCliSessionIds).filter((p): p is string => typeof p === "string" && UUID.test(p) && p !== string(v.cliSessionId)).slice(-PRIOR_CAP) });
     }
     const pinned = new Set(array(prefs?.["starred-local-code-sessions"]).filter((v): v is string => typeof v === "string"));
     const configured = array(layout?.sections).map(object).filter((v): v is Record<string, unknown> => v !== null);
@@ -152,7 +157,10 @@ export class DesktopSidebar {
       // an app session's record that no app session holds now is not in the app's sidebar either.
       if (!row && (sidebar.superseded.has(cliId(s.id)) || superseded.has(cliId(s.id)) || s.desktopBridge && !pendingAppSession(s.id))) return [];
       if (!row) return [{ ...s, group: s.origin === "desktop" ? UNGROUPED : PHONE_GROUP }];
-      return [{ ...s, ...(row.archived ? { archived: true } : {}), title: row.title.trim() || s.title, unread: row.unread, group: row.group, order: row.order, updatedAt: row.activity }];
+      // The app's own record of the ids this conversation moved on from: a /clear typed in the Code tab
+      // names no one to the host, so this is how the phone that has an old id open learns where it went.
+      const supersedes = [...new Set([...(s.supersedes ?? []), ...row.prior])];
+      return [{ ...s, ...(supersedes.length ? { supersedes } : {}), ...(row.archived ? { archived: true } : {}), title: row.title.trim() || s.title, unread: row.unread, group: row.group, order: row.order, updatedAt: row.activity }];
     });
   }
 }

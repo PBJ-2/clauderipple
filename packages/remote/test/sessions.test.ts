@@ -2601,6 +2601,22 @@ test("a /clear in place lists the new session when the move is reported, not at 
   assert.equal(f.sessions.list().some(s => s.id === APP_ID), false, "the old transcript leaves the list at once");
 });
 
+// A /clear typed in the Code tab reports nothing to the host (no mod offer): the app only re-keys its own
+// row, naming the id it left in `priorCliSessionIds`. The phone with the old id open follows `supersedes`.
+test("a /clear typed in the Code tab lists the new session naming the old id it took over, from the app's own record", async t => {
+  const f = appNativeModFixtureClocked(t, 500);
+  const projects = path.dirname(path.dirname(f.file));
+  const next = "abababab-abab-abab-abab-abababababab";
+  assert.equal(f.sessions.list().find(s => s.id === APP_ID)?.supersedes, undefined, "nothing moved yet");
+  fs.writeFileSync(path.join(projects, "project", `${next}.jsonl`), transcriptLine({ type: "user", uuid: "typed-clear", cwd: f.cwd, message: { content: "fresh" } }));
+  f.app.row(2_000_000, next, [APP_ID]);
+  f.registry.set(next, { sessionId: next, pid: 44, status: "idle" });
+  f.clock.advance(31_000);
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.list().some(s => s.id === APP_ID), false, "the old transcript leaves the list");
+  assert.deepEqual(f.sessions.list().find(s => s.id === next)?.supersedes, [APP_ID], "the new session names the id it took over");
+});
+
 test("a claimed /clear that never reports its new session is a failure, not a clear", async t => {
   const f = appNativeModFixture(t, 500);
   f.sessions.modInbox.listen(APP_ID, Date.now());

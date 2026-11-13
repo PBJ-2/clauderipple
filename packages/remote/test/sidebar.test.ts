@@ -40,6 +40,17 @@ function fixture(t: import("node:test").TestContext) {
   let now = 0;
   return { root, dir, storage, config, write, session, sidebar: new DesktopSidebar({ root, now: () => now }), advance: () => { now += 3001; } };
 }
+test("a session the app re-keyed by a /clear names the ids it left, malformed ones and its own id left out", t => {
+  const f = fixture(t);
+  const old = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+  f.session(id, 100, { priorCliSessionIds: [old, "not-an-id", 7, id] });
+  f.advance();
+  const listed = f.sidebar.join([summary(id), summary(old), summary(other)], v => v);
+  assert.deepEqual(listed.find(s => s.id === id)?.supersedes, [old]);
+  assert.equal(listed.some(s => s.id === old), false, "the left id is not listed");
+  assert.equal(listed.find(s => s.id === other)?.supersedes, undefined, "a session that never moved names nothing");
+});
+
 test("Windows sidebar discovers only one complete, verified packaged-app layout", t => {
   const f = fixture(t);
   const appData = fs.mkdtempSync(path.join(os.tmpdir(), "sidebar-appdata-"));
