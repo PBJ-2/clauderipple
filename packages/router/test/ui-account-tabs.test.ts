@@ -76,7 +76,7 @@ function modUi(provider: string, accounts: Account[], pins: { id: string; accoun
     const modTargetValue = (target) => target.agent, modTargetOf = (value) => ({ agent: value });
     const modSelect = (key, items, value, label) => el("select", { "data-key": key, items, value, "aria-label": label });
     ${block("function modChoices(", "// ---- The four workers: a meaning")}
-    ${block("/** One menu of `model · effort`", '/** @typedef {"general"')}
+    ${block("/** Two menus side by side", '/** @typedef {"general"')}
     return { rows: modTickRows, pick: modPickSelect, names: modAccountNames, choiceName: modChoiceName, choices: modChoices };
   `) as (...args: unknown[]) => Ui;
   return build(el, translate(lang), options);
@@ -174,15 +174,16 @@ test("a provider with one account to show has no tabs and no account in a checkb
 
 test("the worker menu names each account as its tab does", () => {
   const ui = modUi("chatgpt", three, threePins);
-  const menu = (picked: string) => ui.pick("k", { target: { agent: picked }, effort: "high" }, "high", "Light 1", () => {}).attrs.items as (MenuItem | MenuGroup)[];
+  // The model menu is the pick's first child; the effort menu beside it holds no account names.
+  const menu = (picked: string) => ui.pick("k", { target: { agent: picked }, effort: "high" }, "high", "Light 1", () => {}).children[0]!.attrs.items as (MenuItem | MenuGroup)[];
   const groups = (items: (MenuItem | MenuGroup)[]) => items.filter((item): item is MenuGroup => "group" in item && item.items.length > 0 && item.group.startsWith("chatgpt"));
   const offered = groups(menu("model-x-bbbbbbbb"));
   assert.deepEqual(offered.map((group) => group.group), ["chatgpt · Subscription · csa", "chatgpt · Subscription · relay", "chatgpt · Subscription · Work"]);
   // A closed menu shows the option alone: account 1 is the provider's default and stays bare, the others say whose.
-  assert.deepEqual(offered.map((group) => group.items.map((item) => item.label)), [["model-x · high"], ["model-x · relay · high"], ["model-x · Work · high"]]);
+  assert.deepEqual(offered.map((group) => group.items.map((item) => item.label)), [["model-x"], ["model-x · relay"], ["model-x · Work"]]);
   // Account 1's own pinned worker is offered only where it is the pick already, and reads by name too.
   const hidden = groups(menu("model-x-aaaaaaaa"))[0]!;
-  assert.deepEqual(hidden.items.map((item) => [item.value, item.label]), [["model-x|high", "model-x · high"], ["model-x-aaaaaaaa|high", "model-x · csa · high"]]);
+  assert.deepEqual(hidden.items.map((item) => [item.value, item.label]), [["model-x", "model-x"], ["model-x-aaaaaaaa", "model-x · csa"]]);
 });
 
 test("a pinned worker shown outside its tab reads by its account's name", () => {

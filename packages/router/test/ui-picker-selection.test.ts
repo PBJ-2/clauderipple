@@ -173,12 +173,12 @@ test("domain editors copy, edit and remove only the selected set's rule; new mod
   assert.equal(find(rows, 'worker:base:ui:heavy:0')!.attrs['aria-label'], 'mod.domainLevel.heavy 1');
   assert.equal(find(rows, 'worker:base:ui:standard:0'), undefined);
   const select = find(rows, 'worker:base:ui:light:0')!;
-  select.value = 'general-purpose+sonnet|high'; select.events.change!();
+  select.value = 'general-purpose+sonnet'; select.events.change!();
   // The light level edits light and standard; the heavy level edits hard and plan.
   for (const rung of ['light', 'standard'] as const) assert.equal(ui.state.settings.domainRules!.ui!.rungs[rung]![0]!.target.model, 'sonnet', rung);
   assert.notEqual(ui.state.settings.domainRules!.ui!.rungs.hard![0]!.target.model, 'sonnet');
   const heavy = find(ui.rows(), 'worker:base:ui:heavy:0')!;
-  heavy.value = 'general-purpose+opus|high'; heavy.events.change!();
+  heavy.value = 'general-purpose+opus'; heavy.events.change!();
   for (const rung of ['hard', 'plan'] as const) assert.equal(ui.state.settings.domainRules!.ui!.rungs[rung]![0]!.target.model, 'opus', rung);
   for (const rung of ['light', 'standard'] as const) assert.equal(ui.state.settings.domainRules!.ui!.rungs[rung]![0]!.target.model, 'sonnet', rung);
   assert.equal(original.light![0]!.target.agent, 'deepseek-v4-1-flash');
