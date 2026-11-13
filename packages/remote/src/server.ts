@@ -399,6 +399,9 @@ export class HostServer {
     void this.opts.sessions.syncBridge(session).catch(error => {
       this.opts.log?.(`bridge sync failed: ${error instanceof Error ? error.message : String(error)}`);
     });
+    // Starts the background restatement of a refusal recorded under older rules; returns at once. What it
+    // finds is served in place by the log's reads, and reaches this phone as a live event when appended.
+    this.opts.sessions.repairFiles(session);
     const log = this.opts.sessions.log(session);
     c.attached.set(session, c.attached.get(session) ?? { epoch: log.epoch, seq: 0 });
     this.syncWatches();

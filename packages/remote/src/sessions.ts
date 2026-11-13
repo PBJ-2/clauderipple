@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { EventLog } from "./eventlog.ts";
+import { repairRefusedFiles } from "./file-repair.ts";
 import { narrationBody } from "./narration.ts";
 import { TaskPlan } from "./task-plan.ts";
 import { BackgroundActivity } from "./background-activity.ts";
@@ -379,6 +380,10 @@ export class Sessions {
   /** Unreadable sessions stay on disk but cannot participate in this host's work. */
   private skippedRecords = new Map<string, SessionRecord>();
   private logs = new Map<string, EventLog>();
+  /** Sessions whose log was already checked for refused files (`repairFiles`) in this run. */
+  private fileRepairs = new Set<string>();
+  /** Sessions whose repair was put off because a turn was running or a message waited. */
+  private repairLater = new Set<string>();
   private live = new Map<string, Live>();
   /** A closed SDK may still be writing its transcript until its process exits. */
   private closing = new Map<string, Live>();
@@ -1497,6 +1502,34 @@ export class Sessions {
     return log;
   }
 
+  /**
+   * A Claude app session's persisted log holds, for each file the host once refused, that refusal
+   * (images.ts rules have widened since). Once per host run, when a phone first looks at the session,
+   * restate those events under today's rules (file-repair.ts). Returns at once: the transcript (up to
+   * hundreds of MB) is read in the background, in chunks that yield, and what it finds reaches the phones
+   * attached by then through the normal event path. Not on host start: most of the 99 sessions are
+   * never opened. Not while a turn runs or a message waits (a restated message at the log's end would
+   * read as the answer to it): tried again when the session goes idle or a phone looks at it again.
+   */
+  repairFiles(id: string): void {
+    const r = this.records.get(id);
+    if (!r?.desktopBridge || !this.desktop || this.fileRepairs.has(id) || this.skippedRecords.has(id) || this.shuttingDown) return;
+    const idle = (): boolean => !BUSY.has(r.state) && !this.sendQueue.items(id).length;
+    if (!idle()) { this.repairLater.add(id); return; }
+    this.fileRepairs.add(id);
+    this.repairLater.delete(id);
+    const report = (error: unknown): void => (this.opts.log ?? console.error)(`[file repair ${id}] ${error instanceof Error ? error.message : String(error)}`);
+    let log: EventLog;
+    try { log = this.log(id); } catch (error) { report(error); return; }
+    const dir = path.join(this.opts.dir, "sessions", id);
+    repairRefusedFiles(log, dir, (want, epoch, onLine) => this.desktop!.reconvertFiles(r.sdkSessionId ?? id, want, r.cwd, epoch, onLine),
+      () => !this.shuttingDown && this.logs.get(id) === log && idle()).then(result => {
+      if (!result) { this.fileRepairs.delete(id); this.repairLater.add(id); return; }
+      const last = result.appended.at(-1);
+      if (last) this.opts.onEvent(id, last);
+    }, report);
+  }
+
   subLog(id: string, sub: string): EventLog | null {
     if (!/^sub-[\w-]{1,80}$/.test(sub)) return null;
     const record = this.records.get(id);
@@ -1563,7 +1596,7 @@ export class Sessions {
       return value;
     };
     while (state.cursor < log.lastSeq) {
-      const page = log.readAfter(state.cursor);
+      const page = log.readAfter(state.cursor, undefined, "inert");
       for (const event of page.events) { state.tracker.accept(event, load); state.activity.accept(event, load); }
       state.cursor = page.events.at(-1)?.seq ?? log.lastSeq;
       if (!page.more) break;
@@ -1605,6 +1638,7 @@ export class Sessions {
     this.save();
     this.opts.onSessions();
     if (!BUSY.has(state) && this.sendQueue.items(r.id).length) setImmediate(() => void this.drainQueue(r.id));
+    if (!BUSY.has(state) && this.repairLater.has(r.id)) setImmediate(() => this.repairFiles(r.id));
   }
 
   // ---- the queue: messages a phone left for when the turn ends (queue.ts) ---------------------
@@ -1896,7 +1930,7 @@ export class Sessions {
     try {
       const log = this.log(id);
       for (let after = seq; after < log.lastSeq;) {
-        const page = log.readAfter(after);
+        const page = log.readAfter(after, undefined, "inert");
         out.push(...page.events);
         if (!page.more || !page.events.length) break;
         after = page.events[page.events.length - 1]!.seq;

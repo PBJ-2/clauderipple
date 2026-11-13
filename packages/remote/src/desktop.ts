@@ -4,7 +4,10 @@ import fs from "node:fs";
 import { execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
-import { EventLog } from "./eventlog.ts";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import { Worker } from "node:worker_threads";
+import { deliveredFiles, EventLog, imageBlobId } from "./eventlog.ts";
 import { creationDateToFileTime, parseFileTime, processCommands, processSnapshot, sameFileTime, type ProcessSnapshot } from "./processes.ts";
 import { fileImages, messageContent, sessionFileTool, unshownFiles, type ImageSink } from "./images.ts";
 import { narrationBody } from "./narration.ts";
@@ -908,6 +911,49 @@ export class DesktopSessions {
 
   transcriptSize(id: string): number { return this.sources.get(id)?.size ?? 0; }
 
+  /**
+   * The events of the transcript lines a persisted log holds a refused file for, converted again with
+   * today's file rules. `want.lines` are transcript line uuids (an event's `src`); `want.calls` are
+   * tool-use ids, for an event that has no `src`. The work (reading hundreds of MB, decoding the wanted
+   * lines, checking and reading each file the way a live conversion does, which is minutes of CPU
+   * for a large picture) runs in a worker thread, so the host's own loop is never held by it. Each
+   * wanted line's events reach `onLine` as they are converted, with the bytes of the files that are
+   * delivered now under the ids they carry (`imageBlobId` of `epoch`); no other image is kept. False
+   * when the transcript is gone: nothing can be said then.
+   */
+  async reconvertFiles(id: string, want: { lines: ReadonlySet<string>; calls: ReadonlySet<string> }, cwd: string, epoch: string, onLine: (bodies: EventBody[], data: Map<string, string>) => void): Promise<boolean> {
+    if (!UUID.test(id)) return false;
+    let file = this.sources.get(id)?.file;
+    if (!file) {
+      try {
+        for (const project of fs.readdirSync(this.projects, { withFileTypes: true })) {
+          if (!project.isDirectory()) continue;
+          const candidate = path.join(this.projects, project.name, `${id}.jsonl`);
+          try { if (fs.lstatSync(candidate).isFile()) { file = candidate; break; } } catch (error) { if (!missing(error)) throw error; }
+        }
+      } catch (error) { if (!missing(error)) throw error; }
+    }
+    if (!file) return false;
+    // The same checks as every transcript read; the worker opens the path again, without following a link.
+    fs.closeSync(this.open(file));
+    const folder = this.liveProcess(id)?.cwd ?? this.sources.get(id)?.summary.cwd ?? cwd;
+    const ext = path.extname(fileURLToPath(import.meta.url));
+    const worker = new Worker(new URL(`./file-repair-worker${ext}`, import.meta.url), { workerData: { file, want: { lines: [...want.lines], calls: [...want.calls] }, cwd: folder, epoch } });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        worker.on("error", reject);
+        worker.on("exit", code => reject(new Error(`file repair worker exited with ${code}`)));
+        worker.on("message", (message: { done?: true; bodies?: EventBody[]; data?: [string, string][] }) => {
+          if (message.done) { resolve(); return; }
+          try { onLine(message.bodies ?? [], new Map(message.data ?? [])); } catch (error) { reject(error); return; }
+          // One line at a time: the worker goes on when the host has taken this one, with the loop free in between.
+          setImmediate(() => worker.postMessage("next"));
+        });
+      });
+    } finally { void worker.terminate(); }
+    return true;
+  }
+
   /** The current end of a known transcript, including writes newer than the discovery cache. */
   transcriptEnd(id: string): number | undefined {
     if (!UUID.test(id)) return undefined;
@@ -1224,6 +1270,73 @@ export class DesktopSessions {
     this.agentMaps.clear();
     if (this.temp) fs.rmSync(this.temp, { recursive: true, force: true });
     this.temp = null;
+  }
+}
+
+/**
+ * The transcript side of `DesktopSessions.reconvertFiles`, run in the worker thread: the lines of `file`
+ * that name an id in `want` (and carry a file mark) converted with the current rules. `onLine` gets each
+ * line's events with the bytes of the files that are delivered under their ids; every other image the
+ * conversion meets (an inline picture) is hashed for its id and dropped.
+ */
+export async function reconvertTranscript(file: string, want: { lines: ReadonlySet<string>; calls: ReadonlySet<string> }, cwd: string, epoch: string, onLine: (bodies: EventBody[], data: Map<string, string>) => void | Promise<void>): Promise<void> {
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  const marks = [Buffer.from("SendUserFile"), Buffer.from("[Image: source:")];
+  const uuidKey = [Buffer.from('"uuid":"')];
+  const callKeys = [Buffer.from('"id":"'), Buffer.from('"tool_use_id":"')];
+  const stash = new Map<string, string>();
+  const sink: ImageSink = data => { const id = imageBlobId(epoch, data); stash.set(id, data); return id; };
+  try {
+    await scanLinesAsync(fd, fs.fstatSync(fd).size, async line => {
+      const r = record(line);
+      if (!r || r.isSidechain === true) return;
+      const content = object(r.message)?.content;
+      const named = Array.isArray(content) && content.some(value => { const b = object(value); return want.calls.has(str(b?.id)) || want.calls.has(str(b?.tool_use_id)); });
+      if (!want.lines.has(str(r.uuid)) && !named) return;
+      // The tool summaries of this conversion are never read: only the files are.
+      const bodies = transcriptEvents(line, cwd, () => "", sink).bodies;
+      const data = new Map<string, string>();
+      for (const delivered of deliveredFiles(bodies)) { const bytes = stash.get(delivered.id); if (bytes !== undefined) data.set(delivered.id, bytes); }
+      stash.clear();
+      await onLine(bodies, data);
+    // The raw bytes decide what is decoded: a file mark, and one of the ids asked for as a value of its key.
+    }, bytes => marks.some(mark => bytes.includes(mark)) && (carries(bytes, uuidKey, want.lines) || carries(bytes, callKeys, want.calls)));
+  } finally { fs.closeSync(fd); }
+}
+
+/** Whether the raw line holds a `key` whose string value is one of `ids` (the line is not decoded). */
+function carries(bytes: Buffer, keys: readonly Buffer[], ids: ReadonlySet<string>): boolean {
+  if (!ids.size) return false;
+  for (const key of keys) {
+    for (let at = bytes.indexOf(key); at !== -1; at = bytes.indexOf(key, at + key.length)) {
+      const from = at + key.length;
+      const end = bytes.indexOf(34, from);
+      if (end !== -1 && end - from <= 128 && ids.has(bytes.toString("latin1", from, end))) return true;
+    }
+  }
+  return false;
+}
+
+const CHUNK = 1024 * 1024;
+/** `scanLines` for a background pass: reads asynchronously and yields to the event loop after every
+ * chunk, and decodes only the lines `wanted` (judged on the raw bytes) accepts. */
+async function scanLinesAsync(fd: number, size: number, visit: (line: string) => void | Promise<void>, wanted: (line: Buffer) => boolean): Promise<void> {
+  const read = promisify(fs.read);
+  const buffer = Buffer.alloc(CHUNK);
+  let carry = Buffer.alloc(0);
+  for (let offset = 0; offset < size;) {
+    const { bytesRead: n } = await read(fd, buffer, 0, Math.min(buffer.length, size - offset), offset);
+    if (!n) break;
+    offset += n;
+    const data = carry.length ? Buffer.concat([carry, buffer.subarray(0, n)]) : buffer.subarray(0, n);
+    let start = 0;
+    for (let end = data.indexOf(10); end !== -1; end = data.indexOf(10, start)) {
+      const line = data.subarray(start, end);
+      if (wanted(line)) await visit(line.toString("utf8"));
+      start = end + 1;
+    }
+    carry = Buffer.from(data.subarray(start));
+    await new Promise<void>(resolve => setImmediate(resolve));
   }
 }
 
