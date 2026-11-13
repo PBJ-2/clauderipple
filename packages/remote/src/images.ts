@@ -117,7 +117,21 @@ export function claudeSessionTemp(scope: SessionFileScope): string[] {
     const base = path.join(tmp, `claude-${uid}`);
     try {
       const stat = fs.statSync(base);
-      return stat.isDirectory() && stat.uid === uid && (stat.mode & 0o022) === 0 ? [path.join(base, slug, scope.sessionId!)] : [];
+      if (!stat.isDirectory() || stat.uid !== uid || (stat.mode & 0o022) !== 0) return [];
+      // The Claude app starts its engine from a spare working folder (`~/.claude-spares/spare-XXXX`),
+      // and the engine names the temp folder after that process folder, not after the cwd the
+      // transcript records (2026-11-13: `-Users-pbj--claude-spares-spare-Hrhwnz/<session id>` for a
+      // session in ~/Documents/tabripple). The session id is the key, so any slug folder that holds
+      // this exact session's directory, owned by this user and not a link, is the same session's.
+      const slugs = new Set([slug]);
+      for (const entry of fs.readdirSync(base, { withFileTypes: true })) {
+        if (!entry.isDirectory() || entry.isSymbolicLink() || entry.name === slug) continue;
+        try {
+          const own = fs.lstatSync(path.join(base, entry.name, scope.sessionId!));
+          if (own.isDirectory() && own.uid === uid) slugs.add(entry.name);
+        } catch { /* no directory for this session under that slug */ }
+      }
+      return [...slugs].map(name => path.join(base, name, scope.sessionId!));
     } catch { return []; }
   });
 }
@@ -281,6 +295,11 @@ export function sessionFileTool(name: string, input: Record<string, unknown>, sc
 }
 export function fileImages(files: readonly SessionFile[]): ImagePart[] {
   return files.filter(file => file.status === "ready" && MIME.has(file.mediaType)).map(file => ({ type: "image", mediaType: file.mediaType, blob: file.blob! }));
+}
+/** What `fileImages` leaves out of a SendUserFile's files: a refused, missing or oversized file and a
+ * non-image. The timeline shows them as file cards that say why, rather than saying nothing. */
+export function unshownFiles(files: readonly SessionFile[]): SessionFile[] {
+  return files.filter(file => !(file.status === "ready" && MIME.has(file.mediaType)));
 }
 
 /** Original inline image bytes are retained; referenced files use the same session boundary. */

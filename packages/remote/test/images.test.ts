@@ -369,3 +369,43 @@ test("summarize names a SendUserFile's files and caption without a caption, and 
   assert.equal(summarize("SendUserFile", { files: ["only.gif"], status: "proactive" }, cwd), "only.gif");
   assert.equal(summarize("SendUserFile", {}, cwd), "");
 });
+
+// The Claude app starts its engine from a spare folder, so the engine names the temp folder after
+// that folder and not after the cwd the transcript records (2026-11-13, a tabripple session whose
+// SendUserFile screenshots never reached the phone).
+test("a SendUserFile from the engine's own temp folder under another project slug reaches the phone, and nothing else does", { skip: process.platform === "win32" }, t => {
+  const { cwd, log, sink } = fixture(t);
+  const root = path.join(fs.existsSync("/private/tmp") ? "/private/tmp" : "/tmp", `claude-${process.getuid!()}`);
+  if (!fs.existsSync(root)) { fs.mkdirSync(root, { mode: 0o700 }); t.after(() => fs.rmSync(root, { recursive: true, force: true })); }
+  const id = "1a1b1c1d-1111-4222-8333-944455556666", other = "1a1b1c1d-1111-4222-8333-999999999999";
+  const spare = path.join(root, `-ripple-test-spare-${process.pid}`);
+  t.after(() => fs.rmSync(spare, { recursive: true, force: true }));
+  const files = [path.join(spare, id, "scratchpad", "out", "16-side.png"), path.join(spare, id, "scratchpad", "out", "1-side.png")];
+  const foreign = path.join(spare, other, "scratchpad", "x.png");
+  for (const file of [...files, foreign]) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, png); }
+  const send = (input: object) => JSON.stringify({ type: "assistant", uuid: "a1", sessionId: id, message: { content: [{ type: "text", text: "비교입니다." }, { type: "tool_use", id: "send", name: "SendUserFile", input }] } });
+  const parsed = transcriptEvents(send({ files: [...files, foreign], caption: "왼쪽이 원본", display: "render" }), cwd, summarize, sink);
+  const event = log.append(parsed.bodies[0]!);
+  assert.ok(event.kind === "assistant");
+  assert.deepEqual(event.tools[0]?.files?.map(file => file.status), ["ready", "ready", "blocked"]);
+  // Both pictures sit inline under the text; the refused one says so as a file card instead of vanishing.
+  assert.equal(event.images?.length, 2);
+  assert.equal(log.blob(event.images![1]!.blob!), data);
+  assert.deepEqual(event.files?.map(file => [file.name, file.status]), [["x.png", "blocked"]]);
+  // The same files with another session's id are refused, and so is a file that only shares the slug.
+  const wrong = transcriptEvents(JSON.stringify({ type: "assistant", uuid: "a2", sessionId: other, message: { content: [{ type: "tool_use", id: "s2", name: "SendUserFile", input: { files: [files[0]] } }] } }), cwd, summarize, sink);
+  assert.equal(wrong.bodies[0]?.kind === "assistant" && wrong.bodies[0].images?.length, 0);
+  assert.deepEqual(wrong.bodies[0]?.kind === "assistant" && wrong.bodies[0].files?.map(file => file.status), ["blocked"]);
+});
+
+test("a Read of a picture reaches the timeline as the tool result's image, for the row thumbnail", t => {
+  const { cwd, log, sink } = fixture(t);
+  const call = transcriptEvents(JSON.stringify({ type: "assistant", uuid: "a1", message: { content: [{ type: "tool_use", id: "read", name: "Read", input: { file_path: "/x/shot.png" } }] } }), cwd, summarize, sink);
+  const result = transcriptEvents(JSON.stringify({ type: "user", uuid: "u1", message: { content: [{ type: "tool_result", tool_use_id: "read", content: [image] }] } }), cwd, summarize, sink);
+  const view = reduce([...call.bodies, ...result.bodies].map(body => log.append(body)));
+  const row = timelineItems(view).find(item => item.type === "toolGroup");
+  assert.ok(row?.type === "toolGroup" && row.rows[0]?.type === "tool");
+  const images = row.rows[0].tool.result?.images;
+  assert.equal(images?.length, 1);
+  assert.equal(log.blob(images![0]!.blob!), data);
+});
