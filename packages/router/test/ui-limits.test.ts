@@ -62,6 +62,10 @@ type LimitsUi = {
   renderChatgptAccountRows(target: Element, data: unknown, name: string, generation: number): void;
   quotaWindowsText(windows: unknown): string;
   setQuotaRemaining(remaining: boolean): void;
+  quotaLine(name: string): string | null;
+  providersUsageTitle(): string;
+  selectProvider(name: string): void;
+  renderCount(): number;
 };
 const defaultConfig = { providers: { claude: { type: "anthropic", auth: "claude-code" }, gpt: { type: "chatgpt" }, other: { type: "openai-compatible" } } };
 // `config` null is the screen before the config has loaded: the status alone names the providers.
@@ -74,6 +78,8 @@ function limitsUi(api: (path: string) => Promise<unknown>, status: Record<string
     const svgIcon = () => el("svg", { "aria-hidden": "true" });
     const APP = null, clientsLoaded = false, modState = {}, updateState = {}, renderDiagnostics = () => {}, modRedraw = () => {}, versionRow = () => null, autoUpdateRow = () => null, priorityRow = () => null;
     let loadedUiRevision = null;
+    let selectedProviderName = null, providerDetailRenders = 0, providerDetailTab = "overview";
+    const renderProviderDetail = () => { providerDetailRenders += 1; };
     ${block("function badge(", "/** A titled group")}
     ${block("let limitsSnapshot = null;", "// ---- Diagnostics:")}
     ${block("const QUOTA_VIEW_STORE =", "/**\n * One line a person can read")}
@@ -85,7 +91,7 @@ function limitsUi(api: (path: string) => Promise<unknown>, status: Record<string
     ${block("function accountPoolBadges(", "function renderClaudeAccountRows(")}
     ${block("function renderChatgptAccountRows(", "let googleLoginBusy")}
     const providerDetailGeneration = 0;
-    return { refreshHealth, renderHealthProviders, limitsAccountRow, limitsWindowRow, limitsUsageWindow, settleLimits: () => limitsRead ?? Promise.resolve(), providerLimits, limitsSnapshotPeek: () => limitsSnapshot, quotaMeters, quotaWindowsText, setQuotaRemaining, claudeQuotaNode, renderChatgptAccountRows };
+    return { refreshHealth, renderHealthProviders, limitsAccountRow, limitsWindowRow, limitsUsageWindow, settleLimits: () => limitsRead ?? Promise.resolve(), providerLimits, limitsSnapshotPeek: () => limitsSnapshot, quotaMeters, quotaWindowsText, setQuotaRemaining, claudeQuotaNode, renderChatgptAccountRows, quotaLine, providersUsageTitle, selectProvider: (name) => { selectedProviderName = name; }, renderCount: () => providerDetailRenders };
   `) as (...args: unknown[]) => LimitsUi;
   const ui = build(async (path: string) => {
     // The config a status poll may re-read answers with the config this screen was given, or fails while it has none.
@@ -268,8 +274,31 @@ test("quota display preference persists locally, tolerates blocked storage and f
   assert.equal(blocked.quotaMeters([{ used_percent: NaN }, { used_percent: Infinity }]), null);
   assert.match(text(blocked.quotaMeters([{ used_percent: 125 }])!), /0% remaining/);
   for (const dict of Object.values(dictionaries)) {
-    for (const key of ["quota.remainingLine", "quota.showUsed", "quota.showRemaining"]) assert.ok(dict[key]);
+    for (const key of ["quota.remainingLine", "quota.showUsed", "quota.showRemaining", "providers.usage", "providers.remaining"]) assert.ok(dict[key]);
   }
+});
+
+test("the used/remaining toggle reaches the one-line quota text and the overview's usage heading, and redraws the open overview", () => {
+  const status = { chatgpt: { quota: { gpt: { rate_limits: { primary: { ...five, used_percent: 80 } } } } } };
+  const ui = limitsUi(async () => ({}), status);
+  assert.equal(ui.quotaLine("gpt"), t("health.quota", { percent: 80, reset: "" }));
+  assert.equal(ui.quotaLine("missing"), null);
+  assert.equal(ui.providersUsageTitle(), t("providers.usage"));
+  // No provider open: nothing is drawn on the hidden page; the toggle only redraws what is open.
+  ui.setQuotaRemaining(true);
+  assert.equal(ui.renderCount(), 0);
+  ui.setQuotaRemaining(false);
+  ui.selectProvider("gpt");
+  const before = ui.renderCount();
+  ui.setQuotaRemaining(true);
+  assert.equal(ui.quotaLine("gpt"), "20% remaining");
+  assert.equal(ui.providersUsageTitle(), t("providers.remaining"));
+  assert.equal(ui.providersUsageTitle(), "Remaining limits");
+  assert.equal(ui.renderCount(), before + 1, "the open overview is drawn again");
+  ui.setQuotaRemaining(false);
+  assert.equal(ui.quotaLine("gpt"), t("health.quota", { percent: 80, reset: "" }));
+  assert.equal(ui.providersUsageTitle(), t("providers.usage"));
+  assert.equal(ui.renderCount(), before + 2);
 });
 
 test("Status replaces subscription text lines with per-account gauges, leaving other providers alone", async () => {

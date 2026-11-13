@@ -1243,7 +1243,11 @@ function setQuotaRemaining(remaining) {
     node.title = meters.title;
   }
   renderHealthProviders();
-  refreshProviderUsage();
+  // The overview's heading, its one-line figure and its gauges are all built with the view, so that
+  // tab is drawn again. Only that tab: the accounts tab can hold a half-typed key form, and its
+  // meters were switched in place above.
+  if (currentConfig && selectedProviderName && providerDetailTab === "overview") renderProviderDetail();
+  else refreshProviderUsage();
 }
 /** The header stays mounted across polls, so keyboard focus stays on the same button. */
 function renderQuotaViewToggle() {
@@ -1269,7 +1273,12 @@ function quotaLine(name) {
   if (!primary) return null;
   // The usage figure is what anyone acts on. The reset countdown was a second number beside it
   // that nobody does anything with, so it is left out.
+  if (quotaRemaining) return t("quota.remainingLine", { window: "", percent: Math.round(quotaShownPercent(primary.used_percent)) }).trim();
   return t("health.quota", { percent: primary.used_percent, reset: "" });
+}
+/** The overview's usage heading and one-line label: the figures under it are the remaining share while the toggle shows that. */
+function providersUsageTitle() {
+  return t(quotaRemaining ? "providers.remaining" : "providers.usage");
 }
 /**
  * One line a person can read. Vendors answer with a JSON body and sometimes an escaped one inside
@@ -3399,7 +3408,7 @@ function providerOverview(name, provider) {
       running ? el("span", { class: "cell-sub", text: t("measure.running", { done: measuring.done, total: measuring.total }) }) : null,
       running ? el("span", { class: "cell-sub", text: t("measure.help") }) : null,
     ]),
-    !gauges && quota ? providerFact(t("providers.usage"), [el("span", { text: quota })]) : null,
+    !gauges && quota ? providerFact(providersUsageTitle(), [el("span", { text: quota })]) : null,
   ]);
   return el("div", { class: "provider-panel" }, [facts, providerUsageSection(name)]);
 }
@@ -3415,7 +3424,7 @@ function providerUsageSection(name) {
   const now = Date.now();
   const credentials = (status && status.credentials && status.credentials[name]) || [];
   return el("section", { class: "section", id: "provider-usage-section" }, [
-    el("div", { class: "section-head" }, [el("h3", { class: "section-title", text: t("providers.usage") })]),
+    el("div", { class: "section-head" }, [el("h3", { class: "section-title", text: providersUsageTitle() })]),
     el("div", { class: "group provider-limits provider-usage" }, gauges.accounts.map((account) =>
       limitsAccountRow(gauges, account, now, account.id === undefined ? undefined : credentials.find((c) => c.id === account.id)))),
   ]);
