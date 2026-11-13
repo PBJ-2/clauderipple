@@ -14,7 +14,9 @@
 // vendor sent. The antigravity path picks the account the conversation is sticky to and moves to the
 // next one only on a refusal that has not reached the client (§4 Credential pools).
 
+import fs from "node:fs";
 import http from "node:http";
+import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { GoogleProvider, ProviderModel } from "../../config.ts";
 import type { Logger } from "../../log.ts";
@@ -31,7 +33,8 @@ import { antigravityBaseUrl, createTransport, credentialParts, googleBaseUrl, re
 import { ThoughtSignatureStore, type ThoughtSignatureSink } from "./thoughtSignatures.ts";
 import { conversationKey, serverToolNames, toolNameRestoreMap, type AnthropicRequest } from "../chatgpt/translate.ts";
 import { GoogleAccountPool, type GoogleAccountSummary, type GoogleCredential, type FetchLike } from "./accounts.ts";
-import { fetchAvailableModels, hostForModel, resolveAntigravityWireModel, staticAntigravityModels, GOOGLE_OAUTH, type HostMap, type MergedCatalogue } from "./antigravity.ts";
+import { fetchAvailableModels, LearnedCatalogue, mergeHostCatalogues, resolveAntigravityWireModel, staticAntigravityModels, GOOGLE_OAUTH, type HostMap, type MergedCatalogue, type ParsedHostCatalogue } from "./antigravity.ts";
+import { writeJsonAtomic } from "../../locked-file.ts";
 import { antigravityQuotaScope, GoogleUsage, type QuotaGroup } from "./usage.ts";
 import { ANTIGRAVITY_PROMPT_REFUSAL_MESSAGE, isAntigravityPromptRefusal } from "./prompt-refusal.ts";
 import { promptAdditions } from "../../identity.ts";
@@ -161,9 +164,10 @@ export function googleRetryDelayMs(text: string): number | undefined {
  * Measured 2026-10-23 for claude-opus-5-5-low ("Individual quota reached … Resets in 4h51m35s",
  * `quotaResetDelay` beside it), while the account's Gemini group read 0.3% used. A 429 without that
  * proof (a per-minute limit, the generic RESOURCE_EXHAUSTED, a detail naming no model) is still read
- * as the whole account's.
+ * as the whole account's. `learned` is the provider's own catalogue knowledge, so a refusal naming
+ * a tier of a learned family is read as that family's.
  */
-export function isGroupQuotaExhausted(status: number, text: string, scope: string): boolean {
+export function isGroupQuotaExhausted(status: number, text: string, scope: string, learned?: LearnedCatalogue): boolean {
   if (status !== 429) return false;
   try {
     const details = (JSON.parse(text) as { error?: { details?: unknown } } | null)?.error?.details;
@@ -171,7 +175,7 @@ export function isGroupQuotaExhausted(status: number, text: string, scope: strin
     return details.some((d) => {
       const detail = d as { reason?: unknown; metadata?: { model?: unknown } } | null;
       const model = detail?.metadata?.model;
-      return detail?.reason === "QUOTA_EXHAUSTED" && typeof model === "string" && antigravityQuotaScope(model) === scope;
+      return detail?.reason === "QUOTA_EXHAUSTED" && typeof model === "string" && antigravityQuotaScope(model, learned) === scope;
     });
   } catch {
     return false;
@@ -192,7 +196,44 @@ const GROUP_NAMES: Record<string, { spent: string; other: string }> = {
   "3p": { spent: "Claude/GPT", other: "Gemini" },
   gemini: { spent: "Gemini", other: "Claude/GPT" },
   argon: { spent: "Gemini 4 Argon", other: "other Gemini and Claude/GPT" },
+  hydrogen: { spent: "Gemini 4 Hydrogen", other: "other Gemini and Claude/GPT" },
 };
+
+/** A learned model's scope is its family's id (`LearnedCatalogue.cliScope`), so the refusal names the model. */
+function groupNames(group: string): { spent: string; other: string } {
+  return Object.hasOwn(GROUP_NAMES, group) ? GROUP_NAMES[group]! : { spent: group, other: "the other" };
+}
+
+/**
+ * Where what each provider's catalogue listed outside the tables is kept, so a start that cannot
+ * read the catalogue still knows it: `{ version, providers: { <provider name>: LearnedSnapshot } }`.
+ * Per provider, because two providers may hold different accounts and pin different hosts.
+ */
+export const LEARNED_MODELS_FILE = "antigravity-models.json";
+const LEARNED_MODELS_VERSION = 2;
+
+/**
+ * Every provider's stored lists in `home`; none when the file is absent, unreadable or of another
+ * version. `newer` says a later build wrote it, whose format is not this one's to overwrite.
+ */
+function readLearnedFile(home: string): { providers: Record<string, unknown>; newer: boolean } {
+  try {
+    const stored = JSON.parse(fs.readFileSync(path.join(home, LEARNED_MODELS_FILE), "utf8")) as { version?: unknown; providers?: unknown } | null;
+    const version = stored?.version;
+    if (typeof version === "number" && version > LEARNED_MODELS_VERSION) return { providers: {}, newer: true };
+    const providers = version === LEARNED_MODELS_VERSION ? stored?.providers : undefined;
+    return { providers: providers && typeof providers === "object" && !Array.isArray(providers) ? { ...(providers as Record<string, unknown>) } : {}, newer: false };
+  } catch {
+    return { providers: {}, newer: false };
+  }
+}
+
+/**
+ * How long a catalogue read that missed a host or a client family stands before it is asked again.
+ * It doubles, up to the hour, while the same asks keep failing, so an ask that never answers for
+ * this account is not repeated every five minutes for good.
+ */
+const PARTIAL_MODELS_CACHE_MS = 5 * 60 * 1000;
 
 /**
  * The page Google sends an account to when it wants the person behind it checked before Cloud
@@ -289,12 +330,30 @@ export class GoogleAdapter {
   private activeOwner: string | null = null;
   /** Accounts Google wants checked, with its page for it; cleared when the account next answers. */
   private readonly verifyUrls = new Map<string, string>();
-  private modelsCache: { at: number; models: ProviderModel[]; hosts: HostMap } | null = null;
+  private modelsCache: { at: number; models: ProviderModel[]; hosts: HostMap; /** How long this read stands: the hour, or less when a host or a CLI ask did not answer. */ ttlMs: number } | null = null;
+  /**
+   * Each host's catalogue as last read whole. An ask that did not answer says nothing, so a host
+   * that fails, or whose CLI ask fails, at a later read keeps what it showed before: a single
+   * failed ask at the hourly re-read used to drop the host from the map and move every conversation
+   * to the other host and back (new prompt cache, other quota, thought signatures lost).
+   */
+  private hostCatalogues = new Map<string, ParsedHostCatalogue>();
+  /** Which asks the last read missed, and for how many reads running. */
+  private partialShape = "";
+  private partialStreak = 0;
   private modelsInFlight: Promise<ProviderModel[] | null> | null = null;
   /** When the last listing attempt failed, so a turn does not retry an unreadable catalogue every time. */
   private modelsFailedAt = Number.NEGATIVE_INFINITY;
   /** The fetch the adapter's side calls use (model listing, and the account store); injectable for tests. */
   private readonly fetchImpl: FetchLike | undefined;
+  private readonly home: string;
+  /**
+   * What this provider's catalogue listed outside the tables (`LearnedCatalogue`): its own, read
+   * from `home` at start and taken from every readable catalogue after. Empty for the api-key mode.
+   */
+  private readonly learned: LearnedCatalogue;
+  /** When saving the learned lists last failed; it is tried again when they change or the hour is up. */
+  private learnedSaveFailedAt = Number.NEGATIVE_INFINITY;
 
   constructor(name: string, cfg: GoogleProvider, home: string, log: Logger, pool = new CredentialPool(), fetchImpl?: FetchLike) {
     this.name = name;
@@ -302,12 +361,20 @@ export class GoogleAdapter {
     this.log = log;
     this.pool = pool;
     this.fetchImpl = fetchImpl;
+    this.home = home;
+    // What the last readable catalogue listed outside the tables, before any turn. Only the hosts
+    // this provider asks are kept: a pinned `url` never borrows a tier another host listed.
+    const stored = cfg.auth === "antigravity" ? readLearnedFile(home).providers : {};
+    this.learned = cfg.auth === "antigravity"
+      ? new LearnedCatalogue(Object.hasOwn(stored, name) ? stored[name] : undefined, cfg.url ? [antigravityBaseUrl(cfg.url)] : GOOGLE_OAUTH.hosts)
+      : new LearnedCatalogue();
     this.accounts = new GoogleAccountPool({ home, log, ...(fetchImpl ? { fetch: fetchImpl } : {}) });
     // Quota: each Cloud Code Assist host counts its own, so the limits row reads every host a
     // selected model lives on (resolved lazily from the cached model catalogue below).
     this.usage = new GoogleUsage(this.accounts, {
       baseUrl: antigravityBaseUrl(cfg.url),
       hosts: () => this.quotaHosts(),
+      learned: this.learned,
       warn: (message) => log.warn(message),
       ...(fetchImpl ? { fetch: fetchImpl } : {}),
     });
@@ -328,15 +395,13 @@ export class GoogleAdapter {
     // No configured model list means the provider routes whatever the client asks for; both hosts
     // are then in use in principle, so both quotas are read.
     if (models.length === 0) return [...GOOGLE_OAUTH.hosts];
-    const fallback = antigravityBaseUrl(this.cfg.url);
     const used: string[] = [];
     for (const entry of models) {
       // The host the model is actually sent to, not every host that lists it: a shared model goes
       // to the preferred (daily) host, so only that host's quota is spent by this provider. The
       // default effort stands in for the configured model because the config carries no per-turn
       // effort; its tier's host is the representative one.
-      const wire = resolveAntigravityWireModel(entry.id, this.cfg.defaultEffort).wire;
-      const host = hostForModel(hosts, entry.id, wire, fallback);
+      const host = this.hostFor(entry.id, this.cfg.defaultEffort);
       if (!used.includes(host)) used.push(host);
     }
     return used.length ? used : [GOOGLE_OAUTH.dailyApi];
@@ -364,7 +429,7 @@ export class GoogleAdapter {
   quotaScopeOf(model: string, effort?: string): string | undefined {
     const at = model.lastIndexOf("@");
     const base = at > 0 ? model.slice(0, at) : model;
-    const group = antigravityQuotaScope(base);
+    const group = antigravityQuotaScope(base, this.learned);
     if (!group) return undefined;
     return antigravityScopeKey(group, this.hostFor(base, (at > 0 ? model.slice(at + 1) : effort) ?? this.cfg.defaultEffort));
   }
@@ -415,7 +480,7 @@ export class GoogleAdapter {
     const credential = (await this.accounts.credentials()).find((c) => c.ownerId === ownerId);
     if (!credential || !this.verifyUrls.has(ownerId)) return "unknown";
     const model = this.cfg.models?.[0]?.id ?? staticAntigravityModels()[0]!.id;
-    const transport = createTransport("antigravity", this.cfg.url ? { url: this.cfg.url } : {});
+    const transport = createTransport("antigravity", { ...(this.cfg.url ? { url: this.cfg.url } : {}), learned: this.learned });
     const built = transport.build(
       { contents: [{ role: "user", parts: [{ text: "ping" }] }], generationConfig: { maxOutputTokens: 16 } },
       { model, stream: false, antigravity: { accessToken: credential.accessToken, projectId: credential.projectId, conversationKey: `recheck:${ownerId}` }, antigravityBaseUrl: this.hostFor(model, undefined) },
@@ -450,12 +515,24 @@ export class GoogleAdapter {
    * falling back to the static list. Null when nothing is signed in. Never throws.
    */
   fetchModels(): Promise<ProviderModel[] | null> {
-    if (this.modelsCache && Date.now() - this.modelsCache.at < MODELS_CACHE_MS) return Promise.resolve(this.modelsCache.models);
+    if (this.modelsCache && this.cacheFresh()) return Promise.resolve(this.modelsCache.models);
     if (this.modelsInFlight) return this.modelsInFlight;
     this.modelsInFlight = this.fetchModelsOnce().then((models) => models ?? this.modelsCache?.models ?? null).finally(() => {
       this.modelsInFlight = null;
     });
     return this.modelsInFlight;
+  }
+
+  /** A whole read stands for the hour; one that missed a host or a CLI ask, for less. */
+  private cacheFresh(): boolean {
+    const cache = this.modelsCache;
+    return !!cache && Date.now() - cache.at < cache.ttlMs;
+  }
+
+  /** The list of a catalogue that cannot be read: the tables' models, and the ones learned earlier. */
+  private fallbackModels(): ProviderModel[] {
+    const rows = staticAntigravityModels();
+    return [...rows, ...this.learned.rows().filter((row) => !rows.some((r) => r.id === row.id))];
   }
 
   private async fetchModelsOnce(): Promise<ProviderModel[] | null> {
@@ -464,48 +541,119 @@ export class GoogleAdapter {
     if (credential instanceof Error) return null;
     // Both Cloud Code Assist hosts are asked; one host failing must not hide the other's models.
     const hosts = this.cfg.url ? [antigravityBaseUrl(this.cfg.url)] : GOOGLE_OAUTH.hosts;
-    const catalogue: MergedCatalogue | null = await fetchAvailableModels(credential.accessToken, credential.projectId, {
-      hosts,
-      ...(this.fetchImpl ? { fetchImpl: this.fetchImpl } : {}),
-      // The IDE list still answers, so without this line Gemini 4 Argon just goes missing.
-      cliFailed: (host, reason) => this.log.warn(`google ${this.name}: CLI model list on ${host} failed (${reason}); models served only to the CLI client, such as Gemini 4 Argon, are left out`),
-    });
+    const cliReasons = new Map<string, string>();
+    const before = this.learned.rows();
+    let catalogue: MergedCatalogue | null = null;
+    try {
+      catalogue = await fetchAvailableModels(credential.accessToken, credential.projectId, {
+        hosts,
+        learned: this.learned,
+        ...(this.fetchImpl ? { fetchImpl: this.fetchImpl } : {}),
+        cliFailed: (host, reason) => cliReasons.set(host, reason),
+      });
+    } catch (error) {
+      // An answer is untrusted input. Whatever it does to the parse, it is an unreadable catalogue
+      // and never a failed turn (`fetchModels` does not throw, and a turn awaits it).
+      this.log.warn(`google ${this.name}: the model catalogue could not be processed (${(error as Error).name}); treated as unreadable`);
+    }
     if (!catalogue) {
-      this.log.warn(`google ${this.name}: fetchAvailableModels returned nothing; falling back to the static list`);
+      this.log.warn(`google ${this.name}: fetchAvailableModels returned nothing; falling back to the static list and the models learned earlier`);
       // A cold host is not asked again on every turn while it is unreadable.
       this.modelsFailedAt = Date.now();
-      return staticAntigravityModels();
+      return this.fallbackModels();
     }
-    this.modelsCache = { at: Date.now(), models: catalogue.models, hosts: catalogue.hosts };
-    if (catalogue.byHost.size < hosts.length) {
-      const answered = [...catalogue.byHost.keys()].map((h) => new URL(h).host);
-      const missing = hosts.filter((h) => !catalogue.byHost.has(h)).map((h) => new URL(h).host);
-      this.log.warn(`google ${this.name}: fetchAvailableModels answered on ${answered.join(", ")}; ${missing.join(", ")} failed, its models are hidden`);
+    this.saveLearned(catalogue.learnedChanged, before);
+    // An ask that did not answer says nothing: a host keeps what it last showed whole.
+    const whole = (c: ParsedHostCatalogue | undefined): boolean => c?.clients?.cli !== undefined;
+    const kept = new Map<string, ParsedHostCatalogue>();
+    const missed: string[] = [];
+    const problems: string[] = [];
+    for (const host of hosts) {
+      const now = catalogue.byHost.get(host);
+      const was = this.hostCatalogues.get(host);
+      const use = now && (whole(now) || !whole(was)) ? now : (was ?? now);
+      if (use) kept.set(host, use);
+      if (!now) {
+        missed.push(host);
+        problems.push(`fetchAvailableModels on ${new URL(host).host} failed; ${was ? "what it listed last time is kept" : "its models are hidden"}`);
+      } else if (!whole(now)) {
+        missed.push(`${host} cli`);
+        // The IDE list still answers, so without this line the models of the CLI family just go missing.
+        problems.push(`CLI model list on ${host} failed (${cliReasons.get(host) ?? "no answer"}); ${whole(was) ? "what it listed last time is kept" : "models served only to the CLI client, such as Gemini 4 Argon and Hydrogen, are left out of the list"}`);
+      }
     }
-    return catalogue.models;
+    this.hostCatalogues = kept;
+    const merged = mergeHostCatalogues(kept);
+    // The same asks failing again are not news, and are asked again less and less often.
+    const shape = missed.join(", ");
+    if (shape !== this.partialShape) for (const problem of problems) this.log.warn(`google ${this.name}: ${problem}`);
+    this.partialStreak = shape ? (shape === this.partialShape ? this.partialStreak + 1 : 1) : 0;
+    this.partialShape = shape;
+    const ttlMs = shape ? Math.min(PARTIAL_MODELS_CACHE_MS * 2 ** (this.partialStreak - 1), MODELS_CACHE_MS) : MODELS_CACHE_MS;
+    this.modelsCache = { at: Date.now(), models: merged.models, hosts: merged.hosts, ttlMs };
+    return merged.models;
   }
 
   /**
-   * Make sure the host map is loaded, within the same hour-long cache as `fetchModels`. A listing
-   * that just failed is not retried on every turn; the default host is used meanwhile.
+   * After a read was taken into `learned`: say which models outside the tables are new, and keep the
+   * lists in `home` under this provider's name for a start that finds the catalogue unreadable. The
+   * file is compared with the lists at every read, not a flag: another adapter of this name (a config
+   * reload whose old adapter finished its read late) may have written older lists over these.
+   */
+  private saveLearned(changed: boolean, before: readonly ProviderModel[]): void {
+    if (changed) {
+      const fresh = this.learned.rows().filter((row) => !before.some((b) => b.id === row.id && b.effortLevels?.join() === row.effortLevels?.join()));
+      if (fresh.length) this.log.info(`google ${this.name}: learned from the catalogue: ${fresh.map((m) => `${m.id}${m.effortLevels ? ` (${m.effortLevels.join("/")})` : ""}${this.learned.cliOnly(m.id) ? " [CLI client only]" : ""}`).join(", ")}`);
+      this.learnedSaveFailedAt = Number.NEGATIVE_INFINITY;
+    }
+    // A save that cannot replace the file holds the event loop while the rename is retried
+    // (locked-file.ts, two seconds on Windows), so after a failure it waits for a change or the hour.
+    if (Date.now() - this.learnedSaveFailedAt < MODELS_CACHE_MS) return;
+    const stored = readLearnedFile(this.home);
+    if (stored.newer) return;
+    const mine = this.learned.snapshot();
+    const theirs = Object.hasOwn(stored.providers, this.name) ? stored.providers[this.name] : undefined;
+    if (theirs === undefined ? Object.keys(mine).length === 0 : JSON.stringify(theirs) === JSON.stringify(mine)) return;
+    try {
+      // The file was read just now, so another provider's lists of this home are written back as they are.
+      writeJsonAtomic(path.join(this.home, LEARNED_MODELS_FILE), { version: LEARNED_MODELS_VERSION, providers: { ...stored.providers, [this.name]: mine } });
+    } catch (error) {
+      this.learnedSaveFailedAt = Date.now();
+      this.log.warn(`google ${this.name}: could not save the learned models (${(error as NodeJS.ErrnoException).code ?? (error as Error).name}); trying again when they change, or in an hour`);
+    }
+  }
+
+  /**
+   * Make sure the host map is loaded before a turn. Nothing cached: the catalogue is
+   * read, unless a read just failed (the default host is used meanwhile, and it is not retried on
+   * every turn). A cached read past its time (an hour; less when it missed a host or a CLI ask)
+   * is asked again without holding the turn, and what such a re-read misses keeps what was cached. A provider that pins `url` needs no host map and its
+   * turns ask nothing, as before: it learns when its model list is read (`fetchModels`: the
+   * provider form, the picker), and from its stored lists at start.
    */
   private async ensureHostMap(): Promise<void> {
-    if (this.modelsCache || this.cfg.url) return;
-    if (!this.accounts.signedIn()) return;
-    if (Date.now() - this.modelsFailedAt < MODELS_CACHE_MS) return;
-    await this.fetchModels();
+    if (this.cfg.url || !this.accounts.signedIn()) return;
+    if (!this.modelsCache) {
+      if (Date.now() - this.modelsFailedAt < MODELS_CACHE_MS) return;
+      await this.fetchModels();
+      return;
+    }
+    if (!this.cacheFresh() && Date.now() - this.modelsFailedAt >= PARTIAL_MODELS_CACHE_MS) void this.fetchModels().catch(() => undefined);
   }
 
   /**
-   * The host a turn for `model` must go to: the one that offers its resolved wire id, preferring
-   * daily when both do, else the provider's default. Unknown models and an unread catalogue fall
-   * back to the default, exactly as before the second host existed.
+   * The host a turn for `model` must go to: the one whose catalogue offers its resolved wire id,
+   * preferring daily when both do; else the host that listed that wire id at an earlier read (a
+   * learned model whose host did not answer this time, or no catalogue this run); else the host that
+   * offers the base id; else the provider's default. Unknown models fall back to the default,
+   * exactly as before the second host existed.
    */
-  private hostFor(model: string, effort: string | undefined): string {
+  private hostFor(model: string, effort: string | undefined, learned: LearnedCatalogue = this.learned): string {
     const fallback = antigravityBaseUrl(this.cfg.url);
-    if (this.cfg.url || !this.modelsCache) return fallback;
-    const wire = resolveAntigravityWireModel(model, effort).wire;
-    return hostForModel(this.modelsCache.hosts, model, wire, fallback);
+    if (this.cfg.url) return fallback;
+    const wire = resolveAntigravityWireModel(model, effort, learned).wire;
+    const hosts = this.modelsCache?.hosts;
+    return hosts?.get(wire)?.[0] ?? learned.hostOf(wire) ?? hosts?.get(model)?.[0] ?? fallback;
   }
 
   /** For side calls (models, project refresh) with no conversation: a usable account, else any. */
@@ -536,7 +684,10 @@ export class GoogleAdapter {
     // that routing, so a cold cache (first turn after a restart) is filled before the turn is built.
     // It is a no-op within the hour after that, and a failure silently keeps the default host.
     if (this.cfg.auth === "antigravity") await this.ensureHostMap();
-    const host = this.cfg.auth === "antigravity" ? this.hostFor(model, useEffort) : undefined;
+    // One view of the learned lists for the whole turn: its wire id, host, User-Agent and quota
+    // scope, and the reading of Google's refusal, must agree even if a catalogue read lands meanwhile.
+    const learned = this.learned.view();
+    const host = this.cfg.auth === "antigravity" ? this.hostFor(model, useEffort, learned) : undefined;
     // Thought signatures are per host: CCA runs its state separately on each, and replaying one
     // host's signature to the other is refused (see thoughtSignatures.ts). The API-key path keeps
     // the unscoped store.
@@ -563,10 +714,11 @@ export class GoogleAdapter {
       ...(this.cfg.url ? { url: this.cfg.url } : {}),
       ...(this.cfg.sessionHeader ? { sessionHeader: this.cfg.sessionHeader } : {}),
       ...(this.cfg.headers ? { headers: this.cfg.headers } : {}),
+      ...(this.cfg.auth === "antigravity" ? { learned } : {}),
     });
 
     if (this.cfg.auth === "antigravity") {
-      return this.handleAntigravity(res, json, upstreamRequest, transport, model, useEffort, wantStream, key, startInput, host!, signatures, options?.accountPin);
+      return this.handleAntigravity(res, json, upstreamRequest, transport, model, useEffort, wantStream, key, startInput, host!, signatures, learned, options?.accountPin);
     }
 
     // The key this attempt goes out on: the pool's own when the proxy chose one, else the provider's
@@ -673,7 +825,7 @@ export class GoogleAdapter {
    * and its failure handling mirror the ChatGPT pool (accounts.ts), because the cache cost of moving
    * a conversation off its account is the same (§4).
    */
-  private async handleAntigravity(res: http.ServerResponse, json: AnthropicRequest, upstreamRequest: GeminiRequest, transport: GoogleTransport, model: string, effort: string | undefined, wantStream: boolean, key: string, startInput: number, host: string, signatures: ThoughtSignatureSink, accountPin?: string): Promise<GoogleOutcome> {
+  private async handleAntigravity(res: http.ServerResponse, json: AnthropicRequest, upstreamRequest: GeminiRequest, transport: GoogleTransport, model: string, effort: string | undefined, wantStream: boolean, key: string, startInput: number, host: string, signatures: ThoughtSignatureSink, learned: LearnedCatalogue, accountPin?: string): Promise<GoogleOutcome> {
     const controller = new AbortController();
     const onClose = (): void => controller.abort();
     res.on("close", onClose);
@@ -688,6 +840,7 @@ export class GoogleAdapter {
       system: upstreamRequest.systemInstruction,
       model,
       host,
+      learned,
       build: (credential) => {
         const built = transport.build(upstreamRequest, {
           model,
@@ -729,7 +882,7 @@ export class GoogleAdapter {
         note = "no credentials";
       } else if (sent.kind === "all-resting") {
         const when = sent.backMs ? ` The first is usable again at ${new Date(Date.now() + sent.backMs).toLocaleTimeString()}.` : "";
-        const names = sent.group ? GROUP_NAMES[sent.group] : undefined;
+        const names = sent.group ? groupNames(sent.group) : undefined;
         err = anthropicError(429, "rate_limit_error", names
           ? `Google Antigravity: the ${names.spent} quota is spent on every signed-in account; ${names.other} models still answer.${when}`
           : `Google Antigravity: every signed-in account is at its limit.${when}`);
@@ -882,6 +1035,8 @@ export class GoogleAdapter {
     model: string;
     /** The CCA host this turn goes to; quota evidence is read from the same host. */
     host: string;
+    /** The turn's view of the learned lists (`LearnedCatalogue.view`). */
+    learned: LearnedCatalogue;
     build: (credential: GoogleCredential) => { built: { url: string; headers: Record<string, string>; body: string } };
   }): Promise<SendResult> {
     const tried = new Set<string>();
@@ -891,7 +1046,9 @@ export class GoogleAdapter {
     let lastThrown: Error | null = null;
     let capacityAsks = 0;
     // The model's quota group on the host this turn goes to: each host counts its own quota.
-    const group = antigravityQuotaScope(spec.model);
+    // A base id and each wire id it resolves to share one group (`antigravityQuotaScope`), so the
+    // turn's model names the group whichever tier this turn runs on.
+    const group = antigravityQuotaScope(spec.model, spec.learned);
     const scope = group ? antigravityScopeKey(group, spec.host) : undefined;
     for (;;) {
       const credential = await this.pickAccount(spec.conversation, tried, scope, spec.accountPin);
@@ -965,7 +1122,7 @@ export class GoogleAdapter {
       // account/model permits a request-specific refusal; otherwise keep ordinary
       // cooldown and account rotation. The proxy can still try a route fallback.
       if (isAntigravityPromptRefusal(spec.system, status, text, upstream.headers.get("retry-after")) &&
-          this.usage.hasRemainingQuota(credential, spec.model, spec.host)) {
+          this.usage.hasRemainingQuota(credential, spec.model, spec.host, spec.learned)) {
         return { kind: "prompt-refused", account: credential.ownerId };
       }
       // Not a rest and not a refresh: the account works again the moment its person finishes
@@ -996,7 +1153,7 @@ export class GoogleAdapter {
 
       const retryHeader = upstream.headers.get("retry-after");
       const waitMs = retryHeader ? retryAfterMs({ "retry-after": retryHeader }) : googleRetryDelayMs(text);
-      const spent = group && isGroupQuotaExhausted(status, text, group) ? group : undefined;
+      const spent = group && isGroupQuotaExhausted(status, text, group, spec.learned) ? group : undefined;
       const verdict = this.pool.penalise(this.name, credential.id, credentialRefused ? 403 : status, waitMs, text, spent ? scope : undefined);
       last = { kind: "refused", status, text: safeText, account: credential.ownerId, ...(status === 429 && waitMs ? { retryAfterSeconds: Math.ceil(waitMs / 1000) } : {}), ...(spent ? { group: spent } : {}) };
       if (!verdict.retryable) return last;
