@@ -15,7 +15,7 @@ import { BackgroundActivity } from "./background-activity.ts";
 import { toolInput } from "./tool-details.ts";
 import type { PushContext } from "./push-content.ts";
 import type { PushEvent } from "./protocol.ts";
-import { attachmentContent, fileImages, messageContent, sessionFileTool, type InputBlock } from "./images.ts";
+import { attachmentContent, fileImages, messageContent, sessionFileTool, unshownFiles, type InputBlock } from "./images.ts";
 import { ATTACHMENT_CAP, ATTACHMENT_COUNT, WATCH_IDLE_MS, type Attachment, type ImagePart, type SessionFile, type SendBehavior } from "./protocol.ts";
 import { artifactOf } from "./artifact.ts";
 import { DesktopSessions, type DesktopProcess, type TurnWrapUp } from "./desktop.ts";
@@ -114,7 +114,9 @@ interface Live {
   /** Content blocks of the API message being streamed, merged across the SDK's per-block messages. */
   current: { msg: string; text: string; images?: ImagePart[]; files?: SessionFile[]; tools: ToolCall[]; model: string; thinkingBlocks: number[]; nextThinkingBlock: number } | null;
   /** Task/Agent tool ids → their subagent while it runs */
-  subs: Map<string, { description: string; model: string | null; steps: number; parent?: string }>;
+  subs: Map<string, { description: string; model: string | null; steps: number; parent?: string; /** started in the background: the call asked for it, or its launch result was async */ background?: boolean }>;
+  /** Background workers a notification has ended, kept for the notifications that come again. */
+  ended: Map<string, { description: string; model: string | null; steps: number; parent?: string; background?: boolean }>;
   turnStart: number;
   restartAfterTurn: boolean;
   retried: boolean;
@@ -3383,7 +3385,7 @@ export class Sessions {
       ...(r.sdkSessionId ? { resume: r.sdkSessionId } : {}),
       ...(this.opts.claudePath ? { pathToClaudeCodeExecutable: this.opts.claudePath } : {}),
     };
-    const live: Live = { query: null as unknown as SdkQuery, ready: Promise.resolve(), input, abort, buffer: null, flushTimer: null, current: null, subs: new Map(), turnStart: this.now(), restartAfterTurn: false, retried: false, interrupted: false, pendingMessages: [] };
+    const live: Live = { query: null as unknown as SdkQuery, ready: Promise.resolve(), input, abort, buffer: null, flushTimer: null, current: null, subs: new Map(), ended: new Map(), turnStart: this.now(), restartAfterTurn: false, retried: false, interrupted: false, pendingMessages: [] };
     this.live.set(r.id, live);
     live.ready = this.opts.router.status().then((s) => {
       // The router's own word on where its proxy and CA are wins over whatever this process inherited.
@@ -3503,10 +3505,11 @@ export class Sessions {
             const tool: ToolCall = { id: b.id, name: b.name, summary: summarize(b.name, input, r.cwd), input: JSON.stringify(input, null, 2), ...sessionFileTool(b.name, input, { cwd: r.cwd, ...(r.sdkSessionId ? { sessionId: r.sdkSessionId } : {}) }, data => this.log(r.id).image(data)) };
             cur.tools.push(tool);
             cur.images.push(...fileImages(tool.files ?? []));
+            cur.files.push(...unshownFiles(tool.files ?? []));
             if (b.name === "Task" || b.name === "Agent") {
-              const sub = { description: summarize(b.name, input, r.cwd), model: typeof input.model === "string" ? input.model : null, steps: 0 };
+              const sub = { description: summarize(b.name, input, r.cwd), model: typeof input.model === "string" ? input.model : null, steps: 0, ...(input.run_in_background === true ? { background: true } : {}) };
               live.subs.set(b.id, sub);
-              this.append(r.id, { kind: "subagent", toolUseId: b.id, sub: `sub-${b.id}`, description: sub.description, model: sub.model, status: "running", steps: 0 });
+              this.append(r.id, { kind: "subagent", toolUseId: b.id, sub: `sub-${b.id}`, description: sub.description, model: sub.model, ...(sub.background ? { background: true as const } : {}), status: "running", steps: 0 });
             }
           }
         }
@@ -3529,9 +3532,15 @@ export class Sessions {
             const task = activity.history.find(task => task.id === taskId);
             const tool = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(notice)?.[1] ?? task?.sub?.replace(/^sub-/, "");
             const status = /<status>([^<]+)<\/status>/.exec(notice)?.[1];
-            if (tool && live.subs.has(tool) && ["completed", "failed", "killed", "stopped"].includes(status ?? "")) {
-              this.workerEvent(r, live, tool, status === "completed" ? "done" : status === "failed" ? "failed" : "stopped");
-              live.subs.delete(tool);
+            if (tool && ["completed", "failed", "killed", "stopped"].includes(status ?? "")) {
+              // The app notifies again each time the worker stops with nothing of its own running: each is an end told again.
+              const sub = live.subs.get(tool) ?? live.ended.get(tool);
+              if (sub) {
+                live.subs.set(tool, sub);
+                this.workerEvent(r, live, tool, status === "completed" ? "done" : status === "failed" ? "failed" : "stopped");
+                live.subs.delete(tool);
+                live.ended.set(tool, sub);
+              }
             }
           }
           if (live.restartAfterTurn && this.sdkIdle(r, live)) this.restartSettings(r, live);
@@ -3553,6 +3562,7 @@ export class Sessions {
           const sub = live.subs.get(b.tool_use_id);
           const resultText = typeof body.text === "string" ? body.text : "";
           const launch = !b.is_error && (toolInput(resultText)?.isAsync === true || /(?:launched asynchronously|async(?: agent)? launched)/i.test(resultText));
+          if (sub && launch) sub.background = true;
           if (sub && !launch) {
             this.workerEvent(r, live, b.tool_use_id, b.is_error ? "failed" : "done");
             live.subs.delete(b.tool_use_id);
@@ -3742,6 +3752,7 @@ export class Sessions {
     const converted = messageContent(message.content, data => this.log(r.id).image(data), { cwd: r.cwd, ...(r.sdkSessionId ? { sessionId: r.sdkSessionId } : {}) });
     const tools = (message.content ?? []).filter((b) => b.type === "tool_use" && b.id && b.name).map((b): ToolCall => ({ id: b.id!, name: b.name!, summary: summarize(b.name!, b.input ?? {}, r.cwd), input: JSON.stringify(b.input ?? {}, null, 2), ...sessionFileTool(b.name!, b.input ?? {}, { cwd: r.cwd, ...(r.sdkSessionId ? { sessionId: r.sdkSessionId } : {}) }, data => log.image(data)) }));
     converted.images.push(...fileImages(tools.flatMap(tool => tool.files ?? [])));
+    converted.files.push(...unshownFiles(tools.flatMap(tool => tool.files ?? [])));
     log.append({ kind: "assistant", msg: message.id ?? randomUUID(), model: message.model ?? "", ...converted, tools });
     for (const tool of tools) {
       if (tool.name !== "Agent" && tool.name !== "Task") continue;
@@ -3763,7 +3774,7 @@ export class Sessions {
   private workerEvent(r: SessionRecord, live: Live, toolUseId: string, status: "running" | "done" | "failed" | "stopped"): void {
     const sub = live.subs.get(toolUseId);
     if (!sub) return;
-    const body: EventBody = { kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: sub.description, model: sub.model, status, steps: sub.steps };
+    const body: EventBody = { kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: sub.description, model: sub.model, ...(sub.background ? { background: true as const } : {}), status, steps: sub.steps };
     if (sub.parent) this.subLog(r.id, `sub-${sub.parent}`)?.append(body);
     else this.append(r.id, body);
   }

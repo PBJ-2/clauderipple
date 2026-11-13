@@ -1,7 +1,7 @@
 // Events → what the timeline shows. Pure, so the same reduction runs in tests and in the app.
 import type { ArtifactRef, PermissionContent, RuleStatus, Effort, Figures, ImagePart, SessionFile, SessionEvent, SessionState, Text, ToolCall } from "../src/protocol.ts";
 import { WRAP_TOOL, wrapUpFields, type WrapUpReply } from "../src/wrap-up.ts";
-import { stringField, toolInput } from "../src/tool-details.ts";
+import { stringField, toolInput, type FinishedAgent } from "../src/tool-details.ts";
 import { settingsOutcome } from "../src/settings-notice.ts";
 
 export interface ToolView extends ToolCall { result?: { ok: boolean; text: Text; images?: ImagePart[]; files?: SessionFile[]; artifact?: ArtifactRef } }
@@ -30,7 +30,9 @@ export type Item =
   | { type: "control"; key: string; ver: string; command: ControlCommand; state: "running" | "done" | "failed"; at: number }
   | { type: "assistant"; key: string; ver: string; text: Text; images?: ImagePart[]; files?: SessionFile[]; streaming: boolean; tools: ToolView[]; model: string; at: number }
   | { type: "thinking"; key: string; ver: string; text: Text; streaming: boolean; msg: string; at: number }
-  | { type: "subagent"; key: string; ver: string; toolUseId: string; sub: string; description: string; model: string | null; /** what to show for `model`; see SessionEvent subagent */ modelLabel?: string; /** the effort the worker ran at, when its record says so */ effort?: string; status: "running" | "done" | "failed" | "stopped"; steps: number }
+  | { type: "subagent"; key: string; ver: string; toolUseId: string; sub: string; description: string; model: string | null; /** what to show for `model`; see SessionEvent subagent */ modelLabel?: string; /** the effort the worker ran at, when its record says so */ effort?: string; status: "running" | "done" | "failed" | "stopped"; steps: number;
+      /** started in the background (see SessionEvent subagent) */ background?: true;
+      /** Each time a notice told that it ended, and where in the conversation: how many items stood before the event. A background worker's end is a notice that arrives later, in whichever group is open then, and the app tells it again each time the worker stops. */ ends?: { at: number; status: "done" | "failed" | "stopped" }[] }
   | (PermissionContent & { type: "permission"; key: string; ver: string; id: string; tool: string; title: string; summary: string; input: Text; canAlways: boolean; decision: null | "allow" | "allow_always" | "deny" | "expired"; ruleStatus?: RuleStatus; reason?: string; at: number })
   | { type: "result"; key: string; ver: string; ok: boolean; error?: string; ms: number; model: string; effort: Effort | null; /** which finished turn this is, when the conversation's first page is loaded; absent otherwise */ turn?: number }
   | { type: "notice"; key: string; ver: string; code: string; text?: string }
@@ -168,7 +170,10 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
         // A later event that does not name the effort keeps the one already recorded for this worker.
         const previous = byKey.has(`s${e.toolUseId}`) ? items[byKey.get(`s${e.toolUseId}`)!] : undefined;
         const effort = e.effort ?? (previous?.type === "subagent" ? previous.effort : undefined);
-        put({ type: "subagent", key: `s${e.toolUseId}`, ver: `${e.seq}`, toolUseId: e.toolUseId, sub: e.sub, description: e.description, model: e.model, ...(e.modelLabel ? { modelLabel: e.modelLabel } : {}), ...(effort ? { effort } : {}), status: e.status, steps: e.steps });
+        const background = e.background ?? (previous?.type === "subagent" ? previous.background : undefined);
+        const ends = previous?.type === "subagent" ? previous.ends : undefined;
+        const told = e.status === "running" ? ends : [...ends ?? [], { at: items.length, status: e.status }];
+        put({ type: "subagent", key: `s${e.toolUseId}`, ver: `${e.seq}`, toolUseId: e.toolUseId, sub: e.sub, description: e.description, model: e.model, ...(e.modelLabel ? { modelLabel: e.modelLabel } : {}), ...(effort ? { effort } : {}), ...(background ? { background } : {}), ...(told ? { ends: told } : {}), status: e.status, steps: e.steps });
         break;
       }
       case "permission":
@@ -234,9 +239,12 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
 }
 
 export type ActivityRow = { type: "tool"; tool: ToolView } | (Extract<Item, { type: "subagent" }> & { call?: ToolView });
+export type { FinishedAgent };
 export interface ToolGroup {
   type: "toolGroup"; key: string; ver: string; rows: ActivityRow[];
   tools: number; workers: number; running: boolean; latest: string;
+  /** Background workers whose end arrived while this group was the latest activity; absent on most groups. */
+  finished?: FinishedAgent[];
 }
 /** A reply button in a turn's closing box: `label` on the button, `message` what a tap sends. */
 export type { WrapUpReply };
@@ -279,16 +287,93 @@ function wrapUpOf(tool: ToolView, ver: string): WrapUp | null | undefined {
 /** The i18n key for a command's state word, shared by both clients. */
 export const controlTextKey = (command: ControlCommand, state: Extract<Item, { type: "control" }>["state"]): string => `control.${command}.${state}`;
 
+/** The tool a Code-tab session uses to hand the person files, with a caption. */
+export const SEND_FILE_TOOL = "SendUserFile";
+const IMAGE_TYPES: ReadonlySet<string> = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+const isImage = (file: SessionFile): boolean => file.status === "ready" && !!file.blob && IMAGE_TYPES.has(file.mediaType);
+
+/**
+ * What a SendUserFile call says in the Claude app's Code tab: not a tool row but words. Its caption
+ * is text, its pictures stand under it, and any other file (or one that could not be handed over) is a
+ * file card; the call counts in no group. The app does this for a call that has not failed and has
+ * a caption, or finished with files; any other call stays a row.
+ */
+function sentFiles(tool: ToolView): { caption: string; images: ImagePart[]; files: SessionFile[] } | null {
+  if (tool.name !== SEND_FILE_TOOL || tool.result?.ok === false) return null;
+  const caption = stringField(inputOf(tool), "caption");
+  const files = tool.files ?? [];
+  if (!caption.trim() && !(tool.result?.ok === true && files.length > 0)) return null;
+  return { caption, images: files.filter(isImage).map((file): ImagePart => ({ type: "image", mediaType: file.mediaType, blob: file.blob! })), files: files.filter(file => !isImage(file)) };
+}
+
+/**
+ * Drops items before `timelineItems` and keeps a background worker's `ends[].at` true: each `at` counts
+ * the items that stood before the end event, so it moves back by the dropped items before it.
+ */
+export function dropItems<T extends { type: string }>(items: readonly T[], drop: (item: T, index: number) => boolean): T[] {
+  const dropped = new Array<number>(items.length + 1).fill(0);
+  items.forEach((item, i) => { dropped[i + 1] = dropped[i]! + (drop(item, i) ? 1 : 0); });
+  const kept: T[] = [];
+  items.forEach((item, i) => {
+    if (dropped[i + 1]! !== dropped[i]!) return;
+    const ends = item.type === "subagent" ? (item as unknown as Extract<Item, { type: "subagent" }>).ends : undefined;
+    kept.push(ends?.some(end => dropped[Math.min(end.at, items.length)]! > 0)
+      ? { ...item, ends: ends.map(end => ({ ...end, at: end.at - dropped[Math.min(end.at, items.length)]! })) }
+      : item);
+  });
+  return kept;
+}
+
 /** Presentation only: text, permissions and turn boundaries separate consecutive activity. */
 export function timelineItems(view: Pick<SessionView, "items" | "state">): TimelineItem[] {
   const result: TimelineItem[] = [];
   const workers = new Map(view.items.flatMap(i => i.type === "subagent" ? [[i.toolUseId, i] as const] : []));
-  const owned = new Set(view.items.flatMap(i => i.type === "assistant" ? i.tools.map(t => t.id) : []));
+  const calls = new Map(view.items.flatMap(i => i.type === "assistant" ? i.tools.map(t => [t.id, t] as const) : []));
+  const owned = new Set(calls.keys());
+  // A background worker's end is a notice that arrives later, wherever the conversation is then: it
+  // is counted by the group that is open at that point (or the next one, if text came last), in
+  // the order the notices arrived.
+  const ends = new Map<number, FinishedAgent[]>();
+  // Which notice of its worker each end is: a worker may tell its end again, and each row needs its own key.
+  const nthOf = new WeakMap<FinishedAgent, number>();
+  for (const item of view.items) {
+    if (item.type !== "subagent" || !item.ends?.length) continue;
+    const call = calls.get(item.toolUseId);
+    if (item.background !== true && !(call && inputOf(call)?.run_in_background === true)) continue;
+    item.ends.forEach((end, nth) => {
+      const finished: FinishedAgent = { id: item.toolUseId, status: end.status, description: item.description };
+      nthOf.set(finished, nth);
+      ends.set(end.at, [...ends.get(end.at) ?? [], finished]);
+    });
+  }
+  const arrivals = [...ends.keys()].sort((a, b) => a - b);
+  let next = 0;
+  let held: FinishedAgent[] = [];
   let group: ToolGroup | null = null;
+  const note = (group: ToolGroup, ends: FinishedAgent[]): void => {
+    group.finished = [...group.finished ?? [], ...ends];
+    group.ver += ends.map(end => `:${end.id}${end.status}`).join("");
+  };
+  const arrive = (index: number): void => {
+    while (next < arrivals.length && arrivals[next]! <= index) {
+      const list = ends.get(arrivals[next++]!)!;
+      if (group) note(group, list); else held.push(...list);
+    }
+  };
+  // The notices no group took: they head a row of their own (no calls in it), so the end is not lost.
+  const flushHeld = (): void => {
+    if (!held.length) return;
+    const own: ToolGroup = { type: "toolGroup", key: `g${held[0]!.id}:end${nthOf.get(held[0]!) ?? 0}`, ver: "", rows: [], tools: 0, workers: 0, running: false, latest: held[0]!.description };
+    note(own, held);
+    held = [];
+    group = null;
+    result.push(own);
+  };
   const add = (row: ActivityRow, key: string, ver: string): void => {
     if (!group) {
       group = { type: "toolGroup", key: `g${key}`, ver: "", rows: [], tools: 0, workers: 0, running: false, latest: "" };
       result.push(group);
+      if (held.length) { note(group, held); held = []; }
     }
     group.rows.push(row);
     group.ver += ver;
@@ -302,18 +387,35 @@ export function timelineItems(view: Pick<SessionView, "items" | "state">): Timel
   // The closing box sits under whatever the turn says after it, as in the Claude app: it is held until
   // the turn ends (its result, or the person's next message).
   let wrap: WrapUp | null = null;
-  const flushWrap = (): void => { if (wrap) { group = null; result.push(wrap); wrap = null; } };
-  for (const item of view.items) {
+  const flushWrap = (): void => { flushHeld(); if (wrap) { group = null; result.push(wrap); wrap = null; } };
+  for (const [index, item] of view.items.entries()) {
+    arrive(index);
     if (item.type === "subagent") {
       if (!owned.has(item.toolUseId)) add(item, item.key, item.ver);
       continue;
     }
     if (item.type === "assistant") {
-      if (typeof item.text !== "string" || item.text.trim() || item.images?.length || item.files?.length || item.streaming) {
+      // The host adds what a SendUserFile hands over to the message's own images and files; they belong
+      // to the call's words, below, not to the message's text.
+      const sent = new Map(item.tools.flatMap(tool => { const spoken = sentFiles(tool); return spoken ? [[tool.id, spoken] as const] : []; }));
+      const own = [...sent.values()];
+      const blobs = new Set(own.flatMap(spoken => spoken.images.map(image => image.blob)));
+      const ids = new Set(own.flatMap(spoken => spoken.files.map(file => file.id)));
+      const images = sent.size ? item.images?.filter(image => !image.blob || !blobs.has(image.blob)) : item.images;
+      const files = sent.size ? item.files?.filter(file => !ids.has(file.id)) : item.files;
+      if (typeof item.text !== "string" || item.text.trim() || images?.length || files?.length || item.streaming) {
+        // Words with no calls under them answer what arrived before them: an end still waiting for a group is told first.
+        if (!item.tools.length) flushHeld();
         group = null;
-        result.push({ ...item, tools: [] });
+        result.push({ ...item, ...(images ? { images } : {}), ...(files ? { files } : {}), tools: [] });
       }
       for (const tool of item.tools) {
+        const spoken = sent.get(tool.id);
+        if (spoken) {
+          group = null;
+          result.push({ ...item, key: `${item.key}:${tool.id}`, ver: `${item.ver}:${tool.id}`, text: spoken.caption, images: spoken.images, files: spoken.files, streaming: false, tools: [] });
+          continue;
+        }
         // The dock shows the task list; the closing box and chapters draw themselves.
         if (tool.name === PLAN_TOOL) continue;
         if (tool.name === WRAP_TOOL) {
@@ -347,6 +449,7 @@ export function timelineItems(view: Pick<SessionView, "items" | "state">): Timel
     group = null;
     result.push(item);
   }
+  arrive(view.items.length);
   flushWrap();
   // A box the person has answered (a message of theirs follows it) keeps its words but not its buttons.
   let answered = false;
@@ -359,7 +462,7 @@ export function timelineItems(view: Pick<SessionView, "items" | "state">): Timel
   if (tail?.type === "thinking" && tail.streaming) result.push(tail);
   // Only the final activity run of the active turn spins, even between tool results.
   const last = result.at(-1);
-  if (last?.type === "toolGroup" && (view.state === "running" || view.state === "starting" || view.state === "waiting")) {
+  if (last?.type === "toolGroup" && last.rows.length > 0 && (view.state === "running" || view.state === "starting" || view.state === "waiting")) {
     last.running = true;
     last.ver += "running";
   }

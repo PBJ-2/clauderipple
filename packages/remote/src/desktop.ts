@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { EventLog } from "./eventlog.ts";
 import { creationDateToFileTime, parseFileTime, processCommands, processSnapshot, sameFileTime, type ProcessSnapshot } from "./processes.ts";
-import { fileImages, messageContent, sessionFileTool, type ImageSink } from "./images.ts";
+import { fileImages, messageContent, sessionFileTool, unshownFiles, type ImageSink } from "./images.ts";
 import { narrationBody } from "./narration.ts";
 import { artifactOf } from "./artifact.ts";
 import { PERMISSION_MODES, type BackgroundTask, type EventBody, type Figures, type PermissionMode, type PlanStep, type SessionSummary, type ToolCall } from "./protocol.ts";
@@ -187,7 +187,11 @@ function title(value: string): string { return value.trim().replace(/\s+/g, " ")
 
 /** A subagent's running state while its parent transcript is converted; `input` lets a terminal
  * event re-resolve its model once its own transcript has written one. */
-export interface SubagentState { description: string; model: string | null; steps: number; bytes: number; input: RecordValue; taskId?: string }
+export interface SubagentState { description: string; model: string | null; steps: number; bytes: number; input: RecordValue; taskId?: string; /** started in the background: the call asked for it, or its launch result said it was async */ background?: boolean }
+/** Workers a notification has ended, by call id and by task id, for the notifications that repeat
+ * (keyed by the scan's state map, which lives as long as the scan or the live tail does). */
+type EndedWorker = SubagentState & { toolUseId: string };
+const endedWorkers = new WeakMap<Map<string, SubagentState>, Map<string, EndedWorker>>();
 /** How to convert one transcript. Omitting it is the top-level session: sidechain records are skipped
  * and no subagent events are produced. The sub pass reads a subagent's own transcript instead. */
 export interface SubagentContext {
@@ -291,17 +295,31 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
     if (notification) {
       for (const [notice] of p.matchAll(/<task-notification>[\s\S]*?<\/task-notification>/g)) {
         const taskId = /<task-id>([^<]+)<\/task-id>/.exec(notice)?.[1];
-        const toolUseId = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(notice)?.[1] ??
-          (taskId ? [...(state ?? [])].find(([, worker]) => worker.taskId === taskId)?.[0] : undefined);
+        const named = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(notice)?.[1];
         const result = /<result>([\s\S]*?)<\/result>/.exec(notice)?.[1];
         const status = /<status>([^<]+)<\/status>/.exec(notice)?.[1];
+        const ended = state ? endedWorkers.get(state) : undefined;
+        // The app notifies again each time the worker stops with nothing of its own running, often without
+        // its call's id: the worker it ended for is remembered by task id once it is no longer running.
+        const again = named ? ended?.get(named) : taskId ? ended?.get(taskId) : undefined;
+        const toolUseId = named ?? (taskId ? [...(state ?? [])].find(([, worker]) => worker.taskId === taskId)?.[0] : undefined) ?? again?.toolUseId;
         // A notification without its tool call has nothing to attach to; it is not the user's words.
         if (!toolUseId) continue;
-        bodies.push({ kind: "tool_result", toolUseId, ok: status === "completed", text: result ?? notice });
-        const running = state?.get(toolUseId);
+        const terminal = status === "completed" ? "done" as const : status === "killed" || status === "stopped" ? "stopped" as const : "failed" as const;
+        // A repeat that names no call keeps the report the first one gave; only the end is told again.
+        if (named || !again) bodies.push({ kind: "tool_result", toolUseId, ok: status === "completed", text: result ?? notice });
+        const running = state?.get(toolUseId) ?? again;
         if (running && resolve) {
           const info = resolve(toolUseId, running.input);
-          bodies.push({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: info.model ?? running.model, ...effortField(info), status: status === "completed" ? "done" : status === "killed" || status === "stopped" ? "stopped" : "failed", steps: info.steps });
+          bodies.push({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: info.model ?? running.model, ...effortField(info), ...backgroundField(running), status: terminal, steps: info.steps });
+        }
+        const gone = state?.get(toolUseId);
+        if (state && gone) {
+          const kept = endedWorkers.get(state) ?? new Map<string, EndedWorker>();
+          const worker: EndedWorker = { ...gone, toolUseId };
+          kept.set(toolUseId, worker);
+          if (gone.taskId) kept.set(gone.taskId, worker);
+          endedWorkers.set(state, kept);
         }
         state?.delete(toolUseId);
       }
@@ -319,10 +337,11 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
         const running = state?.get(b.tool_use_id);
         const resultText = typeof converted.text === "string" ? converted.text : "";
         const result = object(r.toolUseResult) ?? toolInput(resultText);
-        const launched = result?.isAsync === true || /(?:launched asynchronously|async(?: agent)? launched)/i.test(resultText);
+        const launched = result?.isAsync === true || ["async_launched", "remote_launched", "teammate_spawned"].includes(str(result?.status)) || /(?:launched asynchronously|async(?: agent)? launched)/i.test(resultText);
         if (running && launched) {
           const taskId = str(result?.agentId) || str(result?.taskId) || /(?:agentId|task[_ -]?id):\s*([\w-]+)/i.exec(resultText)?.[1];
           if (taskId) running.taskId = taskId;
+          running.background = true;
         }
         if (running && resolve && !launched) {
           const info = resolve(b.tool_use_id, running.input);
@@ -351,13 +370,15 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
       // The top-level pass still skips sidechain records before reaching this point.
       if (worker && state && resolve) {
         const info = resolve(b.id, input);
-        const running: SubagentState = { description: info.description || summary || str(input.subagent_type) || b.name, model: info.model, steps: info.steps, bytes: info.bytes ?? 0, input };
+        const running: SubagentState = { description: info.description || summary || str(input.subagent_type) || b.name, model: info.model, steps: info.steps, bytes: info.bytes ?? 0, input, ...(input.run_in_background === true ? { background: true } : {}) };
         state.set(b.id, running);
-        bodies.push({ kind: "subagent", toolUseId: b.id, sub: `sub-${b.id}`, description: running.description, model: running.model, ...effortField(info), status: "running", steps: running.steps });
+        bodies.push({ kind: "subagent", toolUseId: b.id, sub: `sub-${b.id}`, description: running.description, model: running.model, ...effortField(info), ...backgroundField(running), status: "running", steps: running.steps });
       }
     }
     const body = messageContent(message.content, sink, scope);
-    body.images.push(...fileImages(tools.flatMap(tool => tool.files ?? [])));
+    const delivered = tools.flatMap(tool => tool.files ?? []);
+    body.images.push(...fileImages(delivered));
+    body.files.push(...unshownFiles(delivered));
     if (body.text || body.images.length || body.files.length || tools.length) bodies.push({ kind: "assistant", msg: str(r.uuid) || str(message.id), model: str(message.model), ...body, tools });
   } else if (r.type === "result") {
     const ok = r.subtype === "success" && r.is_error !== true;
@@ -464,6 +485,8 @@ export function effortOf(model: string, description: string): string {
 }
 /** The subagent event's effort, only when a real one was recorded. */
 const effortField = (info: { effort?: string }): { effort?: string } => info.effort ? { effort: info.effort } : {};
+/** The subagent event's `background` mark, once the worker is known to run in the background. */
+const backgroundField = (running: { background?: boolean }): { background?: true } => running.background ? { background: true } : {};
 
 /** Top-level task lifecycle only; synchronous workers and nested subagents are not background tasks.
  * Also the main turn's start as the app counts it: the person's last message (origin "human"; compaction
@@ -675,7 +698,7 @@ export class DesktopSessions {
         running.model = model;
         running.steps = info.steps;
         running.bytes = info.bytes ?? 0;
-        visit({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model, ...effortField(info), status: info.terminal ?? "running", steps: info.steps });
+        visit({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model, ...effortField(info), ...backgroundField(running), status: info.terminal ?? "running", steps: info.steps });
         if (info.terminal) state.delete(toolUseId);
       }
       return next;
@@ -847,7 +870,7 @@ export class DesktopSessions {
       for (const [toolUseId, running] of state) {
         const info = resolve(toolUseId, running.input);
         if (info.terminal) {
-          log.append({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: info.model ?? running.model, ...effortField(info), status: info.terminal, steps: info.steps });
+          log.append({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: info.model ?? running.model, ...effortField(info), ...backgroundField(running), status: info.terminal, steps: info.steps });
           state.delete(toolUseId);
         }
       }
@@ -1033,7 +1056,7 @@ export class DesktopSessions {
       for (const [toolUseId, running] of state) {
         const info = resolve(toolUseId, running.input);
         if (info.terminal) {
-          log.append({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: info.model ?? running.model, ...effortField(info), status: info.terminal, steps: info.steps });
+          log.append({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: info.model ?? running.model, ...effortField(info), ...backgroundField(running), status: info.terminal, steps: info.steps });
           state.delete(toolUseId);
         }
       }

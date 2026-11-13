@@ -343,7 +343,7 @@ export function item(it: TimelineItem, ui: UI): string {
   switch (it.type) {
     case "toolGroup": {
       const open = ui.expanded.has(it.key);
-      const summary = activitySummary(it.rows, it.running, lang());
+      const summary = activitySummary(it.rows, it.running, lang(), it.finished);
       const label = summary.text + (summary.added || summary.removed ? ` [+${summary.added} −${summary.removed}]` : "") + (summary.failed ? (lang() === "ko" ? " · 실패" : " · Failed") : "");
       return `<div class="tools"><button class="tool" data-act="tool-group" data-id="${esc(it.key)}" aria-expanded="${open}">${it.running ? stateRing("running", 16) : toolIcon("Bash")}<span class="sm">${esc(label)}</span><span style="transform:rotate(${open ? 90 : 0}deg)">${icon.chevron(16)}</span></button>${open ? it.rows.map(row => row.type === "tool" ? toolRow(row.tool, ui) : item(row, ui)).join("") : ""}</div>`;
     }

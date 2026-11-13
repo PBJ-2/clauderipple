@@ -1160,6 +1160,10 @@ for (const owner of ["new", "open", "bridge"] as const) test(`desktop handoff pr
   await waitFor(() => query.closed);
   assert.equal(calls, owner === "new" ? 1 : 0);
   assert.equal(reduce(f.sessions.log(id).readAfter(0).events).items.find(item => item.type === "subagent")?.status, "done");
+  // The end is marked as a background worker's, with where it arrived, so a phone counts it in the group open then.
+  const worker = reduce(f.sessions.log(id).readAfter(0).events).items.find(item => item.type === "subagent");
+  assert.ok(worker?.type === "subagent" && worker.background === true);
+  assert.deepEqual(worker.ends?.map(end => end.status), ["done"]);
 });
 
 test("a deferred handoff rechecks background activity before closing the SDK", async t => {

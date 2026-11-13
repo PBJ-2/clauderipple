@@ -226,7 +226,7 @@ export type EventBody = MessageImages & {
   | { kind: "assistant"; msg: string; model: string; text: Text; tools: ToolCall[] }
   | { kind: "tool_result"; toolUseId: string; ok: boolean; text: Text; /** the published page of an `Artifact` call; absent on older hosts and for every other tool */ artifact?: ArtifactRef }
   /** A subagent ran; its own log is `sub` and loads only when asked (Paseo #5820). */
-  | { kind: "subagent"; toolUseId: string; sub: string; description: string; model: string | null; /** what to show for `model`: a pinned worker's `<provider>#<pin>:<model>` as "Opus 5.5 · account"; absent on older hosts */ modelLabel?: string; /** the effort the worker ran at, when its record says so */ effort?: string; status: "running" | "done" | "failed" | "stopped"; steps: number }
+  | { kind: "subagent"; toolUseId: string; sub: string; description: string; model: string | null; /** what to show for `model`: a pinned worker's `<provider>#<pin>:<model>` as "Opus 5.5 · account"; absent on older hosts */ modelLabel?: string; /** the effort the worker ran at, when its record says so */ effort?: string; /** the worker was started in the background (its launch result said so, or the call asked for it): its end arrives as a notification in a later group, not at its call. Absent on older hosts and for synchronous workers. */ background?: true; status: "running" | "done" | "failed" | "stopped"; steps: number }
   | ({ kind: "permission"; id: string; tool: string; title: string; summary: string; input: Text; canAlways: boolean } & PermissionContent)
   | { kind: "background"; tasks: BackgroundTask[]; known: boolean }
   | { kind: "mode"; mode: PermissionMode }
