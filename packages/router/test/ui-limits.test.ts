@@ -102,8 +102,10 @@ function limitsUi(api: (path: string) => Promise<unknown>, status: Record<string
   // A poll draws the status at once and the gauges when the limits read lands; tests wait for both.
   return { ...ui, card, desktop, header, meters, refresh: async () => { await ui.refreshHealth(); await ui.settleLimits(); } };
 }
-// The render path reads the real clock, so the fixtures' resets must be ahead of it.
-const now = Date.now();
+// The render path reads the real clock, so the fixtures' resets must be ahead of it. Whole seconds,
+// as the wire states a reset: `quotaMeters` rounds one to the second, and a fixture half a second
+// short of the minute would then read a minute later there than in the text it is compared with.
+const now = Math.floor(Date.now() / 1000) * 1000;
 const five = { kind: "five_hour", used_percent: 23, window_minutes: 300, reset_at: (now + 255 * 60_000) / 1000 };
 const weekly = { kind: "seven_day", used_percent: 125, window_minutes: 10080, reset_at: (now + 86400_000) / 1000 };
 const current = { id: "current", account: 0, inUse: true, at: now, windows: [weekly, five] };
