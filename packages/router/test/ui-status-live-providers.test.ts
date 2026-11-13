@@ -91,7 +91,7 @@ function harness() {
     const providerDisplayName = (name, provider) => providerTitle(name, provider);
     const providerState = () => el("span", null);
     const providerLimits = () => null;
-    const quotaLine = () => null;
+    const quotaLine = () => null, renderQuotaViewToggle = () => {};
     const credentialLine = () => null;
     const limitsAccountRow = () => el("div", null);
     const chevronIcon = () => el("span", null);

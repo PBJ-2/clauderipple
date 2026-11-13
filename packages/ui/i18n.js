@@ -2,6 +2,7 @@
 
 const I18N = {
   ko: {
+    "quota.remainingLine": "{window} {percent}% 남음", "quota.showUsed": "사용량으로 보기", "quota.showRemaining": "남은 한도로 보기",
     "limits.active": "사용 중", "limits.stale": "오래된 정보",
     "limits.fiveHour": "5시간", "limits.weekly": "주간", "limits.resetUnknown": "초기화 시간을 알 수 없습니다",
     "limits.resetsIn": "{hours}시간 {minutes}분 후 초기화", "limits.resetsAt": "{time} 초기화",
@@ -255,6 +256,7 @@ const I18N = {
     "mod.modeRemoveConfirm": "‘{name}’ 모드를 삭제하시겠습니까?",
   },
   en: {
+    "quota.remainingLine": "{window} {percent}% remaining", "quota.showUsed": "Show usage", "quota.showRemaining": "Show remaining limits",
     "limits.active": "Active", "limits.stale": "Stale",
     "limits.fiveHour": "5-hour", "limits.weekly": "Weekly", "limits.resetUnknown": "Reset time unknown",
     "limits.resetsIn": "resets in {hours}h {minutes}m", "limits.resetsAt": "resets {time}",
@@ -508,6 +510,7 @@ const I18N = {
     "mod.modeRemoveConfirm": "Delete the mode “{name}”?",
   },
   zh: {
+    "quota.remainingLine": "{window} 剩余 {percent}%", "quota.showUsed": "显示用量", "quota.showRemaining": "显示剩余额度",
     "limits.active": "使用中", "limits.stale": "数据已过期",
     "limits.fiveHour": "5 小时", "limits.weekly": "每周", "limits.resetUnknown": "重置时间未知",
     "limits.resetsIn": "{hours} 小时 {minutes} 分钟后重置", "limits.resetsAt": "{time} 重置",
@@ -1064,6 +1067,7 @@ const I18N = {
     "mod.modeRemoveConfirm": "要删除模式“{name}”吗？",
   },
   ja: {
+    "quota.remainingLine": "{window} 残り {percent}%", "quota.showUsed": "使用量を表示", "quota.showRemaining": "残りの上限を表示",
     "limits.active": "使用中", "limits.stale": "古い情報",
     "limits.fiveHour": "5時間", "limits.weekly": "週間", "limits.resetUnknown": "リセット時刻は不明です",
     "limits.resetsIn": "{hours}時間{minutes}分後にリセット", "limits.resetsAt": "{time}にリセット",
@@ -1620,6 +1624,7 @@ const I18N = {
     "mod.modeRemoveConfirm": "モード「{name}」を削除しますか？",
   },
   es: {
+    "quota.remainingLine": "{window} {percent}% restante", "quota.showUsed": "Mostrar uso", "quota.showRemaining": "Mostrar límites restantes",
     "limits.active": "En uso", "limits.stale": "Datos desactualizados",
     "limits.fiveHour": "5 horas", "limits.weekly": "semanal", "limits.resetUnknown": "Hora de reinicio desconocida",
     "limits.resetsIn": "se reinicia en {hours} h {minutes} min", "limits.resetsAt": "se reinicia el {time}",
@@ -2176,6 +2181,7 @@ const I18N = {
     "mod.modeRemoveConfirm": "¿Quieres eliminar el modo «{name}»?",
   },
   pt: {
+    "quota.remainingLine": "{window} {percent}% restante", "quota.showUsed": "Mostrar uso", "quota.showRemaining": "Mostrar limites restantes",
     "limits.active": "Em uso", "limits.stale": "Dados desatualizados",
     "limits.fiveHour": "5 horas", "limits.weekly": "semanal", "limits.resetUnknown": "Horário de redefinição desconhecido",
     "limits.resetsIn": "redefine em {hours} h {minutes} min", "limits.resetsAt": "redefine em {time}",
