@@ -1083,6 +1083,10 @@ a.cell { color: inherit; text-decoration: none; }
 .rung-actions { display: inline-flex; gap: 4px; margin-left: 6px; vertical-align: middle; }
 .rung-item small { display: block; }
 .mod-card .rung-item select.rung-model { width: 260px; max-width: 100%; }
+/* A rung's pick is two menus on one line: the model, then the effort that model takes. */
+.rung-pick { display: inline-flex; gap: 6px; max-width: 100%; vertical-align: middle; }
+.mod-card .rung-item .rung-pick select.rung-model { width: 230px; min-width: 0; flex: 0 1 auto; }
+.mod-card .rung-item select.rung-effort { width: 104px; flex: 0 0 auto; }
 .mode-until { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; max-width: 100%; }
 .mode-until .text-field { width: auto; max-width: 100%; }
 .mode-until .segmented { display: flex; flex-wrap: wrap; gap: 4px; max-width: 100%; }
@@ -1468,6 +1472,9 @@ a.cell { color: inherit; text-decoration: none; }
   .mod-card .cell-value select { width: 100%; }
   .mod-card .cell-value select.narrow { width: 140px; }
   .mod-card .cell-value select.rung-model { width: 100%; }
+  .rung-pick { display: flex; }
+  .mod-card .cell-value .rung-pick select.rung-model { flex: 1 1 auto; width: auto; }
+  .mod-card .cell-value .rung-pick select.rung-effort { width: 104px; }
   .mac-state { flex-wrap: wrap; }
   .mac-side { flex: 1 1 100%; padding-left: 24px; text-align: left; }
   .mac-allow, .mac-setup-note, .mac-setup .form-field, .mac-setup-actions, .mac-setup .conn-note { margin-left: 0; padding-left: 0; }

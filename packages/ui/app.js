@@ -5800,7 +5800,7 @@ function modTwoLevelRungs(rungs) {
   if (heavy) { out.hard = clone(heavy); out.plan = clone(heavy); }
   return out;
 }
-/** One menu of `model · effort` for the ticked models, effort limited to what each model takes; the session's model too. */
+/** Two menus side by side: the ticked models (one line per model and account; the session's model too), and the effort levels that model takes. */
 function modPickSelect(key, step, shown, label, onPick) {
   const picked = step ? modTargetValue(step.target) : "";
   // An unlisted pinned worker (account 1's, see modListed) is offered only where it is the pick already.
@@ -5811,11 +5811,11 @@ function modPickSelect(key, step, shown, label, onPick) {
     if (!named.has(provider)) named.set(provider, modAccountNames(provider));
     return named.get(provider).get(number) || t("mod.accountTab", { n: number });
   };
-  const entries = (list) => list.flatMap((choice) => {
+  const entries = (list) => list.map((choice) => {
     // A closed menu shows the option alone, not its group: a pinned worker names its account there.
     const number = modListed(choice) ? modAccountOf(choice) : null;
     const name = modListed(choice) ? (number && number > 1 ? `${choice.label} · ${accountName(choice.provider, number)}` : choice.label) : modChoiceName(choice);
-    return modLadderOf(choice).map((effort) => ({ value: `${choice.value}|${effort}`, label: `${name} · ${modEffortName(effort)}${choice.usable ? "" : t("mod.unavailableNow")}` }));
+    return { value: choice.value, label: `${name}${choice.usable ? "" : t("mod.unavailableNow")}` };
   });
   // A provider with account tabs gets one group per account, named as its tab is.
   const all = modGroups(modTickable());
@@ -5825,18 +5825,20 @@ function modPickSelect(key, step, shown, label, onPick) {
     if (!tabs) return [{ group: modGroupLabel(group), items: entries(group.items) }];
     return tabs.map((tab) => ({ group: `${modGroupLabel(group)} · ${accountName(whole.items[0].provider, tab.number)}`, items: entries(group.items.filter((choice) => modAccountOf(choice) === tab.number)) }));
   });
-  const current = step ? `${picked}|${shown}` : "";
   const items = [...(step ? [] : [{ value: "", label: "—" }]), ...groups];
   // A pick that is not on offer now (its model unticked, or gone) keeps showing rather than a wrong neighbour.
-  if (step && !groups.some((group) => group.items.some((item) => item.value === current))) {
+  if (step && !groups.some((group) => group.items.some((item) => item.value === picked))) {
     const choice = modChoiceOf(step.target);
-    items.unshift({ value: current, label: `${choice ? modChoiceName(choice) : picked} · ${modEffortName(shown)}${t("mod.unavailable")}` });
+    items.unshift({ value: picked, label: `${choice ? modChoiceName(choice) : picked}${t("mod.unavailable")}` });
   }
-  return modSelect(key, items, current, label, (value) => {
+  const model = modSelect(key, items, picked, label, (value) => {
     if (!value) return;
-    const bar = value.lastIndexOf("|");
-    onPick(modTargetOf(value.slice(0, bar)), value.slice(bar + 1));
+    const target = modTargetOf(value);
+    const ladder = modLadderOf(modChoiceOf(target));
+    onPick(target, modNearest(shown, ladder));
   }, "rung-model");
+  const effort = step ? modSelect(`${key}:effort`, modLadderOf(modChoiceOf(step.target)).map((level) => ({ value: level, label: modEffortName(level) })), shown, `${label} ${t("mod.effort")}`, (value) => onPick(step.target, value), "rung-effort") : null;
+  return el("div", { class: "rung-pick" }, [model, effort]);
 }
 /** @typedef {"general" | "ui" | "backend" | "review"} WorkerRuleKey */
 /** Domain selection is local UI state, independently retained for each saved worker set.
