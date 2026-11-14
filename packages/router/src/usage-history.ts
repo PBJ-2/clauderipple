@@ -18,7 +18,7 @@ export type SummaryBucket = {
   avgMs: number;
   /** What these requests cost at API-price equivalents (see prices.ts), in USD, full precision. */
   costUsd: number;
-  /** Requests that had tokens but no price (the model is in neither the Claude table nor the AA dataset). */
+  /** Requests that had tokens but no price (the model is in none of the Claude table, the AA dataset and the provider-page table). */
   unpricedRequests: number;
   /** Requests priced from an estimate (see `priceOf`), not from an official figure. */
   estimatedRequests: number;

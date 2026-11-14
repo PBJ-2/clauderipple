@@ -2,7 +2,7 @@
 // Code subscription pays a plan, and a provider's own price list may differ from the figures here.
 // Every price is USD per million tokens (MTok).
 import fs from "node:fs";
-import { normalizeAaBase, parseScoreDataset, type ScoreDataset } from "./model-scores.ts";
+import { aaBaseIndex, normalizeAaBase, parseScoreDataset, type ScoreDataset } from "./model-scores.ts";
 
 /**
  * Which rates are official is kept per component. A request is estimated only when it uses a
@@ -60,9 +60,21 @@ const LONG_PROMPT_TOKENS = 100_000;
  * - MiniMax: https://platform.minimax.io/docs/guides/pricing-paygo
  * - Z.AI: https://docs.z.ai/guides/overview/pricing
  * - Google: https://aistudio.google.com/docs/pricing (redirected from ai.google.dev)
+ * - OpenCode Go: https://opencode.ai/docs/go/ ("Usage limits" table), read 2026-11-14 in a browser
  *
  * Left out on purpose: Gemini 3.8/3.6 Flash (price changes 2027-01-01), Gemini 2.5 (deprecated),
- * DeepSeek (the cache price depends on the hour, peak or off-peak), and Kimi (its page shows no cache price).
+ * and Gemini 4 Argon (OpenCode Go's table halves it through 2026-11-30, and Google's own page was
+ * not read for it). Kimi's own page shows no cache price: its entries are OpenCode Go's.
+ *
+ * OpenCode Go's rows agree with the provider pages above wherever both give a figure (GLM, MiniMax,
+ * Grok 4.7, GPT Luna), so its rows stand in for the models whose own page was not read. An entry
+ * is found by model id alone, so it prices that id on any provider that serves it.
+ *
+ * DeepSeek's price depends on the hour, peak or off-peak (half). It was left out for that until
+ * 2026-11-14, when its requests were first priced at all: the fallback read 34M cached tokens of a
+ * month at the input price, $11.28 where the peak rate gives $1.29. Its entries are the Peak row,
+ * the rate AA's input and output prices already are (0.30 / 1.20, 1.32 / 3.96), so an off-peak
+ * request is priced at up to twice what it cost. No record's hour is priced.
  */
 type CacheTier = { from: number; read: number };
 const OFFICIAL_CACHE_READ: Record<string, CacheTier[]> = {
@@ -111,22 +123,101 @@ const OFFICIAL_CACHE_READ: Record<string, CacheTier[]> = {
   "gemini-3.5-flash-lite": [{ from: 0, read: 0.03 }],
   "gemini-3.1-flash-lite": [{ from: 0, read: 0.025 }],
   "gemini-3.1-pro-preview": [{ from: 0, read: 0.20 }, { from: 200_001, read: 0.40 }],
+  // OpenCode Go: the Contributor variants' cached read column. Cache write not shown.
+  "muse-spark-1.3-contributor": [{ from: 0, read: 0.002 }],
+  "muse-spark-1.2-contributor": [{ from: 0, read: 0.002 }],
+  // DeepSeek, from OpenCode Go's table: the Peak rows (see above). Cache write not shown.
+  "deepseek-v4.1-flash": [{ from: 0, read: 0.006 }],
+  "deepseek-v4-pro": [{ from: 0, read: 0.044 }],
+  // OpenCode Go's table, cached read column (2026-11-14), for the rest of its models.
+  "kimi-k3.1-pro": [{ from: 0, read: 0.20 }],
+  "kimi-k3": [{ from: 0, read: 0.30 }],
+  "kimi-k2.7-code": [{ from: 0, read: 0.19 }],
+  "longcat-2.0": [{ from: 0, read: 0.006 }],
+  "step-5-preview": [{ from: 0, read: 0.10 }],
+  "mimo-v2.6-flash": [{ from: 0, read: 0.0028 }],
+  "mimo-v2.6-pro": [{ from: 0, read: 0.003625 }],
+  "mimo-v2.5": [{ from: 0, read: 0.0028 }],
+  "mimo-v2.5-pro": [{ from: 0, read: 0.003625 }],
+  "qwen3.8-max": [{ from: 0, read: 0.25 }],
+  "qwen3.8-flash": [{ from: 0, read: 0.016 }],
+  // The page's "≤ 256K tokens" and "> 256K tokens" rows.
+  "qwen3.7-plus": [{ from: 0, read: 0.04 }, { from: 256_001, read: 0.12 }],
+  "hy4": [{ from: 0, read: 0.042 }],
+  "hy4-preview": [{ from: 0, read: 0.042 }],
+  "hy3": [{ from: 0, read: 0.035 }],
+  // Free for a limited time: the page's row is "Free" in every column.
+  "beam-free": [{ from: 0, read: 0 }],
+  "iceman-contributor-free": [{ from: 0, read: 0 }],
+  "longcat-2.5-free": [{ from: 0, read: 0 }],
 };
 // Keys are normalised the same way AA records are, so `gpt-6.1-sol@high` and `gpt-6-1-sol` both match.
 const CACHE_TABLE = new Map(Object.entries(OFFICIAL_CACHE_READ).map(([model, tiers]) => [normalizeAaBase(model), tiers] as const));
 
-/** AA price per MTok, keyed the way `buildModelScores` keys them (`variant.base`). Empty until a dataset loads. */
+/**
+ * A provider page's input and output price for a model the AA dataset has no record of. AA wins
+ * where it has one: this fills a gap, it does not correct AA.
+ *
+ * OpenCode Go's Contributor variants (https://opencode.ai/docs/go/, "Usage limits" table, read
+ * 2026-11-14) are a provider's own offer, not a model AA lists: the page sells them at a heavy
+ * discount in exchange for training on the prompts. AA's `muse-spark-1-3` ($1.25 in, $4.25 out) is
+ * the plain model, so reading the variant as that base would price it 12 to 21 times too high.
+ *
+ * The other entries are the models of that table AA had no record of on 2026-11-14 (its dataset
+ * keeps a year of measured models). A tier applies to a prompt of at least `from` tokens, as a
+ * cache tier does. A free model is priced at zero: it costs nothing, which is not "no known price".
+ */
+type PageTier = { from: number; priceIn: number; priceOut: number };
+const PAGE_PRICES: Record<string, PageTier[]> = {
+  "muse-spark-1.3-contributor": [{ from: 0, priceIn: 0.10, priceOut: 0.20 }],
+  "muse-spark-1.2-contributor": [{ from: 0, priceIn: 0.10, priceOut: 0.20 }],
+  "glm-5.2": [{ from: 0, priceIn: 1.40, priceOut: 4.40 }],
+  "kimi-k2.7-code": [{ from: 0, priceIn: 0.95, priceOut: 4.00 }],
+  "longcat-2.0": [{ from: 0, priceIn: 0.30, priceOut: 1.20 }],
+  "step-5-preview": [{ from: 0, priceIn: 1.00, priceOut: 2.70 }],
+  "mimo-v2.5": [{ from: 0, priceIn: 0.14, priceOut: 0.28 }],
+  "mimo-v2.5-pro": [{ from: 0, priceIn: 0.435, priceOut: 0.87 }],
+  "qwen3.8-flash": [{ from: 0, priceIn: 0.15, priceOut: 0.47 }],
+  // The page's "≤ 256K tokens" and "> 256K tokens" rows.
+  "qwen3.7-plus": [{ from: 0, priceIn: 0.40, priceOut: 1.60 }, { from: 256_001, priceIn: 1.20, priceOut: 4.80 }],
+  "hy4": [{ from: 0, priceIn: 0.834, priceOut: 2.501 }],
+  "hy4-preview": [{ from: 0, priceIn: 0.834, priceOut: 2.501 }],
+  "hy3": [{ from: 0, priceIn: 0.14, priceOut: 0.58 }],
+  // Free for a limited time.
+  "beam-free": [{ from: 0, priceIn: 0, priceOut: 0 }],
+  "iceman-contributor-free": [{ from: 0, priceIn: 0, priceOut: 0 }],
+  "longcat-2.5-free": [{ from: 0, priceIn: 0, priceOut: 0 }],
+};
+const PAGE_TABLE = new Map(Object.entries(PAGE_PRICES).map(([model, tiers]) => [normalizeAaBase(model), tiers] as const));
+
+function pagePriceOf(key: string, promptTokens: number): PageTier | null {
+  const tiers = PAGE_TABLE.get(key);
+  if (!tiers) return null;
+  let price = tiers[0]!;
+  for (const tier of tiers) if (promptTokens >= tier.from) price = tier;
+  return price;
+}
+
+/** AA price per MTok, under every normalised id a base answers to (`aaBaseIndex`). Empty until a dataset loads. */
 let aaPrices = new Map<string, { priceIn: number; priceOut: number }>();
 
 /**
  * Replace the AA prices with those of a dataset (null clears them). The first variant with both prices
- * wins for a base, the same way the model table reads a base's first variant.
+ * wins for a base, the same way the model table reads a base's first variant. A base is found under
+ * the ids the score table finds it under, so a release-stamped base prices the undated id too.
  */
 export function setAaPriceDataset(dataset: ScoreDataset | null): void {
+  const models = dataset?.models ?? [];
+  const byBase = new Map<string, { priceIn: number; priceOut: number }>();
+  for (const model of models) {
+    if (byBase.has(model.base) || model.priceIn === null || model.priceOut === null) continue;
+    byBase.set(model.base, { priceIn: model.priceIn, priceOut: model.priceOut });
+  }
+  // Indexed over every base, priced or not: an unpriced base keeps its own name from a stamped sibling.
   const next = new Map<string, { priceIn: number; priceOut: number }>();
-  for (const model of dataset?.models ?? []) {
-    if (next.has(model.base) || model.priceIn === null || model.priceOut === null) continue;
-    next.set(model.base, { priceIn: model.priceIn, priceOut: model.priceOut });
+  for (const [id, base] of aaBaseIndex(models.map(model => model.base))) {
+    const price = byBase.get(base);
+    if (price) next.set(id, price);
   }
   aaPrices = next;
 }
@@ -134,7 +225,7 @@ export function setAaPriceDataset(dataset: ScoreDataset | null): void {
 /**
  * Load the AA dataset from the disk cache the score catalog keeps (`aa-models.json` in the router's home).
  * Called once at startup, so a request made before the scores page is ever opened is still priced.
- * A missing or unreadable cache leaves the table empty and every non-Claude request unpriced.
+ * A missing or unreadable cache leaves the table empty and every request AA would have priced unpriced.
  */
 export function loadAaPricesFrom(file: string): void {
   try {
@@ -165,20 +256,23 @@ function cacheReadOf(model: string, promptTokens: number): number | null {
 
 /**
  * Models whose provider's page says a cache write is billed as normal input, so the write is official
- * too. Empty on purpose: OpenAI's page prices cache writes at a model-dependent rate, Google's implicit
- * caching page does not say how writes are billed, and the xAI page could not be read (404), while
- * MiniMax and Z.AI show no cache-write price. Add a normalised base here only with a page that says so.
+ * too. OpenCode Go's table gives Kimi K3 and K3.1 Pro a cached write price equal to their input price
+ * (3.00, 2.00; read 2026-11-14). No other model is here: OpenAI's page prices cache writes at a
+ * model-dependent rate, Google's implicit caching page does not say how writes are billed, and the
+ * xAI page could not be read (404), while MiniMax and Z.AI show no cache-write price. OpenCode Go's
+ * Qwen rows give a write price above the input price, which no field here carries, so a Qwen cache
+ * write stays an estimate. Add a normalised base here only with a page that says so.
  */
-const WRITE_BILLED_AS_INPUT = new Set<string>();
+const WRITE_BILLED_AS_INPUT = new Set<string>(["kimi-k3", "kimi-k3-1-pro"]);
 
 /**
  * The USD per MTok price of one request, or null when the model is unpriced.
  *
  * Claude models (provider `anthropic`, or a model id whose base is one of the table's Claude ids) use
- * the official table. Every other model takes input and output from the AA dataset. Its cache-read
- * price is the provider's page figure where the table has one (`cacheReadOfficial`), otherwise the AA
- * input price. Its cache-write price is the AA input price, official only for a model in
- * WRITE_BILLED_AS_INPUT.
+ * the official table. Every other model takes input and output from the AA dataset, or from
+ * PAGE_PRICES when AA has no record of it. Its cache-read price is the provider's page figure where
+ * the table has one (`cacheReadOfficial`), otherwise its input price. Its cache-write price is its
+ * input price, official only for a model in WRITE_BILLED_AS_INPUT.
  *
  * `servedTier` is accepted so a tier-specific price can be added once a record carries one; no
  * current field says a request ran in a fast or priority tier, so it does not change the price.
@@ -189,13 +283,13 @@ export function priceOf(provider: string, model: string, promptTokens: number, s
   void servedTier;
   const claude = claudePrice(model, promptTokens);
   if (claude) return claude;
-  const aa = aaPrices.get(normalizeAaBase(model));
-  if (!aa) return null;
   const key = normalizeAaBase(model);
+  const listed = aaPrices.get(key) ?? pagePriceOf(key, promptTokens);
+  if (!listed) return null;
   const read = cacheReadOf(model, promptTokens);
   return {
-    input: aa.priceIn, output: aa.priceOut,
-    cacheRead: read ?? aa.priceIn, cacheWrite: aa.priceIn,
+    input: listed.priceIn, output: listed.priceOut,
+    cacheRead: read ?? listed.priceIn, cacheWrite: listed.priceIn,
     cacheReadOfficial: read !== null, cacheWriteOfficial: WRITE_BILLED_AS_INPUT.has(key),
   };
 }

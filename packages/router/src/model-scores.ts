@@ -26,6 +26,37 @@ export function normalizeAaBase(model: string): string {
   return model.toLowerCase().split("/").at(-1)!.replace(/@[a-z]+$/, "").replace(/-\d{8}$/, "").replace(/[._]/g, "-");
 }
 
+/** A release stamp AA ends a base with when it files one dated snapshot of a model: `-1017` (MMDD), `-20261017`. */
+const RELEASE_STAMP = /-(?:\d{8}|(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01]))$/;
+
+/**
+ * Every normalised model id the dataset's bases answer to, against the base that answers.
+ *
+ * A base answers to its own name. A base that ends in a release stamp also answers to the name
+ * without it, because a provider serves the model under the undated id (2026-11-14: AA files
+ * `deepseek-v4-1-flash-1017` where it filed `deepseek-v4-1-flash` a month before, and OpenCode Go
+ * serves `deepseek-v4.1-flash`, so the id had neither a score nor a price).
+ *
+ * Narrow on purpose, as `catalogueWindow` is. A base's own name always wins over a stamped base's
+ * undated name, and the undated name is taken only when exactly one stamped base has it: two
+ * snapshots of one name do not say which of them the provider serves, so neither answers.
+ */
+export function aaBaseIndex(bases: Iterable<string>): Map<string, string> {
+  const own = new Set(bases);
+  const index = new Map<string, string>();
+  const contested = new Set<string>();
+  for (const base of own) {
+    index.set(base, base);
+    const undated = base.replace(RELEASE_STAMP, "");
+    if (undated === base || own.has(undated) || contested.has(undated)) continue;
+    if (index.has(undated)) {
+      index.delete(undated);
+      contested.add(undated);
+    } else index.set(undated, base);
+  }
+  return index;
+}
+
 /** AA minimal/non-reasoning have no equivalent in the picker's five-level ladder. Do not mislabel. */
 export function mapAaEffort(effort: Effort): RouterEffort | null {
   return effort === "minimal" || effort === "non-reasoning" ? null : effort;
@@ -159,8 +190,11 @@ export function buildModelScores(cfg: Config, dataset: ScoreDataset | null): Mod
     group.push(variant);
     groups.set(variant.base, group);
   }
+  const answers = aaBaseIndex(groups.keys());
   const models = [...targets.values()].sort((a, b) => a.model.localeCompare(b.model) || a.provider.localeCompare(b.provider)).map(target => {
-    const aaBase = normalizeAaBase(target.model);
+    // The base that answers to the id, so a matched row names the AA record it shows; an unmatched one keeps the id.
+    const id = normalizeAaBase(target.model);
+    const aaBase = answers.get(id) ?? id;
     const found = groups.get(aaBase) ?? [];
     return {
       ...target, aaBase,

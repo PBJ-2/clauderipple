@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DEFAULTS, type Config } from "../src/config.ts";
-import { AA_DATA_URL, ModelScoreCatalog, buildModelScores, mapAaEffort, normalizeAaBase, parseScoreDataset } from "../src/model-scores.ts";
+import { AA_DATA_URL, ModelScoreCatalog, aaBaseIndex, buildModelScores, mapAaEffort, normalizeAaBase, parseScoreDataset } from "../src/model-scores.ts";
 import { buildDataset, selectVariants, type ApiRow } from "../../../scripts/aa-dataset-lib.mjs";
 
 const NOW = Date.now();
@@ -28,6 +28,39 @@ export function scoreConfig(): Config {
 
 test("AA normalization handles decimal versions, namespaces, Claude snapshots and effort tags", () => {
   for (const [model, base] of [["gpt-6.1-sol", "gpt-6-1-sol"], ["claude-opus-5-5", "claude-opus-5-5"], ["deepseek-v4.1-flash", "deepseek-v4-1-flash"], ["anthropic/claude-opus-5-5-20260921@high", "claude-opus-5-5"], ["z-ai/GLM_5.3", "glm-5-3"]]) assert.equal(normalizeAaBase(model!), base);
+});
+
+test("a release-stamped AA base answers to its undated name only when nothing else claims that name", () => {
+  const answers = (bases: string[]): Record<string, string> => Object.fromEntries(aaBaseIndex(bases));
+  // AA files the dated snapshot; a provider serves the undated id.
+  assert.deepEqual(answers(["deepseek-v4-1-flash-1017", "kimi-k3"]), { "deepseek-v4-1-flash-1017": "deepseek-v4-1-flash-1017", "deepseek-v4-1-flash": "deepseek-v4-1-flash-1017", "kimi-k3": "kimi-k3" });
+  assert.deepEqual(answers(["muse-20261017"]), { "muse-20261017": "muse-20261017", muse: "muse-20261017" });
+  // A base's own name wins, whichever comes first in the dataset.
+  for (const bases of [["a-1017", "a"], ["a", "a-1017"]]) assert.deepEqual(answers(bases), { "a-1017": "a-1017", a: "a" });
+  // Two or three snapshots of one name: which one a provider serves is unknown, so none answers to it.
+  assert.deepEqual(answers(["a-1017", "a-1105"]), { "a-1017": "a-1017", "a-1105": "a-1105" });
+  assert.deepEqual(answers(["a-1017", "a-1105", "a-1201"]), { "a-1017": "a-1017", "a-1105": "a-1105", "a-1201": "a-1201" });
+  // A trailing number that is not a month and day is part of the name: no model is called `nova` here.
+  for (const base of ["nova-8000", "qwen3-8-27b", "gpt-5-4", "ling-1332"]) assert.deepEqual(answers([base]), { [base]: base });
+});
+
+test("AA projection matches an undated id to the release-stamped base AA files the model under", () => {
+  const stamped = parseScoreDataset({
+    source: "https://artificialanalysis.ai", attribution: dataset.attribution, generatedAt: dataset.generatedAt,
+    models: [
+      { slug: "deepseek-v4-1-flash-1017", base: "deepseek-v4-1-flash-1017", effort: "max", intelligence: 32.6, costPerTask: 0.6021, priceIn: 0.3, priceOut: 1.2 },
+      { slug: "deepseek-v4-1-flash-1017-high", base: "deepseek-v4-1-flash-1017", effort: "high", intelligence: 30.1, costPerTask: 0.41, priceIn: 0.3, priceOut: 1.2 },
+    ],
+  });
+  const result = buildModelScores(scoreConfig(), stamped);
+  const flash = result.models.find(m => m.model === "deepseek-v4.1-flash")!;
+  assert.equal(flash.matched, true);
+  // A matched row names the AA record it shows; an unmatched one keeps its own normalised id.
+  assert.equal(flash.aaBase, "deepseek-v4-1-flash-1017");
+  assert.deepEqual(flash.variants, [{ effort: "max", intelligence: 32.6, costPerTask: 0.6021 }, { effort: "high", intelligence: 30.1, costPerTask: 0.41 }]);
+  const unknown = result.models.find(m => m.model === "unknown-model")!;
+  assert.equal(unknown.matched, false);
+  assert.equal(unknown.aaBase, "unknown-model");
 });
 
 test("AA effort mapping preserves five picker levels and never fabricates low from non-reasoning/minimal", () => {

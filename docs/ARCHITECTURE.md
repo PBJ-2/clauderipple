@@ -1270,15 +1270,35 @@ its prompt tokens (`input + cached + cacheWrite`) and output: a Claude model (pr
 `anthropic`, or a `claude-*` id with an optional date, account or `@effort` suffix) takes the
 official table in `prices.ts`, where Haiku 5.5 switches to its long-prompt rate above 100K
 prompt tokens. Every other model takes input and output from the Artificial Analysis dataset
-(`priceIn`/`priceOut`, matched by `normalizeAaBase` as the score table is). Its cache-read price
-is the provider's own pricing page where the page gives one (`cacheReadOfficial`), and otherwise
-the AA input price. Its cache-write price is the AA input price and is official (`cacheWriteOfficial`)
-only where the provider's page says writes are billed as normal input. None does so far: OpenAI's
-page prices cache writes at a model-dependent rate, Google's implicit-caching page does not say how
-writes are billed, the xAI page could not be read, and MiniMax and Z.AI show no cache-write price.
-So a non-Claude request is `estimated` only when it had cache reads without an official read price,
-or cache writes at all. A request with no cache tokens priced from AA input and output alone is not
-estimated.
+(`priceIn`/`priceOut`, matched by `normalizeAaBase` as the score table is). Both tables find a
+base through `aaBaseIndex`: a base answers to its own name, and a base ending in a release stamp
+(`-1017`, `-20261017`) also answers to the undated name when no base has that name and no second
+stamped base shares it. Measured 2026-11-14: AA files `deepseek-v4-1-flash-1017` (it filed
+`deepseek-v4-1-flash` a month before) while OpenCode Go serves `deepseek-v4.1-flash`, so 734
+requests of 30 days had no price.
+
+A model AA has no record of takes input and output from `PAGE_PRICES`, a provider page's own
+figures; AA wins where it has a record. The entries are OpenCode Go's table
+(https://opencode.ai/docs/go/, "Usage limits", read 2026-11-14). Its `muse-spark-1.3-contributor`
+is $0.10 in, $0.20 out, a discounted offer AA does not list: AA's `muse-spark-1-3` ($1.25, $4.25)
+is the plain model and is not its price. The table also prices the other models AA lacked that
+day (GLM-5.2, Kimi K2.7 Code, LongCat-2.0, Step 5 Preview, MiMo-V2.5 and -Pro, Qwen3.8 Flash,
+Qwen3.7 Plus with its 256K tier, Hy4, Hy4 preview, Hy3), and its three free models at zero: a
+free request costs nothing, which is not `unpricedRequests`.
+
+A model's cache-read price is a provider page's figure where `OFFICIAL_CACHE_READ` has one
+(`cacheReadOfficial`), and otherwise its input price. An entry is found by model id alone, so
+OpenCode Go's rows, which agree with the provider pages wherever both give a figure, price that
+id on any provider. DeepSeek's entries are the page's Peak row, the rate AA's input and output
+already are; off-peak hours cost half and no record's hour is priced. Gemini 4 Argon has no
+entry: the table halves it through 2026-11-30. The cache-write price is the input price and is
+official (`cacheWriteOfficial`) only where a page prices a write at the input price: Kimi K3 and
+K3.1 Pro on OpenCode Go's table. No other page does: OpenAI's page prices cache writes at a
+model-dependent rate, Google's implicit-caching page does not say how writes are billed, the xAI
+page could not be read, MiniMax and Z.AI show no cache-write price, and OpenCode Go's Qwen rows
+price a write above input. So a non-Claude request is `estimated` only when it had cache reads
+without an official read price, or cache writes without an official write price. A request with
+no cache tokens priced from input and output alone is not estimated.
 
 An image (`kind: "image"`, target `image`) is billed per image, not per token: it costs nothing and
 is neither unpriced nor estimated. A `count_tokens` call and a record without tokens cost nothing
