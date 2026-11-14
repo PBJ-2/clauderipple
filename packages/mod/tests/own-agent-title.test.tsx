@@ -19,7 +19,9 @@ const definition = (model: string | undefined, eol = '\n') =>
 // The engine hands a path over in the host's form (backslashes and a drive on Windows).
 const posix = (path: string) => path.replace(/\\/g, '/').replace(/^[A-Za-z]:/, '')
 
-function boundaries(on: On, files: Record<string, string>, cwd?: string) {
+// `root` is the folder the session started in, where Claude Code read its agents; `cwd` is where
+// it is now, after any `cd`.
+function boundaries(on: On, files: Record<string, string>, session: { root?: string; cwd?: string } = {}) {
   mock.clock(on, { now: 1000000 })
   mock.env(on, { HOME: '/home/test' })
   on('state.get', { plugin: 'ripple', key: 'settings' }, () => ({ value: { value: normalizeSettings({ agentAuto: 'auto' }), version: 0 } }))
@@ -27,7 +29,8 @@ function boundaries(on: On, files: Record<string, string>, cwd?: string) {
   on('ui.toast', () => ({ value: undefined }))
   on('agent.register', ($, e) => ({ value: { agent: 'ripple:' + e.name } }))
   on('session.messages', () => ({ value: [] }))
-  if (cwd) on('session.cwd', () => ({ value: cwd }))
+  if (session.root) on('session.root', () => ({ value: session.root }))
+  if (session.cwd) on('session.cwd', () => ({ value: session.cwd }))
   on('fs.read', ($, e) => ({ value: files[posix(e.path)] ?? (e.path.endsWith('generated-agents.json') ? JSON.stringify({ agents: [] }) : '{}') }))
   on('fs.exists', ($, e) => ({ value: posix(e.path) in files }))
   on('fs.write', () => ({ value: undefined }))
@@ -64,13 +67,37 @@ test('a definition with CRLF line ends is read', async ($, on) => {
 })
 
 test("the project's definition decides before the user's", async ($, on) => {
-  const { sent } = boundaries(on, { [USER]: definition('gpt-6.1-sol@high'), [PROJECT]: definition('gpt-6-astra@medium') }, '/work/app')
+  const { sent } = boundaries(on, { [USER]: definition('gpt-6.1-sol@high'), [PROJECT]: definition('gpt-6-astra@medium') }, { root: '/work/app' })
   await $.agent.spawn(SPAWN)
   expect(sent[0]?.description).toBe('Astra·medium · Port the parser')
 })
 
 test("a project definition that inherits is titled with the parent's model, not the user file's", async ($, on) => {
-  const { sent } = boundaries(on, { [USER]: definition('gpt-6.1-sol@high'), [PROJECT]: definition('inherit') }, '/work/app')
+  const { sent } = boundaries(on, { [USER]: definition('gpt-6.1-sol@high'), [PROJECT]: definition('inherit') }, { root: '/work/app' })
+  await $.agent.spawn(SPAWN)
+  expect(sent[0]?.description).toBe('Opus5.5 · Port the parser')
+})
+
+// The session started in ~/bridge, whose .claude/agents holds astra-worker, then moved into a
+// repository below it with `cd`. Claude Code still ran the agent from the start folder's
+// definition; the title named the parent's Mythos 5.2 while it ran on gpt-6-astra (2026-11-14).
+test("a session that moved with cd still titles a project agent from the folder it started in", async ($, on) => {
+  const { sent } = boundaries(on, {
+    '/home/test/bridge/.claude/agents/gpt-worker.md': definition('gpt-6-astra@high'),
+    '/home/test/bridge/repo/.git': '',
+  }, { root: '/home/test/bridge', cwd: '/home/test/bridge/repo' })
+  await $.agent.spawn({ ...SPAWN, description: 'Astra·high · Port the parser' })
+  expect(sent[0]?.description).toBe('Astra·high · Port the parser')
+})
+
+test("a project agent in a folder above the start folder is found, up to the repository's root", async ($, on) => {
+  const { sent } = boundaries(on, { [PROJECT]: definition('gpt-6-astra@medium'), '/work/app/.git': '' }, { root: '/work/app/packages/core' })
+  await $.agent.spawn(SPAWN)
+  expect(sent[0]?.description).toBe('Astra·medium · Port the parser')
+})
+
+test("a definition above the repository's root is not the project's", async ($, on) => {
+  const { sent } = boundaries(on, { '/work/.claude/agents/gpt-worker.md': definition('gpt-6-astra@medium'), '/work/app/.git': '' }, { root: '/work/app' })
   await $.agent.spawn(SPAWN)
   expect(sent[0]?.description).toBe('Opus5.5 · Port the parser')
 })
