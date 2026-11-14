@@ -11,6 +11,16 @@ const LOCK_STALE_MS = 30_000;
 const LOCK_WAIT_MS = 100;
 const LOCK_TIMEOUT_MS = 2_000;
 
+/**
+ * Whether taking the lock failed only because another writer holds it or is letting it go. On
+ * Windows a lock directory another process is removing refuses a new `mkdir` with EPERM (or EACCES,
+ * EBUSY) until the removal completes, so eight processes adding accounts at once lost one to EPERM
+ * on Windows CI (2026-11-12). There it is waited out like ELOCKED; elsewhere it is a real refusal.
+ */
+export function lockBusy(code: string | undefined, platform: NodeJS.Platform = process.platform): boolean {
+  return code === "ELOCKED" || (platform === "win32" && (code === "EPERM" || code === "EACCES" || code === "EBUSY"));
+}
+
 /** Run `mutate` while holding the lock for `file`. Waits up to two seconds for another writer. */
 export function withFileLock<T>(file: string, mutate: () => T): T {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -21,7 +31,7 @@ export function withFileLock<T>(file: string, mutate: () => T): T {
       release = lockSync(file, { realpath: false, stale: LOCK_STALE_MS, update: 10_000 });
       break;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ELOCKED" || Date.now() >= deadline) throw error;
+      if (!lockBusy((error as NodeJS.ErrnoException).code) || Date.now() >= deadline) throw error;
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_WAIT_MS);
     }
   }

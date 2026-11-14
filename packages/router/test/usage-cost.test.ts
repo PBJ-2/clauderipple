@@ -171,6 +171,45 @@ test("a stored hour flushed while its model was unpriced is priced at read time,
   });
 });
 
+test("OpenCode Go's models are priced: the undated DeepSeek id from AA's stamped base, the Contributor variant from the provider page", () => {
+  withDir((dir) => {
+    // What AA files today: the dated DeepSeek snapshot, and the plain Muse Spark model only.
+    setAaPriceDataset(aa([{ base: "deepseek-v4-1-flash-1017", priceIn: 0.3, priceOut: 1.2 }, { base: "muse-spark-1-3", priceIn: 1.25, priceOut: 4.25 }]));
+    const hour = Math.floor(Date.parse("2026-10-20T09:00:00.000Z") / HOUR);
+    // An hour flushed while the Contributor variant had no price, as the live history held six of them.
+    fs.writeFileSync(path.join(dir, "usage-hourly.jsonl"), JSON.stringify({ h: hour, p: "opencode-go", m: "muse-spark-1.3-contributor", count: 6, ok: 6, failed: 0, input: 1_000_000, cached: 0, cacheWrite: 0, output: 100_000, ms: 600, cost: 0, unpriced: 6, estimated: 0 }) + "\n");
+    const log = new RequestLog(path.join(dir, "requests.jsonl"));
+    // DeepSeek: 1,000 x 0.30 + 50,000 x 0.006 + 100 x 1.20 = 720 per MTok. Its cached read price is the page's, so not estimated.
+    log.add(record("d", "2026-10-20T10:05:00.000Z", { provider: "opencode-go", target: "deepseek-v4.1-flash", usage: usage(1_000, 50_000, 100) }));
+    // Contributor: 1,000 x 0.10 + 2,000 x 0.002 + 100 x 0.20 = 124 per MTok. Its cached read price is the page's, so not estimated.
+    log.add(record("m", "2026-10-20T10:10:00.000Z", { provider: "opencode-go", target: "muse-spark-1.3-contributor", usage: usage(1_000, 2_000, 100) }));
+
+    const summary = log.usage(FROM, TO);
+    const row = (model: string): SummaryBucket => summary.models.find((m) => m.model === model)!;
+    near(row("deepseek-v4.1-flash").costUsd, 0.00072);
+    assert.equal(row("deepseek-v4.1-flash").unpricedRequests, 0);
+    assert.equal(row("deepseek-v4.1-flash").estimatedRequests, 0);
+    // The stored hour is priced at read time (1,000,000 x 0.10 + 100,000 x 0.20 = 0.12 USD), its six requests as estimated.
+    near(row("muse-spark-1.3-contributor").costUsd, 0.12 + 0.000124);
+    assert.equal(row("muse-spark-1.3-contributor").unpricedRequests, 0);
+    assert.equal(row("muse-spark-1.3-contributor").estimatedRequests, 6);
+    assert.equal(summary.providers["opencode-go"]!.unpricedRequests, 0);
+    near(summary.providers["opencode-go"]!.costUsd, 0.00072 + 0.12 + 0.000124);
+
+    // A free model has tokens and costs nothing: it is priced at zero, not counted as unpriced.
+    log.add(record("f", "2026-10-20T10:15:00.000Z", { provider: "opencode-go", target: "beam-free", usage: usage(1_000, 2_000, 100) }));
+    // A page-priced model AA does not list. Hy3: 1,000 x 0.14 + 2,000 x 0.035 + 100 x 0.58 = 268 per MTok.
+    log.add(record("h", "2026-10-20T10:20:00.000Z", { provider: "opencode-go", target: "hy3", usage: usage(1_000, 2_000, 100) }));
+    const after = log.usage(FROM, TO);
+    const free = after.models.find((m) => m.model === "beam-free")!;
+    assert.equal(free.costUsd, 0);
+    assert.equal(free.unpricedRequests, 0);
+    assert.equal(free.estimatedRequests, 0);
+    near(after.models.find((m) => m.model === "hy3")!.costUsd, 0.000268);
+    assert.equal(after.providers["opencode-go"]!.unpricedRequests, 0);
+  });
+});
+
 test("a stored hour whose model is still unpriced stays unpriced", () => {
   withDir((dir) => {
     const hour = Math.floor(Date.parse("2026-10-20T10:00:00.000Z") / HOUR);
@@ -215,12 +254,12 @@ test("a stored hour mixing priced and unpriced requests of one model stays as st
 
 test("a request is estimated only when a cache component it used is not official", () => {
   withDir((dir) => {
-    setAaPriceDataset(aa([{ base: "kimi-k3", priceIn: 1.5, priceOut: 6 }, { base: "gpt-5-5", priceIn: 5, priceOut: 30 }]));
+    setAaPriceDataset(aa([{ base: "nova-pro", priceIn: 1.5, priceOut: 6 }, { base: "gpt-5-5", priceIn: 5, priceOut: 30 }]));
     const log = new RequestLog(path.join(dir, "requests.jsonl"));
     // Kimi, no cache tokens: not estimated.
-    log.add(record("k1", "2026-10-20T10:00:00.000Z", { provider: "opencode-go", target: "kimi-k3", usage: usage(1_000, 0, 100) }));
+    log.add(record("k1", "2026-10-20T10:00:00.000Z", { provider: "opencode-go", target: "nova-pro", usage: usage(1_000, 0, 100) }));
     // Kimi, cache reads: the read price is AA's input price, so estimated.
-    log.add(record("k2", "2026-10-20T10:01:00.000Z", { provider: "opencode-go", target: "kimi-k3", usage: usage(1_000, 500, 100) }));
+    log.add(record("k2", "2026-10-20T10:01:00.000Z", { provider: "opencode-go", target: "nova-pro", usage: usage(1_000, 500, 100) }));
     // GPT-5.5, cache reads only: the read price is official, so not estimated.
     log.add(record("g1", "2026-10-20T10:02:00.000Z", { provider: "openai", target: "gpt-5.5", usage: usage(1_000, 500, 100) }));
     // GPT-5.5 with a cache write: its write price is not official, so estimated.

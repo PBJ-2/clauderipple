@@ -53,6 +53,8 @@ export type ClaudeOAuthOptions = {
   port?: number;
   /** Skip the loopback listener and use the paste-the-code page from the start. */
   manual?: boolean;
+  /** The stored account the user chose to sign in again; see saveClaudeOAuthAccount. */
+  replaceId?: string;
 };
 
 function base64url(buffer: Buffer): string {
@@ -180,7 +182,7 @@ export class ClaudeOAuthSession {
       this.settle = { resolve, reject };
     });
     this.result = this.grant.then((grant) => {
-      const account = saveClaudeOAuthAccount(options.home, grant);
+      const account = saveClaudeOAuthAccount(options.home, grant, undefined, options.replaceId ? { replaceId: options.replaceId } : {});
       this.stateSnapshot = { ...this.stateSnapshot, running: false, finishedAt: new Date().toISOString(), ok: true, account };
     }).catch((error: Error) => {
       // Saving can fail after a successful exchange; that failure must finish the polled state too.

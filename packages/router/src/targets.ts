@@ -68,6 +68,18 @@ export function claudeLastResortProviders(cfg: Config): string[] {
     .map(([name]) => name);
 }
 
+/**
+ * The native Claude account pool a bare `claude-*` id belongs to when nothing declares it: the first
+ * pool provider in config order (`auth: "claude-code"`, `accountPool: true`, a target, never an API
+ * key), or null when rotation is off everywhere. A pool owns every Claude id, not only the ones its
+ * `models` list ticked: that list is a snapshot of what Anthropic listed when the provider was saved,
+ * so a model released later, or one the person unticked, would otherwise leave on the app's own
+ * login with no rotation (ARCHITECTURE §5, 2026-11-14).
+ */
+export function claudePoolProvider(cfg: Config): string | null {
+  return claudeLastResortProviders(cfg)[0] ?? null;
+}
+
 /** Whether this configured provider serves the OpenAI ingress but cannot take routed requests. */
 export function ingressOnly(cfg: Config, name: string): boolean {
   const provider = cfg.providers[name];

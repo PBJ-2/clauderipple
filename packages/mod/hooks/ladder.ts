@@ -3,7 +3,8 @@
 // so the router fills settings with the same rule the mod uses.
 
 import type { Billing, Effort, LadderChoice, Preset, PresetId, Rung, Rungs, Step, WorkerVerdict } from '../types/index.d.ts'
-import { CLAUDE_WORKERS, EFFORTS, LEVEL_RUNG, RUNGS, candidateKey, isAllowed } from './settings.ts'
+import type { ClaudeLatest } from './settings.ts'
+import { EFFORTS, LEVEL_RUNG, RUNGS, candidateKey, claudeWorkers, isAllowed } from './settings.ts'
 
 /** Below this the judge is unsure enough that a task takes the next rung. */
 export const SURE_ENOUGH = 0.5
@@ -138,9 +139,9 @@ const PRESETS: Readonly<Record<PresetId, Readonly<Record<Rung, readonly Want[]>>
 }
 
 /** Claude's own models as rung choices: always there, since the session itself runs on Claude. */
-export function claudeChoices(efforts: readonly string[]): LadderChoice[] {
+export function claudeChoices(efforts: readonly string[], latest?: ClaudeLatest): LadderChoice[] {
   const ladder = efforts.filter((e): e is Effort => EFFORTS.includes(e as Effort))
-  return CLAUDE_WORKERS.map(w => ({ target: { ...w.target }, model: w.model, provider: w.provider, billing: 'subscription' as const, efforts: ladder }))
+  return claudeWorkers(latest).map(w => ({ target: { ...w.target }, model: w.model, provider: w.provider, billing: 'subscription' as const, efforts: ladder }))
 }
 
 /**

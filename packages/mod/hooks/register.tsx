@@ -9,7 +9,7 @@ import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, jevEffortRequest, jevFailure, jevUsage, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, shouldJudge } from './judge'
 import { AUTO_DESCRIPTION, NATIVE_AGENTS, TIER_MARKERS, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderFallbackModels, ladderPick, liveProviders, markerDomain, modelReason, readMarker, routerModelOptions, resolveClaudeModel, pinnedAccountName, pinnedAccountNames, ruleReason, spawnModel, spawnTitle, titleName, takesOver, tierOf, userSaid, withoutReason, withoutRouting, workerRule, zenJev } from './workers'
-import { MARKER, agentFilePaths, agentModel, definedModel, delegationPin as parseDelegationPin, fixSpawn, humanText, pinInstruction, pinSaid } from './worker'
+import { MARKER, agentFilePaths, agentModel, ancestorFolders, definedModel, delegationPin as parseDelegationPin, fixSpawn, humanText, pinInstruction, pinSaid } from './worker'
 import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom, modeKey, modeOver, quotaWindows, resetProvider, routingSettings } from './modes'
 import type { QuotaWindow } from './modes'
 import type { Spawn, WorkerFix } from './worker'
@@ -680,15 +680,38 @@ async function workerFiles($: EngineInterface): Promise<Map<string, string>> {
  * (`model: gpt-6.1-sol@high` in `~/.claude/agents/my-worker.md`) had its task titled with the
  * parent's model while the router sent it to the model in its file (2026-11-10). The first
  * definition that exists decides, as in Claude Code: a project's overrides the user's.
+ *
+ * The project folders are those of the folder the session started in (`session.root`), where
+ * Claude Code read its agents. They were taken from the current folder (`session.cwd`), so a
+ * session that had moved into a repository below its project with `cd` found no definition, and
+ * `astra-worker` from `~/bridge/.claude/agents`, run on gpt-6-astra, was titled with the parent's
+ * Mythos 5.2 (2026-11-14).
  */
 async function definitionModel($: EngineInterface, subagentType: string): Promise<string | undefined> {
-  const cwd = await $.session.cwd().catch(() => undefined)
-  for (const path of agentFilePaths(subagentType, await claudeHome($), cwd)) {
+  const start = await sessionRoot($)
+  for (const path of agentFilePaths(subagentType, await claudeHome($), start ? await projectFolders($, start) : [])) {
     if (!await $.fs.exists(path).catch(() => false)) continue
     const file = await optionalFile($, path)
     return file ? definedModel(file) : undefined
   }
   return undefined
+}
+/** The folder the session started in; an engine without `session.root` answers with the current one. */
+async function sessionRoot($: EngineInterface): Promise<string | undefined> {
+  try { return await $.session.root() } catch { /* no session.root on this engine */ }
+  return await $.session.cwd().catch(() => undefined)
+}
+/**
+ * The folders whose `.claude/agents` Claude Code reads, nearest first: the start folder and those
+ * above it below the home folder, up to the repository root the start folder is in.
+ */
+async function projectFolders($: EngineInterface, start: string): Promise<string[]> {
+  const out: string[] = []
+  for (const folder of ancestorFolders(start, await userHome($))) {
+    out.push(folder)
+    if (await $.fs.exists(`${folder.replace(/[\\/]+$/, '')}/.git`).catch(() => false)) break
+  }
+  return out
 }
 /**
  * The provider a started agent runs on, for its card's dot: its worker file's (`via <provider>.`),
@@ -717,7 +740,7 @@ async function hearDelegationPin($: EngineInterface, text: string): Promise<void
     const model = agentModel(file), provider = agentProvider(file)
     return model && provider ? [{ model, provider }] : []
   })
-  const sources = workers.concat(claudeCandidates(), (await read($, routerModels)).map(m => ({ model: m.value, provider: m.provider })))
+  const sources = workers.concat(claudeCandidates((await read($, ladderOptions))?.claude),(await read($, routerModels)).map(m => ({ model: m.value, provider: m.provider })))
   const pin = parseDelegationPin({ role: 'user', text }, sources, workers)
   if (pin === undefined) return
   if (pin === null) { await releaseDelegationPin($); return }
@@ -976,7 +999,7 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   const files = await workerFiles($)
   try { await refreshModels($) } catch (error) { await report($, 'worker catalogue', error) }
   // Claude's own models are candidates as well: general-purpose on the model, effort by turn.step.
-  const pinnedCandidates: WorkerCandidate[] = [...[...files].flatMap(([agent, file]) => { const model = agentModel(file)?.replace(/@[^@]*$/, ''); const provider = agentProvider(file); return model && provider ? [{ target: { agent }, model, provider }] : [] }), ...claudeCandidates()]
+  const generatedCandidates: WorkerCandidate[] = [...[...files].flatMap(([agent, file]) => { const model = agentModel(file)?.replace(/@[^@]*$/, ''); const provider = agentProvider(file); return model && provider ? [{ target: { agent }, model, provider }] : [] })]
   const usable = await availability($)
   // The session names the tier and domain; the owner's ladder names the model (2026-10-24, the
   // worker judge removed: see AUTO_DESCRIPTION). A model is named only with where it comes from.
@@ -1025,6 +1048,9 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   await refreshLadder($)
   const now = await $.clock.now()
   const options = await read($, ladderOptions)
+  // A family alias means the newest id of that family on the router's live list (static table until it has one).
+  const claudeLatest = options?.claude
+  const pinnedCandidates: WorkerCandidate[] = [...generatedCandidates, ...claudeCandidates(claudeLatest)]
   const providers = options && options.until > now ? liveProviders(options.providers ?? {}, now) : {}
   const explicitCandidate = target ? pinnedCandidates.find(c => c.target.agent === target!.agent && c.target.model === target!.model) ?? (target.agent === 'general-purpose' ? { target, model: target.model ?? 'sonnet', provider: (source === 'pin' ? pin?.provider : undefined) ?? (await read($, routerModels)).find(m => m.value.toLowerCase() === target!.model?.toLowerCase())?.provider ?? 'anthropic' } : undefined) : undefined
   if (explicitCandidate && s.providers[explicitCandidate.provider] === false) return { deny: t(language, 'workers.disabled', { provider: explicitCandidate.provider }) }
@@ -1046,7 +1072,7 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
     return { deny: said }
   }
   verdict = { ...verdict, effort: resolved.effort }
-  const model = spawnModel(selected, verdict.effort, files.has(selected.agent) ? agentModel(files.get(selected.agent)!) : undefined)
+  const model = spawnModel(selected, verdict.effort, files.has(selected.agent) ? agentModel(files.get(selected.agent)!) : undefined, claudeLatest)
   const fallbacks = ladderResult ? ladderFallbackModels(ladder, ladderResult, pinnedCandidates, routing) : []
   const ladderLine = model && fallbacks.length ? workerLadderLine({ pick: id, model, fallbacks }) : undefined
   const value: WorkerPick = { ...verdict, ...resolved, rule, target: selected, by, ms: 0, id, ...(fallbackReason ? { fallbackReason } : {}) }
@@ -2625,7 +2651,7 @@ export const register: Register = on => {
         }
         // Keep generated workers' own model precedence; only then pin native aliases to our table.
         const selectedModel = input.model ?? (file ? agentModel(file) : undefined)
-        const model = resolveClaudeModel(selectedModel)
+        const model = resolveClaudeModel(selectedModel, (await read($, ladderOptions))?.claude)
         if (ours && model && model !== selectedModel) {
           input = { ...input, model }
           // Consume a matching native marker so the router cannot put its alias back on the wire.

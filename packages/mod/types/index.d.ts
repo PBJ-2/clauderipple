@@ -128,7 +128,8 @@ export type PresetId = 'claude' | 'claudeGpt' | 'gpt' | 'cheap'
 export type Preset = { rungs: Record<Rung, Step>; substituted: Rung[] }
 /** `models`: models out while the provider answers others (a spent Antigravity quota group). */
 export type ProviderAvailability = { usable: boolean; reason?: string; exhaustedUntil?: number; models?: Record<string, { reason?: string; exhaustedUntil?: number }> }
-export type LadderOptions = { until: number; choices: LadderChoice[]; providers?: Record<string, ProviderAvailability> }
+/** `claude`: each Claude family alias's newest id from Anthropic's live list; absent until the router has one. */
+export type LadderOptions = { until: number; choices: LadderChoice[]; providers?: Record<string, ProviderAvailability>; claude?: Record<string, string> }
 export type RouterModel = { value: string; label: string; provider: string; name?: string }
 export type WorkerCandidate = { target: TierTarget; model: string; provider: string }
 /** A model's AA measurements (GET /api/mod-options `scores`): the fill's cost order reads them. */

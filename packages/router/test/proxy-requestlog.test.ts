@@ -21,7 +21,7 @@ import { createCa, createLeaf } from "../src/x509.ts";
 
 const noClaudeCodeCredentialReaders = { keychain: () => null, credentialsFile: () => null };
 
-async function rig(options: { respond?: (res: http.ServerResponse, req: http.IncomingMessage) => void; healthLimit?: number; profiles?: Record<string, string>; profileWait?: Promise<void>; refuse?: (req: http.IncomingMessage) => number | undefined } = {}) {
+async function rig(options: { respond?: (res: http.ServerResponse, req: http.IncomingMessage) => void; healthLimit?: number; profiles?: Record<string, string>; profileWait?: Promise<void>; refuse?: (req: http.IncomingMessage) => number | undefined; noPool?: boolean } = {}) {
   // The current login's email per bearer token, as `/api/oauth/profile` would name it. `profileWait`
   // holds each answer until it resolves, to show what a slow lookup does to the turn and its row.
   const profiles = options.profiles ?? {};
@@ -94,7 +94,9 @@ async function rig(options: { respond?: (res: http.ServerResponse, req: http.Inc
     responses: { type: "openai-compatible", wire: "responses", url, models: [{ id: "responses-test" }] },
     google: { type: "google", auth: "api-key", apiKey: "test-key", url, models: [{ id: "gemini-test" }] },
     compatible: { type: "anthropic-compatible", url, models: [{ id: "compatible-test" }] },
-    claude: { type: "anthropic", auth: "claude-code", accountPool: true, models: [{ id: "claude-pool" }] },
+    // A pool owns every bare Claude id (ARCHITECTURE §5, 2026-11-14), so a test of the un-routed
+    // native path (`claude-native`) runs where rotation is off: `noPool`.
+    ...(options.noPool ? {} : { claude: { type: "anthropic" as const, auth: "claude-code" as const, accountPool: true, models: [{ id: "claude-pool" }] } }),
   } };
   const requests = new RequestLog(path.join(home, "requests.jsonl"));
   const agent = new https.Agent({ ca: ca.certPem, lookup: (_host, _options, callback) => callback(null, [{ address: "127.0.0.1", family: 4 }]) });
@@ -148,7 +150,7 @@ async function rig(options: { respond?: (res: http.ServerResponse, req: http.Inc
 
 test("repeated client cancellations before native headers never trip upstream health", { timeout: 5000 }, async () => {
   let received = Promise.withResolvers<http.ServerResponse>();
-  const r = await rig({ respond: (res) => received.resolve(res), healthLimit: 2 });
+  const r = await rig({ respond: (res) => received.resolve(res), healthLimit: 2, noPool: true });
   try {
     for (let i = 0; i < 3; i++) {
       let client: tls.TLSSocket | undefined;
@@ -185,7 +187,7 @@ for (const [model, provider] of [["claude-native", "anthropic"], ["chat-test", "
             ? 'data: {"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}\n\n'
             : 'data: {"type":"message_start","message":{"id":"msg_partial"}}\n\n');
       received.resolve(res);
-    } });
+    }, noPool: true });
     try {
       const exhaustion = { reason: "quota_exhausted" as const, at: Date.now(), until: Date.now() + 60_000 };
       r.proxy.providerHealth.observe(provider, 429, exhaustion);
@@ -218,7 +220,7 @@ for (const [model, provider] of [["claude-native", "anthropic"], ["chat-test", "
 }
 
 test("real native connection resets still count toward upstream health", { timeout: 5000 }, async () => {
-  const r = await rig({ respond: (res) => res.destroy(), healthLimit: 2 });
+  const r = await rig({ respond: (res) => res.destroy(), healthLimit: 2, noPool: true });
   try {
     for (let i = 0; i < 2; i++) {
       const { text, record } = await r.send("claude-native");
@@ -424,7 +426,11 @@ test("proxy generateImage records the image traffic, with usage on success and a
 test("proxy logs native request-id and classifier purpose without configuring classifier routing", async () => {
   const r = await rig();
   try {
+    // The un-routed native path: rotation is off for this first turn, then back on for the pool's own.
+    const pool = r.cfg.providers.claude!;
+    delete r.cfg.providers.claude;
     const { record } = await r.send("claude-native", { service_tier: "auto", system: "You are a security monitor for autonomous AI coding agents. Check this." });
+    r.cfg.providers.claude = pool;
     assert.equal(record.provider, "anthropic");
     assert.equal(record.target, "claude-native");
     assert.equal(record.upstreamRequestId, "req_final");
@@ -600,7 +606,7 @@ test("a paused current Claude login refuses the app's Bearer instead of the empt
 });
 
 test("proxy records a drain refusal on an already-connected client", async () => {
-  const r = await rig();
+  const r = await rig({ noPool: true });
   try {
     const active = r.send("claude-native", { hold: true });
     while (r.seen.length === 0) await new Promise<void>((resolve) => setTimeout(resolve, 1));

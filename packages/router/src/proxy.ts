@@ -56,7 +56,7 @@ import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
 import { nativeAnthropicHeaders, type ClaudeCodeCredentialReaders } from "./providers/anthropic.ts";
 import { ClaudeAccountAuthPool } from "./providers/anthropic-account-pool.ts";
 import { ClaudeModelCatalog } from "./providers/anthropic-models.ts";
-import { ClaudeUsage, claudeLimitResetMs } from "./providers/anthropic-usage.ts";
+import { ClaudeUsage, claudeLimitResetMs, claudeModelFamily } from "./providers/anthropic-usage.ts";
 import { ClaudeCurrentIdentity, LoginEmailWatch, PendingRowWrites } from "./providers/anthropic-identity.ts";
 import { dropForeignThinking, ThinkingOrigins } from "./thinking.ts";
 
@@ -1081,6 +1081,12 @@ export class Proxy {
       delete record.accountEmail;
       delete record.borrowedLabel;
     };
+    /**
+     * The model family a native Claude pool turn is picked and charged under (`fable`, `opus`, …), so
+     * one family's spent weekly window rests that family on the account and not the account itself.
+     * Set only on the account-pool path; every other provider keeps the whole-credential behaviour.
+     */
+    let poolScope: string | undefined;
     const recordCredential = (name: string, using: Credential, credentials: readonly Credential[], retry = false, pinned = false): void => {
       // count_tokens is answered locally by the translated adapters: no key was actually sent.
       const type = cfg.providers[name]?.type;
@@ -1104,9 +1110,14 @@ export class Proxy {
         loginWatch = new LoginEmailWatch(() => this.claudeIdentity.identifyWith(using.headers));
         loginWatchFor = using.id;
       }
-      const first = this.pool.pick(name, credentials);
+      const first = this.pool.pick(name, credentials, undefined, poolScope);
       const reason = pinned ? "account-pin" : retry ? "retry" : !first ? "all-unavailable" : first.id !== using.id ? "affinity" : "configured-order";
-      const states = this.pool.report(name, credentials).map((row, i) => `${this.credentialLabel(name, credentials[i]!, credentials)}:${row.paused ? "paused" : row.state}`).join(", ");
+      // A resting model scope reads beside the state (`ready[fable 3600s]`): the account answers
+      // other models, and the log must not say it is cooling.
+      const states = this.pool.report(name, credentials).map((row, i) => {
+        const resting = poolScope ? Object.entries(this.pool.scopeCooldowns(name, credentials[i]!.id)).map(([scope, seconds]) => `${scope} ${seconds}s`).join(" ") : "";
+        return `${this.credentialLabel(name, credentials[i]!, credentials)}:${row.paused ? "paused" : row.state}${resting ? `[${resting}]` : ""}`;
+      }).join(", ");
       log.info(`KEY ${name} credential=${label} conversation=${affinity ?? "-"} reason=${reason} candidates=[${states}]`);
     };
     const search = kind === "web-search" ? webSearchQuery(json!) : null;
@@ -1174,7 +1185,7 @@ export class Proxy {
       }
     }
     type Override = { route: Resolved | null; model: string; label: string; purpose: "web-fetch" | "compaction"; refusal?: string | null };
-    const compactDecision = compactModel ? decide(compactModel, {}, cfg, "compaction") : null;
+    const compactDecision = compactModel ? decide(compactModel, {}, cfg, "compaction", true) : null;
     const override: Override | null = compactModel && compactDecision
       ? { ...compactDecision, model: compactModel, label: `compact→${compactModel}`, purpose: "compaction" }
       : fetchRoute ? { route: fetchRoute, model: fetchRoute.model, label: `web fetch via ${fetchRoute.provider}`, purpose: "web-fetch" } : null;
@@ -1234,9 +1245,16 @@ export class Proxy {
         delete output.effort;
         json.output_config = output;
       }
+      // The pool takes an unlisted Claude id (routing.ts `pooled`) only for a model turn on
+      // /v1/messages itself, the request that spends a window and must rotate. Not the continue of a
+      // turn a vendor answered: that has no marker to route by and the pool has no such thread, so it
+      // stays un-routed for the refusal below that makes the CLI resend the turn whole. Not a native
+      // web search, which keeps the app's own login (`webSearch: "native"`), and not count_tokens,
+      // which spends nothing and must not be refused when every account is paused.
+      const poolUnlisted = pathname === "/v1/messages" && kind !== "web-search" && !!json && !continuesTranslatedTurn(json, this.routedMessageIds);
       const decision = override
         ? { route: fetchTarget, refusal: override.refusal ?? null }
-        : json ? decide(model, json, cfg, kind) : { route: null, refusal: null };
+        : json ? decide(model, json, cfg, kind, poolUnlisted) : { route: null, refusal: null };
       let resolved = decision.route;
       const ladderKey = subagent && record.session ? `${record.session}:${agentId}` : undefined;
       if (!fetchTarget && subagent && resolved && json) {
@@ -1696,12 +1714,16 @@ export class Proxy {
             // paused, cooling, quarantined or removed account falls back to the ordinary pool order,
             // and the turn is never refused because of the pin (zero vanished requests). Choosing it
             // directly leaves the conversation's sticky claim and the provider's preference untouched.
-            const pinned = pinnedCredential(route.provider, credentials, route.accountPin, this.pool);
+            // The model's family decides which weekly window this turn spends. An account whose latest
+            // usage reading already shows that window spent is rested for the family before it is tried.
+            poolScope = claudeModelFamily(route.model);
+            this.restSpentScopes(route.provider, credentials, poolScope);
+            const pinned = pinnedCredential(route.provider, credentials, route.accountPin, this.pool, poolScope);
             const pinnedUsable = pinned !== undefined;
             if (pinnedUsable) {
               chosen = pinned;
             } else {
-              chosen = this.pool.pick(route.provider, credentials, affinity);
+              chosen = this.pool.pick(route.provider, credentials, affinity, poolScope);
               if (route.accountPin) log.info(`account-pin fallback ${route.accountPin} → ${chosen?.ownerId?.slice(0, 8) ?? "configured-order"}`);
             }
             const using = chosen ?? credentials[0]!;
@@ -1922,8 +1944,10 @@ export class Proxy {
         if (rest.length === 0) return null;
         // A retry keeps honouring the pin first; once that account was spent, it falls back to the
         // same pool order the first attempt would have used.
-        const pinned = native ? pinnedCredential(route.provider, rest, route.accountPin, this.pool) : undefined;
-        const next = pinned ?? this.pool.pick(route.provider, rest, affinity);
+        const scope = native ? poolScope : undefined;
+        if (native) this.restSpentScopes(route.provider, rest, scope);
+        const pinned = native ? pinnedCredential(route.provider, rest, route.accountPin, this.pool, scope) : undefined;
+        const next = pinned ?? this.pool.pick(route.provider, rest, affinity, scope);
         return next && native ? { ...next, headers: withClientBetas(next.headers, req.headers["anthropic-beta"]) } : next;
       };
 
@@ -2054,15 +2078,30 @@ export class Proxy {
         const statedRetryMs = retryAfterMs(upRes.headers);
         const claudeLimitMs = status === 429 && isApiHost && (!route || cfg.providers[route.provider]?.type === "anthropic")
           ? claudeLimitResetMs(upRes.headers) : undefined;
-        const restMs = claudeLimitMs !== undefined ? Math.max(statedRetryMs ?? 0, claudeLimitMs) : statedRetryMs;
+        // A pool 429 that is not the account's 5h/7d window being spent (`claudeLimitMs` undefined) is
+        // the model family's own limit — Fable has a weekly window of its own — so it rests that
+        // family on this account and leaves the account's other models, and the conversations
+        // sticky to it, where they are. The family's real reset comes from the account's latest usage
+        // reading when that says the window is spent; otherwise the stated `retry-after`, else the
+        // pool's default. The refresh is asked at most once per usage interval, so the next request
+        // after a reading-less rest finds the real reset.
+        const scope = status === 429 && poolScope && claudeLimitMs === undefined && penalised ? poolScope : undefined;
+        let scopedResetMs: number | undefined;
+        if (scope && penalised) {
+          scopedResetMs = chosen ? this.claudeUsage.spentScopeResetMs(chosen, scope) : undefined;
+          if (scopedResetMs === undefined) void this.claudeUsage.snapshot().catch(() => undefined);
+        }
+        const restMs = claudeLimitMs !== undefined ? Math.max(statedRetryMs ?? 0, claudeLimitMs)
+          : scopedResetMs !== undefined ? Math.max(statedRetryMs ?? 0, scopedResetMs) : statedRetryMs;
+        const limitMs = claudeLimitMs ?? scopedResetMs;
         // Charge the answer to the credential that produced it. A rate limit parks this one until its
         // stated reset so the next request takes another; an answer clears whatever it was carrying.
         // A 400 is our own request and is charged to nobody (see `classify`).
         if (penalised) {
           if (status >= 400) {
-            this.pool.penalise(penalised.provider, penalised.id, status, restMs, errBody);
+            this.pool.penalise(penalised.provider, penalised.id, status, restMs, errBody, scope);
             if (status === 401 && cfg.providers[penalised.provider]?.type === "anthropic") this.claudeAccounts.reject(penalised.id);
-          } else this.pool.succeed(penalised.provider, penalised.id);
+          } else this.pool.succeed(penalised.provider, penalised.id, poolScope);
           if (cfg.providers[penalised.provider]?.type === "anthropic") {
             // An answer on the app's own login is what keeps it in the pool; a 401 drops it
             // (issue #123, 2026-11-05). A message answer also states its window usage in the
@@ -2087,7 +2126,7 @@ export class Proxy {
         const retry = status >= 400 ? nextCredential(status, errBody) : null;
         if (retry) {
           const credentials = credentialCandidates;
-          log.info(`RETRY ${route!.provider}: ${this.credentialLabel(route!.provider, chosen!, credentials)} answered ${status}, trying ${this.credentialLabel(route!.provider, retry, credentials)}`);
+          log.info(`RETRY ${route!.provider}: ${this.credentialLabel(route!.provider, chosen!, credentials)} answered ${status}${scope ? ` (${scope})` : ""}, trying ${this.credentialLabel(route!.provider, retry, credentials)}`);
           recordCredential(route!.provider, retry, credentials, true);
           tried.add(retry.id);
           usedCredentialHeaders = { ...usedCredentialHeaders, ...(chosen?.headers ?? {}), ...retry.headers };
@@ -2177,14 +2216,14 @@ export class Proxy {
         // must not spend its own retry ladder until a reset hours away (2026-11-07).
         if (headFilled) {
           const exhaustion = providerExhaustion(status, errBody, statedRetryMs);
-          if (exhaustion || claudeLimitMs !== undefined) {
+          if (exhaustion || limitMs !== undefined) {
             for (let i = outHeaders.length - 2; i >= 0; i -= 2) {
               const name = outHeaders[i]!.toLowerCase();
               if (name === "retry-after" || name === "x-should-retry") outHeaders.splice(i, 2);
             }
             if (exhaustion) {
               for (const [name, value] of Object.entries(exhaustionHeaders(exhaustion))) outHeaders.push(name, value);
-            } else if (claudeLimitMs !== undefined && restMs !== undefined) {
+            } else if (limitMs !== undefined && restMs !== undefined) {
               // The stated reset itself. The pool clamps its own rest to 6 h and asks again then;
               // the caller, told not to retry, is told the real reset (a weekly window can be days).
               outHeaders.push("x-should-retry", "false", "retry-after", String(Math.max(1, Math.ceil(restMs / 1000))));
@@ -2546,7 +2585,11 @@ export class Proxy {
         catch { return false; }
       }
       const accounts = this.claudeAccounts.peekCredentials();
-      return accounts.length > 0 && this.pool.hasUsable(target.provider, accounts);
+      // A pool whose accounts have all spent this model's own weekly window cannot answer it, though
+      // each can answer other models: the ladder must see that, or a Fable slot never falls over.
+      const family = claudeModelFamily(target.model);
+      this.restSpentScopes(target.provider, accounts, family);
+      return accounts.length > 0 && this.pool.hasUsable(target.provider, accounts, family);
     }
     if (provider.type === "chatgpt") return this.chatgpt(target.provider, provider).hasUsable();
     if (provider.type === "google" && provider.auth === "antigravity") return this.google(target.provider, provider).hasUsable(target.model, target.effort);
@@ -2622,6 +2665,20 @@ export class Proxy {
     }
   }
 
+  /**
+   * Rest a model family on every account whose latest usage reading already shows that family's weekly
+   * window spent with its reset ahead, so the account is skipped for that family before a request is
+   * spent on it. Reads the cached readings only; nothing is fetched. A family the pool has no scope for
+   * (undefined) rests nothing.
+   */
+  private restSpentScopes(provider: string, credentials: readonly Credential[], family: string | undefined): void {
+    if (!family) return;
+    for (const credential of credentials) {
+      const wait = this.claudeUsage.spentScopeResetMs(credential, family);
+      if (wait !== undefined) this.pool.restScope(provider, credential, family, wait);
+    }
+  }
+
   /** Health of every credential the config declares, for the dashboard. */
   credentialHealth(): Record<string, ReturnType<CredentialPool["report"]>> {
     const cfg = this.deps.config();
@@ -2631,8 +2688,13 @@ export class Proxy {
         ? this.claudeAccounts.peekCredentials()
         : this.credentialsOf(name, provider, true);
       if (!(provider.type === "anthropic" && provider.accountPool) && !("credentials" in provider && provider.credentials?.length)) continue;
-      out[name] = this.pool.report(name, creds).map((report) => {
-        const credential = creds.find((candidate) => candidate.id === report.id);
+      const claudePool = provider.type === "anthropic" && provider.accountPool === true;
+      out[name] = this.pool.report(name, creds).map((base) => {
+        const credential = creds.find((candidate) => candidate.id === base.id);
+        // A Claude account whose one model family is resting is still ready for the rest; the resting
+        // family is shown beside it rather than by cooling the whole account.
+        const scopes = claudePool ? this.pool.scopeCooldowns(name, base.id) : {};
+        const report = Object.keys(scopes).length > 0 ? { ...base, scopes } : base;
         return credential?.ownerId ? { ...report, id: credential.ownerId } : report;
       });
     }

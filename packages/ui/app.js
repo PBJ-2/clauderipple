@@ -3609,7 +3609,7 @@ function renderClaudeAccountRows(target, data, name, generation) {
     }), rename, remove];
     if (unavailable) {
       const reauth = el("button", { class: "btn secondary compact", type: "button", text: t("providers.reauthAction") });
-      reauth.addEventListener("click", () => openClaudeAccountConsent(name));
+      reauth.addEventListener("click", () => openClaudeAccountConsent(name, account.id));
       actions.unshift(reauth);
     }
     rows.push(el("article", { class: "cell account-card" }, [
@@ -4440,12 +4440,12 @@ window.addEventListener("keydown", (event) => {
   if (action && !action.disabled) { event.preventDefault(); action.click(); }
 });
 
-function openClaudeAccountConsent(providerName) {
+function openClaudeAccountConsent(providerName, replaceId) {
   const accepted = el("input", { type: "checkbox" });
   const proceed = el("button", { class: "btn", type: "button", "data-default-action": "", text: t("providers.anthropicOAuthContinue") });
   proceed.disabled = true;
   accepted.addEventListener("change", () => { proceed.disabled = !accepted.checked; });
-  proceed.addEventListener("click", () => void openClaudeAccountSignIn(providerName, false));
+  proceed.addEventListener("click", () => void openClaudeAccountSignIn(providerName, false, replaceId));
   showModal(el("div", { class: "oauth-consent" }, [
     el("h1", { id: "modal-title", text: t("providers.anthropicOAuthTitle") }),
     el("div", { class: "notice warn" }, [el("strong", { text: t("providers.anthropicOAuthTitle") }), el("span", { text: t("providers.anthropicOAuthWarning") })]),
@@ -4454,7 +4454,7 @@ function openClaudeAccountConsent(providerName) {
   ]));
 }
 
-async function openClaudeAccountSignIn(providerName, manual) {
+async function openClaudeAccountSignIn(providerName, manual, replaceId) {
   let active = true;
   let poll = null;
   const body = el("div", { class: "oauth-progress" });
@@ -4463,7 +4463,7 @@ async function openClaudeAccountSignIn(providerName, manual) {
     stopPolling();
     if (!active) return;
     const retry = el("button", { class: "btn secondary", type: "button", text: t("providers.anthropicSignInManual") });
-    retry.addEventListener("click", () => void openClaudeAccountSignIn(providerName, true));
+    retry.addEventListener("click", () => void openClaudeAccountSignIn(providerName, true, replaceId));
     body.replaceChildren(el("span", { class: "bad-text", text: t("providers.anthropicSignInFailed") }), state.error ? el("p", { class: "small", text: state.error }) : null, retry);
   }
   async function finish(state) {
@@ -4504,7 +4504,7 @@ async function openClaudeAccountSignIn(providerName, manual) {
   });
   body.replaceChildren(el("p", { class: "small", text: t("providers.checking") }));
   try {
-    const state = await api("/api/claude-oauth", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ manual: Boolean(manual) }) });
+    const state = await api("/api/claude-oauth", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ manual: Boolean(manual), ...(replaceId ? { replaceId } : {}) }) });
     if (!active) return;
     renderState(state);
     poll = setInterval(async () => {
@@ -5300,7 +5300,12 @@ const MOD_LANGUAGES = [["ko", "한국어"], ["en", "English"], ["zh", "简体中
 // Claude Code's own agent with a model: what the mod offers besides the generated workers, smallest
 // first, and their current model ids (packages/mod/hooks/settings.ts CLAUDE_WORKERS).
 const MOD_CLAUDE_MODELS = ["haiku", "sonnet", "opus", "fable"];
-const MOD_CLAUDE_IDS = { haiku: "claude-haiku-5-5", sonnet: "claude-sonnet-5-5", opus: "claude-opus-5-5", fable: "claude-fable-5-1" };
+const MOD_CLAUDE_IDS = { haiku: "claude-haiku-5-5", sonnet: "claude-sonnet-5-5", opus: "claude-opus-5-5", fable: "claude-fable-5-2" };
+// The newest id of a family on the router's live Anthropic list (/api/mod-options `claudeLatest`), else the table above.
+function modClaudeId(alias) {
+  const live = modState.options && modState.options.claudeLatest;
+  return (live && typeof live[alias] === "string" && live[alias]) || MOD_CLAUDE_IDS[alias];
+}
 // The four workers, low to max (the mod's rung ids: light, standard, hard, plan).
 const MOD_RUNGS = ["light", "standard", "hard", "plan"];
 // A domain ladder has two levels: light work (the light rung) and heavy work (standard, hard, plan).
@@ -5654,7 +5659,7 @@ function modChoices() {
     };
   });
   const claude = MOD_CLAUDE_MODELS.map((alias) => ({
-    value: `general-purpose+${alias}`, label: `Claude ${modCap(alias)}`, model: MOD_CLAUDE_IDS[alias], provider: "anthropic",
+    value: `general-purpose+${alias}`, label: `Claude ${modCap(alias)}`, model: modClaudeId(alias), provider: "anthropic",
     billing: "subscription", usable: true, efforts: claudeEfforts, claude: true,
   }));
   const session = { value: "general-purpose", label: t("mod.sessionModel"), model: null, provider: null, billing: null, usable: true, efforts: claudeEfforts, claude: true };

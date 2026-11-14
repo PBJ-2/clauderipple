@@ -233,13 +233,44 @@ export function agentModel(file: string): string | undefined {
 }
 
 /**
- * Where Claude Code reads the definition of a named agent, nearest first: the project's
- * `.claude/agents`, then the user's. A plugin agent (`plugin:name`) has no file in either.
+ * Where Claude Code reads the definition of a named agent, nearest first: each project folder's
+ * `.claude/agents` (`projectFolders`, nearest first), then the user's. A plugin agent
+ * (`plugin:name`) has no file in any of them.
  */
-export function agentFilePaths(subagentType: string, claudeHome: string, cwd?: string): string[] {
+export function agentFilePaths(subagentType: string, claudeHome: string, projectFolders: readonly string[] = []): string[] {
   if (!/^[A-Za-z0-9_.-]+$/.test(subagentType)) return []
-  const project = cwd?.replace(/[\\/]+$/, '')
-  return [...(project ? [`${project}/.claude/agents/${subagentType}.md`] : []), `${claudeHome}/agents/${subagentType}.md`]
+  // A root folder ("/", "E:\") loses its separator here and gets it back from the join.
+  const projects = projectFolders.filter(Boolean).map(folder => `${folder.replace(/[\\/]+$/, '')}/.claude/agents/${subagentType}.md`)
+  return [...projects, `${claudeHome}/agents/${subagentType}.md`]
+}
+
+/**
+ * The folder the session started in and each one above it, nearest first, up to and not including
+ * the user's home (whose `.claude` is the user's own folder) or the filesystem root, included.
+ * Claude Code reads project agents from these folders of the start folder, not of the folder the
+ * session later moved to with `cd`; the caller stops the walk at the repository root as it does.
+ */
+export function ancestorFolders(start: string, home?: string): string[] {
+  const windows = /^[A-Za-z]:|\\/.test(start)
+  const key = (path: string) => {
+    const flat = path.replace(/\\/g, '/').replace(/(.)\/+$/, '$1')
+    return windows ? flat.toLowerCase() : flat
+  }
+  const stop = home ? key(home) : undefined
+  const out: string[] = []
+  let folder = start.replace(/(.)[\\/]+$/, '$1')
+  // A path has fewer parts than this; the bound only keeps a malformed one from looping.
+  for (let depth = 0; depth < 256 && folder; depth++) {
+    if (stop !== undefined && key(folder) === stop) break
+    out.push(folder)
+    const cut = Math.max(folder.lastIndexOf('/'), folder.lastIndexOf('\\'))
+    if (cut < 0) break
+    const head = folder.slice(0, cut)
+    const parent = cut === 0 ? folder.slice(0, 1) : /^[A-Za-z]:$/.test(head) ? folder.slice(0, cut + 1) : head
+    if (parent === folder) break
+    folder = parent
+  }
+  return out
 }
 
 /** The model a definition starts its agent on, for a title: `inherit` is the parent's, so none. */

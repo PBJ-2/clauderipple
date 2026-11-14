@@ -346,3 +346,57 @@ test("a removed account drops out of the snapshot", async () => {
   now += 10;
   assert.deepEqual(Object.keys(await usage.snapshot()), ["current"]);
 });
+
+test("a model family is read from a model id or a usage window's display name", async () => {
+  const { claudeModelFamily } = await import("../src/providers/anthropic-usage.ts");
+  assert.equal(claudeModelFamily("claude-fable-5-1"), "fable");
+  assert.equal(claudeModelFamily("Fable"), "fable");
+  assert.equal(claudeModelFamily("claude-opus-5-5"), "opus");
+  assert.equal(claudeModelFamily("claude-sonnet-5-5"), "sonnet");
+  assert.equal(claudeModelFamily("claude-3-5-haiku-20241022"), "haiku");
+  assert.equal(claudeModelFamily("deepseek-v4"), undefined, "an unknown model has no scope");
+  assert.equal(claudeModelFamily("unfabled"), undefined, "a family is a word of the id, not any substring");
+});
+
+test("a spent per-model window's reset is read from the cached body reading, and header readings do not erase it", async () => {
+  let now = 1_000_000_000_000;
+  const resetsAt = (seconds: number) => new Date(now + seconds * 1000).toISOString();
+  const body = (fable: number, reset: string) => ({
+    ...BODY,
+    limits: [
+      { kind: "weekly_scoped", percent: fable, resets_at: reset, scope: { model: { id: null, display_name: "Fable" }, surface: null } },
+      { kind: "weekly_scoped", percent: 3, resets_at: reset, scope: { model: { id: null, display_name: "Opus" }, surface: null } },
+    ],
+  });
+  let reply = body(100, resetsAt(7_200));
+  let asked = 0;
+  const usage = new ClaudeUsage(
+    { credentials: async () => [{ id: "current:aa", ownerId: "current", headers: {} }] },
+    { upstream: () => "api.anthropic.com", now: () => now, ttlMs: 60_000, fetch: async () => { asked++; return Response.json(reply); } },
+  );
+  const current = { id: "current:aa", ownerId: "current", headers: {} };
+  assert.equal(usage.spentScopeResetMs(current, "fable"), undefined, "nothing is read before a body reading exists");
+  await usage.snapshot();
+  assert.equal(asked, 1);
+  assert.equal(usage.spentScopeResetMs(current, "fable"), 7_200_000);
+  assert.equal(usage.spentScopeResetMs(current, "opus"), undefined, "a window under 100% is not spent");
+  assert.equal(usage.spentScopeResetMs({ id: "other", headers: {} }, "fable"), undefined, "another account has its own reading");
+  // The app signed in to another account: same owner "current", another durable account.
+  assert.equal(usage.spentScopeResetMs({ id: "current:bb", ownerId: "current", healthKey: "login-b", headers: {} }, "fable"), undefined,
+    "a reading taken on the previous login does not rest the next one");
+  // A later header reading replaces the display snapshot and carries no per-model window.
+  now += 120_000;
+  usage.observeAnswer("current", {
+    "anthropic-ratelimit-unified-status": "allowed",
+    "anthropic-ratelimit-unified-5h-utilization": "0.1",
+    "anthropic-ratelimit-unified-5h-reset": String(Math.floor(now / 1000) + 600),
+  });
+  assert.equal(usage.spentScopeResetMs(current, "fable"), 7_200_000 - 120_000, "the spent window stays spent until its reset");
+  now += 7_200_000;
+  assert.equal(usage.spentScopeResetMs(current, "fable"), undefined, "after the reset it is not");
+  // A newer body reading that no longer lists the window clears it.
+  reply = { ...BODY, limits: [] } as typeof reply;
+  now += 120_000;
+  await usage.snapshot();
+  assert.equal(usage.spentScopeResetMs(current, "fable"), undefined);
+});

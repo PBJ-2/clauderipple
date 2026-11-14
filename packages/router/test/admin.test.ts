@@ -60,6 +60,7 @@ async function withAdmin(
     minimaxUsage?: NonNullable<AdminDeps["minimaxUsage"]>;
     claudeUsage?: NonNullable<AdminDeps["claudeUsage"]>;
     claudeIdentity?: NonNullable<AdminDeps["claudeIdentity"]>;
+    claudeModels?: NonNullable<AdminDeps["claudeModels"]>;
     googleOAuthFetch?: (url: string, init?: RequestInit) => Promise<Response>;
     googleOAuthPort?: number;
     agentsChanged?: () => void;
@@ -203,6 +204,20 @@ test("relabelling or removing a Claude account re-derives the generated workers 
     assert.equal(del.status, 200);
     assert.equal(notified, 2, "a removal regenerates and tells the tunnels");
   }, { agentsChanged: () => sync!.regenerate() });
+});
+
+test("mod-options names each Claude family's newest id from the live list, whatever its order", async () => {
+  const live = ["claude-fable-5-1", "claude-opus-5-5", "claude-fable-5-3", "claude-fable-5-2", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-haiku-4-5", "claude-mythos-5-1"]
+    .map((id) => ({ id, name: id }));
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const options = await (await fetch(`${base()}:${port}/api/mod-options`)).json() as ModOptions;
+    assert.deepEqual(options.claudeLatest, { fable: "claude-fable-5-3", opus: "claude-opus-5-5", sonnet: "claude-sonnet-5-5", haiku: "claude-haiku-5-5" });
+  }, { claudeModels: async () => live });
+  // No live list (signed out, offline): nothing is claimed, and the mod keeps its own table.
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const options = await (await fetch(`${base()}:${port}/api/mod-options`)).json() as ModOptions;
+    assert.deepEqual(options.claudeLatest, {});
+  }, { claudeModels: async () => null });
 });
 
 test("mod-options lists a pinned Claude worker with the account it runs on", async () => {
@@ -999,6 +1014,17 @@ test("the Claude subscription sign-in runs from the GUI: start, state, pasted co
   }, { claudeOAuthFetch, openBrowser: (url) => { opened.push(url); return true; } });
 });
 
+test("the Claude sign-in start rejects a replaceId that is not a non-empty string", async () => {
+  await withAdmin(makeCfg(), async ({ port }) => {
+    for (const replaceId of [5, null, ["x"], "", "x".repeat(201)]) {
+      const r = await fetch(`${base()}:${port}/api/claude-oauth`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ manual: true, replaceId }) });
+      assert.equal(r.status, 400, JSON.stringify(replaceId)?.slice(0, 20));
+    }
+    const idle = (await (await fetch(`${base()}:${port}/api/claude-oauth`)).json()) as { running: boolean };
+    assert.equal(idle.running, false, "a rejected start opens no sign-in");
+  }, { openBrowser: () => true });
+});
+
 test("Claude account admin endpoints expose no secrets and rename or remove only stored accounts", async () => {
   await withAdmin(makeCfg(), async ({ port, home }) => {
     const account = saveClaudeOAuthAccount(home, {
@@ -1637,7 +1663,7 @@ test("POST /api/providers/probe accepts native Claude Code auth and reports only
   await withAdmin(makeCfg(), async ({ port, home }) => {
     const missing = await fetch(`${base()}:${port}/api/providers/probe`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "anthropic", auth: "claude-code" }) });
     assert.deepEqual(await missing.json(), { ok: false, auth: "missing", source: null, signedIn: null, accountCount: 0, models: [
-      { id: "claude-haiku-5-5", name: "Haiku 5.5" }, { id: "claude-sonnet-5-5", name: "Sonnet 5.5" }, { id: "claude-opus-5-5", name: "Opus 5.5" }, { id: "claude-fable-5-1", name: "Fable 5.1" }, { id: "claude-opus-5", name: "Opus 5" }, { id: "claude-sonnet-5", name: "Sonnet 5" }, { id: "claude-fable-5", name: "Fable 5" }, { id: "claude-opus-4-8", name: "Opus 4.8" }, { id: "claude-opus-4-7", name: "Opus 4.7" }, { id: "claude-sonnet-4-6", name: "Sonnet 4.6" }, { id: "claude-opus-4-6", name: "Opus 4.6" }, { id: "claude-haiku-4-5", name: "Haiku 4.5" },
+      { id: "claude-haiku-5-5", name: "Haiku 5.5" }, { id: "claude-sonnet-5-5", name: "Sonnet 5.5" }, { id: "claude-opus-5-5", name: "Opus 5.5" }, { id: "claude-fable-5-2", name: "Fable 5.2" }, { id: "claude-fable-5-1", name: "Fable 5.1" }, { id: "claude-opus-5", name: "Opus 5" }, { id: "claude-sonnet-5", name: "Sonnet 5" }, { id: "claude-fable-5", name: "Fable 5" }, { id: "claude-opus-4-8", name: "Opus 4.8" }, { id: "claude-opus-4-7", name: "Opus 4.7" }, { id: "claude-sonnet-4-6", name: "Sonnet 4.6" }, { id: "claude-opus-4-6", name: "Opus 4.6" }, { id: "claude-haiku-4-5", name: "Haiku 4.5" },
     ] });
     saveClaudeAuthFile(home, "test-token", "2026-09-13T00:00:00.000Z");
     const available = await fetch(`${base()}:${port}/api/providers/probe`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "anthropic", auth: "claude-code" }) });
@@ -1681,7 +1707,7 @@ test("POST /api/providers/probe sends Anthropic API-key headers and treats a mod
   try {
     const res = await fetch(`${base()}:${admin.port}/api/providers/probe`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "anthropic", auth: "api-key", apiKey: "secret-key" }) });
     assert.deepEqual(await res.json(), { ok: true, auth: "ok", models: [
-      { id: "claude-haiku-5-5", name: "Haiku 5.5" }, { id: "claude-sonnet-5-5", name: "Sonnet 5.5" }, { id: "claude-opus-5-5", name: "Opus 5.5" }, { id: "claude-fable-5-1", name: "Fable 5.1" }, { id: "claude-opus-5", name: "Opus 5" }, { id: "claude-sonnet-5", name: "Sonnet 5" }, { id: "claude-fable-5", name: "Fable 5" }, { id: "claude-opus-4-8", name: "Opus 4.8" }, { id: "claude-opus-4-7", name: "Opus 4.7" }, { id: "claude-sonnet-4-6", name: "Sonnet 4.6" }, { id: "claude-opus-4-6", name: "Opus 4.6" }, { id: "claude-haiku-4-5", name: "Haiku 4.5" },
+      { id: "claude-haiku-5-5", name: "Haiku 5.5" }, { id: "claude-sonnet-5-5", name: "Sonnet 5.5" }, { id: "claude-opus-5-5", name: "Opus 5.5" }, { id: "claude-fable-5-2", name: "Fable 5.2" }, { id: "claude-fable-5-1", name: "Fable 5.1" }, { id: "claude-opus-5", name: "Opus 5" }, { id: "claude-sonnet-5", name: "Sonnet 5" }, { id: "claude-fable-5", name: "Fable 5" }, { id: "claude-opus-4-8", name: "Opus 4.8" }, { id: "claude-opus-4-7", name: "Opus 4.7" }, { id: "claude-sonnet-4-6", name: "Sonnet 4.6" }, { id: "claude-opus-4-6", name: "Opus 4.6" }, { id: "claude-haiku-4-5", name: "Haiku 4.5" },
     ] });
     assert.equal(seen.url, "https://api.anthropic.com/v1/messages");
     assert.equal(seen.headers?.get("x-api-key"), "secret-key");
@@ -4016,6 +4042,48 @@ test("GET /api/limits and /api/status follow the Claude account the pool is usin
     const empty = await (await fetch(`${base()}:${port}/api/status`)).json() as { claude: { accounts: { id: string; inUse?: boolean; quota?: Record<string, unknown> }[] } };
     assert.deepEqual(empty.claude.accounts[0], { id: "current", label: "Current Claude login", quota: {}, inUse: true });
   }, { credentials: () => reports, claudeUsage: async () => usage });
+});
+
+test("GET /api/limits names the current login and leaves out stored copies of it, without renumbering", async () => {
+  const now = Date.now();
+  const uuid = "current-login-uuid";
+  const cfg = makeCfg({ providers: { anthropic: { type: "anthropic", auth: "claude-code", accountPool: true } } });
+  const quota = (used: number) => ({ at: now, rate_limits: { primary: { used_percent: used, window_minutes: 300 } } });
+  let usage: Awaited<ReturnType<NonNullable<AdminDeps["claudeUsage"]>>> = {};
+  type Identity = { email: string; subjectHash: string } | null;
+  let lookup: () => Promise<Identity> = async () => ({ email: "Person@Example.Test", subjectHash: subjectHash(uuid)! });
+  let reports: ReturnType<NonNullable<AdminDeps["credentials"]>> = {};
+  await withAdmin(cfg, async ({ port, home }) => {
+    saveClaudeAuthFile(home, "current-login-token", "2026-10-23T00:00:00.000Z");
+    const grant = (n: number, extra: { accountId?: string; email?: string }) => ({ accessToken: `a${n}`, refreshToken: `r${n}`, expiresAt: now + 3_600_000, ...extra });
+    const copy = saveClaudeOAuthAccount(home, grant(1, { accountId: uuid, email: "copy@example.test" }));
+    const other = saveClaudeOAuthAccount(home, grant(2, { accountId: "someone-else", email: "person@example.test" }));
+    usage = { current: quota(81), [copy.id]: quota(81), [other.id]: quota(15) };
+    const rows = async () => (await (await fetch(`${base()}:${port}/api/limits`)).json() as { providers: LimitsProvider[] }).providers[0]!.accounts;
+
+    let got = await rows();
+    assert.deepEqual(got.map((a) => [a.account, a.id, a.label]), [[0, "current", "Person@Example.Test"], [2, other.id, "person@example.test"]], "the login carries its email; its stored copy is gone; the other keeps number 3");
+
+    // The pool answering on the copy is the login's account spending: the remaining row carries the mark.
+    reports = { anthropic: [{ id: copy.id, state: "ready", failures: 0, inUse: true }] };
+    got = await rows();
+    assert.deepEqual(got.filter((a) => a.inUse).map((a) => a.id), ["current"]);
+    reports = {};
+
+    // Without a reading of the login itself the copy's figures are the account's only ones: keep it.
+    usage = { [copy.id]: quota(81), [other.id]: quota(15) };
+    got = await rows();
+    assert.deepEqual(got.map((a) => a.id), [copy.id, other.id]);
+    usage = { current: quota(81), [copy.id]: quota(81), [other.id]: quota(15) };
+
+    // An unreadable identity leaves the rows exactly as before: no label on the login, every copy listed.
+    lookup = async () => null;
+    got = await rows();
+    assert.deepEqual(got.map((a) => [a.account, a.id, a.label]), [[0, "current", undefined], [1, copy.id, "copy@example.test"], [2, other.id, "person@example.test"]]);
+    lookup = async () => { throw new Error("offline"); };
+    got = await rows();
+    assert.deepEqual(got.map((a) => a.id), ["current", copy.id, other.id]);
+  }, { claudeIdentity: () => lookup(), claudeUsage: async () => usage, credentials: () => reports });
 });
 
 test("GET /api/limits lists every Claude account with usage, in a stable order, with labels and the in-use mark", async () => {
