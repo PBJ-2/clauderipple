@@ -10,7 +10,7 @@ registerHooks({ resolve(specifier, context, next) {
 } })
 const { AUTO_DESCRIPTION, modelReason, ruleReason, withoutRouting, userSaid, readMarker, agentProvider, chatgptUsable,
   ladderPick, markerDomain, workerRule, routerModelOptions, zenJev, spawnModel, takesOver, claudeCandidates, allowed } = await import('../../packages/mod/hooks/workers.ts')
-const { agentFilePaths, agentModel, definedModel, delegationPin, pinAllows, pinSaid, PIN_SAID_MAX, rivalProviders, userNamed } = await import('../../packages/mod/hooks/worker.ts')
+const { agentFilePaths, agentModel, ancestorFolders, definedModel, delegationPin, pinAllows, pinSaid, PIN_SAID_MAX, rivalProviders, userNamed } = await import('../../packages/mod/hooks/worker.ts')
 const candidates: WorkerCandidate[] = [
   { target: { agent: 'deepseek-v4-1-flash' }, model: 'deepseek-v4.1-flash', provider: 'deepseek' },
   { target: { agent: 'gpt-6-1-sol' }, model: 'gpt-6.1-sol', provider: 'chatgpt' },
@@ -520,12 +520,15 @@ test('the ticked models bound the ladder: an unticked rung model falls to the ne
 test("an agent definition the user wrote names its model for the task title", () => {
   // Hand-written definitions are not in generated-agents.json; their `model:` is still what
   // Claude Code starts the agent on, so the title reads it from the same files Claude Code does.
-  assert.deepEqual(agentFilePaths('gpt-worker', '/home/u/.claude', '/work/app'), ['/work/app/.claude/agents/gpt-worker.md', '/home/u/.claude/agents/gpt-worker.md'])
-  assert.deepEqual(agentFilePaths('gpt-worker', 'C:\\Users\\u\\.claude', 'E:\\app\\'), ['E:\\app/.claude/agents/gpt-worker.md', 'C:\\Users\\u\\.claude/agents/gpt-worker.md'])
+  assert.deepEqual(agentFilePaths('gpt-worker', '/home/u/.claude', ['/work/app']), ['/work/app/.claude/agents/gpt-worker.md', '/home/u/.claude/agents/gpt-worker.md'])
+  assert.deepEqual(agentFilePaths('gpt-worker', 'C:\\Users\\u\\.claude', ['E:\\app\\']), ['E:\\app/.claude/agents/gpt-worker.md', 'C:\\Users\\u\\.claude/agents/gpt-worker.md'])
   assert.deepEqual(agentFilePaths('gpt-worker', '/home/u/.claude'), ['/home/u/.claude/agents/gpt-worker.md'])
+  // Every project folder, nearest first, before the user's; a root folder keeps one separator.
+  assert.deepEqual(agentFilePaths('gpt-worker', '/home/u/.claude', ['/work/app/sub', '/work/app', '/']), ['/work/app/sub/.claude/agents/gpt-worker.md', '/work/app/.claude/agents/gpt-worker.md', '/.claude/agents/gpt-worker.md', '/home/u/.claude/agents/gpt-worker.md'])
+  assert.deepEqual(agentFilePaths('gpt-worker', 'C:\\Users\\u\\.claude', ['E:\\']), ['E:/.claude/agents/gpt-worker.md', 'C:\\Users\\u\\.claude/agents/gpt-worker.md'])
   // A plugin's agent and a path are not files in those folders.
-  assert.deepEqual(agentFilePaths('my-plugin:reviewer', '/home/u/.claude', '/work/app'), [])
-  assert.deepEqual(agentFilePaths('../secrets', '/home/u/.claude', '/work/app'), [])
+  assert.deepEqual(agentFilePaths('my-plugin:reviewer', '/home/u/.claude', ['/work/app']), [])
+  assert.deepEqual(agentFilePaths('../secrets', '/home/u/.claude', ['/work/app']), [])
 
   const file = (model: string, eol = '\n') => ['---', 'name: gpt-worker', 'description: >-', '  A backend labourer.', `model: ${model}`, 'tools: Read, Edit', '---', 'Do the work.'].join(eol)
   assert.equal(definedModel(file('gpt-6.1-sol@high')), 'gpt-6.1-sol@high')
@@ -538,4 +541,22 @@ test("an agent definition the user wrote names its model for the task title", ()
   assert.equal(definedModel(['---', 'name: reviewer', 'description: Reviews.', '---', 'Review.'].join('\n')), undefined)
   // A `model:` in the body is not the definition's.
   assert.equal(definedModel(['---', 'name: reviewer', '---', 'model: gpt-6.1-sol'].join('\n')), undefined)
+})
+
+test("project agents are looked up from the folder the session started in and the folders above it, below home", () => {
+  // A session started in ~/bridge that moved into ~/bridge/repo with `cd` still runs the agents
+  // Claude Code read from ~/bridge/.claude/agents; the walk starts at the start folder.
+  assert.deepEqual(ancestorFolders('/home/u/bridge', '/home/u'), ['/home/u/bridge'])
+  assert.deepEqual(ancestorFolders('/home/u/bridge/repo/', '/home/u'), ['/home/u/bridge/repo', '/home/u/bridge'])
+  // Home itself is the user's folder, read separately; outside home the walk reaches the root.
+  assert.deepEqual(ancestorFolders('/home/u', '/home/u'), [])
+  assert.deepEqual(ancestorFolders('/work/app', '/home/u'), ['/work/app', '/work', '/'])
+  assert.deepEqual(ancestorFolders('/work/app'), ['/work/app', '/work', '/'])
+  assert.deepEqual(ancestorFolders('/'), ['/'])
+  // Windows: either separator, a drive root, and home matched without regard to case.
+  assert.deepEqual(ancestorFolders('C:\\Users\\u\\bridge\\repo', 'c:\\users\\U'), ['C:\\Users\\u\\bridge\\repo', 'C:\\Users\\u\\bridge'])
+  assert.deepEqual(ancestorFolders('E:\\app\\', 'C:\\Users\\u'), ['E:\\app', 'E:\\'])
+  assert.deepEqual(ancestorFolders('C:/Users/u/app', 'C:\\Users\\u'), ['C:/Users/u/app'])
+  // A bare name has nothing above it.
+  assert.deepEqual(ancestorFolders('app', '/home/u'), ['app'])
 })
