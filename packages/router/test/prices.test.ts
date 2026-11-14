@@ -60,9 +60,9 @@ test("a request's cost is input x input rate + cached x cache-read rate + cache-
 });
 
 test("a non-Claude model takes AA's input and output prices, with its cache prices falling back to the AA input price", () => {
-  setAaPriceDataset(aa([{ base: "kimi-k3", priceIn: 1.5, priceOut: 6 }]));
-  // Kimi's page shows no cache price, so neither cache rate is official.
-  assert.deepEqual(priceOf("opencode-go", "kimi-k3", 10), { input: 1.5, output: 6, cacheRead: 1.5, cacheWrite: 1.5, cacheReadOfficial: false, cacheWriteOfficial: false });
+  setAaPriceDataset(aa([{ base: "nova-pro", priceIn: 1.5, priceOut: 6 }]));
+  // No page gives this model a cache price, so neither cache rate is official.
+  assert.deepEqual(priceOf("opencode-go", "nova-pro", 10), { input: 1.5, output: 6, cacheRead: 1.5, cacheWrite: 1.5, cacheReadOfficial: false, cacheWriteOfficial: false });
 });
 
 test("an official cache-read price is used for the model it names; its cache write is not official", () => {
@@ -83,9 +83,90 @@ test("a model in neither the Claude table nor the AA dataset is unpriced, and so
   assert.equal(priceOf("opencode-go", "free-model", 10), null);
 });
 
+test("an undated model id is priced from the AA base that carries a release stamp, and a base's own name wins over it", () => {
+  // AA files the snapshot (`deepseek-v4-1-flash-1017`); OpenCode Go serves `deepseek-v4.1-flash`, which showed no cost.
+  setAaPriceDataset(aa([{ base: "deepseek-v4-1-flash-1017", priceIn: 0.3, priceOut: 1.2 }]));
+  // Its cached read is the page's Peak row (0.006), not the input price: fifty times less.
+  assert.deepEqual(priceOf("opencode-go", "deepseek-v4.1-flash", 10), { input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: 0.3, cacheReadOfficial: true, cacheWriteOfficial: false });
+  assert.equal(priceOf("opencode-go", "deepseek-v4.1-flash@max", 10)?.input, 0.3);
+  assert.equal(priceOf("deepseek", "deepseek-v4-1-flash-1017", 10)?.output, 1.2);
+  // Once AA files the undated name as well, that record is the id's price.
+  setAaPriceDataset(aa([{ base: "deepseek-v4-1-flash-1017", priceIn: 0.3, priceOut: 1.2 }, { base: "deepseek-v4-1-flash", priceIn: 0.5, priceOut: 2 }]));
+  assert.equal(priceOf("opencode-go", "deepseek-v4.1-flash", 10)?.input, 0.5);
+  // Even without a price on it: the id is then unpriced, not priced as the snapshot.
+  setAaPriceDataset(aa([{ base: "deepseek-v4-1-flash-1017", priceIn: 0.3, priceOut: 1.2 }, { base: "deepseek-v4-1-flash", priceIn: null, priceOut: null }]));
+  assert.equal(priceOf("opencode-go", "deepseek-v4.1-flash", 10), null);
+});
+
+test("an undated id stays unpriced when two stamped snapshots share its name, or when the trailing number is no date", () => {
+  setAaPriceDataset(aa([{ base: "deepseek-v4-1-flash-1017", priceIn: 0.3, priceOut: 1.2 }, { base: "deepseek-v4-1-flash-1105", priceIn: 0.4, priceOut: 1.6 }]));
+  assert.equal(priceOf("opencode-go", "deepseek-v4.1-flash", 10), null);
+  assert.equal(priceOf("opencode-go", "deepseek-v4-1-flash-1105", 10)?.input, 0.4);
+  // 8000 is not a month and day: `nova-8000` is that model's own name, and `nova` is another model.
+  setAaPriceDataset(aa([{ base: "nova-8000", priceIn: 1, priceOut: 2 }]));
+  assert.equal(priceOf("opencode-go", "nova", 10), null);
+  assert.equal(priceOf("opencode-go", "nova-8000", 10)?.input, 1);
+});
+
+test("a provider's own variant that AA has no record of takes the provider page's price, not the plain model's", () => {
+  // AA lists the plain model only. The Contributor variant is OpenCode Go's discounted offer (0.10 in, 0.20 out, 0.002 cached read).
+  setAaPriceDataset(aa([{ base: "muse-spark-1-3", priceIn: 1.25, priceOut: 4.25 }]));
+  const page = { input: 0.10, output: 0.20, cacheRead: 0.002, cacheWrite: 0.10, cacheReadOfficial: true, cacheWriteOfficial: false };
+  assert.deepEqual(priceOf("opencode-go", "muse-spark-1.3-contributor", 10), page);
+  assert.deepEqual(priceOf("opencode-go", "muse-spark-1.3-contributor@high", 10), page);
+  assert.deepEqual(priceOf("opencode-go", "muse-spark-1.2-contributor", 10), page);
+  assert.equal(priceOf("opencode-go", "muse-spark-1.3", 10)?.input, 1.25);
+  // The page gives the cached read price, so a cache read is no estimate; it shows no cache-write price.
+  assert.equal(chargeOf(page, { input: 1_000, cached: 500, cacheWrite: 0, output: 100 }).estimated, false);
+  assert.equal(chargeOf(page, { input: 1_000, cached: 500, cacheWrite: 10, output: 100 }).estimated, true);
+  // The page price needs no AA data.
+  setAaPriceDataset(null);
+  assert.deepEqual(priceOf("opencode-go", "muse-spark-1.3-contributor", 10), page);
+  // AA wins once it has a record of the variant: the table fills a gap, it does not correct AA.
+  setAaPriceDataset(aa([{ base: "muse-spark-1-3-contributor", priceIn: 0.12, priceOut: 0.24 }]));
+  assert.deepEqual(priceOf("opencode-go", "muse-spark-1.3-contributor", 10), { input: 0.12, output: 0.24, cacheRead: 0.002, cacheWrite: 0.12, cacheReadOfficial: true, cacheWriteOfficial: false });
+});
+
+test("a model of OpenCode Go's table that AA has no record of takes the table's price, tiered where the table is", () => {
+  // No AA data at all: these come from the provider page alone.
+  assert.deepEqual(priceOf("opencode-go", "hy3", 10), { input: 0.14, output: 0.58, cacheRead: 0.035, cacheWrite: 0.14, cacheReadOfficial: true, cacheWriteOfficial: false });
+  assert.deepEqual(priceOf("opencode-go", "glm-5.2", 10), { input: 1.40, output: 4.40, cacheRead: 0.26, cacheWrite: 1.40, cacheReadOfficial: true, cacheWriteOfficial: false });
+  assert.deepEqual(priceOf("opencode-go", "kimi-k2.7-code@high", 10), { input: 0.95, output: 4.00, cacheRead: 0.19, cacheWrite: 0.95, cacheReadOfficial: true, cacheWriteOfficial: false });
+  // Qwen3.7 Plus: "≤ 256K tokens" is the base row, one token more is the long-prompt row, cached read included.
+  assert.deepEqual(priceOf("opencode-go", "qwen3.7-plus", 256_000), { input: 0.40, output: 1.60, cacheRead: 0.04, cacheWrite: 0.40, cacheReadOfficial: true, cacheWriteOfficial: false });
+  assert.deepEqual(priceOf("opencode-go", "qwen3.7-plus", 256_001), { input: 1.20, output: 4.80, cacheRead: 0.12, cacheWrite: 1.20, cacheReadOfficial: true, cacheWriteOfficial: false });
+  // Every paid id of the table that AA lacked on 2026-11-14 is priced.
+  for (const model of ["longcat-2.0", "step-5-preview", "mimo-v2.5", "mimo-v2.5-pro", "qwen3.8-flash", "hy4", "hy4-preview"]) assert.ok((priceOf("opencode-go", model, 10)?.input ?? 0) > 0, model);
+  // AA still wins for a model it lists; the table then gives only the cached read.
+  setAaPriceDataset(aa([{ base: "hy3", priceIn: 0.2, priceOut: 0.8 }, { base: "mimo-v2-6-pro", priceIn: 0.435, priceOut: 0.87 }]));
+  assert.equal(priceOf("opencode-go", "hy3", 10)?.input, 0.2);
+  assert.deepEqual(priceOf("opencode-go", "mimo-v2.6-pro", 10), { input: 0.435, output: 0.87, cacheRead: 0.003625, cacheWrite: 0.435, cacheReadOfficial: true, cacheWriteOfficial: false });
+});
+
+test("a free model costs nothing and is priced, not unpriced", () => {
+  for (const model of ["beam-free", "iceman-contributor-free", "longcat-2.5-free"]) {
+    const price = priceOf("opencode-go", model, 10);
+    assert.deepEqual(price, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheReadOfficial: true, cacheWriteOfficial: false }, model);
+    assert.equal(chargeOf(price!, { input: 1_000_000, cached: 1_000_000, cacheWrite: 0, output: 1_000_000 }).usd, 0);
+  }
+});
+
+test("Kimi's cached read and write are the page's: a read at its own rate, a write at the input rate, neither an estimate", () => {
+  setAaPriceDataset(aa([{ base: "kimi-k3", priceIn: 3, priceOut: 15 }, { base: "kimi-k3-1-pro", priceIn: 2, priceOut: 10 }, { base: "qwen3-8-max", priceIn: 2, priceOut: 6 }]));
+  const k3 = priceOf("opencode-go", "kimi-k3", 10);
+  assert.deepEqual(k3, { input: 3, output: 15, cacheRead: 0.30, cacheWrite: 3, cacheReadOfficial: true, cacheWriteOfficial: true });
+  assert.deepEqual(priceOf("opencode-go", "kimi-k3.1-pro", 10), { input: 2, output: 10, cacheRead: 0.20, cacheWrite: 2, cacheReadOfficial: true, cacheWriteOfficial: true });
+  assert.equal(chargeOf(k3!, { input: 1_000, cached: 500, cacheWrite: 10, output: 100 }).estimated, false);
+  // Qwen3.8 Max: the read is the page's (0.25), but its write costs more than input, so a write is still an estimate.
+  const qwen = priceOf("opencode-go", "qwen3.8-max", 10);
+  assert.equal(qwen?.cacheRead, 0.25);
+  assert.equal(chargeOf(qwen!, { input: 1_000, cached: 500, cacheWrite: 0, output: 100 }).estimated, false);
+  assert.equal(chargeOf(qwen!, { input: 1_000, cached: 500, cacheWrite: 10, output: 100 }).estimated, true);
+});
+
 test("a request is estimated only when it uses a cache component that is not official", () => {
-  setAaPriceDataset(aa([{ base: "kimi-k3", priceIn: 1.5, priceOut: 6 }, { base: "gpt-5-5", priceIn: 5, priceOut: 30 }]));
-  const kimi = priceOf("opencode-go", "kimi-k3", 10);
+  setAaPriceDataset(aa([{ base: "nova-pro", priceIn: 1.5, priceOut: 6 }, { base: "gpt-5-5", priceIn: 5, priceOut: 30 }]));
+  const kimi = priceOf("opencode-go", "nova-pro", 10);
   const gpt = priceOf("openai", "gpt-5.5", 10);
   const claude = priceOf("anthropic", "claude-haiku-5-5", 10);
   assert.ok(kimi && gpt && claude);
@@ -108,7 +189,7 @@ test("the AA dataset a ModelScoreCatalog loads or refreshes is the one prices fo
       source: "https://artificialanalysis.ai",
       attribution: ATTRIBUTION,
       generatedAt: "2026-11-09T00:00:00.000Z",
-      models: [{ slug: "kimi-k3-0", base: "kimi-k3", name: "Kimi K3", creator: "x", releaseDate: "2026-10-01", effort: null, intelligence: null, costPerTask: null, priceIn, priceOut: 6, intelligenceEstimated: null, checkedAt: null }],
+      models: [{ slug: "nova-pro-0", base: "nova-pro", name: "Kimi K3", creator: "x", releaseDate: "2026-10-01", effort: null, intelligence: null, costPerTask: null, priceIn, priceOut: 6, intelligenceEstimated: null, checkedAt: null }],
     });
     // A fetch refreshes the dataset, and the prices follow it.
     const fetched = new ModelScoreCatalog({
@@ -117,9 +198,9 @@ test("the AA dataset a ModelScoreCatalog loads or refreshes is the one prices fo
       onDataset: setAaPriceDataset,
       warn: () => {},
     });
-    assert.equal(priceOf("opencode-go", "kimi-k3", 10), null);
+    assert.equal(priceOf("opencode-go", "nova-pro", 10), null);
     assert.ok(await fetched.get());
-    assert.equal(priceOf("opencode-go", "kimi-k3", 10)?.input, 1.5);
+    assert.equal(priceOf("opencode-go", "nova-pro", 10)?.input, 1.5);
 
     // A fresh catalog reads the disk cache the fetch wrote, and the prices follow that load too.
     fs.writeFileSync(path.join(home, "aa-models.json"), JSON.stringify(envelope(2.5)));
@@ -127,7 +208,7 @@ test("the AA dataset a ModelScoreCatalog loads or refreshes is the one prices fo
     // No network: without its own fetch the catalog reached the published dataset, whose real price won.
     const fromDisk = new ModelScoreCatalog({ home, fetch: (async () => { throw new Error("offline"); }) as unknown as typeof fetch, onDataset: setAaPriceDataset, warn: () => {} });
     assert.ok(await fromDisk.get());
-    assert.equal(priceOf("opencode-go", "kimi-k3", 10)?.input, 2.5);
+    assert.equal(priceOf("opencode-go", "nova-pro", 10)?.input, 2.5);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
