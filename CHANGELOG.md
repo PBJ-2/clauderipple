@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.12.35 — 2026-11-15
+
+### Fixed
+
+- **With account rotation on, a Claude turn no longer fails when the Claude app's own login hits its 5-hour
+  limit.** A Claude model that was not ticked in the provider's model list, was released after the list was
+  saved, or was listed by two providers went out on the app's own login, where a 429 is never retried on
+  another account. Every Claude model turn now goes through the account pool, so it moves to another
+  account instead, and there is no need to leave 1-2% on the main account. Model lists, the picker, slots,
+  API-key providers and setups with rotation off are unchanged.
+
+- **A spent Fable weekly window rests only Fable on that account.** When only an account's Fable window is
+  spent, Opus and Sonnet conversations stay on that account with their cache, the account rests for Fable
+  until the window resets, and it is no longer tried for Fable every minute. A spent 5-hour or 7-day window
+  still rests the whole account.
+
+- **"다시 로그인" on a Claude account renews that account.** It no longer adds a second entry for the same
+  person and leaves the old one on "needs login".
+
+- **The limits panel names the current Claude login and lists it once.** The login shows its email instead
+  of a bare "Claude 1", and a stored copy of the same account is no longer listed again with the same
+  figures.
+
+- **A general-purpose worker asked for `fable`, `opus` and the like runs the family's newest model.** It
+  now runs Fable 5.2 where it ran Fable 5.1, and follows later releases without an update (#168).
+
+- **Every OpenCode Go model is priced.** 14 of its 32 models showed no cost in the log (#166, thanks
+  @csa906).
+
+- **A project agent's task title reads its definition from the folder the session started in, after a
+  `cd`; the Windows account lock waits out transient file contention.** Adding several accounts at once on
+  Windows no longer fails on a lock another process is still removing (#167, thanks @115dkk).
+
 ## 0.12.34 — 2026-11-13
 
 ### Added
