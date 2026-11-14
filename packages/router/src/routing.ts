@@ -11,7 +11,7 @@
 //   Quoted anywhere else, a marker is prose (issue #13).
 
 import type { Config } from "./config.ts";
-import { bareOwners, ingressOnly, qualifiedModel, rawDeclaredBy, soleOwner } from "./targets.ts";
+import { bareOwners, claudePoolProvider, ingressOnly, qualifiedModel, rawDeclaredBy, soleOwner } from "./targets.ts";
 export { qualifiedModel, declaredBy, pinnedModel } from "./targets.ts";
 import { isWebFetchRequest } from "./webfetch.ts";
 import { webSearchQuery } from "./websearch.ts";
@@ -194,7 +194,7 @@ function resolveMarker(hit: ReturnType<typeof scanMarker>, aliases: Record<strin
  * non-null only for a request that must be refused instead of passed through to Anthropic: never for
  * a non-string model, and never when `route` is non-null.
  */
-export function decide(model: unknown, body: unknown, cfg: Config, kind: RequestKind): Decision {
+export function decide(model: unknown, body: unknown, cfg: Config, kind: RequestKind, claudePool = false): Decision {
   if (typeof model !== "string") return { route: null, refusal: null };
   const routed = (route: Omit<Resolved, "kind" | "asked">): Decision => ({
     route: { ...route, kind, asked: model },
@@ -235,6 +235,20 @@ export function decide(model: unknown, body: unknown, cfg: Config, kind: Request
   const effective = ov?.model ?? base;
   const hasDirect = (id: string): boolean => cfg.direct.some((d) => id.startsWith(d.prefix));
 
+  // With `claudePool` (set only by the proxy, for a live request), a bare Claude id that nothing
+  // routes (undeclared, unticked, declared twice, or declared only by an ingress-only provider)
+  // belongs to the native account pool when one is on. Every other caller of `decide`/`resolve`
+  // (picker, model scores, context windows, the OpenAI ingress) asks which models are *declared*
+  // and keeps that answer. Without this the id goes out on the app's own login with no rotation, and
+  // that login's 5h limit reaches the client while the pooled accounts sit idle (§5, 2026-11-14).
+  // Never reached by a qualified id, a slot or a rule, and an id one routable owner declares keeps
+  // that owner. Several pools: the first in config order.
+  const pooled = (id: string, finalEffort: string | undefined, marked: boolean): Decision | null => {
+    const pool = claudePool ? claudePoolProvider(cfg) : null;
+    if (!pool || !id.startsWith("claude-")) return null;
+    return routed({ provider: pool, model: id, effort: finalEffort, tag: `${model}->${id}${marked ? " (marker)" : ""}` });
+  };
+
   // Every way below of finding no route ends here, so passing through and refusing are decided by
   // one set of rules, in this order.
   const noRoute = (): Decision => {
@@ -272,7 +286,7 @@ export function decide(model: unknown, body: unknown, cfg: Config, kind: Request
   const qualified = qualifiedModel(base, cfg);
   if (qualified) {
     if (ov) {
-      const target = decide(`${ov.model}@${ov.effort ?? effort ?? ""}`, {}, cfg, "turn").route;
+      const target = decide(`${ov.model}@${ov.effort ?? effort ?? ""}`, {}, cfg, "turn", claudePool).route;
       return target ? routed({ ...target, tag: `${model}->${target.model} (marker)` }) : noRoute();
     }
     if (ingressOnly(cfg, qualified.provider)) return noRoute();
@@ -292,7 +306,7 @@ export function decide(model: unknown, body: unknown, cfg: Config, kind: Request
       if (qualified) return ingressOnly(cfg, qualified.provider) ? noRoute() : routed({ ...qualified, effort: finalEffort, tag: `${model}->${qualified.model} (marker)` });
       const ownDirect = cfg.direct.find((d) => effective.startsWith(d.prefix));
       const provider = ownDirect ? ownDirect.provider : soleOwner(effective, cfg);
-      if (!provider || ingressOnly(cfg, provider)) return noRoute();
+      if (!provider || ingressOnly(cfg, provider)) return pooled(effective, finalEffort, true) ?? noRoute();
       return routed({ provider, model: effective, effort: finalEffort, tag: `${model}->${effective} (marker)` });
     }
     // The log says when a marker decided: `claude-sonnet-5->gpt-6-astra` with no hint of why cost a
@@ -337,7 +351,11 @@ export function decide(model: unknown, body: unknown, cfg: Config, kind: Request
   // `deepseek-v4-pro` on both a direct DeepSeek mapping and OpenCode Go, and they are not the same
   // deal). Guessing would route someone's traffic to a vendor they did not choose, so an ambiguous
   // id keeps requiring the explicit rule it requires today.
-  if (owners.length !== 1) return noRoute();
+  if (owners.length !== 1) {
+    // A marker whose own target is no Claude id and undeclared leaves the request on its Claude model.
+    const keep = owners.length === 0 && !effective.startsWith("claude-") && base.startsWith("claude-");
+    return (keep ? pooled(base, effort, false) : pooled(effective, ov?.effort ?? effort, !!ov)) ?? noRoute();
+  }
   const owner = owners[0]!;
 
   // An ingress-only provider declaring a model does not make it a target: it serves the OpenAI
@@ -347,7 +365,7 @@ export function decide(model: unknown, body: unknown, cfg: Config, kind: Request
   // §5). Counting it as an owner rather than skipping it is deliberate: if some other provider also
   // offered `claude-opus-5`, that is an ambiguity to be asked about, not a silent redirection of
   // Claude traffic to a third party.
-  if (ingressOnly(cfg, owner)) return noRoute();
+  if (ingressOnly(cfg, owner)) return pooled(effective, ov?.effort ?? effort, !!ov) ?? noRoute();
 
   return routed({ provider: owner, model: effective, effort: ov?.effort ?? effort, tag: `${model}->${effective}${ov ? " (marker)" : ""}` });
 }

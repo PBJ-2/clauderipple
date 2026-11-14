@@ -1185,7 +1185,7 @@ export class Proxy {
       }
     }
     type Override = { route: Resolved | null; model: string; label: string; purpose: "web-fetch" | "compaction"; refusal?: string | null };
-    const compactDecision = compactModel ? decide(compactModel, {}, cfg, "compaction") : null;
+    const compactDecision = compactModel ? decide(compactModel, {}, cfg, "compaction", true) : null;
     const override: Override | null = compactModel && compactDecision
       ? { ...compactDecision, model: compactModel, label: `compact→${compactModel}`, purpose: "compaction" }
       : fetchRoute ? { route: fetchRoute, model: fetchRoute.model, label: `web fetch via ${fetchRoute.provider}`, purpose: "web-fetch" } : null;
@@ -1245,9 +1245,16 @@ export class Proxy {
         delete output.effort;
         json.output_config = output;
       }
+      // The pool takes an unlisted Claude id (routing.ts `pooled`) only for a model turn on
+      // /v1/messages itself, the request that spends a window and must rotate. Not the continue of a
+      // turn a vendor answered: that has no marker to route by and the pool has no such thread, so it
+      // stays un-routed for the refusal below that makes the CLI resend the turn whole. Not a native
+      // web search, which keeps the app's own login (`webSearch: "native"`), and not count_tokens,
+      // which spends nothing and must not be refused when every account is paused.
+      const poolUnlisted = pathname === "/v1/messages" && kind !== "web-search" && !!json && !continuesTranslatedTurn(json, this.routedMessageIds);
       const decision = override
         ? { route: fetchTarget, refusal: override.refusal ?? null }
-        : json ? decide(model, json, cfg, kind) : { route: null, refusal: null };
+        : json ? decide(model, json, cfg, kind, poolUnlisted) : { route: null, refusal: null };
       let resolved = decision.route;
       const ladderKey = subagent && record.session ? `${record.session}:${agentId}` : undefined;
       if (!fetchTarget && subagent && resolved && json) {

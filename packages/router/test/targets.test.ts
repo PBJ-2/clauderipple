@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { DEFAULTS, type Config, type Provider } from "../src/config.ts";
-import { answersWebSearch, ingressOnly, isTargetProvider, runsServerTools, targetWarnings } from "../src/targets.ts";
+import { answersWebSearch, claudePoolProvider, ingressOnly, isTargetProvider, runsServerTools, targetWarnings } from "../src/targets.ts";
 
 function config(providers: Config["providers"]): Config {
   return { ...DEFAULTS, providers };
@@ -85,4 +85,13 @@ test("targetWarnings reports accepted primary and direct ingress-only rules only
     'route "slot" names "ingress", which serves the OpenAI ingress only; requests for it pass through to Anthropic',
     'direct rule "native-" names "ingress", which serves the OpenAI ingress only; requests it matches pass through to Anthropic',
   ]);
+});
+
+test("claudePoolProvider is the first rotation-on, signed-in Anthropic provider in config order", () => {
+  assert.equal(claudePoolProvider(config({ ingress: { type: "anthropic", auth: "claude-code" }, key: { type: "anthropic", auth: "api-key", apiKey: "k" } as Provider })), null);
+  assert.equal(claudePoolProvider(config({
+    key: { type: "anthropic", auth: "api-key", apiKey: "k" } as Provider,
+    one: { type: "anthropic", auth: "claude-code", accountPool: true },
+    two: { type: "anthropic", auth: "claude-code", accountPool: true },
+  })), "one");
 });

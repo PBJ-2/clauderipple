@@ -119,7 +119,7 @@ async function nativeRig(reply: (seen: Seen, attempt: number) => Reply, claude: 
   await proxy.listen();
 
   let lastHeaders: Record<string, string> = {};
-  const send = async (conversation = "conversation-1", options: { content?: string; previous?: string; model?: string; auth?: string } = {}): Promise<number> => {
+  const send = async (conversation = "conversation-1", options: { content?: string; previous?: string; model?: string; auth?: string; path?: string } = {}): Promise<number> => {
     const socket = net.connect(proxyPort, "127.0.0.1");
     await new Promise<void>((resolve) => socket.once("connect", resolve));
     socket.write("CONNECT localhost:443 HTTP/1.1\r\nHost: localhost:443\r\n\r\n");
@@ -136,7 +136,7 @@ async function nativeRig(reply: (seen: Seen, attempt: number) => Reply, claude: 
       ...(options.previous ? { thread: { type: "continue", previous_message_id: options.previous } } : {}),
     });
     secure.write(
-      "POST /v1/messages HTTP/1.1\r\n" +
+      `POST ${options.path ?? "/v1/messages"} HTTP/1.1\r\n` +
       "Host: localhost\r\n" +
       "content-type: application/json\r\n" +
       // The app's own login is the observed one: every request carries it, routed or not.
@@ -726,5 +726,55 @@ test("a cooling pin falls back on the next turn, and an in-turn retry honours th
     assert.deepEqual(third.seen.map((item) => item.authorization), ["Bearer third-token", "Bearer current-token"], "the pin answered first; the retry used the pool");
   } finally {
     await third.stop();
+  }
+});
+
+// The pool's `models` list is a snapshot: a Claude id it does not list (unticked, or released after
+// the provider was saved) left on the app's own login, and that login's 5h 429 reached the client
+// while the other accounts sat idle (2026-11-14).
+test("a Claude id the pool does not list still rotates when the app's own login is limited", async () => {
+  const rig = await nativeRig((seen) => seen.authorization === "Bearer current-token"
+    ? { status: 429, headers: { "retry-after": "300" }, body: JSON.stringify({ type: "error", error: { type: "rate_limit_error" } }) }
+    : { status: 200 });
+  try {
+    assert.equal(await rig.send("unlisted-1", { model: "claude-sonnet-5-9" }), 200, "the 429 on the current login is retried on the next account");
+    assert.deepEqual(rig.seen.map((item) => item.authorization), ["Bearer current-token", "Bearer stored-token"]);
+    assert.equal(rig.seen[1]!.body.model, "claude-sonnet-5-9", "the id reaches the account unchanged");
+    assert.match(fs.readFileSync(path.join(rig.home, "router.log"), "utf8"), /CLAUDE claude-sonnet-5-9->claude-sonnet-5-9/);
+  } finally {
+    await rig.stop();
+  }
+});
+
+test("an unlisted Claude id's native web search and token count stay on the app's own login", async () => {
+  const rig = await nativeRig(() => ({ status: 200 }));
+  try {
+    // The CLI's search side request: the one web_search tool and its fixed sentence.
+    assert.equal(await rig.send("search-1", { model: "claude-haiku-5-9", content: "Perform a web search for the query: weather" }), 200);
+    assert.equal(await rig.send("count-1", { model: "claude-sonnet-5-9", path: "/v1/messages/count_tokens" }), 200);
+    assert.deepEqual(rig.seen.map((item) => item.authorization), ["Bearer current-token", "Bearer current-token"],
+      "neither spends a window, so neither is moved onto a stored account");
+  } finally {
+    await rig.stop();
+  }
+});
+
+test("without a pool, or on a caller's own key, an unlisted Claude id still passes through untouched", async () => {
+  const off = await nativeRig(() => ({ status: 429, body: JSON.stringify({ type: "error", error: { type: "rate_limit_error" } }) }), { type: "anthropic", auth: "claude-code" });
+  try {
+    assert.equal(await off.send("rotation-off", { model: "claude-sonnet-5-9" }), 429, "rotation off: the login's own answer reaches the client");
+    assert.equal(off.seen.length, 1);
+    assert.equal(off.seen[0]!.authorization, "Bearer current-token");
+  } finally {
+    await off.stop();
+  }
+  const keyed = await nativeRig(() => ({ status: 429, body: JSON.stringify({ type: "error", error: { type: "rate_limit_error" } }) }));
+  try {
+    assert.equal(await keyed.send("script-2", { model: "claude-sonnet-5-9", auth: "x-api-key: sk-ant-api03-script\r\nuser-agent: Python-urllib/3.12\r\n" }), 429);
+    assert.equal(keyed.seen.length, 1, "a caller's own key is not rotated");
+    assert.equal(keyed.seen[0]!.apiKey, "sk-ant-api03-script");
+    assert.equal(keyed.seen[0]!.body.model, "claude-sonnet-5-9");
+  } finally {
+    await keyed.stop();
   }
 });
