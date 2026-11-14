@@ -185,13 +185,17 @@ test("a learned CLI-only family resolves by tier, carries the CLI User-Agent and
   assert.equal(body.model, "gemini-5-neon-xhigh");
   assert.equal(body.request.generationConfig?.thinkingConfig, undefined, "the suffix names the tier, so no level is sent beside it");
   assert.match(built.headers["user-agent"] ?? "", /^antigravity\/cli\//);
-  for (const id of ["gemini-5-neon", "gemini-5-neon-low", "gemini-5-solo-high"]) assert.equal(servedToAntigravityCli(id, learned), true, id);
-  for (const id of ["gemini-5-neonate", "gemini-5-neon-ultra", "gemini-5-solo", "gemini-3.8-flash-low", "claude-opus-5-5-high"]) assert.equal(servedToAntigravityCli(id, learned), false, id);
+  // `gemini-5-solo` is not listed and not offered, but a request for it resolves onto its one listed
+  // tier, so it takes that tier's client family.
+  for (const id of ["gemini-5-neon", "gemini-5-neon-low", "gemini-5-solo-high", "gemini-5-solo"]) assert.equal(servedToAntigravityCli(id, learned), true, id);
+  for (const id of ["gemini-5-neonate", "gemini-5-neon-ultra", "gemini-5-sol", "gemini-3.8-flash-low", "claude-opus-5-5-high"]) assert.equal(servedToAntigravityCli(id, learned), false, id);
 
   // A base id and every wire id it resolves to share one scope, so a turn's scope does not depend
   // on which of them names the model.
   for (const id of ["gemini-5-neon", "gemini-5-neon@high", ...neonTiers]) assert.equal(antigravityQuotaScope(id, learned), "gemini-5-neon", id);
-  assert.equal(antigravityQuotaScope("gemini-5-solo-high", learned), "gemini-5-solo-high");
+  // A lone tier id is rested under its base id too: a request for that base resolves onto it, and
+  // the two must not rest apart.
+  for (const id of ["gemini-5-solo-high", "gemini-5-solo"]) assert.equal(antigravityQuotaScope(id, learned), "gemini-5-solo", id);
   assert.equal(antigravityQuotaScope("gemini-3.8-flash", learned), "gemini");
   assert.equal(antigravityQuotaScope("gemini-4-argon-high", learned), "argon");
   assert.equal(antigravityQuotaScope("claude-opus-5-5-high", learned), "3p");
@@ -238,7 +242,7 @@ test("an id is asked of the lists as Google wrote it, and what the lists do not 
     assert.equal(servedToAntigravityCli(id, odd.learned), false);
   }
   const kept = odd.learned.snapshot()[DAILY]!.cli!;
-  assert.equal(kept.length, 500, "the lists are bounded");
+  assert.ok(kept.length > 400 && kept.length <= 500, "the lists are bounded, by the same bound an answer is read to");
   const offered = odd.merged.models.filter((m) => m.id.startsWith("gemini-9-m"));
   assert.ok(offered.length > 0 && offered.every((m) => kept.includes(m.id) && servedToAntigravityCli(m.id, odd.learned)), "what is offered is exactly what is kept, so it carries the CLI User-Agent");
   assert.equal(odd.merged.models.some((m) => m.id === "gemini-9-m519"), false, "an id past the bound is left out");
@@ -301,7 +305,8 @@ test("what is learned never overrides the tables, and a stored snapshot is check
   assert.match(antigravityUserAgentFor("gemini-3.8-flash-low", learned), /^antigravity\/ide\//);
   assert.match(antigravityUserAgentFor("gemini-pro-agent", learned), /^antigravity\/ide\//);
   assert.deepEqual(resolveAntigravityWireModel("gemini-3.8-flash", "high", learned), { wire: "gemini-3.8-flash-medium", known: true });
-  assert.deepEqual(resolveAntigravityWireModel("gemini-7-y", "high", learned), { wire: "gemini-7-y", known: false }, "one tier is not a family");
+  assert.equal(learned.family("gemini-7-y"), undefined, "one tier is not a family to list");
+  assert.deepEqual(resolveAntigravityWireModel("gemini-7-y", "low", learned), { wire: "gemini-7-y-high", known: true }, "but its base id reaches the tier that is listed");
   assert.equal(learned.family("claude-sonnet-9"), undefined, "only Gemini ids collapse");
   assert.deepEqual(learned.rows(), [{ id: "claude-sonnet-9-high" }, { id: "claude-sonnet-9-low" }, { id: "gemini-7-x", effortLevels: ["low", "high"] }, { id: "gemini-7-y-high" }]);
   // Without a list of hosts asked, any host's lists are kept, and still no token is ever sent to one
@@ -333,9 +338,17 @@ test("a family ends when its bare id is listed, shrinks with its tiers, and a CL
   assert.deepEqual(g.learned.family("gemini-5-g"), ["low", "high"]);
   assert.equal(resolveAntigravityWireModel("gemini-5-g", "medium", g.learned).wire, "gemini-5-g-low");
   assert.deepEqual(g.learned.rows().filter((row) => row.id.startsWith("gemini-5-g")), [{ id: "gemini-5-g", effortLevels: ["low", "high"] }], "the withdrawn tier is not a row of its own");
+  // One tier left is no ladder to offer, and its id is listed as a row of its own. The base id a
+  // configuration saved while it was a family still reaches that tier, whatever effort is asked:
+  // forwarded as it is, it would name an id no host lists.
   await read(allAnswer(catalogue({ ...ideModels, ...tiersOf("gemini-5-g", ["high"]) })), g.learned);
-  assert.deepEqual(resolveAntigravityWireModel("gemini-5-g", "high", g.learned), { wire: "gemini-5-g", known: false });
+  assert.equal(g.learned.family("gemini-5-g"), undefined);
   assert.deepEqual(g.learned.rows().filter((row) => row.id.startsWith("gemini-5-g")), [{ id: "gemini-5-g-high" }]);
+  for (const effort of ["low", "high", "max", undefined]) assert.deepEqual(resolveAntigravityWireModel("gemini-5-g", effort, g.learned), { wire: "gemini-5-g-high", known: true }, String(effort));
+  assert.deepEqual(resolveAntigravityWireModel("gemini-5-g-high", "low", g.learned), { wire: "gemini-5-g-high", known: false }, "the listed id goes out as it is");
+  // No tier left: there is nothing to resolve onto.
+  await read(allAnswer(catalogue(ideModels)), g.learned);
+  assert.deepEqual(resolveAntigravityWireModel("gemini-5-g", "high", g.learned), { wire: "gemini-5-g", known: false });
 
   // CLI-only until an IDE answer lists it.
   const neon = await read(fakeCatalogues());
@@ -354,6 +367,22 @@ test("a family ends when its bare id is listed, shrinks with its tiers, and a CL
   assert.equal(servedToAntigravityCli("gemini-5-solo-high", neon.learned), false);
   assert.equal(resolveAntigravityWireModel("gemini-5-neon", "high", neon.learned).wire, "gemini-5-neon-high", "the family is still a family");
   assert.equal(antigravityQuotaScope("gemini-5-neon-high", neon.learned), "gemini");
+});
+
+test("a CLI-only family that shrank to one tier: the saved base id keeps its wire id, User-Agent, host and scope", async () => {
+  const one = catalogue({ ...ideModels, "gemini-5-neon-high": entry("Gemini 5 Neon (High)") });
+  const { learned } = await read(fakeCatalogues());
+  const scope = antigravityQuotaScope("gemini-5-neon", learned);
+  await read(fakeCatalogues({ dailyCli: one, prodCli: one }), learned);
+  assert.equal(resolveAntigravityWireModel("gemini-5-neon", "low", learned).wire, "gemini-5-neon-high");
+  assert.equal(servedToAntigravityCli("gemini-5-neon", learned), true);
+  assert.match(antigravityUserAgentFor("gemini-5-neon-high", learned), /^antigravity\/cli\//);
+  assert.equal(learned.hostOf("gemini-5-neon-high"), DAILY);
+  // The turn is asked by the base id and Google's 429 names the wire id: one scope for both, and the
+  // one the family had, so a rest recorded before the tier left still holds.
+  assert.equal(antigravityQuotaScope("gemini-5-neon", learned), scope);
+  assert.equal(antigravityQuotaScope("gemini-5-neon-high", learned), scope);
+  assert.equal(isGroupQuotaExhausted(429, spent("gemini-5-neon-high"), "gemini-5-neon", learned), true);
 });
 
 test("a family the IDE lists in part: each tier takes its own User-Agent, the family one scope, and Gemini's windows are no evidence for it", async () => {
@@ -539,9 +568,11 @@ test("through the adapter: a learned model is called on its wire id, host and Us
   assert.deepEqual(fallback?.find((m) => m.id === "gemini-5-neon"), { id: "gemini-5-neon", effortLevels: ["low", "medium", "high", "xhigh"] }, "and it stays in the fallback list");
   assert.deepEqual(fallback?.slice(0, staticAntigravityModels().length), staticAntigravityModels(), "after the tables' own models");
 
-  // Another provider of the same home knows nothing of it, and a damaged file teaches nothing and breaks nothing.
+  // Another provider of the same home, with no lists of its own yet, starts from these: the accounts
+  // are the home's, so the same hosts answer it alike. A damaged file teaches nothing and breaks nothing.
   const other = new GoogleAdapter("other", cfg, home, log);
-  assert.equal((await other.fetchModels())?.some((m) => m.id.startsWith("gemini-5-")), false);
+  assert.equal((await other.fetchModels())?.some((m) => m.id === "gemini-5-neon"), true);
+  assert.deepEqual(Object.keys(storedIn(home).providers), ["ag"], "an unreadable catalogue writes nothing under its name");
   fs.writeFileSync(path.join(home, LEARNED_MODELS_FILE), "{ not json");
   assert.deepEqual(await new GoogleAdapter("ag", cfg, home, log).fetchModels(), staticAntigravityModels());
   fs.writeFileSync(path.join(home, LEARNED_MODELS_FILE), JSON.stringify({ version: 1, models: [{ id: "gemini-5-neon", tiers: ["low", "high"], cli: true }] }));
@@ -746,4 +777,123 @@ test("through the adapter: a re-read that misses an ask keeps what was cached, i
   t.mock.timers.tick(30 * 60_000);
   await sentTo("gemini-3.8-flash");
   assert.equal(asks.length, 16);
+});
+
+test("through the adapter: after a partial re-read a learned model goes to a host that lists it for the client family its User-Agent names", async (t) => {
+  const home = homeWithAccount(t);
+  let later = false;
+  // First both hosts list Neon for the CLI family alone. Then daily cannot be read, and prod lists
+  // Neon for the IDE family too.
+  const first = fakeCatalogues() as unknown as (url: string, init?: RequestInit) => Promise<Response>;
+  const second = fakeCatalogues({ dailyIde: null, prodIde: cliBody }) as unknown as (url: string, init?: RequestInit) => Promise<Response>;
+  const { calls } = upstream(t, (url, init) => (later ? second : first)(url, init));
+  const adapter = new GoogleAdapter("ag", cfg, home, log);
+  const sent = async (model: string, effort: string): Promise<{ model: unknown; host: string; cli: boolean }> => {
+    answered(await turn(adapter, model, effort));
+    const call = calls.at(-1)!;
+    return { model: call.model, host: new URL(call.url).origin, cli: call.ua.startsWith("antigravity/cli/") };
+  };
+  assert.deepEqual(await sent("gemini-5-neon", "high"), { model: "gemini-5-neon-high", host: DAILY, cli: true });
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  t.mock.timers.tick(61 * 60_000);
+  later = true;
+  await sent("gemini-3.8-flash", "low");
+  await adapter.fetchModels();
+  // An IDE answer lists it now, so it goes out under the IDE User-Agent; daily is only known to
+  // list it for the CLI family, so that request must not go there.
+  assert.deepEqual(await sent("gemini-5-neon", "high"), { model: "gemini-5-neon-high", host: PROD, cli: false });
+  // What the tables name stays where daily's last whole read put it.
+  assert.deepEqual(await sent("gemini-3.8-flash", "low"), { model: "gemini-3.8-flash-low", host: DAILY, cli: false });
+  assert.deepEqual(await sent("gemini-4-argon", "low"), { model: "gemini-4-argon-low", host: DAILY, cli: true });
+});
+
+test("through the adapter: a first read after a restart that misses the preferred host keeps a learned model on the host its stored lists name", async (t) => {
+  const home = homeWithAccount(t);
+  const lists = { ide: [], cli: [...neonTiers].sort() };
+  fs.writeFileSync(path.join(home, LEARNED_MODELS_FILE), JSON.stringify({ version: 2, providers: { ag: { [DAILY]: lists, [PROD]: lists } } }));
+  // Daily's catalogue cannot be read on this start; prod answers whole.
+  const { calls, asks } = upstream(t, fakeCatalogues({ dailyIde: null, dailyCli: null }) as unknown as (url: string, init?: RequestInit) => Promise<Response>);
+  const adapter = new GoogleAdapter("ag", cfg, home, log);
+  answered(await turn(adapter, "gemini-5-neon", "high"));
+  assert.ok(asks.length > 0, "the catalogue was asked before the turn");
+  const call = calls.at(-1)!;
+  assert.deepEqual([call.model, new URL(call.url).origin], ["gemini-5-neon-high", DAILY], "the host it was sent to before the restart");
+  assert.match(call.ua, /^antigravity\/cli\//);
+  // And it rests there: the scope a 429 from that turn would cool is daily's, as before the restart.
+  assert.equal(adapter.quotaScopeOf("gemini-5-neon", "high"), "gemini-5-neon@daily-cloudcode-pa.googleapis.com");
+  assert.deepEqual(storedIn(home).providers.ag![DAILY], lists, "an unread host's stored lists are written back as they were");
+});
+
+test("through the adapter: with no catalogue this run, the limits read asks the host the stored lists send a model to", async (t) => {
+  const home = homeWithAccount(t);
+  const prodOnly = { cli: ["gemini-6-x-high", "gemini-6-x-low"] };
+  fs.writeFileSync(path.join(home, LEARNED_MODELS_FILE), JSON.stringify({ version: 2, providers: { ag: { [PROD]: prodOnly } } }));
+  const quotaAsks: string[] = [];
+  const side = async (url: string): Promise<Response> => {
+    if (url.includes(":retrieveUserQuotaSummary")) {
+      quotaAsks.push(new URL(url).origin);
+      return Response.json({});
+    }
+    return new Response("down", { status: 500 });
+  };
+  const adapter = new GoogleAdapter("ag", { ...cfg, models: [{ id: "gemini-6-x" }] }, home, log, undefined, side);
+  await adapter.usageSnapshot();
+  assert.deepEqual([...new Set(quotaAsks)], [PROD], "the host generation goes to, not the default one");
+  assert.equal(adapter.quotaScopeOf("gemini-6-x", "high"), "gemini-6-x@cloudcode-pa.googleapis.com");
+  // A provider with no model list routes whatever is asked: the hosts its stored lists name.
+  quotaAsks.length = 0;
+  await new GoogleAdapter("ag", { ...cfg, models: [] }, home, log, undefined, side).usageSnapshot();
+  assert.deepEqual([...new Set(quotaAsks)], [PROD]);
+  // And the default host alone when nothing is stored.
+  quotaAsks.length = 0;
+  await new GoogleAdapter("ag", { ...cfg, models: [] }, homeWithAccount(t), log, undefined, side).usageSnapshot();
+  assert.deepEqual([...new Set(quotaAsks)], [DAILY]);
+});
+
+test("through the adapter: a provider with no lists of its own starts from what was learned for its hosts, and a rebuilt one from the one it replaces", async (t) => {
+  const home = homeWithAccount(t);
+  // No catalogue can be read in this test: everything a turn knows comes from what was learned before.
+  const { calls, asks } = upstream(t, async () => new Response("down", { status: 500 }));
+  const file = path.join(home, LEARNED_MODELS_FILE);
+  const tiers = (list: string[]): string[] => list.map((tier) => `gemini-5-neon-${tier}`).sort();
+  // A saved provider read both hosts: prod lists an xhigh tier that daily does not.
+  fs.writeFileSync(file, JSON.stringify({ version: 2, providers: { first: { [DAILY]: { ide: [], cli: tiers(["low", "high"]) }, [PROD]: { ide: [], cli: tiers(["low", "high", "xhigh"]) } } } }));
+  const sent = async (adapter: GoogleAdapter): Promise<[unknown, string, boolean]> => {
+    answered(await turn(adapter, "gemini-5-neon", "xhigh"));
+    const call = calls.at(-1)!;
+    return [call.model, new URL(call.url).origin, call.ua.startsWith("antigravity/cli/")];
+  };
+  // The form showed a provider that was not saved yet the first one's catalogue. Saved, pinned to
+  // prod, it knows what prod listed, before its own list is ever read.
+  assert.deepEqual(await sent(new GoogleAdapter("second", { ...cfg, url: PROD }, home, log)), ["gemini-5-neon-xhigh", PROD, true]);
+  assert.deepEqual(await sent(new GoogleAdapter("third", { ...cfg, url: DAILY }, home, log)), ["gemini-5-neon-high", DAILY, true], "and only what its own host listed");
+  assert.equal(asks.length, 0, "a pinned provider's turns ask nothing");
+  // A provider with lists of its own keeps them, whatever another one stored.
+  fs.writeFileSync(file, JSON.stringify({ version: 2, providers: { first: { [PROD]: { cli: tiers(["low", "high", "xhigh"]) } }, own: { [PROD]: { cli: tiers(["low", "high"]) } } } }));
+  assert.deepEqual(await sent(new GoogleAdapter("own", { ...cfg, url: PROD }, home, log)), ["gemini-5-neon-high", PROD, true]);
+
+  // A rebuilt adapter (its configuration was saved) is handed what the one it replaces learned,
+  // so nothing depends on the file having been written: here there is none.
+  fs.rmSync(file);
+  const before = new GoogleAdapter("own", { ...cfg, url: PROD }, home, log, undefined, undefined, { [PROD]: { cli: tiers(["low", "high", "xhigh"]) }, [DAILY]: { cli: tiers(["low"]) } });
+  const after = new GoogleAdapter("own", { ...cfg, url: PROD, models: [{ id: "gemini-5-neon" }] }, home, log, undefined, undefined, before.learnedLists());
+  assert.deepEqual(Object.keys(before.learnedLists() as object), [PROD], "only the hosts a provider asks are kept");
+  assert.deepEqual(await sent(after), ["gemini-5-neon-xhigh", PROD, true]);
+  // Nothing learned anywhere: an unknown id goes out as it is, as before.
+  answered(await turn(new GoogleAdapter("fresh", { ...cfg, url: PROD }, home, log, undefined, undefined, {}), "gemini-5-neon", "xhigh"));
+  assert.equal(calls.at(-1)!.model, "gemini-5-neon");
+});
+
+test("a host's list is never a truncated answer, so an id missing from it is one that host does not list", async () => {
+  // Daily lists more ids outside the tables than the lists keep, and the one both hosts list comes
+  // last. Were the answer read further than the lists are kept, daily's list would lack an id its
+  // catalogue offers, and the id would be sent to prod while the host map says daily.
+  const many = Object.fromEntries(Array.from({ length: 520 }, (_, i) => [`claude-extra-${String(i).padStart(3, "0")}`, entry(`Extra ${i}`)]));
+  const daily = catalogue({ ...many, "claude-future": entry("Claude Future") });
+  const prod = catalogue({ "claude-future": entry("Claude Future") });
+  const { learned, merged } = await read(fakeCatalogues({ dailyIde: daily, dailyCli: daily, prodIde: prod, prodCli: prod }));
+  const mapped = merged.hosts.get("claude-future");
+  assert.equal(learned.hostOf("claude-future") ?? mapped?.[0], mapped?.[0], "the lists and the host map name the same host");
+  assert.equal(mapped?.[0], PROD, "what was not read of daily's answer is not offered on daily either");
+  assert.ok(learned.snapshot()[DAILY]!.ide!.length <= 500);
 });

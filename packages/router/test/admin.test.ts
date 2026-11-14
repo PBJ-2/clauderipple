@@ -3430,6 +3430,41 @@ test("google (antigravity) probe reports no account with the static catalogue an
   });
 });
 
+test("google (antigravity) probe lists the catalogue of the provider being configured, not of the first one", async () => {
+  // Each provider learns its own catalogue: a list read through another provider offers models the
+  // one being configured never learns, and it then sends them as an unknown id.
+  const asked: string[] = [];
+  const account = { id: "acct-1", label: "g@example.test", email: "g@example.test", projectId: "proj-1", expiresAt: Date.now() + 3_600_000, needsReauth: false, paused: false, preferred: false, inUse: true, state: "ready" as const, active: true };
+  const google = () => ({
+    accounts: () => ({ first: [account], pinned: [account] }),
+    models: async (name: string) => { asked.push(name); return [{ id: name === "first" ? "gemini-5-neon" : "gemini-5-prod-only" }]; },
+    clearCooldown: () => {},
+  });
+  const prod = "https://cloudcode-pa.googleapis.com";
+  const providers = { first: { type: "google" as const, auth: "antigravity" as const }, pinned: { type: "google" as const, auth: "antigravity" as const, url: `${prod}/` } };
+  await withAdmin(makeCfg({ providers }), async ({ port }) => {
+    const probe = async (more: Record<string, unknown>): Promise<string[]> => {
+      const res = await fetch(`${base()}:${port}/api/providers/probe`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "google", auth: "antigravity", ...more }) });
+      const body = await res.json() as { ok: boolean; models: { id: string }[] };
+      assert.equal(body.ok, true);
+      return body.models.map((m) => m.id);
+    };
+    assert.deepEqual(await probe({ name: "pinned", url: prod }), ["gemini-5-prod-only"]);
+    assert.deepEqual(await probe({ name: "first" }), ["gemini-5-neon"]);
+    assert.deepEqual(asked, ["pinned", "first"]);
+    // A provider not saved yet has no catalogue of its own: it is shown one read from the hosts it
+    // would ask, and the tables' list when no saved provider asks those.
+    assert.deepEqual(await probe({ name: "new one", url: prod }), ["gemini-5-prod-only"]);
+    assert.deepEqual(await probe({}), ["gemini-5-neon"]);
+    assert.deepEqual(asked.slice(2), ["pinned", "first"]);
+    const elsewhere = await probe({ url: "https://daily-cloudcode-pa.googleapis.com" });
+    assert.ok(elsewhere.includes("gemini-3.8-flash") && !elsewhere.some((id) => id.startsWith("gemini-5-")), "the static list");
+    assert.equal(asked.length, 4, "no provider's catalogue was asked for hosts it does not ask");
+    // A name that is another kind of provider is not asked either.
+    assert.deepEqual(await probe({ name: "missing" }), ["gemini-5-neon"]);
+  }, { google });
+});
+
 test("google login: the API returns the terms warning and account endpoints expose no token", async () => {
   const googleToken = "ya29.SECRET-GOOGLE-TOKEN";
   const seen: string[] = [];

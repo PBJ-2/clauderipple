@@ -2194,7 +2194,8 @@ They were not live-tested during the original implementation. Files are under `s
     `gemini-4-carbon-disabled` carries `disabled: true`. So each provider keeps what its
     catalogue listed outside the tables, per host and per client family, exactly as the answers
     gave it (`LearnedCatalogue` in `antigravity.ts`; one per provider, because two providers may
-    hold different accounts and pin different hosts), and reads three facts off those lists each
+    pin different hosts and each keeps only the hosts it asks; the accounts are the home's, so the
+    same host answers every provider alike), and reads three facts off those lists each
     time they are needed, so nothing derived can outlive the listing it came from:
     - *Tier family* (`family`): a `gemini-` base with at least two tier suffixes
       (`minimal|low|medium|high|xhigh|max`) listed, whose bare id no host lists, collapses to
@@ -2203,9 +2204,14 @@ They were not live-tested during the original implementation. Files are under `s
       (existing configurations name them). An effort takes its tier, else the nearest tier
       below, else the nearest above; no effort takes `medium` by the same rule. No `thinkingLevel`
       is sent beside the suffix. That last point is **inferred** from the three measured families,
-      not measured for a model that does not exist yet. The list and routing ask the same rule
-      (`catalogueFrom` is handed `family`), and a family ends on the read that lists its bare id
-      or leaves it one tier.
+      not measured for a model that does not exist yet. The list asks `family` (`catalogueFrom` is
+      handed it); routing, the client family and the quota scope ask `tiers`, the same rule with
+      one tier enough. So a family that Google cuts to one tier is no longer offered as a ladder
+      (the tier that is left is a row of its own), but the base id a configuration saved while it
+      was a family still resolves onto that tier under the same UA, host and scope. Forwarded as
+      it is, it named an id no host lists (review of PR 165). The same holds for the
+      base of a lone tier id that was never a family: it is not offered, and a request for it
+      reaches the listed tier. Both end on the read that lists the bare id or no tier of it.
     - *Client family* (`cliOnly`, per wire id): a `gemini-` id that some CLI answer lists and no
       IDE answer of any host this provider asks lists is sent under the CLI UA; every other id
       under the IDE UA, and `transport.build` chooses by the wire id alone. One answer for every
@@ -2246,19 +2252,38 @@ They were not live-tested during the original implementation. Files are under `s
     more later (a failed replace holds the event loop while the rename is retried). A provider
     keeps only the hosts it asks (a pinned `url` never borrows a tier another host listed), and
     a learned host is only ever one of `GOOGLE_OAUTH.hosts`, because that is where the account's
-    token is sent. `hostFor` takes the host map's host for the wire id, else `hostOf` (the first
-    of the two hosts whose IDE answer listed that wire id at an earlier read, else, for a
-    CLI-only id, the first whose CLI answer did), else the base id's, else the default: a read
-    that missed prod's CLI answer used to send a prod-only model to daily, whose generic 429
-    rested every account. A re-read in which a host did not answer keeps that host's catalogue
+    token is sent. `hostFor` places a wire id outside the tables by `hostOf` (the first of the
+    two hosts whose IDE answer lists it, else, for a CLI-only id, the first whose CLI answer
+    does): the same lists that choose its UA, so host and UA cannot disagree. A table id is not
+    in the lists and takes the host map's host for its wire id; then the base id's; then the
+    default. The lists come before the host map for three reasons found in review (PR 165): the
+    map is built per host and keeps an unanswered host's earlier catalogue, so after a partial
+    re-read it could name a host that lists an id for the CLI family while the other host's new
+    IDE listing had already moved that id to the IDE UA (a 400); on the first read after a
+    restart that missed the preferred host, the map knew only the other host and moved the
+    model, its quota scope and its prompt cache there although the stored lists named the
+    preferred one; and with no catalogue at all there is no map, so the limits read
+    (`quotaHosts`) asked the default host instead of the one the stored lists send the model
+    to. A read that missed prod's CLI answer used to send a prod-only model to daily, whose
+    generic 429 rested every account. A re-read in which a host did not answer keeps that host's catalogue
     from the last read that had it (rows and host map are merged from the kept per-host
     catalogues, `mergeHostCatalogues`), so one failed ask moves no conversation to the other
     host and back. Such a partial read (a host or a CLI ask did not answer) stands for five
     minutes instead of the hour, doubling up to the hour while the same asks keep failing, and a
     cached read past its time is asked again from the turn path without holding the turn. A
     provider that pins `url` asks nothing on the turn path, as before: it learns when its model
-    list is read (the provider form, the picker) and from the file. A catalogue answer is
-    untrusted input: at most 2 000 ids of one answer are read, a kept id matches
+    list is read (the provider form, the picker) and from the file. The provider form's probe
+    (`POST /api/providers/probe`) therefore reads the catalogue of the provider being edited (the
+    form sends its `name` and `url`), not of the first Antigravity provider: a list read through
+    another provider offered a second, pinned provider a family it never learned and then sent
+    as an unknown id under the IDE UA. A provider not saved yet is shown the catalogue of a
+    saved one that asks the same hosts, else the tables' list. What it was shown is still its own
+    once saved: an adapter with no stored lists under its name starts from the lists another
+    provider of the home stored for the hosts it asks (same accounts, same host, same answer), and
+    an adapter rebuilt because its configuration changed is handed the lists of the one it
+    replaces (`GoogleAdapter`'s `inherit`), so nothing depends on the file having been written
+    between the form's probe and the save. A catalogue answer is
+    untrusted input: at most 500 ids of one answer are read (the bound of a kept list, so a list is never a truncated answer and an id missing from it is one that host does not list), a kept id matches
     `[A-Za-z0-9][A-Za-z0-9._-]{0,127}` (500 per list, 8 hosts), every table lookup by a client-
     or catalogue-supplied id is an own-property lookup (`constructor` is not a model), and
     `fetchAvailableModels` reading never throws into `fetchModels` (it falls back to the static

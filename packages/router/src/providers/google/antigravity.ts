@@ -228,9 +228,10 @@ export function resolveAntigravityWireModel(model: string, effort: string | unde
   if (tiered) {
     return { wire: tiered.wire, thinkingLevel: (level ?? tiered.default) as "low" | "medium" | "high", known: true };
   }
-  // A tier family the provider's catalogue showed (below): the suffix names the tier, as for the
-  // families above. Asked again on every turn, so a family ends the moment its bare id is listed.
-  const tiers = learned?.family(model);
+  // A base id whose tier ids the provider's catalogue showed (below): the suffix names the tier, as
+  // for the families above. Asked again on every turn, so it ends the moment its bare id is listed,
+  // and it holds while one tier is left (`LearnedCatalogue.tiers`).
+  const tiers = learned?.tiers(model);
   if (tiers) return { wire: `${model}-${tierFor(tiers, effort)}`, known: true };
   // Claude models on Antigravity take effort through thinkingConfig only, no suffix — CCA validates
   // the field against Google's ThinkingLevel enum. Source: opencodex rule 4.
@@ -314,9 +315,10 @@ function learnedIds(value: unknown): string[] | undefined {
  * An id in the tables is never kept here and never looked up here: what was measured for it by hand
  * stays as written. The same holds for what the hand-written rules cover: a `claude-*` or other
  * non-Gemini id is offered and sent exactly as before (listed when an IDE answer lists it, IDE
- * User-Agent, `3p` scope for Claude and GPT-OSS). One instance per provider: two providers may hold
- * different accounts and pin different hosts, and what one of them is listed says nothing about
- * the other.
+ * User-Agent, `3p` scope for Claude and GPT-OSS). One instance per provider: two providers may pin
+ * different hosts, and each keeps only the hosts it asks. The accounts are the home's, so a host
+ * answers every provider alike, which is why a provider with no lists of its own may start from
+ * what another kept for the same host (`GoogleAdapter`).
  */
 export class LearnedCatalogue {
   /** Replaced whole by `take`, never changed in place, so a `view` stays what it was. */
@@ -413,16 +415,43 @@ export class LearnedCatalogue {
    * 2026-11-13), but they are separate picker rows here and existing configurations name them.
    */
   family(base: string): string[] | undefined {
-    if (!base.startsWith("gemini-") || isStaticId(base) || this.listed(base)) return undefined;
-    const tiers = TIERS.filter((t) => this.listed(`${base}-${t}`));
-    return tiers.length >= 2 ? tiers : undefined;
+    const tiers = this.tiers(base);
+    return tiers && tiers.length >= 2 ? tiers : undefined;
   }
 
-  /** The family a base id or one of its tier ids belongs to. */
+  /**
+   * The tier ids listed for `base`, lowest first, when `base` itself is not listed: what a request
+   * for `base` resolves onto. One is enough here, where `family` (what the list collapses) wants
+   * two: a family that Google cut to one tier is no longer offered as a ladder, but the base id a
+   * configuration saved while it was one must keep reaching the tier that is left. Forwarded as it
+   * is, it would name an id no host lists. So routing, the client family and the quota scope all
+   * ask this, and only the list asks `family`.
+   */
+  tiers(base: string): string[] | undefined {
+    if (!base.startsWith("gemini-") || isStaticId(base) || this.listed(base)) return undefined;
+    const tiers = TIERS.filter((t) => this.listed(`${base}-${t}`));
+    return tiers.length ? tiers : undefined;
+  }
+
+  /** Google's hosts that some kept list names, in preference order. */
+  knownHosts(): string[] {
+    return GOOGLE_OAUTH.hosts.filter((host) => {
+      const lists = this.hosts.get(host);
+      return !!lists && ((lists.ide?.length ?? 0) > 0 || (lists.cli?.length ?? 0) > 0);
+    });
+  }
+
+  /** The base id that `id` (a base id, or one of its tier ids) is routed and rested under. */
   familyOf(id: string): string | undefined {
-    if (this.family(id)) return id;
+    if (this.tiers(id)) return id;
     const match = TIER_SUFFIX.exec(id);
-    return match && this.family(match[1]!)?.includes(match[2]!) ? match[1]! : undefined;
+    return match && this.tiers(match[1]!)?.includes(match[2]!) ? match[1]! : undefined;
+  }
+
+  /** The collapsed row `id` is listed under: its base id when the list collapses that base. */
+  private rowOf(id: string): string {
+    const match = TIER_SUFFIX.exec(id);
+    return match && this.family(match[1]!)?.includes(match[2]!) ? match[1]! : id;
   }
 
   /** A `gemini-` wire id that some CLI answer lists and no IDE answer does. */
@@ -438,7 +467,7 @@ export class LearnedCatalogue {
    * `catalogueFrom`).
    */
   cliOnly(id: string): boolean {
-    const tiers = this.family(id);
+    const tiers = this.tiers(id);
     return tiers ? tiers.every((t) => this.wireCliOnly(`${id}-${t}`)) : this.wireCliOnly(id);
   }
 
@@ -453,15 +482,16 @@ export class LearnedCatalogue {
   cliScope(id: string): string | undefined {
     if (!id.startsWith("gemini-") || isStaticId(id) || servedToCliByName(id)) return undefined;
     const family = this.familyOf(id);
-    const wires = family ? this.family(family)!.map((t) => `${family}-${t}`) : [id];
+    const wires = family ? this.tiers(family)!.map((t) => `${family}-${t}`) : [id];
     return wires.some((w) => this.wireCliOnly(w)) ? (family ?? id) : undefined;
   }
 
   /**
-   * The host a wire id goes to when the host map lacks it: the first of Google's two whose IDE
-   * answer listed it, else, for an id served to the CLI family alone, the first whose CLI answer
-   * did. Only those two hosts are ever returned, whatever a stored snapshot names: a host is where
-   * the account's token is sent.
+   * The host a wire id outside the tables goes to: the first of Google's two whose IDE answer
+   * lists it, else, for an id served to the CLI family alone, the first whose CLI answer does. The
+   * same lists choose the User-Agent (`wireCliOnly`), so the two always agree, and the adapter asks
+   * this before its host map (`GoogleAdapter.hostFor`). Only those two hosts are ever returned,
+   * whatever a stored snapshot names: a host is where the account's token is sent.
    */
   hostOf(wire: string): string | undefined {
     const lists = (host: string): LearnedLists | undefined => this.hosts.get(host);
@@ -477,8 +507,8 @@ export class LearnedCatalogue {
   rows(): ProviderModel[] {
     const all = this.all();
     const ids = new Set<string>();
-    for (const id of all.ide) ids.add(this.familyOf(id) ?? id);
-    for (const id of all.cli) if (this.wireCliOnly(id)) ids.add(this.familyOf(id) ?? id);
+    for (const id of all.ide) ids.add(this.rowOf(id));
+    for (const id of all.cli) if (this.wireCliOnly(id)) ids.add(this.rowOf(id));
     return [...ids].sort().map((id) => {
       const efforts = (this.family(id) ?? []).filter((t) => PICKER_EFFORTS.includes(t));
       return { id, ...(efforts.length ? { effortLevels: efforts } : {}) };
@@ -590,8 +620,12 @@ function collapseWireId(wireId: string): string {
 export type ParsedHostCatalogue = { models: ProviderModel[]; wireIds: string[]; families?: Record<string, string[]>; clients?: { ide: string[]; cli?: string[] } };
 
 /** One answer of `fetchAvailableModels`: the agent-callable ids in listing order, and what `models{}` says of each. */
-/** The most ids one answer is read for; a measured answer lists under twenty. */
-const ANSWER_MAX_IDS = 2_000;
+/**
+ * The most ids one answer is read for; a measured answer lists under twenty. The same bound as the
+ * lists a provider keeps, so a kept list is never a truncated answer: `LearnedCatalogue.hostOf`
+ * reads an id missing from a host's list as that host not listing it.
+ */
+const ANSWER_MAX_IDS = LEARNED_MAX_IDS;
 
 type CatalogueAnswer = { listed: string[]; info: Record<string, unknown> };
 

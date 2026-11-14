@@ -524,7 +524,9 @@ export class Proxy {
     const key = JSON.stringify(cfg);
     const cur = this.googleAdapters.get(name);
     if (cur && cur.key === key) return cur.adapter;
-    const adapter = new GoogleAdapter(name, cfg, this.deps.home, this.deps.log, this.pool);
+    // A rebuilt adapter keeps what the one it replaces learned from the catalogue: the provider form
+    // has just shown those models, and saving the form is what rebuilds the adapter.
+    const adapter = new GoogleAdapter(name, cfg, this.deps.home, this.deps.log, this.pool, undefined, cur?.adapter.learnedLists());
     this.googleAdapters.set(name, { key, adapter });
     return adapter;
   }

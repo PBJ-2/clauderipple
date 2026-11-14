@@ -207,10 +207,23 @@ function groupNames(group: string): { spent: string; other: string } {
 /**
  * Where what each provider's catalogue listed outside the tables is kept, so a start that cannot
  * read the catalogue still knows it: `{ version, providers: { <provider name>: LearnedSnapshot } }`.
- * Per provider, because two providers may hold different accounts and pin different hosts.
+ * Per provider, because two providers may pin different hosts and each keeps only the hosts it asks.
  */
 export const LEARNED_MODELS_FILE = "antigravity-models.json";
 const LEARNED_MODELS_VERSION = 2;
+
+/** For each host in `asked`, the lists the first stored provider that has that host kept for it. */
+function listsOfOthers(stored: Record<string, unknown>, asked: readonly string[]): Record<string, unknown> {
+  const lists: Record<string, unknown> = {};
+  for (const host of asked) {
+    for (const entry of Object.values(stored)) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry) || !Object.hasOwn(entry, host)) continue;
+      lists[host] = (entry as Record<string, unknown>)[host];
+      break;
+    }
+  }
+  return lists;
+}
 
 /**
  * Every provider's stored lists in `home`; none when the file is absent, unreadable or of another
@@ -355,7 +368,12 @@ export class GoogleAdapter {
   /** When saving the learned lists last failed; it is tried again when they change or the hour is up. */
   private learnedSaveFailedAt = Number.NEGATIVE_INFINITY;
 
-  constructor(name: string, cfg: GoogleProvider, home: string, log: Logger, pool = new CredentialPool(), fetchImpl?: FetchLike) {
+  /**
+   * `inherit` is the learned lists of the adapter this one replaces (the same provider, rebuilt
+   * because its configuration changed): what that one read is still true, and the stored file is
+   * only a best-effort copy of it.
+   */
+  constructor(name: string, cfg: GoogleProvider, home: string, log: Logger, pool = new CredentialPool(), fetchImpl?: FetchLike, inherit?: unknown) {
     this.name = name;
     this.cfg = cfg;
     this.log = log;
@@ -364,10 +382,19 @@ export class GoogleAdapter {
     this.home = home;
     // What the last readable catalogue listed outside the tables, before any turn. Only the hosts
     // this provider asks are kept: a pinned `url` never borrows a tier another host listed.
-    const stored = cfg.auth === "antigravity" ? readLearnedFile(home).providers : {};
-    this.learned = cfg.auth === "antigravity"
-      ? new LearnedCatalogue(Object.hasOwn(stored, name) ? stored[name] : undefined, cfg.url ? [antigravityBaseUrl(cfg.url)] : GOOGLE_OAUTH.hosts)
-      : new LearnedCatalogue();
+    //
+    // A provider with no lists of its own yet (just saved, or renamed) starts from what another
+    // provider of this home stored for the same hosts. The accounts are the home's, not the
+    // provider's, so a host answers both alike; and the provider form shows a provider that is not
+    // saved yet the catalogue of one that asks its hosts. Without this the saved provider would
+    // offer a model it knows nothing of until its own list is read, and send it as an unknown id
+    // under the IDE User-Agent.
+    if (cfg.auth === "antigravity") {
+      const asked = cfg.url ? [antigravityBaseUrl(cfg.url)] : GOOGLE_OAUTH.hosts;
+      const stored = readLearnedFile(home).providers;
+      const handed = inherit && typeof inherit === "object" && Object.keys(inherit).length > 0 ? inherit : undefined;
+      this.learned = new LearnedCatalogue(handed ?? (Object.hasOwn(stored, name) ? stored[name] : listsOfOthers(stored, asked)), asked);
+    } else this.learned = new LearnedCatalogue();
     this.accounts = new GoogleAccountPool({ home, log, ...(fetchImpl ? { fetch: fetchImpl } : {}) });
     // Quota: each Cloud Code Assist host counts its own, so the limits row reads every host a
     // selected model lives on (resolved lazily from the cached model catalogue below).
@@ -387,14 +414,18 @@ export class GoogleAdapter {
    */
   private quotaHosts(): string[] {
     if (this.cfg.url) return [antigravityBaseUrl(this.cfg.url)];
-    const hosts = this.modelsCache?.hosts;
-    // Without a catalogue we cannot tell which host the models go to; read the default one only,
-    // rather than showing an unused host's numbers.
-    if (!hosts) return [GOOGLE_OAUTH.dailyApi];
     const models = this.cfg.models ?? [];
     // No configured model list means the provider routes whatever the client asks for; both hosts
-    // are then in use in principle, so both quotas are read.
-    if (models.length === 0) return [...GOOGLE_OAUTH.hosts];
+    // are then in use in principle, so both quotas are read. Without a catalogue we cannot tell
+    // that either is: the default one only, rather than showing an unused host's numbers.
+    // With no catalogue this run, the hosts the stored lists name are the ones a model can be sent to.
+    if (models.length === 0) {
+      if (this.modelsCache) return [...GOOGLE_OAUTH.hosts];
+      const known = this.learned.knownHosts();
+      return known.length ? known : [GOOGLE_OAUTH.dailyApi];
+    }
+    // With no catalogue this run, `hostFor` still names the host a learned model's stored lists send
+    // it to (and the default for the rest), so the numbers shown are the ones its turns spend.
     const used: string[] = [];
     for (const entry of models) {
       // The host the model is actually sent to, not every host that lists it: a shared model goes
@@ -529,6 +560,11 @@ export class GoogleAdapter {
     return !!cache && Date.now() - cache.at < cache.ttlMs;
   }
 
+  /** What this provider's catalogue listed outside the tables, for the adapter that replaces this one. */
+  learnedLists(): unknown {
+    return this.learned.snapshot();
+  }
+
   /** The list of a catalogue that cannot be read: the tables' models, and the ones learned earlier. */
   private fallbackModels(): ProviderModel[] {
     const rows = staticAntigravityModels();
@@ -642,18 +678,27 @@ export class GoogleAdapter {
   }
 
   /**
-   * The host a turn for `model` must go to: the one whose catalogue offers its resolved wire id,
-   * preferring daily when both do; else the host that listed that wire id at an earlier read (a
-   * learned model whose host did not answer this time, or no catalogue this run); else the host that
-   * offers the base id; else the provider's default. Unknown models fall back to the default,
-   * exactly as before the second host existed.
+   * The host a turn for `model` must go to, preferring daily when both would do.
+   *
+   * A wire id outside the tables is placed by the provider's lists (`LearnedCatalogue.hostOf`), the
+   * same lists that choose its User-Agent: a host whose IDE answer lists it, else, for an id served
+   * to the CLI family alone, one whose CLI answer does. The host map cannot stand in for them. It
+   * is built per host, and after a read in which one host did not answer it still carries that
+   * host's earlier catalogue, so it could name a host that lists the id for the CLI family while
+   * the other host's new IDE listing has already moved the id to the IDE User-Agent (a 400). The
+   * lists also hold across a restart, so a first read that misses the preferred host does not move
+   * the model, its quota scope and its prompt cache to the other one.
+   *
+   * A table id is not in those lists and takes the host map's host for its wire id; then the host
+   * that offers the base id; then the provider's default, exactly as before the second host
+   * existed.
    */
   private hostFor(model: string, effort: string | undefined, learned: LearnedCatalogue = this.learned): string {
     const fallback = antigravityBaseUrl(this.cfg.url);
     if (this.cfg.url) return fallback;
     const wire = resolveAntigravityWireModel(model, effort, learned).wire;
     const hosts = this.modelsCache?.hosts;
-    return hosts?.get(wire)?.[0] ?? learned.hostOf(wire) ?? hosts?.get(model)?.[0] ?? fallback;
+    return learned.hostOf(wire) ?? hosts?.get(wire)?.[0] ?? hosts?.get(model)?.[0] ?? fallback;
   }
 
   /** For side calls (models, project refresh) with no conversation: a usable account, else any. */
