@@ -113,7 +113,7 @@ const MIME: Record<string, string> = {
 };
 
 /** One row of a provider's credential-pool report: ids, flags and health, never a header value. */
-export type CredentialRow = { id: string; label?: string; state: string; cooldownSeconds?: number; failures: number; paused?: boolean; preferred?: boolean; inUse?: boolean };
+export type CredentialRow = { id: string; label?: string; state: string; cooldownSeconds?: number; scopes?: Record<string, number>; failures: number; paused?: boolean; preferred?: boolean; inUse?: boolean };
 
 export type AdminDeps = {
   /** External boundaries for the host-local control bridge; no production side effects in tests. */

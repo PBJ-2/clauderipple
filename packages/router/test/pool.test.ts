@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classify, CredentialPool, retryAfterMs, targets, ThreadAffinity, type Credential } from "../src/pool.ts";
+import { classify, CredentialPool, pinnedCredential, retryAfterMs, targets, ThreadAffinity, type Credential } from "../src/pool.ts";
 
 import { ProviderHealth, providerExhaustion } from "../src/health.ts";
 
@@ -564,4 +564,49 @@ test("clearing one provider's login leaves another provider's rest on the same l
   assert.equal(pool.hasUsable("claude-work", [login]), false, "the other provider still rests until it is cleared");
   pool.clearOwner("claude-work", "current");
   assert.equal(pool.hasUsable("claude-work", [login]), true, "its own clear still finds its login");
+});
+
+test("a rested model scope leaves the account's other scopes alone, in every pick path", () => {
+  let now = 1_000_000;
+  const pool = new CredentialPool({ now: () => now });
+  const a: Credential = { id: "a:1", ownerId: "a-owner", headers: {} };
+  const b: Credential = { id: "b:1", ownerId: "b-owner", headers: {} };
+  const list = [a, b];
+  // Two conversations are sticky to a, one asking for opus and one for fable.
+  assert.equal(pool.pick("claude", list, "opus-conv", "opus")?.id, "a:1");
+  assert.equal(pool.pick("claude", list, "fable-conv", "fable")?.id, "a:1");
+  pool.penalise("claude", "a:1", 429, 3_600_000, "", "fable");
+  assert.equal(pool.pick("claude", list, "opus-conv", "opus")?.id, "a:1", "an opus conversation does not move");
+  assert.equal(pool.pick("claude", list, "opus-new", "opus")?.id, "a:1", "a new opus conversation still starts on a");
+  assert.equal(pool.pick("claude", list, "fable-conv", "fable")?.id, "b:1", "the fable conversation leaves a");
+  assert.equal(pool.pick("claude", list, "fable-new", "fable")?.id, "b:1");
+  assert.equal(pool.pick("claude", list, "unscoped")?.id, "a:1", "a turn with no family is not affected");
+  assert.equal(pool.report("claude", list)[0]!.state, "ready", "the account is not cooling overall");
+  assert.deepEqual(pool.scopeCooldowns("claude", "a:1"), { fable: 3600 });
+  // The pin falls back for the resting family and holds for the other.
+  assert.equal(pinnedCredential("claude", list, "a-owner", pool, "fable"), undefined);
+  assert.equal(pinnedCredential("claude", list, "a-owner", pool, "opus")?.id, "a:1");
+  assert.equal(pool.hasUsable("claude", [a], "fable"), false);
+  assert.equal(pool.hasUsable("claude", [a], "opus"), true);
+  // An account-wide rest still rests every family.
+  pool.penalise("claude", "a:1", 429, 60_000, "");
+  assert.equal(pool.pick("claude", list, "opus-new-2", "opus")?.id, "b:1");
+  assert.equal(pool.report("claude", list)[0]!.state, "cooling");
+  now += 60_001;
+  assert.equal(pool.pick("claude", list, "opus-new-3", "opus")?.id, "a:1", "the account-wide rest ended; the fable scope still rests");
+  assert.equal(pool.hasUsable("claude", [a], "fable"), false);
+});
+
+test("restScope rests a scope until a stated time without charging a failure, bounded by the 6 h clamp", () => {
+  let now = 1_000_000;
+  const pool = new CredentialPool({ now: () => now });
+  const a: Credential = { id: "a", headers: {} };
+  pool.restScope("claude", a, "fable", 3 * 24 * 3_600_000);
+  assert.deepEqual(pool.scopeCooldowns("claude", "a"), { fable: 6 * 3600 });
+  assert.equal(pool.report("claude", [a])[0]!.failures, 0);
+  assert.equal(pool.hasUsable("claude", [a], "opus"), true);
+  pool.restScope("claude", a, "fable", 60_000);
+  assert.deepEqual(pool.scopeCooldowns("claude", "a"), { fable: 6 * 3600 }, "a shorter rest never shortens a longer one");
+  now += 6 * 3_600_000 + 1;
+  assert.equal(pool.hasUsable("claude", [a], "fable"), true);
 });

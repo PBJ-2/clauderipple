@@ -158,6 +158,12 @@ export type CredentialReport = {
   state: "ready" | "cooling" | "quarantined";
   /** Seconds until this credential is usable again; absent when it is ready or quarantined. */
   cooldownSeconds?: number;
+  /**
+   * Seconds each resting quota scope (a Claude model family's weekly window) still has to run. A scope
+   * rests only its own models, so `state` stays `ready`. Filled by the caller that knows its scopes
+   * are worth showing; absent when none rests.
+   */
+  scopes?: Record<string, number>;
   failures: number;
   paused: boolean;
   preferred: boolean;
@@ -339,6 +345,19 @@ export class CredentialPool {
     if (verdict.quarantine) this.quarantined.add(this.key(provider, id));
     else h.cooldownUntil = Math.max(h.cooldownUntil, this.now() + verdict.cooldownMs);
     return verdict;
+  }
+
+  /**
+   * Rest one scope of a credential until a time the vendor's own usage reading states, without
+   * charging a failure: nothing was refused, the account is known to be spent for that scope. Bounded
+   * by the same 6 h clamp as any rest; a reader that still sees the scope spent when it lapses rests it
+   * again, so the clamp costs no extra request.
+   */
+  restScope(provider: string, credential: Credential, scope: string, ms: number): void {
+    // The rest belongs to the durable account, which the pool learns from the credential itself.
+    this.remember(provider, [credential]);
+    const h = this.scopedHealthOf(provider, credential.id, scope);
+    h.cooldownUntil = Math.max(h.cooldownUntil, this.now() + Math.max(1_000, Math.min(MAX_COOLDOWN_MS, Math.round(ms))));
   }
 
   /**

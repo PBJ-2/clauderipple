@@ -38,6 +38,12 @@ type Reply = { status: number; headers?: Record<string, string>; body?: string }
 
 const POOL: Config["providers"][string] = { type: "anthropic", auth: "claude-code", accountPool: true, models: [{ id: "claude-opus-5" }] };
 
+/** Client model names the model-family tests send: each routes to one upstream family. */
+const FAMILY_ROUTES: Config["routes"] = {
+  "claude-fable-4-8": { provider: "claude", model: "claude-fable-5-1" },
+  "claude-sonnet-4-8": { provider: "claude", model: "claude-sonnet-5-5" },
+};
+
 async function nativeRig(reply: (seen: Seen, attempt: number) => Reply, claude: Config["providers"][string] = POOL, clientBeta = "claude-code-20250219,prompt-caching-scope-2026-01-05") {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-native-account-proxy-"));
   const ca = createCa({ cn: "clauderipple native account test" });
@@ -94,7 +100,7 @@ async function nativeRig(reply: (seen: Seen, attempt: number) => Reply, claude: 
     upstream: "localhost",
     listen: { host: "127.0.0.1", port: proxyPort },
     providers: { claude },
-    routes: { "claude-opus-4-8": { provider: "claude", model: "claude-opus-5" } },
+    routes: { "claude-opus-4-8": { provider: "claude", model: "claude-opus-5" }, ...FAMILY_ROUTES },
     direct: [],
   };
   const requests = new RequestLog(path.join(home, "requests.jsonl"));
@@ -243,6 +249,170 @@ test("a short Retry-After does not shorten a spent Claude window's rest", async 
       assert.equal(row.state, "cooling");
       assert.ok((row.cooldownSeconds ?? 0) >= 3_500, `${row.id} rests ${row.cooldownSeconds}s, not 60`);
     }
+  } finally {
+    await rig.stop();
+  }
+});
+
+// A subscription has a weekly window per model (Fable's) beside the 5h and all-model 7d ones. A 429
+// whose unified headers show neither of those spent is that model family's own limit: the account
+// rests for that family only, so its Opus and Sonnet conversations keep their prompt cache.
+const familyLimited = (extra: Record<string, string> = {}): Reply => ({
+  status: 429,
+  headers: {
+    "anthropic-ratelimit-unified-status": "rejected",
+    "anthropic-ratelimit-unified-5h-utilization": "0.2",
+    "anthropic-ratelimit-unified-5h-reset": String(Math.floor(Date.now() / 1000) + 3_600),
+    "anthropic-ratelimit-unified-7d-utilization": "0.3",
+    "anthropic-ratelimit-unified-7d-reset": String(Math.floor(Date.now() / 1000) + 86_400),
+    ...extra,
+  },
+  body: JSON.stringify({ type: "error", error: { type: "rate_limit_error" } }),
+});
+
+/** A body reading of one account's usage, as the usage lookup would have cached it. */
+const readFableWindow = (rig: { proxy: Proxy }, owner: string, percent: number, resetInSeconds: number): void => {
+  const readings = (rig.proxy.claudeUsage as unknown as { scopedReadings: Map<string, unknown> }).scopedReadings;
+  // A reading names the durable account it was taken on, keyed as the pool keys health.
+  const credentials = (rig.proxy as unknown as { claudeAccounts: { peekCredentials(): { id: string; ownerId?: string; healthKey?: string }[] } }).claudeAccounts.peekCredentials();
+  const credential = credentials.find((c) => (c.ownerId ?? c.id) === owner)!;
+  readings.set(owner, {
+    account: credential.healthKey ?? credential.ownerId ?? credential.id,
+    windows: [{ name: "Fable", used_percent: percent, window_minutes: 10_080, reset_at: Math.floor(Date.now() / 1000) + resetInSeconds }],
+  });
+};
+
+test("a Fable-only 429 retries on the next account and rests only Fable on the first", async () => {
+  const rig = await nativeRig((seen) => seen.authorization === "Bearer current-token" && seen.body.model === "claude-fable-5-1"
+    ? familyLimited({ "retry-after": "300" })
+    : { status: 200 });
+  try {
+    assert.equal(await rig.send("opus-conv"), 200);
+    assert.equal(await rig.send("sonnet-conv", { model: "claude-sonnet-4-8" }), 200);
+    assert.equal(await rig.send("fable-conv", { model: "claude-fable-4-8" }), 200, "the client is answered on its first ask");
+    assert.deepEqual(rig.seen.map((item) => item.authorization), [
+      "Bearer current-token", "Bearer current-token", "Bearer current-token", "Bearer stored-token",
+    ], "the Fable turn moved to the second account inside the turn");
+
+    // The first account still serves every other family, and its conversations did not move.
+    assert.equal(await rig.send("opus-conv", { content: "again" }), 200);
+    assert.equal(await rig.send("sonnet-conv", { model: "claude-sonnet-4-8", content: "again" }), 200);
+    assert.equal(await rig.send("opus-new"), 200);
+    assert.deepEqual(rig.seen.slice(4).map((item) => item.authorization), ["Bearer current-token", "Bearer current-token", "Bearer current-token"]);
+    // Fable turns skip the resting account at once, with no wasted 429 each minute.
+    const before = rig.seen.length;
+    assert.equal(await rig.send("fable-conv", { model: "claude-fable-4-8", content: "again" }), 200);
+    assert.equal(await rig.send("fable-new", { model: "claude-fable-4-8" }), 200);
+    assert.deepEqual(rig.seen.slice(before).map((item) => item.authorization), ["Bearer stored-token", "Bearer stored-token"]);
+
+    // The dashboard row stays ready; the resting family is shown beside it.
+    const current = rig.proxy.credentialHealth()["claude"]!.find((row) => row.id === "current")!;
+    assert.equal(current.state, "ready");
+    assert.equal(current.cooldownSeconds, undefined);
+    assert.ok((current.scopes?.fable ?? 0) > 200 && (current.scopes?.fable ?? 0) <= 300, `Fable rests the stated retry-after: ${current.scopes?.fable}`);
+    assert.equal(Object.keys(current.scopes ?? {}).length, 1, "only Fable rests");
+    const log = fs.readFileSync(path.join(rig.home, "router.log"), "utf8");
+    assert.match(log, /RETRY claude: #1 answered 429 \(fable\), trying #2/);
+  } finally {
+    await rig.stop();
+  }
+});
+
+test("a Fable rest lasts until the Fable window resets when the account's usage reading says it is spent", async () => {
+  const rig = await nativeRig((seen) => {
+    if (seen.authorization === "Bearer current-token" && seen.body.model === "claude-fable-5-1") {
+      // The usage lookup landed while this request was in flight: the window is now read as spent.
+      readFableWindow(rig, "current", 100, 7_200);
+      return familyLimited({ "retry-after": "60" });
+    }
+    return { status: 200 };
+  });
+  try {
+    assert.equal(await rig.send("fable-conv", { model: "claude-fable-4-8" }), 200);
+    const current = rig.proxy.credentialHealth()["claude"]!.find((row) => row.id === "current")!;
+    const rest = current.scopes?.fable ?? 0;
+    assert.ok(rest > 7_100 && rest <= 7_200, `rests until the window's reset, not the 60 s retry-after: ${rest}s`);
+    assert.equal(current.state, "ready");
+  } finally {
+    await rig.stop();
+  }
+});
+
+test("an account whose cached usage shows Fable spent is skipped for Fable before it is tried", async () => {
+  const rig = await nativeRig(() => ({ status: 200 }));
+  try {
+    readFableWindow(rig, "current", 100, 86_400);
+    readFableWindow(rig, rig.stored.id, 40, 86_400);
+    assert.equal(await rig.send("fable-conv", { model: "claude-fable-4-8" }), 200);
+    assert.equal(rig.seen[0]!.authorization, "Bearer stored-token", "no request was spent on the spent account");
+    assert.equal(await rig.send("opus-conv"), 200);
+    assert.equal(rig.seen[1]!.authorization, "Bearer current-token", "the same account still answers Opus");
+  } finally {
+    await rig.stop();
+  }
+});
+
+test("a spent 7-day window still rests the whole account for every family", async () => {
+  const reset = Math.floor(Date.now() / 1000) + 3_600;
+  const rig = await nativeRig((seen, attempt) => attempt === 1
+    ? { status: 429, headers: {
+      "anthropic-ratelimit-unified-status": "rejected",
+      "anthropic-ratelimit-unified-5h-utilization": "0.1",
+      "anthropic-ratelimit-unified-5h-reset": String(reset),
+      "anthropic-ratelimit-unified-7d-utilization": "1",
+      "anthropic-ratelimit-unified-7d-reset": String(reset + 80_000),
+    }, body: "{}" }
+    : { status: 200 });
+  try {
+    assert.equal(await rig.send("fable-conv", { model: "claude-fable-4-8" }), 200);
+    assert.equal(await rig.send("opus-new"), 200);
+    assert.equal(await rig.send("sonnet-new", { model: "claude-sonnet-4-8" }), 200);
+    assert.deepEqual(rig.seen.map((item) => item.authorization), ["Bearer current-token", "Bearer stored-token", "Bearer stored-token", "Bearer stored-token"]);
+    const current = rig.proxy.credentialHealth()["claude"]!.find((row) => row.id === "current")!;
+    assert.equal(current.state, "cooling");
+    assert.equal(current.scopes, undefined, "an account-wide rest is not a family's");
+  } finally {
+    await rig.stop();
+  }
+});
+
+test("when every account is resting for Fable the client gets the final 429 with the stated reset", async () => {
+  const rig = await nativeRig((seen) => {
+    if (seen.body.model !== "claude-fable-5-1") return { status: 200 };
+    const owner = seen.authorization === "Bearer current-token" ? "current" : seen.authorization === "Bearer stored-token" ? rig.stored.id : rig.third.id;
+    readFableWindow(rig, owner, 100, 5_400);
+    return familyLimited();
+  });
+  try {
+    assert.equal(await rig.send("fable-conv", { model: "claude-fable-4-8" }), 429);
+    assert.equal(rig.seen.length, 3, "every account was tried once before the caller was told");
+    assert.equal(rig.lastHeaders()["x-should-retry"], "false");
+    const wait = Number(rig.lastHeaders()["retry-after"]);
+    assert.ok(wait > 5_300 && wait <= 5_400, `retry-after is the Fable reset: ${wait}s`);
+    // Nothing is left to try for Fable, and nothing else is affected.
+    const before = rig.seen.length;
+    assert.equal(await rig.send("fable-again", { model: "claude-fable-4-8" }), 429);
+    assert.equal(rig.seen.length, before + 1, "the turn is still sent once, so the client hears the provider's own answer");
+    assert.equal(await rig.send("opus-conv"), 200);
+    for (const row of rig.proxy.credentialHealth()["claude"]!) assert.equal(row.state, "ready");
+  } finally {
+    await rig.stop();
+  }
+});
+
+test("a pinned Fable worker falls back while its account rests for Fable; a pinned Opus worker stays", async () => {
+  const rig = await nativeRig((seen) => seen.authorization === "Bearer stored-token" && seen.body.model === "claude-fable-5-1"
+    ? familyLimited({ "retry-after": "300" })
+    : { status: 200 }, { ...POOL, models: [{ id: "claude-opus-5" }, { id: "claude-fable-5-1" }] } as Config["providers"][string]);
+  try {
+    const pin = rig.stored.id.slice(0, 8);
+    assert.equal(await rig.send("fable-worker", { model: `claude#${pin}:claude-fable-5-1` }), 200);
+    assert.deepEqual(rig.seen.map((item) => item.authorization), ["Bearer stored-token", "Bearer current-token"], "the refused pin is retried from the pool");
+    const before = rig.seen.length;
+    assert.equal(await rig.send("fable-worker-2", { model: `claude#${pin}:claude-fable-5-1` }), 200);
+    assert.equal(await rig.send("opus-worker", { model: `claude#${pin}:claude-opus-5` }), 200);
+    assert.deepEqual(rig.seen.slice(before).map((item) => item.authorization), ["Bearer current-token", "Bearer stored-token"]);
+    assert.equal(rig.proxy.credentialHealth()["claude"]!.find((row) => row.id === rig.stored.id)!.state, "ready");
   } finally {
     await rig.stop();
   }

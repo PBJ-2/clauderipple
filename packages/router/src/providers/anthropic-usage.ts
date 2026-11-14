@@ -131,6 +131,21 @@ function scopedFromLimits(limits: unknown): Record<string, number | string>[] {
   return out;
 }
 
+/**
+ * The model family of a Claude model id or a usage window's display name ("claude-fable-5-1",
+ * "Fable"), which is what a per-model weekly window is scoped to. Undefined for anything else, and
+ * the caller then keeps the account-wide behaviour.
+ */
+export function claudeModelFamily(model: string): "fable" | "opus" | "sonnet" | "haiku" | undefined {
+  const match = /(?:^|[^a-z])(fable|opus|sonnet|haiku)(?![a-z])/.exec(model.toLowerCase());
+  return match?.[1] as "fable" | "opus" | "sonnet" | "haiku" | undefined;
+}
+
+/** The account a credential spends, keyed as the pool keys its health (pool.ts): a token refresh keeps it. */
+function durableAccount(credential: Credential): string {
+  return credential.healthKey ?? credential.ownerId ?? credential.id;
+}
+
 type UsageSource = { credentials(): Promise<Credential[]> };
 type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 type UsageOptions = {
@@ -158,6 +173,14 @@ export class ClaudeUsage {
   private readonly failures = new Map<string, number>();
   /** Per-account "do not ask again before", from a 429 or its `retry-after`. */
   private readonly blockedUntil = new Map<string, number>();
+  /**
+   * The per-model weekly windows of each account's latest body reading. Kept apart from `last`
+   * because a header reading replaces that snapshot and carries no per-model window, while a spent
+   * weekly window stays spent until its stated reset whatever replaced the display. Each reading names
+   * the durable account it was read on: the current login keeps the owner "current" across a switch
+   * to another account, and one account's spent window must not rest the next one.
+   */
+  private readonly scopedReadings = new Map<string, { account: string; windows: Record<string, number | string>[] }>();
   /** Accounts whose current snapshot came from answer headers, so a later answer may correct it. */
   private readonly fromHeaders = new Set<string>();
   /** Header readings stored per account. A refresh captures this before it collects credentials and
@@ -237,6 +260,10 @@ export class ClaudeUsage {
       if (outcome.ok) {
         if (outcome.snapshot) {
           this.last.set(owner, outcome.snapshot);
+          this.scopedReadings.set(owner, {
+            account: durableAccount(credential),
+            windows: (outcome.snapshot.scoped as Record<string, number | string>[] | undefined) ?? [],
+          });
           // A fresh body reading wins over headers and stays until it goes stale.
           this.fromHeaders.delete(owner);
         }
@@ -253,8 +280,32 @@ export class ClaudeUsage {
       this.blockedUntil.delete(owner);
       this.fromHeaders.delete(owner);
       this.readings.delete(owner);
+      this.scopedReadings.delete(owner);
     }
     return Object.fromEntries(this.last);
+  }
+
+  /**
+   * How long until a model family's weekly window resets, when the account's latest body reading
+   * says that window is spent (100% or more) and names a reset still ahead. Undefined otherwise.
+   * Reads what is already cached and asks nothing: an old reading cannot be wrong about a window
+   * that was spent with its reset in the future, because a window only resets at its reset. A reading
+   * taken on another account under the same owner (the current login after a switch) says nothing.
+   */
+  spentScopeResetMs(credential: Credential, family: string): number | undefined {
+    const reading = this.scopedReadings.get(credential.ownerId ?? credential.id);
+    if (!reading || reading.account !== durableAccount(credential)) return undefined;
+    const now = (this.opts.now ?? Date.now)();
+    let soonest: number | undefined;
+    for (const window of reading.windows) {
+      if (typeof window.name !== "string" || claudeModelFamily(window.name) !== family) continue;
+      if (typeof window.used_percent !== "number" || window.used_percent < 100) continue;
+      if (typeof window.reset_at !== "number") continue;
+      const wait = window.reset_at * 1000 - now;
+      if (wait <= 0) continue;
+      soonest = soonest === undefined ? wait : Math.min(soonest, wait);
+    }
+    return soonest;
   }
 
   /**
