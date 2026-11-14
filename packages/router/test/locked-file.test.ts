@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { renameWithRetry, writeJsonAtomic } from "../src/locked-file.ts";
+import { lockBusy, renameWithRetry, writeJsonAtomic } from "../src/locked-file.ts";
 
 const failure = (code: string): NodeJS.ErrnoException => Object.assign(new Error(`${code}: rename failed`), { code });
 
@@ -54,4 +54,15 @@ test("writeJsonAtomic still replaces the file through the retrying rename", (t) 
   writeJsonAtomic(file, { second: 2 });
   assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { second: 2 });
   assert.deepEqual(fs.readdirSync(home), ["state.json"], "the temp file is gone");
+});
+
+test("a lock another writer holds or is releasing is waited for; on Windows that includes EPERM, EACCES and EBUSY", () => {
+  for (const platform of ["win32", "darwin", "linux"] as const) assert.equal(lockBusy("ELOCKED", platform), true);
+  // Windows refuses a mkdir of a lock directory another process is still removing.
+  for (const code of ["EPERM", "EACCES", "EBUSY"]) {
+    assert.equal(lockBusy(code, "win32"), true, `${code} on Windows`);
+    assert.equal(lockBusy(code, "linux"), false, `${code} elsewhere is a real refusal`);
+    assert.equal(lockBusy(code, "darwin"), false, `${code} elsewhere is a real refusal`);
+  }
+  for (const code of ["ENOENT", "EROFS", undefined]) assert.equal(lockBusy(code, "win32"), false);
 });

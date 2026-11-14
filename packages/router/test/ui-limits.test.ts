@@ -102,8 +102,11 @@ function limitsUi(api: (path: string) => Promise<unknown>, status: Record<string
   // A poll draws the status at once and the gauges when the limits read lands; tests wait for both.
   return { ...ui, card, desktop, header, meters, refresh: async () => { await ui.refreshHealth(); await ui.settleLimits(); } };
 }
-// The render path reads the real clock, so the fixtures' resets must be ahead of it.
-const now = Date.now();
+// The render path reads the real clock, so the fixtures' resets must be ahead of it. They are whole
+// seconds, as the servers send them, so the clock they start from is too: the account meters round
+// a reset to the second, and a fractional one rounded across a minute made the meter and the line
+// name different minutes (11/14 01:29 PM against 01:28 PM on Windows CI, 2026-11-13).
+const now = Math.floor(Date.now() / 1000) * 1000;
 const five = { kind: "five_hour", used_percent: 23, window_minutes: 300, reset_at: (now + 255 * 60_000) / 1000 };
 const weekly = { kind: "seven_day", used_percent: 125, window_minutes: 10080, reset_at: (now + 86400_000) / 1000 };
 const current = { id: "current", account: 0, inUse: true, at: now, windows: [weekly, five] };

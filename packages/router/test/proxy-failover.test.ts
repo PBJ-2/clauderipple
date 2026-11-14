@@ -80,6 +80,32 @@ type Rig = {
   stop: () => Promise<void>;
 };
 
+/**
+ * One HTTP response read to its end: its declared length, the last chunk, or the connection's close,
+ * whichever the response says it uses. A fixed wait read whatever had come by then, and a Windows
+ * runner that took longer than 250 ms to relay a 403 left nothing to read: status 0 (2026-11-13).
+ */
+function wholeResponse(socket: tls.TLSSocket, limitMs = 5000): Promise<Buffer> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = [];
+    const done = () => { clearTimeout(timer); socket.off("data", data); resolve(Buffer.concat(chunks)); };
+    const timer = setTimeout(done, limitMs);
+    const data = (d: Buffer) => {
+      chunks.push(d);
+      const all = Buffer.concat(chunks);
+      const split = all.indexOf("\r\n\r\n");
+      if (split < 0) return;
+      const head = all.subarray(0, split).toString("latin1");
+      const length = /\r\ncontent-length:\s*(\d+)/i.exec(head);
+      if (length) { if (all.length - split - 4 >= Number(length[1])) done(); return; }
+      if (/\r\ntransfer-encoding:\s*chunked/i.test(head) && (all.subarray(split + 4).includes("\r\n0\r\n\r\n") || all.subarray(split + 4).toString("latin1").startsWith("0\r\n\r\n"))) done();
+    };
+    socket.on("data", data);
+    socket.once("close", done);
+    socket.once("end", done);
+  });
+}
+
 /** A live proxy in front of `providers`, reachable the way Claude Code reaches it. */
 async function rig(providers: Config["providers"], routes: Config["routes"], native: { upstreamPort?: number; upstreamAgent?: https.Agent } = {}): Promise<Rig> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-failover-"));
@@ -161,11 +187,8 @@ async function rig(providers: Config["providers"], routes: Config["routes"], nat
     secure.write(
       `POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
     );
-    const chunks: Buffer[] = [];
-    secure.on("data", (d: Buffer) => chunks.push(d));
-    await new Promise<void>((r) => setTimeout(r, 250));
+    const all = await wholeResponse(secure);
     secure.destroy();
-    const all = Buffer.concat(chunks);
     const split = all.indexOf("\r\n\r\n");
     const head = all.subarray(0, split < 0 ? all.length : split).toString("latin1");
     const headers: Record<string, string> = {};

@@ -79,6 +79,10 @@ test("real fs.watch tails a bridge transcript without polling", async t => {
   const f = bridgeFixture(t, { onEvent: (_id, event) => events.push(event) });
   f.sessions.log(bridgeId);
   f.sessions.watchAttached(new Set([bridgeId]));
+  // macOS's FSEvents starts a watch asynchronously and drops what changes before it is running: a
+  // line appended in the same tick as `fs.watch` never arrived on macOS CI (2026-11-11, -12, -13).
+  // A real transcript is watched for its whole life, and the poll catches a line that came earlier.
+  await delay(250);
   const reads = f.stateReads();
   fs.appendFileSync(f.file, answer("watched"));
   await until(() => events.some(e => e.kind === "assistant" && e.msg === "watched"));
