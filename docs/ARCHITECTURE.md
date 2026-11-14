@@ -2118,7 +2118,8 @@ They were not live-tested during the original implementation. Files are under `s
   served to the CLI family only: its requests carry `antigravity/cli/1.3.4 (…)`
   (`antigravityUserAgentFor`; measured 2026-10-27, one Google AI Pro account: Argon 404s under the IDE UA on
   the daily host and answers 200 under the CLI one; opencodex `antigravityCliUserAgent`). The IDE
-  override env vars do not replace the CLI UA. Response frames nest the standard
+  override env vars do not replace the CLI UA. Gemini 4 Hydrogen is served the same way (measured
+  2026-11-13, one Google AI Pro account, see "Hydrogen" below). Response frames nest the standard
   Gemini payload under `response` (`adapters/google.ts:1281,1591-1596`).
 - **Two hosts, different catalogues and separate quotas (measured 2026-10-20, user's account,
   `fetchAvailableModels` on the same OAuth token).** `daily-cloudcode-pa.googleapis.com` and
@@ -2160,23 +2161,164 @@ They were not live-tested during the original implementation. Files are under `s
     is not a substitute: in the same measurement, production's Argon High quota metadata matched
     the ordinary Gemini five-hour window while the explicit summary reported spent Argon weekly
     quota, and other Argon catalogue entries omitted `remainingFraction`.
+  - **Hydrogen (measured 2026-11-13, one Google AI Pro account).** Under the CLI UA the daily
+    host's `fetchAvailableModels` lists `gemini-4-hydrogen-{low,medium,high,xhigh}` (display names
+    `Gemini 4 Hydrogen (Low|Medium|High|XHigh)`, `maxTokens` 1048576, `maxOutputTokens` 262144) in
+    `agentModelSorts`; the IDE answer on either host and the CLI answer on prod do not. One
+    `generateContent` per tier on daily under the CLI UA answered 200 with
+    `modelVersion: gemini-4-hydrogen`, with no `thinkingLevel` sent, and a `thinkingLevel` beside
+    `-medium` was accepted too. `-medium` under the IDE UA on daily and the bare
+    `gemini-4-hydrogen` 404, and `-medium` on prod under the CLI UA answers a generic 429
+    `RESOURCE_EXHAUSTED` (no ErrorInfo) rather than a 404, which would rest the whole account, so
+    Hydrogen must reach daily: the host map does that, and daily is also the default host.
+    `retrieveUserQuotaSummary` under the CLI UA reports no Hydrogen group on either host (Gemini,
+    Claude/GPT and Argon only). Hydrogen therefore has a pool scope of its own (`hydrogen`) with no
+    summary group behind it: a 429 proving Hydrogen spent rests only Hydrogen, a spent Gemini group
+    does not hide it, and the ordinary Gemini windows are never its positive-quota evidence, so a
+    generic 429 on Hydrogen is never read as the SDK prompt refusal. The limits show no Hydrogen
+    row. A provider whose `url` pins prod is not guarded: Hydrogen saved on it would be sent to
+    prod and take that generic 429 as the whole account's. **Not measured:**
+    which bucket Hydrogen draws on, a spent Hydrogen's refusal, an Ultra account, and long or
+    tool-using turns. The same catalogue lists `gemini-4-carbon-disabled` (`disabled: true`,
+    "available to Ultra plan subscribers"); it is not in the static list and was not called.
+  - **Models outside the tables are learned from the catalogue (2026-11-13).** Argon and Hydrogen
+    each needed their id typed into five tables (`servedToAntigravityCli`, `SUFFIX_TIER_MODELS`,
+    `CONTEXT_WINDOWS`, `EFFORT_LEVELS`, `ANTIGRAVITY_BASE_MODELS`) and a tier regex before they
+    could be listed or called, so a model Google added stayed invisible until a release. Measured
+    2026-11-13 on all four answers (two hosts, IDE and CLI UA, one Google AI Pro account): the CLI
+    answer is the IDE answer plus, on daily, `gemini-4-argon-{low,medium,high}`,
+    `gemini-4-hydrogen-{low,medium,high,xhigh}` and `gemini-4-carbon-disabled`, and on prod the
+    Argon ids alone; no IDE answer lists an agent id its host's CLI answer lacks. Every tier id
+    carries its own numeric `thinkingLevel` in `models{}` (`-low` 1, `-medium` 2, `-high` 3,
+    `-xhigh` 100; Flash 3.8, Argon, Hydrogen and the Claude tier ids alike), and
+    `gemini-4-carbon-disabled` carries `disabled: true`. So each provider keeps what its
+    catalogue listed outside the tables, per host and per client family, exactly as the answers
+    gave it (`LearnedCatalogue` in `antigravity.ts`; one per provider, because two providers may
+    pin different hosts and each keeps only the hosts it asks; the accounts are the home's, so the
+    same host answers every provider alike), and reads three facts off those lists each
+    time they are needed, so nothing derived can outlive the listing it came from:
+    - *Tier family* (`family`): a `gemini-` base with at least two tier suffixes
+      (`minimal|low|medium|high|xhigh|max`) listed, whose bare id no host lists, collapses to
+      one row whose ladder is those tiers. One suffixed id alone stays a row of its own
+      (`gpt-oss-120b-medium` is a whole model name), and Claude tier ids are never collapsed
+      (existing configurations name them). An effort takes its tier, else the nearest tier
+      below, else the nearest above; no effort takes `medium` by the same rule. No `thinkingLevel`
+      is sent beside the suffix. That last point is **inferred** from the three measured families,
+      not measured for a model that does not exist yet. The list asks `family` (`catalogueFrom` is
+      handed it); routing, the client family and the quota scope ask `tiers`, the same rule with
+      one tier enough. So a family that Google cuts to one tier is no longer offered as a ladder
+      (the tier that is left is a row of its own), but the base id a configuration saved while it
+      was a family still resolves onto that tier under the same UA, host and scope. Forwarded as
+      it is, it named an id no host lists (review of PR 165). The same holds for the
+      base of a lone tier id that was never a family: it is not offered, and a request for it
+      reaches the listed tier. Both end on the read that lists the bare id or no tier of it.
+    - *Client family* (`cliOnly`, per wire id): a `gemini-` id that some CLI answer lists and no
+      IDE answer of any host this provider asks lists is sent under the CLI UA; every other id
+      under the IDE UA, and `transport.build` chooses by the wire id alone. One answer for every
+      host is safe because an id that any host's IDE answer lists is only ever offered on, and
+      sent to, such a host (`hostOf` below; `catalogueFrom` is handed this same predicate, so what
+      is offered from a CLI answer is exactly what goes out under the CLI UA). A family the IDE
+      lists in part sends each tier under the UA it was listed for. Gemini only: a `claude-*` or
+      `gpt-oss*` id that only a CLI answer lists is neither offered nor sent under the CLI UA,
+      as before this change (the validated-function-calling and `3p` rules were measured under
+      the IDE UA).
+    - *Quota scope* (`cliScope`): a learned `gemini-` model with at least one wire id that only
+      CLI answers list has a pool scope of its own, named for its family and shared by its base id
+      and every tier, with no summary group, exactly as Hydrogen: proof that it is spent rests
+      only it, and the Gemini windows are never its positive-quota evidence. One scope for the
+      base id and all its wire ids matters: the turn is asked by the base id and Google's 429
+      names the wire id. A learned model whose every wire id some IDE answer lists keeps the
+      `gemini` scope, as any unknown `gemini-*` id did before, and a learned `claude-*`/`gpt-oss*`
+      id keeps the measured `3p` group whatever lists it. The lists are asked by the id as Google
+      wrote it (no lower-casing on the way to the lookup).
+    A turn takes one immutable `view()` of the lists and resolves its wire id, host, UA and quota
+    scope, and reads Google's refusal, against that view: `take` replaces the map and never
+    changes it in place, so a catalogue read that lands mid-turn cannot make the turn's 429 name
+    another scope than the one it was started under.
+    An id outside the tables whose entry says `disabled: true` is not listed (the flag, not the
+    name). A table id is never kept and never looked up there: everything measured by hand stays
+    as written, and the measured answers above give the same rows and host map as before
+    (replayed through both versions; every row and effort resolves to a wire id that the host it
+    goes to lists for the client family whose UA it carries). A read replaces the lists of each
+    host and client family that answered and leaves the others as they were (an ask that did not
+    answer says nothing), so a tier Google withdraws leaves at the next whole read. The lists are
+    kept in `<home>/antigravity-models.json` as `{version: 2, providers: {<name>: {<host>:
+    {ide, cli}}}}`, read at start, so a start that finds the catalogue unreadable still resolves
+    a learned model's wire id, client family and host and still lists it after the static rows.
+    The file is written only when this provider's entry in it differs from what is kept (compared
+    as sorted JSON, other providers' entries written back as they were), a file whose `version`
+    is later than this build's is left untouched, a file of an earlier version is not read as
+    this one, and a save that fails is tried again when the lists change or at a read an hour or
+    more later (a failed replace holds the event loop while the rename is retried). A provider
+    keeps only the hosts it asks (a pinned `url` never borrows a tier another host listed), and
+    a learned host is only ever one of `GOOGLE_OAUTH.hosts`, because that is where the account's
+    token is sent. `hostFor` places a wire id outside the tables by `hostOf` (the first of the
+    two hosts whose IDE answer lists it, else, for a CLI-only id, the first whose CLI answer
+    does): the same lists that choose its UA, so host and UA cannot disagree. A table id is not
+    in the lists and takes the host map's host for its wire id; then the base id's; then the
+    default. The lists come before the host map for three reasons found in review (PR 165): the
+    map is built per host and keeps an unanswered host's earlier catalogue, so after a partial
+    re-read it could name a host that lists an id for the CLI family while the other host's new
+    IDE listing had already moved that id to the IDE UA (a 400); on the first read after a
+    restart that missed the preferred host, the map knew only the other host and moved the
+    model, its quota scope and its prompt cache there although the stored lists named the
+    preferred one; and with no catalogue at all there is no map, so the limits read
+    (`quotaHosts`) asked the default host instead of the one the stored lists send the model
+    to. A read that missed prod's CLI answer used to send a prod-only model to daily, whose
+    generic 429 rested every account. A re-read in which a host did not answer keeps that host's catalogue
+    from the last read that had it (rows and host map are merged from the kept per-host
+    catalogues, `mergeHostCatalogues`), so one failed ask moves no conversation to the other
+    host and back. Such a partial read (a host or a CLI ask did not answer) stands for five
+    minutes instead of the hour, doubling up to the hour while the same asks keep failing, and a
+    cached read past its time is asked again from the turn path without holding the turn. A
+    provider that pins `url` asks nothing on the turn path, as before: it learns when its model
+    list is read (the provider form, the picker) and from the file. The provider form's probe
+    (`POST /api/providers/probe`) therefore reads the catalogue of the provider being edited (the
+    form sends its `name` and `url`), not of the first Antigravity provider: a list read through
+    another provider offered a second, pinned provider a family it never learned and then sent
+    as an unknown id under the IDE UA. A provider not saved yet is shown the catalogue of a
+    saved one that asks the same hosts, else the tables' list. What it was shown is still its own
+    once saved: an adapter with no stored lists under its name starts from the lists another
+    provider of the home stored for the hosts it asks (same accounts, same host, same answer), and
+    an adapter rebuilt because its configuration changed is handed the lists of the one it
+    replaces (`GoogleAdapter`'s `inherit`), so nothing depends on the file having been written
+    between the form's probe and the save. A catalogue answer is
+    untrusted input: at most 500 ids of one answer are read (the bound of a kept list, so a list is never a truncated answer and an id missing from it is one that host does not list), a kept id matches
+    `[A-Za-z0-9][A-Za-z0-9._-]{0,127}` (500 per list, 8 hosts), every table lookup by a client-
+    or catalogue-supplied id is an own-property lookup (`constructor` is not a model), and
+    `fetchAvailableModels` reading never throws into `fetchModels` (it falls back to the static
+    and learned rows).
+    **Accepted, not fixed:** two accounts on different plans answer different catalogues, and
+    the read uses one account, so which account answered decides what is listed until the next
+    read. Not measured with accounts on different plans.
+    Listing is not enabling: a learned model becomes a worker when it is ticked, as any other.
+    **Not measured:** a real model arriving this way (checked instead by renaming Hydrogen's ids
+    in the measured answers: same row, host, tier wire ids and CLI UA as the hand-written entry),
+    an Ultra account's Carbon ids, and the bucket a future CLI-only model draws on. The same
+    catalogue's `quotaInfo` for the Hydrogen ids equalled Flash 3.8's (same fraction and reset)
+    while Argon's was its own weekly figure; `quotaInfo` is not quota evidence (2026-10-28 above),
+    so Hydrogen's scope is unchanged.
 - Model ids. CCA's wire ids carry the tier as a suffix (`gemini-3.8-flash-low`) or a
   `-tiered` rename (`gemini-3.7-flash-tiered`), while the picker shows a collapsed base id.
   Resolution, from `providers/antigravity-models.ts`: `gemini-3.8-flash` → its suffix per
   effort (`…-low/medium/high`, no `thinkingLevel` beside it — the suffix IS the effort);
   `gemini-3.1-pro` → `gemini-3.1-pro-low` / `gemini-pro-agent` with `thinkingLevel`;
   `gemini-3.7-flash` → `gemini-3.7-flash-tiered` with `thinkingLevel`; `gemini-4-argon` → its
-  suffix per effort (`…-low/medium/high`, default medium, no `thinkingLevel`); a `claude-*` id takes a
+  suffix per effort (`…-low/medium/high`, default medium, no `thinkingLevel`); `gemini-4-hydrogen` →
+  its suffix per effort (`…-low/medium/high/xhigh`, default medium by choice, `max`/`ultra` take
+  `-xhigh`, no `thinkingLevel`); a `claude-*` id takes a
   `thinkingLevel` only (`resolveAntigravityThinkingLevel` clamps `xhigh/max/ultra`→`high`).
   CCA's own catalogue is `POST {host}/v1internal:fetchAvailableModels` with `{project}`, per host
   (see "Two hosts" below) and per client family: the IDE answer gives every model, and a second ask
-  under the CLI UA adds only Argon's ids (which the IDE answer omits); an unreadable IDE answer leaves
+  under the CLI UA adds the ids only it lists: Argon's and Hydrogen's, and any id outside the tables
+  (see "Models outside the tables" above); an unreadable IDE answer leaves
   the host unread as before. Body `{models:{<wireId>:{maxTokens,…}}, agentModelSorts:[{groups:[{modelIds:[…]}]}],
   tieredModelIds:{flash:[…]}}` (`providers/quota/antigravity.ts:166-168`,
   `providers/antigravity-models.ts:489-560`); when it cannot be read on any host we fall back to the
-  static collapsed list (`gemini-3.8-flash`, `gemini-4-argon`, `gemini-3.7-flash`, `gemini-3.1-pro`,
+  static collapsed list (`gemini-3.8-flash`, `gemini-4-argon`, `gemini-4-hydrogen`, `gemini-3.7-flash`, `gemini-3.1-pro`,
   `gemini-3.1-flash-image`, `claude-sonnet-4-6`, `claude-opus-4-6-thinking`,
-  `gpt-oss-120b-medium`, context windows from CCA `maxTokens`).
+  `gpt-oss-120b-medium`, context windows from CCA `maxTokens`). A collapsed row's name drops the tier
+  its first wire id was named for (`Gemini 4 Hydrogen (High)` → `Gemini 4 Hydrogen`).
 - Claude models on CCA force `toolConfig.functionCallingConfig.mode = "VALIDATED"`; a client
   asking for no tools gets the declarations dropped instead (`adapters/google.ts:1109-1120`).
 - **thoughtSignature.** The CCA path sends a real signature back on the exact `functionCall`
@@ -2196,8 +2338,9 @@ They were not live-tested during the original implementation. Files are under `s
   and is not retried. The exception is the model-capacity 503 below, which rests nothing.
   **A 429 that proves one quota group spent rests only that group** (`isGroupQuotaExhausted`:
   an ErrorInfo `reason: "QUOTA_EXHAUSTED"` whose `metadata.model` is in the turn's group;
-  `antigravityQuotaScope`: `gemini` for other gemini-*, `3p` for claude-*/gpt-oss*, and `argon`
-  for gemini-4-argon*. The distinct Argon scope preserves the measured Pro quota boundary;
+  `antigravityQuotaScope`: `gemini` for other gemini-*, `3p` for claude-*/gpt-oss*, `argon`
+  for gemini-4-argon*, `hydrogen` for gemini-4-hydrogen*, and its own family id for a learned
+  CLI-only model. The distinct Argon scope preserves the measured Pro quota boundary;
   its positive-quota evidence requires its own explicitly reported weekly bucket, never the
   ordinary Gemini windows (see the 2026-10-28 measurement above). This does not infer a shared
   Ultra quota scope from a missing bucket). Measured 2026-10-23: one such 429 for

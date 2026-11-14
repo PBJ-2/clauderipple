@@ -1485,11 +1485,19 @@ async function probeGoogle(body: { apiKey?: unknown; url?: unknown }, probeFetch
  * Cloud Code Assist returns for it (falling back to the static list). No network call is made here
  * beyond the catalogue the provider already serves; a signed-out state is the common answer.
  */
-async function probeGoogleAntigravity(deps: AdminDeps): Promise<{ ok: boolean; auth: ProbeAuth; models: ModelEntry[]; error?: string }> {
+async function probeGoogleAntigravity(deps: AdminDeps, probe: { name?: unknown; url?: unknown } = {}): Promise<{ ok: boolean; auth: ProbeAuth; models: ModelEntry[]; error?: string }> {
   const accounts = deps.google?.().accounts?.() ?? {};
   const signedIn = Object.values(accounts).some((list) => list.length > 0) || readGoogleAccounts(homeDir()).length > 0;
   if (!signedIn) return { ok: false, auth: "missing", models: staticAntigravityModels(), error: "no Google account; run `clauderipple google-login`" };
-  const named = Object.keys(accounts)[0];
+  // Whose catalogue to read. Each Antigravity provider learns the models outside the tables from
+  // its own catalogue, on the hosts it asks, so a list read through another provider can offer a
+  // model the one being configured never learns and would then send as an unknown id. The form
+  // names the provider it is editing; one not saved yet is shown the catalogue of a saved provider
+  // that asks the same hosts (the same pinned `url`, or none), and the tables' list when there is
+  // no such provider. It reads its own catalogue once it is saved.
+  const antigravity = Object.entries(deps.config().providers).filter(([, p]) => p.type === "google" && p.auth === "antigravity") as [string, { url?: string }][];
+  const pin = (url: unknown): string => (typeof url === "string" ? url.trim().replace(/\/+$/, "") : "");
+  const named = antigravity.find(([name]) => name === probe.name)?.[0] ?? antigravity.find(([, p]) => pin(p.url) === pin(probe.url))?.[0];
   const models = named ? await deps.google?.().models?.(named).catch(() => null) ?? null : null;
   return { ok: true, auth: "ok", models: models ?? staticAntigravityModels() };
 }
@@ -2610,7 +2618,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         }
         if (probe.type === "google") {
           if (probe.auth === "antigravity") {
-            sendJson(res, 200, await probeGoogleAntigravity(deps));
+            sendJson(res, 200, await probeGoogleAntigravity(deps, probe));
             return;
           }
           sendJson(res, 200, await probeGoogle({ apiKey: probe.apiKey, url: probe.url }, deps.probeFetch));
