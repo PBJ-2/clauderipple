@@ -179,12 +179,41 @@ function defaultLabel(accounts: readonly ClaudeOAuthAccount[], email?: string): 
   return `Claude account ${accounts.length + 1}`;
 }
 
-/** Add a distinct account, or atomically replace the same upstream account after re-login. */
-export function saveClaudeOAuthAccount(home: string, grant: ClaudeOAuthAccountGrant, now = new Date().toISOString()): ClaudeAccountSummary {
+/**
+ * Add a distinct account, or atomically replace the same upstream account after re-login.
+ *
+ * `replaceId` names the entry the user clicked "sign in again" on. An account migrated from the old
+ * single OAuth file has no subjectHash, so matching by hash alone could never find it. The target
+ * is only touched when it is provably not another person's account: the grant matches an entry by
+ * hash (a hashless target is then folded into it, handing over `preferred`), or the target has no
+ * hash to contradict the grant (renewed in place). A target with a different hash, or a different
+ * email, is left alone and the grant is added as a new entry. A matching email is never taken as
+ * proof, since one email can belong to a personal and a team account.
+ */
+export function saveClaudeOAuthAccount(
+  home: string,
+  grant: ClaudeOAuthAccountGrant,
+  now = new Date().toISOString(),
+  options: { replaceId?: string } = {},
+): ClaudeAccountSummary {
   return withAccountLock(home, () => {
     const accounts = readClaudeOAuthAccountsForMutation(home);
     const hash = subjectHash(grant.accountId);
-    const index = hash ? accounts.findIndex((account) => account.subjectHash === hash) : -1;
+    let index = hash ? accounts.findIndex((account) => account.subjectHash === hash) : -1;
+    const targetIndex = options.replaceId ? accounts.findIndex((account) => account.id === options.replaceId) : -1;
+    const target = targetIndex >= 0 ? accounts[targetIndex] : undefined;
+    let carryPreferred = false;
+    // Email cannot prove two logins are one account, but a different email proves they are not.
+    const otherPerson = !!target?.email && !!grant.email && target.email.trim().toLowerCase() !== grant.email.trim().toLowerCase();
+    if (target && !target.subjectHash && !otherPerson) {
+      if (index < 0) {
+        index = targetIndex;
+      } else if (index !== targetIndex) {
+        carryPreferred = target.preferred === true;
+        accounts.splice(targetIndex, 1);
+        if (targetIndex < index) index -= 1;
+      }
+    }
     const previous = index >= 0 ? accounts[index] : undefined;
     const account: ClaudeOAuthAccount = {
       id: previous?.id ?? crypto.randomUUID(),
@@ -194,11 +223,12 @@ export function saveClaudeOAuthAccount(home: string, grant: ClaudeOAuthAccountGr
       createdAt: previous?.createdAt ?? now,
       updatedAt: now,
       label: previous?.label ?? defaultLabel(accounts, grant.email),
-      ...(previous?.preferred ? { preferred: true } : {}),
+      ...(previous?.preferred || carryPreferred ? { preferred: true } : {}),
       ...(previous?.paused ? { paused: true } : {}),
       ...(hash ? { subjectHash: hash } : previous?.subjectHash ? { subjectHash: previous.subjectHash } : {}),
       ...(grant.email ? { email: grant.email } : previous?.email ? { email: previous.email } : {}),
     };
+    if (carryPreferred) for (const other of accounts) other.preferred = false;
     if (index >= 0) accounts[index] = account;
     else accounts.push(account);
     writeClaudeAccountsFile(home, accounts);

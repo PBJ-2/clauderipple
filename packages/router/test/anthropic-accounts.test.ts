@@ -18,6 +18,7 @@ import {
   renameClaudeAccount,
   replaceClaudeOAuthAccount,
   saveClaudeOAuthAccount,
+  updateClaudeAccount,
 } from "../src/providers/anthropic-accounts.ts";
 import { readClaudeAuthFile, saveClaudeOAuthFile } from "../src/providers/anthropic-token-file.ts";
 import { posixModes } from "../../../test/capabilities.ts";
@@ -154,6 +155,138 @@ test("legacy migration uses directory durability on POSIX and the atomic rename 
   assert.equal(legacyMigrationDurable(true, "darwin"), true);
   assert.equal(legacyMigrationDurable(false, "darwin"), false);
   assert.equal(legacyMigrationDurable(false, "win32"), true);
+});
+
+function legacyNeedingLogin(dir: string): void {
+  saveClaudeOAuthFile(dir, { accessToken: "legacy-access", refreshToken: "legacy-refresh", expiresAt: 3_000_000 }, "2026-09-19T00:00:00.000Z");
+  assert.equal(markClaudeAccountNeedsReauth(dir, "legacy", "legacy-refresh"), true);
+}
+
+test("replaceId renews a hashless legacy entry in place", () => {
+  const dir = home();
+  try {
+    legacyNeedingLogin(dir);
+    const renewed = saveClaudeOAuthAccount(dir, grant("new"), "2026-09-20T00:00:00.000Z", { replaceId: "legacy" });
+    assert.equal(renewed.id, "legacy");
+    const stored = readClaudeAccountsFile(dir);
+    assert.equal(stored.length, 1);
+    assert.equal(stored[0]!.token, "access-new");
+    assert.equal(stored[0]!.createdAt, "2026-09-19T00:00:00.000Z");
+    assert.ok(stored[0]!.subjectHash);
+    assert.equal(stored[0]!.email, "new@example.test");
+    assert.notEqual(stored[0]!.needsReauth, true);
+    assert.equal(listClaudeAccounts(dir)[0]!.needsReauth, false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("replaceId does not hand a hashless entry to a login under a different email", () => {
+  const dir = home();
+  try {
+    saveClaudeOAuthFile(dir, { accessToken: "legacy-access", refreshToken: "legacy-refresh", expiresAt: 3_000_000 }, "2026-09-19T00:00:00.000Z");
+    assert.equal(replaceClaudeOAuthAccount(dir, "legacy", "legacy-refresh", { accessToken: "a", refreshToken: "legacy-refresh-2", expiresAt: 3_000_000, email: "Me@Example.test" }), true);
+    assert.equal(markClaudeAccountNeedsReauth(dir, "legacy", "legacy-refresh-2"), true);
+    const added = saveClaudeOAuthAccount(dir, grant("someone"), undefined, { replaceId: "legacy" });
+    assert.notEqual(added.id, "legacy");
+    const legacy = readClaudeAccountsFile(dir).find((account) => account.id === "legacy")!;
+    assert.equal(legacy.needsReauth, true);
+    assert.equal(legacy.token, "a");
+    // The same email in another casing is still the entry the user clicked.
+    const renewed = saveClaudeOAuthAccount(dir, { ...grant("me"), email: "me@example.TEST" }, undefined, { replaceId: "legacy" });
+    assert.equal(renewed.id, "legacy");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("replaceId keeps preferred and paused on an in-place renewal", () => {
+  const dir = home();
+  try {
+    legacyNeedingLogin(dir);
+    assert.equal(updateClaudeAccount(dir, "legacy", { preferred: true, paused: true }), true);
+    saveClaudeOAuthAccount(dir, grant("new"), undefined, { replaceId: "legacy" });
+    const [only] = readClaudeAccountsFile(dir);
+    assert.equal(only!.preferred, true);
+    assert.equal(only!.paused, true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("replaceId folds a hashless target into the entry the grant matches, handing over preferred only", () => {
+  const dir = home();
+  try {
+    legacyNeedingLogin(dir);
+    const hashed = saveClaudeOAuthAccount(dir, grant("old", "same-subject"), "2026-09-20T00:00:00.000Z");
+    assert.equal(updateClaudeAccount(dir, "legacy", { preferred: true, paused: true }), true);
+    const renewed = saveClaudeOAuthAccount(dir, grant("new", "same-subject"), "2026-09-21T00:00:00.000Z", { replaceId: "legacy" });
+    assert.equal(renewed.id, hashed.id);
+    const stored = readClaudeAccountsFile(dir);
+    assert.deepEqual(stored.map((account) => account.id), [hashed.id]);
+    assert.equal(stored[0]!.token, "access-new");
+    assert.equal(stored[0]!.preferred, true);
+    assert.notEqual(stored[0]!.paused, true, "paused does not carry over");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("replaceId leaves exactly one preferred entry when a hashless target folds into a matched one", () => {
+  const dir = home();
+  try {
+    legacyNeedingLogin(dir);
+    const hashed = saveClaudeOAuthAccount(dir, grant("old", "same-subject"));
+    const other = saveClaudeOAuthAccount(dir, grant("other"));
+    assert.equal(updateClaudeAccount(dir, other.id, { preferred: true }), true);
+    assert.equal(updateClaudeAccount(dir, "legacy", { preferred: true }), true);
+    saveClaudeOAuthAccount(dir, grant("new", "same-subject"), undefined, { replaceId: "legacy" });
+    const stored = readClaudeAccountsFile(dir);
+    assert.deepEqual(stored.filter((account) => account.preferred).map((account) => account.id), [hashed.id]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("replaceId naming an entry of a different upstream account leaves it alone and adds a new one", () => {
+  const dir = home();
+  try {
+    const target = saveClaudeOAuthAccount(dir, grant("target", "subject-a"), "2026-09-20T00:00:00.000Z");
+    const added = saveClaudeOAuthAccount(dir, grant("someone", "subject-b"), "2026-09-21T00:00:00.000Z", { replaceId: target.id });
+    assert.notEqual(added.id, target.id);
+    const stored = readClaudeAccountsFile(dir);
+    assert.deepEqual(stored.map((account) => account.id), [target.id, added.id]);
+    assert.equal(stored[0]!.token, "access-target");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an unknown replaceId behaves like no replaceId", () => {
+  const dir = home();
+  try {
+    legacyNeedingLogin(dir);
+    const added = saveClaudeOAuthAccount(dir, grant("new"), undefined, { replaceId: "no-such-id" });
+    assert.deepEqual(readClaudeAccountsFile(dir).map((account) => account.id), ["legacy", added.id]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("without replaceId a hashless legacy entry with the same email is not touched", () => {
+  const dir = home();
+  try {
+    legacyNeedingLogin(dir);
+    assert.equal(replaceClaudeOAuthAccount(dir, "legacy", "legacy-refresh", { accessToken: "a", refreshToken: "legacy-refresh", expiresAt: 3_000_000, email: "new@example.test" }), true);
+    assert.equal(markClaudeAccountNeedsReauth(dir, "legacy", "legacy-refresh"), true);
+    const added = saveClaudeOAuthAccount(dir, grant("new"));
+    const stored = readClaudeAccountsFile(dir);
+    assert.deepEqual(stored.map((account) => account.id), ["legacy", added.id]);
+    assert.equal(stored[0]!.token, "a");
+    assert.equal(stored[0]!.needsReauth, true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("the legacy OAuth file is visible until the first pool mutation, then migrated once", () => {

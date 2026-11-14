@@ -999,6 +999,17 @@ test("the Claude subscription sign-in runs from the GUI: start, state, pasted co
   }, { claudeOAuthFetch, openBrowser: (url) => { opened.push(url); return true; } });
 });
 
+test("the Claude sign-in start rejects a replaceId that is not a non-empty string", async () => {
+  await withAdmin(makeCfg(), async ({ port }) => {
+    for (const replaceId of [5, null, ["x"], "", "x".repeat(201)]) {
+      const r = await fetch(`${base()}:${port}/api/claude-oauth`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ manual: true, replaceId }) });
+      assert.equal(r.status, 400, JSON.stringify(replaceId)?.slice(0, 20));
+    }
+    const idle = (await (await fetch(`${base()}:${port}/api/claude-oauth`)).json()) as { running: boolean };
+    assert.equal(idle.running, false, "a rejected start opens no sign-in");
+  }, { openBrowser: () => true });
+});
+
 test("Claude account admin endpoints expose no secrets and rename or remove only stored accounts", async () => {
   await withAdmin(makeCfg(), async ({ port, home }) => {
     const account = saveClaudeOAuthAccount(home, {

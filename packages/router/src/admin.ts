@@ -2999,14 +2999,23 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           return;
         }
         let manual = false;
+        let replaceId: string | undefined;
         try {
           const body = (await readBody(req)).toString("utf8");
-          manual = body.length > 0 && (JSON.parse(body) as { manual?: unknown }).manual === true;
+          const parsed = body.length > 0 ? (JSON.parse(body) as { manual?: unknown; replaceId?: unknown }) : {};
+          manual = parsed.manual === true;
+          if (parsed.replaceId !== undefined) {
+            if (typeof parsed.replaceId !== "string" || !parsed.replaceId || parsed.replaceId.length > 200) {
+              sendJson(res, 400, { error: "invalid replaceId" });
+              return;
+            }
+            replaceId = parsed.replaceId;
+          }
         } catch {
           sendJson(res, 400, { error: "invalid JSON" });
           return;
         }
-        const session = new ClaudeOAuthSession({ home: homeDir(), manual, ...(deps.claudeOAuthFetch ? { fetch: deps.claudeOAuthFetch } : {}) });
+        const session = new ClaudeOAuthSession({ home: homeDir(), manual, ...(replaceId ? { replaceId } : {}), ...(deps.claudeOAuthFetch ? { fetch: deps.claudeOAuthFetch } : {}) });
         claudeOAuth = session;
         const { url, manual: needsCode } = await session.start();
         const opened = deps.openBrowser ? deps.openBrowser(url) : openBrowser(url);
