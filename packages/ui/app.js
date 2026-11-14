@@ -5300,7 +5300,12 @@ const MOD_LANGUAGES = [["ko", "한국어"], ["en", "English"], ["zh", "简体中
 // Claude Code's own agent with a model: what the mod offers besides the generated workers, smallest
 // first, and their current model ids (packages/mod/hooks/settings.ts CLAUDE_WORKERS).
 const MOD_CLAUDE_MODELS = ["haiku", "sonnet", "opus", "fable"];
-const MOD_CLAUDE_IDS = { haiku: "claude-haiku-5-5", sonnet: "claude-sonnet-5-5", opus: "claude-opus-5-5", fable: "claude-fable-5-1" };
+const MOD_CLAUDE_IDS = { haiku: "claude-haiku-5-5", sonnet: "claude-sonnet-5-5", opus: "claude-opus-5-5", fable: "claude-fable-5-2" };
+// The newest id of a family on the router's live Anthropic list (/api/mod-options `claudeLatest`), else the table above.
+function modClaudeId(alias) {
+  const live = modState.options && modState.options.claudeLatest;
+  return (live && typeof live[alias] === "string" && live[alias]) || MOD_CLAUDE_IDS[alias];
+}
 // The four workers, low to max (the mod's rung ids: light, standard, hard, plan).
 const MOD_RUNGS = ["light", "standard", "hard", "plan"];
 // A domain ladder has two levels: light work (the light rung) and heavy work (standard, hard, plan).
@@ -5654,7 +5659,7 @@ function modChoices() {
     };
   });
   const claude = MOD_CLAUDE_MODELS.map((alias) => ({
-    value: `general-purpose+${alias}`, label: `Claude ${modCap(alias)}`, model: MOD_CLAUDE_IDS[alias], provider: "anthropic",
+    value: `general-purpose+${alias}`, label: `Claude ${modCap(alias)}`, model: modClaudeId(alias), provider: "anthropic",
     billing: "subscription", usable: true, efforts: claudeEfforts, claude: true,
   }));
   const session = { value: "general-purpose", label: t("mod.sessionModel"), model: null, provider: null, billing: null, usable: true, efforts: claudeEfforts, claude: true };

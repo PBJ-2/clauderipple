@@ -717,7 +717,7 @@ async function hearDelegationPin($: EngineInterface, text: string): Promise<void
     const model = agentModel(file), provider = agentProvider(file)
     return model && provider ? [{ model, provider }] : []
   })
-  const sources = workers.concat(claudeCandidates(), (await read($, routerModels)).map(m => ({ model: m.value, provider: m.provider })))
+  const sources = workers.concat(claudeCandidates((await read($, ladderOptions))?.claude),(await read($, routerModels)).map(m => ({ model: m.value, provider: m.provider })))
   const pin = parseDelegationPin({ role: 'user', text }, sources, workers)
   if (pin === undefined) return
   if (pin === null) { await releaseDelegationPin($); return }
@@ -976,7 +976,7 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   const files = await workerFiles($)
   try { await refreshModels($) } catch (error) { await report($, 'worker catalogue', error) }
   // Claude's own models are candidates as well: general-purpose on the model, effort by turn.step.
-  const pinnedCandidates: WorkerCandidate[] = [...[...files].flatMap(([agent, file]) => { const model = agentModel(file)?.replace(/@[^@]*$/, ''); const provider = agentProvider(file); return model && provider ? [{ target: { agent }, model, provider }] : [] }), ...claudeCandidates()]
+  const generatedCandidates: WorkerCandidate[] = [...[...files].flatMap(([agent, file]) => { const model = agentModel(file)?.replace(/@[^@]*$/, ''); const provider = agentProvider(file); return model && provider ? [{ target: { agent }, model, provider }] : [] })]
   const usable = await availability($)
   // The session names the tier and domain; the owner's ladder names the model (2026-10-24, the
   // worker judge removed: see AUTO_DESCRIPTION). A model is named only with where it comes from.
@@ -1025,6 +1025,9 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   await refreshLadder($)
   const now = await $.clock.now()
   const options = await read($, ladderOptions)
+  // A family alias means the newest id of that family on the router's live list (static table until it has one).
+  const claudeLatest = options?.claude
+  const pinnedCandidates: WorkerCandidate[] = [...generatedCandidates, ...claudeCandidates(claudeLatest)]
   const providers = options && options.until > now ? liveProviders(options.providers ?? {}, now) : {}
   const explicitCandidate = target ? pinnedCandidates.find(c => c.target.agent === target!.agent && c.target.model === target!.model) ?? (target.agent === 'general-purpose' ? { target, model: target.model ?? 'sonnet', provider: (source === 'pin' ? pin?.provider : undefined) ?? (await read($, routerModels)).find(m => m.value.toLowerCase() === target!.model?.toLowerCase())?.provider ?? 'anthropic' } : undefined) : undefined
   if (explicitCandidate && s.providers[explicitCandidate.provider] === false) return { deny: t(language, 'workers.disabled', { provider: explicitCandidate.provider }) }
@@ -1046,7 +1049,7 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
     return { deny: said }
   }
   verdict = { ...verdict, effort: resolved.effort }
-  const model = spawnModel(selected, verdict.effort, files.has(selected.agent) ? agentModel(files.get(selected.agent)!) : undefined)
+  const model = spawnModel(selected, verdict.effort, files.has(selected.agent) ? agentModel(files.get(selected.agent)!) : undefined, claudeLatest)
   const fallbacks = ladderResult ? ladderFallbackModels(ladder, ladderResult, pinnedCandidates, routing) : []
   const ladderLine = model && fallbacks.length ? workerLadderLine({ pick: id, model, fallbacks }) : undefined
   const value: WorkerPick = { ...verdict, ...resolved, rule, target: selected, by, ms: 0, id, ...(fallbackReason ? { fallbackReason } : {}) }
@@ -2625,7 +2628,7 @@ export const register: Register = on => {
         }
         // Keep generated workers' own model precedence; only then pin native aliases to our table.
         const selectedModel = input.model ?? (file ? agentModel(file) : undefined)
-        const model = resolveClaudeModel(selectedModel)
+        const model = resolveClaudeModel(selectedModel, (await read($, ladderOptions))?.claude)
         if (ours && model && model !== selectedModel) {
           input = { ...input, model }
           // Consume a matching native marker so the router cannot put its alias back on the wire.

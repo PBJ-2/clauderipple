@@ -53,8 +53,42 @@ export const CLAUDE_WORKERS: readonly { name: string; model: string; provider: s
   { name: 'general-purpose:haiku', model: 'claude-haiku-5-5', provider: 'anthropic', target: { agent: 'general-purpose', model: 'haiku' } },
   { name: 'general-purpose:sonnet', model: 'claude-sonnet-5-5', provider: 'anthropic', target: { agent: 'general-purpose', model: 'sonnet' } },
   { name: 'general-purpose:opus', model: 'claude-opus-5-5', provider: 'anthropic', target: { agent: 'general-purpose', model: 'opus' } },
-  { name: 'general-purpose:fable', model: 'claude-fable-5-1', provider: 'anthropic', target: { agent: 'general-purpose', model: 'fable' } },
+  { name: 'general-purpose:fable', model: 'claude-fable-5-2', provider: 'anthropic', target: { agent: 'general-purpose', model: 'fable' } },
 ]
+
+/** A family alias's newest concrete id, as the router reads it from Anthropic's model list. */
+export type ClaudeLatest = Readonly<Record<string, string>>
+
+const CLAUDE_ID = /^claude-(haiku|sonnet|opus|fable)-(\d+)(?:-(\d{1,2}))?$/
+
+/** Newer first: 5-5 over 5-1 over 5 over 4-8, by number and never by list order. */
+function newer(a: string, b: string): boolean {
+  const [, , aMajor, aMinor] = CLAUDE_ID.exec(a)!, [, , bMajor, bMinor] = CLAUDE_ID.exec(b)!
+  return Number(aMajor) !== Number(bMajor) ? Number(aMajor) > Number(bMajor) : Number(aMinor ?? 0) > Number(bMinor ?? 0)
+}
+
+/**
+ * Each family's newest id among `ids` (dated ids and non-family ids such as `claude-mythos-5-1` are
+ * skipped). The static table above knows only what was released when it was cut; the router's live
+ * list is what keeps a later release from being passed over for the older one.
+ */
+export function latestClaudeIds(ids: Iterable<string>): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const id of ids) {
+    const family = CLAUDE_ID.exec(id)?.[1]
+    if (family && (!out[family] || newer(id, out[family]!))) out[family] = id
+  }
+  return out
+}
+
+/** CLAUDE_WORKERS with each family's model replaced by `latest`'s, where it names one. */
+export function claudeWorkers(latest?: ClaudeLatest): typeof CLAUDE_WORKERS {
+  if (!latest) return CLAUDE_WORKERS
+  return CLAUDE_WORKERS.map(w => {
+    const id = latest[w.target.model!]
+    return id && CLAUDE_ID.exec(id)?.[1] === w.target.model ? { ...w, model: id } : w
+  })
+}
 
 /** The allow-list key of a target: the agent's name, or `general-purpose:<model>` for Claude's own. */
 export function candidateKey(target: TierTarget): string {

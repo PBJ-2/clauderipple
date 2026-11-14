@@ -487,6 +487,26 @@ test('spawn models resolve every native family from the worker table without cha
   }
 })
 
+test('the fable alias runs the newest Fable on the router list; without one it runs the table\'s', async () => {
+  const { ladderOptionsFrom, resolveClaudeModel, ladderFallbackModels } = await import('../../packages/mod/hooks/workers.ts')
+  const fable = { agent: 'general-purpose', model: 'fable' }
+  assert.equal(spawnModel(fable, 'high'), 'claude-fable-5-2')
+  assert.equal(resolveClaudeModel('fable[1m]@high'), 'claude-fable-5-2[1m]@high')
+  const options = ladderOptionsFrom({ claudeEfforts: ['low', 'high'], claudeLatest: { fable: 'claude-fable-5-3', opus: 'claude-opus-5-5', sonnet: 'gpt-6-1-sol', haiku: 7 } }, 0)
+  assert.deepEqual(options.claude, { fable: 'claude-fable-5-3', opus: 'claude-opus-5-5' })
+  assert.equal(options.choices.find(c => c.target.model === 'fable')?.model, 'claude-fable-5-3')
+  assert.equal(options.choices.find(c => c.target.model === 'sonnet')?.model, 'claude-sonnet-5-5')
+  assert.equal(spawnModel(fable, 'high', undefined, options.claude), 'claude-fable-5-3')
+  assert.equal(resolveClaudeModel('fable@max', options.claude), 'claude-fable-5-3@max')
+  assert.equal(resolveClaudeModel('claude-fable-5-1', options.claude), 'claude-fable-5-1')
+  assert.equal(claudeCandidates(options.claude).find(c => c.target.model === 'fable')?.model, 'claude-fable-5-3')
+  // A ladder's recorded fallbacks name the newest too.
+  const rule = { mode: 'ladder' as const, rungs: { hard: [{ target: { agent: 'gpt-6-astra' }, effort: 'high' as const }, { target: fable, effort: 'medium' as const }] } }
+  const candidates = [{ target: { agent: 'gpt-6-astra' }, model: 'gpt-6-astra', provider: 'chatgpt' }, ...claudeCandidates(options.claude)]
+  assert.deepEqual(ladderFallbackModels(rule, { effort: 'high', rung: 'hard', position: 1 }, candidates, DEFAULTS), ['claude-fable-5-3@medium'])
+  assert.equal(ladderOptionsFrom({}, 0).claude, undefined)
+})
+
 test('allow-lists pick by worker agent, so one model from two providers is told apart; provider names still match', () => {
   const twins: WorkerCandidate[] = [
     { target: { agent: 'deepseek-flash' }, model: 'deepseek-v4.1-flash', provider: 'deepseek' },

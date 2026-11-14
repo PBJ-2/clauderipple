@@ -40,7 +40,7 @@ import { accountDisplayName, agentRenames, generatedAgents } from "./agents.ts";
 import { isJudgeOnlyModel } from "./model-policy.ts";
 import { ModSettingsInputError, readModSettings, validateSettings, validateSettingsSchema, writeAutoCompactWindow, writeModSettings } from "./mod-settings.ts";
 import { billingOf, claudeChoices, fillLadder, ladderNeedsFill } from "../../mod/hooks/ladder.ts";
-import { normalizeSettings, twoLevelRungs } from "../../mod/hooks/settings.ts";
+import { latestClaudeIds, normalizeSettings, twoLevelRungs } from "../../mod/hooks/settings.ts";
 import type { Billing, DomainRules, Effort, LadderChoice, Rungs, Settings, Step } from "../../mod/types/index.d.ts";
 import { chatPickerModels } from "./picker.ts";
 import { accountPinFor, declaredBy, resolve } from "./routing.ts";
@@ -659,6 +659,7 @@ const CLAUDE_MODEL_FALLBACK: { id: string; name: string }[] = [
   { id: "claude-haiku-5-5", name: "Haiku 5.5" },
   { id: "claude-sonnet-5-5", name: "Sonnet 5.5" },
   { id: "claude-opus-5-5", name: "Opus 5.5" },
+  { id: "claude-fable-5-2", name: "Fable 5.2" },
   { id: "claude-fable-5-1", name: "Fable 5.1" },
   { id: "claude-opus-5", name: "Opus 5" },
   { id: "claude-sonnet-5", name: "Sonnet 5" },
@@ -822,6 +823,12 @@ export type ModOptions = {
   scores: ReturnType<typeof buildModelScores>;
   /** Claude's own models' effort ladder, for the rungs that run Claude Code's own agent. */
   claudeEfforts: Effort[];
+  /**
+   * Each Claude family alias (haiku, sonnet, opus, fable) → its newest id on Anthropic's live model
+   * list, so `model: fable` runs the newest Fable. Empty when the router has no live list; the mod
+   * then uses its own table.
+   */
+  claudeLatest: Record<string, string>;
 };
 
 /**
@@ -1010,7 +1017,8 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
   const model = zen?.models?.find(m => isJudgeOnlyModel(m.id))?.id ?? null;
   const scored = buildModelScores(cfg, await scores.get());
   const claudeEfforts = modEfforts(catalog.anthropic?.default);
-  return { agents, models, providers, zen: { configured: model !== null, model }, scores: scored, claudeEfforts };
+  const liveClaude = await deps.claudeModels?.().catch(() => null);
+  return { agents, models, providers, zen: { configured: model !== null, model }, scores: scored, claudeEfforts, claudeLatest: latestClaudeIds((liveClaude ?? []).map(m => m.id)) };
 }
 
 /**
@@ -1025,7 +1033,7 @@ function ladderChoices(options: ModOptions): LadderChoice[] {
       const costs = (options.scores.models.find(m => m.model === a.model && m.provider === a.provider)?.variants ?? []).flatMap(v => typeof v.costPerTask === "number" ? [v.costPerTask] : []);
       return { target: { agent: a.name }, model: a.model, provider: a.provider, billing: a.billing, efforts: a.efforts, ...(costs.length ? { cost: Math.min(...costs) } : {}) };
     }),
-    ...claudeChoices(options.claudeEfforts),
+    ...claudeChoices(options.claudeEfforts, options.claudeLatest),
   ];
 }
 

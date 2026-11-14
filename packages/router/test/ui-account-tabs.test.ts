@@ -69,6 +69,7 @@ function modUi(provider: string, accounts: Account[], pins: { id: string; accoun
     const MOD_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
     ${placeholder}
     const MOD_CLAUDE_MODELS = ["opus"], MOD_CLAUDE_IDS = { opus: "claude-opus-5-5" };
+    const modClaudeId = (alias) => MOD_CLAUDE_IDS[alias];
     const modState = { settings: { allow: [], allowKnown: [] }, options };
     const modAgents = () => options.agents, modProviderInfo = (name) => options.providers.find((entry) => entry.name === name);
     const effortLevelsFor = () => ["high"], providerHue = () => "#000", modRefresh = () => {}, modPatch = () => {};

@@ -1,5 +1,6 @@
 import type { Billing, Domain, Effort, LadderChoice, LadderOptions, ModelScore, ProviderAvailability, RouterModel, Rule, Rung, Settings, TierTarget, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
-import { CLAUDE_WORKERS, EFFORTS, candidateKey, isAllowed } from './settings'
+import type { ClaudeLatest } from './settings'
+import { EFFORTS, candidateKey, claudeWorkers, isAllowed, latestClaudeIds } from './settings'
 import { MARKER, providerModelId } from './worker'
 import { t } from './i18n'
 import type { Lang } from './i18n'
@@ -167,8 +168,8 @@ export function allowed(candidate: WorkerCandidate, allow: readonly string[], kn
   return isAllowed(candidateKey(candidate.target), candidate.provider, allow, known)
 }
 /** Claude's own models as candidates: general-purpose on each. */
-export function claudeCandidates(): WorkerCandidate[] {
-  return CLAUDE_WORKERS.map(w => ({ target: { ...w.target }, model: w.model, provider: w.provider }))
+export function claudeCandidates(latest?: ClaudeLatest): WorkerCandidate[] {
+  return claudeWorkers(latest).map(w => ({ target: { ...w.target }, model: w.model, provider: w.provider }))
 }
 const BILLINGS: readonly Billing[] = ['free', 'payg', 'subscription']
 /**
@@ -198,7 +199,10 @@ export function ladderOptionsFrom(raw: unknown, until: number, allow: readonly s
     const models = unavailableModels(p.models)
     return [[p.name, { usable: p.usable, ...(typeof p.reason === 'string' ? { reason: p.reason } : {}), ...(typeof p.exhaustedUntil === 'number' ? { exhaustedUntil: p.exhaustedUntil } : {}), ...(Object.keys(models).length ? { models } : {}) }]]
   }))
-  return { until, choices: tickedChoices([...choices, ...claudeChoices(efforts(root.claudeEfforts))], allow, allowKnown), providers }
+  // Only family ids the router read from Anthropic's list; anything else is dropped, so a bad body cannot rename a worker.
+  const claude = latestClaudeIds(Object.values(record(root.claudeLatest)).filter((id): id is string => typeof id === 'string'))
+  const live = Object.keys(claude).length ? claude : undefined
+  return { until, choices: tickedChoices([...choices, ...claudeChoices(efforts(root.claudeEfforts), live)], allow, allowKnown), providers, ...(live ? { claude: live } : {}) }
 }
 /**
  * A provider's models that are out while it answers others (GET /api/mod-options `models`): a spent
@@ -294,15 +298,15 @@ export function ladderFallbackModels(rule: Rule, pick: Resolution, candidates: r
 }
 
 /** Resolve only native family aliases; explicit versions, custom ids and inheritance stay intact. */
-export function resolveClaudeModel(model: string | undefined): string | undefined {
+export function resolveClaudeModel(model: string | undefined, latest?: ClaudeLatest): string | undefined {
   if (!model) return model
   const alias = baseModel(model).replace(/\[1m\]$/, '')
-  const worker = CLAUDE_WORKERS.find(w => w.target.model === alias)
+  const worker = claudeWorkers(latest).find(w => w.target.model === alias)
   return worker ? worker.model + model.slice(alias.length) : model
 }
 
-export function spawnModel(target: TierTarget, effort: Effort, fileModel?: string): string | undefined {
-  return resolveClaudeModel(fileModel && target.agent !== 'general-purpose' ? `${baseModel(fileModel)}@${effort}` : target.model)
+export function spawnModel(target: TierTarget, effort: Effort, fileModel?: string, latest?: ClaudeLatest): string | undefined {
+  return resolveClaudeModel(fileModel && target.agent !== 'general-purpose' ? `${baseModel(fileModel)}@${effort}` : target.model, latest)
 }
 /** A prefix this mod (or the retired agent-title hook) put on a title: "Sol·high · ". */
 const EFFORT_WORD = 'low|medium|high|xhigh|max'

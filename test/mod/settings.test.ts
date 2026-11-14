@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { CLAUDE_WORKERS, DEFAULTS, applySettingsChanges, allowedWorkers, candidateKey, hadRetiredRouting, isAllowed, normalizeSettings, settingsChanges, twoLevelRungs } from '../../packages/mod/hooks/settings.ts'
+import { CLAUDE_WORKERS, DEFAULTS, applySettingsChanges, allowedWorkers, candidateKey, claudeWorkers, hadRetiredRouting, isAllowed, latestClaudeIds, normalizeSettings, settingsChanges, twoLevelRungs } from '../../packages/mod/hooks/settings.ts'
 import type { Step } from '../../packages/mod/types/index.d.ts'
 
 const ALLOW_WORKERS = [
@@ -149,9 +149,32 @@ test('allow-lists name workers; provider names from old settings migrate to that
 
 test('Claude models are candidates keyed general-purpose:<model>', () => {
   assert.deepEqual(CLAUDE_WORKERS.map(w => w.name), ['general-purpose:haiku', 'general-purpose:sonnet', 'general-purpose:opus', 'general-purpose:fable'])
-  assert.deepEqual(CLAUDE_WORKERS.map(w => w.model), ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5', 'claude-fable-5-1'])
+  assert.deepEqual(CLAUDE_WORKERS.map(w => w.model), ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5', 'claude-fable-5-2'])
   for (const w of CLAUDE_WORKERS) assert.equal(candidateKey(w.target), w.name)
   assert.equal(candidateKey({ agent: 'gpt-6-1-sol' }), 'gpt-6-1-sol')
+})
+
+test('the newest id of a family is chosen by version, whatever the list order', () => {
+  const ids = ['claude-fable-5-1', 'claude-fable-5-2', 'claude-fable-5', 'claude-opus-4-8', 'claude-opus-5', 'claude-opus-5-5', 'claude-opus-5-10',
+    'claude-sonnet-5-5-20261001', 'claude-sonnet-4-6', 'claude-haiku-5-5', 'claude-mythos-5-1', 'claude-3-5-haiku', 'gpt-6-1-sol']
+  const expected = { fable: 'claude-fable-5-2', opus: 'claude-opus-5-10', sonnet: 'claude-sonnet-4-6', haiku: 'claude-haiku-5-5' }
+  assert.deepEqual(latestClaudeIds(ids), expected)
+  assert.deepEqual(latestClaudeIds([...ids].reverse()), expected)
+  assert.deepEqual(latestClaudeIds([]), {})
+})
+
+test('a live list moves a family alias to its newest id; a family it lacks keeps the table', () => {
+  const live = claudeWorkers({ fable: 'claude-fable-5-3', opus: 'claude-opus-5-6' })
+  assert.deepEqual(live.map(w => w.model), ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-6', 'claude-fable-5-3'])
+  assert.equal(claudeWorkers(), CLAUDE_WORKERS)
+  // An id of another family never renames a worker.
+  assert.deepEqual(claudeWorkers({ fable: 'claude-opus-5-6', haiku: 'gpt-6-1-sol' }).map(w => w.model), CLAUDE_WORKERS.map(w => w.model))
+})
+
+test('stored settings keep the alias, never a pinned family id, so a newer release needs no migration', () => {
+  const stored = normalizeSettings({ rules: { general: { mode: 'ladder', rungs: { hard: [{ target: { agent: 'general-purpose', model: 'fable' }, effort: 'high' }] } } }, fallback: { agent: 'general-purpose', model: 'fable' } })
+  assert.deepEqual(stored.rules.general.rungs.hard, [{ target: { agent: 'general-purpose', model: 'fable' }, effort: 'high' }])
+  assert.deepEqual(stored.fallback, { agent: 'general-purpose', model: 'fable' })
 })
 
 test('a model is ticked by its key or, in old settings, its provider; an empty list ticks every model', () => {

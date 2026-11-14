@@ -364,10 +364,17 @@ request went, and a `Pane` holds the request log.
   `model: "sonnet"` plus the marker on the second line reached the router as
   `deepseek-v4.1-flash@low`, effort low. Without the mod, the first-line rule
   and the no-`model` rule stand as before.
-- **Native Claude worker versions** come from `CLAUDE_WORKERS` in
-  `hooks/settings.ts`. The mod resolves family aliases (`haiku`, `sonnet`, `opus`,
-  `fable`) to that table's concrete IDs before dispatch, so the advertised worker
-  and the requested model agree even when the CLI's alias defaults differ.
+- **Native Claude worker versions** are the newest id per family on the router's
+  live Anthropic model list (`/api/mod-options` `claudeLatest`, from
+  `latestClaudeIds`: highest version, never list order), else the static
+  `CLAUDE_WORKERS` table in `hooks/settings.ts` (a family the live list lacks
+  keeps the table's id). The mod resolves family aliases (`haiku`, `sonnet`,
+  `opus`, `fable`) to those concrete IDs before dispatch, so the advertised worker
+  and the requested model agree even when the CLI's alias defaults differ. Stored
+  settings keep the alias (`general-purpose:fable`), never a pinned id, so a new
+  release needs no migration (issue #168: Fable 5.2 was passed over for 5.1).
+  The table, `CLAUDE_MODEL_FALLBACK` (admin.ts) and the dashboard's
+  `MOD_CLAUDE_IDS` are only the offline fallback: add a release to them too.
   Explicit versioned IDs and inherited models stay unchanged. This does not
   change Claude Code's separate Auto mode security classifier.
 - **Where it can draw.** The desktop app's header icons (terminal, diff,
