@@ -4029,6 +4029,48 @@ test("GET /api/limits and /api/status follow the Claude account the pool is usin
   }, { credentials: () => reports, claudeUsage: async () => usage });
 });
 
+test("GET /api/limits names the current login and leaves out stored copies of it, without renumbering", async () => {
+  const now = Date.now();
+  const uuid = "current-login-uuid";
+  const cfg = makeCfg({ providers: { anthropic: { type: "anthropic", auth: "claude-code", accountPool: true } } });
+  const quota = (used: number) => ({ at: now, rate_limits: { primary: { used_percent: used, window_minutes: 300 } } });
+  let usage: Awaited<ReturnType<NonNullable<AdminDeps["claudeUsage"]>>> = {};
+  type Identity = { email: string; subjectHash: string } | null;
+  let lookup: () => Promise<Identity> = async () => ({ email: "Person@Example.Test", subjectHash: subjectHash(uuid)! });
+  let reports: ReturnType<NonNullable<AdminDeps["credentials"]>> = {};
+  await withAdmin(cfg, async ({ port, home }) => {
+    saveClaudeAuthFile(home, "current-login-token", "2026-10-23T00:00:00.000Z");
+    const grant = (n: number, extra: { accountId?: string; email?: string }) => ({ accessToken: `a${n}`, refreshToken: `r${n}`, expiresAt: now + 3_600_000, ...extra });
+    const copy = saveClaudeOAuthAccount(home, grant(1, { accountId: uuid, email: "copy@example.test" }));
+    const other = saveClaudeOAuthAccount(home, grant(2, { accountId: "someone-else", email: "person@example.test" }));
+    usage = { current: quota(81), [copy.id]: quota(81), [other.id]: quota(15) };
+    const rows = async () => (await (await fetch(`${base()}:${port}/api/limits`)).json() as { providers: LimitsProvider[] }).providers[0]!.accounts;
+
+    let got = await rows();
+    assert.deepEqual(got.map((a) => [a.account, a.id, a.label]), [[0, "current", "Person@Example.Test"], [2, other.id, "person@example.test"]], "the login carries its email; its stored copy is gone; the other keeps number 3");
+
+    // The pool answering on the copy is the login's account spending: the remaining row carries the mark.
+    reports = { anthropic: [{ id: copy.id, state: "ready", failures: 0, inUse: true }] };
+    got = await rows();
+    assert.deepEqual(got.filter((a) => a.inUse).map((a) => a.id), ["current"]);
+    reports = {};
+
+    // Without a reading of the login itself the copy's figures are the account's only ones: keep it.
+    usage = { [copy.id]: quota(81), [other.id]: quota(15) };
+    got = await rows();
+    assert.deepEqual(got.map((a) => a.id), [copy.id, other.id]);
+    usage = { current: quota(81), [copy.id]: quota(81), [other.id]: quota(15) };
+
+    // An unreadable identity leaves the rows exactly as before: no label on the login, every copy listed.
+    lookup = async () => null;
+    got = await rows();
+    assert.deepEqual(got.map((a) => [a.account, a.id, a.label]), [[0, "current", undefined], [1, copy.id, "copy@example.test"], [2, other.id, "person@example.test"]]);
+    lookup = async () => { throw new Error("offline"); };
+    got = await rows();
+    assert.deepEqual(got.map((a) => a.id), ["current", copy.id, other.id]);
+  }, { claudeIdentity: () => lookup(), claudeUsage: async () => usage, credentials: () => reports });
+});
+
 test("GET /api/limits lists every Claude account with usage, in a stable order, with labels and the in-use mark", async () => {
   const now = Date.now();
   const cfg = makeCfg({ providers: {

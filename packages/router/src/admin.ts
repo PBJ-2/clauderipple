@@ -458,6 +458,17 @@ function numberedAccounts<T extends { state: string }>(accounts: readonly T[]): 
 }
 
 /**
+ * Whether a stored Claude account is the app's current login: by subject hash when it has one, by
+ * email (case-insensitive) when it predates hashes. The dashboard's `sameAsCurrent` and the limits
+ * share this, so a copy is hidden in one place exactly when it is flagged in the other.
+ */
+function isSameAsCurrentLogin(account: { subjectHash?: string | undefined; email?: string | undefined }, identity: { email: string; subjectHash: string }): boolean {
+  return account.subjectHash !== undefined
+    ? account.subjectHash === identity.subjectHash
+    : account.email !== undefined && account.email.toLowerCase() === identity.email.toLowerCase();
+}
+
+/**
  * Every Claude account's plan windows, one entry each, numbered by claudeNumberedAccounts so an
  * account keeps its number while another's usage comes and goes. Only accounts whose usage is
  * known are listed; `inUse` marks the one the pool serves with now (claudeInUseId), and when that
@@ -471,17 +482,31 @@ async function anthropicLimitAccounts(deps: AdminDeps, name: string): Promise<Li
   } catch {
     return [];
   }
-  const inUse = claudeInUseId(deps, name);
   const owners = claudeNumberedAccounts();
+  // Only a known current login can name itself or point out a stored copy of itself; when the
+  // lookup fails or the login is unreadable the rows stay exactly as they were.
+  let identity: { email: string; subjectHash: string } | null = null;
+  if (claudeAuthStore(deps).describeSource()) identity = (await deps.claudeIdentity?.().catch(() => null)) ?? null;
+  const copies = new Set<string>();
+  // A copy is hidden only behind a current row that will be shown; without the login's own reading
+  // the copy's figures are the only ones there are for that account.
+  const currentShown = owners.some((owner) => owner.id === "current") && !!usage.current && claudeLimitWindows(usage.current).length > 0;
+  if (identity && currentShown) for (const stored of listClaudeAccountsWithSubject(homeDir())) if (isSameAsCurrentLogin(stored, identity)) copies.add(stored.id);
+  // The pool spending on a stored copy is spending on the login's account, which is the row left.
+  const served = claudeInUseId(deps, name);
+  const inUse = served !== undefined && copies.has(served) ? "current" : served;
   const out: LimitsAccount[] = [];
   owners.forEach((owner, account) => {
     const quota = usage[owner.id];
     if (!quota) return;
+    // The same upstream account as the login: its figures are the login's, listed once. The number stays.
+    if (copies.has(owner.id)) return;
+    const label = owner.id === "current" && identity ? identity.email : owner.label;
     const windows = claudeLimitWindows(quota);
     if (!windows.length) return;
     const at = typeof quota.at === "number" ? quota.at : Date.now();
     // A refused refresh keeps the last reading and marks it stale (anthropic-usage.ts), so the figures say so.
-    out.push({ account, id: owner.id, ...(owner.label ? { label: owner.label } : {}), ...(owner.id === inUse ? { inUse: true as const } : {}), ...(quota.stale === true ? { stale: true as const } : {}), windows, at });
+    out.push({ account, id: owner.id, ...(label ? { label } : {}), ...(owner.id === inUse ? { inUse: true as const } : {}), ...(quota.stale === true ? { stale: true as const } : {}), windows, at });
   });
   return out;
 }
@@ -2862,9 +2887,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         const name = providers.find(([key]) => key === wanted)?.[0] ?? providers[0]?.[0];
         const reports = claudePoolReports(deps, name);
         const accounts = listClaudeAccountsWithSubject(homeDir()).map(({ subjectHash: hash, ...account }) => {
-          const same = identity !== null && (hash !== undefined
-            ? hash === identity.subjectHash
-            : account.email !== undefined && account.email.toLowerCase() === identity.email.toLowerCase());
+          const same = identity !== null && isSameAsCurrentLogin({ subjectHash: hash, email: account.email }, identity);
           const report = reports.find((row) => row.id === account.id);
           return {
             ...account,
