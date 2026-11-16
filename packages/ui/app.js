@@ -6550,6 +6550,17 @@ async function loadConfiguredProviders() {
   if (configuredProviders || currentConfig) return;
   try { configuredProviders = (await api("/api/config")).providers || {}; } catch { /* the usage and requests still name their providers */ }
 }
+function purposeTag(purpose) {
+  const keys = {
+    "auto-mode-classifier": "logs.autoModeCheck",
+    "web-search": "logs.webSearch",
+    "web-fetch": "logs.webFetch",
+    compaction: "logs.compaction",
+  };
+  if (!Object.hasOwn(keys, purpose)) return null;
+  const key = keys[purpose];
+  return el("span", { class: "purpose-tag", text: t(key), title: t(`${key}Help`) });
+}
 /** A model row's cost: its amount (or "—"), what it leaves out or estimates on hover; "—" from a router that sends none. */
 function modelCostCell(entry) {
   const figure = costFigureOf(entry);
@@ -6561,8 +6572,7 @@ function modelUsageRow(entry) {
   const rate = modelRateOf(entry);
   const model = el("div", { class: "request-models" }, [
     el("span", { class: "model", text: entry.model, title: entry.model }),
-    // A WebSearch side request is counted apart from the model's own turns; the router marks it.
-    entry.purpose === "web-search" ? el("span", { class: "purpose-tag", text: t("logs.webSearch"), title: t("logs.webSearchHelp") }) : null,
+    purposeTag(entry.purpose),
     providerBadge(entry.provider, providerDisplayName(entry.provider)),
   ]);
   // The labels show only where a narrow window drops the header row.
@@ -6640,9 +6650,10 @@ function requestAccount(record) {
   return record.credential || "";
 }
 function requestDetail(record) {
+  const purpose = purposeTag(record.purpose);
   const details = [
     [t("logs.detail.id"), record.id],
-    [t("logs.detail.kind"), record.purpose === "web-search" ? `${record.kind} · ${t("logs.webSearch")}` : record.kind],
+    [t("logs.detail.kind"), purpose ? [record.kind, " · ", purpose] : record.kind],
     [t("logs.detail.stop"), record.stopReason || t("logs.none")],
     [t("logs.detail.uncached"), record.usage ? formatNumber(record.usage.input) : t("logs.none")],
     [t("logs.detail.cacheRead"), record.usage && record.usage.cached ? formatNumber(record.usage.cached) : t("logs.none")],
@@ -6653,7 +6664,7 @@ function requestDetail(record) {
   // Both tiers side by side: the ChatGPT sign-in often serves `default` for a request made on
   // `priority` (#54), so the served tier cannot be the FAST badge's basis; the requested one is.
   if (record.requestedTier || record.servedTier) details.push([t("logs.detail.tier"), `${record.requestedTier || t("logs.none")} / ${record.servedTier || t("logs.none")}`]);
-  const cells = details.map(([label, value]) => el("div", {}, [el("span", { class: "detail-label", text: label }), el("span", { class: "detail-value", text: value })]));
+  const cells = details.map(([label, value]) => el("div", {}, [el("span", { class: "detail-label", text: label }), el("span", { class: "detail-value" }, Array.isArray(value) ? value : [value])]));
   if (record.note) cells.push(el("div", { class: "request-note" }, [el("span", { class: "detail-label", text: t("logs.detail.note") }), el("span", { class: "detail-value", text: record.note })]));
   return el("tr", { class: "request-detail" }, [el("td", { colspan: "7" }, [el("div", { class: "request-detail-grid" }, cells)])]);
 }
@@ -6667,7 +6678,7 @@ function requestRow(record) {
   const model = el("div", { class: "request-models" }, [
     el("span", { class: "model", text: record.target }),
     source && source !== record.target ? el("span", { class: "small", text: `(${source})` }) : null,
-    record.purpose === "web-search" ? el("span", { class: "purpose-tag", text: t("logs.webSearch"), title: t("logs.webSearchHelp") }) : null,
+    purposeTag(record.purpose),
     // The account says more than the provider's name, which the dot's hue already carries: the
     // badge names the provider on hover and in the detail.
     providerBadge(record.provider, account || providerDisplayName(record.provider), account ? providerDisplayName(record.provider) : undefined),

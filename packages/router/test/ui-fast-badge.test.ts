@@ -35,6 +35,7 @@ function load(configuredProviders: Record<string, unknown> = {}): Builders {
   const i18n = loadI18n();
   const code = [
     sourceBetween(app, "function el(", "// Inside the ClaudeRipple app"),
+    sourceBetween(app, "function purposeTag(", "function modelCostCell("),
     sourceBetween(app, "function totalInputOf", "async function refreshRequests"),
   ].join("\n");
   class Node_ {
