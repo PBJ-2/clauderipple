@@ -39,6 +39,10 @@ status) ask it instead of spelling the rule themselves. The dashboard keeps one
 copy of `isTargetProvider` for providers not saved yet, and `ui-targets.test.ts`
 holds that copy to the router's.
 
+A slot mapping may leave effort to the app: with no `effort` saved, the request's
+`output_config.effort` passes through and the target's adapter clamps it to its
+supported ladder. A saved effort level overrides the app's choice.
+
 Why this path is stable:
 
 - Anthropic's [corporate proxy docs](https://code.claude.com/docs/en/corporate-proxy)

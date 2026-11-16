@@ -2826,23 +2826,23 @@ function slotRow(id, route) {
   const target = targetSelect(route);
   source.setAttribute("aria-label", t("slots.th.claude"));
   target.setAttribute("aria-label", t("slots.th.target"));
-  const initialTarget = routeFromTarget(target.value);
-  const effort = effortSelect(route && route.effort, initialTarget ? effortLevelsFor(initialTarget.provider, initialTarget.model) : ["high"]);
+  const effort = el("select", {});
   effort.setAttribute("aria-label", t("slots.th.effort"));
   const effortCell = el("div", { class: "map-col map-effort" }, [el("span", { class: "map-label", text: t("slots.th.effort") }), effort]);
   const remove = el("button", { class: "icon-btn remove", type: "button", title: t("common.remove"), "aria-label": t("common.remove"), onclick: () => { row.remove(); updateSlotSummary(); scheduleSlotsSave(); } }, [svgIcon("0 0 20 20", ["M10 2.8a7.2 7.2 0 1 0 0 14.4 7.2 7.2 0 0 0 0-14.4z", "M6.6 10h6.8"])]);
   // Who answers, in its vendor's hue: Claude's own when the row passes through, else the provider picked.
   const dot = vendorDot("anthropic", { type: "anthropic" });
-  function sync() {
+  // Keep a saved level on first draw even when the catalogue no longer lists it.
+  function sync(prior, keepUnlisted) {
     const selected = routeFromTarget(target.value);
     dot.style.color = selected ? providerHue(selected.provider, currentConfig.providers[selected.provider]) : providerHue("anthropic", { type: "anthropic" });
     // A row that passes through reads quieter, so the rows that send a model elsewhere stand out.
     row.classList.toggle("passthrough", !selected);
     const levels = selected ? effortLevelsFor(selected.provider, selected.model) : [];
     const supported = levels.length > 0;
-    const prior = effort.value;
-    effort.replaceChildren(...levels.map((level) => selectOption(level, level)));
-    if (supported) effort.value = levels.includes(prior) ? prior : (levels.includes("high") ? "high" : levels[0]);
+    const shown = keepUnlisted && prior && !levels.includes(prior) ? [...levels, prior] : levels;
+    effort.replaceChildren(selectOption("", t("slots.effortFromApp")), ...shown.map((level) => selectOption(level, level)));
+    effort.value = shown.includes(prior) ? prior : "";
     effort.disabled = !supported;
     effortCell.classList.toggle("muted-cell", !supported);
     if (!supported) {
@@ -2854,7 +2854,7 @@ function slotRow(id, route) {
     }
     updateSlotSummary();
   }
-  target.addEventListener("change", () => { sync(); scheduleSlotsSave(); });
+  target.addEventListener("change", () => { sync(effort.value, false); scheduleSlotsSave(); });
   source.addEventListener("change", () => { updateSlotSummary(); scheduleSlotsSave(); });
   effort.addEventListener("change", scheduleSlotsSave);
   row.append(
@@ -2864,8 +2864,8 @@ function slotRow(id, route) {
     effortCell,
     el("div", { class: "map-remove" }, [remove]),
   );
-  row._get = () => ({ id: source.value, route: routeFromTarget(target.value), effort: effort.disabled ? undefined : effort.value });
-  sync();
+  row._get = () => ({ id: source.value, route: routeFromTarget(target.value), effort: effort.disabled ? undefined : effort.value || undefined });
+  sync(route && route.effort, true);
   return row;
 }
 async function loadSlots() {
@@ -2999,7 +2999,7 @@ function updateSlotSummary() {
     const source = claudeModels.find((model) => model.id === item.id);
     const group = groupedModels(currentConfig).find((itemGroup) => itemGroup.name === item.route.provider);
     const target = group && group.models.find((model) => model.id === item.route.model);
-    return `${labelOf(source || { id: item.id })} → ${labelOf(target || { id: item.route.model })}${effortLevelsFor(item.route.provider, item.route.model).length ? ` (${item.effort})` : ""}`;
+    return `${labelOf(source || { id: item.id })} → ${labelOf(target || { id: item.route.model })}${item.effort ? ` (${item.effort})` : ""}`;
   });
   $("#slots-summary").textContent = summaries.length ? summaries.join(" · ") : t("slots.noChanges");
 }
