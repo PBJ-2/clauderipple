@@ -2250,17 +2250,29 @@ They were not live-tested during the original implementation. Files are under `s
   request-specific refusal in that measurement, not Google's internal policy or every account's
   quota. Related independent reports: [OpenCodex #2899](https://github.com/lidge-jun/opencodex/issues/2899),
   [Magpie #666](https://github.com/yetone/magpie/issues/666).
-  The SDK paragraph alone does not distinguish refusal from exhaustion: SDK clients send it on
+  Gemini 4 Argon was also observed refusing it (issue #170, reporter's 4-probe table: of four
+  probes, only adding the SDK `systemInstruction` turned a 200 into a 429).
+  The SDK sentence alone does not distinguish refusal from exhaustion: SDK clients send it on
   every request, and Google can use the same generic 429 for real limits. `prompt-refusal.ts`
-  checks the outbound paragraph, exact generic `RESOURCE_EXHAUSTED` JSON, and absence of a
-  retry header or nonempty error details. The adapter additionally requires a **fresh successful
+  checks the outbound system text, exact generic `RESOURCE_EXHAUSTED` JSON, and absence of a
+  retry header or nonempty error details. The system text matches when any line of any system
+  part, trimmed, starts with the SDK sentence: a paragraph of its own, a block whose next line
+  carries more text, and the sentence run straight into the following text all count; the
+  sentence in the middle of a line does not. The adapter additionally requires a **fresh successful
   usage snapshot for the attempted account and project**, with quota remaining in every required
   window of the requested model's known quota group: both 5h and weekly for Gemini or Claude/GPT,
   or the single explicitly reported weekly bucket for Argon.
   Evidence expires after five minutes or a bucket's reset time, and a failed refresh invalidates
   it even when the dashboard retains old values. Missing, malformed, ambiguous, stale or exhausted
-  evidence follows ordinary 429 cooldown/account rotation. This is a cache-only check; it does
-  not probe quota per request. Group-level quota is supporting evidence, not proof about every
+  evidence follows ordinary 429 cooldown/account rotation. Evidence is otherwise filled only by
+  `usageSnapshot()`, which runs when something polls `GET /api/limits` (the dashboard); a
+  headless install never does (issue #170, measured 2026-11-15 on Gemini 4 Argon: every
+  refusal rested the account and rotated). So when the refusal shape matches and the cached
+  evidence is missing or stale, the adapter refreshes the shared usage snapshot once (a failed
+  lookup is ignored; a turn aborted meanwhile ends as aborted) and checks again. The snapshot
+  is TTL-cached (five minutes) with one shared in-flight lookup, so this costs at most one
+  lookup per TTL however many refusals arrive. A response that does not have the refusal shape
+  never triggers the lookup. Group-level quota is supporting evidence, not proof about every
   model or concurrent request; unknown groups/models are not classified.
   With that evidence the adapter leaves the prompt intact and returns a distinct **unwritten**
   `prompt-incompatible` outcome, without cooling the account or trying the prompt on its peers.

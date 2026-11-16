@@ -1447,11 +1447,29 @@ test("dispatch to a ChatGPT fallback keeps the original model, effort and tools"
   } finally { await r.stop(); }
 });
 
+// Issue #170: a headless install never polls /api/limits, so no lookup has happened when the first
+// refusal arrives. The refusal shape itself triggers one lookup (TTL-cached), and room in it is evidence.
+test("no quota lookup has happened: the refusal shape fetches one, finds room, and uses the fallback", async () => {
+  const r = await frig({ routes: () => route([{ provider: "c", model: "fb-model" }]), quota: "none", accounts: 2 });
+  try {
+    assert.equal(r.quotaCalls(), 0, "nothing polled the dashboard");
+    const res = await r.post(turn({ stream: false }));
+    assert.equal(res.status, 200);
+    assert.match(res.text, /compat answer/);
+    assert.equal(r.google.hits.length, 1, "the refused prompt was not walked across accounts");
+    assert.equal(r.compat.hits.length, 1);
+    assert.deepEqual(r.states(), ["ready", "ready"]);
+    const callsAfterFirst = r.quotaCalls();
+    assert.ok(callsAfterFirst > 0, "the refusal fetched the usage snapshot");
+    assert.equal((await r.post(turn({ stream: false }))).status, 200);
+    assert.equal(r.quotaCalls(), callsAfterFirst, "the second refusal reuses the TTL-cached snapshot");
+  } finally { await r.stop(); }
+});
+
 // The refusal is only believed when the lookup shows room, because the same 429 body is also what a
 // spent account says. Without exact evidence the old handling stands: rest the account, walk the
 // pool, and leave the route fallback to the next turn (chooseTarget), not to this one.
 for (const [label, quota] of [
-  ["no quota lookup has happened", "none"],
   ["the five-hour window is spent", { body: quotaBody({ five: 0 }) }],
   ["the weekly window is spent", { body: quotaBody({ weekly: 0 }) }],
   ["a window is missing", { body: quotaBody({ weekly: null }) }],
@@ -1473,7 +1491,6 @@ for (const [label, quota] of [
       assert.equal(rec!.refusal, undefined);
       assert.equal(rec!.status, 429);
       assert.doesNotMatch(rec!.note ?? "", /fallback/);
-      if (quota === "none") assert.equal(r.quotaCalls(), 0);
     } finally { await r.stop(); }
   });
 }
