@@ -2205,6 +2205,64 @@ test('a tidy turn that is stopped compacts nothing and says the chat was left al
   await ui.unmount()
 })
 
+// 2026-11-16: a context already near full compacted on its own the moment the tidy prompt went in,
+// and the mod then ran /compact over the tidied turn too. A compaction of the main chat while the
+// tidy-up stands is the compaction; it is not done a second time, whatever the turn's end was.
+for (const when of ['before the prompt became a turn', 'while its turn runs'] as const) for (const reason of ['answer', 'aborted'] as const) {
+  test(`an automatic compaction ${when} leaves the tidy turn's end ${reason} without a second /compact`, async ($, on) => {
+    const b = boundaries(on)
+    http(on)
+    const notes = compacts(on)
+    on('session.compact', () => ({ messages: MESSAGES }))
+    await start($)
+    const ui = await pressCompact($, 'Keep the router decision.')
+    expect(b.submitted).toEqual([TIDY])
+    if (when === 'before the prompt became a turn') await $.session.compact({ trigger: 'auto', messages: MESSAGES })
+    await $.turn.start({ text: TIDY, turnId: 'turn-2' })
+    if (when === 'while its turn runs') await $.session.compact({ trigger: 'auto', messages: MESSAGES })
+    await $.turn.complete({ turnId: 'turn-2', answer: reason === 'answer' ? 'Done.' : '', reason, durationMs: 10, isAborted: reason !== 'answer' })
+    await b.clock.advance(10)
+    expect(notes).toEqual([])
+    expect(b.toasts.some(text => text.includes('the tidy-up did not finish'))).toBe(false)
+    expect(await ui.find({ type: 'Text', text: 'Compacted' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /did not finish/ })).toBeUndefined()
+    await ui.unmount()
+  })
+}
+
+test('a tidy turn with no compaction meanwhile compacts exactly once', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  const notes = compacts(on)
+  on('session.compact', () => ({ messages: MESSAGES }))
+  await start($)
+  const ui = await pressCompact($, 'Keep the router decision.')
+  await $.turn.start({ text: TIDY, turnId: 'turn-2' })
+  await $.turn.complete({ turnId: 'turn-2', answer: 'Done.', reason: 'answer', durationMs: 10, isAborted: false })
+  await b.clock.advance(10)
+  await b.clock.advance(10)
+  expect(notes).toEqual(['Keep the router decision.'])
+  expect(await ui.find({ type: 'Text', text: 'Compacted' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a precompute or a subagent compaction during the tidy-up does not stand in for the /compact', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  const notes = compacts(on)
+  on('session.compact', () => ({ messages: MESSAGES }))
+  await start($)
+  const ui = await pressCompact($, 'Keep the router decision.')
+  await $.session.compact({ trigger: 'precompute', messages: MESSAGES })
+  await $.turn.start({ text: TIDY, turnId: 'turn-2' })
+  await $.session.compact({ trigger: 'auto', messages: MESSAGES, agentId: 'worker' })
+  await $.session.compact({ trigger: 'precompute', messages: MESSAGES })
+  await $.turn.complete({ turnId: 'turn-2', answer: 'Done.', reason: 'answer', durationMs: 10, isAborted: false })
+  await b.clock.advance(10)
+  expect(notes).toEqual(['Keep the router decision.'])
+  await ui.unmount()
+})
+
 test('the tidy switch is on by default, kept, and off compacts at once', async ($, on) => {
   const b = boundaries(on)
   http(on)

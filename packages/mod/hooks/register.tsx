@@ -1278,8 +1278,12 @@ async function driveHandoff($: EngineInterface): Promise<void> {
     await report($, 'handoff', error)
   }
 }
-/** The tidy prompt the last Compact press sent and the main-loop turn it became; null once it settles. */
-type Tidy = { text: string; note: string; model: string; turnId: string | null }
+/**
+ * The tidy prompt the last Compact press sent and the main-loop turn it became; null once it settles.
+ * `compacted` is set when the main conversation was compacted while the wait stood (a near-full
+ * context compacts on its own as the prompt goes in), whether the prompt had its turn yet or not.
+ */
+type Tidy = { text: string; note: string; model: string; turnId: string | null; compacted: boolean }
 let tidy: Tidy | null = null
 let compactOnce: string | null = null
 async function compactNow($: EngineInterface, note: string, model: string): Promise<void> {
@@ -1307,10 +1311,11 @@ async function tidyStopped($: EngineInterface): Promise<void> {
  * updates its handoff or memory files while those are still in the transcript. The prompt and the
  * answer stay in the transcript, and the summary is built from them. The turn it becomes is bound at
  * `turn.start` and settled at `turn.complete`: only its own end compacts, and one that is stopped
- * compacts nothing. A prompt still waiting for that turn when Compact is pressed again (the queue
- * let it go, or the engine never started it) is given up and sent once more, so the button cannot be
- * left dead; one already bound to a turn blocks the second press. With the switch off, the
- * compaction goes at once.
+ * compacts nothing. A chat that was compacted meanwhile (2026-11-16: a near-full context compacts on
+ * its own when the prompt goes in) is not compacted a second time, whatever the turn's end was. A
+ * prompt still waiting for that turn when Compact is pressed again (the queue let it go, or the
+ * engine never started it) is given up and sent once more, so the button cannot be left dead; one
+ * already bound to a turn blocks the second press. With the switch off, the compaction goes at once.
  */
 async function runCompact($: EngineInterface, note = '', model?: string): Promise<void> {
   await update($, panel, () => null)
@@ -1325,7 +1330,7 @@ async function runCompact($: EngineInterface, note = '', model?: string): Promis
   if (!await read($, compactTidy)) { await compactNow($, note, choice); return }
   await update($, resultCard, () => ({ stage: 'tidying' }))
   const text = t(language, 'alerts.tidyPrompt')
-  const wait: Tidy = { text, note, model: choice, turnId: null }
+  const wait: Tidy = { text, note, model: choice, turnId: null, compacted: false }
   tidy = wait
   try {
     // In the person's words, not under "the ripple plugin sent a message": it is their Compact press.
@@ -2536,10 +2541,12 @@ export const register: Register = on => {
     if (!e.agentId && currentTurn === e.turnId) currentTurn = null
     try {
       if (!e.agentId && tidy?.turnId === e.turnId) {
-        const { note, model } = tidy
+        const { note, model, compacted } = tidy
         tidy = null
+        // The chat was compacted on its own meanwhile: that is the compaction, a second would cut the tidied turn away.
+        if (compacted) await update($, resultCard, () => ({ stage: 'compacted' }))
         // The compaction runs from a tick of its own, not inside this turn's hooks.
-        if (e.reason === 'answer') void $.clock.after(1, async () => { await compactNow($, note, model) })
+        else if (e.reason === 'answer') void $.clock.after(1, async () => { await compactNow($, note, model) })
         else await tidyStopped($)
       }
       if (e.agentId) {
@@ -2732,6 +2739,9 @@ export const register: Register = on => {
       try {
         if (!e.agentId && e.trigger !== 'precompute' && 'messages' in result) {
           await update($, compactions, n => n + 1)
+          // A tidy-up waiting on its turn needs no compaction of its own now. The mod's own `/compact`
+          // runs once `tidy` is cleared, so it never marks itself.
+          if (tidy) tidy.compacted = true
           // Only a successful replacement forgets the mode's old-context bookkeeping.
           if (await read($, modeNoted) !== null) await update($, modeNoted, () => null)
           // The count was of the context this compaction replaced: make it stale for a count already
