@@ -1166,9 +1166,17 @@ export class GoogleAdapter {
       // The generic 429 is also real exhaustion. Only fresh quota evidence for this
       // account/model permits a request-specific refusal; otherwise keep ordinary
       // cooldown and account rotation. The proxy can still try a route fallback.
-      if (isAntigravityPromptRefusal(spec.system, status, text, upstream.headers.get("retry-after")) &&
-          this.usage.hasRemainingQuota(credential, spec.model, spec.host, spec.learned)) {
-        return { kind: "prompt-refused", account: credential.ownerId };
+      if (isAntigravityPromptRefusal(spec.system, status, text, upstream.headers.get("retry-after"))) {
+        // Headless installs never poll /api/limits, so the evidence is never fresh on its own
+        // (issue #170). When the shape matches and evidence is missing or stale, refresh the shared
+        // snapshot once (TTL-cached with one in-flight lookup, so at most one lookup per TTL) and ask again.
+        if (!this.usage.hasRemainingQuota(credential, spec.model, spec.host, spec.learned)) {
+          await this.usageSnapshot().catch(() => undefined);
+          if (spec.signal.aborted) return { kind: "aborted" };
+        }
+        if (this.usage.hasRemainingQuota(credential, spec.model, spec.host, spec.learned)) {
+          return { kind: "prompt-refused", account: credential.ownerId };
+        }
       }
       // Not a rest and not a refresh: the account works again the moment its person finishes
       // Google's page, so it stays in rotation and the next turn finds out.

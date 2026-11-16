@@ -31,7 +31,21 @@ test("the refusal detector requires the exact observed response and an outbound 
   }
   assert.equal(isAntigravityPromptRefusal(undefined, 429, body, null), false);
   assert.equal(isAntigravityPromptRefusal({ parts: [{ text: `Quoted example: ${sdk}` }] }, 429, body, null), false);
-  assert.equal(isAntigravityPromptRefusal({ parts: [{ text: `${sdk} Extra words.` }] }, 429, body, null), false);
+});
+
+test("the refusal detector matches the SDK sentence at the start of any line, not inside one", () => {
+  const body = JSON.stringify(refusal);
+  const matches = (text: string) => isAntigravityPromptRefusal({ parts: [{ text }] }, 429, body, null);
+  // The sentence need not be a paragraph of its own: it may head a block whose next line carries more text.
+  assert.equal(matches(`${sdk}\nKeep the user's instructions.`), true);
+  assert.equal(matches(`Billing header\n${sdk}\nKeep the user's instructions.`), true);
+  assert.equal(matches(`Billing header\r\n  ${sdk}  \r\nMore.`), true);
+  assert.equal(matches(`${sdk}You are an agent for the user.`), true);
+  assert.equal(matches(`${sdk} Extra words.`), true);
+  assert.equal(matches(`Quoted example: ${sdk}\nNext line.`), false, "the sentence in the middle of a line is not the SDK block");
+  assert.equal(matches(`prefix ${sdk}`), false);
+  assert.equal(matches("You are a Claude agent, built on Anthropic's SDK."), false);
+  assert.equal(isAntigravityPromptRefusal({ parts: [{ text: "other" }, { text: `x\n${sdk}\ny` }] }, 429, body, null), true, "any system part counts");
 });
 
 function quotaSummary(fraction = 0.9) {
@@ -41,7 +55,13 @@ function quotaSummary(fraction = 0.9) {
   })) }] };
 }
 
-async function rig(t: TestContext, apiKey = false, quota: unknown = quotaSummary()) {
+const QUOTA_FAILS = Symbol("quota lookup fails");
+
+async function rig(t: TestContext, apiKey = false, initialQuota: unknown = quotaSummary()) {
+  // The quota answer can change after the rig is built, so a test can start with no cached evidence
+  // and decide what the first lookup says; `quotaCalls` counts the requests the lookup makes.
+  let quota = initialQuota;
+  let quotaCalls = 0;
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-prompt-refusal-"));
   const seen: { token: string | undefined; body: { request?: { systemInstruction?: unknown } } }[] = [];
   let reply = { status: 429, body: refusal as unknown, retryAfter: undefined as string | undefined };
@@ -60,8 +80,13 @@ async function rig(t: TestContext, apiKey = false, quota: unknown = quotaSummary
   const adapter = new GoogleAdapter("google", apiKey
     ? { type: "google", auth: "api-key", apiKey: "test-key", url }
     : { type: "google", auth: "antigravity", url }, home, new Logger(null, 1e6, 1, false), undefined,
-    async (_url, init) => Response.json(typeof quota === "function" ? quota(new Headers(init?.headers).get("authorization")) : quota));
-  if (quota !== null) await adapter.usageSnapshot();
+    async (_url, init) => {
+      quotaCalls++;
+      if (quota === QUOTA_FAILS) return new Response("unavailable", { status: 500 });
+      return Response.json(typeof quota === "function" ? quota(new Headers(init?.headers).get("authorization")) : quota);
+    });
+  if (initialQuota !== null) await adapter.usageSnapshot();
+  quotaCalls = 0;
   let outcome: GoogleOutcome | undefined;
   const front = http.createServer(async (req, res) => {
     let body = "";
@@ -84,6 +109,8 @@ async function rig(t: TestContext, apiKey = false, quota: unknown = quotaSummary
   });
   return {
     adapter, seen,
+    quotaCalls: () => quotaCalls,
+    setQuota: (value: unknown) => { quota = value; },
     setReply: (value: typeof reply) => { reply = value; },
     call: async (body: AnthropicRequest) => {
       const r = await fetch(`http://127.0.0.1:${(front.address() as { port: number }).port}/v1/messages`, {
@@ -133,15 +160,87 @@ for (const evidence of [
   assert.deepEqual(r.adapter.accountStatus().map(a => a.state), ["cooling", "cooling"]);
 });
 
-test("stale quota evidence keeps the SDK request on the ordinary account-rotation path", async t => {
+test("stale quota evidence is refreshed once; a failed refresh keeps the SDK request on the ordinary account-rotation path", async t => {
   const r = await rig(t);
   const now = Date.now();
   t.mock.method(Date, "now", () => now + 300_001);
+  r.setQuota(QUOTA_FAILS);
+  const res = await r.call(request);
+  assert.equal(res.status, 429);
+  assert.equal(res.outcome?.refusal, undefined);
+  assert.equal(r.seen.length, 2);
+  assert.equal(r.quotaCalls(), 4, "one lookup (two requests per account: CLI then IDE user agent), not one per attempt");
+  assert.deepEqual(r.adapter.accountStatus().map(a => a.state), ["cooling", "cooling"]);
+});
+
+test("stale quota evidence that the refresh renews classifies the refusal", async t => {
+  const r = await rig(t);
+  const now = Date.now();
+  t.mock.method(Date, "now", () => now + 300_001);
+  const res = await r.call(request);
+  assert.equal(res.status, 400);
+  assert.equal(res.outcome?.refusal, "prompt-incompatible");
+  assert.equal(r.seen.length, 1);
+  assert.equal(r.quotaCalls(), 2);
+  assert.deepEqual(r.adapter.accountStatus().map(a => a.state), ["ready", "ready"]);
+});
+
+// Issue #170: a headless install never polls /api/limits, so no evidence exists when the refusal arrives.
+test("refusal shape with no cached evidence fetches the usage snapshot once and classifies the refusal", async t => {
+  const r = await rig(t, false, null);
+  r.setQuota(quotaSummary());
+  const res = await r.call(request);
+  assert.equal(res.status, 400);
+  assert.equal(JSON.parse(res.text).error.type, "invalid_request_error");
+  assert.equal(res.outcome?.refusal, "prompt-incompatible");
+  assert.equal(res.outcome?.exhaustion, undefined);
+  assert.equal(r.seen.length, 1, "the rejected prompt must not walk the other account");
+  assert.equal(r.quotaCalls(), 2, "one snapshot: one lookup per account");
+  assert.deepEqual(r.adapter.accountStatus().map(a => a.state), ["ready", "ready"], "no account is penalised");
+  const again = await r.call(request);
+  assert.equal(again.status, 400);
+  assert.equal(r.quotaCalls(), 2, "the snapshot is TTL-cached; a second refusal does not fetch again");
+});
+
+test("refusal shape with no cached evidence and an exhausted snapshot keeps the ordinary rest path", async t => {
+  const r = await rig(t, false, null);
+  r.setQuota(quotaSummary(0));
+  const res = await r.call(request);
+  assert.equal(res.status, 429);
+  assert.equal(res.outcome?.refusal, undefined);
+  assert.equal(r.seen.length, 2);
+  assert.equal(r.quotaCalls(), 2, "the snapshot is read once, not once per account attempt");
+  assert.deepEqual(r.adapter.accountStatus().map(a => a.state), ["cooling", "cooling"]);
+});
+
+test("refusal shape with no cached evidence and a failing snapshot keeps the ordinary rest path", async t => {
+  const r = await rig(t, false, null);
+  r.setQuota(QUOTA_FAILS);
   const res = await r.call(request);
   assert.equal(res.status, 429);
   assert.equal(res.outcome?.refusal, undefined);
   assert.equal(r.seen.length, 2);
   assert.deepEqual(r.adapter.accountStatus().map(a => a.state), ["cooling", "cooling"]);
+});
+
+test("a 429 that is not the refusal shape never fetches the usage snapshot", async t => {
+  const r = await rig(t, false, null);
+  r.setQuota(quotaSummary());
+  r.setReply({ status: 429, body: { error: { code: 429, status: "RESOURCE_EXHAUSTED", message: "You have exhausted your capacity on this model. Your quota will reset after 3h." } }, retryAfter: undefined });
+  const withDetails = await r.call(request);
+  assert.equal(withDetails.status, 429);
+  r.setReply({ status: 429, body: refusal, retryAfter: "120" });
+  await r.call(request);
+  await r.call({ ...request, system: "A normal assistant." });
+  assert.equal(r.quotaCalls(), 0);
+});
+
+test("an SDK sentence that is followed by more text on the next line of the same block is still the refusal", async t => {
+  const r = await rig(t);
+  const res = await r.call({ ...request, system: [{ type: "text", text: `${sdk}\nKeep the user's instructions.` }] });
+  assert.equal(res.status, 400);
+  assert.equal(res.outcome?.refusal, "prompt-incompatible");
+  assert.match(JSON.stringify(r.seen[0]!.body.request!.systemInstruction), /Claude Agent SDK\.\\nKeep the user/);
 });
 
 test("another account's positive quota does not excuse the attempted account's exhaustion", async t => {
