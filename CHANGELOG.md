@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.12.36 — 2026-11-16
+
+### Fixed
+
+- **Antigravity's refusal of the Claude Agent SDK prompt is recognised on an install nobody watches.** Google
+  answers a Claude Code subagent turn carrying the Agent SDK system sentence with a generic 429. The router
+  only treated that as a refusal when fresh quota evidence was cached, and only the dashboard filled that
+  cache, so on a headless install every such turn rested the account and ended as "all accounts resting".
+  The router now reads the quota once when the refusal shape appears (at most once every five minutes), so
+  the turn ends at once or moves to the route fallback and the account stays in rotation. Gemini 4 Argon
+  refuses the prompt too; Agent SDK subagents still cannot use Antigravity models (#170, thanks
+  @momorichan).
+
+- **The Compact button compacts once when the app compacts during its tidy-up.** With the context near full,
+  the tidy-up prompt going in made the Claude app compact on its own (for example with a summary written
+  while you were away), and the mod then ran `/compact` a second time. It now sees that compaction and
+  stops there.
+
 ## 0.12.35 — 2026-11-15
 
 ### Fixed
