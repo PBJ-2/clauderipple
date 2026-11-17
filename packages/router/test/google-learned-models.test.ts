@@ -840,10 +840,11 @@ test("through the adapter: with no catalogue this run, the limits read asks the 
   await adapter.usageSnapshot();
   assert.deepEqual([...new Set(quotaAsks)], [PROD], "the host generation goes to, not the default one");
   assert.equal(adapter.quotaScopeOf("gemini-6-x", "high"), "gemini-6-x@cloudcode-pa.googleapis.com");
-  // A provider with no model list routes whatever is asked: the hosts its stored lists name.
+  // A provider with no model list routes whatever is asked: the hosts its stored lists name, and
+  // the default host the tables send an ordinary model to (default first).
   quotaAsks.length = 0;
   await new GoogleAdapter("ag", { ...cfg, models: [] }, home, log, undefined, side).usageSnapshot();
-  assert.deepEqual([...new Set(quotaAsks)], [PROD]);
+  assert.deepEqual([...new Set(quotaAsks)].sort(), [DAILY, PROD].sort());
   // And the default host alone when nothing is stored.
   quotaAsks.length = 0;
   await new GoogleAdapter("ag", { ...cfg, models: [] }, homeWithAccount(t), log, undefined, side).usageSnapshot();
@@ -882,6 +883,35 @@ test("through the adapter: a provider with no lists of its own starts from what 
   // Nothing learned anywhere: an unknown id goes out as it is, as before.
   answered(await turn(new GoogleAdapter("fresh", { ...cfg, url: PROD }, home, log, undefined, undefined, {}), "gemini-5-neon", "xhigh"));
   assert.equal(calls.at(-1)!.model, "gemini-5-neon");
+});
+
+test("through the adapter: a new provider starts from the stored provider that asks exactly its hosts, the one the probe shows", async (t) => {
+  const home = homeWithAccount(t);
+  // The unpinned provider's prod list is an older CLI-only tier family; the prod-pinned provider's
+  // has since moved to an IDE-callable bare id. The probe shows an unsaved prod-pinned provider the latter.
+  const stale = { cli: ["gemini-5-neon-high", "gemini-5-neon-low"] };
+  const current = { ide: ["gemini-5-neon"], cli: [] };
+  fs.writeFileSync(path.join(home, LEARNED_MODELS_FILE), JSON.stringify({ version: 2, providers: { unpinned: { [DAILY]: { cli: ["gemini-5-neon-low"] }, [PROD]: stale }, pinned: { [PROD]: current } } }));
+  assert.deepEqual(new GoogleAdapter("new", { ...cfg, url: PROD }, home, log).learnedLists(), { [PROD]: current });
+  // Unpinned, it asks the pair the unpinned provider asks; a host no provider asks exactly falls back per host.
+  assert.deepEqual(new GoogleAdapter("other", { ...cfg }, home, log).learnedLists(), { [DAILY]: { cli: ["gemini-5-neon-low"] }, [PROD]: stale });
+  assert.deepEqual(new GoogleAdapter("daily", { ...cfg, url: DAILY }, home, log).learnedLists(), { [DAILY]: { cli: ["gemini-5-neon-low"] } });
+});
+
+test("through the adapter: with no catalogue and no model list, the limits read asks the default host with the hosts the stored lists name", async (t) => {
+  const home = homeWithAccount(t);
+  fs.writeFileSync(path.join(home, LEARNED_MODELS_FILE), JSON.stringify({ version: 2, providers: { ag: { [PROD]: { cli: ["gemini-6-x-high", "gemini-6-x-low"] } } } }));
+  const quotaAsks: string[] = [];
+  const side = async (url: string): Promise<Response> => {
+    if (url.includes(":retrieveUserQuotaSummary")) {
+      quotaAsks.push(new URL(url).origin);
+      return Response.json({});
+    }
+    return new Response("down", { status: 500 });
+  };
+  await new GoogleAdapter("ag", { ...cfg, models: [] }, home, log, undefined, side).usageSnapshot();
+  // A table model (Flash by its `gemini-` prefix) still goes to the default host.
+  assert.deepEqual([...new Set(quotaAsks)].sort(), [DAILY, PROD].sort());
 });
 
 test("a host's list is never a truncated answer, so an id missing from it is one that host does not list", async () => {

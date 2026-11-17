@@ -212,15 +212,23 @@ function groupNames(group: string): { spent: string; other: string } {
 export const LEARNED_MODELS_FILE = "antigravity-models.json";
 const LEARNED_MODELS_VERSION = 2;
 
-/** For each host in `asked`, the lists the first stored provider that has that host kept for it. */
+/**
+ * The lists another stored provider kept for the hosts in `asked`: the first provider that asks
+ * exactly those hosts (the same pin, or the same unpinned pair), which is the one the admin probe
+ * shows an unsaved provider. Only when none does, for each host the first stored provider that
+ * has that host.
+ */
 function listsOfOthers(stored: Record<string, unknown>, asked: readonly string[]): Record<string, unknown> {
+  const entries = Object.values(stored).filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === "object" && !Array.isArray(entry));
+  const same = entries.find((entry) => {
+    const keys = Object.keys(entry);
+    return keys.length === asked.length && asked.every((host) => Object.hasOwn(entry, host));
+  });
+  if (same) return { ...same };
   const lists: Record<string, unknown> = {};
   for (const host of asked) {
-    for (const entry of Object.values(stored)) {
-      if (!entry || typeof entry !== "object" || Array.isArray(entry) || !Object.hasOwn(entry, host)) continue;
-      lists[host] = (entry as Record<string, unknown>)[host];
-      break;
-    }
+    const entry = entries.find((e) => Object.hasOwn(e, host));
+    if (entry) lists[host] = entry[host];
   }
   return lists;
 }
@@ -384,8 +392,9 @@ export class GoogleAdapter {
     // this provider asks are kept: a pinned `url` never borrows a tier another host listed.
     //
     // A provider with no lists of its own yet (just saved, or renamed) starts from what another
-    // provider of this home stored for the same hosts. The accounts are the home's, not the
-    // provider's, so a host answers both alike; and the provider form shows a provider that is not
+    // provider of this home stored for the same hosts (the one that asks exactly the hosts this one
+    // does, as the form's probe shows; else per host the first that has it). The accounts are the
+    // home's, not the provider's, so a host answers both alike; and the provider form shows a provider that is not
     // saved yet the catalogue of one that asks its hosts. Without this the saved provider would
     // offer a model it knows nothing of until its own list is read, and send it as an unknown id
     // under the IDE User-Agent.
@@ -418,11 +427,12 @@ export class GoogleAdapter {
     // No configured model list means the provider routes whatever the client asks for; both hosts
     // are then in use in principle, so both quotas are read. Without a catalogue we cannot tell
     // that either is: the default one only, rather than showing an unused host's numbers.
-    // With no catalogue this run, the hosts the stored lists name are the ones a model can be sent to.
+    // With no catalogue this run, a model can be sent to a host the stored lists name, and a model
+    // the tables route (an ordinary `gemini-` id) goes to the default host, so both are read.
     if (models.length === 0) {
       if (this.modelsCache) return [...GOOGLE_OAUTH.hosts];
-      const known = this.learned.knownHosts();
-      return known.length ? known : [GOOGLE_OAUTH.dailyApi];
+      const base = antigravityBaseUrl(this.cfg.url);
+      return [base, ...this.learned.knownHosts().filter((host) => host !== base)];
     }
     // With no catalogue this run, `hostFor` still names the host a learned model's stored lists send
     // it to (and the default for the rest), so the numbers shown are the ones its turns spend.
