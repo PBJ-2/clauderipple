@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.39 — 2026-11-17
+
+### Changed
+
+- **An effort level asked for in chat now applies to that message only.** In 0.12.38 the asked level held
+  for the rest of the chat, so later prompts kept running at it while the bar showed automatic selection.
+  The level now covers the turn that asked for it; the next message, a short follow-up included, is judged
+  automatically again within your floor, ceiling and save mode. The effort descriptions in the dashboard
+  and the mod's settings panel say so.
+
 ## 0.12.38 — 2026-11-17
 
 ### Added
