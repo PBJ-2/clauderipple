@@ -482,7 +482,7 @@ async function installPick($: EngineInterface, value: Pick): Promise<void> {
   await rememberAsked($, asked)
 }
 const ASKED_PREFIX = 'askedEffort:'
-/** The level the user asked for in this chat, read back after a restart; any other pick clears it. */
+/** The level the user asked for in this chat, read back after a reload mid-turn; any other pick (the next prompt's) clears it. */
 async function rememberAsked($: EngineInterface, level: Pick['asked']): Promise<void> {
   try {
     const key = ASKED_PREFIX + await $.session.id()
@@ -2350,8 +2350,9 @@ export const register: Register = on => {
         contextRun += 1
         fullMark = null
         await update($, contextFull, () => null)
-        // A resumed or forked chat is another chat: the hold of the one before it stays in that chat's own key,
+        // A resumed or forked chat is another chat: the asked level of the one before it stays in that chat's own key,
         // and loadSettings restores this chat's own from its session id (the starting pick is the shared, bounded one).
+        // The restored level only covers a turn cut off by the reload: the next prompt is judged and clears it.
         const switched = e.source !== 'clear'
         const chatId = switched ? e.session_id || await $.session.id() : undefined
         if (switched && (await read($, pick))?.asked) await update($, pick, () => null)
@@ -2527,7 +2528,7 @@ export const register: Register = on => {
           // Both the judge's raw read and what was installed, so a wrong pick can be traced in the log pane.
           await update($, judgeRuns, runs => runs.map(run => run.at === judged.at && run.for === 'prompt' ? { ...run, ...(value ? { final: value.effort } : {}), ...(!run.userAsked && value?.asked ? { userAsked: value.asked } : {}) } : run))
           if (!value) {
-            // Nothing to change: a held request stays, or the judge failed. The prompt still runs at the current level.
+            // Nothing to change: the judge failed with no asked level to drop. The prompt still runs at the current level.
             if (current) await update($, stats, old => addPrompt(old, current.effort))
           } else {
             if (e.turnId && current && EFFORTS.indexOf(value.effort) < EFFORTS.indexOf(current.effort)) await update($, heldPick, () => value)

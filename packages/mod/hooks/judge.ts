@@ -107,9 +107,9 @@ export function shouldJudge(input: {
   if (!input.auto || !['composer', 'bridge', 'sdk'].includes(input.origin) || (!input.text.trim() && !input.attachments?.length) || input.hostCommand) return false
   if (input.modelId !== undefined && !isCacheSafeModel(input.modelId)) return false
   const effortWords = mightAskEffort(input.text)
-  // A level the user asked for holds until they say otherwise: only a message that names an effort can say so.
-  if (input.current?.asked && !effortWords) return false
-  const followup = input.current && input.current.by !== 'manual' && !input.text.trim().startsWith('/') &&
+  // A level the user asked for applies to that prompt only: the next prompt is judged again, even a terse "ok",
+  // so it never inherits the asked level as a follow-up would.
+  const followup = input.current && !input.current.asked && input.current.by !== 'manual' && !input.text.trim().startsWith('/') &&
     !input.attachments?.length && isShortFollowUp(input.text) && !looksLikeRetry(input.text) && !looksLikeQuestion(input.assistantTail ?? '') && !effortWords
   return !followup
 }
@@ -309,25 +309,31 @@ export function finalEffort(verdict: Verdict, settings: Settings, saving: boolea
 
 /**
  * What a judged prompt does to the session's pick, or null to leave the pick as it is.
- *  - the user asked a level: exactly that level (pick.asked remembers it for the following turns);
- *  - the user asked for auto: the judge's own choice replaces the held level;
- *  - nothing asked while a level is held: the held pick stays (no re-judging down);
- *  - otherwise: the judge's verdict through bias, floor, ceiling and save mode.
+ *  - the user asked a level: exactly that level for this prompt's turn (pick.asked marks it so the turn's
+ *    steps keep it; the next prompt is judged again and its pick carries no `asked`);
+ *  - the user asked for auto: the judge's own choice replaces the asked level;
+ *  - otherwise: the judge's verdict through bias, floor, ceiling and save mode. A pick that still carries
+ *    `asked` from an earlier prompt is dropped here, never held.
+ *  - a judge that failed on such a prompt (or on "auto") keeps the current effort, brought inside the
+ *    floor, ceiling and save cap, without `asked`.
  * The judge is read first; the deterministic check covers a judge that said "none" or failed.
  */
 export function choosePick(input: { verdict?: Verdict; text: string; current?: Pick | null; settings: Settings; saving: boolean; lang?: Lang; by: Pick['by']; at: number }): Pick | null {
   const lang = input.lang ?? 'en'
   // A judge that answered decides, "none" included; the text check only stands in for one that did not.
   const request = input.verdict?.askedRead || input.verdict?.asked ? input.verdict.asked : explicitEffortRequest(input.text)
-  const held = input.current?.asked
   if (request && request !== 'auto') {
     const { effort, why } = finalEffort({ effort: request, why: '', asked: request }, input.settings, input.saving, lang)
     return { effort, why, asked: request, by: input.by, at: input.at }
   }
-  if (!request && held) return null
   if (!input.verdict) {
-    // Asked for auto but the judge failed: drop the hold and keep running at the level it gave.
-    return request === 'auto' && input.current ? { effort: input.current.effort, why: t(lang, 'toasts.effortAutoBack'), by: input.current.by, at: input.at } : null
+    // The judge failed after an asked level (or an ask for auto): the level ends with its turn, and the
+    // chat keeps running at the effort it had, brought back inside the owner's bounds and save cap.
+    const current = input.current
+    if (current && (current.asked || request === 'auto')) {
+      return { effort: capped(bounded(current.effort, input.settings.floor, input.settings.ceiling), input.saving), why: t(lang, 'toasts.effortAutoBack'), by: current.by, at: input.at }
+    }
+    return null
   }
   const { asked: _dropped, askedRead: _read, ...verdict } = input.verdict
   const final = finalEffort(verdict, input.settings, input.saving, lang)

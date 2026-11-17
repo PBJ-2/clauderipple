@@ -225,9 +225,10 @@ test('a judge that answered decides: "none" is not overridden by the text check,
   // A judge without the field (older prompt) or an unsure Jev answer on an unknown choice leaves it to the text check.
   assert.equal(parseEffortVerdict('{"effort":"high","why":"x"}')?.askedRead, undefined)
   assert.equal(judgePick(parseEffortVerdict('{"effort":"high","why":"x"}')!, '추론 강도 매우 높음으로', pick)?.asked, 'xhigh')
-  // Held on a later turn: "none" on a question does not release or replace the hold.
+  // An asked level ends with its turn: "none" on a later question is judged normally and the pick carries no `asked`.
   const held = judgePick({ effort: 'medium', why: '', asked: 'xhigh' }, '추론 강도 매우 높음으로', pick)!
-  assert.equal(judgePick(none, 'Why did you use max effort?', held), null)
+  const after = judgePick(none, 'Why did you use max effort?', held)!
+  assert.deepEqual([after.effort, after.asked], ['high', undefined])
 })
 
 test('short messages that carry a request still reach detection, other short answers still skip', () => {
@@ -252,14 +253,24 @@ test('an asked level beats bias, floor and ceiling; save mode still caps it with
   assert.equal(judgePick({ effort: 'medium', why: '' }, '추론 강도 매우높음으로', pick)?.effort, 'xhigh')
 })
 
-test('an asked level holds on the next turn without re-judging down, until another level, auto, or a manual pick', () => {
+test('an asked level applies to its own prompt only: the next prompt is judged again and drops it', () => {
   const held = judgePick({ effort: 'medium', why: '', asked: 'xhigh' }, ownerText, pick)!
   assert.equal(held.asked, 'xhigh')
-  // Ordinary prompts neither reach the judge nor change the pick.
-  assert.equal(shouldJudge({ text: 'Add a unit test for the parser and run the suite', origin: 'composer', auto: true, current: held }), false)
-  assert.equal(shouldJudge({ text: 'ok', origin: 'composer', auto: true, current: held }), false)
-  // Even if one were judged low, the held request stays.
-  assert.equal(judgePick({ effort: 'low', why: 'chat' }, 'thanks', held), null)
+  // Any prompt after an asked turn reaches the judge, a terse "ok" included.
+  assert.equal(shouldJudge({ text: 'Add a unit test for the parser and run the suite', origin: 'composer', auto: true, current: held }), true)
+  assert.equal(shouldJudge({ text: 'ok', origin: 'composer', auto: true, current: held, assistantTail: 'Done.' }), true)
+  // Without an asked level the same "ok" is still a follow-up that inherits the pick.
+  assert.equal(shouldJudge({ text: 'ok', origin: 'composer', auto: true, current: pick, assistantTail: 'Done.' }), false)
+  // A low verdict replaces the pick, through the floor, with no `asked`.
+  const next = judgePick({ effort: 'low', why: 'chat' }, 'thanks', held)!
+  assert.deepEqual([next.effort, next.asked], ['medium', undefined])
+  assert.equal(judgePick({ effort: 'low', why: 'chat' }, 'thanks', held, { settings: { ...bounds, floor: 'low' } })?.effort, 'low')
+  // A judge that failed drops `asked` and brings the effort inside the bounds and the save cap.
+  const failedNext = judgePick(undefined, 'Add a unit test', held)!
+  assert.deepEqual([failedNext.effort, failedNext.asked, failedNext.why], ['high', undefined, 'back to automatic'])
+  assert.equal(judgePick(undefined, 'Add a unit test', held, { saving: true })?.effort, 'medium')
+  // With nothing asked and no verdict, the pick is left alone.
+  assert.equal(judgePick(undefined, 'Add a unit test', pick), null)
   // Another level replaces it.
   assert.equal(shouldJudge({ text: '추론 강도 낮음으로', origin: 'composer', auto: true, current: held }), true)
   const lower = judgePick({ effort: 'high', why: '', asked: 'low' }, '추론 강도 낮음으로', held)!
@@ -268,9 +279,9 @@ test('an asked level holds on the next turn without re-judging down, until anoth
   const released = judgePick({ effort: 'max', why: 'plan', asked: 'auto' }, '추론 강도 자동으로 돌려줘', held)!
   assert.deepEqual([released.effort, released.asked], ['high', undefined])
   assert.equal(shouldJudge({ text: '자동으로', origin: 'composer', auto: true, current: held }), true)
-  // A judge that failed on "auto" still lets go of the hold, at the level it ran.
+  // A judge that failed on "auto" still lets go of the asked level, at the level it ran, inside the bounds.
   const failed = judgePick(undefined, 'effort to auto', held)!
-  assert.deepEqual([failed.effort, failed.asked], ['xhigh', undefined])
+  assert.deepEqual([failed.effort, failed.asked], ['high', undefined])
   // A manual change in the app installs a pick with no `asked`: judging is ordinary again.
   const manual: Pick = { effort: 'low', why: 'app', by: 'manual', at: 2 }
   assert.equal(shouldJudge({ text: 'Add a unit test for the parser and run the suite', origin: 'composer', auto: true, current: manual }), true)
