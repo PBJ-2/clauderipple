@@ -50,6 +50,66 @@ function loadI18n(): Record<string, Record<string, string>> {
 
 const LANGUAGES = ["ko", "en", "zh", "ja", "es", "pt"];
 
+type LogNode = {
+  tag: string;
+  attrs: Record<string, unknown>;
+  children: unknown[];
+  style: Record<string, string>;
+  append: (...children: unknown[]) => void;
+};
+
+function logElement(tag: string, attrs: Record<string, unknown> = {}, children: unknown[] = []): LogNode {
+  return { tag, attrs, children, style: {}, append(...values) { this.children.push(...values); } };
+}
+
+function purposeTags(node: unknown): LogNode[] {
+  if (!node || typeof node !== "object" || !("attrs" in node)) return [];
+  const element = node as LogNode;
+  return [ ...(element.attrs.class === "purpose-tag" ? [element] : []), ...element.children.flatMap(purposeTags) ];
+}
+
+function loadLogRows() {
+  const body = slice("app.js", "function purposeTag(", "function renderRequests(");
+  const en = loadI18n().en!;
+  return new Function("el", "t", "providerHue", "providerEntry", "providerClass", "providerDisplayName", "costFigureOf", "costCaveatsOf", "formatNumber", "formatSeconds", "timeOf", `${body}; return { requestRow, requestDetail, modelUsageRow };`)(
+    logElement, (key: string) => en[key] ?? key, () => "", () => ({}), () => "", (name: string) => name,
+    () => null, () => [], String, String, String,
+  ) as Record<string, (record: Record<string, unknown>) => LogNode>;
+}
+
+for (const [purpose, key, label] of [
+  ["auto-mode-classifier", "logs.autoModeCheck", "Auto mode check"],
+  ["web-fetch", "logs.webFetch", "Page read"],
+  ["compaction", "logs.compaction", "Compaction"],
+  ["web-search", "logs.webSearch", "Web search"],
+  [undefined, undefined, undefined],
+  ["unknown", undefined, undefined],
+  ["__proto__", undefined, undefined],
+]) {
+  test(`Logs tags ${purpose ?? "no purpose"} consistently on requests, details and model rows`, () => {
+    const rows = loadLogRows();
+    for (const render of Object.values(rows)) {
+      const tags = purposeTags(render({ purpose, kind: "messages", source: "claude-sonnet-5", target: "claude-sonnet-5", model: "claude-sonnet-5", provider: "claude", ok: true, count: 1, ms: 1000, avgMs: 1000 }));
+      assert.equal(tags.length, key ? 1 : 0);
+      if (key) {
+        assert.equal(tags[0]!.attrs.text, label);
+        assert.equal(tags[0]!.attrs.title, loadI18n().en![`${key}Help`]);
+        assert.ok(tags[0]!.attrs.title);
+      }
+    }
+  });
+}
+
+test("every language defines the purpose labels and help texts", () => {
+  const i18n = loadI18n();
+  for (const lang of LANGUAGES) {
+    for (const key of ["logs.autoModeCheck", "logs.webFetch", "logs.compaction", "logs.webSearch"]) {
+      assert.ok(i18n[lang]?.[key], `${lang} is missing ${key}`);
+      assert.ok(i18n[lang]?.[`${key}Help`], `${lang} is missing ${key}Help`);
+    }
+  }
+});
+
 test("a prompt is read whole: uncached, cache write and cache read", () => {
   const { totalInputOf } = loadTokenBlock();
   assert.equal(totalInputOf({ input: 2, cached: 45_000, cacheWrite: 1_200, output: 900 }), 46_202);
