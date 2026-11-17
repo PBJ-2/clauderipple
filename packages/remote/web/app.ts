@@ -705,7 +705,9 @@ export class App {
 
   summary(id: string): SessionSummary | undefined {
     const s = this.ui.sessions.find((x) => x.id === id);
-    if (s || !id.startsWith("local:")) return s?.origin === "desktop" ? { ...s, readOnly: false } : s;
+    // A Claude app session is replyable whatever an older host said (4ec33b8), but one a CLI outside the
+    // app holds now is not: a second resume on it would fork the conversation (issue #171).
+    if (s || !id.startsWith("local:")) return s?.origin === "desktop" && !s.ownedExternally ? { ...s, readOnly: false } : s;
     const o = this.outbox.find((x) => x.clientMsgId === id.slice(6));
     if (!o?.create) return undefined;
     return { id, title: o.text, cwd: o.create.cwd, model: o.create.model, effort: o.create.effort, state: "starting", pending: 0, createdAt: o.at, updatedAt: o.at, lastSeq: 0, epoch: "" };

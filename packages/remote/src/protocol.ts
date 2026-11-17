@@ -307,6 +307,9 @@ export interface SessionSummary {
   id: string;
   origin?: "host" | "desktop";
   readOnly?: boolean;
+  /** A Claude Code CLI alive outside the Claude app (a terminal, Paseo) holds this session: it is
+   * `readOnly` for good reason, so a client must not turn it replyable (issue #171). */
+  ownedExternally?: true;
   /** Desktop sessions: the Claude app's own session id (`local_…`), so a `#local_…` link in a
    * conversation can find this session. Absent on older hosts and for host-created sessions. */
   appSessionId?: string;

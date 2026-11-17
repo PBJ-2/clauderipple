@@ -119,7 +119,7 @@ function controlledQueries(readInputs = true, waitForExit = false) {
   return { queryFn, queries };
 }
 
-function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {}, extra: Partial<Pick<SessionsOptions, "handoff" | "log" | "queryFn" | "desktopProjects" | "desktopRegistry" | "desktopProcesses" | "bridgeClient" | "desktopSidebar" | "now" | "onSessions" | "onLoginProblem" | "environmentRoot" | "environmentWaitMs" | "environmentPollMs" | "environmentModeMs" | "modOfferMs" | "modResultMs" | "away">> = {}) {
+function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {}, extra: Partial<Pick<SessionsOptions, "handoff" | "log" | "queryFn" | "desktopProjects" | "desktopRegistry" | "desktopExternalRegistry" | "desktopProcesses" | "bridgeClient" | "desktopSidebar" | "now" | "onSessions" | "onLoginProblem" | "environmentRoot" | "environmentWaitMs" | "environmentPollMs" | "environmentModeMs" | "modOfferMs" | "modResultMs" | "away">> = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-sessions-"));
   const cwd = path.join(dir, "project");
   fs.mkdirSync(cwd);
@@ -2044,6 +2044,24 @@ for (const kind of ["attachment", "slash", "clear", "interrupt"] as const) test(
   }
   assert.deepEqual(f.sessions.modInbox.pending(f.id), []);
   assert.equal(f.boundary.queries.length, 0);
+});
+
+test("a session a CLI outside the app holds is listed read-only and a phone message never resumes it (#171)", async t => {
+  const id = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+  const projects = fs.mkdtempSync(path.join(os.tmpdir(), "outside-cli-"));
+  t.after(() => fs.rmSync(projects, { recursive: true, force: true }));
+  const outside = new Map<string, DesktopProcess>([[id, { sessionId: id, pid: 42, status: "idle", external: true }]]);
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn, desktopProjects: projects, desktopRegistry: () => new Map(), desktopExternalRegistry: () => outside, desktopProcesses: () => "", modOfferMs: 5, log() {} });
+  fs.mkdirSync(path.join(projects, "project"));
+  fs.writeFileSync(path.join(projects, "project", `${id}.jsonl`), transcriptLine({ type: "user", uuid: "first", cwd: f.cwd, message: { content: "From a terminal" } }));
+  const row = f.sessions.list().find(s => s.id === id);
+  assert.deepEqual([row?.origin, row?.readOnly, row?.ownedExternally], ["desktop", true, true]);
+  // Refused, not queued: a queued message would be stranded once the CLI exits and the row is gone.
+  assert.throws(() => f.sessions.send(id, "phone-1", "Phone message"), (error: Error & { code?: string }) => error.code === "desktop_external");
+  assert.equal(boundary.queries.length, 0, "no second --resume on a conversation another process holds");
+  assert.throws(() => f.sessions.enqueue(id, "phone-2", "Queued from the phone"), (error: Error & { code?: string }) => error.code === "desktop_external", "the phone's queue button is refused too");
+  assert.equal(f.sessions.summaryOf(id)?.queue?.length ?? 0, 0, "nothing waits on a CLI that may exit");
 });
 
 test("a closed app-created session can still continue on the host", async t => {

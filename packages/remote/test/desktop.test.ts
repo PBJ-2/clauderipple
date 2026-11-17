@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { agentEnded, BackgroundTasks, DesktopSessions, processHasSession, transcriptEvents } from "../src/desktop.ts";
+import { spawn, spawnSync } from "node:child_process";
+import { agentEnded, BackgroundTasks, DesktopSessions, liveDesktopProcesses, liveExternalProcesses, processHasSession, transcriptEvents, type DesktopProcess } from "../src/desktop.ts";
+import type { ProcessSnapshot } from "../src/processes.ts";
 import { summarize, Sessions } from "../src/sessions.ts";
 import { PermissionQueue } from "../src/permissions.ts";
 import { FRAME_CAP } from "../src/protocol.ts";
@@ -773,6 +775,113 @@ test("once the sidebar lists a named transcript, the sidebar alone keeps it", t 
   listed.delete(other);
   now += 60_000;
   assert.deepEqual(desktop.list().map(s => s.id), [id], "no longer named, and the sidebar no longer lists it");
+});
+
+// ---- a Claude Code CLI alive outside the Claude app (issue #171) ---------------------------------
+
+const outside = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+/** A DesktopSessions with the sidebar present and the registries injected, the way the host builds one. */
+function withSidebar(t: import("node:test").TestContext, sidebar: Set<string>) {
+  const f = fixture(t);
+  const external = new Map<string, DesktopProcess>();
+  let now = Date.now();
+  const desktop = new DesktopSessions({ projects: f.projects, summarize, excluded: () => f.excluded, now: () => now, processes: () => "",
+    sidebarIds: () => sidebar, registry: () => new Map(), externalRegistry: () => external });
+  t.after(() => desktop.close());
+  const cli = (sessionId: string, status: DesktopProcess["status"] = "idle") => external.set(sessionId, { sessionId, pid: 4242, status, external: true });
+  return { f, desktop, external, cli, rescan: () => { now += 31_000; } };
+}
+
+test("a CLI alive outside the app is listed while the sidebar is present, read-only and in its live state", t => {
+  const w = withSidebar(t, new Set([id]));
+  fs.writeFileSync(path.join(w.f.project, `${id}.jsonl`), line(user));
+  fs.writeFileSync(path.join(w.f.project, `${outside}.jsonl`), line(user));
+  assert.deepEqual(w.desktop.list().map(s => s.id), [id], "no process holds it: the sidebar alone decides, as before");
+  w.cli(outside, "busy");
+  w.rescan();
+  const rows = w.desktop.list();
+  assert.deepEqual(rows.map(s => s.id).sort(), [id, outside].sort());
+  const row = rows.find(s => s.id === outside)!;
+  assert.deepEqual([row.state, row.readOnly, row.ownedExternally, row.origin], ["running", true, true, "desktop"]);
+  assert.equal(rows.find(s => s.id === id)!.readOnly, false, "the app's own session stays replyable");
+  w.cli(outside, "waiting");
+  w.rescan();
+  assert.equal(w.desktop.list().find(s => s.id === outside)!.state, "waiting");
+  w.cli(outside, "idle");
+  w.rescan();
+  assert.equal(w.desktop.list().find(s => s.id === outside)!.state, "idle");
+});
+
+test("a rediscovery that rebuilds an outside CLI's summary inside the live-update throttle keeps it read-only", t => {
+  const w = withSidebar(t, new Set([id]));
+  let now = Date.now();
+  const desktop = new DesktopSessions({ projects: w.f.projects, summarize, excluded: () => w.f.excluded, now: () => now, processes: () => "",
+    sidebarIds: () => new Set([id]), registry: () => new Map(), externalRegistry: () => w.external });
+  t.after(() => desktop.close());
+  fs.writeFileSync(path.join(w.f.project, `${id}.jsonl`), line(user));
+  fs.writeFileSync(path.join(w.f.project, `${outside}.jsonl`), line(user));
+  w.cli(outside);
+  assert.equal(desktop.list().find(s => s.id === outside)?.readOnly, true);
+  now += 28_000;
+  desktop.list(); // a live update, no rediscovery yet
+  fs.appendFileSync(path.join(w.f.project, `${outside}.jsonl`), line(user));
+  now += 2_500; // rediscovery is due, the live update is still throttled
+  const row = desktop.list().find(s => s.id === outside)!;
+  assert.deepEqual([row.readOnly, row.ownedExternally], [true, true]);
+});
+
+test("an outside CLI row disappears on the next scan after its process exits", t => {
+  const w = withSidebar(t, new Set([id]));
+  fs.writeFileSync(path.join(w.f.project, `${id}.jsonl`), line(user));
+  fs.writeFileSync(path.join(w.f.project, `${outside}.jsonl`), line(user));
+  w.cli(outside);
+  w.rescan();
+  assert.ok(w.desktop.list().some(s => s.id === outside));
+  w.external.clear(); // the PID is gone
+  w.rescan();
+  assert.deepEqual(w.desktop.list().map(s => s.id), [id]);
+});
+
+test("a session the sidebar lists and an outside CLI holds is one row, read-only", t => {
+  const w = withSidebar(t, new Set([id]));
+  fs.writeFileSync(path.join(w.f.project, `${id}.jsonl`), line(user));
+  w.cli(id, "busy");
+  w.rescan();
+  const rows = w.desktop.list();
+  assert.equal(rows.length, 1);
+  assert.deepEqual([rows[0]!.readOnly, rows[0]!.state], [true, "running"], "a second resume on a held session would fork it");
+  w.external.clear();
+  w.rescan();
+  assert.deepEqual(w.desktop.list().map(s => [s.id, s.readOnly, s.ownedExternally]), [[id, false, undefined]], "released: replyable again");
+});
+
+test("the id a /clear left behind is not listed: only the id a live process holds is", t => {
+  const w = withSidebar(t, new Set([id]));
+  fs.writeFileSync(path.join(w.f.project, `${id}.jsonl`), line(user));
+  fs.writeFileSync(path.join(w.f.project, `${outside}.jsonl`), line(user));
+  fs.writeFileSync(path.join(w.f.project, `${other}.jsonl`), line(user)); // the CLI's earlier conversation
+  w.cli(outside);
+  w.rescan();
+  assert.deepEqual(w.desktop.list().map(s => s.id).sort(), [id, outside].sort());
+});
+
+test("the registry reader sorts live CLIs outside the app from the app's own writers", t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "registry-test-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const dead = spawnSync(process.execPath, ["-e", "0"]).pid!;
+  const entry = (pid: number, sessionId: string, over: Record<string, unknown>) =>
+    fs.writeFileSync(path.join(dir, `${pid}.json`), JSON.stringify({ pid, sessionId, cwd: "/synthetic", status: "idle", kind: "interactive", ...over }));
+  entry(process.pid, outside, { entrypoint: "sdk-cli" });
+  entry(dead, other, { entrypoint: "cli" });
+  entry(process.ppid, linked, { entrypoint: "claude-desktop" });
+  const headless = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"]);
+  t.after(() => { headless.kill(); });
+  entry(headless.pid!, id, { entrypoint: "sdk-cli", kind: "headless" });
+  const none = { current: () => [] } as unknown as ProcessSnapshot;
+  const external = liveExternalProcesses(dir, 0, "darwin", none);
+  assert.deepEqual([...external.keys()], [outside], "a dead pid, a headless run and the app's writer are not listed");
+  assert.equal(external.get(outside)?.external, true);
+  assert.deepEqual([...liveDesktopProcesses(dir, 0, "darwin", none).keys()], [linked], "the app's registry read holds the app's writer only");
 });
 
 test("an Artifact call's result carries the published page, and its row reads as the title", () => {

@@ -153,6 +153,8 @@ export interface SessionsOptions {
   desktopSidebar?: SidebarOptions;
   desktopProcesses?: () => string;
   desktopRegistry?: () => Map<string, DesktopProcess>;
+  /** Test boundary for the Claude Code CLIs alive outside the Claude app. */
+  desktopExternalRegistry?: () => Map<string, DesktopProcess>;
   bridgeClient?: BridgeClient;
   /** Test boundary for the app's data directory and bounded attachment wait. */
   environmentRoot?: string;
@@ -291,6 +293,8 @@ const APP_STOP = "이 세션은 Claude 앱에서 실행 중입니다. Claude 앱
 /** The stricter permission mode the person picked was not confirmed by the app's worker. */
 class EnvironmentModeError extends Error {}
 const MOD_CLAIMED = "Claude 앱에서 메시지를 처리하고 있습니다. 처리가 완료된 후 다시 시도해 주세요.";
+/** A Claude Code CLI outside the app (a terminal, Paseo) holds the session: nothing may queue for it or resume it (#171). */
+const DESKTOP_EXTERNAL = "이 세션은 터미널 등 Claude 앱 외부에서 실행 중이어서 메시지를 보낼 수 없습니다. 해당 프로그램에서 실행 중인 Claude Code를 종료한 뒤 다시 시도해 주세요.";
 /** A /clear the mod ran in place failed before the app reported its new session. */
 const MOD_CLEAR_FAILED = "Claude 앱에서 대화를 비우지 못했습니다. Claude 앱 상태를 확인한 뒤 대기 중인 메시지를 다시 전송해 주세요.";
 /** The approval the phone can no longer give: the Mac answered it first. */
@@ -643,6 +647,7 @@ export class Sessions {
       projects: opts.desktopProjects, now: this.now, summarize, figures: id => this.desktopFigures.get(id), userId: (id, uuid, text) => this.appUserId(id, uuid, text), held: id => this.heldFor(id),
       ...(opts.desktopProcesses ? { processes: opts.desktopProcesses } : {}),
       ...(opts.desktopRegistry ? { registry: opts.desktopRegistry } : {}),
+      ...(opts.desktopExternalRegistry ? { externalRegistry: opts.desktopExternalRegistry } : {}),
       // Only transcripts the host is writing right now, or a phone session not yet handed to the
       // desktop app, are hidden; any other one may be open in the app and must stay reachable
       // (a record the host once resumed is rebased onto Remote Control from here).
@@ -1669,7 +1674,11 @@ export class Sessions {
       return Promise.resolve(riding).then(() => {});
     }
     if (this.seen(id, clientMsgId)) return;
-    if (!this.sendQueue.add(id, { id: clientMsgId, text, attachments: files }, this.now(), this.records.get(id)?.sdkSessionId ?? id)) return;
+    // Never queued for a CLI outside the app: once it exits its row leaves the list and the message
+    // would wait there for good (#171). The phone's queue button comes here, not through send().
+    const desktopId = this.records.get(id)?.sdkSessionId ?? id;
+    if (!this.live.has(id) && this.desktop?.externalProcess(desktopId)) throw new CodedError("desktop_external", DESKTOP_EXTERNAL);
+    if (!this.sendQueue.add(id, { id: clientMsgId, text, attachments: files }, this.now(), desktopId)) return;
     this.noteQueued(id, clientMsgId);
     this.watchQueueRegistry();
     this.opts.onSessions();
@@ -1780,7 +1789,7 @@ export class Sessions {
   private appModSession(id: string, desktopId: string): boolean {
     const process = this.desktop?.liveProcess(desktopId);
     return !process?.bridgeSessionId && !this.live.has(id) && !this.handingOff.has(id) &&
-      !!(process || this.desktop?.isOpen(desktopId));
+      !!(process || this.desktop?.externalProcess(desktopId) || this.desktop?.isOpen(desktopId));
   }
 
   /** An idle app session without Remote Control can receive plain text through its mod. */
@@ -2489,6 +2498,9 @@ export class Sessions {
       return id;
     }
     const desktopId = this.records.get(id)?.sdkSessionId ?? id;
+    // Refused up front, not queued: a message waiting on a CLI outside the app is stranded when that
+    // CLI exits and the row leaves the list, and resuming beside it would fork the conversation.
+    if (!this.live.has(id) && this.desktop?.externalProcess(desktopId)) throw new CodedError("desktop_external", DESKTOP_EXTERNAL);
     const eligible = this.appModSession(id, desktopId);
     // A /clear to a Claude app session whose mod answers runs in place (the same session, its settings
     // kept), queued like a message; without a mod the fresh-session fallback below stands.

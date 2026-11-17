@@ -28,7 +28,7 @@ type RecordValue = Record<string, unknown>;
 type Summarize = (tool: string, input: RecordValue, cwd: string) => string;
 interface Source { file: string; size: number; mtime: number; unfinished: boolean; summary: SessionSummary }
 interface Imported { size: number; mtime: number; log: EventLog; dir: string; children?: Map<string, SubagentState> }
-export interface DesktopProcess { sessionId: string; pid: number; status: "busy" | "shell" | "idle" | "waiting"; bridgeSessionId?: string; /** The folder the app's worker runs in, as its registry records it. */ cwd?: string }
+export interface DesktopProcess { sessionId: string; pid: number; status: "busy" | "shell" | "idle" | "waiting"; bridgeSessionId?: string; /** The folder the app's worker runs in, as its registry records it. */ cwd?: string; /** A CLI running outside the Claude app, not one of the app's writers. */ external?: true }
 
 /**
  * pid → the start time `ps` reported for it. A pid's start time never changes while it lives, and
@@ -36,7 +36,6 @@ export interface DesktopProcess { sessionId: string; pid: number; status: "busy"
  * running it for every registry entry on every poll blocked the host (2026-10-12).
  */
 const verifiedStarts = new Map<number, string>();
-let snapshot: { dir: string; platform: string; at: number; result: Map<string, DesktopProcess> } | null = null;
 
 /**
  * Is this pid the process the registry recorded? On macOS the start time comes from `ps`.
@@ -78,16 +77,22 @@ function windowsAlive(processes: ProcessSnapshot): (pid: number, procStart: unkn
   };
 }
 
+/** The registry entrypoints of a Claude Code CLI a person runs outside the Claude app (a terminal, Paseo). */
+const EXTERNAL_ENTRYPOINTS = ["cli", "sdk-cli"];
+/** The Claude app's own writers and the CLIs running outside it, split from one registry read. */
+interface Registry { app: Map<string, DesktopProcess>; external: Map<string, DesktopProcess> }
+let snapshot: { dir: string; platform: string; at: number; result: Registry } | null = null;
+
 /**
  * Registry identity is authoritative; ps flags remain a legacy fallback only. Cached for 1 s.
  * The Windows snapshot behind it is read in the background, so this never waits for PowerShell
  * more than once (see ProcessSnapshot).
  */
-export function liveDesktopProcesses(dir: string, maxAgeMs = 1000, platform = process.platform, processes: ProcessSnapshot = processSnapshot): Map<string, DesktopProcess> {
-  if (platform !== "darwin" && platform !== "win32") return new Map();
+function readRegistry(dir: string, maxAgeMs: number, platform: string, processes: ProcessSnapshot): Registry {
+  const result: Registry = { app: new Map(), external: new Map() };
+  if (platform !== "darwin" && platform !== "win32") return result;
   const now = Date.now();
   if (snapshot && snapshot.dir === dir && snapshot.platform === platform && now - snapshot.at < maxAgeMs) return snapshot.result;
-  const result = new Map<string, DesktopProcess>();
   snapshot = { dir, platform, at: now, result };
   let entries: fs.Dirent[];
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
@@ -99,18 +104,39 @@ export function liveDesktopProcesses(dir: string, maxAgeMs = 1000, platform = pr
     let value: RecordValue | null;
     try { value = record(fs.readFileSync(path.join(dir, entry.name), "utf8")); }
     catch (error) { if (missing(error)) continue; throw error; }
-    if (!value || value.entrypoint !== "claude-desktop" || typeof value.sessionId !== "string" || !UUID.test(value.sessionId) || pid <= 1 || (value.pid !== undefined && value.pid !== pid)) continue;
+    if (!value || typeof value.sessionId !== "string" || !UUID.test(value.sessionId) || pid <= 1 || (value.pid !== undefined && value.pid !== pid)) continue;
+    const external = EXTERNAL_ENTRYPOINTS.includes(str(value.entrypoint)) && (value.kind === undefined || value.kind === "interactive");
+    if (value.entrypoint !== "claude-desktop" && !external) continue;
     if (!["busy", "shell", "idle", "waiting"].includes(str(value.status))) continue;
     const status = value.status as DesktopProcess["status"];
-    candidates.push({ pid, procStart: value.procStart, entry: { sessionId: value.sessionId, pid, status, ...(typeof value.bridgeSessionId === "string" ? { bridgeSessionId: value.bridgeSessionId } : {}), ...(typeof value.cwd === "string" && value.cwd ? { cwd: value.cwd } : {}) } });
+    candidates.push({ pid, procStart: value.procStart, entry: { sessionId: value.sessionId, pid, status, ...(external ? { external: true as const } : {}), ...(typeof value.bridgeSessionId === "string" ? { bridgeSessionId: value.bridgeSessionId } : {}), ...(typeof value.cwd === "string" && value.cwd ? { cwd: value.cwd } : {}) } });
   }
   if (!candidates.length) return result;
   const alive = platform === "win32" ? windowsAlive(processes) : darwinAlive();
   for (const candidate of candidates) {
     if (!alive(candidate.pid, candidate.procStart)) continue;
-    result.set(candidate.entry.sessionId, candidate.entry);
+    (candidate.entry.external ? result.external : result.app).set(candidate.entry.sessionId, candidate.entry);
   }
   return result;
+}
+
+/** A summary marked read-only while a CLI outside the app holds its session, and replyable once none does. */
+function ownedBy(summary: SessionSummary, owner: DesktopProcess | undefined): SessionSummary {
+  const { ownedExternally: _released, ...held } = summary;
+  return { ...held, readOnly: !!owner, ...(owner ? { ownedExternally: true as const } : {}) };
+}
+
+/** The Claude app's own live writers, by session id. */
+export function liveDesktopProcesses(dir: string, maxAgeMs = 1000, platform = process.platform, processes: ProcessSnapshot = processSnapshot): Map<string, DesktopProcess> {
+  return readRegistry(dir, maxAgeMs, platform, processes).app;
+}
+
+/**
+ * The Claude Code CLIs alive right now outside the Claude app (a terminal, Paseo), by session id. They
+ * hold their conversation: the host lists them but never resumes one a second time (issue #171).
+ */
+export function liveExternalProcesses(dir: string, maxAgeMs = 1000, platform = process.platform, processes: ProcessSnapshot = processSnapshot): Map<string, DesktopProcess> {
+  return readRegistry(dir, maxAgeMs, platform, processes).external;
 }
 export interface DesktopOptions {
   projects?: string;
@@ -119,6 +145,8 @@ export interface DesktopOptions {
   excluded: () => Set<string>;
   processes?: () => string;
   registry?: () => Map<string, DesktopProcess>;
+  /** The CLIs alive outside the Claude app (liveExternalProcesses); injected by tests. */
+  externalRegistry?: () => Map<string, DesktopProcess>;
   sidebarIds?: () => Set<string>;
   /** The latest figures the host read for a session. A snapshot is rebuilt from the transcript
    * whenever it grows, so the figures are put back at the end of every rebuild. */
@@ -617,6 +645,20 @@ export class DesktopSessions {
 
   liveProcess(id: string, maxAgeMs = 1000): DesktopProcess | undefined {
     return (this.opts.registry?.() ?? liveDesktopProcesses(path.join(path.dirname(this.projects), "sessions"), maxAgeMs)).get(id);
+  }
+
+  /** The CLIs alive outside the Claude app, minus any session the app's own registry holds: the app's writer wins. */
+  private externalProcesses(maxAgeMs = 1000): Map<string, DesktopProcess> {
+    const sessions = path.join(path.dirname(this.projects), "sessions");
+    const external = this.opts.externalRegistry?.() ?? liveExternalProcesses(sessions, maxAgeMs);
+    if (!external.size) return external;
+    const app = this.opts.registry?.() ?? liveDesktopProcesses(sessions, maxAgeMs);
+    return new Map([...external].filter(([id]) => !app.has(id)));
+  }
+
+  /** The Claude Code CLI outside the Claude app that holds this session right now (a terminal, Paseo), if any. */
+  externalProcess(id: string, maxAgeMs = 1000): DesktopProcess | undefined {
+    return this.externalProcesses(maxAgeMs).get(id);
   }
 
   /** Find the CLI identity the app assigned to an environment-created bridge session. */
@@ -1123,6 +1165,7 @@ export class DesktopSessions {
     const now = (this.opts.now ?? Date.now)();
     if (now - this.checkedAt < 3000) return;
     const registry = this.opts.registry?.() ?? liveDesktopProcesses(path.join(path.dirname(this.projects), "sessions"));
+    const external = this.externalProcesses();
     const processes = this.sources.size ? this.opts.processes?.() ?? processCommands() : "";
     for (const [id, previous] of this.sources) {
       let stat: fs.Stats;
@@ -1132,8 +1175,10 @@ export class DesktopSessions {
       const source = previous.size === stat.size && previous.mtime === stat.mtimeMs
         ? previous : this.readSummary(id, previous.file, stat);
       if (!source) { this.sources.delete(id); continue; }
-      const live = registry.get(id);
-      source.summary = { ...source.summary, state: live ? live.status === "waiting" ? "waiting" : live.status === "idle" ? "idle" : "running" : processHasSession(processes, id) &&
+      // A CLI outside the app owns its conversation: the phone may read it, never resume it (#171).
+      const owner = external.get(id);
+      const live = registry.get(id) ?? owner;
+      source.summary = { ...ownedBy(source.summary, owner), state: live ? live.status === "waiting" ? "waiting" : live.status === "idle" ? "idle" : "running" : processHasSession(processes, id) &&
         (now - source.mtime <= 10_000 || source.unfinished) ? "running" : "stopped" };
       this.sources.set(id, source);
     }
@@ -1147,6 +1192,10 @@ export class DesktopSessions {
     const candidates: { id: string; file: string; stat: fs.Stats }[] = [];
     const excluded = this.opts.excluded();
     const sidebar = this.opts.sidebarIds?.();
+    // A CLI alive outside the app is listed as long as its process lives, whatever the sidebar holds
+    // (#171). Only the ids a live process holds now: the id a /clear left behind is not one, so the
+    // duplicate rows the sidebar filter was added against (stale prior ids) do not come back.
+    const outside = this.externalProcesses();
     for (const [id, at] of this.named) if (sidebar?.has(id) || now - at > NAMED_MS) this.named.delete(id);
     try {
       for (const project of fs.readdirSync(this.projects, { withFileTypes: true })) {
@@ -1157,19 +1206,23 @@ export class DesktopSessions {
           if (!entry.isFile() || !entry.name.endsWith(".jsonl") || !UUID.test(id) || excluded.has(id)) continue;
           const file = path.join(dir, entry.name);
           const stat = fs.lstatSync(file);
-          if (stat.isFile() && (this.named.has(id) || (sidebar?.size ? sidebar.has(id) : stat.mtimeMs >= now - RECENT_MS))) candidates.push({ id, file, stat });
+          if (stat.isFile() && (this.named.has(id) || outside.has(id) || (sidebar?.size ? sidebar.has(id) : stat.mtimeMs >= now - RECENT_MS))) candidates.push({ id, file, stat });
         }
       }
     } catch (error) { if (!missing(error)) throw error; }
     candidates.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
     const next = new Map<string, Source>();
     for (const { id, file, stat } of candidates) {
-      if (!sidebar?.size && next.size >= 50) break;
+      if (!sidebar?.size && next.size >= 50 && !outside.has(id)) continue;
       if (next.has(id)) continue;
       const cached = this.sources.get(id);
       const source = cached?.file === file && cached.size === stat.size && cached.mtime === stat.mtimeMs
         ? cached : this.readSummary(id, file, stat);
-      if (source) next.set(id, source);
+      if (!source) continue;
+      // A summary rebuilt here starts replyable; the CLI holding it keeps it read-only even before the
+      // next live update, which its 3 s throttle may put off.
+      if (source !== cached) source.summary = ownedBy(source.summary, outside.get(id));
+      next.set(id, source);
     }
     this.sources = next;
     for (const id of this.tasks.keys()) if (!next.has(id)) this.tasks.delete(id);

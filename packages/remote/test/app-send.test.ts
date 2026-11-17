@@ -53,6 +53,7 @@ interface AppBoundary {
   start(): Promise<void>;
   go(screen: { name: "home" } | { name: "session"; id: string }): void;
   submit(text: string): boolean;
+  summary(id: string): { readOnly?: boolean } | undefined;
   act(name: string, el: { dataset: Record<string, string> }): Promise<void>;
   outbox: OutboxEntry[];
   ui: {
@@ -511,4 +512,23 @@ test("a running worker's open conversation asks only for the steps after the one
   } finally {
     running.app.link?.stop();
   }
+});
+
+// ---- a Claude Code CLI outside the Claude app holds the session (issue #171) ---------------------
+
+test("a Claude app session stays replyable, but one a CLI outside the app holds is read-only", async () => {
+  const running = await launch(new Storage());
+  try {
+    running.socket.deliver({ t: "sessions", sessions: [
+      summary({ id: "app", origin: "desktop", readOnly: true }),
+      summary({ id: "held", origin: "desktop", readOnly: true, ownedExternally: true }),
+      summary({ id: "host", origin: "host", readOnly: false }),
+    ], groups: [] });
+    assert.equal(running.app.summary("app")?.readOnly, false, "an older host's read-only desktop row is replyable, as 4ec33b8 intended");
+    assert.equal(running.app.summary("held")?.readOnly, true, "the backend's owned-by-another-process mark is not overridden");
+    assert.equal(running.app.summary("host")?.readOnly, false);
+    running.app.go({ name: "session", id: "held" });
+    assert.equal(running.app.submit("hello"), false, "nothing is sent to a session another process holds");
+    assert.equal(framesOf(running, "send").length, 0);
+  } finally { running.app.link?.stop(); }
 });
