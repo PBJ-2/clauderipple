@@ -211,6 +211,18 @@ function missingService(r: { ok: boolean; out: string; code?: number | null }): 
   return r.code === 113 || /could not find service|service .*not found/i.test(r.out);
 }
 
+/**
+ * Whether a finished bootout left the job unloaded. macOS 27 answers a bootout of a job that is
+ * already gone with exit 5 "Input/output error" instead of 113, so a failed bootout is judged by
+ * asking launchd whether the job is still there. Only a definite "no such service" counts: any
+ * other answer keeps the failure, so a job that is still loaded is never reported as stopped.
+ */
+function bootedOut(run: Launchctl, r: { ok: boolean; out: string; code?: number | null }): boolean {
+  if (r.ok || missingService(r)) return true;
+  const state = run(["print", `${domain()}/${launchdLabel()}`]);
+  return !state.ok && missingService(state);
+}
+
 function domain(): string {
   return `gui/${process.getuid?.() ?? 501}`;
 }
@@ -257,7 +269,7 @@ export function removeAgent(home: string = homeDir(), run: Launchctl = launchctl
     }
     const definition = fs.readFileSync(file, "utf8");
     const stopped = run(["bootout", domain(), file]);
-    if (!stopped.ok && !missingService(stopped)) throw new Error(`launchd bootout failed: ${stopped.out}; definition preserved`);
+    if (!bootedOut(run, stopped)) throw new Error(`launchd bootout failed: ${stopped.out}; definition preserved`);
     if (agentOwnership(home).state !== "ours" || fs.readFileSync(file, "utf8") !== definition) return "ownership-unknown";
     try {
       guard.remove();
@@ -425,6 +437,7 @@ export function stopAgent(home: string = homeDir(), run: Launchctl = launchctl, 
       if (who !== "ours") return "identity-unknown";
     }
     const result = run(["bootout", domain(), plistPath()]);
-    return result.ok ? "stopped" : missingService(result) ? "not-loaded" : "failed";
+    if (result.ok) return "stopped";
+    return bootedOut(run, result) ? "not-loaded" : "failed";
   });
 }

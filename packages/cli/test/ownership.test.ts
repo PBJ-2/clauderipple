@@ -152,6 +152,76 @@ test("this installation's agent stops, restarts and is removed as before", () =>
   assert.ok(fs.existsSync(file));
 });
 
+/**
+ * A launchctl whose bootout always fails with `bootout`'s answer while the job stays in `state`.
+ * `print` answers "Could not find service" (113) once the job is gone, like launchd does.
+ */
+function failingBootout(bootout: { code: number; out: string }, stillLoaded: boolean) {
+  const calls: string[][] = [];
+  return {
+    calls,
+    run: (args: string[]) => {
+      calls.push(args);
+      if (args[0] === "print") {
+        return stillLoaded ? { ok: true, out: "state = waiting\n" } : { ok: false, out: "Could not find service", code: 113 };
+      }
+      if (args[0] === "bootout") return { ok: false, out: bootout.out, code: bootout.code };
+      return { ok: true, out: "" };
+    },
+  };
+}
+
+const IO_ERROR = { code: 5, out: "Boot-out failed: 5: Input/output error" };
+
+test("macOS 27's exit 5 for a job that is already gone does not keep the definition", () => {
+  fs.rmSync(launchd.plistPath(), { force: true });
+  launchd.installAgent({ program, args: ["/r.ts"], home: B }, launchdFake().run);
+  const file = launchd.plistPath();
+  const ours = () => "ours" as const;
+  const gone = failingBootout(IO_ERROR, false);
+  assert.equal(launchd.removeAgent(B, gone.run, ours), "removed");
+  assert.equal(fs.existsSync(file), false);
+  assert.ok(gone.calls.filter((c) => c[0] === "print").length >= 2, "the job was asked about again after the failed bootout");
+
+  launchd.installAgent({ program, args: ["/r.ts"], home: B }, launchdFake().run);
+  assert.equal(launchd.stopAgent(B, failingBootout(IO_ERROR, false).run, ours), "not-loaded");
+  fs.rmSync(file, { force: true });
+});
+
+test("a failed bootout of a job that is still loaded keeps failing and keeps the definition", () => {
+  fs.rmSync(launchd.plistPath(), { force: true });
+  launchd.installAgent({ program, args: ["/r.ts"], home: B }, launchdFake().run);
+  const file = launchd.plistPath();
+  const before = read(file);
+  const ours = () => "ours" as const;
+  assert.throws(() => launchd.removeAgent(B, failingBootout(IO_ERROR, true).run, ours), /launchd bootout failed: .*Input\/output error.*definition preserved/);
+  assert.equal(read(file), before);
+  assert.equal(launchd.stopAgent(B, failingBootout(IO_ERROR, true).run, ours), "failed");
+  // A lookup that itself fails is no proof the job is gone.
+  let booted = false;
+  const blind = (args: string[]) => {
+    if (args[0] === "bootout") booted = true;
+    if (args[0] === "print") return booted ? { ok: false, out: "Operation not permitted", code: 1 } : { ok: true, out: "state = waiting\n" };
+    return booted ? { ok: false, out: IO_ERROR.out, code: 5 } : { ok: true, out: "" };
+  };
+  assert.equal(launchd.stopAgent(B, blind, ours), "failed");
+  assert.equal(read(file), before);
+  fs.rmSync(file, { force: true });
+});
+
+test("exit 113 from bootout still counts as already gone without a second question", () => {
+  fs.rmSync(launchd.plistPath(), { force: true });
+  launchd.installAgent({ program, args: ["/r.ts"], home: B }, launchdFake().run);
+  const file = launchd.plistPath();
+  const ours = () => "ours" as const;
+  const gone = failingBootout({ code: 113, out: "" }, false);
+  assert.equal(launchd.stopAgent(B, gone.run, ours), "not-loaded");
+  const printsAfterStop = gone.calls.length;
+  assert.equal(launchd.removeAgent(B, gone.run, ours), "removed");
+  assert.equal(gone.calls.slice(printsAfterStop).filter((c) => c[0] === "print").length, 1, "removeAgent's own pid lookup is the only print");
+  assert.equal(fs.existsSync(file), false);
+});
+
 test("a launchd job that cannot be proven this installation's is not unloaded or signalled", () => {
   fs.rmSync(launchd.plistPath(), { force: true });
   const fake = launchdFake();
