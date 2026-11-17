@@ -242,7 +242,7 @@ test('short messages that carry a request still reach detection, other short ans
 
 test('an asked level beats bias, floor and ceiling; save mode still caps it with its own reason', () => {
   const asked = { effort: 'medium' as const, sure: 0.2, why: 'x', asked: 'xhigh' as const }
-  assert.deepEqual(judgePick(asked, ownerText, pick), { effort: 'xhigh', why: 'you asked for this level', asked: 'xhigh', by: 'jev', at: 1 })
+  assert.deepEqual(judgePick(asked, ownerText, pick), { effort: 'xhigh', why: 'asked for in chat', asked: 'xhigh', by: 'jev', at: 1 })
   assert.equal(judgePick(asked, ownerText, pick, { settings: { ...bounds, bias: -2 } })?.effort, 'xhigh')
   assert.equal(judgePick({ ...asked, asked: 'low' }, 'effort low', pick)?.effort, 'low')
   const saved = judgePick(asked, ownerText, pick, { saving: true })

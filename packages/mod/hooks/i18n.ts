@@ -382,7 +382,7 @@ const EN = {
   'toasts.logNotPlaced': 'The log could not open here: {reason}',
   'toasts.saveMode': 'save mode',
   'toasts.yourSettings': 'your settings',
-  'toasts.effortAsked': 'you asked for this level',
+  'toasts.effortAsked': 'asked for in chat',
   'toasts.effortAutoBack': 'back to automatic',
   'toasts.jevNetwork': 'Jev network unavailable',
   'toasts.workerMissing': '{name} is not installed',
@@ -997,9 +997,8 @@ const KO: Record<Key, string> = {
   'toasts.logNotPlaced': '여기서는 로그를 열 수 없습니다: {reason}',
   'toasts.saveMode': '절약 모드',
   'toasts.yourSettings': '직접 정한 설정',
-  // TODO-copy: English placeholder, Korean wording pending the owner's review.
-  'toasts.effortAsked': 'you asked for this level',
-  'toasts.effortAutoBack': 'back to automatic',
+  'toasts.effortAsked': '채팅에서 요청한 추론 강도',
+  'toasts.effortAutoBack': '자동 선택으로 전환',
   'toasts.jevNetwork': 'Jev 연결 불가',
   'toasts.workerMissing': '{name} 에이전트 설치 안 됨',
   // Commands (stats and debug labels included).
@@ -1608,9 +1607,8 @@ const ZH: Record<Key, string> = {
   'toasts.logNotPlaced': '无法在此打开日志：{reason}',
   'toasts.saveMode': '节省模式',
   'toasts.yourSettings': '你的设置',
-  // TODO-copy: English placeholder.
-  'toasts.effortAsked': 'you asked for this level',
-  'toasts.effortAutoBack': 'back to automatic',
+  'toasts.effortAsked': '在对话中要求的强度',
+  'toasts.effortAutoBack': '已切换为自动选择',
   'toasts.jevNetwork': 'Jev 网络不可用',
   'toasts.workerMissing': '未安装 {name}',
   // Commands (stats and debug labels included).
@@ -2219,9 +2217,8 @@ const JA: Record<Key, string> = {
   'toasts.logNotPlaced': 'ここではログを開けません: {reason}',
   'toasts.saveMode': '節約モード',
   'toasts.yourSettings': 'ご自身の設定',
-  // TODO-copy: English placeholder.
-  'toasts.effortAsked': 'you asked for this level',
-  'toasts.effortAutoBack': 'back to automatic',
+  'toasts.effortAsked': 'チャットで指定した推論強度',
+  'toasts.effortAutoBack': '自動選択に切り替え',
   'toasts.jevNetwork': 'Jev のネットワークに接続できません',
   'toasts.workerMissing': '{name} がインストールされていません',
   // Commands (stats and debug labels included).
@@ -2830,9 +2827,8 @@ const ES: Record<Key, string> = {
   'toasts.logNotPlaced': 'No se pudo abrir el registro aquí: {reason}',
   'toasts.saveMode': 'modo ahorro',
   'toasts.yourSettings': 'tu configuración',
-  // TODO-copy: English placeholder.
-  'toasts.effortAsked': 'you asked for this level',
-  'toasts.effortAutoBack': 'back to automatic',
+  'toasts.effortAsked': 'pedido en el chat',
+  'toasts.effortAutoBack': 'de vuelta a automático',
   'toasts.jevNetwork': 'Red de Jev no disponible',
   'toasts.workerMissing': '{name} no está instalado',
   // Commands (stats and debug labels included).
@@ -3441,9 +3437,8 @@ const PT: Record<Key, string> = {
   'toasts.logNotPlaced': 'Não foi possível abrir o registro aqui: {reason}',
   'toasts.saveMode': 'modo economia',
   'toasts.yourSettings': 'suas configurações',
-  // TODO-copy: English placeholder.
-  'toasts.effortAsked': 'you asked for this level',
-  'toasts.effortAutoBack': 'back to automatic',
+  'toasts.effortAsked': 'pedido no chat',
+  'toasts.effortAutoBack': 'de volta ao automático',
   'toasts.jevNetwork': 'Rede do Jev indisponível',
   'toasts.workerMissing': '{name} não está instalado',
   // Commands (stats and debug labels included).
