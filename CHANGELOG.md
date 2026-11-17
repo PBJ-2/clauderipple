@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.12.40 — 2026-11-17
+
+### Added
+
+- **A dashboard switch for Claude Code's idle compaction, and keep-warm is no longer pre-empted by it.**
+  Claude Code summarizes a conversation over 200K tokens that sits idle for close to an hour (at 90% of the
+  1-hour cache, about 54 minutes) and continues from that summary when you come back. Keep-warm pings at
+  about 56 minutes, so with keep-warm on, the conversation was still compacted. ClaudeRipple now writes
+  Claude Code's `idleCompaction` setting: on only when the new "Compact ahead while idle" switch (under
+  conversation compaction, on by default) is on and keep-warm is off. Running sessions pick the change up
+  within seconds. Uninstalling removes the `idleCompaction: false` ClaudeRipple wrote.
+
 ## 0.12.39 — 2026-11-17
 
 ### Changed
