@@ -343,6 +343,21 @@ test("rewriteBody sets model, effort and clamps ultra", () => {
   assert.equal("output_config" in k, false);
 });
 
+test("a mapping without effort keeps the app's effort through resolution and rewriting", () => {
+  const request = { model: "claude-opus-4-8", ...body("hi"), output_config: { effort: "low" } };
+  const route = resolve(request.model, request, cfg)!;
+  assert.equal(route.effort, undefined);
+  assert.deepEqual(rewriteBody(request, route, cfg.effortClamp).output_config, { effort: "low" });
+  assert.equal(request.model, "gpt-6-astra");
+});
+
+test("a mapping with explicit effort replaces the app's effort", () => {
+  const request = { model: "claude-opus-4-6", ...body("hi"), output_config: { effort: "low" } };
+  const route = resolve(request.model, request, cfg)!;
+  assert.equal(route.effort, "high");
+  assert.deepEqual(rewriteBody(request, route, cfg.effortClamp).output_config, { effort: "high" });
+});
+
 // A pinned worker's model id names a stored Claude account on its provider half. Routing must strip
 // it before anything is sent, and the request body must otherwise match an unpinned turn byte for byte.
 test("a pinned account id routes to its provider and forwards the bare model", () => {

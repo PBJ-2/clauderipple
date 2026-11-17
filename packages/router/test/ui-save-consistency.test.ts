@@ -142,7 +142,7 @@ async function harness(initial = fixture()) {
     const renderClients = () => {};
     let status = { providers: {} };
     const providersOffering = () => ['p'];
-    return { loadSlots, saveSlots, scheduleSlotsSave, toggleWorkerTools, saveModelSlots,
+    return { loadSlots, saveSlots, scheduleSlotsSave, slotRow, toggleWorkerTools, saveModelSlots,
       configRequest, toast, showModal, closeModal, setStatus: value => {status = value;},
       current: () => currentConfig };
   `)(
@@ -155,6 +155,7 @@ async function harness(initial = fixture()) {
     (id: number) => { timers.delete(id); },
   ) as {
     loadSlots(): Promise<void>; saveSlots(): Promise<void>; scheduleSlotsSave(): void;
+    slotRow(id: string, route: Route | null): DomNode;
     toggleWorkerTools(on: boolean): Promise<void>; saveModelSlots(): Promise<void>;
     configRequest(next: Config): Promise<unknown>; toast(message: string, error?: boolean): void;
     showModal(content: DomNode): void; closeModal(): void; setStatus(value: unknown): void; current(): Config;
@@ -248,7 +249,72 @@ test('failed reads never PUT stale routes, and failed writes keep the unsaved ed
   assert.equal(view.h.latest.routes.b!.model, 'three');
 });
 
-test('unavailable targets and defaulted efforts on untouched rows are not silently rewritten', async () => {
+test('a mapping without effort follows the app on screen and after a model edit is saved', async () => {
+  const config = fixture(); delete config.routes.a!.effort;
+  const view = await harness(config);
+  const effort = view.select('a', 2);
+  assert.equal(effort.value, '');
+  assert.equal(effort.disabled, false);
+  assert.equal(effort.children[0]!.value, '');
+  assert.equal(effort.children[0]!.children[0]!.textContent, 'slots.effortFromApp');
+  assert.equal(view.nodes['slots-summary']!.textContent, 'a → one · b → two (high)');
+  view.edit('a', 'three'); await view.ui.saveSlots();
+  assert.equal(Object.hasOwn(view.h.latest.routes.a!, 'effort'), false);
+});
+
+test('choosing the app effort removes a saved override and its summary suffix', async () => {
+  const view = await harness();
+  view.select('a', 2).value = ''; view.select('a', 2).emit('change');
+  await view.ui.saveSlots();
+  assert.equal(Object.hasOwn(view.h.latest.routes.a!, 'effort'), false);
+  assert.equal(view.nodes['slots-summary']!.textContent, 'a → one · b → two (high)');
+});
+
+test('an added mapping follows the app when its target is selected', async () => {
+  const view = await harness();
+  view.row('c').remove();
+  const row = view.ui.slotRow('c', null); view.nodes['slots-list']!.appendChild(row);
+  assert.equal(view.select('c', 2).value, '');
+  assert.equal(view.select('c', 2).disabled, true);
+  view.edit('c', 'one');
+  assert.equal(view.select('c', 2).value, '');
+  assert.equal(view.select('c', 2).disabled, false);
+  await view.ui.saveSlots();
+  assert.deepEqual(view.h.latest.routes.c, { provider: 'p', model: 'one' });
+});
+
+test('changing targets keeps supported efforts or the app choice, never a different level', async () => {
+  const config = fixture(); config.providers.p!.models[2]!.effortLevels = ['low'];
+  const view = await harness(config);
+  view.edit('a', 'two'); assert.equal(view.select('a', 2).value, 'high');
+  view.edit('a', 'three'); assert.equal(view.select('a', 2).value, '');
+  view.edit('a', 'one'); assert.equal(view.select('a', 2).value, '');
+  await view.ui.saveSlots();
+  assert.equal(Object.hasOwn(view.h.latest.routes.a!, 'effort'), false);
+});
+
+test('a saved unlisted effort is shown on first draw and survives a save', async () => {
+  const config = fixture(); config.routes.a!.effort = 'max';
+  const view = await harness(config);
+  assert.equal(view.select('a', 2).value, 'max');
+  assert.equal(view.select('a', 2).disabled, false);
+  view.row('c').remove(); view.select('a', 0).value = 'c'; await view.ui.saveSlots();
+  assert.equal(view.h.latest.routes.c!.effort, 'max');
+  assert.equal(view.h.latest.routes.a, undefined);
+});
+
+test('a target without an effort ladder keeps its muted, disabled effort cell', async () => {
+  const config = fixture(); config.providers.p!.models[0]!.effortLevels = [];
+  const view = await harness(config);
+  const effort = view.select('a', 2), cell = effort.parent!;
+  assert.equal(effort.disabled, true);
+  assert.equal(cell.classes.has('muted-cell'), true);
+  assert.equal((cell as DomNode & { title: string }).title, 'slots.noEffort');
+  view.row('c').remove(); view.select('a', 0).value = 'c'; await view.ui.saveSlots();
+  assert.equal(Object.hasOwn(view.h.latest.routes.c!, 'effort'), false);
+});
+
+test('unavailable targets and unset efforts on untouched rows are not silently rewritten', async () => {
   const config = fixture(); config.routes.b!.model = 'unlisted'; delete config.routes.a!.effort;
   const view = await harness(config); view.edit('c', 'three'); await view.ui.saveSlots();
   assert.deepEqual(view.h.latest.routes.a, config.routes.a);
