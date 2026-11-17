@@ -45,7 +45,8 @@ const systemd = await import("../src/systemd.ts");
 const schtasks = await import("../src/schtasks.ts");
 const { launcherHome, normalizeHome, plistEnvironment, unitEnvironment } = await import("../src/ownership.ts");
 const { restartWindowsRouter, startRouter, stopWindowsRouter } = await import("../src/supervisor.ts");
-const { adminUrl, routerIdentity } = await import("../src/router-state.ts");
+const { adminUrl, probeRouter, routerIdentity } = await import("../src/router-state.ts");
+const { restartSwitched, versionMismatch } = await import("../src/router-switch.ts");
 const { ensureInstallationId, installationIdPath, readInstallationId } = await import("../../router/src/installation-id.ts");
 
 const A = path.join(root, "install-a");
@@ -452,6 +453,103 @@ test("a Windows restart waits for its replacement to answer before judging it", 
   assert.ok(restarted.asked.includes(6262));
 });
 
+// 0.12.35 -> 0.12.36 report (Windows 11): the router ran outside the scheduled task (task Ready, no
+// process under it), `restart` called it "another installation" and `update` still said "Done".
+test("a Windows restart replaces this installation's own router that runs outside the task", () => {
+  type Id = "ours" | "other" | "absent" | "unsupervised";
+  const scenario = (o: { answers: Id[]; shutdown?: boolean; drainedThen?: Id }) => {
+    const calls: string[] = [];
+    const progress: string[] = [];
+    const pending = [...o.answers];
+    let drained = false;
+    const asked: Array<number | null> = [];
+    let clock = 0;
+    const ops: import("../src/supervisor.ts").WindowsRouterOps = {
+      owner: () => ({ state: "ours", home: winB }),
+      // The task is Ready: no router under its launcher, until `start` runs it.
+      targetPid: () => (calls.includes("start") ? 8888 : null),
+      identity: (expectedPid) => {
+        asked.push(expectedPid);
+        if (calls.includes("start")) return "ours";
+        if (drained) return o.drainedThen ?? "absent";
+        return pending.length > 1 ? pending.shift()! : pending[0]!;
+      },
+      unsupervisedPid: () => 57700,
+      running: () => false,
+      shutdown: () => { calls.push("shutdown"); drained = o.shutdown ?? true; return o.shutdown ?? true; },
+      stopTask: () => (calls.push("stopTask"), "stopped" as const),
+      launcherPid: () => null,
+      stopLauncher: () => false,
+      start: () => (calls.push("start"), "started" as const),
+      now: () => clock,
+      sleep: (ms) => { clock += ms; },
+    };
+    return { ops, calls, progress, asked, restart: () => restartWindowsRouter(ops, { onProgress: (m) => progress.push(m) }), stop: () => stopWindowsRouter(ops) };
+  };
+
+  // Same id, task has no process (expectedPid null): drained through /api/shutdown, then started by the task.
+  const replace = scenario({ answers: ["unsupervised"] });
+  assert.equal(replace.restart(), "drained");
+  assert.deepEqual(replace.calls, ["shutdown", "start"], "drained first, started only after the port was released");
+  assert.equal(replace.asked[0], null, "the caller has no task process to act on");
+  assert.match(replace.progress[0]!, /this installation's router \(pid 57700\) is running outside the scheduled task/);
+
+  // A drain that never lets the port go is a failure, never a second router beside it.
+  const stuck = scenario({ answers: ["unsupervised"], drainedThen: "unsupervised" });
+  assert.equal(restartWindowsRouter(stuck.ops, { waitMs: 0 }), "failed");
+  assert.deepEqual(stuck.calls, ["shutdown"]);
+
+  // The router refuses the shutdown request: nothing is started on top of it.
+  const refused = scenario({ answers: ["unsupervised"], shutdown: false });
+  assert.equal(refused.restart(), "failed");
+  assert.deepEqual(refused.calls, ["shutdown"]);
+
+  // Someone else (another id) takes the port while ours drains: refused, not started.
+  const taken = scenario({ answers: ["unsupervised"], drainedThen: "other" });
+  assert.equal(taken.restart(), "other-installation");
+  assert.deepEqual(taken.calls, ["shutdown"]);
+
+  // Another installation's router (different id) is still refused and never asked to shut down.
+  const foreign = scenario({ answers: ["other"] });
+  assert.equal(foreign.restart(), "other-installation");
+  assert.equal(foreign.stop(), "other-installation");
+  assert.deepEqual(foreign.calls, []);
+
+  // `stop` (uninstall's first step) drains the same router so --purge is not blocked by its open log.
+  const stop = scenario({ answers: ["unsupervised"] });
+  assert.equal(stop.stop(), "stopped");
+  assert.deepEqual(stop.calls, ["shutdown"]);
+
+  // A status that times out mid-drain reads "absent" while the old router is still serving. It is
+  // waited for until its process exits; starting then would find it running and start nothing.
+  const slow = scenario({ answers: ["unsupervised"] });
+  let exitsAt = 5_000, clockNow = 0;
+  slow.ops.alive = (pid) => pid === 57700 && clockNow < exitsAt;
+  const sleep = slow.ops.sleep;
+  slow.ops.sleep = (ms) => { clockNow += ms; sleep(ms); };
+  assert.equal(slow.restart(), "drained");
+  assert.ok(clockNow >= exitsAt, "started only after the old process exited");
+  assert.deepEqual(slow.calls, ["shutdown", "start"]);
+  // Never exits within the budget: a failure, not a start beside it and not a reported stop.
+  const hung = scenario({ answers: ["unsupervised"] });
+  hung.ops.alive = () => true;
+  assert.equal(restartWindowsRouter(hung.ops, { waitMs: 3_000 }), "failed");
+  assert.deepEqual(hung.calls, ["shutdown"]);
+  const hungStop = scenario({ answers: ["unsupervised"] });
+  hungStop.ops.alive = () => true;
+  assert.equal(stopWindowsRouter(hungStop.ops, 3_000), "failed");
+  exitsAt = 0;
+});
+
+test("install and update count only a router on the installed version as applied", () => {
+  assert.equal(versionMismatch("0.12.35", "0.12.36"), "the router still answering is 0.12.35, not 0.12.36");
+  assert.equal(versionMismatch("0.12.36", "0.12.36"), null);
+  assert.equal(versionMismatch(null, "0.12.36"), null, "nothing answering is the probe's to report");
+  for (const switched of ["drained", "kickstarted", "direct"] as const) assert.equal(restartSwitched(switched), true);
+  // Every refusal left the old router in place, so none of them may fall through to "Done".
+  for (const refused of ["failed", "other-installation", "ownership-unknown", "identity-unknown"] as const) assert.equal(restartSwitched(refused), false);
+});
+
 // #131: a launcher written before the fix outlives its drained router while it waits for the
 // installer, and the installer waits for the task to end. Only this home's launcher may be ended.
 test("a Windows restart ends only this home's stuck launcher, then starts the task as usual (#131)", () => {
@@ -565,10 +663,18 @@ test("a response on a shared admin port needs both this installation's id and th
   assert.equal(routerIdentity(A, { probe: () => status(idA, 111), expectedPid: 111 }), "ours");
   assert.equal(routerIdentity(B, { probe: () => status(idA, 111), expectedPid: 111 }), "other", "B must not accept A's router");
   assert.equal(routerIdentity(B, { probe: () => status(idB, 222), expectedPid: 222 }), "ours");
-  // The same home's direct router (right id, other pid) does not authorize touching the job.
-  assert.equal(routerIdentity(B, { probe: () => status(idB, 999), expectedPid: 222 }), "other");
-  // A caller with no process to act on can never accept a responder.
-  assert.equal(routerIdentity(B, { probe: () => status(idB, 222), expectedPid: null }), "other");
+  // The same home's router outside the job (right id, other pid) does not authorize touching the
+  // job, but it is not a stranger either: it is its own state, never "ours" and never "other".
+  assert.equal(routerIdentity(B, { probe: () => status(idB, 999), expectedPid: 222 }), "unsupervised");
+  // A caller with no process to act on (the task is not running) can never accept a responder as
+  // "ours", yet this installation's own id still names it (0.12.35 -> 0.12.36 report, Windows).
+  assert.equal(routerIdentity(B, { probe: () => status(idB, 222), expectedPid: null }), "unsupervised");
+  assert.deepEqual(probeRouter(B, { probe: () => status(idB, 57700), expectedPid: null }), { state: "unsupervised", pid: 57700 });
+  // Another installation's id with no process to act on stays "other": it is never replaced.
+  assert.equal(routerIdentity(B, { probe: () => status(idA, 222), expectedPid: null }), "other");
+  assert.equal(routerIdentity(B, { probe: () => status(idA, 999), expectedPid: 222 }), "other");
+  // A responder that reports no pid cannot be told apart from anything: not unsupervised either.
+  assert.equal(routerIdentity(B, { probe: () => ({ version: "9.9.9", installId: idB }), expectedPid: null }), "other");
   // Any other HTTP server that answers with a version string alone is never ours.
   assert.equal(routerIdentity(B, { probe: () => ({ version: "9.9.9" }), expectedPid: 222 }), "other");
   assert.equal(routerIdentity(B, { probe: () => status("0".repeat(32), 222), expectedPid: 222 }), "other");

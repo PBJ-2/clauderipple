@@ -32,6 +32,7 @@ import { GROK_DEFAULT_URL } from "../../router/src/providers/grok/catalog.ts";
 import { claudeLogin, claudeLogout, desktopClaudeCodeDirs } from "./claude-auth.ts";
 import { openBrowser } from "./browser.ts";
 import { electronPath, installTrayRuntime, startTray } from "./tray.ts";
+import { restartSwitched, versionMismatch } from "./router-switch.ts";
 import { dropPowerShellShim, installKind, isNewer, latestVersion, PACKAGE, runUpdate } from "./update.ts";
 import { ClaudeOAuthSession } from "../../router/src/providers/claude-oauth.ts";
 import { requestHostUpdate } from "../../remote/src/host-update.ts";
@@ -278,20 +279,32 @@ async function install(): Promise<void> {
   // Running the installer again is how an update arrives, and it replaces files, not the process:
   // a router left alone keeps serving the old code until the next login. Restart one that
   // answers with another version.
-  if (started === "already-running") {
+  // Not only after "already-running": a task that was Ready while an older router still held the
+  // port also answers "started" (its own router could not bind), and the probe below would pass
+  // against the old one (reported 2026-11-17, Windows 0.12.35 -> 0.12.36).
+  if (started !== "failed") {
     const running = await runningVersion(adminPort(cfg));
     if (running && running !== VERSION) {
       console.log(`  the running router is ${running}; restarting it on ${VERSION}`);
       const restarted = restartAgent({ onProgress: (m) => console.log(`  ${m}`) });
       console.log(describeRestart(restarted));
-      if (restarted === "failed") {
+      if (!restartSwitched(restarted)) {
         // The old router may still be answering, so the probe below would pass and the installer
         // would report a version it never switched to — what the tray showed as "updated" while
-        // the version stayed old until `repair` (#62, #80).
+        // the version stayed old until `repair` (#62, #80). A refused restart (another
+        // installation, an unverifiable instance) is the same: nothing was switched.
         process.exitCode = 1;
         console.log(`${settingsPath()} was left as it was: the router was not switched to ${VERSION}. Run \`clauderipple restart\`, then install again.`);
         return;
       }
+    }
+    // Last word on the process, not the files: whatever answers now must be the version installed.
+    const after = await runningVersion(adminPort(cfg));
+    const mismatch = versionMismatch(after, VERSION);
+    if (mismatch) {
+      process.exitCode = 1;
+      console.log(`✗ not applied: ${mismatch}. ${settingsPath()} was left as it was. Run \`clauderipple restart\`, then install again.`);
+      return;
     }
   }
 
@@ -584,7 +597,15 @@ async function update(): Promise<void> {
   if (result.ok && hadTray) {
     // The new files decide where Electron lives; ask them, not this process's copy. --refresh also
     // replaces a runtime the previous version fetched, which an install alone would keep (B15).
-    execFileSync(installedRuntime.node, [installedRuntime.cli, "tray", "--install", "--refresh"], { env: { ...process.env, ...installedRuntime.env }, stdio: "inherit" });
+    // The router and files are already updated at this point. A tray that is running holds its
+    // Electron open on Windows, so the swap can be refused (EPERM); that must not fail the update,
+    // or every automatic retry hits the same wall until the tray happens to be closed. The old
+    // runtime stays intact (swapTrayRuntime), so the tray keeps working; say how to finish.
+    try {
+      execFileSync(installedRuntime.node, [installedRuntime.cli, "tray", "--install", "--refresh"], { env: { ...process.env, ...installedRuntime.env }, stdio: "inherit" });
+    } catch {
+      console.log("! the tray's Electron was not refreshed (a running tray holds it). The update itself is done; quit the tray, then run `clauderipple tray --install --refresh`.");
+    }
   }
   console.log(result.message);
   if (!result.ok) process.exitCode = 1;

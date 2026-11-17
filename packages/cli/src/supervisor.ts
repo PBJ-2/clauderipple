@@ -9,7 +9,7 @@ import * as launchd from "./launchd.ts";
 import * as schtasks from "./schtasks.ts";
 import * as systemd from "./systemd.ts";
 import type { AgentRemove, AgentRestart, AgentStart, AgentStop, Ownership } from "./ownership.ts";
-import { type RouterIdentity, adminUrl, awaitIdentity, routerIdentity } from "./router-state.ts";
+import { type RouterIdentity, adminUrl, awaitIdentity, probeRouter, routerIdentity } from "./router-state.ts";
 import { runtime } from "./runtime.ts";
 import { windowsPowerShellEnv } from "./windows-powershell.ts";
 
@@ -198,6 +198,10 @@ export type WindowsRouterOps = {
   targetPid(): number | null;
   /** Whose instance is answering, checked against the pid this caller would act on. */
   identity(expectedPid: number | null): RouterIdentity;
+  /** The pid this installation's own router answers with when it runs outside the task; for messages. */
+  unsupervisedPid?(): number | null;
+  /** Whether that process still exists: a status that times out is not evidence that it exited. */
+  alive?(pid: number): boolean;
   /** Whether the registered task has a running instance. */
   running(): boolean;
   /** POST /api/shutdown on this installation's admin port. */
@@ -213,7 +217,7 @@ export type WindowsRouterOps = {
 };
 
 /** Waits until the identity of the instance we asked to drain satisfies `done`. */
-function waitForRouter(ops: Pick<WindowsRouterOps, "identity" | "now" | "sleep">, expectedPid: number, done: (id: RouterIdentity) => boolean, budgetMs: number, onProgress?: (msg: string) => void): boolean {
+function waitForRouter(ops: Pick<WindowsRouterOps, "identity" | "now" | "sleep">, expectedPid: number | null, done: (id: RouterIdentity) => boolean, budgetMs: number, onProgress?: (msg: string) => void): boolean {
   const t0 = ops.now();
   let lastTick = 0;
   while (ops.now() - t0 < budgetMs) {
@@ -226,6 +230,19 @@ function waitForRouter(ops: Pick<WindowsRouterOps, "identity" | "now" | "sleep">
     ops.sleep(1_000);
   }
   return done(ops.identity(expectedPid));
+}
+
+/**
+ * Drains this installation's router running outside the task. Done only when its process has
+ * exited: one status that times out reads as "absent" while the router is still serving, and a
+ * start then finds it running and does nothing, leaving no router once it finishes draining.
+ */
+function drainUnsupervised(ops: WindowsRouterOps, waitMs: number, onProgress?: (msg: string) => void): boolean {
+  const pid = ops.unsupervisedPid?.() ?? null;
+  if (pid === null) return false;
+  if (!ops.shutdown()) return false;
+  const gone = (id: RouterIdentity) => id !== "unsupervised" && !(ops.alive?.(pid) ?? false);
+  return waitForRouter(ops, null, gone, waitMs, onProgress);
 }
 
 /** Waits for the task's own instance to be gone (after a stop), bounded. */
@@ -255,9 +272,16 @@ export function stopWindowsRouter(ops: WindowsRouterOps, waitMs = 120_000): Stop
   const identity = ops.identity(targetPid);
   if (identity === "other") return "other-installation";
   if (identity === "absent") return ops.running() ? "identity-unknown" : "not-loaded";
-  if (targetPid === null) return "identity-unknown";
-  if (!ops.shutdown()) return "failed";
-  if (!waitForRouter(ops, targetPid, (id) => id !== "ours", waitMs)) return "failed";
+  // This installation's router outside the task: its id is the proof, so it is drained like any other.
+  const unsupervised = identity === "unsupervised";
+  if (targetPid === null && !unsupervised) return "identity-unknown";
+  if (unsupervised) {
+    if (!drainUnsupervised(ops, waitMs)) return "failed";
+    if (ops.identity(targetPid) === "other") return "other-installation";
+  } else {
+    if (!ops.shutdown()) return "failed";
+    if (!waitForRouter(ops, targetPid, (id) => id !== "ours", waitMs)) return "failed";
+  }
   // The task may have been replaced while we waited: re-read before touching it.
   const again = ops.owner();
   if (again.state === "other") return "other-installation";
@@ -287,10 +311,24 @@ export function restartWindowsRouter(ops: WindowsRouterOps, opts: { waitMs?: num
     if (ops.running()) return "identity-unknown";
     return restartResult(ops.start());
   }
-  if (targetPid === null) return "identity-unknown";
-  if (!ops.shutdown()) return "failed";
+  // This installation's own router, running outside the task (its launcher is gone, or the task is
+  // Ready while the router lives on): the installation id proves it, so it is drained through
+  // /api/shutdown with that id and the task starts the replacement. A router with another id never
+  // reaches this branch ("other" above).
+  const unsupervised = identity === "unsupervised";
+  if (unsupervised) {
+    const pid = ops.unsupervisedPid?.() ?? null;
+    opts.onProgress?.(`this installation's router${pid === null ? "" : ` (pid ${pid})`} is running outside the scheduled task; replacing it`);
+  }
+  if (targetPid === null && !unsupervised) return "identity-unknown";
   // Still draining: a second router would only fight it for the port, so this is a failure.
-  if (!waitForRouter(ops, targetPid, (id) => id !== "ours", opts.waitMs ?? 120_000, opts.onProgress)) return "failed";
+  if (unsupervised) {
+    if (!drainUnsupervised(ops, opts.waitMs ?? 120_000, opts.onProgress)) return "failed";
+    if (ops.identity(targetPid) === "other") return "other-installation";
+  } else {
+    if (!ops.shutdown()) return "failed";
+    if (!waitForRouter(ops, targetPid, (id) => id !== "ours", opts.waitMs ?? 120_000, opts.onProgress)) return "failed";
+  }
   const again = ops.owner();
   if (again.state === "other") return "other-installation";
   if (again.state === "unknown") return "ownership-unknown";
@@ -327,6 +365,8 @@ function windowsOps(home: string): WindowsRouterOps {
     owner: () => schtasks.taskOwnership(home),
     targetPid: () => schtasks.taskRouterPid(schtasks.taskName(), { home }),
     identity: (expectedPid) => routerIdentity(home, { expectedPid }),
+    unsupervisedPid: () => probeRouter(home, { expectedPid: null }).pid,
+    alive: isAlive,
     running: () => schtasks.agentState(schtasks.taskName()) === "running",
     shutdown: () => askShutdown(home),
     stopTask: () => schtasks.stopAgent(schtasks.taskName(), { home }),

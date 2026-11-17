@@ -21,8 +21,14 @@ import { ensureInstallationId, readInstallationId } from "../../router/src/insta
 import { sameHome } from "./ownership.ts";
 import { runtime } from "./runtime.ts";
 
-/** "absent": nothing answers; "other": something answers but is not provably this instance. */
-export type RouterIdentity = "ours" | "other" | "absent";
+/**
+ * "absent": nothing answers; "other": something answers but is not provably this installation's;
+ * "unsupervised": this installation's own router (its installation id matches) answers, but it is
+ * not the process the caller would act on — it runs outside the supervisor, or `expectedPid` is
+ * null because the supervisor has no process. Only the id proves it, so it may be asked to drain
+ * (with the id header) and replaced, but never signalled.
+ */
+export type RouterIdentity = "ours" | "other" | "absent" | "unsupervised";
 
 /** One status read. Injected in tests so no server or child process is needed. */
 export type StatusProbe = (url: string, timeoutMs: number) => Record<string, unknown> | null;
@@ -111,8 +117,10 @@ function ownInstallationId(home: string): string | null {
 /**
  * Identifies the responder. `expectedPid` is the process the caller would act on (the supervisor's
  * job/unit pid, or the router under the registered task); when given, a responder with any other
- * pid is `"other"`, even if its installation id matches. Pass `null` when the caller has no such
- * process: a responder then cannot authorize anything.
+ * pid is not `"ours"`: with a matching installation id it is `"unsupervised"` (this installation's,
+ * outside the supervisor), otherwise `"other"`. Pass `null` when the caller has no such process: a
+ * responder then cannot authorize signalling or removing anything, but a matching id still marks it
+ * `"unsupervised"` so the caller can say so and ask it to drain.
  *
  * A status from before the id existed is `"ours"` only when it reports this home and the listener
  * on this home's admin port is exactly `expectedPid`. Otherwise `"other"`.
@@ -138,7 +146,10 @@ export function probeRouter(home: string = homeDir(), opts: { probe?: StatusProb
   if (!expected) return { state: "other", pid: answeredPid };
   if (typeof status.installId !== "string" || status.installId !== expected) return { state: "other", pid: answeredPid };
   if (answeredPid === null) return { state: "other", pid: null };
-  if (opts.expectedPid !== undefined && opts.expectedPid !== answeredPid) return { state: "other", pid: answeredPid };
+  // The id is this installation's, so this is not a stranger: a different pid (or none expected) only
+  // means the supervisor is not what runs it (reported 2026-11-17, Windows: a router left running
+  // after its task's launcher was gone read as "another installation").
+  if (opts.expectedPid !== undefined && opts.expectedPid !== answeredPid) return { state: "unsupervised", pid: answeredPid };
   return { state: "ours", pid: answeredPid };
 }
 
