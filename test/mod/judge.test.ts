@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { DEFAULTS } from '../../packages/mod/hooks/settings.ts'
 import { EFFORT_JUDGE_SYSTEM, isShortFollowUp, looksLikeQuestion, looksLikeRetry, shouldJudge, judgeContext,
   parseEffortVerdict, verdictObject, jevEffortRequest, parseJevEffort,
-  jevUsage, jevFailure, parseJevKey, tipped, bounded, capped, finalEffort, isCacheSafeModel } from '../../packages/mod/hooks/judge.ts'
+  jevUsage, jevFailure, parseJevKey, tipped, bounded, capped, finalEffort, isCacheSafeModel,
+  explicitEffortRequest, mightAskEffort, choosePick } from '../../packages/mod/hooks/judge.ts'
 import type { JudgeInput, Pick } from '../../packages/mod/types/index.d.ts'
 
 const pick: Pick = { effort: 'high', why: 'build', by: 'haiku', at: 0 }
@@ -95,8 +96,9 @@ test('Jev effort body has only the specified root/state/questions and all effort
   assert.equal(body.state.current_model, 'sonnet')
   assert.equal(body.state.current_effort, 'high')
   assert.equal(body.state.next_message.length, 4000)
-  assert.deepEqual(Object.keys(body.questions), ['effort'])
+  assert.deepEqual(Object.keys(body.questions), ['effort', 'asked'])
   assert.deepEqual(Object.keys(body.questions.effort.criteria), ['low', 'medium', 'high', 'xhigh', 'max'])
+  assert.deepEqual(Object.keys(body.questions.asked.criteria), ['none', 'low', 'medium', 'high', 'xhigh', 'max', 'auto'])
   assert.equal(body.questions.effort.type, 'choice')
   const empty = jevEffortRequest({ messages: [], next: '' })
   assert.equal(empty.state.current_model, null)
@@ -168,4 +170,92 @@ test('floor wins inverted ceiling, save wins floor, and reasons explain final ch
 test('only the measured models (5.5 Claude families, Fable 5.2) are cache-safe', () => {
   for (const id of ['claude-opus-5-5', 'claude-sonnet-5-5-20261001', 'haiku-5-5', 'claude-fable-5-2', 'claude-fable-5-2[1m]']) assert.equal(isCacheSafeModel(id), true)
   for (const id of ['claude-fable-5-1', 'claude-fable-5-20', 'claude-mythos-5-1', 'claude-opus-4-6', 'gpt-6-1-sol', 'claude-sonnet-5-50', 'sonnet']) assert.equal(isCacheSafeModel(id), false)
+})
+
+// An effort the user asks for in chat (2026-11-17): "추론강도가 왜 중간으로갔지 … 매우높음으로" was read as
+// ordinary text and the ceiling clamped it. The judge reads the request; the owner's bounds do not apply to it.
+const bounds = { ...DEFAULTS, floor: 'medium' as const, ceiling: 'high' as const }
+const ownerText = '잠만 ㅇ추론강도가 왜 중간으로갔지 기획설계야 이거 매우높음으로'
+const judgePick = (verdict: Parameters<typeof choosePick>[0]['verdict'], text: string, current: Pick | null, extra: { saving?: boolean; settings?: typeof bounds } = {}) =>
+  choosePick({ verdict, text, current, settings: extra.settings ?? bounds, saving: extra.saving ?? false, by: 'jev', at: 1 })
+
+test('the judge reports an explicit effort request: Jev answers and JSON verdicts carry it, "none" and unsure answers do not', () => {
+  assert.equal(parseJevEffort({ answers: { effort: { choice: 'medium', confidence: 0.9 }, asked: { choice: 'xhigh', confidence: 0.9 } } })?.asked, 'xhigh')
+  assert.equal(parseJevEffort({ answers: { effort: { choice: 'medium' }, asked: { choice: 'auto' } } })?.asked, 'auto')
+  assert.equal('asked' in parseJevEffort({ answers: { effort: { choice: 'medium' }, asked: { choice: 'none', confidence: 0.99 } } })!, false)
+  assert.equal('asked' in parseJevEffort({ answers: { effort: { choice: 'medium' }, asked: { choice: 'max', confidence: 0.4 } } })!, false)
+  assert.equal('asked' in parseJevEffort({ answers: { effort: { choice: 'medium' }, asked: { choice: 'bad' } } })!, false)
+  assert.equal(parseEffortVerdict('{"effort":"high","asked":"xhigh","sure":0.9,"why":"x"}')?.asked, 'xhigh')
+  assert.equal(parseEffortVerdict('{"effort":"high","asked":"auto","why":"x"}')?.asked, 'auto')
+  assert.equal(parseEffortVerdict('{"effort":"high","asked":"none","why":"x"}')?.asked, undefined)
+  assert.equal(parseEffortVerdict('{"effort":"high","why":"x"}')?.asked, undefined)
+  assert.match(EFFORT_JUDGE_SYSTEM, /"asked":"none\|low\|medium\|high\|xhigh\|max\|auto"/)
+})
+
+test('the deterministic check reads unambiguous requests only, and the last instruction wins', () => {
+  assert.equal(explicitEffortRequest(ownerText), 'xhigh')
+  for (const [text, level] of [
+    ['추론 강도 매우 높음으로 바꿔줘', 'xhigh'], ['추론강도 최대로', 'max'], ['생각 강도 높음으로 해줘', 'high'], ['추론 강도를 중간으로', 'medium'],
+    ['추론 강도 낮음으로', 'low'], ['매우높음으로', 'xhigh'], ['높음으로 해줘', 'high'], ['xhigh', 'xhigh'], ['effort xhigh', 'xhigh'],
+    ['set the reasoning effort to extra high', 'xhigh'], ['use max effort please', 'max'], ['effort: high', 'high'],
+    ['추론 강도 자동으로 돌려줘', 'auto'], ['effort to auto', 'auto'],
+  ] as const) assert.equal(explicitEffortRequest(text), level, text)
+  // A question, a complaint, or a level word in another sense is not an instruction.
+  for (const text of ['추론강도가 왜 중간으로갔지', '추론 강도가 지금 얼마야?', '우선순위 높음으로 표시된 이슈를 고쳐줘', '이 값이 높음이면 어떻게 돼?', 'the priority is high', 'a high level overview of max_tokens',
+    '더 깊이 생각해 줘', 'think harder', '최대한 빨리 해줘', '최대로', 'high']) assert.equal(explicitEffortRequest(text), undefined, text)
+})
+
+test('short messages that carry a request still reach detection, other short answers still skip', () => {
+  const held = { ...pick, by: 'jev' as const }
+  const base = { origin: 'composer', auto: true, current: held, assistantTail: 'Working on it.' }
+  for (const text of ['매우높음으로', 'xhigh', '최대', '자동으로', 'auto', '높음으로']) {
+    assert.equal(mightAskEffort(text), true, text)
+    assert.equal(shouldJudge({ ...base, text }), true, text)
+  }
+  for (const text of ['B', '계속', 'go now']) assert.equal(shouldJudge({ ...base, text }), false, text)
+})
+
+test('an asked level beats bias, floor and ceiling; save mode still caps it with its own reason', () => {
+  const asked = { effort: 'medium' as const, sure: 0.2, why: 'x', asked: 'xhigh' as const }
+  assert.deepEqual(judgePick(asked, ownerText, pick), { effort: 'xhigh', why: 'you asked for this level', asked: 'xhigh', by: 'jev', at: 1 })
+  assert.equal(judgePick(asked, ownerText, pick, { settings: { ...bounds, bias: -2 } })?.effort, 'xhigh')
+  assert.equal(judgePick({ ...asked, asked: 'low' }, 'effort low', pick)?.effort, 'low')
+  const saved = judgePick(asked, ownerText, pick, { saving: true })
+  assert.deepEqual([saved?.effort, saved?.why, saved?.asked], ['medium', 'save mode', 'xhigh'])
+  // The judge failed or said "none", yet the message is plainly an instruction.
+  assert.equal(judgePick(undefined, ownerText, pick)?.asked, 'xhigh')
+  assert.equal(judgePick({ effort: 'medium', why: '' }, ownerText, pick)?.effort, 'xhigh')
+})
+
+test('an asked level holds on the next turn without re-judging down, until another level, auto, or a manual pick', () => {
+  const held = judgePick({ effort: 'medium', why: '', asked: 'xhigh' }, ownerText, pick)!
+  assert.equal(held.asked, 'xhigh')
+  // Ordinary prompts neither reach the judge nor change the pick.
+  assert.equal(shouldJudge({ text: 'Add a unit test for the parser and run the suite', origin: 'composer', auto: true, current: held }), false)
+  assert.equal(shouldJudge({ text: 'ok', origin: 'composer', auto: true, current: held }), false)
+  // Even if one were judged low, the held request stays.
+  assert.equal(judgePick({ effort: 'low', why: 'chat' }, 'thanks', held), null)
+  // Another level replaces it.
+  assert.equal(shouldJudge({ text: '추론 강도 낮음으로', origin: 'composer', auto: true, current: held }), true)
+  const lower = judgePick({ effort: 'high', why: '', asked: 'low' }, '추론 강도 낮음으로', held)!
+  assert.deepEqual([lower.effort, lower.asked], ['low', 'low'])
+  // Auto releases it: the judge's own choice, through the owner's bounds again.
+  const released = judgePick({ effort: 'max', why: 'plan', asked: 'auto' }, '추론 강도 자동으로 돌려줘', held)!
+  assert.deepEqual([released.effort, released.asked], ['high', undefined])
+  assert.equal(shouldJudge({ text: '자동으로', origin: 'composer', auto: true, current: held }), true)
+  // A judge that failed on "auto" still lets go of the hold, at the level it ran.
+  const failed = judgePick(undefined, 'effort to auto', held)!
+  assert.deepEqual([failed.effort, failed.asked], ['xhigh', undefined])
+  // A manual change in the app installs a pick with no `asked`: judging is ordinary again.
+  const manual: Pick = { effort: 'low', why: 'app', by: 'manual', at: 2 }
+  assert.equal(shouldJudge({ text: 'Add a unit test for the parser and run the suite', origin: 'composer', auto: true, current: manual }), true)
+  assert.equal(judgePick({ effort: 'high', why: 'x' }, 'Add a unit test', manual)?.asked, undefined)
+  // Another chat has its own pick: an unrelated chat without one is judged as always.
+  assert.deepEqual(judgePick({ effort: 'max', why: 'x' }, 'Plan the architecture', null)?.effort, 'high')
+})
+
+test('an unrelated "높음" is judged like any prompt and is not taken as a request', () => {
+  const text = '우선순위 높음으로 표시된 이슈부터 고쳐줘'
+  const picked = judgePick({ effort: 'xhigh', sure: 0.9, why: 'x' }, text, pick)!
+  assert.deepEqual([picked.effort, picked.asked], ['high', undefined])
 })

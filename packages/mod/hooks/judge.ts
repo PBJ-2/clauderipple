@@ -1,4 +1,4 @@
-import type { Effort, JudgeInput, Pick, Settings, Verdict } from '../types'
+import type { Asked, Effort, JudgeInput, Pick, Settings, Verdict } from '../types'
 import { t } from './i18n.ts'
 import type { Lang } from './i18n.ts'
 
@@ -13,7 +13,62 @@ Assess work volume, uncertainty, and the cost of mistakes, not message length. A
 Low and medium are only for turns that need no judgment: low for chit-chat, thanks, or a direct answer needing no inspection; medium for one fully specified, low-risk step the user spelled out (run this command, rename this). Ordinary coding that asks the agent to decide, explain why, review, verify, debug with a known direction, delegate, or change more than one thing is high.
 Go above high when the outcome hinges on judgment rather than labor. xhigh: debugging whose cause is unknown, changes across interacting modules, or planning a feature. max: decisions that shape the product or system (architecture, an important plan or strategy, a design meant to last), work where a wrong call risks security, money, or data loss, and problems that earlier attempts in this conversation failed to solve. Not every plan is max; a small or routine plan is high or xhigh.
 When the user says the previous attempt failed, is wrong, or still does not work, choose at least one level above the running effort. Other corrections and steering keep at least the running effort. Consider the current model's strength.
-Return only JSON {"effort":"low|medium|high|xhigh|max","sure":0.0,"why":"short reason"}. Confidence is between zero and one. The reason uses the user's language and at most six words.`
+Also report "asked": the reasoning effort the user's latest message explicitly instructs, else "none". Level names: low (낮음), medium (중간), high (높음), xhigh (매우 높음, extra high), max (최대). "auto" means the user hands effort control back to automatic. Only a direct instruction about the effort, reasoning or thinking level counts (for example "set effort to xhigh", "추론 강도 매우 높음으로"). A question about the current level, a complaint about it, a level word in another sense, or "think hard" with no level is "none". If a message complains and then instructs, follow the instruction.
+Return only JSON {"effort":"low|medium|high|xhigh|max","asked":"none|low|medium|high|xhigh|max|auto","sure":0.0,"why":"short reason"}. Confidence is between zero and one. The reason uses the user's language and at most six words.`
+
+const ASKED_VALUES: readonly Asked[] = [...EFFORTS, 'auto']
+
+/** "none" and anything unknown mean nothing was asked. */
+function askedAnswer(value: unknown): Asked | undefined {
+  return ASKED_VALUES.includes(value as Asked) ? value as Asked : undefined
+}
+
+const LEVEL_PATTERNS: readonly [Effort, string][] = [
+  ['xhigh', '매우\\s*높음|아주\\s*높음|엑스트라\\s*하이|x-?high|extra[\\s-]*high'],
+  ['max', '최대|맥스|max(?:imum)?'],
+  // Not the tail of "매우 높음" or "extra high", which are xhigh.
+  ['high', '(?<!매우\\s*)(?<!아주\\s*)높음|(?<!x-?)(?<!extra[\\s-]*)high'],
+  ['medium', '중간|medium'],
+  ['low', '낮음|low'],
+]
+const EFFORT_WORD = '(?:추론|생각|사고)\\s*(?:강도|수준|레벨|량)?|강도|effort|reasoning|thinking'
+const ALL_LEVELS = LEVEL_PATTERNS.map(([, source]) => source).join('|')
+
+/** A message may carry an effort request only if it names an effort or a level; a cheap gate before any judge call. */
+export function mightAskEffort(text: string): boolean {
+  return new RegExp(`${EFFORT_WORD}|${ALL_LEVELS}|자동|\\bauto(?:matic)?\\b`, 'i').test(text)
+}
+
+/**
+ * Safety net for phrasings that cannot mean anything else; the judge is the primary reader.
+ * A level counts only as an instruction (`매우 높음으로`, `effort xhigh`), never as the thing a
+ * question or complaint is about (`왜 중간으로 갔지`). The last instruction in the message wins.
+ */
+export function explicitEffortRequest(text: string): Asked | undefined {
+  const body = text.trim()
+  if (!body) return undefined
+  if (/^x-?high[\s.!]*$/i.test(body)) return 'xhigh'
+  const named = new RegExp(EFFORT_WORD, 'i').test(body)
+  const hits: { at: number; level: Asked }[] = []
+  for (const [level, source] of LEVEL_PATTERNS) {
+    // Korean: "<level>으로/로" as a command; "으로 갔/됐/나왔" describes what already happened.
+    const korean = new RegExp(`(?:${source})\\s*(?:으로|로)(?!\\s*(?:갔|가|됐|되었|나왔|나와|왔|잡혔|떨어졌|올라갔))`, 'gi')
+    for (const match of body.matchAll(korean)) {
+      // A bare "최대로" is as likely "as much as possible" as an effort, so only the judge reads it.
+      if (named || (body.length <= 12 && level !== 'max')) hits.push({ at: match.index ?? 0, level })
+    }
+    if (named) {
+      const english = new RegExp(`\\b(?:effort|reasoning|thinking)(?:\\s+level)?\\s*(?:to|at|=|:|→)?\\s*(?:${source})\\b|\\b(?:${source})\\s+(?:effort|reasoning|thinking)\\b`, 'gi')
+      for (const match of body.matchAll(english)) hits.push({ at: match.index ?? 0, level })
+    }
+  }
+  if (named && (/자동\s*(?:으로|모드)|자동\s*(?:해|돌려|복귀|되돌|설정|맞춰)|\b(?:back to|return to|switch to|set to|go) auto(?:matic)?\b|\b(?:effort|reasoning|thinking)\s*(?:to|=|:)?\s*auto(?:matic)?\b/i.test(body))) {
+    const at = body.search(/자동|auto/i)
+    hits.push({ at, level: 'auto' })
+  }
+  hits.sort((a, b) => a.at - b.at)
+  return hits.at(-1)?.level
+}
 
 /** A terse continuation usually carries no new scope; answers to questions are handled separately. */
 export function isShortFollowUp(text: string): boolean {
@@ -37,8 +92,11 @@ export function shouldJudge(input: {
 }): boolean {
   if (!input.auto || !['composer', 'bridge', 'sdk'].includes(input.origin) || (!input.text.trim() && !input.attachments?.length) || input.hostCommand) return false
   if (input.modelId !== undefined && !isCacheSafeModel(input.modelId)) return false
+  const effortWords = mightAskEffort(input.text)
+  // A level the user asked for holds until they say otherwise: only a message that names an effort can say so.
+  if (input.current?.asked && !effortWords) return false
   const followup = input.current && input.current.by !== 'manual' && !input.text.trim().startsWith('/') &&
-    !input.attachments?.length && isShortFollowUp(input.text) && !looksLikeRetry(input.text) && !looksLikeQuestion(input.assistantTail ?? '')
+    !input.attachments?.length && isShortFollowUp(input.text) && !looksLikeRetry(input.text) && !looksLikeQuestion(input.assistantTail ?? '') && !effortWords
   return !followup
 }
 
@@ -84,7 +142,8 @@ export function parseEffortVerdict(text: string): Verdict | undefined {
   const level = effort(value?.effort)
   if (!level) return undefined
   const sure = confidence(value?.sure)
-  return { effort: level, ...(sure !== undefined ? { sure } : {}), why: typeof value?.why === 'string' ? value.why.slice(0, 60) : '' }
+  const request = askedAnswer(value?.asked)
+  return { effort: level, ...(sure !== undefined ? { sure } : {}), why: typeof value?.why === 'string' ? value.why.slice(0, 60) : '', ...(request ? { asked: request } : {}) }
 }
 
 /** Shared boundary decoder keeps effort and worker fields on the same object. */
@@ -126,12 +185,24 @@ const effortCriteria = {
   xhigh: 'Debugging with an unknown cause, changes across interacting modules, or planning a feature.',
   max: 'Product or architecture decisions, important plans or strategy, security or data-loss risk, or a problem earlier attempts failed to solve.',
 }
+const askedCriteria = {
+  none: 'No explicit instruction about the effort level: ordinary work, a question about the level, a complaint about it, or a level word used in another sense.',
+  low: 'The user instructs low effort (낮음).',
+  medium: 'The user instructs medium effort (중간).',
+  high: 'The user instructs high effort (높음).',
+  xhigh: 'The user instructs extra high effort (매우 높음, xhigh).',
+  max: 'The user instructs maximum effort (최대, max).',
+  auto: 'The user hands effort control back to automatic.',
+}
 function jevBody(input: JudgeInput, task: string) {
   return {
     model: 'jev-latest' as const,
     state: { task, current_model: input.current?.model ?? null, current_effort: input.current?.effort ?? null,
       recent_conversation: recent(input), next_message: nextText(input, 4000) },
-    questions: { effort: { type: 'choice' as const, instructions: 'Select the effort needed for this work.', criteria: { ...effortCriteria } } },
+    questions: {
+      effort: { type: 'choice' as const, instructions: 'Select the effort needed for this work.', criteria: { ...effortCriteria } },
+      asked: { type: 'choice' as const, instructions: 'Select the reasoning effort the next message explicitly instructs, if any.', criteria: { ...askedCriteria } },
+    },
   }
 }
 
@@ -156,8 +227,19 @@ export function parseJevEffort(json: unknown, current?: { effort: Effort } | nul
   const sure = answerSure(answer)
   const odds = record(answer.probabilities)
   const plausible = current && (!odds || (confidence(odds[current.effort]) ?? 0) >= 0.25)
-  if (sure !== undefined && sure < 0.5 && current && current.effort !== level && plausible) return { effort: current.effort, sure, why: t(lang, 'judge.keptUnsure') }
-  return { effort: level, ...(sure !== undefined ? { sure } : {}), why: '' }
+  const request = jevAsked(json)
+  const extra = request ? { asked: request } : {}
+  if (sure !== undefined && sure < 0.5 && current && current.effort !== level && plausible) return { effort: current.effort, sure, why: t(lang, 'judge.keptUnsure'), ...extra }
+  return { effort: level, ...(sure !== undefined ? { sure } : {}), why: '', ...extra }
+}
+
+/** An instruction in chat is trusted only when Jev is at least half sure; a coin flip is not an order. */
+function jevAsked(json: unknown): Asked | undefined {
+  const answer = record(answers(json)?.asked)
+  const value = askedAnswer(answer?.choice)
+  if (!answer || !value) return undefined
+  const sure = answerSure(answer)
+  return sure !== undefined && sure < 0.5 ? undefined : value
 }
 
 export function jevUsage(json: unknown): number {
@@ -196,11 +278,44 @@ export function capped(level: Effort, saving: boolean): Effort {
   return saving && EFFORTS.indexOf(level) > 1 ? 'medium' : level
 }
 
-/** Save is last, so even a high floor cannot defeat the subscription-saving cap. */
+/**
+ * Save is last, so even a high floor cannot defeat the subscription-saving cap. A level the user
+ * asked for in chat skips bias, floor and ceiling (it is the user's word, not a guess) but not save mode.
+ */
 export function finalEffort(verdict: Verdict, settings: Settings, saving: boolean, lang: Lang = 'en'): { effort: Effort; why: string } {
+  if (verdict.asked && verdict.asked !== 'auto') {
+    const result = capped(verdict.asked, saving)
+    return { effort: result, why: result !== verdict.asked ? t(lang, 'toasts.saveMode') : t(lang, 'toasts.effortAsked') }
+  }
   const adjusted = bounded(tipped(verdict.effort, verdict.sure, settings.bias), settings.floor, settings.ceiling)
   const result = capped(adjusted, saving)
   return { effort: result, why: result !== adjusted ? t(lang, 'toasts.saveMode') : adjusted !== verdict.effort ? t(lang, 'toasts.yourSettings') : verdict.why }
+}
+
+/**
+ * What a judged prompt does to the session's pick, or null to leave the pick as it is.
+ *  - the user asked a level: exactly that level (pick.asked remembers it for the following turns);
+ *  - the user asked for auto: the judge's own choice replaces the held level;
+ *  - nothing asked while a level is held: the held pick stays (no re-judging down);
+ *  - otherwise: the judge's verdict through bias, floor, ceiling and save mode.
+ * The judge is read first; the deterministic check covers a judge that said "none" or failed.
+ */
+export function choosePick(input: { verdict?: Verdict; text: string; current?: Pick | null; settings: Settings; saving: boolean; lang?: Lang; by: Pick['by']; at: number }): Pick | null {
+  const lang = input.lang ?? 'en'
+  const request = input.verdict?.asked ?? explicitEffortRequest(input.text)
+  const held = input.current?.asked
+  if (request && request !== 'auto') {
+    const { effort, why } = finalEffort({ effort: request, why: '', asked: request }, input.settings, input.saving, lang)
+    return { effort, why, asked: request, by: input.by, at: input.at }
+  }
+  if (!request && held) return null
+  if (!input.verdict) {
+    // Asked for auto but the judge failed: drop the hold and keep running at the level it gave.
+    return request === 'auto' && input.current ? { effort: input.current.effort, why: t(lang, 'toasts.effortAutoBack'), by: input.current.by, at: input.at } : null
+  }
+  const { asked: _dropped, ...verdict } = input.verdict
+  const final = finalEffort(verdict, input.settings, input.saving, lang)
+  return { ...verdict, ...final, why: request === 'auto' && !final.why ? t(lang, 'toasts.effortAutoBack') : final.why, by: input.by, at: input.at }
 }
 
 /**

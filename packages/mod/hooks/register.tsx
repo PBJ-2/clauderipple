@@ -7,7 +7,7 @@ import { MOD_SETTINGS_SCHEMA_VERSION, RUNG_EFFORT, applySettingsChanges, normali
 import { rungOf, workerLadderLine } from './ladder'
 import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
-import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, jevEffortRequest, jevFailure, jevUsage, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, shouldJudge } from './judge'
+import { EFFORT_JUDGE_SYSTEM, choosePick, isCacheSafeModel, jevEffortRequest, jevFailure, jevUsage, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, shouldJudge } from './judge'
 import { AUTO_DESCRIPTION, NATIVE_AGENTS, TIER_MARKERS, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderFallbackModels, ladderPick, liveProviders, markerDomain, modelReason, readMarker, routerModelOptions, resolveClaudeModel, pinnedAccountName, pinnedAccountNames, ruleReason, spawnModel, spawnTitle, titleName, takesOver, tierOf, userSaid, withoutReason, withoutRouting, workerRule, zenJev } from './workers'
 import { MARKER, agentFilePaths, agentModel, ancestorFolders, definedModel, delegationPin as parseDelegationPin, fixSpawn, humanText, pinInstruction, pinSaid } from './worker'
 import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom, modeKey, modeOver, quotaWindows, resetProvider, routingSettings } from './modes'
@@ -446,6 +446,11 @@ async function loadSettings($: EngineInterface): Promise<void> {
       carriedPick = true
       await update($, pick, () => ({ effort: level, why: typeof carried.why === 'string' ? carried.why : '', by: carried.by as Pick['by'], at: typeof carried.at === 'number' ? carried.at : 0 }))
     }
+    // This chat's own requested level survives a restart; the shared pick above never carries it to another chat.
+    try {
+      const asked = effortOf(object(await $.store.get(ASKED_PREFIX + await $.session.id())).level)
+      if (asked) await update($, pick, p => ({ why: '', by: 'jev' as const, at: 0, ...p, effort: asked, asked }))
+    } catch (error) { await report($, 'asked effort restore', error) }
   }
 }
 async function saveSettings($: EngineInterface, s: Settings, baseline?: Settings): Promise<boolean> {
@@ -465,7 +470,20 @@ async function saveSettings($: EngineInterface, s: Settings, baseline?: Settings
 async function installPick($: EngineInterface, value: Pick): Promise<void> {
   carriedPick = false
   await update($, pick, () => value)
-  await $.store.set('pick', value)
+  // The shared store carries the last pick into a brand-new chat as a starting effort; a level the
+  // user asked for belongs to this chat only, so it is kept under this chat's own key (askedKey).
+  const { asked, ...shared } = value
+  await $.store.set('pick', shared)
+  await rememberAsked($, asked)
+}
+const ASKED_PREFIX = 'askedEffort:'
+/** The level the user asked for in this chat, read back after a restart; any other pick clears it. */
+async function rememberAsked($: EngineInterface, level: Pick['asked']): Promise<void> {
+  try {
+    const key = ASKED_PREFIX + await $.session.id()
+    if (level && level !== 'auto') await $.store.set(key, { level })
+    else await $.store.delete(key)
+  } catch (error) { await report($, 'asked effort store', error) }
 }
 
 // The engine's pane list is authoritative: a reload can close panes without sending ui.close.
@@ -892,7 +910,7 @@ async function down($: EngineInterface, message: string, network = false): Promi
   await $.ui.toast(t(await read($, lang), 'toasts.judgeDown', { reason: message }))
 }
 
-type Judged = { verdict: Verdict | undefined; by: JudgeKind; ms: number; error?: string }
+type Judged = { verdict: Verdict | undefined; by: JudgeKind; ms: number; at: number; error?: string }
 function judgeFailure(answer: ModelCompleteResult): string | undefined {
   if (answer.isAnswered) return undefined
   return answer.reason === 'api-error' ? `${answer.reason}: ${answer.error} (${answer.status ?? 'no response'})` : answer.reason
@@ -972,14 +990,14 @@ async function judge($: EngineInterface, s: Settings, input: JudgeInput, testing
   await update($, stats, value => ({ ...value, judge: { ...value.judge, ms: value.judge.ms + ms } }))
   if (!testing) {
     // The log pane lists it: a Jev call never reaches the router, so nothing else would show it.
-    const run: JudgeRun = { at: started, for: 'prompt', asked: s.judge, by, ms, ...(verdict?.effort ? { effort: verdict.effort } : {}), ...(verdict?.sure !== undefined ? { sure: verdict.sure } : {}), ...(failure ? { error: failure } : {}) }
+    const run: JudgeRun = { at: started, for: 'prompt', asked: s.judge, by, ms, ...(verdict?.effort ? { effort: verdict.effort } : {}), ...(verdict?.sure !== undefined ? { sure: verdict.sure } : {}), ...(verdict?.asked ? { userAsked: verdict.asked } : {}), ...(failure ? { error: failure } : {}) }
     await update($, judgeRuns, value => [...value, run].slice(-40))
     // A network blip or timeout is said only when it happens twice running; Haiku covers the one prompt.
     jevBlips = blip ? jevBlips + 1 : 0
     if (failure && !(blip && jevBlips < 2)) await down($, failure, blip)
     else if (await read($, judgeDown)) await update($, judgeDown, () => null)
   }
-  return { verdict, by, ms, ...(failure ? { error: failure } : {}) }
+  return { verdict, by, ms, at: started, ...(failure ? { error: failure } : {}) }
 }
 async function testJudge($: EngineInterface): Promise<void> {
   const language = await read($, lang)
@@ -2226,7 +2244,9 @@ async function prepareStep($: EngineInterface, e: TurnStepInput): Promise<TurnSt
   if (!await read($, busy)) await update($, busy, () => true)
   if (!safe || !p || (!s.effortAuto && p.by !== 'manual')) return e
   const saving = s.effortAuto && (await read($, saveUntil) ?? 0) > await $.clock.now()
-  return { ...e, effort: saving && EFFORTS.indexOf(p.effort) > EFFORTS.indexOf('medium') ? 'medium' : p.effort }
+  // A requested level is applied as asked: a save-mode cap on it lifts when save mode ends.
+  const level = p.asked && p.asked !== 'auto' ? p.asked : p.effort
+  return { ...e, effort: saving && EFFORTS.indexOf(level) > EFFORTS.indexOf('medium') ? 'medium' : level }
 }
 
 async function agentsRenderFailure($: EngineInterface, e: RenderInput, error: unknown, context: { frame?: Frame; records?: readonly AgentRec[]; wasOpen?: boolean } = {}): Promise<RenderElement> {
@@ -2329,6 +2349,9 @@ export const register: Register = on => {
         await update($, heldPick, () => null)
         await update($, deciding, () => false)
         if (e.source === 'clear') {
+          // A fresh conversation starts without the level asked for in the old one.
+          const askedPick = await read($, pick)
+          if (askedPick?.asked) { const { asked: _released, ...rest } = askedPick; await update($, pick, () => rest); await rememberAsked($, undefined) }
           await update($, cache, () => null)
           await update($, context, () => null)
           await update($, lastRealReplyAt, () => null)
@@ -2482,12 +2505,19 @@ export const register: Register = on => {
         const c = await read($, context)
         const input: JudgeInput = { messages, next: e.text, attachments: e.attachments, current: { model, effort: current?.effort ?? effortOf(await read($, appEffort)) ?? 'medium' }, contextPercent: c?.percent, midTurn: !!e.turnId }
         const judged = await judge($, s, input)
-        if (sequence === judgeSequence && (await currentSettings($)).effortAuto && judged.verdict) {
-          const final = finalEffort(judged.verdict, s, (await read($, saveUntil) ?? 0) > await $.clock.now(), await read($, lang))
-          const value: Pick = { ...judged.verdict, ...final, by: judged.by, at: await $.clock.now() }
-          if (e.turnId && current && EFFORTS.indexOf(value.effort) < EFFORTS.indexOf(current.effort)) await update($, heldPick, () => value)
-          else { await update($, heldPick, () => null); await installPick($, value) }
-          await update($, stats, old => addPrompt(old, value.effort))
+        // A message that is itself an effort request must not be dropped because the judge failed: the deterministic check still reads it.
+        if (sequence === judgeSequence && (await currentSettings($)).effortAuto) {
+          const value = choosePick({ verdict: judged.verdict, text: e.text, current, settings: s, saving: (await read($, saveUntil) ?? 0) > await $.clock.now(), lang: await read($, lang), by: judged.by, at: await $.clock.now() })
+          // Both the judge's raw read and what was installed, so a wrong pick can be traced in the log pane.
+          await update($, judgeRuns, runs => runs.map(run => run.at === judged.at && run.for === 'prompt' ? { ...run, ...(value ? { final: value.effort } : {}), ...(!run.userAsked && value?.asked ? { userAsked: value.asked } : {}) } : run))
+          if (!value) {
+            // Nothing to change: a held request stays, or the judge failed. The prompt still runs at the current level.
+            if (current) await update($, stats, old => addPrompt(old, current.effort))
+          } else {
+            if (e.turnId && current && EFFORTS.indexOf(value.effort) < EFFORTS.indexOf(current.effort)) await update($, heldPick, () => value)
+            else { await update($, heldPick, () => null); await installPick($, value) }
+            await update($, stats, old => addPrompt(old, value.effort))
+          }
         }
       } else if (human && !hostCommand && s.effortAuto && current && isCacheSafeModel(model)) {
         await update($, stats, old => addPrompt(old, current.effort))

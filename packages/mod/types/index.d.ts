@@ -81,6 +81,10 @@ export type JudgeRun = {
   ms: number
   effort?: Effort
   sure?: number
+  /** What the judge read the message as asking for: a level, or `auto` to hand control back. Absent when nothing was asked. */
+  userAsked?: Asked
+  /** The effort finally installed after bias, floor, ceiling and save mode. */
+  final?: Effort
   /** Why the asked judge gave no verdict. */
   error?: string
 }
@@ -243,9 +247,12 @@ export type SettingsChange = { path: string[]; value?: unknown; remove?: boolean
 export type SettingsSync = { schemaVersion?: number; revision: number | null; pending: SettingsChange[]; migrationChecked: boolean; migration: Settings | null }
 
 /** A judge's answer for the main chat's next prompt. */
-export type Verdict = { effort: Effort; sure?: number; why: string }
+export type Verdict = { effort: Effort; sure?: number; why: string; asked?: Asked }
 
-/** The effort the main chat runs at now, and who set it. */
+/** An effort the user explicitly asked for in chat, or `auto` to return to the judge's choice. */
+export type Asked = Effort | 'auto'
+
+/** The effort the main chat runs at now, and who set it. A pick with `asked` was requested in chat and holds until the user says otherwise. */
 export type Pick = Verdict & { by: JudgeKind | 'manual' | 'followup'; at: number }
 
 /** A judge's answer for a delegated task; a judge that names no kind means do. */
