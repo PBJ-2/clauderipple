@@ -17,7 +17,7 @@ import { EventEmitter } from "node:events";
 import nacl from "tweetnacl";
 import { toB64u } from "../src/e2ee.ts";
 import { HOST_SILENT_MS, PING_MS, RELAY_CLOSE, STALE_MS } from "../src/protocol.ts";
-import { ROUTE_CHECK_MS, ROUTE_FIRST_MS, ROUTE_TIMEOUT_MS, RelayHost } from "../src/relay.ts";
+import { ROUTE_CHECK_MS, ROUTE_FIRST_MS, ROUTE_RETRY_CAP_MS, ROUTE_TIMEOUT_MS, RelayHost, routeRetryMs } from "../src/relay.ts";
 import type { WsLike } from "../src/relay.ts";
 import type { Peer } from "../src/server.ts";
 import { Room } from "../relay/room.ts";
@@ -372,6 +372,97 @@ test("the host walks the phone's path after each hello and every 5 minutes; a pr
   host.stop();
 });
 
+// Each walk of the route wakes the relay room: a probe socket, a connect frame, a data socket, their
+// closes. 2026-11-16 the free tier ran out again; an idle host walked it every 5 minutes, all day.
+test("an idle host walks the route once an hour, not every 5 minutes", () => {
+  const { net, makeHost } = setup();
+  const host = makeHost();
+  host.start();
+  net.clock.advance(ROUTE_FIRST_MS + 1000);
+  const probes = () => net.accepted.filter((s) => s.tags.includes("client")).length;
+  assert.equal(probes(), 1, "the walk after the hello still happens");
+  net.clock.advance(ROUTE_CHECK_MS - 10_000);
+  assert.equal(probes(), 1, "nothing for nearly an hour");
+  net.clock.advance(20_000);
+  assert.equal(probes(), 2, "one at the hour");
+  assert.ok(ROUTE_CHECK_MS >= 30 * 60_000);
+  host.stop();
+});
+
+test("a phone that was let through proves the route: the next walk waits a whole interval after it", () => {
+  const { net, makeHost, phoneReaches } = setup();
+  const host = makeHost();
+  host.start();
+  net.clock.advance(ROUTE_FIRST_MS + 1000);
+  const clients = () => net.accepted.filter((s) => s.tags.includes("client")).length;
+  net.clock.advance(ROUTE_CHECK_MS / 2);
+  assert.equal(phoneReaches().ok, true);
+  const afterPhone = clients();
+  net.clock.advance(ROUTE_CHECK_MS / 2 + 30_000); // the walk's turn came: the phone's visit counts
+  assert.equal(clients(), afterPhone, "no probe an hour after the hello, only half an hour after the phone");
+  net.clock.advance(ROUTE_CHECK_MS / 2);
+  assert.equal(clients(), afterPhone + 1, "walked once the phone's proof is an interval old");
+  host.stop();
+});
+
+test("a broken route is still found without any phone: the walk runs at its interval and reconnects", () => {
+  const { net, makeHost, controls, phoneReaches } = setup();
+  const host = makeHost();
+  host.start();
+  net.clock.advance(ROUTE_FIRST_MS + 1000);
+  const deaf = controls[0]!;
+  const deliver = deaf.wire.client!.deliver;
+  deaf.wire.client!.deliver = (data) => { if (typeof data === "string" && data.includes(`"connect"`)) return; deliver(data); };
+  net.clock.advance(ROUTE_CHECK_MS + ROUTE_TIMEOUT_MS + 10_000);
+  assert.ok(controls.length >= 2);
+  assert.equal(phoneReaches().ok, true);
+  host.stop();
+});
+
+test("a process that did not run for a while (sleep) walks the route again soon; a short stall and dark wakes do not", () => {
+  const { net, makeHost, controls } = setup();
+  const host = makeHost();
+  host.start();
+  net.clock.advance(ROUTE_FIRST_MS + 1000);
+  const probes = () => net.accepted.filter((s) => s.tags.includes("client")).length;
+  assert.equal(probes(), 1);
+  // 40 s with no timer: proven 40 s ago, so nothing to walk.
+  net.clock.freeze(40_000);
+  net.clock.advance(PING_MS);
+  assert.equal(probes(), 1, "a short stall is not a reason");
+  // A long sleep on a socket that survived it: the path may have changed.
+  net.clock.advance(1000);
+  net.clock.freeze(20 * 60_000);
+  net.clock.advance(PING_MS + ROUTE_FIRST_MS + 1000);
+  assert.equal(controls.length, 1, "the socket was never reconnected");
+  assert.equal(probes(), 2, "walked after waking");
+  // A dark wake right after: proven a moment ago.
+  net.clock.freeze(60_000);
+  net.clock.advance(PING_MS + ROUTE_FIRST_MS + 1000);
+  assert.equal(probes(), 2, "dark wakes do not walk it again within ROUTE_STALL_GAP_MS");
+  host.stop();
+});
+
+test("recheckRoute on demand walks now, once at a time, and only on an open control socket", () => {
+  const { net, makeHost } = setup();
+  const host = makeHost();
+  assert.equal(host.recheckRoute(), false, "not connected yet");
+  host.start();
+  net.clock.advance(ROUTE_FIRST_MS + 1000);
+  const probes = () => net.accepted.filter((s) => s.tags.includes("client")).length;
+  assert.equal(host.recheckRoute(false), false, "proven moments ago: nothing to do unless forced");
+  assert.equal(host.recheckRoute(), true);
+  assert.equal(host.recheckRoute(), true, "a walk that has not started yet is just moved");
+  net.clock.advance(ROUTE_FIRST_MS + 1000);
+  assert.equal(probes(), 2);
+  host.stop();
+});
+
+test("route failures: the first retries are as quick as before, then they back off to minutes", () => {
+  assert.deepEqual([1, 2, 3, 4, 5, 6].map(routeRetryMs), [5_000, 10_000, 15_000, 20_000, 25_000, 30_000], "unchanged where a user may be waiting");
+  assert.deepEqual([7, 8, 9, 10, 40].map(routeRetryMs), [60_000, 120_000, 240_000, ROUTE_RETRY_CAP_MS, ROUTE_RETRY_CAP_MS]);
+});
+
 test("route check: when the relay stops letting phones through, the host reconnects and they reach it again", () => {
   const { net, makeHost, controls, phoneReaches, logs } = setup();
   const host = makeHost();
@@ -433,4 +524,21 @@ test("replaced by another host with the same id: back off fully instead of tradi
   assert.equal(controls.length, count, "a waits rather than replacing b at once");
   a.stop();
   b.stop();
+});
+
+test("the host that was replaced comes back within 30 s once the other one stops", () => {
+  const { net, makeHost, logs } = setup();
+  const a = makeHost();
+  a.start();
+  net.clock.advance(1000);
+  const b = makeHost();
+  b.start();
+  net.clock.advance(10 * 60_000);
+  b.stop();
+  const before = logs.length;
+  net.clock.advance(31_000);
+  const waits = logs.map((l) => /retrying in (\d+) s/.exec(l)?.[1]).filter((w): w is string => w !== undefined).map(Number);
+  assert.ok(waits.every((w) => w <= 30), "a replaced host never waits longer than 30 s");
+  assert.ok(logs.length >= before);
+  a.stop();
 });

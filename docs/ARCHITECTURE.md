@@ -3187,6 +3187,32 @@ carries the `fired` frame above); a process that starts with work already
 running sends `watch` and moves it. A host that is idle and sleeps leaves no alarm at all. A
 restart longer than 3 min does fire (the host really was gone for that long).
 
+**Wake-ups (2026-11-17; the free tier's 13,000 GB-s/day ran out again on 11-16).** Each wake keeps the
+Durable Object resident ~10 s, so what matters is how many separate wakes a day, not frames. Cuts, each
+negotiated so every old/new mix of relay, host and phone keeps today's behavior:
+- *Ping-judged watch.* The relay's `hello` carries `watchPing:true`; a host that sees it sends `watch`
+  with `ping:true` and renews only on a device change or every `WATCH_RENEW_SLOW_MS` (30 min). The room
+  then judges that watch by the newest control socket's pings (stamped by the runtime without waking the
+  object): the alarm looks, finds a ping younger than `WATCH_SILENT_MS` (150 s) and re-arms at
+  `lastPing + 150 s`; once the host is silent that long it fires — so the alert lands 140–150 s after the
+  host vanishes, inside the old rule's 120–180 s, and an outage under ~140 s never alerts, as before. A
+  closed control socket counts the silence from the close (`hostLeft`), so a restart is not alerted. A
+  `watch` without `ping` (older host) and any relay without `watchPing` (the host then renews every 60 s
+  without the flag) behave exactly as before. A hung host loop stops both pings and renewals alike.
+- *Route check.* A walk of the phone's path costs a probe socket, a connect frame, a data socket and
+  their closes. Every 5 min, 24/7 (~370 GB-s/day per host) is now once an hour (`ROUTE_CHECK_MS`), a real
+  phone's handshake counts as the proof, a stalled process (sleep) walks it again at most every 15 min,
+  and `recheckRoute()` walks on demand. It guards against a relay routing to a socket that never reads
+  (§5, 2026-10-15); the relay itself now routes only to the newest socket that pinged, and a socket that
+  broke the route had to reconnect first, which walks it after the hello.
+- *Loops.* A failing route check retries 5…30 s as before for six rounds, then doubles to 5 min; a host
+  replaced by another with its server id keeps its 30 s wait (when the other stops, nothing the phone
+  does can shorten that host's timer).
+- *Phone.* A link waiting to retry while the app/page is hidden (`Link.background()`) waits
+  `HIDDEN_RETRY_MS` (10 min); foreground, a network change and the retry button still reconnect at
+  once. Presence rides the link's end-to-end beat (`Link.onBeat`) so the ping and presence frames leave in
+  the same moment and share one wake instead of two per minute.
+
 **Online notice: expired Claude login.** Two sources feed one host state: `Sessions.noteBridge`
 entering the existing `HostInfo.desktopProblem` state (a `BridgeAuthError`), and a host-run SDK turn
 refused because the CLI's own login is missing or expired (`isLoginRefusal`; the result error or a

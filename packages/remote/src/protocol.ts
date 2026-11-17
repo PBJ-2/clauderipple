@@ -44,6 +44,12 @@ export const SLOW_PING_MS = 60_000;
 export const SLOW_STALE_MS = 3 * SLOW_PING_MS;
 /** Reconnect backoff is min(BACKOFF_CAP_MS, attempt × 1 s) and never stops. */
 export const BACKOFF_CAP_MS = 30_000;
+/**
+ * While the app or page is hidden, a link that cannot reach its host retries this rarely: nobody
+ * is looking, and every attempt at an offline host wakes the relay room (accept, then close 4404).
+ * Coming to the front, a network change or the retry button still reconnect at once.
+ */
+export const HIDDEN_RETRY_MS = 10 * 60_000;
 /** A socket that opens but is not ready (relay hello, host ready) within this is abandoned. */
 export const READY_MS = 8_000;
 /** Largest frame the relay forwards: an encrypted FRAME_CAP frame (16-byte tag) with room to spare. */
@@ -62,7 +68,7 @@ export const RELAY_FRAME_CAP = FRAME_CAP + 1024;
  * itself (without waking the room). An older relay leaves it out, and a phone must not send one
  * then: that relay would forward it to the host, whose channel expects sealed bytes only.
  */
-export type RelayMsg = { relay: "hello" } | { relay: "fired"; firedAt: number } | { relay: "connect"; conn: string } | { relay: "open"; liveness?: true };
+export type RelayMsg = { relay: "hello"; watchPing?: true } | { relay: "fired"; firedAt: number } | { relay: "connect"; conn: string } | { relay: "open"; liveness?: true };
 
 /**
  * The host → relay control frames on the host's authenticated control socket, beside "ping".
@@ -71,7 +77,10 @@ export type RelayMsg = { relay: "hello" } | { relay: "fired"; firedAt: number } 
  * room's dead-man alarm moving; `unwatch` takes it away. See WATCH_* below.
  */
 export type HostControlMsg =
-  | { t: "watch"; tokens: { token: string; lang: "ko" | "en" }[]; host: string }
+  | { t: "watch"; tokens: { token: string; lang: "ko" | "en" }[]; host: string;
+      /** Only sent after the relay's hello said `watchPing`: the room may judge this host by its
+       * control-socket pings (WATCH_SILENT_MS) instead of by renewals, so renewals are sparse. */
+      ping?: true }
   | { t: "unwatch" }
   /** The host has sent the recovery notice for this outage; the room forgets `firedAt`. */
   | { t: "cleared"; firedAt: number };
@@ -87,6 +96,22 @@ export const WATCH_TICK_MS = 10_000;
 export const WATCH_RENEW_MS = 60_000;
 export const WATCH_IDLE_MS = 120_000;
 export const WATCH_ALARM_MS = 180_000;
+/**
+ * Ping-judged watch (the hello's `watchPing`, the watch's `ping`): the room alerts once the host's
+ * newest control socket has been silent this long, instead of 180 s after the last renewal. The
+ * host's pings are answered by the runtime without waking the room, and a ping every 10 s says
+ * more about the host than a renewal every 60 s did; the old rule fired 120-180 s after the host
+ * vanished, this one fires about 140-150 s after it (the alarm re-arms at lastPing + this, so it
+ * lands as soon as the silence is long enough, never earlier). Renewals then only carry token
+ * changes and a resync, WATCH_RENEW_SLOW_MS apart.
+ */
+export const WATCH_SILENT_MS = 150_000;
+export const WATCH_RENEW_SLOW_MS = 30 * 60_000;
+/**
+ * A re-armed alarm never comes sooner than this, whatever the ping age says (clock slack must not
+ * make the alarm spin).
+ */
+export const WATCH_REARM_MIN_MS = 5_000;
 /**
  * A sleeping laptop wakes in the dark for under a minute every few minutes (network upkeep, mail,
  * Power Nap) and sleeps again. A tick that comes this late means the computer was asleep; until it

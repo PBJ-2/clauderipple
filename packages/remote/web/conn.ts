@@ -10,7 +10,7 @@
 // advertises `capabilities.slowHeartbeat`, the end-to-end ping and presence run at SLOW_PING_MS
 // instead of PING_MS; between them only the relay's own plain "ping" goes out, which the runtime
 // answers without waking the object. The tests pin both cadences.
-import { BACKOFF_CAP_MS, PING_MS, READY_MS, SLOW_PING_MS, SLOW_STALE_MS, STALE_MS } from "../src/protocol.ts";
+import { BACKOFF_CAP_MS, HIDDEN_RETRY_MS, PING_MS, READY_MS, SLOW_PING_MS, SLOW_STALE_MS, STALE_MS } from "../src/protocol.ts";
 import type { ClientFeature, ClientMsg, HostInfo, HostMsg } from "../src/protocol.ts";
 import { FrameAssembler, isChunkFrame, isHostFrame } from "../src/chunks.ts";
 
@@ -75,6 +75,12 @@ export class Link {
   onStatus: (s: LinkStatus) => void = () => {};
   /** Called after the host accepted the token: re-attach sessions, flush the outbox. */
   onReady: () => void = () => {};
+  /**
+   * Called on every end-to-end beat of an open link (every SLOW_PING_MS against a slow host, else
+   * PING_MS), right after the check went out. Send periodic reports here, not on a timer of your
+   * own: frames sent in the same moment share one wake of the relay room.
+   */
+  onBeat: () => void = () => {};
 
   private deps: LinkDeps;
   private sock: SocketLike | null = null;
@@ -89,6 +95,8 @@ export class Link {
   private probeN: number | null = null;
   private pingN = 0;
   private stopped = false;
+  /** The app or page is out of sight (background()); retries wait HIDDEN_RETRY_MS. */
+  private hidden = false;
   /**
    * The host advertised `capabilities.slowHeartbeat`: it sizes its stale and visible windows for
    * SLOW_PING_MS, so this link may drop its end-to-end checks and presence to that cadence. Over
@@ -131,8 +139,22 @@ export class Link {
    * returned from another app (Discord, 2026-10-22). The count starts again from now.
    */
   foreground(): void {
+    this.hidden = false;
     if (this.status.downSince !== null) this.status = { ...this.status, downSince: this.deps.now() };
     this.nudge();
+  }
+
+  /**
+   * The app or page went out of sight. A link that is waiting to retry then waits HIDDEN_RETRY_MS
+   * instead of its short backoff (each attempt at an offline host wakes the relay room for
+   * nothing); an open link is left alone. `foreground()`, a network change (`nudge`) and the retry
+   * button still reconnect at once. A client that never calls this keeps the plain backoff.
+   */
+  background(): void {
+    this.hidden = true;
+    if (this.stopped || this.retryTimer === null) return;
+    this.clearAll();
+    this.schedule();
   }
 
   send(msg: ClientMsg): boolean {
@@ -288,7 +310,8 @@ export class Link {
 
   private schedule(): void {
     const epoch = this.epoch;
-    const wait = backoff(this.status.attempt);
+    // Out of sight, an unreachable host is asked rarely; coming back to the front asks at once.
+    const wait = this.hidden ? Math.max(backoff(this.status.attempt), HIDDEN_RETRY_MS) : backoff(this.status.attempt);
     const nextAt = this.deps.now() + wait;
     if (this.status.state !== "offline") {
       this.set({ state: "waiting", nextAt });
@@ -341,7 +364,11 @@ export class Link {
     const now = this.deps.now();
     if (now < this.nextPingAt) return;
     this.nextPingAt = now + this.cadence();
+    const epoch = this.epoch;
     this.check(now);
+    // Right behind the check, so whatever the app sends on the host's cadence (presence) reaches
+    // the relay in the same moment and the room wakes once for both.
+    if (this.epoch === epoch) this.onBeat();
   }
 
   /** The cadence the host's capability allows: its own stale/visible windows match it. */

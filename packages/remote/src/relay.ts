@@ -60,7 +60,7 @@ export interface RelayDeps {
   /** Called on every hello (undefined) and for the room's `fired` frame with the moment its
    * dead-man switch alerted the phone while this host was away (src/watch.ts sends the recovery
    * notice and clears it). */
-  onHello?: (firedAt: number | undefined) => void;
+  onHello?: (firedAt: number | undefined, relay?: { watchPing: boolean }) => void;
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (id: unknown) => void;
@@ -73,9 +73,26 @@ export function relayBackoff(attempt: number): number {
   return Math.min(BACKOFF_CAP_MS, Math.max(1, attempt) * 1000);
 }
 
-/** First walk of the phone's path after a hello, then every ROUTE_CHECK_MS while connected. */
+/**
+ * First walk of the phone's path after a hello, then every ROUTE_CHECK_MS while connected. Every
+ * walk wakes the relay room (a probe socket, a connect frame, a data socket, their closes), so the
+ * idle interval is long: the relay already routes only to the newest host socket that pinged
+ * recently, and a socket that broke the route had to reconnect first, which walks it again. A real
+ * phone that was let through proves the route as well as a probe, so the walk waits a whole
+ * interval after one. A process that did not run for a while (sleep) walks it again soon, unless
+ * it did within ROUTE_STALL_GAP_MS (dark wakes would otherwise walk it all night).
+ */
 export const ROUTE_FIRST_MS = 2_000;
-export const ROUTE_CHECK_MS = 5 * 60_000;
+export const ROUTE_CHECK_MS = 60 * 60_000;
+export const ROUTE_STALL_GAP_MS = 15 * 60_000;
+/** The retry after a failed walk grows from 5 s to this; the first ones stay quick, a relay that keeps failing is not hammered. */
+export const ROUTE_RETRY_CAP_MS = 5 * 60_000;
+
+/** Wait before reconnecting after the `n`th route check in a row failed: 5 s steps to 30 s, then doubling to ROUTE_RETRY_CAP_MS. */
+export function routeRetryMs(n: number): number {
+  if (n <= 6) return relayBackoff(5 * n);
+  return Math.min(ROUTE_RETRY_CAP_MS, BACKOFF_CAP_MS * 2 ** (n - 6));
+}
 /** A probe phone that is not let through ("open") within this has no route to this host. */
 export const ROUTE_TIMEOUT_MS = 10_000;
 /** A ping timer this late means the process did not run (sleep, or a blocked event loop). */
@@ -162,6 +179,8 @@ export class RelayHost {
   private probe: WsLike | null = null;
   /** A route check passed on the current control socket (said once per connection). */
   private routeConfirmed = false;
+  /** The last moment a route check passed or a real phone was let through (its handshake). */
+  private routeProvedAt = 0;
 
   constructor(deps: RelayDeps) {
     this.deps = deps;
@@ -240,8 +259,8 @@ export class RelayHost {
         this.downSince = null;
         this.armPing(sock);
         this.routeConfirmed = false;
-        this.armRouteCheck(sock, ROUTE_FIRST_MS);
-        this.deps.onHello?.(undefined);
+        this.armRouteCheck(sock, ROUTE_FIRST_MS, true);
+        this.deps.onHello?.(undefined, { watchPing: msg.watchPing === true });
       } else if (msg.relay === "fired" && typeof msg.firedAt === "number" && Number.isFinite(msg.firedAt)) {
         // The room alerted the phone while this host was away: send the recovery notice (src/watch.ts).
         this.deps.onHello?.(msg.firedAt);
@@ -259,7 +278,8 @@ export class RelayHost {
       if (code === RELAY_CLOSE.replaced) {
         // This process keeps one control socket, so a replacement came from somewhere else: another
         // ripple-host with the same server id and secret. Back off fully rather than trade the room
-        // back and forth with it every second.
+        // back and forth with it every second. Not longer than that: when the other host stops, this
+        // one is the only way back to the phone, and nothing the phone does can shorten this wait.
         this.log(`replaced by another connection with this server id (a second ripple-host sharing this host.json?); retrying in ${BACKOFF_CAP_MS / 1000} s`);
         this.fail(sock, BACKOFF_CAP_MS);
         return;
@@ -296,6 +316,9 @@ export class RelayHost {
         // proves nothing yet; ping, and judge a moment later.
         this.log(`timers ran ${Math.round(late / 1000)} s late (sleep or a blocked event loop); checking the connection`);
         graceUntil = now + STALL_GRACE_MS;
+        // The path may have changed while this process was away (a new network, a moved NAT): walk
+        // it soon, if it has not been walked or proven lately.
+        this.recheckRoute(false);
       } else if (now - this.lastRx > STALE_MS && now >= graceUntil) {
         // Half-open: no frame, not even a pong, for 30 s. Drop it ourselves rather than wait for TCP.
         this.log(`nothing from the relay for ${Math.round((now - this.lastRx) / 1000)} s; dropping the connection`);
@@ -311,9 +334,29 @@ export class RelayHost {
     this.timers.ping = this.setTimer(loop, PING_MS);
   }
 
-  private armRouteCheck(sock: WsLike, ms: number): void {
+  /**
+   * Walk the route now (on demand: something suggests phones may not get through). Without
+   * `force`, a route proven within ROUTE_STALL_GAP_MS stands and nothing is walked. False when
+   * there is no open control socket or a walk is already running.
+   */
+  recheckRoute(force = true): boolean {
+    const sock = this.sock;
+    if (!sock || this.state !== "open" || this.probe) return false;
+    if (!force && this.now() - this.routeProvedAt < ROUTE_STALL_GAP_MS) return false;
+    this.armRouteCheck(sock, ROUTE_FIRST_MS, true);
+    return true;
+  }
+
+  /** `walk`: check when the timer fires; otherwise only if no walk or phone has proven the route for ROUTE_CHECK_MS. */
+  private armRouteCheck(sock: WsLike, ms: number, walk = false): void {
     if (this.timers.route !== null) this.clearTimer(this.timers.route);
-    this.timers.route = this.setTimer(() => { this.timers.route = null; this.checkRoute(sock); }, ms);
+    this.timers.route = this.setTimer(() => {
+      this.timers.route = null;
+      if (this.sock !== sock || this.stopped) return;
+      const left = this.routeProvedAt + ROUTE_CHECK_MS - this.now();
+      if (!walk && left > 0) { this.armRouteCheck(sock, left); return; }
+      this.checkRoute(sock);
+    }, ms);
   }
 
   /**
@@ -343,6 +386,7 @@ export class RelayHost {
         else if (!this.routeConfirmed) this.log("route check: phones reach this host");
         this.routeConfirmed = true;
         this.routeFailures = 0;
+        this.routeProvedAt = this.now();
         this.armRouteCheck(sock, ROUTE_CHECK_MS);
         return;
       }
@@ -351,7 +395,7 @@ export class RelayHost {
       if (this.routeFailures === 1 || this.routeFailures % 10 === 0) this.log(`route check failed (${why}): a phone cannot reach this host through the relay; reconnecting (failure ${this.routeFailures})`);
       try { sock.terminate(); } catch { /* gone */ }
       // Growing waits: a route the relay keeps broken is retried, not hammered.
-      this.fail(sock, relayBackoff(5 * this.routeFailures));
+      this.fail(sock, routeRetryMs(this.routeFailures));
     };
     const timeout = this.setTimer(() => finish(false, `not let through within ${ROUTE_TIMEOUT_MS / 1000} s`), ROUTE_TIMEOUT_MS);
     probe.on("message", (data, isBinary) => {
@@ -385,6 +429,8 @@ export class RelayHost {
         const { text, channel } = hostAccept(this.deps.nacl, this.deps.hostKey, new TextDecoder().decode(bytes));
         ws.send(text);
         this.deps.onPeer(new SecurePeer(ws, channel));
+        // A real phone got through: that proves the route as well as a probe would.
+        this.routeProvedAt = this.now();
       } catch (e) {
         this.deps.log?.(`relay: phone handshake failed: ${(e as Error).message}`);
         try { ws.close(4400, "handshake"); } catch { /* gone */ }

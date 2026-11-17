@@ -5,7 +5,7 @@
 // Pure logic over a small context, so it runs the same inside the Durable Object (worker.ts, where
 // the context is the hibernation API: tags survive the object sleeping between frames) and in an
 // in-process test with fake sockets.
-import { EXPO_TOKEN_RE, HOST_SILENT_MS, RELAY_CLOSE, RELAY_FRAME_CAP, WATCH_ALARM_MS, WATCH_TOKENS_MAX, WATCH_TTL_S, outageBody } from "../src/protocol.ts";
+import { EXPO_TOKEN_RE, HOST_SILENT_MS, RELAY_CLOSE, RELAY_FRAME_CAP, WATCH_ALARM_MS, WATCH_REARM_MIN_MS, WATCH_SILENT_MS, WATCH_TOKENS_MAX, WATCH_TTL_S, outageBody } from "../src/protocol.ts";
 import type { HostControlMsg, RelayMsg } from "../src/protocol.ts";
 
 export interface Sock {
@@ -51,9 +51,16 @@ export interface WatchState {
   tokens: { token: string; lang: "ko" | "en" }[];
   host: string;
   firedAt?: number;
+  /** The host said (watch `ping`) that this room may judge it by its control-socket pings. */
+  byPing?: true;
 }
 
 const WATCH_KEY = "watch";
+/** At least this long after a host socket closes before the room alerts, so a restart can reconnect first. */
+const HOST_LEFT_GRACE_MS = 60_000;
+
+/** How long after a watch frame the alarm first looks; a ping-judged watch then follows the pings. */
+const alarmIn = (state: WatchState): number => state.byPing ? WATCH_SILENT_MS : WATCH_ALARM_MS;
 
 const say = (ws: Sock, msg: RelayMsg): void => { try { ws.send(JSON.stringify(msg)); } catch { /* closing */ } };
 const shut = (ws: Sock, code: number, reason: string): void => { try { ws.close(code, reason); } catch { /* already closed */ } };
@@ -93,7 +100,9 @@ export class Room<S extends Sock> {
     const at = Math.max(this.ctx.now(), ...old.map((o) => this.acceptedAt(o) + 1));
     this.ctx.accept(ws, ["host", `at:${at}`]);
     for (const o of old) shut(o, RELAY_CLOSE.replaced, "replaced");
-    say(ws, { relay: "hello" });
+    // `watchPing`: this room judges a ping-marked watch by the host's pings (see alarm). An older
+    // host ignores the field (it only reads `relay`) and keeps renewing every minute.
+    say(ws, { relay: "hello", watchPing: true });
     // A dead-man alert fired while this host was away: say so right after the hello (a separate
     // frame, so the hello keeps its shape for hosts that predate the switch). The host sends the
     // recovery notice and answers {"t":"cleared"}; the caller read this before accepting the socket.
@@ -190,7 +199,7 @@ export class Room<S extends Sock> {
     if (typeof data !== "string") return;
     let msg: Partial<HostControlMsg> & { tokens?: unknown; host?: unknown };
     try { msg = JSON.parse(data) as typeof msg; } catch { return; }
-    if (msg?.t === "watch") await this.watch(ws, msg.tokens, msg.host);
+    if (msg?.t === "watch") await this.watch(ws, msg.tokens, msg.host, (msg as { ping?: unknown }).ping === true);
     else if (msg?.t === "unwatch") await this.unwatch(ws);
     else if (msg?.t === "cleared" && typeof msg.firedAt === "number" && Number.isFinite(msg.firedAt)) await this.clearFired(msg.firedAt);
   }
@@ -200,7 +209,7 @@ export class Room<S extends Sock> {
    * WATCH_ALARM_MS. Invalid tokens are dropped, at most WATCH_TOKENS_MAX kept; with none left there
    * is nothing to tell, so the watch is taken away instead.
    */
-  private async watch(ws: S, rawTokens: unknown, rawHost: unknown): Promise<void> {
+  private async watch(ws: S, rawTokens: unknown, rawHost: unknown, byPing: boolean): Promise<void> {
     const tokens: WatchState["tokens"] = [];
     if (Array.isArray(rawTokens)) {
       for (const raw of rawTokens) {
@@ -216,14 +225,15 @@ export class Room<S extends Sock> {
     const current = await this.loadWatch();
     // An outage already reported stays reported until the host acknowledges it.
     const firedAt = current?.firedAt;
-    await this.ctx.put(WATCH_KEY, JSON.stringify({ tokens, host, ...(firedAt ? { firedAt } : {}) } satisfies WatchState));
+    const state: WatchState = { tokens, host, ...(firedAt ? { firedAt } : {}), ...(byPing ? { byPing: true as const } : {}) };
+    await this.ctx.put(WATCH_KEY, JSON.stringify(state));
     if (firedAt) {
       // This socket lived through the outage (the computer slept on the same WebSocket): the renewal
       // is the first it hears of it. Tell it now — the host sends the recovery notice once per
       // firedAt and answers `cleared` — and keep an alarm so renewals still count as liveness.
       say(ws, { relay: "fired", firedAt });
     }
-    await this.ctx.setAlarm(this.ctx.now() + WATCH_ALARM_MS);
+    await this.ctx.setAlarm(this.ctx.now() + alarmIn(state));
   }
 
   /**
@@ -244,11 +254,11 @@ export class Room<S extends Sock> {
   private async clearFired(firedAt: number): Promise<void> {
     const current = await this.loadWatch();
     if (!current?.firedAt || current.firedAt !== firedAt) return;
-    const next: WatchState = { tokens: current.tokens, host: current.host };
+    const next: WatchState = { tokens: current.tokens, host: current.host, ...(current.byPing ? { byPing: true as const } : {}) };
     await this.ctx.put(WATCH_KEY, JSON.stringify(next));
     // The host is back with a watch it did not drop: arm again here as well as on its next renewal.
     // (The clear and that renewal can arrive together; either message may run first.)
-    if (next.tokens.length) await this.ctx.setAlarm(this.ctx.now() + WATCH_ALARM_MS);
+    if (next.tokens.length) await this.ctx.setAlarm(this.ctx.now() + alarmIn(next));
   }
 
   /**
@@ -259,6 +269,16 @@ export class Room<S extends Sock> {
   async alarm(): Promise<void> {
     const current = await this.loadWatch();
     if (!current || current.firedAt || !current.tokens.length) return;
+    if (current.byPing) {
+      // The host's pings are the evidence (the runtime stamps each without waking this object): a
+      // newest control socket that pinged within WATCH_SILENT_MS is a host that is there. Look
+      // again exactly when that silence would be long enough, never sooner than a few seconds.
+      const until = this.silentAt();
+      if (until !== null && until > this.ctx.now()) {
+        await this.ctx.setAlarm(Math.max(until, this.ctx.now() + WATCH_REARM_MIN_MS));
+        return;
+      }
+    }
     const firedAt = this.ctx.now();
     await this.ctx.put(WATCH_KEY, JSON.stringify({ ...current, firedAt } satisfies WatchState));
     const messages: OutagePush[] = current.tokens.map((t) => ({
@@ -278,8 +298,48 @@ export class Room<S extends Sock> {
     try { return JSON.parse(raw) as WatchState; } catch { return null; }
   }
 
+  /**
+   * When the newest host control socket will have been silent for WATCH_SILENT_MS, judged by the
+   * last time it was heard (accepted, or pinged: by the runtime, or by this object when awake).
+   * Null when the room has no host socket at all.
+   */
+  private silentAt(): number | null {
+    let newest: S | null = null;
+    let newestAt = -1;
+    for (const h of this.ctx.sockets("host")) {
+      const at = this.acceptedAt(h);
+      if (at > newestAt) { newest = h; newestAt = at; }
+    }
+    if (!newest) return null;
+    return this.heardAt(newest) + WATCH_SILENT_MS;
+  }
+
+  /** The last time this host socket was heard: accepted, or pinged (by the runtime, or by this object when awake). */
+  private heardAt(ws: S): number {
+    return Math.max(this.acceptedAt(ws), this.ctx.lastPing(ws) ?? 0, this.pinged.get(ws) ?? 0);
+  }
+
+  /**
+   * The host's newest control socket closed while a ping-judged watch is armed: the host left now,
+   * not when it last pinged, so the outage is counted from here (the alarm would otherwise come
+   * at an earlier moment, find no socket, and alert after a few seconds of a restart). A host
+   * that reconnects sends watch or unwatch at once, which moves or removes this alarm.
+   */
+  private async hostLeft(ws: S): Promise<void> {
+    const at = this.acceptedAt(ws);
+    if (this.ctx.sockets("host").some((h) => h !== ws && this.acceptedAt(h) > at)) return;
+    const current = await this.loadWatch();
+    if (!current?.byPing || current.firedAt || !current.tokens.length) return;
+    // A close noticed late (after a sleep or a lost network) does not restart the count: the alert
+    // stays within WATCH_ALARM_MS of the last ping, as with renewals. A restart's close comes right
+    // after a ping, so it still gets the full WATCH_SILENT_MS to reconnect and send its watch.
+    const heard = this.heardAt(ws);
+    const grace = Math.min(this.ctx.now() + HOST_LEFT_GRACE_MS, heard + WATCH_ALARM_MS);
+    await this.ctx.setAlarm(Math.max(heard + WATCH_SILENT_MS, grace));
+  }
+
   /** One side of a pair went away: the other has nothing to talk to, so it closes too and reconnects. */
-  closed(ws: S): void {
+  closed(ws: S): Promise<void> {
     const phone = this.connOf(ws, "c:");
     if (phone) for (const d of this.ctx.sockets(`d:${phone}`)) if (d !== ws) shut(d, 1000, "phone left");
     const host = this.connOf(ws, "d:");
@@ -287,6 +347,7 @@ export class Room<S extends Sock> {
     if (host && !this.ctx.sockets(`d:${host}`).some(d => d !== ws && this.acceptedAt(d) > this.acceptedAt(ws))) {
       for (const c of this.ctx.sockets(`c:${host}`)) shut(c, RELAY_CLOSE.peerGone, "host left");
     }
+    return this.ctx.tags(ws).includes("host") ? this.hostLeft(ws) : Promise.resolve();
   }
 
   /** 0 for a host socket accepted before sockets carried the tag (older than any tagged one). */

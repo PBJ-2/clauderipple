@@ -9,7 +9,7 @@
 // meets active work in each occurrence while this computer holds it. Both use ExpoNotifier's send
 // path and fixed copy from OUTAGE_COPY.
 import { readJson, writeFileAtomic } from "./fsutil.ts";
-import { WATCH_RENEW_MS, WATCH_SETTLE_MS, WATCH_TICK_MS, WATCH_TOKENS_MAX, WATCH_WAKE_GAP_MS, outageMinutes } from "./protocol.ts";
+import { WATCH_RENEW_MS, WATCH_RENEW_SLOW_MS, WATCH_SETTLE_MS, WATCH_TICK_MS, WATCH_TOKENS_MAX, WATCH_WAKE_GAP_MS, outageMinutes } from "./protocol.ts";
 import type { HostControlMsg } from "./protocol.ts";
 
 export interface WatchDeps {
@@ -51,6 +51,10 @@ export class RelayWatch {
   private wokeAt: number | null = null;
   /** An outage the room told us about while the computer had not settled: reported once it has. */
   private pendingFiredAt: number | null = null;
+  /** The relay of the current control socket judges a ping-marked watch by the host's pings (its hello said so). */
+  private pingWatch = false;
+  /** The devices the last `watch` carried, so a change goes out at once even on the slow renewal. */
+  private sentTokensKey = "";
 
   constructor(deps: WatchDeps) {
     this.deps = deps;
@@ -109,11 +113,20 @@ export class RelayWatch {
       if (this.sendWatch(now)) this.primed = true;
       return;
     }
-    if (this.lastWatchAt === null || now - this.lastWatchAt >= WATCH_RENEW_MS) this.sendWatch(now);
+    // Against a relay that judges by pings, a renewal only carries a change of devices and a
+    // resync; the room's own alarm follows the control socket's pings. An older relay keeps the
+    // minute: its alarm fires 180 s after the last renewal.
+    const every = this.pingWatch ? WATCH_RENEW_SLOW_MS : WATCH_RENEW_MS;
+    if (this.lastWatchAt === null || now - this.lastWatchAt >= every || (this.pingWatch && this.tokensKey() !== this.sentTokensKey)) this.sendWatch(now);
   }
 
-  /** The relay's hello (`undefined`) or its `fired` frame (`firedAt`): answer on this socket. */
-  hello(firedAt?: number): void {
+  /**
+   * The relay's hello (`undefined`) or its `fired` frame (`firedAt`): answer on this socket.
+   * `relay` is given with a hello only: what that relay says it understands (an older one says
+   * nothing, so it is judged by renewals as before).
+   */
+  hello(firedAt?: number, relay?: { watchPing: boolean }): void {
+    if (relay) this.pingWatch = relay.watchPing;
     const now = this.now();
     this.clock(now);
     const settled = this.settled(now);
@@ -166,6 +179,10 @@ export class RelayWatch {
     return this.wokeAt === null || now - this.wokeAt >= WATCH_SETTLE_MS;
   }
 
+  private tokensKey(): string {
+    return JSON.stringify(this.deps.targets().slice(0, WATCH_TOKENS_MAX));
+  }
+
   private sendWatch(now: number): boolean {
     const tokens = this.deps.targets().slice(0, WATCH_TOKENS_MAX);
     // No native device: nothing the relay could tell, so leave no watch behind. The interval still
@@ -174,10 +191,11 @@ export class RelayWatch {
       // The first frame of a process still clears a stale watch a previous process may have left.
       if (this.watching || !this.primed) this.sendUnwatch();
       this.lastWatchAt = now;
+      this.sentTokensKey = JSON.stringify(tokens);
       return true;
     }
-    const ok = this.deps.send({ t: "watch", tokens, host: this.deps.host });
-    if (ok) { this.lastWatchAt = now; this.watching = true; }
+    const ok = this.deps.send({ t: "watch", tokens, host: this.deps.host, ...(this.pingWatch ? { ping: true as const } : {}) });
+    if (ok) { this.lastWatchAt = now; this.watching = true; this.sentTokensKey = JSON.stringify(tokens); }
     return ok;
   }
 

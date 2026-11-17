@@ -4,7 +4,7 @@
 // says when it fired so the host can send the recovery notice.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { WATCH_ALARM_MS, WATCH_TTL_S, WATCH_TOKENS_MAX, WATCH_RENEW_MS, outageBody } from "../src/protocol.ts";
+import { WATCH_ALARM_MS, WATCH_RENEW_SLOW_MS, WATCH_SILENT_MS, WATCH_TTL_S, WATCH_TOKENS_MAX, WATCH_RENEW_MS, outageBody } from "../src/protocol.ts";
 import { Room } from "../relay/room.ts";
 import type { OutagePush, RoomCtx, Sock } from "../relay/room.ts";
 
@@ -26,6 +26,7 @@ function fakeRoom(start = 1_000_000) {
   const tags = new Map<FakeSock, string[]>();
   const store = new Map<string, string>();
   const posts: OutagePush[][] = [];
+  const pings = new Map<FakeSock, number>();
   let alarmAt: number | null = null;
   let now = start;
   let n = 0;
@@ -33,7 +34,7 @@ function fakeRoom(start = 1_000_000) {
     accept: (ws, t) => { tags.set(ws, t); },
     sockets: (tag) => [...tags].filter(([ws, t]) => !ws.closed && t.includes(tag)).map(([ws]) => ws),
     tags: (ws) => tags.get(ws) ?? [],
-    lastPing: () => null,
+    lastPing: (ws) => pings.get(ws) ?? null,
     now: () => now,
     get: async (k) => store.get(k),
     put: async (k, v) => { store.set(k, v); },
@@ -46,11 +47,14 @@ function fakeRoom(start = 1_000_000) {
   const room = new Room(ctx);
   return {
     room, store, posts,
+    /** The runtime's auto-response stamp: this socket's ping reached the relay just now. */
+    ping: (ws: FakeSock) => { pings.set(ws, now); },
+    at: () => now,
     alarm: () => alarmAt,
     advance: (ms: number) => { now += ms; },
     watchOf: () => {
       const raw = store.get("watch");
-      return raw === undefined ? null : JSON.parse(raw) as { tokens: { token: string; lang: string }[]; host: string; firedAt?: number };
+      return raw === undefined ? null : JSON.parse(raw) as { tokens: { token: string; lang: string }[]; host: string; firedAt?: number; byPing?: boolean };
     },
     newHost: () => {
       const ws = new FakeSock("host");
@@ -123,7 +127,7 @@ test("a host that reconnects after a fire is told firedAt; cleared forgets it; a
   assert.equal(told, firedAt);
   f.room.hostControl(second, told);
   assert.deepEqual(second.texts().map((t) => JSON.parse(t)), [
-    { relay: "hello" },
+    { relay: "hello", watchPing: true },
     { relay: "fired", firedAt },
   ]);
 
@@ -244,4 +248,181 @@ test("an unauthenticated phone socket cannot arm or clear a watch", async () => 
   assert.equal(f.alarm(), null);
   await f.room.message(phone, JSON.stringify({ t: "cleared", firedAt: 1 }));
   assert.equal(f.watchOf(), null);
+});
+
+// ---- ping-judged watch (the watch's `ping` flag, the hello's `watchPing`) ----------------------
+// Wake-ups: every renewal and every alarm wakes the Durable Object. A host that pings (answered by
+// the runtime without waking the room) is judged by its pings, so renewals are rare and the alarm
+// looks again exactly when the silence would be long enough.
+
+const pingWatchMsg = (tokens: { token: string; lang: "ko" | "en" }[], host = HOST_KEY) =>
+  JSON.stringify({ t: "watch", tokens, host, ping: true });
+
+test("a ping-marked watch: a host that keeps pinging is never alerted and needs no renewal; once it stops, the alert comes WATCH_SILENT_MS after its last ping", async () => {
+  const f = fakeRoom();
+  const host = f.newHost();
+  f.room.hostControl(host);
+  await f.room.message(host, pingWatchMsg([{ token: KO, lang: "ko" }]));
+  assert.equal(f.watchOf()?.byPing, true);
+  assert.equal(f.alarm(), f.at() + WATCH_SILENT_MS);
+  // 40 minutes with no renewal at all, only pings: every look finds the host and re-arms.
+  let looks = 0;
+  for (let i = 0; i < 40 * 60 / 10; i++) {
+    f.advance(10_000);
+    f.ping(host);
+    if (f.at() >= f.alarm()!) { await f.room.alarm(); looks++; }
+  }
+  assert.equal(f.posts.length, 0, "a pinging host is there");
+  assert.ok(looks >= 10 && looks <= 20, `about one look per ${WATCH_SILENT_MS / 1000} s, not one per minute (${looks})`);
+  // The computer sleeps: the last ping is the reference, and the look lands right at its silence.
+  const lastPing = f.at();
+  const look = f.alarm()!;
+  assert.ok(look - lastPing <= WATCH_SILENT_MS && look > lastPing);
+  f.advance(look - f.at());
+  await f.room.alarm();
+  assert.equal(f.posts.length, f.at() - lastPing >= WATCH_SILENT_MS ? 1 : 0);
+  if (f.posts.length === 0) {
+    f.advance(f.alarm()! - f.at());
+    await f.room.alarm();
+  }
+  assert.equal(f.posts.length, 1, "one alert for the outage");
+  assert.equal(f.at() - lastPing, WATCH_SILENT_MS, "exactly WATCH_SILENT_MS after the last ping: never earlier, and within the old rule's 120-180 s");
+});
+
+test("a ping-marked watch is not alerted by a look that finds less silence than WATCH_SILENT_MS, and the next look is lastPing + silence", async () => {
+  const f = fakeRoom();
+  const host = f.newHost();
+  f.room.hostControl(host);
+  await f.room.message(host, pingWatchMsg([{ token: KO, lang: "ko" }]));
+  const armed = f.alarm()!;
+  f.advance(armed - f.at() - 1_000);
+  f.ping(host); // the last sign of life, 1 s before the first look
+  f.advance(1_000);
+  await f.room.alarm();
+  assert.equal(f.posts.length, 0, "alive 1 s ago");
+  assert.equal(f.alarm(), armed - 1_000 + WATCH_SILENT_MS);
+  f.advance(f.alarm()! - f.at() - 1);
+  await f.room.alarm();
+  assert.equal(f.posts.length, 0, "a look 1 ms early finds a silence that is not long enough yet");
+  f.advance(1);
+  await f.room.alarm();
+  assert.equal(f.posts.length, 1);
+});
+
+test("an outage shorter than the silence never alerts: the host's pings are back before the look", async () => {
+  const f = fakeRoom();
+  const host = f.newHost();
+  f.room.hostControl(host);
+  await f.room.message(host, pingWatchMsg([{ token: KO, lang: "ko" }]));
+  f.advance(WATCH_SILENT_MS - 60_000);
+  f.ping(host);
+  f.advance(60_000 + 20_000); // 80 s without a ping when the look comes...
+  f.ping(host); // ...and it pings again at once
+  await f.room.alarm();
+  assert.equal(f.posts.length, 0);
+});
+
+test("a watch without the ping flag (an older host) keeps the strict rule: pings do not stand in for renewals", async () => {
+  const f = fakeRoom();
+  const host = f.newHost();
+  f.room.hostControl(host);
+  await f.room.message(host, watchMsg([{ token: KO, lang: "ko" }]));
+  assert.equal(f.watchOf()?.byPing, undefined);
+  assert.equal(f.alarm(), f.at() + WATCH_ALARM_MS);
+  f.advance(WATCH_ALARM_MS - 1_000);
+  f.ping(host);
+  f.advance(1_000);
+  await f.room.alarm();
+  assert.equal(f.posts.length, 1);
+});
+
+test("a ping-judged host whose socket closes is counted from the close; one that reconnects at once is not alerted", async () => {
+  const f = fakeRoom();
+  const first = f.newHost();
+  f.room.hostControl(first);
+  await f.room.message(first, pingWatchMsg([{ token: KO, lang: "ko" }]));
+  f.advance(100_000);
+  f.ping(first);
+  first.close(1001);
+  await f.room.closed(first);
+  assert.equal(f.alarm(), f.at() + WATCH_SILENT_MS, "silence is counted from the moment it left, not from an earlier look");
+  // A restart: the new socket's first frame moves the alarm.
+  f.advance(5_000);
+  const second = f.newHost();
+  f.room.hostControl(second);
+  await f.room.message(second, pingWatchMsg([{ token: KO, lang: "ko" }]));
+  f.advance(WATCH_SILENT_MS - 1_000);
+  f.ping(second);
+  f.advance(1_000);
+  await f.room.alarm();
+  assert.equal(f.posts.length, 0, "the host is back and pinging");
+
+  // One that never comes back is alerted WATCH_SILENT_MS after it was last heard, which a prompt close equals.
+  f.ping(second);
+  second.close(1001);
+  await f.room.closed(second);
+  const left = f.at();
+  f.advance(WATCH_SILENT_MS - 1);
+  assert.equal(f.alarm(), left + WATCH_SILENT_MS);
+  f.advance(1);
+  await f.room.alarm();
+  assert.equal(f.posts.length, 1);
+});
+
+test("a close noticed long after the host's last ping still alerts within WATCH_ALARM_MS of that ping", async () => {
+  const f = fakeRoom();
+  const host = f.newHost();
+  f.room.hostControl(host);
+  await f.room.message(host, pingWatchMsg([{ token: KO, lang: "ko" }]));
+  f.ping(host);
+  const last = f.at();
+  // The PC vanished; the runtime only reports the close 140 s later.
+  f.advance(140_000);
+  host.close(1006);
+  await f.room.closed(host);
+  assert.ok(f.alarm()! <= last + WATCH_ALARM_MS, `alarm at +${(f.alarm()! - last) / 1000} s, not counted again from the late close`);
+  f.advance(f.alarm()! - f.at());
+  await f.room.alarm();
+  assert.equal(f.posts.length, 1);
+});
+
+test("an older socket closing late does not move the alarm; with nothing watched a close arms nothing", async () => {
+  const f = fakeRoom();
+  const first = f.newHost();
+  f.room.hostControl(first);
+  await f.room.message(first, pingWatchMsg([{ token: KO, lang: "ko" }]));
+  const second = f.newHost();
+  f.room.hostControl(second);
+  await f.room.message(second, pingWatchMsg([{ token: KO, lang: "ko" }]));
+  const armed = f.alarm();
+  f.advance(30_000);
+  await f.room.closed(first);
+  assert.equal(f.alarm(), armed);
+  await f.room.message(second, JSON.stringify({ t: "unwatch" }));
+  assert.equal(f.alarm(), null);
+  second.close(1001);
+  await f.room.closed(second);
+  assert.equal(f.alarm(), null);
+});
+
+test("the mode follows the frame: cleared and renewals keep a ping-judged watch, a plain watch turns it back to the strict rule", async () => {
+  const f = fakeRoom();
+  const host = f.newHost();
+  f.room.hostControl(host);
+  await f.room.message(host, pingWatchMsg([{ token: KO, lang: "ko" }]));
+  f.advance(WATCH_SILENT_MS + 1_000);
+  await f.room.alarm();
+  const firedAt = f.watchOf()!.firedAt!;
+  await f.room.message(host, JSON.stringify({ t: "cleared", firedAt }));
+  assert.equal(f.watchOf()?.byPing, true);
+  assert.equal(f.alarm(), f.at() + WATCH_SILENT_MS);
+  // The relay was rolled back and a host that does not know the flag renewed.
+  await f.room.message(host, watchMsg([{ token: KO, lang: "ko" }]));
+  assert.equal(f.watchOf()?.byPing, undefined);
+  assert.equal(f.alarm(), f.at() + WATCH_ALARM_MS);
+});
+
+test("the numbers keep the old rule's promises", () => {
+  assert.ok(WATCH_SILENT_MS >= 120_000 && WATCH_SILENT_MS <= WATCH_ALARM_MS, "alerts within the old 120-180 s window after the host vanishes");
+  assert.ok(WATCH_RENEW_SLOW_MS >= WATCH_RENEW_MS * 10);
 });

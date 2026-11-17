@@ -132,7 +132,7 @@ test("room: phone → connect to host → data socket → open; frames forwarded
   const { room, track } = fakeRoom();
   const host = track(new FakeSock("host"));
   room.hostControl(host);
-  assert.deepEqual(host.texts(), [`{"relay":"hello"}`]);
+  assert.deepEqual(host.texts(), [`{"relay":"hello","watchPing":true}`]);
   const phone = track(new FakeSock("phone"));
   room.client(phone);
   const connect = JSON.parse(host.texts()[1]!) as { relay: string; conn: string };

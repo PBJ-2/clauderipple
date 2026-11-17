@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { DesktopProblemAlert, RelayWatch } from "../src/watch.ts";
 import type { WatchDeps } from "../src/watch.ts";
-import { WATCH_RENEW_MS, WATCH_SETTLE_MS, WATCH_TICK_MS, WATCH_TOKENS_MAX, outageBody, recoveredBody } from "../src/protocol.ts";
+import { WATCH_RENEW_MS, WATCH_RENEW_SLOW_MS, WATCH_SETTLE_MS, WATCH_TICK_MS, WATCH_TOKENS_MAX, outageBody, recoveredBody } from "../src/protocol.ts";
 import type { HostControlMsg } from "../src/protocol.ts";
 
 const TOKENS = [
@@ -252,6 +252,49 @@ test("a hello states the current state even when the host believes the room alre
   f.setActive(true);
   f.watch.hello();
   assert.deepEqual(f.sent.at(-1), f.sent[0], "the active hello renews the watch on the new socket");
+});
+
+test("against a relay that judges by pings, the watch carries the flag and renews rarely; a change of devices goes out at once", () => {
+  let targets = TOKENS;
+  const f = fakeWatch({ targets: () => targets });
+  f.watch.hello(undefined, { watchPing: true });
+  f.tick();
+  const watches = (): HostControlMsg[] => f.sent.filter((m) => m.t === "watch");
+  assert.deepEqual(watches().at(-1), { t: "watch", tokens: TOKENS, host: "host-key", ping: true });
+  const first = watches().length;
+  awake(f, WATCH_RENEW_SLOW_MS - WATCH_TICK_MS);
+  assert.equal(watches().length, first, "no renewal for half an hour: the room follows the host's pings");
+  targets = [TOKENS[0]!];
+  awake(f, WATCH_TICK_MS);
+  assert.equal(watches().length, first + 1, "a new device list is not held back for the slow renewal");
+  assert.deepEqual((watches().at(-1) as { tokens: unknown }).tokens, [TOKENS[0]]);
+  awake(f, WATCH_RENEW_SLOW_MS);
+  assert.equal(watches().length, first + 2, "and the slow renewal still resyncs");
+});
+
+test("an older relay (its hello says nothing) keeps the minute and sends no flag; so does a relay that lost the capability", () => {
+  const f = fakeWatch();
+  f.watch.hello(undefined, { watchPing: false });
+  f.tick();
+  assert.deepEqual(f.sent.at(-1), { t: "watch", tokens: TOKENS, host: "host-key" }, "no `ping` for a relay that never promised it");
+  awake(f, WATCH_RENEW_MS * 5);
+  assert.equal(f.sent.filter((m) => m.t === "watch").length, 1 + 5, "renewed every minute as before");
+  // The same host meets a relay that judges by pings on its next socket...
+  f.watch.hello(undefined, { watchPing: true });
+  assert.deepEqual(f.sent.at(-1), { t: "watch", tokens: TOKENS, host: "host-key", ping: true });
+  // ...and then an older deploy again: the minute and the plain frame come back with that socket.
+  f.watch.hello(undefined, { watchPing: false });
+  assert.deepEqual(f.sent.at(-1), { t: "watch", tokens: TOKENS, host: "host-key" });
+  const n = f.sent.length;
+  awake(f, WATCH_RENEW_MS);
+  assert.equal(f.sent.length, n + 1);
+});
+
+test("a `fired` frame does not change what the relay was understood to support", () => {
+  const f = fakeWatch();
+  f.watch.hello(undefined, { watchPing: true });
+  f.watch.hello(Date.now() - 120_000); // the relay's `fired` frame carries no capabilities
+  assert.equal((f.sent.filter((m) => m.t === "watch").at(-1) as { ping?: true }).ping, true);
 });
 
 test("the fixed Korean copy is the owner's, with whole minutes in the recovery line", () => {

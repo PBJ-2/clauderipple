@@ -8,7 +8,7 @@ import { dictionaries } from "../web/i18n.ts";
 import { markdown } from "../web/md.ts";
 import { pushAvailability } from "../web/pushstate.ts";
 import { mergeEvents, reduce } from "../web/timeline.ts";
-import { BACKOFF_CAP_MS, CHUNK_TIMEOUT_MS, PING_MS, SLOW_PING_MS, SLOW_STALE_MS, STALE_MS } from "../src/protocol.ts";
+import { BACKOFF_CAP_MS, CHUNK_TIMEOUT_MS, HIDDEN_RETRY_MS, PING_MS, SLOW_PING_MS, SLOW_STALE_MS, STALE_MS } from "../src/protocol.ts";
 import type { ClientFeature, EventBody, HostMsg, SessionEvent } from "../src/protocol.ts";
 
 test("quoted paragraphs, line breaks, lists and code keep their structure", () => {
@@ -840,4 +840,127 @@ test("the time spent in the background does not count as the computer's silence"
   sockets.at(-1)!.open();
   sockets.at(-1)!.recv(ready);
   assert.equal(link.status.downSince, null);
+});
+
+// ---- relay wake-ups (2026-11-16: the free tier ran out again) ------------------------------------
+// Every attempt at an offline host (accept, then close 4404) wakes the room, so a phone left
+// retrying every 30 s cost ~1,100 GB-s a day. Out of sight it now waits; in sight nothing changes.
+
+/** Fail attempts the way an offline host does: each new socket closes before it opens. Returns how many were made in `ms`. */
+function attemptsIn(h: ReturnType<typeof setup>, ms: number): number {
+  const before = h.sockets.length;
+  const end = h.clock.now + ms;
+  while (h.clock.now < end) {
+    const s = h.sockets.at(-1)!;
+    if (!s.closed && s.readyState === 0) s.close();
+    h.clock.advance(1000);
+  }
+  return h.sockets.length - before;
+}
+
+test("in sight, an unreachable host is still retried at the plain backoff, up to every 30 s (unchanged)", () => {
+  const h = setup();
+  h.link.start();
+  h.sockets[0]!.close();
+  assert.ok(attemptsIn(h, 10 * 60_000) >= 20, "about one attempt per 30 s once the backoff has grown");
+  assert.ok(h.link.status.nextAt === null || h.link.status.nextAt - h.clock.now <= BACKOFF_CAP_MS);
+});
+
+test("out of sight, an unreachable host is retried only every HIDDEN_RETRY_MS; a retry already counting down is pushed out too", () => {
+  const h = setup();
+  h.link.start();
+  h.sockets[0]!.close(); // attempt 1 failed: a 1 s retry is pending
+  h.clock.advance(1000);
+  h.sockets[1]!.close();
+  h.clock.advance(1_000); // a longer backoff is pending now
+  h.link.background();
+  assert.equal(h.link.status.state, "waiting");
+  assert.ok(h.link.status.nextAt! - h.clock.now >= HIDDEN_RETRY_MS - 1000, "the countdown now runs to the hidden wait");
+  const made = h.sockets.length;
+  h.clock.advance(HIDDEN_RETRY_MS - 5000);
+  assert.equal(h.sockets.length, made, "no attempt while hidden");
+  h.clock.advance(6000);
+  assert.equal(h.sockets.length, made + 1, "one attempt at the hidden interval");
+  h.sockets.at(-1)!.close();
+  assert.ok(h.link.status.nextAt! - h.clock.now >= HIDDEN_RETRY_MS - 1000, "and the next one is as far");
+  assert.ok(attemptsIn(h, 60 * 60_000) <= 7, "an hour hidden is a handful of attempts, not 120");
+});
+
+test("coming to the front, a network change and the retry button reconnect at once, and the short backoff is back", () => {
+  const h = setup();
+  h.link.start();
+  h.sockets[0]!.close();
+  h.link.background();
+  const made = h.sockets.length;
+  h.link.foreground();
+  assert.equal(h.sockets.length, made + 1, "foreground: immediate attempt");
+  h.sockets.at(-1)!.close(); // still offline: the next retry is the short one
+  assert.ok(h.link.status.nextAt! - h.clock.now <= BACKOFF_CAP_MS);
+  h.link.background();
+  const hiddenMade = h.sockets.length;
+  h.link.nudge(); // the network changed
+  assert.equal(h.sockets.length, hiddenMade + 1, "nudge reconnects even while hidden");
+  h.sockets.at(-1)!.open();
+  h.sockets.at(-1)!.recv(ready);
+  assert.equal(h.link.status.state, "open");
+  assert.equal(h.link.status.attempt, 0);
+});
+
+test("hidden while offline (no network): the retry waits, the network coming back does not", () => {
+  const online = { value: false };
+  const h = setup(online);
+  h.link.start();
+  h.link.background();
+  h.clock.advance(HIDDEN_RETRY_MS - 1000);
+  assert.equal(h.sockets.length, 0);
+  online.value = true;
+  h.link.nudge();
+  assert.equal(h.sockets.length, 1, "online event: at once");
+});
+
+test("a hidden but connected link is left alone; one that drops while hidden waits; a client that never calls background() keeps the plain backoff", () => {
+  const h = setup();
+  h.link.start();
+  h.sockets[0]!.open();
+  h.sockets[0]!.recv(ready);
+  h.link.background();
+  h.clock.advance(PING_MS);
+  assert.equal(h.link.status.state, "open", "background does not drop an open link");
+  h.sockets[0]!.close(); // the OS dropped it while hidden
+  assert.ok(h.link.status.nextAt! - h.clock.now >= HIDDEN_RETRY_MS - 1000);
+  h.link.foreground();
+  assert.equal(h.sockets.length, 2);
+
+  const plain = setup();
+  plain.link.start();
+  plain.sockets[0]!.close();
+  assert.ok(plain.link.status.nextAt! - plain.clock.now <= 1000, "never backgrounded: attempt × 1 s as ever");
+});
+
+test("onBeat comes right behind each end-to-end check: every SLOW_PING_MS for a slow host, every PING_MS otherwise", () => {
+  const slow = setup({ value: true }, undefined, true);
+  slow.link.start();
+  const s = slow.sockets[0] as RelayFakeSocket;
+  s.open();
+  s.recv({ ...ready, host: { ...ready.host, capabilities: { slowHeartbeat: true } } });
+  const pings = (sock: FakeSocket): number => sock.sent.filter((f) => (JSON.parse(f) as { t?: string }).t === "ping").length;
+  const beats: { at: number; pings: number }[] = [];
+  slow.link.onBeat = () => beats.push({ at: slow.clock.now, pings: pings(s) });
+  for (let i = 0; i < 12; i++) {
+    slow.clock.advance(PING_MS);
+    s.pong();
+    if (i % 6 === 5) s.recv({ t: "pong", n: pings(s) });
+  }
+  assert.equal(beats.length, 2, "two beats in two minutes, not twelve");
+  assert.equal(beats[1]!.at - beats[0]!.at, SLOW_PING_MS);
+  assert.deepEqual(beats.map((b) => b.pings), [1, 2], "the check is already on the wire when the beat runs: both leave in the same moment");
+
+  const fast = setup();
+  fast.link.start();
+  fast.sockets[0]!.open();
+  fast.sockets[0]!.recv(ready); // no slow capability: the old cadence
+  let n = 0;
+  fast.link.onBeat = () => { n++; };
+  for (let i = 0; i < 6; i++) { fast.clock.advance(PING_MS); fast.sockets[0]!.recv({ t: "pong", n: i }); }
+  assert.equal(n, 6);
 });

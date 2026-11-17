@@ -266,7 +266,7 @@ async function runHost(): Promise<void> {
       makeSocket: (url, headers) => new WebSocket(url, { headers, maxPayload: 2 * 1024 * 1024 }) as unknown as WsLike,
       onPeer: (peer) => host.connected(peer),
       // A fired dead-man alert is answered with the recovery notice and cleared (src/watch.ts).
-      onHello: (firedAt) => watch.hello(firedAt),
+      onHello: (firedAt, relay) => watch.hello(firedAt, relay),
     });
     relayHost.start();
     watch.start();

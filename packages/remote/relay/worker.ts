@@ -143,11 +143,12 @@ export class RelayRoom {
   }
 
   async webSocketMessage(ws: CfSocket, data: string | ArrayBuffer): Promise<void> { await this.room.message(ws, data); }
-  webSocketClose(ws: CfSocket, code: number): void {
-    this.room.closed(ws);
+  async webSocketClose(ws: CfSocket, code: number): Promise<void> {
+    const left = this.room.closed(ws);
     try { ws.close(code === 1005 || code === 1006 ? 1000 : code, "closed"); } catch { /* already closed */ }
+    await left;
   }
-  webSocketError(ws: CfSocket): void { this.room.closed(ws); }
+  async webSocketError(ws: CfSocket): Promise<void> { await this.room.closed(ws); }
   /** The dead-man alarm: the host has not renewed, so its phones are told (Room.alarm). */
   async alarm(): Promise<void> { await this.room.alarm(); }
 }
