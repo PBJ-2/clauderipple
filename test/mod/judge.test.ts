@@ -199,14 +199,17 @@ test('the deterministic check reads unambiguous requests only, and the last inst
   for (const [text, level] of [
     ['추론 강도 매우 높음으로 바꿔줘', 'xhigh'], ['추론강도 최대로', 'max'], ['생각 강도 높음으로 해줘', 'high'], ['추론 강도를 중간으로', 'medium'],
     ['추론 강도 낮음으로', 'low'], ['매우높음으로', 'xhigh'], ['높음으로 해줘', 'high'], ['xhigh', 'xhigh'], ['effort xhigh', 'xhigh'],
-    ['set the reasoning effort to extra high', 'xhigh'], ['use max effort please', 'max'], ['effort: high', 'high'],
+    ['set the reasoning effort to extra high', 'xhigh'], ['use max effort please', 'max'],
     ['추론 강도 자동으로 돌려줘', 'auto'], ['effort to auto', 'auto'],
   ] as const) assert.equal(explicitEffortRequest(text), level, text)
   // A question, a complaint, or a level word in another sense is not an instruction.
   for (const text of ['추론강도가 왜 중간으로갔지', '추론 강도가 지금 얼마야?', '우선순위 높음으로 표시된 이슈를 고쳐줘', '이 값이 높음이면 어떻게 돼?', 'the priority is high', 'a high level overview of max_tokens',
     '더 깊이 생각해 줘', 'think harder', '최대한 빨리 해줘', '최대로', 'high',
     'Why did you use max effort?', 'Why did you use max effort', 'Set effort to high in the config file', '추론 강도 높음으로 정렬', '높음으로 정렬해줘',
-    '설정 파일에서 effort를 high로 바꿔', 'sort by effort high', '코드에서 effort max로 해줘']) assert.equal(explicitEffortRequest(text), undefined, text)
+    '설정 파일에서 effort를 high로 바꿔', 'sort by effort high', '코드에서 effort max로 해줘',
+    // Ruled out or described, not asked for.
+    'Do not use max effort', "don't use max effort", '추론 강도 최대로 하지 마', '추론 강도 최대로 말고 높음 정도면 돼', 'The log says effort: max',
+    'the log says effort to high', 'effort: high']) assert.equal(explicitEffortRequest(text), undefined, text)
 })
 
 test('a judge that answered decides: "none" is not overridden by the text check, which only covers a judge without an answer', () => {

@@ -2027,7 +2027,7 @@ async function dashboard($: EngineInterface, working: boolean): Promise<Dashboar
   const w = await read($, warm)
   const pinned = await read($, delegationPin)
   // A save-mode cap on a requested level lifts when save mode ends; prepareStep then sends the asked level, so show it.
-  const lifted = p?.asked && p.asked !== 'auto' && !saving && p.asked !== p.effort ? p.asked : undefined
+  const lifted = p?.asked && p.asked !== 'auto' && !saving && s.effortAuto && p.by !== 'manual' && p.asked !== p.effort ? p.asked : undefined
   return {
     effort: { level: lifted ?? p?.effort ?? effortOf(await read($, appEffort)) ?? null,
       mode: await read($, deciding) ? 'deciding' : await read($, paused) ? 'paused' : p?.by === 'manual' ? 'manual' : s.effortAuto ? 'auto' : 'off',

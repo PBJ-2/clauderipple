@@ -41,6 +41,8 @@ export function mightAskEffort(text: string): boolean {
 
 /** A question about the level or a "why" is never an instruction; the sentence it sits in is skipped. */
 const QUESTION = /[?？]|왜|\bwhy\b|어째서|how come/i
+/** "Do not use max effort", "최대로 하지 마": a level named only to rule it out. */
+const NEGATION = /\b(?:not|don['’]?t|never|no longer|instead of|rather than)\b|말고|하지\s*마|않|대신/i
 /** A level word next to code, config or sorting is that thing's level, not the agent's effort. */
 const OTHER_USE = /\b(?:config|file|code|json|ya?ml|toml|settings?)\b|파일|코드|설정\s*값|정렬|\bsort/i
 const KOREAN_ORDER = '해|바꿔|바꾸|올려|내려|맞춰|맞추|설정|변경|지정|돌려|써|사용|부탁|고정|진행|하자|할게'
@@ -66,11 +68,12 @@ export function explicitEffortRequest(text: string): Asked | undefined {
   for (const sentence of body.split(/(?<=[?？.!。\n])\s*/)) {
     const start = body.indexOf(sentence, base)
     base = start + sentence.length
-    if (!sentence || QUESTION.test(sentence) || !new RegExp(EFFORT_WORD, 'i').test(sentence)) continue
+    if (!sentence || QUESTION.test(sentence) || NEGATION.test(sentence) || !new RegExp(EFFORT_WORD, 'i').test(sentence)) continue
     for (const [level, source] of LEVEL_PATTERNS) {
       const korean = new RegExp(`(?:${source})\\s*(?:으로|로)(?=[\\s.!,~]*$|\\s*(?:${KOREAN_ORDER}))`, 'gi')
       for (const match of sentence.matchAll(korean)) hits.push({ at: start + (match.index ?? 0), level })
-      const english = new RegExp(`\\b(?:effort|reasoning|thinking)(?:\\s+level)?\\s*(?:to|at|=|:|→)\\s*(?:${source})\\b|^\\s*(?:effort|reasoning|thinking)\\s+(?:${source})\\W*$|\\buse\\s+(?:${source})\\s+(?:effort|reasoning|thinking)\\b`, 'gi')
+      // English counts only as a command that opens the sentence; "the log says effort: max" describes.
+      const english = new RegExp(`^\\s*(?:please\\s+)?(?:set|switch|change|put|bump|raise|lower|turn)\\b[^.!?]*?\\b(?:effort|reasoning|thinking)(?:\\s+level)?\\s+(?:to|at)\\s+(?:${source})\\b|^\\s*(?:effort|reasoning|thinking)\\s+(?:${source})\\W*$|^\\s*(?:please\\s+)?use\\s+(?:${source})\\s+(?:effort|reasoning|thinking)\\b`, 'gi')
       for (const match of sentence.matchAll(english)) hits.push({ at: start + (match.index ?? 0), level })
     }
     if (/자동\s*(?:으로|모드)|자동\s*(?:해|돌려|복귀|되돌|설정|맞춰)|\b(?:back to|return to|switch to|set to|go) auto(?:matic)?\b|\b(?:effort|reasoning|thinking)\s*(?:to|=|:)?\s*auto(?:matic)?\b/i.test(sentence)) {
