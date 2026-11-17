@@ -3087,7 +3087,8 @@ async function probeProvider(name, provider, onComplete) {
     const body = provider.type === "anthropic"
       ? { type: "anthropic", auth: provider.auth, ...(provider.auth === "api-key" && provider.apiKey ? { apiKey: provider.apiKey } : {}) }
       : provider.type === "google"
-      ? { type: "google", auth: provider.auth, ...(provider.apiKey ? { apiKey: provider.apiKey } : {}), ...(provider.url ? { url: provider.url } : {}) }
+      // The name says whose catalogue to read: an Antigravity provider learns its models from its own.
+      ? { type: "google", auth: provider.auth, name, ...(provider.apiKey ? { apiKey: provider.apiKey } : {}), ...(provider.url ? { url: provider.url } : {}) }
       : provider.type === "grok"
       ? { type: "grok", ...Object.fromEntries(["home", "cli", "url", "clientVersion"].filter((key) => provider[key]).map((key) => [key, provider[key]])) }
       : {
@@ -4885,7 +4886,8 @@ function openGoogleProviderForm(options) {
     probeButton.disabled = true;
     result.textContent = t("providers.checking");
     try {
-      const body = auth.value === "antigravity" ? { type: "google", auth: "antigravity" } : { type: "google", auth: "api-key", apiKey: keyInput.value.trim() || (existing && existing.apiKey) };
+      // The provider being edited and its pinned host, so the list is its own catalogue's and not another Antigravity provider's.
+      const body = auth.value === "antigravity" ? { type: "google", auth: "antigravity", ...(options.name ? { name: options.name } : {}), ...(existing && existing.url ? { url: existing.url } : {}) } : { type: "google", auth: "api-key", apiKey: keyInput.value.trim() || (existing && existing.apiKey) };
       const response = await api("/api/providers/probe", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
       if (!formActive) return;
       const failed = response.auth === "bad-key" ? t("providers.probeBadKey") : response.auth === "missing" && auth.value === "antigravity" ? t("providers.googleSignInFirst") : t("providers.probeFailed");

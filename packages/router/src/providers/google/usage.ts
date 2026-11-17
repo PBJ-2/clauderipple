@@ -22,7 +22,7 @@
 // older `retrieveUserQuota` returns meaningless values and is deliberately not used.
 
 import type { GoogleCredential } from "./accounts.ts";
-import { GOOGLE_OAUTH, antigravityCliUserAgent, antigravityUserAgent, type FetchLike } from "./antigravity.ts";
+import { GOOGLE_OAUTH, antigravityCliUserAgent, antigravityUserAgent, type FetchLike, type LearnedCatalogue } from "./antigravity.ts";
 
 /** The five-hour and weekly window lengths in minutes, for the limits row's `window_minutes`. */
 const FIVE_HOURS = 5 * 60;
@@ -192,23 +192,36 @@ const ARGON_GROUP = { name: "gemini 4 argon", ids: { weekly: "gemini-argon-wtu-w
 
 /**
  * The quota group a model draws on, as a pool scope (pool.ts): `argon` for gemini-4-argon*,
- * `gemini` for other gemini-*, `3p` for claude-* and gpt-oss*, undefined otherwise.
- * A spent group rests only its own models.
+ * `hydrogen` for gemini-4-hydrogen* (a scope without a measured summary group),
+ * `gemini` for other gemini-*, `3p` for claude-* and gpt-oss*, undefined otherwise. A Gemini model
+ * that the provider's catalogue (`learned`) showed to be served to the CLI family alone has a scope
+ * of its own, named for its family (`LearnedCatalogue.cliScope`), with no summary group either. A
+ * base id and every wire id it resolves to share one scope, so a turn's scope does not depend on
+ * which of them it is asked by. A spent group rests only its own models.
  */
-export function antigravityQuotaScope(model: string): "argon" | "gemini" | "3p" | undefined {
+export function antigravityQuotaScope(model: string, learned?: LearnedCatalogue): string | undefined {
   const id = model.toLowerCase().replace(/@[^@]*$/, "");
   // The CLI quota summary reports a separate "Gemini 4 Argon" weekly bucket on Pro (measured
   // 2026-10-28). Keep Argon's cooldown isolated; missing summary evidence never proves shared
   // Gemini quota or an Ultra plan. Catalogue quotaInfo is not quota evidence.
   if (/^gemini-4-argon(?:-|$)/.test(id)) return "argon";
+  // Gemini 4 Hydrogen has a scope of its own and no summary group: the summary (measured
+  // 2026-11-13, both hosts, CLI UA, one Pro account) reports none for it, and which bucket it draws
+  // on is not measured. So a spent Hydrogen rests only Hydrogen, a spent Gemini group does not hide
+  // it, and the ordinary Gemini windows are never its positive-quota evidence (`groupFor` knows no
+  // group for this scope).
+  if (/^gemini-4-hydrogen(?:-|$)/.test(id)) return "hydrogen";
+  // The lists keep an id as Google wrote it, so they are asked by the id as given, not lowercased.
+  const own = learned?.cliScope(model.replace(/@[^@]*$/, ""));
+  if (own) return own;
   if (/^gemini-/.test(id)) return "gemini";
   if (/^claude-/.test(id) || /^gpt-oss(-|$)/.test(id)) return "3p";
   return undefined;
 }
 
 /** Match exactly one known group, without substituting general Gemini quota for absent Argon quota. */
-function groupFor(groups: readonly QuotaGroup[], model: string): { group: QuotaGroup; ids: Record<string, string> } | undefined {
-  const scope = antigravityQuotaScope(model);
+function groupFor(groups: readonly QuotaGroup[], model: string, learned?: LearnedCatalogue): { group: QuotaGroup; ids: Record<string, string> } | undefined {
+  const scope = antigravityQuotaScope(model, learned);
   const known = scope === "argon" ? ARGON_GROUP : scope === "gemini" ? GEMINI_GROUP : scope === "3p" ? THIRD_PARTY_GROUP : undefined;
   if (!known) return undefined;
   const found = groups.filter((g) => g.displayName.trim().toLowerCase() === known.name);
@@ -239,6 +252,8 @@ type UsageOptions = {
    * about the other's. Read fresh on each refresh; defaults to just `baseUrl`.
    */
   hosts?: () => readonly string[];
+  /** What the provider's catalogue showed about models outside the tables, for `hasRemainingQuota`'s scope. */
+  learned?: LearnedCatalogue;
   fetch?: FetchLike;
   now?: () => number;
   ttlMs?: number;
@@ -291,7 +306,7 @@ export class GoogleUsage {
    * this is positive evidence, not a guess, so "false"
    * means "unknown or spent", not "refused".
    */
-  hasRemainingQuota(credential: Pick<GoogleCredential, "ownerId" | "projectId">, model: string, host?: string): boolean {
+  hasRemainingQuota(credential: Pick<GoogleCredential, "ownerId" | "projectId">, model: string, host?: string, learned: LearnedCatalogue | undefined = this.opts.learned): boolean {
     const evidence = this.evidence.get(credential.ownerId);
     if (!evidence || evidence.projectId !== credential.projectId) return false;
     const target = evidence.hosts.get(host ?? this.opts.baseUrl ?? GOOGLE_OAUTH.dailyApi);
@@ -299,7 +314,7 @@ export class GoogleUsage {
     const now = (this.opts.now ?? Date.now)();
     const age = now - target.observedAt;
     if (!(age >= 0 && age < (this.opts.ttlMs ?? 5 * 60_000))) return false;
-    const match = groupFor(target.groups, model);
+    const match = groupFor(target.groups, model, learned);
     return !!match && groupHasQuota(match.group, match.ids, now);
   }
 

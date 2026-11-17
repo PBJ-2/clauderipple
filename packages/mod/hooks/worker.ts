@@ -26,7 +26,7 @@ const GENERIC = new Set(['flash', 'free', 'pro', 'mini', 'max', 'lite', 'preview
 const SPOKEN: Record<string, readonly string[]> = {
   gemini: ['제미나이', '제미니'], deepseek: ['딥시크'], minimax: ['미니맥스'], gpt: ['지피티'], sol: ['솔'], astra: ['아스트라'],
   luna: ['루나'], terra: ['테라'], opus: ['오푸스', '오퍼스'], sonnet: ['소넷'], haiku: ['하이쿠'], fable: ['페이블'], mythos: ['미토스'],
-  muse: ['뮤즈'], kimi: ['키미'], qwen: ['큐웬'], mimo: ['미모'], longcat: ['롱캣'], argon: ['아르곤'],
+  muse: ['뮤즈'], kimi: ['키미'], qwen: ['큐웬'], mimo: ['미모'], longcat: ['롱캣'], argon: ['아르곤'], hydrogen: ['하이드로젠'],
 }
 const PROVIDER_SPOKEN: Record<string, readonly string[]> = {
   opencode: ['오픈코드'], google: ['구글'], chatgpt: ['챗지피티'], antigravity: ['안티그래비티'], anthropic: ['앤트로픽'],

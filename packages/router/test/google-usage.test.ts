@@ -157,6 +157,7 @@ test("every configured host is read, one failing host keeps the other's numbers 
   ]);
   assert.equal(shown["acct-1"]?.length, 2, "the reachable host's groups are shown");
   assert.equal(usage.hasRemainingQuota({ ownerId: "acct-1", projectId: "proj" }, GEMINI, "https://daily.test"), true);
+  assert.equal(usage.hasRemainingQuota({ ownerId: "acct-1", projectId: "proj" }, "gemini-4-hydrogen", "https://daily.test"), false, "Gemini's windows are not evidence for Hydrogen, whose bucket is not measured");
   assert.equal(usage.hasRemainingQuota({ ownerId: "acct-1", projectId: "proj" }, GEMINI, "https://prod.test"), false, "a failed host proves nothing");
 });
 

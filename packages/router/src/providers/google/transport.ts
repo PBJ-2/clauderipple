@@ -12,7 +12,7 @@
 // live** — this environment has no Antigravity subscription. See docs/ARCHITECTURE.md §4d.
 
 import type { GeminiRequest } from "./translate.ts";
-import { antigravityRequestId, antigravitySessionId, antigravityUserAgentFor, GOOGLE_OAUTH, resolveAntigravityWireModel } from "./antigravity.ts";
+import { antigravityRequestId, antigravitySessionId, antigravityUserAgentFor, GOOGLE_OAUTH, resolveAntigravityWireModel, type LearnedCatalogue } from "./antigravity.ts";
 import { VERSION } from "../../version.ts";
 import { withDefaultUserAgent } from "../../presets.ts";
 
@@ -99,7 +99,7 @@ export function antigravityBaseUrl(configured?: string): string {
   return (configured?.trim() || GOOGLE_OAUTH.dailyApi).replace(/\/+$/, "");
 }
 
-export function createTransport(mode: "api-key" | "antigravity", opts: { apiKey?: string; url?: string; sessionHeader?: string; headers?: Record<string, string>; pooled?: boolean }): GoogleTransport {
+export function createTransport(mode: "api-key" | "antigravity", opts: { apiKey?: string; url?: string; sessionHeader?: string; headers?: Record<string, string>; pooled?: boolean; /** Antigravity only: what the provider's catalogue showed about models outside the tables. */ learned?: LearnedCatalogue }): GoogleTransport {
   if (mode === "antigravity") {
     const base = antigravityBaseUrl(opts.url);
     return {
@@ -107,7 +107,8 @@ export function createTransport(mode: "api-key" | "antigravity", opts: { apiKey?
       build(req, o) {
         const auth = o.antigravity;
         if (!auth) throw new Error("ClaudeRipple: the Google Antigravity mode needs a signed-in account; run `clauderipple google-login`");
-        const resolved = resolveAntigravityWireModel(o.model, o.effort);
+        const resolved = resolveAntigravityWireModel(o.model, o.effort, opts.learned);
+        const host = o.antigravityBaseUrl ? o.antigravityBaseUrl.replace(/\/+$/, "") : base;
         const request: GeminiRequest & { sessionId?: string } = { ...req, sessionId: antigravitySessionId(auth.conversationKey) };
         // The transport owns `thinkingConfig` on this wire. The translation guesses a level from the
         // base id, but CCA's wire id already encodes the tier for some models (gemini-3.8-flash-low);
@@ -143,13 +144,14 @@ export function createTransport(mode: "api-key" | "antigravity", opts: { apiKey?
           request,
         };
         return {
-          url: `${(o.antigravityBaseUrl ? o.antigravityBaseUrl.replace(/\/+$/, "") : base)}/${GOOGLE_OAUTH.apiVersion}:${method}${query}`,
+          url: `${host}/${GOOGLE_OAUTH.apiVersion}:${method}${query}`,
           headers: {
             "content-type": "application/json",
             accept: o.stream ? "text/event-stream" : "application/json",
-            // The IDE client family is required to unlock newer agent models, and Gemini 4 Argon is
-            // served to the CLI family only. Never a giveaway literal.
-            "user-agent": antigravityUserAgentFor(resolved.wire),
+            // The IDE client family is required to unlock newer agent models, and Gemini 4 Argon and
+            // Hydrogen are served to the CLI family only, as is a learned Gemini model that only CLI
+            // answers list. Never a giveaway literal.
+            "user-agent": antigravityUserAgentFor(resolved.wire, opts.learned),
             authorization: `Bearer ${auth.accessToken}`,
           },
           body: JSON.stringify(envelope),

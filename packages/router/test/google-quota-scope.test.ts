@@ -79,7 +79,8 @@ async function rig(t: TestContext, reply: (seen: { token: string | undefined; mo
 }
 
 test("models map onto the two measured quota groups; anything else has none", () => {
-  for (const model of ["gemini-3.8-flash", "gemini-3.8-flash@high", "Gemini-4-Pro", "gemini-4-argonaut"]) assert.equal(antigravityQuotaScope(model), "gemini", model);
+  for (const model of ["gemini-3.8-flash", "gemini-3.8-flash@high", "Gemini-4-Pro", "gemini-4-argonaut", "gemini-4-hydrogenate"]) assert.equal(antigravityQuotaScope(model), "gemini", model);
+  for (const model of ["gemini-4-hydrogen", "gemini-4-hydrogen-xhigh", "gemini-4-hydrogen@xhigh"]) assert.equal(antigravityQuotaScope(model), "hydrogen", model);
   for (const model of ["gemini-4-argon", "gemini-4-argon-low", "gemini-4-argon@high"]) assert.equal(antigravityQuotaScope(model), "argon", model);
   for (const model of ["claude-opus-5-5-low", "claude-sonnet-5-5-high", "gpt-oss-120b", "gpt-oss"]) assert.equal(antigravityQuotaScope(model), "3p", model);
   for (const model of ["gpt-6-luna", "gpt-ossify", "deepseek-v4", ""]) assert.equal(antigravityQuotaScope(model), undefined, model);
@@ -289,6 +290,28 @@ test("a spent Argon rests only Argon: Gemini Flash and Claude keep answering, an
   assert.equal(refused.status, 429);
   assert.match(JSON.parse(refused.text).error.message, /the Gemini 4 Argon quota is spent on every signed-in account; other Gemini and Claude\/GPT models still answer/);
   assert.equal(r.seen.filter(s => s.model.startsWith("gemini-4-argon-")).length, 1, "the resting Argon is refused without an upstream call");
+});
+
+// Gemini 4 Hydrogen's bucket is not measured (2026-11-13: the summary reports no group for it), so
+// it rests in a scope of its own. No spent Hydrogen has been observed: the body is the measured
+// Claude 429 with Hydrogen's wire id in `metadata.model`.
+test("a spent Hydrogen rests only Hydrogen, and a spent Gemini group leaves Hydrogen answering", async t => {
+  const HYDROGEN = "gemini-4-hydrogen";
+  const naming = (model: string) => ({ error: { ...ARGON_429.error, details: [{ ...ARGON_429.error.details[0], metadata: { ...ARGON_429.error.details[0]!.metadata, model } }, ARGON_429.error.details[1]] } });
+  const r = await rig(t, ({ model }) => model.startsWith("gemini-4-hydrogen-") ? { status: 429, body: naming("gemini-4-hydrogen-medium") } : { status: 200, body: OK });
+  assert.equal((await r.call(HYDROGEN)).status, 429);
+  assert.deepEqual(groupsOf(r.adapter.accountStatus()[0]), ["hydrogen"]);
+  assert.equal(r.adapter.hasUsable(HYDROGEN), false);
+  assert.equal(r.adapter.hasUsable(GEMINI), true, "Flash's quota is not known to be Hydrogen's");
+  assert.equal(r.adapter.hasUsable(ARGON), true);
+  assert.equal((await r.call(GEMINI)).status, 200);
+  const refused = await r.call(HYDROGEN);
+  assert.match(JSON.parse(refused.text).error.message, /the Gemini 4 Hydrogen quota is spent on every signed-in account/);
+
+  const flash = await rig(t, ({ model }) => model.startsWith("gemini-3.8-flash") ? { status: 429, body: naming("gemini-3.8-flash-low") } : { status: 200, body: OK });
+  assert.equal((await flash.call(GEMINI)).status, 429);
+  assert.equal(flash.adapter.hasUsable(HYDROGEN), true);
+  assert.equal((await flash.call(HYDROGEN)).status, 200);
 });
 
 test("a spent Gemini group leaves Argon answering", async t => {

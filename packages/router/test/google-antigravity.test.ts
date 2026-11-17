@@ -32,6 +32,8 @@ import {
   parseAvailableModels,
   resolveAntigravityWireModel,
   staticAntigravityModels,
+  buildHostMap,
+  hostForModel,
 } from "../src/providers/google/antigravity.ts";
 import { CredentialPool } from "../src/pool.ts";
 import { Logger } from "../src/log.ts";
@@ -222,7 +224,7 @@ test("fetchAvailableModels parsing collapses tiers and reads context windows", (
   assert.equal(ids.filter((id) => id.startsWith("gemini-3.8-flash")).length, 1);
   assert.deepEqual(models!.find((m) => m.id === "gemini-3.8-flash")!.effortLevels, ["low", "medium", "high"]);
   assert.equal(parseAvailableModels({ models: {} }), null, "an empty catalogue falls back, not empty");
-  assert.equal(staticAntigravityModels().length, 8);
+  assert.equal(staticAntigravityModels().length, 9);
 });
 
 // ── Gemini 4 Argon: served to the CLI client family only ────────────────────────────────────────
@@ -234,6 +236,51 @@ test("Gemini 4 Argon resolves to its tier wire ids and defaults to medium", () =
   assert.deepEqual(resolveAntigravityWireModel("gemini-4-argon", undefined), { wire: "gemini-4-argon-medium", known: true }, "no effort takes Argon's own default");
   const argon = staticAntigravityModels().find((m) => m.id === "gemini-4-argon");
   assert.deepEqual(argon, { id: "gemini-4-argon", contextWindow: 1_048_576, effortLevels: ["low", "medium", "high"] });
+});
+
+// Measured 2026-11-13 (one Google AI Pro account): the daily host's CLI catalogue lists
+// gemini-4-hydrogen-{low,medium,high,xhigh}; each answers 200 under the CLI UA with no thinkingLevel,
+// -medium 404s under the IDE UA, and the bare id 404s.
+test("Gemini 4 Hydrogen resolves to its four tier wire ids, xhigh included, and defaults to medium", () => {
+  for (const tier of ["low", "medium", "high", "xhigh"]) assert.deepEqual(resolveAntigravityWireModel("gemini-4-hydrogen", tier), { wire: `gemini-4-hydrogen-${tier}`, known: true }, tier);
+  assert.deepEqual(resolveAntigravityWireModel("gemini-4-hydrogen", "max"), { wire: "gemini-4-hydrogen-xhigh", known: true }, "the top of the ladder is xhigh, not high");
+  assert.deepEqual(resolveAntigravityWireModel("gemini-4-hydrogen", "minimal"), { wire: "gemini-4-hydrogen-low", known: true });
+  assert.deepEqual(resolveAntigravityWireModel("gemini-4-hydrogen", undefined), { wire: "gemini-4-hydrogen-medium", known: true });
+  assert.deepEqual(resolveAntigravityWireModel("gemini-4-hydrogen", "constructor"), { wire: "gemini-4-hydrogen-medium", known: true }, "an effort is never read off the prototype");
+  assert.deepEqual(resolveAntigravityWireModel("gemini-4-argon", "xhigh"), { wire: "gemini-4-argon-high", known: true }, "a three-tier model still clamps xhigh to high");
+  assert.deepEqual(resolveAntigravityWireModel("gemini-3.8-flash", "xhigh"), { wire: "gemini-3.8-flash-medium", known: true });
+  assert.deepEqual(staticAntigravityModels().find((m) => m.id === "gemini-4-hydrogen"), { id: "gemini-4-hydrogen", contextWindow: 1_048_576, effortLevels: ["low", "medium", "high", "xhigh"] });
+});
+
+test("a Hydrogen request carries the CLI User-Agent and its tier in the wire id alone", () => {
+  const transport = createTransport("antigravity", {});
+  const auth = { accessToken: "tok", projectId: "proj", conversationKey: "conv" };
+  const req = { contents: [{ role: "user" as const, parts: [{ text: "hi" }] }], generationConfig: { thinkingConfig: { thinkingLevel: "high" as const } } };
+  const built = transport.build(req, { model: "gemini-4-hydrogen", stream: true, effort: "xhigh", antigravity: auth });
+  assert.match(built.headers["user-agent"] ?? "", /^antigravity\/cli\//);
+  const body = JSON.parse(built.body) as { model: string; request: { generationConfig?: { thinkingConfig?: unknown } } };
+  assert.equal(body.model, "gemini-4-hydrogen-xhigh");
+  assert.equal(body.request.generationConfig?.thinkingConfig, undefined, "the suffix is the effort");
+  assert.match(antigravityUserAgentFor("gemini-4-hydrogen-low"), /^antigravity\/cli\//, "a wire id named outright is Hydrogen too");
+  assert.match(antigravityUserAgentFor("gemini-4-hydrogenate"), /^antigravity\/ide\//);
+});
+
+test("the CLI answer's Hydrogen tiers collapse to one row routed to the host that lists them", async () => {
+  const ide = { models: { "gemini-3.8-flash-low": { maxTokens: 1_048_576 } }, agentModelSorts: [{ groups: [{ modelIds: ["gemini-3.8-flash-low"] }] }] };
+  const tiers = ["high", "xhigh", "medium", "low"].map((t) => `gemini-4-hydrogen-${t}`);
+  const cli = {
+    models: { ...ide.models, ...Object.fromEntries(tiers.map((id) => [id, { maxTokens: 1_048_576, displayName: `Gemini 4 Hydrogen (${id.endsWith("xhigh") ? "XHigh" : "High"})` }])) },
+    agentModelSorts: [{ groups: [{ modelIds: [...tiers, "gemini-3.8-flash-low"] }] }],
+  };
+  const fetchFor = (withHydrogen: boolean) => (async (_url: string, init?: RequestInit) =>
+    Response.json(withHydrogen && String(new Headers(init?.headers).get("user-agent")).startsWith("antigravity/cli/") ? cli : ide)) as unknown as typeof fetch;
+  const daily = await fetchHostCatalogue("tok", "proj", "https://daily.test", fetchFor(true));
+  assert.deepEqual(daily?.models.find((m) => m.id === "gemini-4-hydrogen"), { id: "gemini-4-hydrogen", name: "Gemini 4 Hydrogen", contextWindow: 1_048_576, effortLevels: ["low", "medium", "high", "xhigh"] });
+  assert.equal(daily?.models.filter((m) => m.id.startsWith("gemini-4-hydrogen")).length, 1, "xhigh collapses too");
+  const prod = await fetchHostCatalogue("tok", "proj", "https://prod.test", fetchFor(false));
+  // Prod first in preference, yet Hydrogen still goes to the only host that lists it.
+  const hosts = buildHostMap(new Map([["https://prod.test", prod!], ["https://daily.test", daily!]]));
+  assert.equal(hostForModel(hosts, "gemini-4-hydrogen", "gemini-4-hydrogen-xhigh", "https://prod.test"), "https://daily.test");
 });
 
 test("an Argon request carries the CLI User-Agent and every other model keeps the IDE one", () => {
@@ -280,10 +327,11 @@ test("the host catalogue adds Argon from the CLI answer and keeps the IDE answer
       "gemini-4-argon-low": { maxTokens: 1_048_576, displayName: "Gemini 4 Argon (Low)" },
       "gemini-4-argon-medium": { maxTokens: 1_048_576 },
       "gemini-4-argon-high": { maxTokens: 1_048_576 },
-      // A non-Argon id the CLI alone lists is not taken: its requests would go out under the IDE UA.
-      "gemini-cli-only": { maxTokens: 1000 },
+      // A table model the CLI alone lists is not taken: its requests go out under the IDE UA. (An id
+      // outside the tables is taken and marked CLI-only: google-learned-models.test.ts.)
+      "gemini-3.7-flash-tiered": { maxTokens: 1000 },
     },
-    agentModelSorts: [{ groups: [{ modelIds: ["gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-4-argon-low", "gemini-4-argon-medium", "gemini-4-argon-high", "gemini-cli-only"] }] }],
+    agentModelSorts: [{ groups: [{ modelIds: ["gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-4-argon-low", "gemini-4-argon-medium", "gemini-4-argon-high", "gemini-3.7-flash-tiered"] }] }],
   };
   const answer = (cli: Response | null, ide: Response | null) =>
     (async (_url: string, init?: RequestInit) => {
@@ -298,7 +346,7 @@ test("the host catalogue adds Argon from the CLI answer and keeps the IDE answer
   const both = await fetchHostCatalogue("tok", "proj", "https://h.test", answer(Response.json(cliBody), Response.json(ideBody)), undefined, undefined, hear);
   assert.deepEqual(heard, [], "a CLI ask that answered is not reported");
   assert.deepEqual(both?.models.map((m) => m.id), ["gemini-3.8-flash", "gemini-4-argon"]);
-  assert.deepEqual(both?.models.find((m) => m.id === "gemini-4-argon"), { id: "gemini-4-argon", name: "Gemini 4 Argon (Low)", contextWindow: 1_048_576, effortLevels: ["low", "medium", "high"] });
+  assert.deepEqual(both?.models.find((m) => m.id === "gemini-4-argon"), { id: "gemini-4-argon", name: "Gemini 4 Argon", contextWindow: 1_048_576, effortLevels: ["low", "medium", "high"] }, "a collapsed row is not named for one tier");
   assert.deepEqual(both?.wireIds, ["gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-4-argon-low", "gemini-4-argon-medium", "gemini-4-argon-high"]);
 
   const cliDown = await fetchHostCatalogue("tok", "proj", "https://h.test", answer(new Response("no", { status: 404 }), Response.json(ideBody)), undefined, undefined, hear);
