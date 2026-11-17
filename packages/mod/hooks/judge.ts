@@ -39,32 +39,43 @@ export function mightAskEffort(text: string): boolean {
   return new RegExp(`${EFFORT_WORD}|${ALL_LEVELS}|자동|\\bauto(?:matic)?\\b`, 'i').test(text)
 }
 
+/** A question about the level or a "why" is never an instruction; the sentence it sits in is skipped. */
+const QUESTION = /[?？]|왜|\bwhy\b|어째서|how come/i
+/** A level word next to code, config or sorting is that thing's level, not the agent's effort. */
+const OTHER_USE = /\b(?:config|file|code|json|ya?ml|toml|settings?)\b|파일|코드|설정\s*값|정렬|\bsort/i
+const KOREAN_ORDER = '해|바꿔|바꾸|올려|내려|맞춰|맞추|설정|변경|지정|돌려|써|사용|부탁|고정|진행|하자|할게'
+
 /**
- * Safety net for phrasings that cannot mean anything else; the judge is the primary reader.
- * A level counts only as an instruction (`매우 높음으로`, `effort xhigh`), never as the thing a
- * question or complaint is about (`왜 중간으로 갔지`). The last instruction in the message wins.
+ * Fallback for a judge that failed, timed out or does not report `asked`; whenever the judge answered,
+ * its answer decides (choosePick). A level counts only as an instruction about the agent's own effort:
+ * a bare `<level>으로 (해줘)` as the whole message, or an effort word with a level in an imperative or
+ * target form (`추론 강도 매우 높음으로`, `set effort to high`, `use max effort`). Questions, other
+ * uses of a level word (code, config, sorting) and descriptions (`중간으로 갔지`) never count.
+ * The last instruction in the message wins.
  */
 export function explicitEffortRequest(text: string): Asked | undefined {
   const body = text.trim()
-  if (!body) return undefined
+  if (!body || OTHER_USE.test(body)) return undefined
   if (/^x-?high[\s.!]*$/i.test(body)) return 'xhigh'
-  const named = new RegExp(EFFORT_WORD, 'i').test(body)
-  const hits: { at: number; level: Asked }[] = []
   for (const [level, source] of LEVEL_PATTERNS) {
-    // Korean: "<level>으로/로" as a command; "으로 갔/됐/나왔" describes what already happened.
-    const korean = new RegExp(`(?:${source})\\s*(?:으로|로)(?!\\s*(?:갔|가|됐|되었|나왔|나와|왔|잡혔|떨어졌|올라갔))`, 'gi')
-    for (const match of body.matchAll(korean)) {
-      // A bare "최대로" is as likely "as much as possible" as an effort, so only the judge reads it.
-      if (named || (body.length <= 12 && level !== 'max')) hits.push({ at: match.index ?? 0, level })
-    }
-    if (named) {
-      const english = new RegExp(`\\b(?:effort|reasoning|thinking)(?:\\s+level)?\\s*(?:to|at|=|:|→)?\\s*(?:${source})\\b|\\b(?:${source})\\s+(?:effort|reasoning|thinking)\\b`, 'gi')
-      for (const match of body.matchAll(english)) hits.push({ at: match.index ?? 0, level })
-    }
+    // A bare "최대로" is as likely "as much as possible" as an effort, so only the judge reads it.
+    if (level !== 'max' && new RegExp(`^(?:${source})\\s*(?:으로|로)\\s*(?:해\\s*줘|해\\s*주세요|바꿔\\s*줘|해|바꿔)?[\\s.!]*$`, 'i').test(body)) return level
   }
-  if (named && (/자동\s*(?:으로|모드)|자동\s*(?:해|돌려|복귀|되돌|설정|맞춰)|\b(?:back to|return to|switch to|set to|go) auto(?:matic)?\b|\b(?:effort|reasoning|thinking)\s*(?:to|=|:)?\s*auto(?:matic)?\b/i.test(body))) {
-    const at = body.search(/자동|auto/i)
-    hits.push({ at, level: 'auto' })
+  const hits: { at: number; level: Asked }[] = []
+  let base = 0
+  for (const sentence of body.split(/(?<=[?？.!。\n])\s*/)) {
+    const start = body.indexOf(sentence, base)
+    base = start + sentence.length
+    if (!sentence || QUESTION.test(sentence) || !new RegExp(EFFORT_WORD, 'i').test(sentence)) continue
+    for (const [level, source] of LEVEL_PATTERNS) {
+      const korean = new RegExp(`(?:${source})\\s*(?:으로|로)(?=[\\s.!,~]*$|\\s*(?:${KOREAN_ORDER}))`, 'gi')
+      for (const match of sentence.matchAll(korean)) hits.push({ at: start + (match.index ?? 0), level })
+      const english = new RegExp(`\\b(?:effort|reasoning|thinking)(?:\\s+level)?\\s*(?:to|at|=|:|→)\\s*(?:${source})\\b|^\\s*(?:effort|reasoning|thinking)\\s+(?:${source})\\W*$|\\buse\\s+(?:${source})\\s+(?:effort|reasoning|thinking)\\b`, 'gi')
+      for (const match of sentence.matchAll(english)) hits.push({ at: start + (match.index ?? 0), level })
+    }
+    if (/자동\s*(?:으로|모드)|자동\s*(?:해|돌려|복귀|되돌|설정|맞춰)|\b(?:back to|return to|switch to|set to|go) auto(?:matic)?\b|\b(?:effort|reasoning|thinking)\s*(?:to|=|:)?\s*auto(?:matic)?\b/i.test(sentence)) {
+      hits.push({ at: start + sentence.search(/자동|auto/i), level: 'auto' })
+    }
   }
   hits.sort((a, b) => a.at - b.at)
   return hits.at(-1)?.level
@@ -143,7 +154,7 @@ export function parseEffortVerdict(text: string): Verdict | undefined {
   if (!level) return undefined
   const sure = confidence(value?.sure)
   const request = askedAnswer(value?.asked)
-  return { effort: level, ...(sure !== undefined ? { sure } : {}), why: typeof value?.why === 'string' ? value.why.slice(0, 60) : '', ...(request ? { asked: request } : {}) }
+  return { effort: level, ...(sure !== undefined ? { sure } : {}), why: typeof value?.why === 'string' ? value.why.slice(0, 60) : '', ...(request ? { asked: request } : {}), ...(request || value?.asked === 'none' ? { askedRead: true as const } : {}) }
 }
 
 /** Shared boundary decoder keeps effort and worker fields on the same object. */
@@ -228,7 +239,8 @@ export function parseJevEffort(json: unknown, current?: { effort: Effort } | nul
   const odds = record(answer.probabilities)
   const plausible = current && (!odds || (confidence(odds[current.effort]) ?? 0) >= 0.25)
   const request = jevAsked(json)
-  const extra = request ? { asked: request } : {}
+  const choice = record(answers(json)?.asked)?.choice
+  const extra = { ...(request ? { asked: request } : {}), ...(askedAnswer(choice) || choice === 'none' ? { askedRead: true as const } : {}) }
   if (sure !== undefined && sure < 0.5 && current && current.effort !== level && plausible) return { effort: current.effort, sure, why: t(lang, 'judge.keptUnsure'), ...extra }
   return { effort: level, ...(sure !== undefined ? { sure } : {}), why: '', ...extra }
 }
@@ -302,7 +314,8 @@ export function finalEffort(verdict: Verdict, settings: Settings, saving: boolea
  */
 export function choosePick(input: { verdict?: Verdict; text: string; current?: Pick | null; settings: Settings; saving: boolean; lang?: Lang; by: Pick['by']; at: number }): Pick | null {
   const lang = input.lang ?? 'en'
-  const request = input.verdict?.asked ?? explicitEffortRequest(input.text)
+  // A judge that answered decides, "none" included; the text check only stands in for one that did not.
+  const request = input.verdict?.askedRead || input.verdict?.asked ? input.verdict.asked : explicitEffortRequest(input.text)
   const held = input.current?.asked
   if (request && request !== 'auto') {
     const { effort, why } = finalEffort({ effort: request, why: '', asked: request }, input.settings, input.saving, lang)
@@ -313,7 +326,7 @@ export function choosePick(input: { verdict?: Verdict; text: string; current?: P
     // Asked for auto but the judge failed: drop the hold and keep running at the level it gave.
     return request === 'auto' && input.current ? { effort: input.current.effort, why: t(lang, 'toasts.effortAutoBack'), by: input.current.by, at: input.at } : null
   }
-  const { asked: _dropped, ...verdict } = input.verdict
+  const { asked: _dropped, askedRead: _read, ...verdict } = input.verdict
   const final = finalEffort(verdict, input.settings, input.saving, lang)
   return { ...verdict, ...final, why: request === 'auto' && !final.why ? t(lang, 'toasts.effortAutoBack') : final.why, by: input.by, at: input.at }
 }

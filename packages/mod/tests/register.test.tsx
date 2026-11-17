@@ -1820,6 +1820,42 @@ test('prompt judge rewrites every Opus 5.5 main step, not subagent effort', asyn
   expect(stats.text).toContain('Auto: 1 prompts, 2 requests')
 })
 
+test('a level asked for in one chat runs there, but a new chat starts at the bounded level, and a resumed chat holds only its own', async ($, on) => {
+  const b = boundaries(on, { floor: 'medium', ceiling: 'high' })
+  http(on)
+  judgeStub(on, '{"effort":"medium","asked":"xhigh","sure":0.9,"why":"asked"}')
+  const sent = stepStub(on)
+  await start($)
+  await submit($, '추론 강도 매우 높음으로')
+  await step($)
+  expect(sent[0]?.effort).toBe('xhigh')
+  // The shared record a new chat starts from stays inside the ceiling; the level itself is kept under this chat's key.
+  expect(b.saved.get('pick')).toMatchObject({ effort: 'high' })
+  expect(b.saved.get('pick')).not.toHaveProperty('asked')
+  expect(b.saved.get('askedEffort:session-test')).toEqual({ level: 'xhigh' })
+  // Resuming another chat drops this chat's hold: it starts at the shared, bounded level and the old key stays for its own chat.
+  await $.classic.SessionStart({ source: 'resume', session_id: 'other-chat', seconds_since_last_response: 120, prompt_cache_likely_expired: false, model: 'claude-opus-5-5' })
+  await step($)
+  expect(sent[1]?.effort).toBe('high')
+  expect(b.saved.get('askedEffort:session-test')).toEqual({ level: 'xhigh' })
+  // A resumed chat that had asked for its own level takes that one back.
+  b.saved.set('askedEffort:own-chat', { level: 'max' })
+  await $.classic.SessionStart({ source: 'resume', session_id: 'own-chat', seconds_since_last_response: 120, prompt_cache_likely_expired: false, model: 'claude-opus-5-5' })
+  await step($)
+  expect(sent[2]?.effort).toBe('max')
+})
+
+test('a judge that answered "none" is not overridden by the text check, so a question about the level changes nothing', async ($, on) => {
+  boundaries(on, { floor: 'medium', ceiling: 'high' })
+  http(on)
+  judgeStub(on, '{"effort":"medium","asked":"none","sure":0.9,"why":"question"}')
+  const sent = stepStub(on)
+  await start($)
+  await submit($, 'Why did you use max effort? Set effort to high in the config file')
+  await step($)
+  expect(sent[0]?.effort).toBe('medium')
+})
+
 test('Fable pauses without paying a judge or rewriting effort', async ($, on) => {
   const b = boundaries(on)
   b.setModel('claude-fable-5-1')

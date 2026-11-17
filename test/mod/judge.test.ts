@@ -193,7 +193,9 @@ test('the judge reports an explicit effort request: Jev answers and JSON verdict
 })
 
 test('the deterministic check reads unambiguous requests only, and the last instruction wins', () => {
-  assert.equal(explicitEffortRequest(ownerText), 'xhigh')
+  // The owner's long message mixes a question with the instruction; the judge reads it, the text check leaves questions alone.
+  assert.equal(explicitEffortRequest(ownerText), undefined)
+  assert.equal(explicitEffortRequest('추론강도가 왜 중간으로 갔지? 추론강도 매우높음으로'), 'xhigh')
   for (const [text, level] of [
     ['추론 강도 매우 높음으로 바꿔줘', 'xhigh'], ['추론강도 최대로', 'max'], ['생각 강도 높음으로 해줘', 'high'], ['추론 강도를 중간으로', 'medium'],
     ['추론 강도 낮음으로', 'low'], ['매우높음으로', 'xhigh'], ['높음으로 해줘', 'high'], ['xhigh', 'xhigh'], ['effort xhigh', 'xhigh'],
@@ -202,7 +204,27 @@ test('the deterministic check reads unambiguous requests only, and the last inst
   ] as const) assert.equal(explicitEffortRequest(text), level, text)
   // A question, a complaint, or a level word in another sense is not an instruction.
   for (const text of ['추론강도가 왜 중간으로갔지', '추론 강도가 지금 얼마야?', '우선순위 높음으로 표시된 이슈를 고쳐줘', '이 값이 높음이면 어떻게 돼?', 'the priority is high', 'a high level overview of max_tokens',
-    '더 깊이 생각해 줘', 'think harder', '최대한 빨리 해줘', '최대로', 'high']) assert.equal(explicitEffortRequest(text), undefined, text)
+    '더 깊이 생각해 줘', 'think harder', '최대한 빨리 해줘', '최대로', 'high',
+    'Why did you use max effort?', 'Why did you use max effort', 'Set effort to high in the config file', '추론 강도 높음으로 정렬', '높음으로 정렬해줘',
+    '설정 파일에서 effort를 high로 바꿔', 'sort by effort high', '코드에서 effort max로 해줘']) assert.equal(explicitEffortRequest(text), undefined, text)
+})
+
+test('a judge that answered decides: "none" is not overridden by the text check, which only covers a judge without an answer', () => {
+  const none = parseEffortVerdict('{"effort":"high","asked":"none","why":"x"}')!
+  assert.equal(none.askedRead, true)
+  const jevNone = parseJevEffort({ answers: { effort: { choice: 'high' }, asked: { choice: 'none', confidence: 0.9 } } })!
+  assert.equal(jevNone.askedRead, true)
+  // The text check alone would call this an instruction; the judge said it is not.
+  assert.equal(explicitEffortRequest('추론 강도 매우 높음으로'), 'xhigh')
+  assert.equal(judgePick(none, '추론 강도 매우 높음으로', pick)?.asked, undefined)
+  assert.equal(judgePick(jevNone, '추론 강도 매우 높음으로', pick)?.asked, undefined)
+  assert.equal('askedRead' in judgePick(none, 'ok', null)!, false)
+  // A judge without the field (older prompt) or an unsure Jev answer on an unknown choice leaves it to the text check.
+  assert.equal(parseEffortVerdict('{"effort":"high","why":"x"}')?.askedRead, undefined)
+  assert.equal(judgePick(parseEffortVerdict('{"effort":"high","why":"x"}')!, '추론 강도 매우 높음으로', pick)?.asked, 'xhigh')
+  // Held on a later turn: "none" on a question does not release or replace the hold.
+  const held = judgePick({ effort: 'medium', why: '', asked: 'xhigh' }, '추론 강도 매우 높음으로', pick)!
+  assert.equal(judgePick(none, 'Why did you use max effort?', held), null)
 })
 
 test('short messages that carry a request still reach detection, other short answers still skip', () => {
@@ -223,8 +245,8 @@ test('an asked level beats bias, floor and ceiling; save mode still caps it with
   const saved = judgePick(asked, ownerText, pick, { saving: true })
   assert.deepEqual([saved?.effort, saved?.why, saved?.asked], ['medium', 'save mode', 'xhigh'])
   // The judge failed or said "none", yet the message is plainly an instruction.
-  assert.equal(judgePick(undefined, ownerText, pick)?.asked, 'xhigh')
-  assert.equal(judgePick({ effort: 'medium', why: '' }, ownerText, pick)?.effort, 'xhigh')
+  assert.equal(judgePick(undefined, '추론 강도 매우높음으로', pick)?.asked, 'xhigh')
+  assert.equal(judgePick({ effort: 'medium', why: '' }, '추론 강도 매우높음으로', pick)?.effort, 'xhigh')
 })
 
 test('an asked level holds on the next turn without re-judging down, until another level, auto, or a manual pick', () => {

@@ -247,7 +247,9 @@ export type SettingsChange = { path: string[]; value?: unknown; remove?: boolean
 export type SettingsSync = { schemaVersion?: number; revision: number | null; pending: SettingsChange[]; migrationChecked: boolean; migration: Settings | null }
 
 /** A judge's answer for the main chat's next prompt. */
-export type Verdict = { effort: Effort; sure?: number; why: string; asked?: Asked }
+export type Verdict = { effort: Effort; sure?: number; why: string; asked?: Asked
+  /** The judge answered the `asked` question (`none` included), so its answer stands and no text check overrides it. */
+  askedRead?: true }
 
 /** An effort the user explicitly asked for in chat, or `auto` to return to the judge's choice. */
 export type Asked = Effort | 'auto'

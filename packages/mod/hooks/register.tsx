@@ -7,7 +7,7 @@ import { MOD_SETTINGS_SCHEMA_VERSION, RUNG_EFFORT, applySettingsChanges, normali
 import { rungOf, workerLadderLine } from './ladder'
 import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
-import { EFFORT_JUDGE_SYSTEM, choosePick, isCacheSafeModel, jevEffortRequest, jevFailure, jevUsage, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, shouldJudge } from './judge'
+import { EFFORT_JUDGE_SYSTEM, bounded, choosePick, isCacheSafeModel, jevEffortRequest, jevFailure, jevUsage, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, shouldJudge } from './judge'
 import { AUTO_DESCRIPTION, NATIVE_AGENTS, TIER_MARKERS, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderFallbackModels, ladderPick, liveProviders, markerDomain, modelReason, readMarker, routerModelOptions, resolveClaudeModel, pinnedAccountName, pinnedAccountNames, ruleReason, spawnModel, spawnTitle, titleName, takesOver, tierOf, userSaid, withoutReason, withoutRouting, workerRule, zenJev } from './workers'
 import { MARKER, agentFilePaths, agentModel, ancestorFolders, definedModel, delegationPin as parseDelegationPin, fixSpawn, humanText, pinInstruction, pinSaid } from './worker'
 import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom, modeKey, modeOver, quotaWindows, resetProvider, routingSettings } from './modes'
@@ -434,7 +434,7 @@ async function syncSettings($: EngineInterface, admin: string): Promise<void> {
   sync = await read($, settingsSync)
   if (sync.pending.length || sync.migration) await putSettings($, admin, snapshot.stored ? snapshot.settings : sync.migration ?? snapshot.settings)
 }
-async function loadSettings($: EngineInterface): Promise<void> {
+async function loadSettings($: EngineInterface, sessionId?: string): Promise<void> {
   try { await settingsTask(async () => { await syncSettings($, await adminUrl($)) }) }
   catch (error) { await installSettings($, await currentSettings($)); await routerSettingsDown($, error) }
   const hidden = (await $.store.get('bandHidden')) === true
@@ -448,7 +448,7 @@ async function loadSettings($: EngineInterface): Promise<void> {
     }
     // This chat's own requested level survives a restart; the shared pick above never carries it to another chat.
     try {
-      const asked = effortOf(object(await $.store.get(ASKED_PREFIX + await $.session.id())).level)
+      const asked = effortOf(object(await $.store.get(ASKED_PREFIX + (sessionId ?? await $.session.id()))).level)
       if (asked) await update($, pick, p => ({ why: '', by: 'jev' as const, at: 0, ...p, effort: asked, asked }))
     } catch (error) { await report($, 'asked effort restore', error) }
   }
@@ -472,7 +472,12 @@ async function installPick($: EngineInterface, value: Pick): Promise<void> {
   await update($, pick, () => value)
   // The shared store carries the last pick into a brand-new chat as a starting effort; a level the
   // user asked for belongs to this chat only, so it is kept under this chat's own key (askedKey).
-  const { asked, ...shared } = value
+  // Its effort may lie outside floor and ceiling, so the shared record takes the bounded level a new chat may start at.
+  const { asked, askedRead: _read, ...shared } = value
+  if (asked && asked !== 'auto') {
+    const s = await currentSettings($)
+    shared.effort = bounded(shared.effort, s.floor, s.ceiling)
+  }
   await $.store.set('pick', shared)
   await rememberAsked($, asked)
 }
@@ -2021,10 +2026,12 @@ async function dashboard($: EngineInterface, working: boolean): Promise<Dashboar
   const l = await read($, limit)
   const w = await read($, warm)
   const pinned = await read($, delegationPin)
+  // A save-mode cap on a requested level lifts when save mode ends; prepareStep then sends the asked level, so show it.
+  const lifted = p?.asked && p.asked !== 'auto' && !saving && p.asked !== p.effort ? p.asked : undefined
   return {
-    effort: { level: p?.effort ?? effortOf(await read($, appEffort)) ?? null,
+    effort: { level: lifted ?? p?.effort ?? effortOf(await read($, appEffort)) ?? null,
       mode: await read($, deciding) ? 'deciding' : await read($, paused) ? 'paused' : p?.by === 'manual' ? 'manual' : s.effortAuto ? 'auto' : 'off',
-      ...(p?.why ? { why: p.why, by: p.by } : {}), ...(await read($, decidingSince) !== null ? { since: (await read($, decidingSince))! } : {}) },
+      ...(p?.why ? { why: lifted ? t(await read($, lang), 'toasts.effortAsked') : p.why, by: p.by } : {}), ...(await read($, decidingSince) !== null ? { since: (await read($, decidingSince))! } : {}) },
     model: await read($, modelIs) ? modelName((await read($, modelIs))!) : null,
     context: await read($, context), cache: await read($, cache), warm: { ...w, on: await keepWarmOn($, s), ...(await read($, warmHere) !== null ? { here: true } : {}) },
     limit: l ? { ...l, save: saving } : null, route: record ? routeOf(record) : null, notice: await read($, line),
@@ -2343,7 +2350,16 @@ export const register: Register = on => {
         contextRun += 1
         fullMark = null
         await update($, contextFull, () => null)
-        await loadSettings($)
+        // A resumed or forked chat is another chat: the hold of the one before it stays in that chat's own key,
+        // and loadSettings restores this chat's own from its session id (the starting pick is the shared, bounded one).
+        const switched = e.source !== 'clear'
+        const chatId = switched ? e.session_id || await $.session.id() : undefined
+        if (switched && (await read($, pick))?.asked) await update($, pick, () => null)
+        await loadSettings($, chatId)
+        if (chatId && !(await read($, pick))?.asked) {
+          const own = effortOf(object(await $.store.get(ASKED_PREFIX + chatId)).level)
+          if (own) await update($, pick, p => ({ why: '', by: 'jev' as const, at: 0, ...p, effort: own, asked: own }))
+        }
         await update($, busy, () => false)
         await update($, appEffort, () => null)
         await update($, heldPick, () => null)
