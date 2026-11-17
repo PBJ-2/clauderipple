@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.12.38 — 2026-11-17
+
+### Added
+
+- **An effort level asked for in chat is applied as asked.** With automatic reasoning effort on, tell the
+  agent in chat which level to use (for example "추론 강도 매우 높음으로", "매우높음으로", "set effort to
+  xhigh" or "use max effort") and the judge reads it and that exact level is used, even outside the floor and
+  ceiling you set (save mode still caps it). It holds for that chat until you ask for another level, ask to
+  go back to automatic, change the effort in the app, or run /clear; other chats and new chats are
+  unaffected. Questions ("why did it go to medium?"), negations ("don't use max") and level words about code
+  or config do not count as a request. The judge's verdict (level, confidence, whether a level was asked, and
+  the level applied) is now logged.
+
+### Fixed
+
+- **`uninstall --purge` on macOS 27 no longer fails with "launchd bootout failed … Input/output error" and
+  leaves the launch agent file behind.** A failed bootout is now checked against launchd, and only a job that
+  is really gone counts as removed.
+
 ## 0.12.37 — 2026-11-17
 
 ### Added
