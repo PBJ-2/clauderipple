@@ -5329,6 +5329,7 @@ const MOD_DEFAULTS = {
   allow: [], allowKnown: [], modes: [], delegation: "normal", providers: {},
   fallback: { agent: "general-purpose", model: "sonnet" },
   keepWarm: false, keepWarmHours: 2, keepWarmMinTokens: 30000,
+  idleCompact: true,
   compactModel: "claude-haiku-5-5", compactModels: [],
   swampAlert: false, layout: "dashboard", appearance: "auto", skin: "deep", language: "auto", hide: ["reason"], extras: [], setupDone: false,
 };
@@ -6261,6 +6262,10 @@ function modCompactCard() {
     cell(t("mod.compactModel"), modSelect("compact-model", modCompactModelItems(), s.compactModel, t("mod.compactModel"), (compactModel) => modPatch({ compactModel })), null, "wide"),
     modCompactChoices(s),
     cell(t("mod.compactAt"), el("div", { class: "mode-until compact-at" }, [preset, custom]), el("span", { class: outOfRange ? "cell-sub warn-text" : undefined, text: hint }), "wide"),
+    // Claude Code's own `idleCompaction` follows this toggle, but the router turns it off while keep-warm is on.
+    // The switch stays editable: the stored choice applies as soon as keep-warm is switched off.
+    cell(t("mod.idleCompact"), modSwitch("idle-compact", s.idleCompact, t("mod.idleCompact"), (idleCompact) => modPatch({ idleCompact })),
+      [modCap(t("mod.idleCompactHint")), s.keepWarm ? el("span", { class: "cell-sub warn-text", "data-key": "idle-compact-note", text: t("mod.idleCompactKeepWarm") }) : null]),
   ])]);
 }
 

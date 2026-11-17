@@ -142,6 +142,61 @@ export function writeAutoCompactWindow(tokens: number | null): void {
   });
 }
 
+/**
+ * Claude Code's `idleCompaction` is derived, never chosen here: on only when the user's
+ * "compact ahead while idle" toggle is on and keep-warm is off. Its idle summary starts at 90% of
+ * the 1-hour cache (about 54 minutes) and keep-warm pings at about 56, so it would always win the
+ * race and replace the cache keep-warm is there to keep. Absence means Claude Code's default
+ * (true), so the key is written only as `false` and removed otherwise (ARCHITECTURE §3b).
+ */
+export function idleCompactionWanted(settings: { idleCompact: boolean; keepWarm: boolean }): boolean {
+  return settings.idleCompact && !settings.keepWarm;
+}
+
+/**
+ * Bring settings.json's `idleCompaction` in line with `wanted`, touching nothing else and
+ * nothing at all when it already matches (no backup, no rewrite). Same locked, backed-up, atomic
+ * path as `writeAutoCompactWindow`; a file that is not a JSON object is refused with 409.
+ * A missing file is left missing when `wanted` (the default already says so). Returns whether
+ * the file changed.
+ */
+export function writeIdleCompaction(wanted: boolean): boolean {
+  const file = claudeSettingsPath();
+  return withFileLock(file, () => {
+    let previous: string | null = null;
+    try { previous = fs.readFileSync(file, "utf8"); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    let current: Record<string, unknown> = {};
+    if (previous !== null && previous.trim()) {
+      try {
+        const parsed: unknown = JSON.parse(previous);
+        if (!object(parsed)) throw new Error("not an object");
+        current = parsed;
+      } catch {
+        throw new ModSettingsInputError("settings.json is not a JSON object; idleCompaction was not written", 409);
+      }
+    }
+    const next = { ...current };
+    if (wanted) delete next.idleCompaction;
+    else next.idleCompaction = false;
+    if (JSON.stringify(next) === JSON.stringify(current)) return false;
+    if (previous !== null) {
+      const backup = `${file}.bak-clauderipple-${new Date().toISOString().replace(/[-:]/g, "").slice(0, 15)}`;
+      fs.copyFileSync(file, backup);
+      fs.chmodSync(backup, 0o600);
+    }
+    writeJsonAtomic(file, next);
+    return true;
+  });
+}
+
+/** Derive and write `idleCompaction` from the stored mod settings; used after a save and at startup. */
+export function reconcileIdleCompaction(home = homeDir()): boolean {
+  return writeIdleCompaction(idleCompactionWanted(readModRoutingSettings(home).settings));
+}
+
 type StoredModSettings = Omit<ModSettingsSnapshot, "compactAt">;
 const modSettingsCache = new Map<string, { version: string; snapshot: StoredModSettings; compactModel: string | undefined }>();
 
@@ -219,6 +274,9 @@ export function writeModSettings(body: unknown, home = homeDir()): ModSettingsWr
     const current = readModSettings(home);
     if (expected !== undefined && expected !== current.revision) return { stale: true, current };
     if (current.revision === Number.MAX_SAFE_INTEGER) throw new Error("mod settings revision exhausted");
+    // A mod loaded before `idleCompact` existed saves without the key; normalization would read that
+    // as the default (true) and undo the user's choice, so an absent key keeps the stored value.
+    if (!Object.hasOwn(body.settings as Record<string, unknown>, "idleCompact")) settings.idleCompact = current.settings.idleCompact;
     // `compactAt` is reported in the answer but never stored here: settings.json is its one home.
     const next: ModSettingsSnapshot = { settings, revision: current.revision + 1, stored: true, compactAt: readAutoCompactWindow() };
     if (current.stored) backupModSettings(file, current.revision);

@@ -38,7 +38,7 @@ import { adminPort, headerValueProblem, homeDir, searchProviderFor, ssidProblem,
 export { adminPort } from "./config.ts";
 import { accountDisplayName, agentRenames, generatedAgents } from "./agents.ts";
 import { isJudgeOnlyModel } from "./model-policy.ts";
-import { ModSettingsInputError, readModSettings, validateSettings, validateSettingsSchema, writeAutoCompactWindow, writeModSettings } from "./mod-settings.ts";
+import { ModSettingsInputError, idleCompactionWanted, readModSettings, validateSettings, validateSettingsSchema, writeAutoCompactWindow, writeIdleCompaction, writeModSettings } from "./mod-settings.ts";
 import { billingOf, claudeChoices, fillLadder, ladderNeedsFill } from "../../mod/hooks/ladder.ts";
 import { latestClaudeIds, normalizeSettings, twoLevelRungs } from "../../mod/hooks/settings.ts";
 import type { Billing, DomainRules, Effort, LadderChoice, Rungs, Settings, Step } from "../../mod/types/index.d.ts";
@@ -2522,7 +2522,12 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         if (body && typeof body === "object" && body.settings && typeof body.settings === "object" && !Array.isArray(body.settings)) {
           // Checked before normalizing, which would drop a credential field the check is there to refuse.
           validateSettings(body.settings);
-          body.settings = await withFilledLadder(deps, scores, normalizeSettings(body.settings));
+          // Normalizing fills a missing `idleCompact` with the default; an older mod's save leaves it
+          // out, and writeModSettings keeps the stored value only while the key stays absent.
+          const idleAbsent = !Object.hasOwn(body.settings, "idleCompact");
+          const normalized: Partial<Settings> = await withFilledLadder(deps, scores, normalizeSettings(body.settings));
+          if (idleAbsent) delete normalized.idleCompact;
+          body.settings = normalized;
         }
         if (!body || typeof body !== "object" || body.settings === undefined) {
           if (body && typeof body === "object" && body.compactAt !== undefined) {
@@ -2534,6 +2539,12 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           throw new ModSettingsInputError("settings must be a JSON object");
         }
         const result = writeModSettings(parsed);
+        if (!result.stale) {
+          // Claude Code's `idleCompaction` follows the saved toggle and keep-warm. The save already
+          // happened, so a settings.json that cannot be written is logged, not turned into a failed save.
+          try { writeIdleCompaction(idleCompactionWanted(result.current.settings)); }
+          catch (error) { deps.log.warn(`admin: idleCompaction not synced: ${(error as Error).message}`); }
+        }
         sendJson(res, result.stale ? 409 : 200, result.current);
         return;
       }

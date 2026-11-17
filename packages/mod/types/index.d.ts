@@ -208,6 +208,12 @@ export type Settings = {
   keepWarmHours: 1 | 2 | 4 | 8
   keepWarmMinTokens: number
   /**
+   * Let Claude Code write a compaction summary in the background while a long chat sits idle
+   * (its `idleCompaction`). The router turns it off in settings.json whenever `keepWarm` is on,
+   * since the idle summary would replace the cache keep-warm exists to keep. Default true.
+   */
+  idleCompact: boolean
+  /**
    * The model that writes a compaction summary: 'session' for the engine's own compactor, else a
    * model id (a Claude id or a router id) with an optional `@effort`. Defaults to Haiku.
    */

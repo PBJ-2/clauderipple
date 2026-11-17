@@ -469,3 +469,31 @@ test("an installation whose CA is already gone can still finish its removal", ()
   // Nothing trusted to remove is not a failure: --purge must not be blocked by a CA that is absent.
   assert.equal(removeClientIntegrations(ctx.A, () => "absent", { agentDir: ctx.agents, defaultHome: ctx.A }), true);
 });
+
+// ---- idleCompaction ------------------------------------------------------------------------
+
+test("the default home's uninstall removes the router-written idleCompaction: false; another home's leaves it", () => {
+  const ctx = scratch();
+  const realHome = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = process.env.USERPROFILE = path.join(root, "fake-user");
+  try {
+    const write = (value: unknown) => fs.writeFileSync(ctx.settings, JSON.stringify({ model: "opus", idleCompaction: value }));
+    const read = () => JSON.parse(fs.readFileSync(ctx.settings, "utf8")) as Record<string, unknown>;
+
+    write(false);
+    assert.equal(removeProxyEnv({ ...proxy(18890), home: ctx.B }).changed, false, "a non-default home does not own the account-wide key");
+    assert.deepEqual(read(), { model: "opus", idleCompaction: false });
+
+    const edit = removeProxyEnv({ ...proxy(18791), home: path.join(os.homedir(), ".clauderipple") });
+    assert.equal(edit.changed, true);
+    assert.deepEqual(read(), { model: "opus" }, "removed; every other key kept");
+
+    write(true);
+    assert.equal(removeProxyEnv({ ...proxy(18791), home: path.join(os.homedir(), ".clauderipple") }).changed, false, "only false is ours");
+    assert.deepEqual(read(), { model: "opus", idleCompaction: true });
+  } finally {
+    for (const [key, value] of Object.entries(realHome)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
+});

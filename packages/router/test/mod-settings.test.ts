@@ -12,10 +12,15 @@ import {
   COMPACT_AT_MIN,
   ModSettingsInputError,
   claudeSettingsPath,
+  idleCompactionWanted,
   readAutoCompactWindow,
   readModSettings,
+  reconcileIdleCompaction,
   writeAutoCompactWindow,
+  writeIdleCompaction,
+  writeModSettings,
 } from "../src/mod-settings.ts";
+import { MOD_SETTINGS_SCHEMA_VERSION, normalizeSettings } from "../../mod/hooks/settings.ts";
 
 function tempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ripple-compact-at-"));
@@ -129,4 +134,81 @@ test("a per-model value /autocompact saved is read and preserved by a global das
     // Models that disagree have no one value to show.
     assert.equal(readAutoCompactWindow(), null);
   } finally { split.restore(); }
+});
+
+// Claude Code's `idleCompaction` is derived: on only when the toggle is on and keep-warm is off.
+test("idleCompact normalizes to true and only a boolean overrides it", () => {
+  assert.equal(normalizeSettings(null).idleCompact, true);
+  assert.equal(normalizeSettings({ idleCompact: "no" }).idleCompact, true);
+  assert.equal(normalizeSettings({ idleCompact: false }).idleCompact, false);
+  assert.equal(normalizeSettings({ idleCompact: true }).idleCompact, true);
+});
+
+test("idleCompaction is wanted only with the toggle on and keep-warm off", () => {
+  for (const [idleCompact, keepWarm, wanted] of [[true, false, true], [true, true, false], [false, false, false], [false, true, false]] as const) {
+    assert.equal(idleCompactionWanted({ idleCompact, keepWarm }), wanted, `toggle ${idleCompact}, keep-warm ${keepWarm}`);
+  }
+});
+
+test("writeIdleCompaction writes false, deletes the key for true, keeps every other key, and skips no-ops", () => {
+  const t = withSettingsFile({ model: "opus", autoCompactWindow: 400000, env: { A: "1" } });
+  try {
+    assert.equal(writeIdleCompaction(true), false, "already the default: nothing to write");
+    assert.deepEqual(fs.readdirSync(t.dir), ["settings.json"], "no backup for a no-op");
+    assert.equal(writeIdleCompaction(false), true);
+    assert.deepEqual(JSON.parse(fs.readFileSync(t.file, "utf8")), { model: "opus", autoCompactWindow: 400000, env: { A: "1" }, idleCompaction: false });
+    assert.ok(fs.readdirSync(t.dir).some(name => name.startsWith("settings.json.bak-clauderipple-")), "previous bytes backed up");
+    const before = fs.readFileSync(t.file, "utf8");
+    assert.equal(writeIdleCompaction(false), false, "already false: unchanged");
+    assert.equal(fs.readFileSync(t.file, "utf8"), before);
+    assert.equal(writeIdleCompaction(true), true);
+    assert.deepEqual(JSON.parse(fs.readFileSync(t.file, "utf8")), { model: "opus", autoCompactWindow: 400000, env: { A: "1" } });
+  } finally { t.restore(); }
+
+  const missing = withSettingsFile();
+  try {
+    assert.equal(writeIdleCompaction(true), false);
+    assert.equal(fs.existsSync(missing.file), false, "a missing file stays missing when the default is wanted");
+    assert.equal(writeIdleCompaction(false), true);
+    assert.deepEqual(JSON.parse(fs.readFileSync(missing.file, "utf8")), { idleCompaction: false });
+  } finally { missing.restore(); }
+});
+
+test("writeIdleCompaction refuses a settings.json that is not a JSON object", () => {
+  for (const bad of ["{ not json", "[1,2]", "42"]) {
+    const t = withSettingsFile(bad);
+    try {
+      assert.throws(() => writeIdleCompaction(false), (error: unknown) => error instanceof ModSettingsInputError && error.status === 409);
+      assert.equal(fs.readFileSync(t.file, "utf8"), bad);
+    } finally { t.restore(); }
+  }
+});
+
+test("reconcileIdleCompaction derives the key from the stored mod settings (startup path)", () => {
+  const t = withSettingsFile({ model: "opus" });
+  try {
+    // No store yet: defaults say toggle on, keep-warm off, so the key stays absent.
+    assert.equal(reconcileIdleCompaction(t.dir), false);
+    assert.equal(JSON.parse(fs.readFileSync(t.file, "utf8")).idleCompaction, undefined);
+    writeModSettings({ schemaVersion: MOD_SETTINGS_SCHEMA_VERSION, settings: { keepWarm: true } }, t.dir);
+    assert.equal(reconcileIdleCompaction(t.dir), true);
+    assert.equal(JSON.parse(fs.readFileSync(t.file, "utf8")).idleCompaction, false);
+    writeModSettings({ schemaVersion: MOD_SETTINGS_SCHEMA_VERSION, settings: { keepWarm: false, idleCompact: false } }, t.dir);
+    assert.equal(reconcileIdleCompaction(t.dir), false, "toggle off keeps it false");
+    writeModSettings({ schemaVersion: MOD_SETTINGS_SCHEMA_VERSION, settings: { keepWarm: false, idleCompact: true } }, t.dir);
+    assert.equal(reconcileIdleCompaction(t.dir), true);
+    assert.deepEqual(JSON.parse(fs.readFileSync(t.file, "utf8")), { model: "opus" });
+  } finally { t.restore(); }
+});
+
+test("a save without idleCompact (a mod from before it existed) keeps the stored value; one that names it overrides", () => {
+  const t = withSettingsFile({ model: "opus" });
+  try {
+    const save = (settings: Record<string, unknown>) => writeModSettings({ schemaVersion: MOD_SETTINGS_SCHEMA_VERSION, settings }, t.dir).current.settings.idleCompact;
+    assert.equal(save({ idleCompact: false }), false);
+    assert.equal(save({ keepWarm: false }), false, "absent key: stored false survives");
+    assert.equal(save({ idleCompact: true }), true, "explicit key still wins");
+    assert.equal(save({ keepWarm: true }), true, "absent key: stored true survives");
+    assert.equal(save({ idleCompact: "no" }), true, "a present but invalid value still normalizes to the default");
+  } finally { t.restore(); }
 });

@@ -445,6 +445,38 @@ The final word of a field name decides (`apiKey`, `access_token`, `clientSecret`
 `password`, etc.); `keepWarmMinTokens` is a count, not a credential, and is accepted.
 Corrupt storage is an error, never an empty store to overwrite.
 
+**`idleCompaction` is router-derived (2026-11-17).** Claude Code 2.1.325 compacts a long
+main conversation while it sits idle: with at least 200K context tokens
+(`CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS`, floor 100K) and a 1-hour prompt cache, it writes a
+summary in the background at 90% of the cache TTL (about 54 minutes after the last activity)
+and swaps it in when the user returns. Keep-warm pings 4 minutes before expiry (about 56), so
+with both on the idle summary always wins the race and replaces the full cache keep-warm
+exists to keep. The mod setting `idleCompact` (boolean, default true, normalized like
+`keepWarm`; dashboard "Compact ahead while idle" beside `compactAt`) is the user's choice; the
+router owns settings.json's `idleCompaction` and derives it as `idleCompact && !keepWarm`
+(`mod-settings.ts:idleCompactionWanted`, `writeIdleCompaction`). False is written as
+`"idleCompaction": false`; true deletes the key (Claude Code's default is true). It writes only
+when the result differs, with `writeAutoCompactWindow`'s lock, backup and atomic replace, keeps
+every other key, and refuses a settings.json that is not a JSON object (409). Every
+`PUT /api/mod-settings` that is not stale applies it, which covers the dashboard and the mod
+panel; a failure there is logged and never fails the save (the store is already saved). The
+router also reconciles once at start (`reconcileIdleCompaction`), so a hand edit or a change
+made while it was down is corrected. A hand-set `idleCompaction: false` is therefore removed
+while the toggle is on and keep-warm off. Only global `keepWarm` counts: the mod's per-chat
+`warmHere` override is invisible to the router. A save whose
+payload lacks the `idleCompact` key (a mod loaded before it existed) keeps the stored value
+instead of the default, so an old mod cannot undo the user's choice (`writeModSettings`). The
+default home's uninstall removes `idleCompaction` from settings.json when it is `false`
+(`settings.ts:removeProxyEnvLocked`); any other value is left, and a non-default home's
+uninstall never touches it, like the other account-wide state. The 200K minimum is deliberately not a
+setting; the env var is Claude Code's own. Claude Code reads the key live: `idleCompaction` is
+read through `Hi("idleCompaction", true)` each time the idle decision runs, and `Hi` goes
+through the settings store's per-source cache, which a settings file watcher (chokidar on the
+settings directories, `awaitWriteFinish` 1000 ms, 2000 ms polling fallback) clears on any
+change, atomic replacement included. A running session therefore sees a router write within a
+few seconds; no restart is needed. Not checked: whether a headless `-p` session starts that
+watcher (the gate also depends on the launch mode).
+
 The mod reads this endpoint at `session.start` and every 3-second router poll, even
 when its band is hidden. A changed revision replaces the settings atom and redraws
 readers; every read also refreshes `compactAt`, which `/autocompact` changes without

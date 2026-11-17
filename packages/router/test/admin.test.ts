@@ -624,6 +624,36 @@ test("admin mod-settings returns full defaults before storage, normalizes writes
   });
 });
 
+test("admin mod-settings save derives Claude Code's idleCompaction from the toggle and keep-warm", async () => {
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const file = process.env.CLAUDE_SETTINGS_PATH!;
+    fs.writeFileSync(file, JSON.stringify({ model: "opus" }));
+    const read = () => JSON.parse(fs.readFileSync(file, "utf8"));
+    assert.equal((await putModSettings(port, { settings: { keepWarm: false } })).status, 200);
+    assert.deepEqual(read(), { model: "opus" });
+    assert.equal((await putModSettings(port, { settings: { keepWarm: true } })).status, 200);
+    assert.deepEqual(read(), { model: "opus", idleCompaction: false });
+    assert.equal((await putModSettings(port, { settings: { keepWarm: false, idleCompact: false } })).status, 200);
+    assert.deepEqual(read(), { model: "opus", idleCompaction: false });
+    assert.equal((await putModSettings(port, { settings: { keepWarm: false, idleCompact: true } })).status, 200);
+    assert.deepEqual(read(), { model: "opus" });
+    // A save from a mod that predates the toggle leaves it out: the stored choice stands.
+    assert.equal((await putModSettings(port, { settings: { keepWarm: false, idleCompact: false } })).status, 200);
+    const legacy = await putModSettings(port, { settings: { keepWarm: false } });
+    assert.equal(legacy.status, 200);
+    assert.equal((await legacy.json() as { settings: { idleCompact: boolean } }).settings.idleCompact, false);
+    assert.deepEqual(read(), { model: "opus", idleCompaction: false });
+    assert.equal((await putModSettings(port, { settings: { keepWarm: false, idleCompact: true } })).status, 200);
+    assert.deepEqual(read(), { model: "opus" });
+    // A stale save changes nothing; a settings.json that is not an object never fails the save itself.
+    assert.equal((await putModSettings(port, { settings: { keepWarm: true }, revision: 1 })).status, 409);
+    assert.deepEqual(read(), { model: "opus" });
+    fs.writeFileSync(file, "[1]");
+    assert.equal((await putModSettings(port, { settings: { keepWarm: true } })).status, 200);
+    assert.equal(fs.readFileSync(file, "utf8"), "[1]");
+  });
+});
+
 test("admin mod-settings empty-store conflicts include normalized defaults and stored false", async () => {
   await withAdmin(makeCfg(), async ({ port, home }) => {
     const response = await putModSettings(port, { settings: { language: "ko" }, revision: 1 });

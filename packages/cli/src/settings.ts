@@ -10,7 +10,7 @@ import path from "node:path";
 import { homeDir } from "../../router/src/config.ts";
 import { withFileLock, writeJsonAtomic } from "../../router/src/locked-file.ts";
 import { type HomeClaims, type OwnerStore, type SlotClaims, claimedElsewhere, claimsOf, ownersPath, readOwners, setClaims } from "./owners.ts";
-import { legacyIntegrationPath } from "./ownership.ts";
+import { legacyIntegrationPath, sameHome } from "./ownership.ts";
 import { reconcileCompactWindows } from "./compact-windows.ts";
 
 /** Slots whose env value this call actually wrote or removed. Empty when the file already agreed. */
@@ -359,9 +359,15 @@ function removeProxyEnvLocked(opts: { proxyUrl: string; caPath: string; models?:
       return { changed: false, backup: null, notes, wroteSlots: [] };
     }
   }
+  // The router writes `idleCompaction: false` (never true) when it turns idle compaction off for
+  // keep-warm or the user's toggle; with ClaudeRipple gone nothing would turn it back on. The key is
+  // account-wide, so only the default home's uninstall removes it; another home's uninstall leaves it.
+  const dropIdleCompaction = s.idleCompaction === false && sameHome(home, path.join(os.homedir(), ".clauderipple"));
+  if (dropIdleCompaction) changed = true;
   if (!changed) return { changed: false, backup: null, notes, wroteSlots: [] };
   const b = backup(file);
   const next = { ...s };
+  if (dropIdleCompaction) delete next.idleCompaction;
   if (Object.keys(env).length === 0) delete next.env;
   else next.env = env;
   write(file, next);

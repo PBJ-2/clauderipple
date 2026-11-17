@@ -33,6 +33,7 @@ import { allowLongSilences } from "./providers/retry.ts";
 import { assetsFingerprint, readLocalAssets, spawnSsh, syncRemoteAssets } from "./remote-host.ts";
 import { RemoteTunnels, proxyConnectHost } from "./remote-tunnel.ts";
 import { syncContextWindows } from "./context-windows.ts";
+import { reconcileIdleCompaction } from "./mod-settings.ts";
 import { applyProcessPriority } from "./process-priority.ts";
 
 // Startup timing. Claude Desktop routes *all* its traffic through us in picker mode, so every
@@ -289,6 +290,11 @@ proxy
       catch (e) { log!.warn(`compact windows: ${(e as Error).message}`); }
     };
     syncCompact();
+    // `idleCompaction` in Claude Code's settings.json is derived from the stored mod settings
+    // (toggle on and keep-warm off). Saves keep it right; this fixes it after a hand edit of
+    // either file or a store that changed while the router was down.
+    try { reconcileIdleCompaction(); }
+    catch (e) { log!.warn(`idleCompaction: ${(e as Error).message}`); }
     // The terminal CLI signs accounts in and out without telling a running router; the signature
     // costs three small file reads and moves only when a worker file would change, so this is the
     // cheapest place to notice. Same cadence as the compact-window sync above.
