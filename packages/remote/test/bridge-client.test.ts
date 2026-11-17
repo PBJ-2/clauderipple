@@ -159,3 +159,109 @@ test("openRequests replays from the start cursor, skipping answered and withdraw
   assert.deepEqual(await client.openRequests("b"), [{ requestId: "r2", tool: "Bash", input: { command: "b" }, toolUseId: "t-r2" }]);
   assert.deepEqual(urls, ["https://api.anthropic.com/v1/code/sessions/b/events?sort_order=asc"]);
 });
+
+// Issue #169: the CLI's keychain login and the Claude app can be two accounts. The organization comes
+// from the app's `.claude.json`, so the CLI's token is answered 404 (another account's session is
+// never admitted to exist) while the token the router saw the app use is answered 200.
+const clock = 1_700_000_000_000;
+const split = (observed: boolean) => () => ({
+  accessToken: "keychain-token-b", organizationUuid: "org-a", expiresAt: clock + 3_600_000,
+  ...(observed ? { alternate: { accessToken: "observed-token-a", expiresAt: clock + 600_000 } } : {}),
+});
+const byToken = (seen: string[], accepted: string) => async (_url: unknown, options?: RequestInit) => {
+  const token = new Headers(options?.headers).get("authorization")!.slice("Bearer ".length);
+  seen.push(token);
+  return token === accepted ? Response.json({ worker_status: "idle" }) : new Response("{}", { status: 404 });
+};
+
+test("a keychain login of another account is answered 404, then the observed login serves and is kept", async () => {
+  const seen: string[] = [];
+  const client = new BridgeClient({ auth: split(true), now: () => clock, fetch: byToken(seen, "observed-token-a") });
+  assert.deepEqual(await client.session("s"), { worker_status: "idle" });
+  assert.deepEqual(seen, ["keychain-token-b", "observed-token-a"]);
+  await client.session("s");
+  await client.send("s", "u", "hi");
+  assert.deepEqual(seen.slice(2), ["observed-token-a", "observed-token-a"], "the working login is kept, no 404 round trip again");
+});
+
+test("a 404 to both logins fails once and never loops, and the keychain login stays first", async () => {
+  const seen: string[] = [];
+  const client = new BridgeClient({ auth: split(true), now: () => clock, fetch: byToken(seen, "nobody") });
+  await assert.rejects(client.session("s"), /\(404\)/);
+  assert.deepEqual(seen, ["keychain-token-b", "observed-token-a"]);
+  await assert.rejects(client.session("s"), /\(404\)/);
+  assert.equal(seen[2], "keychain-token-b");
+  assert.equal(seen.length, 4);
+});
+
+test("the keychain login of the same account is used as before, with no second request", async () => {
+  const seen: string[] = [];
+  const client = new BridgeClient({ auth: split(true), now: () => clock, fetch: byToken(seen, "keychain-token-b") });
+  await client.session("s");
+  await client.session("s");
+  assert.deepEqual(seen, ["keychain-token-b", "keychain-token-b"]);
+});
+
+test("without an observed login a 404 stays a 404 on the keychain login alone", async () => {
+  const seen: string[] = [];
+  const client = new BridgeClient({ auth: split(false), now: () => clock, fetch: byToken(seen, "observed-token-a") });
+  await assert.rejects(client.session("s"), /\(404\)/);
+  assert.deepEqual(seen, ["keychain-token-b"]);
+});
+
+test("once the CLI is signed in again with a new token, that token is tried first, not the kept observed one", async () => {
+  const seen: string[] = [];
+  let keychain = "keychain-token-b";
+  let now = clock;
+  let accepted = "observed-token-a";
+  const auth = () => ({ accessToken: keychain, organizationUuid: "org-a", expiresAt: now + 3_600_000, alternate: { accessToken: "observed-token-a", expiresAt: now + 600_000 } });
+  const client = new BridgeClient({ auth, now: () => now, fetch: async (url, options) => byToken(seen, accepted)(url, options) });
+  await client.session("s");
+  assert.deepEqual(seen, ["keychain-token-b", "observed-token-a"]);
+  // The CLI signs in to the app's account; the kept login nears expiry, so the next request rereads.
+  keychain = "keychain-token-a2";
+  accepted = "keychain-token-a2";
+  now += 60 * 60_000;
+  assert.deepEqual(await client.session("s"), { worker_status: "idle" });
+  assert.deepEqual(seen.slice(2), ["keychain-token-a2"]);
+});
+
+test("a 401 to the observed login after a 404 does not mark the keychain login refused", async () => {
+  const seen: string[] = [];
+  const client = new BridgeClient({
+    auth: split(true), now: () => clock,
+    fetch: async (url, options) => {
+      const token = new Headers(options?.headers).get("authorization")!.slice("Bearer ".length);
+      seen.push(token);
+      if (String(url).includes("/retired")) return new Response("{}", { status: token === "observed-token-a" ? 401 : 404 });
+      return token === "keychain-token-b" ? Response.json({ worker_status: "idle" }) : new Response("{}", { status: 404 });
+    },
+  });
+  await assert.rejects(client.session("retired"), /\(404\)/);
+  assert.deepEqual(await client.session("live"), { worker_status: "idle" });
+  assert.equal(seen.at(-1), "keychain-token-b");
+});
+
+test("a 5xx to the observed login after a 404 stays a 5xx, an unknown outcome for a write", async () => {
+  const client = new BridgeClient({
+    auth: split(true), now: () => clock,
+    fetch: async (_url, options) => {
+      const token = new Headers(options?.headers).get("authorization")!.slice("Bearer ".length);
+      return new Response("{}", { status: token === "observed-token-a" ? 502 : 404 });
+    },
+  });
+  await assert.rejects(client.send("s", "u", "hi"), /\(502\)/);
+});
+
+test("loadBridgeAuth hands the observed login along as the alternate only when it is another token", async () => {
+  const { loadBridgeAuth } = await import("../src/bridge-client.ts");
+  const files: Record<string, string> = { "/h/.claude.json": JSON.stringify({ oauthAccount: { organizationUuid: "org-a", accountUuid: "acc-a" } }) };
+  const base = { platform: "darwin" as const, userHome: "/h", now: clock, readFile: (f: string) => files[f]! };
+  const cli = { accessToken: "keychain-token-b", expiresAt: clock + 3_600_000 };
+  const observed = { accessToken: "observed-token-a", expiresAt: clock + 600_000 };
+  const different = loadBridgeAuth({ ...base, cli: () => cli, observed: () => observed });
+  assert.equal(different.accessToken, "keychain-token-b");
+  assert.deepEqual(different.alternate, observed);
+  assert.equal(loadBridgeAuth({ ...base, cli: () => cli, observed: () => ({ ...observed, accessToken: "keychain-token-b" }) }).alternate, undefined);
+  assert.equal(loadBridgeAuth({ ...base, cli: () => cli, observed: () => null }).alternate, undefined);
+});

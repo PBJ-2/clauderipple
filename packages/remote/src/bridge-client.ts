@@ -67,7 +67,21 @@ export function isCliNotLoggedIn(text: string): boolean {
 export function isLoginRefusal(text: string): boolean {
   return isCliNotLoggedIn(text) || /please\s+run\s+\/login\b/i.test(text);
 }
-export interface BridgeAuth { accessToken: string; organizationUuid: string; accountUuid?: string; expiresAt: number }
+export interface BridgeAuth {
+  accessToken: string; organizationUuid: string; accountUuid?: string; expiresAt: number;
+  /**
+   * The Claude app's observed login, set only when the CLI's own login was chosen and is a different
+   * token. Neither token names its account, so which one matches `.claude.json` is learned from the
+   * API: a 404 to the CLI's token (another account's session is never admitted to exist) retries
+   * with this one (issue #169).
+   */
+  alternate?: { accessToken: string; expiresAt: number };
+}
+/** The same login with its alternate's token in place of its own, and no alternate left to try. */
+function withAlternate(auth: BridgeAuth): BridgeAuth {
+  const { alternate, ...rest } = auth;
+  return { ...rest, ...alternate };
+}
 class BridgeNetworkError extends Error {}
 class BridgeHttpError extends Error {
   status: number;
@@ -168,8 +182,10 @@ export function loadBridgeAuth(options: BridgeAuthOptions = {}): BridgeAuth {
   // The CLI's login while it is good; else the one the Claude app is working with; else the
   // CLI's expired one, so the phone is told it expired.
   const identity = { organizationUuid, ...(accountUuid ? { accountUuid } : {}) };
-  if (cli && cli.expiresAt - now > 5 * 60_000) return { ...cli, ...identity };
   const observed = options.observed ? options.observed(now) : loadObservedAuth(now);
+  if (cli && cli.expiresAt - now > 5 * 60_000) {
+    return { ...cli, ...identity, ...(observed && observed.accessToken !== cli.accessToken ? { alternate: observed } : {}) };
+  }
   if (observed) return { ...observed, ...identity };
   if (cli) return { ...cli, ...identity };
   throw new BridgeAuthError(LOGIN_EXPIRED);
@@ -234,19 +250,51 @@ export class BridgeClient {
   }
   /** The API answered 401 to the token in `cached`; cleared when the keychain is read again. */
   private refused = false;
+  /**
+   * The keychain token that was answered 404 while the observed login was not: the CLI is signed in
+   * to another account than the app, so while the keychain still holds that token the observed login
+   * is used instead (issue #169). A different keychain token (the CLI signed in again) is tried on
+   * its own merits.
+   */
+  private observedOver: string | null = null;
   private async request(id: string | null, suffix: string, options: RequestInit): Promise<Response> {
-    const auth = this.auth();
+    let auth = this.auth();
     if (this.refused) throw new BridgeAuthError(LOGIN_REFUSED);
+    if (auth.alternate && auth.accessToken === this.observedOver) auth = this.cached = withAlternate(auth);
     if (auth.expiresAt <= this.now()) throw new BridgeAuthError(LOGIN_EXPIRED);
-    let response: Response;
+    const first = await this.attempt(auth, id, suffix, options);
+    // A 404 is a definite refusal (nothing was created or written), so the one retry is safe for
+    // writes too. It happens once per request and never when there is no other login to try.
+    const alternate = auth.alternate;
+    if (first.status === 404 && alternate && alternate.expiresAt > this.now()) {
+      await first.body?.cancel();
+      const retry = await this.attempt(withAlternate(auth), id, suffix, options);
+      // When the observed login is refused too (404, or 401 to its own token), the keychain login's
+      // 404 stands: a 401 to the observed token says nothing about the keychain one, so it must not
+      // mark this client's login refused. Any other failure reached the server with a working login
+      // and may have written, so it is reported as it came (a 5xx stays an unknown outcome).
+      if (retry.status === 401 || retry.status === 404) {
+        await retry.body?.cancel();
+        throw new BridgeHttpError(404);
+      }
+      if (!retry.ok) return this.settle(retry);
+      this.observedOver = auth.accessToken;
+      if (this.cached === auth) this.cached = withAlternate(auth);
+      return retry;
+    }
+    return this.settle(first);
+  }
+  private async attempt(auth: BridgeAuth, id: string | null, suffix: string, options: RequestInit): Promise<Response> {
     try {
       // The bridge treats a prompt as the user's own only from a person's app platform
       // (ios, android, web_claude_ai, desktop_app in CLI 2.1.296); any claude_code_* platform
       // is demoted to "a message from another Claude session". These prompts are typed on a phone.
-      response = await this.fetchFn(`https://api.anthropic.com/v1/code/sessions${id === null ? "" : `/${encodeURIComponent(id)}`}${suffix}`, {
+      return await this.fetchFn(`https://api.anthropic.com/v1/code/sessions${id === null ? "" : `/${encodeURIComponent(id)}`}${suffix}`, {
         ...options, redirect: "error", headers: { Authorization: `Bearer ${auth.accessToken}`, "anthropic-version": "2023-06-01", "anthropic-client-platform": "ios", "x-organization-uuid": auth.organizationUuid, "Content-Type": "application/json", "User-Agent": "RippleRemote/0.8.10" },
       });
     } catch { throw new BridgeNetworkError("Claude 앱과 연결하지 못했습니다."); }
+  }
+  private async settle(response: Response): Promise<Response> {
     if (!response.ok) {
       await response.body?.cancel();
       if (response.status === 401) {

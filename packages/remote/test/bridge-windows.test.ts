@@ -213,7 +213,7 @@ test("the Windows bridge login comes from the CLI's credentials file, then from 
   const read = (file: string) => fs.readFileSync(file, "utf8");
   // The CLI's own login while it is good.
   assert.deepEqual(loadBridgeAuth({ platform: "win32", userHome: dir, now, readFile: read, observed: () => ({ accessToken: "observed-token", expiresAt: now + 3_600_000 }) }),
-    { accessToken: "cli-token", organizationUuid: "org-1", expiresAt: now + 3_600_000 });
+    { accessToken: "cli-token", organizationUuid: "org-1", expiresAt: now + 3_600_000, alternate: { accessToken: "observed-token", expiresAt: now + 3_600_000 } });
   // The app's own login stands in for the CLI's expired one.
   fs.writeFileSync(path.join(dir, ".claude", ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "stale-token", expiresAt: now - 1 } }));
   assert.deepEqual(loadBridgeAuth({ platform: "win32", userHome: dir, now, readFile: read, observed: () => ({ accessToken: "observed-token", expiresAt: now + 3_600_000 }) }),
