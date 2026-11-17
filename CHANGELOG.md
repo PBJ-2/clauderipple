@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.12.37 — 2026-11-17
+
+### Added
+
+- **Gemini 4 Hydrogen on Antigravity, and a model Google adds later is listed and called without a release.**
+  Google started serving `gemini-4-hydrogen-{low,medium,high,xhigh}` on 2026-11-12; it is now in the table
+  with its own quota scope and its spoken name in the mod's worker picker. Each Antigravity provider also
+  keeps what its catalogue listed outside the built-in tables, so a new `gemini-` model (a tier family, a
+  CLI-only model, the host that listed it) shows up in the list and can be called as soon as Google serves it,
+  and it is still resolved when the catalogue cannot be read at start. A new provider starts from the lists
+  of the provider that asks exactly its hosts, so a prod-pinned provider no longer sends an id the host no
+  longer lists (400), and a provider with no model list reads the default host's quota instead of showing 0%
+  used while it is nearly spent (#165, thanks @csa906).
+
+- **A model mapping can keep the reasoning effort chosen in the Claude app.** The Model mapping page used to
+  fill in a concrete level (`high` by default) for every target with an effort ladder, so each mapping
+  overrode the effort picked in the app even when you only wanted to send a model elsewhere. "Same as the
+  app" is now the first choice and the default for new mappings; mappings that name a level are unchanged
+  (#172, thanks @RedBoardDev).
+
+- **The Logs page names the purpose of Claude Code's background requests.** Auto mode's classifier calls
+  showed up as unexplained model usage (thousands of `claude-sonnet-5 → claude-sonnet-5` rows) because only
+  web searches carried a purpose tag. Requests and their details now name every known purpose with a short
+  explanation, in all six languages (#173, thanks @RedBoardDev).
+
+- **The remote list shows a live Claude Code CLI that runs outside the Claude app, read-only.** A session
+  started in a terminal or Paseo was hidden whenever the Claude app's sidebar was present, and the web UI forced
+  every row replyable. Such a session now appears while its process lives and is marked read-only; sending or
+  queueing a message to it is refused instead of being stranded when the CLI exits, and sessions in the
+  Claude app stay replyable (#171, thanks @122yjs).
+
+### Fixed
+
+- **The remote bridge no longer fails with a 404 when the terminal CLI is signed in to a different account
+  than the Claude app.** The bridge paired the app's organization with the CLI's keychain token, so the API
+  answered 404 to every session call and queued messages were held with a 404 error. On a 404 it now retries once with the Claude app's observed login and keeps using it while the
+  keychain still holds the token that was refused, so signing the CLI in again is honoured. A 404 to both
+  fails as before (#169, thanks @122yjs).
+
+- **On Windows, `clauderipple restart`, `update` and `stop` handle a router that runs outside the scheduled
+  task.** A router of this installation started by hand, or left behind when the task's launcher was gone,
+  was refused as "another installation", so the update carried on, the check passed against the old router and
+  it printed Done with the old version still running. Such a router is now drained through its own shutdown
+  call and the task is started; a router of a different installation is still refused. After every start the
+  install checks which version answers and does not report an update as applied when the old one still does,
+  and a tray update blocked by a running tray no longer fails the whole update.
+
+### Changed
+
+- **Far fewer Cloudflare relay wake-ups for remote control.** The relay's free tier ran out again because
+  four things woke it with nobody using it: the host's route check every 5 minutes, a hidden phone retrying
+  an offline host every 30 seconds, the foreground phone's ping and presence as two wakes a minute, and the
+  60-second dead-man renewals. The host now checks its route hourly (a phone connecting counts as proof, and
+  it re-checks after a sleep), a phone with the app hidden retries every 10 minutes, presence rides on the
+  existing ping, and the dead-man alarm is judged by the control socket's pings instead of renewals. A phone
+  that is in the foreground, changes network or taps the retry button still reconnects at once, and the
+  dead-man alert still arrives 140-150 seconds after the host vanishes, inside the old 120-180 seconds. Older
+  hosts and relays keep the previous timing.
+
 ## 0.12.36 — 2026-11-16
 
 ### Fixed
