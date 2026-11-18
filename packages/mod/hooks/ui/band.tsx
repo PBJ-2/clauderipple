@@ -43,7 +43,7 @@ import type { Els } from './parts'
 import type { Face } from './ripple'
 import { cacheTone, chOf, clip, contextTone, displayWidth, limitTone, providerColor, textTone } from './theme'
 import type { BandActions, DashboardView, Frame, LimitGroup } from './view'
-import { EFFORTS, bandLimitGroups, compactNumber, effortIndex, effortLabel, effortName, exhaustLeft, exhaustSentence, exhaustShort, exhaustShortWidest, isRich, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTip, limitItemTone, limitName, minutesLeft, modelName, narrowLimitGroups, rateText, resetsLabel, seconds } from './view'
+import { EFFORTS, bandLimitGroups, bandLimitNumbered, claudeBandOff, compactNumber, effortIndex, effortLabel, effortName, exhaustLeft, exhaustSentence, exhaustShort, exhaustShortWidest, firstOfProvider, isRich, limitGroupName, limitGroups, limitItemName, limitItemTip, limitItemTone, limitName, minutesLeft, modelName, narrowLimitGroups, rateText, resetsLabel, seconds } from './view'
 
 /** Growing ripples: low → max. */
 const RIPPLE_CHAR = ['·', '∘', '○', '◎', '◉']
@@ -232,7 +232,8 @@ export function contextFact(frame: Frame, view: DashboardView): Fact | null {
 
 export function limitFact(frame: Frame, view: DashboardView): Fact | null {
   const limit = view.limit
-  if (!limit || !view.extras.includes('limits')) return null
+  // Claude hidden from the limits row (bandLimits) is hidden here too.
+  if (!limit || !view.extras.includes('limits') || claudeBandOff(view)) return null
   const tone = limitTone(limit.percent)
   const rich = isRich(frame)
   const save = t(frame.lang, 'band.save')
@@ -357,9 +358,11 @@ function factsFor(frame: Frame, view: DashboardView, actions: BandActions, room:
 // under the pointer: Handoff, Auto's switch, keep-warm's flame, the agents, settings, and the way out.
 // Pointing at a fact shows what it means in the reason's place.
 // With the `limits` extra on and any window known, a second row under the first (starting where
-// the effort does) gauges every plan window — Claude's, then each ChatGPT account's — and the
-// first row's limit fact steps aside for the route. The row is a button: pressed, it opens the
-// limits pane, where each window's share and when it resets are spelled out.
+// the effort does) gauges the plan windows — Claude's, then every other provider's, by default the
+// account in use of each, or the providers and accounts the owner chose in the dashboard
+// (bandLimits) — and the first row's limit fact steps aside for the route. The row is a button:
+// pressed, it opens the limits pane, where every account's windows, their shares and when they reset
+// are spelled out.
 
 /** 리플이 in the band, px: the mini drawing (ripple.ts), a little taller than a line of text. */
 export const BAND_RIPPLE = 24
@@ -517,7 +520,8 @@ function cacheDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | nul
 
 function limitDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | null {
   const limit = view.limit
-  if (!limit || !view.extras.includes('limits')) return null
+  // Claude hidden from the limits row (bandLimits) does not come back here when that row draws nothing.
+  if (!limit || !view.extras.includes('limits') || claudeBandOff(view)) return null
   const { Text } = el
   const save = t(frame.lang, 'band.save')
   // The window is a gauge (art.ts), not its word: at 100 columns the name "주간"/"Weekly" was cut
@@ -543,16 +547,19 @@ function modeDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | null
 // ---- Limits row ----------------------------------------------------------------------------------
 //
 // The capsule's second row, under the first and starting where the effort does (a CREST_CELLS
-// indent): every plan window as a small gauge — Claude's 5-hour, weekly and per-model weeklies,
-// then each ChatGPT account's. A thinner row than the first (a line of text or so), and a button:
-// pressed, it opens the limits pane, where each window's share and when it resets are readable
-// (2026-10-25: the row has no room to add the reset beside every figure). Widths alone decide,
-// never values: the bar is one width, the figure's slot fits "100%", and only the name takes what
-// it takes (a changing figure never moves a neighbour). Narrow, the later providers' scoped windows
-// (3P) go first, then the GPT accounts (the last one first), then the later providers' whole groups,
-// and only then Claude's per-model windows (Fable): Claude's own windows outlast every later
-// provider (the owner, 2026-11-10). Then the scoped windows that fit again come back (the refill).
-// What is left not fitting means no second row, and the first row keeps its limit fact as before.
+// indent): each plan window as a small gauge — Claude's 5-hour, weekly and per-model weeklies,
+// then every other provider's (GPT, Gemini, Go, …). Of each provider the row shows the account in
+// use, unless the owner chose in the dashboard (bandLimits) to hide the provider, show all its
+// accounts or only some, each then numbered as in the pane. A thinner row than the first (a line of
+// text or so), and a button: pressed, it opens the limits pane, where each window's share and when
+// it resets are readable (2026-10-25: the row has no room to add the reset beside every figure).
+// Widths alone decide, never values: the bar is one width, the figure's slot fits "100%", and only
+// the name takes what it takes (a changing figure never moves a neighbour). Narrow, the later
+// providers' scoped windows (3P) go first, then a provider's later accounts (the last one first),
+// then the later providers' whole groups, and only then Claude's per-model windows (Fable): Claude's
+// own windows outlast every later provider (the owner, 2026-11-10). Then the scoped windows that fit
+// again come back (the refill). What is left not fitting means no second row, and the first row
+// keeps its limit fact as before, unless the owner hid Claude from the row (claudeBandOff).
 //
 // A window the router expects to run out before it resets (`exhaustsAt`) is the one exception to
 // "the share alone": its tone is at least amber, red within the hour, and after its figure the row
@@ -686,14 +693,18 @@ function forecastTips(groups: readonly LimitGroup[], numbered: (g: LimitGroup) =
 }
 
 /**
- * The second row, or null: no `limits` extra, no windows at all, or not even Claude's own windows
- * fitting. Narrow, the scoped windows of the later providers (3P, …) go first, then a later
- * provider's secondary accounts (the last one first), then a later provider's whole group, and
- * only then Claude's own scoped windows (Fable): Claude's own group stays to the last, and its Fable
- * outlasts every later provider (the owner, 2026-11-10). Then whatever scoped windows fit again come
- * back into the groups drawn (Claude's first), so the row keeps every window that fits. Of each
- * provider's accounts the row shows
- * only the one in use (bandLimitGroups), unnumbered; the limits pane lists them all.
+ * The second row, or null: no `limits` extra, no windows at all or none the owner chose, or not even
+ * the first group's own windows fitting. Narrow, the scoped windows of the later providers (3P, …)
+ * go first, then a later provider's secondary accounts (the last one first), then a later
+ * provider's whole group, and only then the first group's own scoped windows (Claude's Fable): the
+ * first group (Claude's, unless the owner hid Claude) stays to the last, and its Fable outlasts
+ * every later provider (the owner, 2026-11-10). Then whatever scoped windows fit again come back
+ * into the groups drawn (the first group's first), so the row keeps every window that fits. Which
+ * providers and accounts the row shows is the owner's (bandLimits, picked in the dashboard): a
+ * provider not named shows only its account in use, unnumbered; a named one shows none of its
+ * accounts ('off'), every one the router read ('all') or only the chosen ones ('accounts'), its
+ * account in use first and each numbered as the pane numbers it (bandLimitGroups,
+ * bandLimitNumbered). The limits pane lists every account whatever the choice.
  * `onPress`: the row is a button (the limits pane); pressed it says so in the tip place, and each
  * window's own tip (its name and reset) gives way to that one.
  */
@@ -701,13 +712,16 @@ function limitsRowDrawn(el: Els, frame: Frame, view: DashboardView, budget: numb
   const { Box } = el
   const items = view.limits ?? []
   if (!items.length || !view.extras.includes('limits')) return null
-  // Of each provider's accounts only the one in use: the pane lists the rest.
-  const all = bandLimitGroups(limitGroups(items))
+  // The providers and accounts the owner chose, by default one account each, the one in use.
+  const full = limitGroups(items)
+  const all = bandLimitGroups(full, view.bandLimits)
   // Numbering follows the whole set of accounts a provider has, decided before any narrowing.
-  const numbered = limitGroupNumbered(all)
-  // Save mode's word sat beside the first row's limit; with this row drawn it follows Claude's windows.
+  const numbered = bandLimitNumbered(full, all, view.bandLimits)
+  // Save mode's word sat beside the first row's limit; with this row drawn it follows Claude's
+  // windows, once however many Claude accounts the row shows.
   const save = !!view.limit?.save
-  const width = (density: LimitDensity) => (gs: readonly LimitGroup[]) => gs.reduce((n, g) => n + limitGroupCells(g, limitGroupName(g, numbered(g)), frame.lang, frame.now, density, save), 0) + RULE_CELLS * Math.max(0, gs.length - 1) + LIMITS_GAP * Math.max(0, 2 * gs.length - 2)
+  const first = firstOfProvider(all)
+  const width = (density: LimitDensity) => (gs: readonly LimitGroup[]) => gs.reduce((n, g) => n + limitGroupCells(g, limitGroupName(g, numbered(g)), frame.lang, frame.now, density, save && first(g)), 0) + RULE_CELLS * Math.max(0, gs.length - 1) + LIMITS_GAP * Math.max(0, 2 * gs.length - 2)
   // Pressable, the row's light keeps a fact's air either side of the figures, which the row takes
   // from its budget.
   const room = onPress ? budget - PRESS_PAD * 2 : budget
@@ -716,7 +730,7 @@ function limitsRowDrawn(el: Els, frame: Frame, view: DashboardView, budget: numb
   const density = DENSITIES.find(d => width(d)(all) <= room) ?? 'compact'
   const groups = narrowLimitGroups(all, room, width(density))
   if (!groups) return null
-  const drawn = groups.map(g => limitGroupDrawn(el, frame, g, limitGroupName(g, numbered(g)), save, density))
+  const drawn = groups.map(g => limitGroupDrawn(el, frame, g, limitGroupName(g, numbered(g)), save && first(g), density))
   const children: RenderNode[] = []
   drawn.forEach((d, i) => {
     if (i > 0) children.push(rule(el, frame, 'limits-' + groups[i]!.key))
@@ -1279,7 +1293,7 @@ export function renderFooter(el: Els, frame: Frame, view: DashboardView, actions
         </Text>
       ) : null}
       {view.cache && !view.hide.includes('timer') ? <Text dimColor>{'⧗ ' + minutesLeft(left, frame.lang) + (view.warm.on ? ' ≈' : '')}</Text> : null}
-      {view.limit && view.extras.includes('limits') ? <Text dimColor>{limitName(view.limit.kind, frame.lang) + ' ' + Math.round(view.limit.percent) + '%'}</Text> : null}
+      {view.limit && view.extras.includes('limits') && !claudeBandOff(view) ? <Text dimColor>{limitName(view.limit.kind, frame.lang) + ' ' + Math.round(view.limit.percent) + '%'}</Text> : null}
       {textButton(el, 'auto', t(frame.lang, 'band.auto') + (view.auto ? ' ●' : ' ○'), actions.toggleAuto)}
       {textButton(el, 'settings', '⚙', actions.openSettings)}
       {pinText(el, frame, view, actions, 60)}

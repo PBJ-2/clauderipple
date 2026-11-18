@@ -2087,7 +2087,7 @@ async function dashboard($: EngineInterface, working: boolean): Promise<Dashboar
     agents: counts,
     compactions: await read($, compactions),
     logOpen: await read($, logOpen), agentsOpen: await read($, agentsOpen), effortMenu: await read($, effortMenuOpen),
-    hide: s.hide, extras: s.extras, isWorking: working,
+    hide: s.hide, extras: s.extras, bandLimits: s.bandLimits, isWorking: working,
     ...(activeModeOf(s) ? { mode: activeModeOf(s)!.name } : {}),
     ...(pinned ? { delegationPin: titleName(pinned.model, await read($, routerModels)), ...(pinned.said ? { delegationSaid: pinned.said } : {}) } : {}),
   }

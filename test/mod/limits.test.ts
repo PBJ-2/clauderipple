@@ -3,6 +3,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { registerHooks } from 'node:module'
+import type { BandLimit } from '../../packages/mod/types/index.d.ts'
 registerHooks({ resolve(specifier, context, next) {
   const source = context.parentURL?.includes('/packages/mod/hooks/')
   return next(source && /^\.\.?\//.test(specifier) && !/\.[a-z]+$/.test(specifier) ? `${specifier}.ts` : specifier, context)
@@ -10,7 +11,7 @@ registerHooks({ resolve(specifier, context, next) {
 const { claudeScopedFrom, CLAUDE_USAGE_STALE_MS, COST_MODELS, costFromSummary, localMidnight, routerLimitItems } = await import('../../packages/mod/hooks/session.ts')
 const { t } = await import('../../packages/mod/hooks/i18n.ts')
 const { chatgptProviders, gptLimitsFrom } = await import('../../packages/mod/hooks/modes.ts')
-const { providerDisplayName, costFigure, costText, exhaustLeft, exhaustSentence, exhaustShort, exhaustShortWidest, limitItemTone, bandLimitGroups, limitAccountLabel, limitGroupAccount, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTip, narrowLimitGroups, paceLabel, paceLevel, resetMoment, resetShort, timeLeft } = await import('../../packages/mod/hooks/ui/view.ts')
+const { providerDisplayName, costFigure, costText, exhaustLeft, exhaustSentence, exhaustShort, exhaustShortWidest, limitItemTone, bandLimitGroups, bandLimitNumbered, claudeBandOff, firstOfProvider, limitAccountLabel, limitGroupAccount, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTip, narrowLimitGroups, paceLabel, paceLevel, resetMoment, resetShort, timeLeft } = await import('../../packages/mod/hooks/ui/view.ts')
 const { barArt } = await import('../../packages/mod/hooks/ui/art.ts')
 
 const NOW = Date.parse('2026-10-15T00:00:00Z')
@@ -450,6 +451,146 @@ test('the band keeps one account per provider, the one in use, unnumbered', () =
   assert.deepEqual(bandLimitGroups(fallback), fallback)
 })
 
+// 2026-11-19: the owner picks in the dashboard which providers and accounts the band's row shows
+// (Settings.bandLimits), naming an account by the owner id `/api/limits` sends with it.
+/** MANY with each account's owner id, as the router sends them since the account tabs. */
+const IDS = { providers: [
+  { ...MANY.providers[0]!, accounts: MANY.providers[0]!.accounts.map((a, i) => ({ ...a, id: ['current', 'stored-a', 'stored-c'][i]! })) },
+  { ...MANY.providers[1]!, accounts: MANY.providers[1]!.accounts.map((a, i) => ({ ...a, id: ['legacy', 'team-id'][i]! })) },
+  { provider: 'opencode-go', type: 'opencode-go', title: 'Go', accounts: [
+    { account: 0, label: 'key one', at: NOW, windows: [{ kind: 'five_hour', used_percent: 3, window_minutes: 300 }] },
+    { account: 1, at: NOW, windows: [{ kind: 'five_hour', used_percent: 9, window_minutes: 300 }] },
+  ] },
+] }
+const choose = (...choices: BandLimit[]): BandLimit[] => choices
+const bandNames = (groups: ReturnType<typeof limitGroups>, choices: BandLimit[]) => {
+  const band = bandLimitGroups(groups, choices)
+  const numbered = bandLimitNumbered(groups, band, choices)
+  return band.map(g => limitGroupName(g, numbered(g)))
+}
+
+test('each account\'s owner id reaches its windows and its group; a row without one carries none', () => {
+  const items = routerLimitItems(IDS, NOW)
+  assert.deepEqual(items.map(i => [i.provider, i.account, i.accountId]), [
+    ['anthropic', 0, 'current'], ['anthropic', 1, 'stored-a'], ['anthropic', 1, 'stored-a'], ['anthropic', 3, 'stored-c'],
+    ['chatgpt', 0, 'legacy'], ['chatgpt', 1, 'team-id'],
+    ['opencode-go', 0, undefined], ['opencode-go', 1, undefined],
+  ])
+  // OpenCode Go, MiniMax and Grok rows have no id; an empty or non-string one is none either.
+  assert.equal('accountId' in items[6]!, false)
+  const odd = routerLimitItems({ providers: [{ provider: 'g', type: 'grok', title: 'Grok', accounts: [
+    { account: 0, id: '', windows: [{ kind: 'five_hour', used_percent: 1 }] },
+    { account: 1, id: 7, windows: [{ kind: 'five_hour', used_percent: 1 }] },
+    { account: 2, windows: [{ kind: 'five_hour', used_percent: 1 }] },
+  ] }] }, NOW)
+  assert.deepEqual(odd.map(i => 'accountId' in i), [false, false, false])
+  const groups = limitGroups(items)
+  assert.deepEqual(groups.map(g => g.accountId), ['current', 'stored-a', 'stored-c', 'legacy', 'team-id', undefined, undefined])
+  assert.equal('accountId' in groups[5]!, false)
+})
+
+test('no choice is the band as it was: one account a provider, the one in use, unnumbered', () => {
+  const groups = limitGroups(routerLimitItems(IDS, NOW))
+  const band = bandLimitGroups(groups)
+  assert.deepEqual(band.map(g => g.key), ['anthropic#1', 'chatgpt#1', 'opencode-go#0'])
+  assert.deepEqual(bandLimitGroups(groups, []), band)
+  assert.deepEqual(bandLimitGroups(groups, undefined), band)
+  const plain = limitGroupNumbered(band)
+  for (const choices of [undefined, []]) {
+    const numbered = bandLimitNumbered(groups, band, choices)
+    assert.deepEqual(band.map(numbered), band.map(plain))
+  }
+  assert.deepEqual(bandNames(groups, []), ['Claude', 'GPT', 'Go'])
+})
+
+test('a provider set to off leaves the row; the others keep the default', () => {
+  const groups = limitGroups(routerLimitItems(IDS, NOW))
+  assert.deepEqual(bandLimitGroups(groups, choose({ provider: 'opencode-go', show: 'off' })).map(g => g.key), ['anthropic#1', 'chatgpt#1'])
+  assert.deepEqual(bandLimitGroups(groups, choose({ provider: 'anthropic', show: 'off' })).map(g => g.key), ['chatgpt#1', 'opencode-go#0'])
+  // A choice for a provider the router did not answer for changes nothing.
+  assert.deepEqual(bandLimitGroups(groups, choose({ provider: 'minimax', show: 'off' })).map(g => g.key), ['anthropic#1', 'chatgpt#1', 'opencode-go#0'])
+  assert.deepEqual(bandNames(groups, choose({ provider: 'opencode-go', show: 'off' })), ['Claude', 'GPT'])
+})
+
+test('all draws every account read, the one in use first, each numbered as in the pane', () => {
+  const groups = limitGroups(routerLimitItems(IDS, NOW))
+  const gpt = choose({ provider: 'chatgpt', show: 'all' })
+  assert.deepEqual(bandLimitGroups(groups, gpt).map(g => g.key), ['anthropic#1', 'chatgpt#1', 'chatgpt#0', 'opencode-go#0'])
+  // Claude, not named, is still its one account in use, unnumbered.
+  assert.deepEqual(bandNames(groups, gpt), ['Claude', 'GPT 2', 'GPT 1', 'Go'])
+  assert.deepEqual(bandNames(groups, choose({ provider: 'anthropic', show: 'all' })), ['Claude 2', 'Claude 1', 'Claude 4', 'GPT', 'Go'])
+  // Keys without ids: all still means every key the router read.
+  assert.deepEqual(bandNames(groups, choose({ provider: 'opencode-go', show: 'all' })), ['Claude', 'GPT', 'Go 1', 'Go 2'])
+  // One account read: no number to tell it from another.
+  const one = limitGroups(routerLimitItems({ providers: [{ ...IDS.providers[1]!, accounts: [IDS.providers[1]!.accounts[0]!] }] }, NOW))
+  assert.deepEqual(bandNames(one, gpt), ['GPT'])
+})
+
+test('a chosen account is found by its id when its number moves', () => {
+  const gpt = choose({ provider: 'chatgpt', show: 'accounts', accounts: ['team-id'] })
+  const groups = limitGroups(routerLimitItems(IDS, NOW))
+  assert.deepEqual(bandLimitGroups(groups, gpt).map(g => g.key), ['anthropic#1', 'chatgpt#1', 'opencode-go#0'])
+  assert.deepEqual(bandNames(groups, gpt), ['Claude', 'GPT 2', 'Go'])
+  // The account before it paused: the router numbers the rest again, so the same account is index 0.
+  const paused = { providers: [{ ...IDS.providers[1]!, accounts: [{ ...IDS.providers[1]!.accounts[1]!, account: 0 }] }] }
+  const moved = limitGroups(routerLimitItems(paused, NOW))
+  assert.deepEqual(bandLimitGroups(moved, gpt).map(g => [g.key, g.accountId]), [['chatgpt#0', 'team-id']])
+  assert.deepEqual(bandNames(moved, gpt), ['GPT'])
+})
+
+test('a chosen account the router did not answer for draws nothing, and no other account stands in', () => {
+  const groups = limitGroups(routerLimitItems(IDS, NOW))
+  assert.deepEqual(bandLimitGroups(groups, choose({ provider: 'chatgpt', show: 'accounts', accounts: ['gone'] })).map(g => g.key), ['anthropic#1', 'opencode-go#0'])
+  // Keys without ids are never matched by a chosen id.
+  assert.deepEqual(bandLimitGroups(groups, choose({ provider: 'opencode-go', show: 'accounts', accounts: ['key one', '0'] })).map(g => g.key), ['anthropic#1', 'chatgpt#1'])
+  // Of two chosen, only the second answered (the first not read yet): it alone, by its own number.
+  const both = choose({ provider: 'chatgpt', show: 'accounts', accounts: ['legacy', 'team-id'] })
+  const half = limitGroups(routerLimitItems({ providers: [{ ...IDS.providers[1]!, accounts: [IDS.providers[1]!.accounts[1]!] }] }, NOW))
+  assert.deepEqual(bandLimitGroups(half, both).map(g => g.key), ['chatgpt#1'])
+  assert.deepEqual(bandNames(half, both), ['GPT 2'])
+  // Both answered: in use first, both numbered.
+  assert.deepEqual(bandNames(groups, both), ['Claude', 'GPT 2', 'GPT 1', 'Go'])
+})
+
+test('narrow, a chosen provider keeps its account in use and drops the other first', () => {
+  const groups = limitGroups(routerLimitItems(IDS, NOW))
+  const all = bandLimitGroups(groups, choose({ provider: 'chatgpt', show: 'all' }))
+  const measure = (gs: readonly { items: unknown[] }[]) => gs.reduce((n, g) => n + g.items.length, 0) + gs.length
+  // Claude (five-hour, Fable) 3, each GPT account 2, Go 2: 9 cells. At 7 GPT 1, the account not in
+  // use, goes before Go's whole group; at 5 Go goes too, and GPT 2, the one in use, stays.
+  assert.deepEqual(narrowLimitGroups(all, 9, measure)?.map(g => g.key), ['anthropic#1', 'chatgpt#1', 'chatgpt#0', 'opencode-go#0'])
+  assert.deepEqual(narrowLimitGroups(all, 7, measure)?.map(g => g.key), ['anthropic#1', 'chatgpt#1', 'opencode-go#0'])
+  assert.deepEqual(narrowLimitGroups(all, 5, measure)?.map(g => g.key), ['anthropic#1', 'chatgpt#1'])
+})
+
+test('save mode\'s word follows the first Claude group only, and Claude off hides the first row\'s chip', () => {
+  const items = routerLimitItems(IDS, NOW)
+  const groups = limitGroups(items)
+  const several = bandLimitGroups(groups, choose({ provider: 'anthropic', show: 'all' }))
+  assert.deepEqual(several.map(firstOfProvider(several)), [true, false, false, true, true])
+  const band = bandLimitGroups(groups)
+  assert.deepEqual(band.map(firstOfProvider(band)), [true, true, true])
+  // Compared by key: the narrow row draws copies.
+  assert.equal(firstOfProvider(several)({ ...several[0]!, items: [] }), true)
+  // Only when every Claude provider the limits name is off.
+  const off = (bandLimits?: BandLimit[]) => claudeBandOff({ limits: items, ...(bandLimits ? { bandLimits } : {}) })
+  assert.equal(off(choose({ provider: 'anthropic', show: 'off' })), true)
+  assert.equal(off(), false)
+  assert.equal(off([]), false)
+  assert.equal(off(choose({ provider: 'anthropic', show: 'all' })), false)
+  assert.equal(off(choose({ provider: 'anthropic', show: 'accounts', accounts: ['current'] })), false)
+  assert.equal(off(choose({ provider: 'chatgpt', show: 'off' })), false)
+  // Two Claude providers: both must be off.
+  const twice = [...items, { ...items[0]!, provider: 'anthropic-2' }]
+  assert.equal(claudeBandOff({ limits: twice, bandLimits: choose({ provider: 'anthropic', show: 'off' }) }), false)
+  assert.equal(claudeBandOff({ limits: twice, bandLimits: choose({ provider: 'anthropic', show: 'off' }, { provider: 'anthropic-2', show: 'off' }) }), true)
+  // The fallback path's 'claude' provider is no 'anthropic'; and nothing read is nothing hidden.
+  const fallback = [{ provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: 'five_hour' as const, label: '', percent: 3 }]
+  assert.equal(claudeBandOff({ limits: fallback, bandLimits: choose({ provider: 'anthropic', show: 'off' }) }), false)
+  assert.equal(claudeBandOff({ bandLimits: choose({ provider: 'anthropic', show: 'off' }) }), false)
+  assert.equal(claudeBandOff({ limits: [], bandLimits: choose({ provider: 'anthropic', show: 'off' }) }), false)
+})
+
 // 2026-11-09: the router forecasts a window that will reach 100% before it resets (`exhaust_at`).
 // It is parsed into the item (epoch ms), colours the window's figure (amber, red within the hour),
 // and says in the tip how long is left; a window without a forecast is exactly what it was.
@@ -696,4 +837,18 @@ test('every language says the forecast and the cost, with the placeholders the c
     assert.match(t(lang, 'cost.estimated', { count: 7 }), /7/, lang)
     assert.ok(t(lang, 'cost.estimated', { count: 7 }).includes('≈'), lang)
   }
+})
+
+test('a stored Claude account the app logs into is found on the login\'s row, which names it in sameAs', () => {
+  const choice = choose({ provider: 'anthropic', show: 'accounts', accounts: ['stored-a'] })
+  const before = limitGroups(routerLimitItems(IDS, NOW))
+  assert.deepEqual(bandLimitGroups(before, choice).map(g => g.key), ['anthropic#1', 'chatgpt#1', 'opencode-go#0'])
+  // The router hides the stored copy behind the login's row (admin.ts anthropicLimitAccounts) and names it there.
+  const [login, , other] = IDS.providers[0]!.accounts
+  const after = limitGroups(routerLimitItems({ providers: [{ ...IDS.providers[0]!, accounts: [{ ...login!, sameAs: ['stored-a'], inUse: true }, other!] }] }, NOW))
+  assert.deepEqual(after.map(g => g.accountAliases ?? []), [['stored-a'], []])
+  assert.deepEqual(bandLimitGroups(after, choice).map(g => g.key), ['anthropic#0'])
+  // Ids that are not strings are not carried.
+  const odd = routerLimitItems({ providers: [{ ...IDS.providers[0]!, accounts: [{ ...login!, sameAs: ['', 3, null] }] }] }, NOW)
+  assert.ok(odd.every(item => !('accountAliases' in item)))
 })
