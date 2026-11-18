@@ -283,6 +283,13 @@ test("a limits read redraws the picker only when what it lists has changed", () 
   assert.deepEqual(findAll(ui.state.box, (node) => node.attrs.class === "cell wide").map((row) => findAll(row, (node) => node.attrs.class === "cell-label tick-name")[0]!.children.at(-1)!.attrs.text), ["Claude", "GPT", "Grok"]);
   ui.redraw();
   assert.equal(ui.state.redraws, 1);
+  // A stored copy leaving the login's row, or an account renumbered when one before it paused, is drawn again too.
+  ui.setSnapshot({ providers: [{ ...claude, accounts: [{ ...claude.accounts[0]!, sameAs: ["copy"] }, claude.accounts[1]!] }, gpt, grok] });
+  ui.redraw();
+  assert.equal(ui.state.redraws, 2);
+  ui.setSnapshot({ providers: [{ ...claude, accounts: [{ ...claude.accounts[0]!, sameAs: ["copy"] }, claude.accounts[1]!] }, { ...gpt, accounts: gpt.accounts.map((account) => ({ ...account, account: account.account + 1 })) }, grok] });
+  ui.redraw();
+  assert.equal(ui.state.redraws, 3);
 });
 
 // The page's own copy of the mod's defaults, its normalizer and its keyed merge.

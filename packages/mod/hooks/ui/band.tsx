@@ -703,8 +703,9 @@ function forecastTips(groups: readonly LimitGroup[], numbered: (g: LimitGroup) =
  * providers and accounts the row shows is the owner's (bandLimits, picked in the dashboard): a
  * provider not named shows only its account in use, unnumbered; a named one shows none of its
  * accounts ('off'), every one the router read ('all') or only the chosen ones ('accounts'), its
- * account in use first and each numbered as the pane numbers it (bandLimitGroups,
- * bandLimitNumbered). The limits pane lists every account whatever the choice.
+ * account in use first and each numbered by its own account number, as the pane does whenever
+ * the router read more than one; a lone account past the first still reads "GPT 2", never a bare
+ * "GPT" (bandLimitGroups, bandLimitNumbered). The limits pane lists every account whatever the choice.
  * `onPress`: the row is a button (the limits pane); pressed it says so in the tip place, and each
  * window's own tip (its name and reset) gives way to that one.
  */

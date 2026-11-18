@@ -512,7 +512,7 @@ test('a provider set to off leaves the row; the others keep the default', () => 
   assert.deepEqual(bandNames(groups, choose({ provider: 'opencode-go', show: 'off' })), ['Claude', 'GPT'])
 })
 
-test('all draws every account read, the one in use first, each numbered as in the pane', () => {
+test('all draws every account read, the one in use first, each numbered by its own account number', () => {
   const groups = limitGroups(routerLimitItems(IDS, NOW))
   const gpt = choose({ provider: 'chatgpt', show: 'all' })
   assert.deepEqual(bandLimitGroups(groups, gpt).map(g => g.key), ['anthropic#1', 'chatgpt#1', 'chatgpt#0', 'opencode-go#0'])
@@ -579,6 +579,9 @@ test('save mode\'s word follows the first Claude group only, and Claude off hide
   assert.equal(off([]), false)
   assert.equal(off(choose({ provider: 'anthropic', show: 'all' })), false)
   assert.equal(off(choose({ provider: 'anthropic', show: 'accounts', accounts: ['current'] })), false)
+  // Chosen accounts none of which was read: the first row's chip would show the account in use, which was not chosen.
+  assert.equal(off(choose({ provider: 'anthropic', show: 'accounts', accounts: ['gone'] })), true)
+  assert.equal(off(choose({ provider: 'anthropic', show: 'all' }, { provider: 'chatgpt', show: 'accounts', accounts: ['gone'] })), false)
   assert.equal(off(choose({ provider: 'chatgpt', show: 'off' })), false)
   // Two Claude providers: both must be off.
   const twice = [...items, { ...items[0]!, provider: 'anthropic-2' }]

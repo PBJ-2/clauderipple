@@ -674,15 +674,24 @@ export function firstOfProvider(groups: readonly LimitGroup[]): (group: LimitGro
 }
 
 /**
- * Whether the owner hid Claude from the band's row: every Claude provider among the limits read is
- * 'off' in `bandLimits`. The first row's Claude limit chip, which returns whenever the second row
- * draws nothing, then stays away too. False while no Claude window is known, so the default band,
- * and the fallback path's 'claude' provider no choice names, are as they were.
+ * Whether the owner's choice leaves Claude out of the band's row: every Claude provider among the
+ * limits read is 'off' in `bandLimits`, or set to chosen accounts none of which the router answered
+ * for. The first row's Claude limit chip, which returns whenever the second row draws nothing, then
+ * stays away too: it shows the account in use, which such a choice did not name, so it would be
+ * another account's figure standing in (2026-11-19 review). False while no Claude window is known,
+ * so the default band, and the fallback path's 'claude' provider no choice names, are as they were.
  */
 export function claudeBandOff(view: Pick<DashboardView, 'limits' | 'bandLimits'>): boolean {
-  const chosen = bandChoices(view.bandLimits ?? [])
-  const claude = new Set((view.limits ?? []).filter(isClaude).map(item => item.provider))
-  return claude.size > 0 && [...claude].every(provider => chosen.get(provider)?.show === 'off')
+  const choices = view.bandLimits ?? []
+  const chosen = bandChoices(choices)
+  const items = view.limits ?? []
+  const claude = new Set(items.filter(isClaude).map(item => item.provider))
+  if (!claude.size) return false
+  const drawn = new Set(bandLimitGroups(limitGroups(items), choices).map(g => g.provider))
+  return [...claude].every(provider => {
+    const choice = chosen.get(provider)
+    return choice?.show === 'off' || (choice?.show === 'accounts' && !drawn.has(provider))
+  })
 }
 
 /**

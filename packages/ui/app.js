@@ -6321,11 +6321,16 @@ const MOD_BAND_LABELS = { all: "mod.bandLimitsAll", accounts: "mod.bandLimitsCho
 /** Whether the read gave an account an owner id: only those can be picked one by one (OpenCode Go and MiniMax keys have none). */
 function modBandLimitsHasId(account) { return Boolean(account) && typeof account.id === "string" && account.id !== ""; }
 
-/** What the picker lists, so a read that brings the same providers and accounts redraws nothing. */
+/**
+ * What the picker draws from, so a read that brings the same providers and accounts redraws nothing.
+ * The number and `sameAs` are in it too: a name falls back to the number, and a stored copy leaving
+ * the login's row changes which boxes are ticked (2026-11-19 review).
+ */
 function modBandLimitsSig() {
   if (!limitsSnapshot || !Array.isArray(limitsSnapshot.providers)) return "none";
   return JSON.stringify(limitsSnapshot.providers.map((entry) => [entry.provider, entry.type, entry.title,
-    (Array.isArray(entry.accounts) ? entry.accounts : []).map((account) => [modBandLimitsHasId(account) ? account.id : account.account, account.label || account.email || "", account.inUse === true])]));
+    (Array.isArray(entry.accounts) ? entry.accounts : []).map((account) => [modBandLimitsHasId(account) ? account.id : null, account.account,
+      Array.isArray(account.sameAs) ? account.sameAs : [], account.label || account.email || "", account.inUse === true])]));
 }
 
 /** The providers the read listed, in its order; two that share a title take their config name after it ("GPT · work"). */
