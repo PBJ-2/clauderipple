@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.12.41 — 2026-11-18
+
+### Changed
+
+- **Idle compaction now yields to keep-warm chat by chat, not by a global switch.** In 0.12.40,
+  turning keep-warm on in Settings turned Claude Code's idle compaction off for every chat, and a chat
+  whose keep-warm you switched on or off with the band's flame was not followed. Now the "Compact ahead
+  while idle" switch alone decides Claude Code's `idleCompaction`, and in each chat the mod skips the
+  idle summary only while keep-warm is actually keeping that chat's cache (on for the chat, not stopped,
+  within its time limit and big enough). Other chats are compacted ahead as usual, and compaction at
+  the threshold or one you ask for is unchanged. Sessions already open pick this up when they restart.
+
 ## 0.12.40 — 2026-11-17
 
 ### Added
