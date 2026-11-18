@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.12.42 — 2026-11-18
+
+### Fixed
+
+- **A paused account no longer has workers in the worker menus.** A worker pinned to a paused
+  ChatGPT, Google or Claude account was still listed and could be picked for a worker rung, but a paused
+  account never runs a turn, so the work quietly went to another account. Those workers now leave the
+  menus while the account is paused and come back when you resume it. A rung that already names one shows
+  it as unavailable and is skipped until then. The "models to use" list remembers whether such a worker
+  was ticked, so it comes back as you left it.
+
 ## 0.12.41 — 2026-11-18
 
 ### Changed
