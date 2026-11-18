@@ -9,9 +9,9 @@ import path from "node:path";
 
 import { DEFAULTS, type Config, type Provider } from "../src/config.ts";
 import { generatedAgents, syncAgentFiles } from "../src/agents.ts";
-import { storedAccountsFor } from "../src/pinned-accounts.ts";
+import { pinnableAccountsFor, storedAccountsFor, storedAccountsSignature } from "../src/pinned-accounts.ts";
 import { CredentialPool, pinnedCredential } from "../src/pool.ts";
-import { markClaudeAccountNeedsReauth, saveClaudeOAuthAccount } from "../src/providers/anthropic-accounts.ts";
+import { markClaudeAccountNeedsReauth, saveClaudeOAuthAccount, updateClaudeAccount } from "../src/providers/anthropic-accounts.ts";
 import { saveChatGptAccount, updateChatGptAccount, removeChatGptAccount } from "../src/providers/chatgpt/accounts.ts";
 import { saveGoogleAccount, updateGoogleAccount } from "../src/providers/google/accounts.ts";
 /** packages/mod/hooks/workers.ts `agentProvider`, which test/mod/workers.test.ts checks on the same shape. */
@@ -117,4 +117,54 @@ test("pinnedCredential answers only for a present, usable account; the caller ke
   pool.penalise("p", "b", 429, 60_000, "", "gemini");
   assert.equal(pinnedCredential("p", credentials, "bbbbbbbb", pool)?.id, "b");
   assert.equal(pinnedCredential("p", credentials, "bbbbbbbb", pool, "gemini"), undefined);
+});
+
+test("a paused account gets no pinned worker until it is resumed; the numbering list still has it", (t) => {
+  const home = tempHome();
+  const dir = path.join(home, "agents");
+  const manifest = path.join(home, "generated-agents.json");
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+
+  const claude = saveClaudeOAuthAccount(home, { ...grant, accountId: "claude-upstream", email: "mambo@example.test" });
+  const chatgpt = saveChatGptAccount(home, { ...grant, accountId: "chatgpt-account" });
+  const google = saveGoogleAccount(home, { ...grant, projectId: "proj-1", email: "gwork@example.test" });
+  const cfg: Config = {
+    ...DEFAULTS,
+    providers: {
+      anthropic: { type: "anthropic", auth: "claude-code", accountPool: true, models: [{ id: "claude-opus-5-5" }] },
+      chatgpt: { type: "chatgpt", auth: "own", models: [{ id: "gpt-6.1-sol" }] },
+      google: { type: "google", auth: "antigravity", models: [{ id: "gemini-4-argon" }] },
+    },
+    routes: {}, direct: [], aliases: {},
+  };
+  const accountsFor = (provider: Provider) => pinnableAccountsFor(provider, home);
+  const sync = () => syncAgentFiles(cfg, dir, undefined, { manifestPath: manifest, pinnedAccounts: accountsFor });
+  const pinnedNames = () => generatedAgents(cfg, dir, manifest, undefined, accountsFor).filter((agent) => agent.account !== undefined).map((agent) => agent.name).sort();
+  const names = (id: string, model: string) => `${model}-${id.slice(0, 8)}`;
+  const all = [names(claude.id, "claude-opus-5-5"), names(chatgpt.id, "gpt-6-1-sol"), names(google.id, "gemini-4-argon")].sort();
+
+  sync();
+  assert.deepEqual(pinnedNames(), all);
+  const live = storedAccountsSignature(cfg.providers, home);
+
+  updateChatGptAccount(home, chatgpt.id, { paused: true });
+  updateGoogleAccount(home, google.id, { paused: true });
+  assert.ok(updateClaudeAccount(home, claude.id, { paused: true }));
+  assert.notEqual(storedAccountsSignature(cfg.providers, home), live, "pausing changes the signature, so the next check regenerates");
+  assert.deepEqual(pinnedNames(), [], "no paused account is offered as a pinned worker");
+  sync();
+  for (const file of all) assert.equal(fs.existsSync(path.join(dir, `${file}.md`)), false, `${file} is removed while paused`);
+  assert.ok(fs.existsSync(path.join(dir, "gpt-6-1-sol.md")), "the ordinary worker stays");
+  // The dashboard's account numbering still lists them, after the numbered ones.
+  assert.deepEqual(storedAccountsFor({ type: "chatgpt", auth: "own" }, home).map((a) => a.id), [chatgpt.id]);
+  assert.deepEqual(storedAccountsFor({ type: "google", auth: "antigravity" }, home).map((a) => a.id), [google.id]);
+  assert.deepEqual(storedAccountsFor({ type: "anthropic", auth: "claude-code", accountPool: true }, home).map((a) => a.id), [claude.id]);
+
+  updateChatGptAccount(home, chatgpt.id, { paused: false });
+  updateGoogleAccount(home, google.id, { paused: false });
+  assert.ok(updateClaudeAccount(home, claude.id, { paused: false }));
+  assert.equal(storedAccountsSignature(cfg.providers, home), live, "resuming restores the signature");
+  sync();
+  assert.deepEqual(pinnedNames(), all);
+  for (const file of all) assert.ok(fs.existsSync(path.join(dir, `${file}.md`)), `${file} is back after resuming`);
 });

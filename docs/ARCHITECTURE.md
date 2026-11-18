@@ -1809,7 +1809,21 @@ tight, and nothing at 100 or more.
   warning like any other generated-name clash. `storedAccountsFor`
   (`pinned-accounts.ts`) is the one place that maps a provider kind to its store;
   the CLI/Desktop login and the borrowed Codex login are in none of them, so they
-  never get pinned workers. A worker's frontmatter model id is
+  never get pinned workers. Accounts waiting for a sign-in and **paused**
+  accounts get none either (`pinnableAccountsFor`, which the agent files, the
+  dashboard/mod agent options and `storedAccountsSignature` all use): a paused
+  account never serves a pinned turn, so its worker would be listed and picked
+  while the work ran elsewhere (found 2026-11-18: a paused ChatGPT account's
+  workers sat in the max rung). A pause or resume through the dashboard
+  regenerates the files before its request returns (`agentsChanged`); one made
+  elsewhere (the terminal CLI, a hand edit) is caught by the 15-second check,
+  because the signature changes with the list. The dashboard's account numbering
+  keeps using `storedAccountsFor`, which still lists paused accounts. The "models
+  to use" list keeps a worker's tick or untick while it is away
+  (`modTick`, ui/app.js), so a resumed account's worker comes back as it was. A saved rung naming a vanished worker is not
+  rewritten: the dashboard shows it as unavailable
+  (`modPickSelect`, ui/app.js) and the mod skips it as "not installed"
+  (`ladderPick`, mod/hooks/workers.ts). A worker's frontmatter model id is
   `<provider>#<account-pin>:<model>@<effort>`: the pin is the stable local account
   id prefix, never the label, and it rides on the provider half so
   `qualifiedModel` (targets.ts) still selects one declaration while

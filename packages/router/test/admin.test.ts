@@ -270,10 +270,12 @@ test("mod-options numbers a pinned worker's account as the limits do", async () 
       const paused = await fetch(`${base()}:${port}/api/claude-accounts/${first.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ paused: true }) });
       assert.equal(paused.status, 200);
       const after = await read();
-      assert.deepEqual([after.first, after.second], [3, 2], "a paused account leaves the limits' numbering and follows the numbered ones");
+      assert.deepEqual([after.first, after.second], [undefined, 2], "a paused account has no pinned worker, and the other keeps its number");
+      assert.deepEqual(after.accounts?.map((account) => account.number), [1, 2, 3], "the paused account still follows the numbered ones in the list");
+      assert.equal(after.accounts?.[2]?.label, accountLabel(home, first.id));
       setCurrentClaudeAccountPaused(home, true);
       const noCurrent = await read();
-      assert.deepEqual([noCurrent.first, noCurrent.second], [2, 1], "pausing the app login leaves no gap or replacement by its cached identity");
+      assert.deepEqual([noCurrent.first, noCurrent.second], [undefined, 1], "pausing the app login leaves no gap or replacement by its cached identity");
       assert.deepEqual(noCurrent.accounts?.map((account) => account.number), [1, 2]);
       assert.equal(noCurrent.accounts?.[0]?.label, accountLabel(home, second.id));
       assert.deepEqual([noCurrent.accounts?.[0]?.name, noCurrent.accounts?.[0]?.current], ["second", undefined], "a stored account in first place is not the app login");

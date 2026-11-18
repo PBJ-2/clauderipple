@@ -17,7 +17,7 @@ import path from "node:path";
 import { adminPort, homeDir, type Config, type Provider } from "./config.ts";
 import { withFileLock } from "./locked-file.ts";
 import { accountPinFor, declaredBy, pinnedModel, qualifiedModel } from "./routing.ts";
-import { storedAccountsFor, storedAccountsSignature, type PinnedAccount } from "./pinned-accounts.ts";
+import { pinnableAccountsFor, storedAccountsSignature, type PinnedAccount } from "./pinned-accounts.ts";
 import { bareOwners, isTargetProvider, namedOnly } from "./targets.ts";
 import { isJudgeOnlyModel } from "./model-policy.ts";
 import { GROK_EFFORT_LEVELS } from "./providers/grok/catalog.ts";
@@ -187,7 +187,7 @@ function workerNames(modelId: string, providerName: string, suffixed: boolean): 
 /** One generated worker: the config it comes from, and the two names it can be known by. */
 type AgentTarget = { modelId: string; title: string; provider: string; suffix: string; legacy: string; account?: string };
 
-/** Where a provider's pinned workers come from: the stored accounts of that one provider. */
+/** Where a provider's pinned workers come from: its pinnable stored accounts (not paused, not waiting for a sign-in). */
 export type AccountsFor = (provider: Provider) => readonly PinnedAccount[];
 
 /**
@@ -790,7 +790,7 @@ export class PinnedAgentSync {
     try {
       files = syncAgentFiles(cfg, this.opts.dir, this.opts.log, {
         ...(this.opts.manifestPath ? { manifestPath: this.opts.manifestPath } : {}),
-        pinnedAccounts: (provider) => storedAccountsFor(provider, this.opts.home),
+        pinnedAccounts: (provider) => pinnableAccountsFor(provider, this.opts.home),
         onIncomplete: () => { incomplete = true; },
       });
     } catch (e) {

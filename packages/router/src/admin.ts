@@ -74,7 +74,7 @@ import { statusModEnabled, syncModelSlots } from "../../cli/src/settings.ts";
 import { ClaudeOAuthSession, type ClaudeOAuthState } from "./providers/claude-oauth.ts";
 import { readClaudeAuthFile } from "./providers/anthropic-token-file.ts";
 import { isCurrentClaudeAccountPaused, listClaudeAccounts, listClaudeAccountsWithSubject, removeClaudeAccount, updateClaudeAccount, setCurrentClaudeAccountPaused, setPreferredClaudeAccount } from "./providers/anthropic-accounts.ts";
-import { storedAccountsFor } from "./pinned-accounts.ts";
+import { pinnableAccountsFor, storedAccountsFor } from "./pinned-accounts.ts";
 import { CODEX_LOGIN_ID, readChatGptAccounts, removeChatGptAccount, summarize as summarizeChatGptAccount, updateChatGptAccount } from "./providers/chatgpt/accounts.ts";
 import { exhaustedForMs, IMAGE_ASPECTS, IMAGE_BACKGROUNDS, IMAGE_FORMATS, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
 import type { GoogleAccountStatus } from "./providers/google/index.ts";
@@ -951,7 +951,7 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
   const credentials = deps.credentials?.() ?? {};
   const health = deps.providerHealth?.() ?? {};
   const catalog = effortLevels(cfg).providers;
-  const agents: ModOptions["agents"] = generatedAgents(cfg, deps.agentDir, undefined, deps.log, (provider) => storedAccountsFor(provider, homeDir())).map(a => ({
+  const agents: ModOptions["agents"] = generatedAgents(cfg, deps.agentDir, undefined, deps.log, (provider) => pinnableAccountsFor(provider, homeDir())).map(a => ({
     ...a,
     efforts: modEfforts(catalog[a.provider]?.models?.[a.model] ?? catalog[a.provider]?.default),
     billing: billingOf(cfg.providers[a.provider] as { type: string; auth?: string; preset?: string; url?: string }, a.model),
