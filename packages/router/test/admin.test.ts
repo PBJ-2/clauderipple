@@ -659,6 +659,33 @@ test("admin mod-settings save derives Claude Code's idleCompaction from the togg
   });
 });
 
+test("admin mod-settings keeps the band limits choice when an older mod's save leaves the key out; a named [] clears it", async () => {
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const chosen = [{ provider: "chatgpt", show: "accounts", accounts: ["fa928bf4-0000-4000-8000-000000000000"] }, { provider: "claude-anthropic", show: "all" }];
+    const get = async () => ((await (await fetch(`${base()}:${port}/api/mod-settings`)).json()) as ModSettingsSnapshot).settings;
+    const saved = await putModSettings(port, { settings: { bandLimits: chosen } });
+    assert.equal(saved.status, 200);
+    assert.deepEqual((await saved.json() as ModSettingsSnapshot).settings.bandLimits, chosen);
+    // The body an older mod sends: the admin handler normalizes first, which must not fill [] in.
+    const legacy = await putModSettings(port, { settings: { keepWarm: false } });
+    assert.equal(legacy.status, 200);
+    assert.deepEqual((await legacy.json() as ModSettingsSnapshot).settings.bandLimits, chosen);
+    assert.deepEqual((await get()).bandLimits, chosen);
+    const cleared = await putModSettings(port, { settings: { bandLimits: [] } });
+    assert.equal(cleared.status, 200);
+    assert.deepEqual((await cleared.json() as ModSettingsSnapshot).settings.bandLimits, []);
+    assert.deepEqual((await get()).bandLimits, []);
+  });
+});
+
+test("admin mod-settings saves a provider whose name ends in -key: the choice is a value, not a credential field", async () => {
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const response = await putModSettings(port, { settings: { bandLimits: [{ provider: "openai-key", show: "off" }] } });
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json() as ModSettingsSnapshot).settings.bandLimits, [{ provider: "openai-key", show: "off" }]);
+  });
+});
+
 test("admin mod-settings empty-store conflicts include normalized defaults and stored false", async () => {
   await withAdmin(makeCfg(), async ({ port, home }) => {
     const response = await putModSettings(port, { settings: { language: "ko" }, revision: 1 });
@@ -4133,6 +4160,8 @@ test("GET /api/limits names the current login and leaves out stored copies of it
 
     let got = await rows();
     assert.deepEqual(got.map((a) => [a.account, a.id, a.label]), [[0, "current", "Person@Example.Test"], [2, other.id, "person@example.test"]], "the login carries its email; its stored copy is gone; the other keeps number 3");
+    // The login's row names the copy it stands for, so the band's bandLimits choice of that stored account still finds it.
+    assert.deepEqual(got.map((a) => a.sameAs), [[copy.id], undefined]);
 
     // The pool answering on the copy is the login's account spending: the remaining row carries the mark.
     reports = { anthropic: [{ id: copy.id, state: "ready", failures: 0, inUse: true }] };
@@ -4150,6 +4179,7 @@ test("GET /api/limits names the current login and leaves out stored copies of it
     lookup = async () => null;
     got = await rows();
     assert.deepEqual(got.map((a) => [a.account, a.id, a.label]), [[0, "current", undefined], [1, copy.id, "copy@example.test"], [2, other.id, "person@example.test"]]);
+    assert.ok(got.every((a) => a.sameAs === undefined), "no copy hidden, none named");
     lookup = async () => { throw new Error("offline"); };
     got = await rows();
     assert.deepEqual(got.map((a) => a.id), ["current", copy.id, other.id]);

@@ -38,7 +38,7 @@ import { adminPort, headerValueProblem, homeDir, searchProviderFor, ssidProblem,
 export { adminPort } from "./config.ts";
 import { accountDisplayName, agentRenames, generatedAgents } from "./agents.ts";
 import { isJudgeOnlyModel } from "./model-policy.ts";
-import { ModSettingsInputError, idleCompactionWanted, readModSettings, validateSettings, validateSettingsSchema, writeAutoCompactWindow, writeIdleCompaction, writeModSettings } from "./mod-settings.ts";
+import { KEPT_WHEN_ABSENT, ModSettingsInputError, idleCompactionWanted, readModSettings, validateSettings, validateSettingsSchema, writeAutoCompactWindow, writeIdleCompaction, writeModSettings } from "./mod-settings.ts";
 import { billingOf, claudeChoices, fillLadder, ladderNeedsFill } from "../../mod/hooks/ladder.ts";
 import { latestClaudeIds, normalizeSettings, twoLevelRungs } from "../../mod/hooks/settings.ts";
 import type { Billing, DomainRules, Effort, LadderChoice, Rungs, Settings, Step } from "../../mod/types/index.d.ts";
@@ -399,9 +399,11 @@ export type LimitsWindow = { kind: "five_hour" | "seven_day" | "scoped" | "windo
  * (Claude's app login is "current"), so a reader joins the two by id, never by position. `label` is the
  * name the owner gave it (absent for the Claude app login); `inUse` marks the account the router serves
  * new turns with now. `stale` is set while the reading is kept from before a refused refresh: its
- * figures are the last ones read, not the current ones.
+ * figures are the last ones read, not the current ones. `sameAs` (2026-11-19), on Claude's "current"
+ * row only, names the stored accounts hidden behind it as copies of the same login: a choice that
+ * named one of them (the mod's `bandLimits`) still finds it after the app logs into that account.
  */
-export type LimitsAccount = { account: number; id?: string; label?: string; inUse?: true; stale?: true; windows: LimitsWindow[]; at: number };
+export type LimitsAccount = { account: number; id?: string; sameAs?: string[]; label?: string; inUse?: true; stale?: true; windows: LimitsWindow[]; at: number };
 export type LimitsProvider = { provider: string; type: string; title: string; accounts: LimitsAccount[] };
 
 /** A `{used_percent, window_minutes, reset_at}` snapshot window as `/api/limits` reads it, or null. */
@@ -506,7 +508,8 @@ async function anthropicLimitAccounts(deps: AdminDeps, name: string): Promise<Li
     if (!windows.length) return;
     const at = typeof quota.at === "number" ? quota.at : Date.now();
     // A refused refresh keeps the last reading and marks it stale (anthropic-usage.ts), so the figures say so.
-    out.push({ account, id: owner.id, ...(label ? { label } : {}), ...(owner.id === inUse ? { inUse: true as const } : {}), ...(quota.stale === true ? { stale: true as const } : {}), windows, at });
+    const sameAs = owner.id === "current" ? [...copies] : [];
+    out.push({ account, id: owner.id, ...(sameAs.length ? { sameAs } : {}), ...(label ? { label } : {}), ...(owner.id === inUse ? { inUse: true as const } : {}), ...(quota.stale === true ? { stale: true as const } : {}), windows, at });
   });
   return out;
 }
@@ -2527,11 +2530,11 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         if (body && typeof body === "object" && body.settings && typeof body.settings === "object" && !Array.isArray(body.settings)) {
           // Checked before normalizing, which would drop a credential field the check is there to refuse.
           validateSettings(body.settings);
-          // Normalizing fills a missing `idleCompact` with the default; an older mod's save leaves it
-          // out, and writeModSettings keeps the stored value only while the key stays absent.
-          const idleAbsent = !Object.hasOwn(body.settings, "idleCompact");
+          // Normalizing fills a missing `idleCompact` or `bandLimits` with the default; an older mod's
+          // save leaves it out, and writeModSettings keeps the stored value only while the key stays absent.
+          const absent = KEPT_WHEN_ABSENT.filter(key => !Object.hasOwn(body.settings as object, key));
           const normalized: Partial<Settings> = await withFilledLadder(deps, scores, normalizeSettings(body.settings));
-          if (idleAbsent) delete normalized.idleCompact;
+          for (const key of absent) delete normalized[key];
           body.settings = normalized;
         }
         if (!body || typeof body !== "object" || body.settings === undefined) {

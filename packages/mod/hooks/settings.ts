@@ -1,4 +1,4 @@
-import type { Calibration, Domain, DomainRules, Effort, Level, Mode, Rule, Rung, Settings, SettingsChange, Skin, Step, TierTarget } from '../types/index.d.ts'
+import type { BandLimit, Calibration, Domain, DomainRules, Effort, Level, Mode, Rule, Rung, Settings, SettingsChange, Skin, Step, TierTarget } from '../types/index.d.ts'
 
 /**
  * Bump whenever a writer's normalization can lose another format's fields. 2: `domainRules.review`,
@@ -35,7 +35,7 @@ export const DEFAULTS: Settings = {
   keepWarm: false, keepWarmHours: 2, keepWarmMinTokens: 30000,
   idleCompact: true,
   compactModel: 'claude-haiku-5-5', compactModels: [],
-  swampAlert: false, layout: 'dashboard', appearance: 'auto', skin: 'deep', language: 'auto', hide: ['reason'], extras: [], setupDone: false,
+  swampAlert: false, layout: 'dashboard', appearance: 'auto', skin: 'deep', language: 'auto', hide: ['reason'], extras: [], bandLimits: [], setupDone: false,
 }
 
 /** The desktop's skins, in the order the panel offers them. */
@@ -316,6 +316,35 @@ export function normalizeModes(raw: unknown, base: Rule['rungs'] = DEFAULTS.rule
   return out
 }
 
+/** How many providers the band's limits row keeps a choice for. */
+const BAND_LIMITS_MAX = 16
+/** How many accounts one provider's choice may name. */
+const BAND_ACCOUNTS_MAX = 8
+/** How long an account id may be: a UUID or a short name such as "current"; a longer one is dropped, never cut. */
+const BAND_ACCOUNT_ID_MAX = 128
+
+/**
+ * The band's limits row choices (2026-11-19). The first entry for a provider wins; 'off' and 'all'
+ * keep only the provider and the choice, 'accounts' keeps the listed ids and is dropped when none
+ * is left. An unknown choice drops the entry, so a later shape is not misread as one of these.
+ */
+function bandLimits(raw: unknown): BandLimit[] {
+  if (!Array.isArray(raw)) return []
+  const out: BandLimit[] = []
+  for (const entry of raw) {
+    const v = object(entry)
+    const provider = typeof v.provider === 'string' ? v.provider.trim() : ''
+    if (!provider || provider.length > PROVIDER_NAME_MAX || out.some(b => b.provider === provider)) continue
+    if (v.show === 'off' || v.show === 'all') out.push({ provider, show: v.show })
+    else if (v.show === 'accounts') {
+      const accounts = names(v.accounts).filter(id => id.length <= BAND_ACCOUNT_ID_MAX).slice(0, BAND_ACCOUNTS_MAX)
+      if (accounts.length) out.push({ provider, show: 'accounts', accounts })
+    }
+    if (out.length === BAND_LIMITS_MAX) break
+  }
+  return out
+}
+
 /** The general pin every install had before the ladder: what stored `tiers` filled in. */
 const LEGACY_GENERAL: Readonly<Record<Level, TierTarget>> = { light: { agent: 'deepseek-v4-1-flash' }, standard: { agent: 'gpt-6-1-sol' }, deep: { agent: 'gpt-6-astra' } }
 
@@ -337,7 +366,7 @@ export function normalizeSettings(raw: unknown, workers?: readonly Worker[]): Se
   }
   const ticked = names(Array.isArray(value.allow) ? value.allow : object(stored.general).mode === 'auto' ? object(stored.general).allow : [])
   const savedKnown = names(value.allowKnown)
-  const result: Settings = { ...DEFAULTS, rules, allow: workers?.length ? migrateAllow(ticked, workers) : ticked, allowKnown: savedKnown, providers: {}, hide: [...DEFAULTS.hide], extras: [...DEFAULTS.extras], fallback: { ...DEFAULTS.fallback } }
+  const result: Settings = { ...DEFAULTS, rules, allow: workers?.length ? migrateAllow(ticked, workers) : ticked, allowKnown: savedKnown, providers: {}, hide: [...DEFAULTS.hide], extras: [...DEFAULTS.extras], bandLimits: [], fallback: { ...DEFAULTS.fallback } }
   for (const [name, enabled] of Object.entries(object(value.providers))) if (typeof enabled === 'boolean') result.providers[name] = enabled
   for (const key of ['effortAuto', 'keepWarm', 'idleCompact', 'setupDone', 'swampAlert'] as const) if (typeof value[key] === 'boolean') result[key] = value[key]
   if (Array.isArray(value.extras)) result.extras = [...new Set(value.extras.filter((part): part is string => typeof part === 'string' && EXTRAS.includes(part)))]
@@ -356,6 +385,7 @@ export function normalizeSettings(raw: unknown, workers?: readonly Worker[]): Se
   if (typeof value.compactModel === 'string' && value.compactModel.trim()) result.compactModel = value.compactModel.trim()
   else if (value.compactWith === 'session') result.compactModel = 'session'
   result.compactModels = names(value.compactModels).slice(0, 4)
+  result.bandLimits = bandLimits(value.bandLimits)
   if (Array.isArray(value.hide)) result.hide = [...new Set(value.hide.filter((part): part is string => typeof part === 'string' && ['timer', 'reason', 'route', 'limits'].includes(part)))]
   result.fallback = target(value.fallback, DEFAULTS.fallback)!
   const domains = domainRules(value.domainRules)
