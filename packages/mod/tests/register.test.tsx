@@ -2084,6 +2084,133 @@ test('the flame turns keep-warm off for this chat only; Settings stay as they ar
   expect(b.router().settings.keepWarm).toBe(true)
 })
 
+// Claude Code's idle compaction asks `session.compact` for a `precompute` ~54 minutes into the idle,
+// while keep-warm's ping is still two minutes away. The mod answers `{ skip }` for a chat whose
+// cache keep-warm will hold; everything else goes on to core.
+const IDLE = 54 * 60000
+/** A chat with one finished reply (so a warm memo), then `IDLE` of silence; counts what core and the pings saw. */
+async function idleChat($: Engine, on: On, patch: Partial<Settings> = { keepWarm: true }, options: Parameters<typeof boundaries>[2] = { tokens: 220000 }) {
+  const b = boundaries(on, patch, options)
+  http(on)
+  judgeStub(on)
+  stepStub(on)
+  const seen = { core: 0, forks: 0 }
+  on('model.fork', () => { seen.forks++; return { value: { isAnswered: true, text: 'ok', usage: USAGE } } })
+  on('session.compact', () => { seen.core++; return { messages: MESSAGES } })
+  await start($)
+  await step($)
+  await complete($)
+  await b.clock.advance(IDLE)
+  return { b, seen }
+}
+const precompute = ($: Engine, extra: { agentId?: string } = {}) => $.session.compact({ trigger: 'precompute', messages: MESSAGES, ...extra })
+
+test('an idle precompute is skipped, not computed, while keep-warm will hold the chat\'s cache; the ping still comes', async ($, on) => {
+  const { b, seen } = await idleChat($, on)
+  expect(seen.forks).toBe(0)
+  const out = await precompute($)
+  expect('skip' in out && typeof out.skip === 'string' && out.skip.length > 0).toBe(true)
+  expect(seen.core).toBe(0)
+  expect(b.logs.some(log => log.includes('idle compaction skipped'))).toBe(true)
+  expect(b.toasts).toEqual([])
+  await b.clock.advance(3375000 - IDLE)
+  expect(seen.forks).toBe(1)
+})
+
+test('an interactive terminal\'s idle compaction (its host\'s `auto`, outside a turn) is skipped the same way', async ($, on) => {
+  const { seen } = await idleChat($, on)
+  const out = await $.session.compact({ trigger: 'auto', messages: MESSAGES })
+  expect('skip' in out).toBe(true)
+  expect(seen.core).toBe(0)
+})
+
+test('a turn that started but has not stepped yet (a built-in command) keeps its precompute and threshold compaction', async ($, on) => {
+  const { seen } = await idleChat($, on)
+  await $.turn.start({ text: '/init', turnId: 'turn-2' })
+  expect('skip' in await precompute($)).toBe(false)
+  expect('skip' in await $.session.compact({ trigger: 'auto', messages: MESSAGES })).toBe(false)
+  expect(seen.core).toBe(2)
+  await $.turn.complete({ turnId: 'turn-2', answer: 'Done.', reason: 'answer', durationMs: 1000, isAborted: false })
+  expect('skip' in await precompute($)).toBe(true)
+  expect(seen.core).toBe(2)
+})
+
+test('the same precompute reaches core while the turn runs, for a subagent, and under any other trigger', async ($, on) => {
+  const { seen } = await idleChat($, on)
+  expect('skip' in await precompute($, { agentId: 'worker' })).toBe(false)
+  expect('skip' in await $.session.compact({ trigger: 'auto', messages: MESSAGES, agentId: 'worker' })).toBe(false)
+  for (const trigger of ['manual', 'plugin'] as const) expect('skip' in await $.session.compact({ trigger, messages: MESSAGES })).toBe(false)
+  expect(seen.core).toBe(4)
+  // A new prompt starts the main turn: the in-turn precompute arms run, untouched.
+  await submit($)
+  expect('skip' in await precompute($)).toBe(false)
+  expect(seen.core).toBe(5)
+  await complete($)
+  expect('skip' in await precompute($)).toBe(true)
+  expect(seen.core).toBe(5)
+})
+
+for (const [name, patch, options, flame] of [
+  ['keep-warm off', { keepWarm: false }, { tokens: 220000 }, false],
+  ['the chat is too small for keep-warm', { keepWarm: true }, { tokens: 10000 }, false],
+  ['the flame turned keep-warm off for this chat', { keepWarm: true }, { tokens: 220000 }, true],
+] as const) {
+  test(`an idle precompute still runs when ${name}`, async ($, on) => {
+    const b = boundaries(on, patch, options)
+    http(on)
+    judgeStub(on)
+    stepStub(on)
+    let core = 0
+    on('model.fork', () => ({ value: { isAnswered: true, text: 'ok', usage: USAGE } }))
+    on('session.compact', () => { core++; return { messages: MESSAGES } })
+    await start($)
+    await step($)
+    await complete($)
+    if (flame) await command($, 'warm')
+    await b.clock.advance(IDLE)
+    expect('skip' in await precompute($)).toBe(false)
+    expect(core).toBe(1)
+  })
+}
+
+test('the flame turns keep-warm on for one chat while Settings keep it off: its idle precompute is skipped', async ($, on) => {
+  const b = boundaries(on, { keepWarm: false }, { tokens: 220000 })
+  http(on)
+  judgeStub(on)
+  stepStub(on)
+  let core = 0
+  on('model.fork', () => ({ value: { isAnswered: true, text: 'ok', usage: USAGE } }))
+  on('session.compact', () => { core++; return { messages: MESSAGES } })
+  await start($)
+  await step($)
+  await complete($)
+  await command($, 'warm')
+  await b.clock.advance(IDLE)
+  expect('skip' in await precompute($)).toBe(true)
+  expect(core).toBe(0)
+  expect(b.router().settings.keepWarm).toBe(false)
+})
+
+test('an idle precompute runs once keep-warm has stopped itself', async ($, on) => {
+  const b = boundaries(on, { keepWarm: true, keepWarmHours: 1 }, { tokens: 220000 })
+  http(on)
+  judgeStub(on)
+  stepStub(on)
+  let core = 0
+  on('model.fork', () => ({ value: JSON.parse('null') }))
+  on('session.compact', () => { core++; return { messages: MESSAGES } })
+  await start($)
+  await step($)
+  await complete($)
+  // The reply was at 0; the one-hour bound is at 60 minutes and the ping at 56 comes before it.
+  await b.clock.advance(IDLE)
+  expect('skip' in await precompute($)).toBe(true)
+  // The ping's fork fails: keep-warm stops itself, and the chat's cache is no longer kept.
+  await b.clock.advance(3375000 - IDLE)
+  expect('skip' in await precompute($)).toBe(false)
+  expect(core).toBe(1)
+})
+
 test('typed compaction passes core input and output unchanged, with no model call or pick POST', async ($, on) => {
   boundaries(on, { compactModel: 'gpt-6.1-sol@high' })
   const urls = http(on)

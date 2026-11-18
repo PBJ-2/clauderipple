@@ -209,8 +209,9 @@ export type Settings = {
   keepWarmMinTokens: number
   /**
    * Let Claude Code write a compaction summary in the background while a long chat sits idle
-   * (its `idleCompaction`). The router turns it off in settings.json whenever `keepWarm` is on,
-   * since the idle summary would replace the cache keep-warm exists to keep. Default true.
+   * (its `idleCompaction`); the router writes settings.json from this toggle alone. A chat whose
+   * keep-warm will hold its cache skips that idle summary itself (the mod's `session.compact` hook),
+   * since it would replace the cache keep-warm exists to keep. Default true.
    */
   idleCompact: boolean
   /**

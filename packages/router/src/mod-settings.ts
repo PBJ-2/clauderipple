@@ -143,14 +143,15 @@ export function writeAutoCompactWindow(tokens: number | null): void {
 }
 
 /**
- * Claude Code's `idleCompaction` is derived, never chosen here: on only when the user's
- * "compact ahead while idle" toggle is on and keep-warm is off. Its idle summary starts at 90% of
- * the 1-hour cache (about 54 minutes) and keep-warm pings at about 56, so it would always win the
- * race and replace the cache keep-warm is there to keep. Absence means Claude Code's default
- * (true), so the key is written only as `false` and removed otherwise (ARCHITECTURE §3b).
+ * Claude Code's `idleCompaction` is derived, never chosen here: it follows the user's "compact
+ * ahead while idle" toggle alone. Keep-warm is decided per chat (the mod's `warmHere` switch, which
+ * the router cannot see), so the mod skips the idle summary in the chats where keep-warm will hold
+ * the cache; the summary starts at 90% of the 1-hour cache (about 54 minutes) and keep-warm pings
+ * at about 56. Absence means Claude Code's default (true), so the key is written only as `false`
+ * and removed otherwise (ARCHITECTURE §3b).
  */
-export function idleCompactionWanted(settings: { idleCompact: boolean; keepWarm: boolean }): boolean {
-  return settings.idleCompact && !settings.keepWarm;
+export function idleCompactionWanted(settings: { idleCompact: boolean }): boolean {
+  return settings.idleCompact;
 }
 
 /**

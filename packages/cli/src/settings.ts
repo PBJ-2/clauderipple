@@ -359,8 +359,8 @@ function removeProxyEnvLocked(opts: { proxyUrl: string; caPath: string; models?:
       return { changed: false, backup: null, notes, wroteSlots: [] };
     }
   }
-  // The router writes `idleCompaction: false` (never true) when it turns idle compaction off for
-  // keep-warm or the user's toggle; with ClaudeRipple gone nothing would turn it back on. The key is
+  // The router writes `idleCompaction: false` (never true) when the user's toggle turns idle
+  // compaction off; with ClaudeRipple gone nothing would turn it back on. The key is
   // account-wide, so only the default home's uninstall removes it; another home's uninstall leaves it.
   const dropIdleCompaction = s.idleCompaction === false && sameHome(home, path.join(os.homedir(), ".clauderipple"));
   if (dropIdleCompaction) changed = true;

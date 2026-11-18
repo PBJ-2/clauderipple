@@ -6,7 +6,7 @@ import type { CacheMemo, WarmState } from '../../packages/mod/types/index.d.ts'
 registerHooks({ resolve(specifier, context, next) {
   return next(context.parentURL?.includes('/packages/mod/hooks/') && /^\.\.?\//.test(specifier) && !/\.[a-z]+$/.test(specifier) ? `${specifier}.ts` : specifier, context)
 } })
-const { ttlFromUsage, nextMemo, secondsLeft, shouldPing, afterPing, restoreFromResume, cacheMemoryKey, CACHE_MEMORY_PREFIX, savedMemory, staleMemory, liveContextTokens, laterMemo } = await import('../../packages/mod/hooks/cache.ts')
+const { ttlFromUsage, nextMemo, secondsLeft, shouldPing, warmWillHold, afterPing, restoreFromResume, cacheMemoryKey, CACHE_MEMORY_PREFIX, savedMemory, staleMemory, liveContextTokens, laterMemo } = await import('../../packages/mod/hooks/cache.ts')
 const hour = 3600000, five = 300000
 const warm: WarmState = { pings: 0, cost: 0 }
 const memo: CacheMemo = { ttlMs: hour, lastReplyAt: 0, expiresAt: hour }
@@ -60,6 +60,47 @@ test('keep-warm refuses disabled, busy, expired, unknown, stopped and time-bound
   const bound = { ...ping, now: 2 * hour, memo: { ...memo, expiresAt: 2 * hour + 1 } }
   assert.equal(shouldPing(bound).ping, false)
   assert.equal(shouldPing({ ...bound, now: bound.now - 1 }).ping, true)
+})
+
+// What the mod's idle-compaction skip asks: will keep-warm still hold the cache through the expiry?
+// The idle summary starts at 54 minutes; the ping for an hour-long memo comes at 56.
+const holds = { settings: { ...DEFAULTS, keepWarm: true }, memo, warm, now: 54 * 60000, contextTokens: 220000, lastRealReplyAt: 0 }
+
+test('warmWillHold is true for a warm, big, in-bound chat with keep-warm on, whenever the idle summary asks', () => {
+  assert.equal(warmWillHold(holds), true)
+  assert.equal(warmWillHold({ ...holds, now: 1 }), true, 'far from the lead window: only the plan matters')
+  assert.equal(warmWillHold({ ...holds, now: hour - 1 }), true, 'inside the lead window')
+  assert.equal(warmWillHold({ ...holds, contextTokens: 30000 }), true, 'the minimum is inclusive, like the ping')
+  const short = { ...holds, memo: { ...memo, ttlMs: five, expiresAt: five }, now: five - 90000 }
+  assert.equal(warmWillHold(short), true)
+})
+
+test('warmWillHold is false when keep-warm is off, stopped, expired, unknown, out of bound or too small', () => {
+  assert.equal(warmWillHold({ ...holds, settings: DEFAULTS }), false, 'keep-warm off for the chat')
+  assert.equal(warmWillHold({ ...holds, warm: { ...warm, stopped: 'no cache' } }), false)
+  assert.equal(warmWillHold({ ...holds, memo: null }), false)
+  assert.equal(warmWillHold({ ...holds, memo: { ...memo, expiresAt: holds.now } }), false, 'expired memo')
+  assert.equal(warmWillHold({ ...holds, now: hour + 1 }), false)
+  assert.equal(warmWillHold({ ...holds, lastRealReplyAt: null }), false)
+  assert.equal(warmWillHold({ ...holds, contextTokens: 29999 }), false, 'too small')
+  // A one-hour bound counted from the last real reply, against the ping at 56 minutes.
+  const bounded = { ...holds, settings: { ...holds.settings, keepWarmHours: 1 as const } }
+  assert.equal(warmWillHold({ ...bounded, now: 40 * 60000, lastRealReplyAt: -10 * 60000 }), false, 'bound at 50 min, ping at 56')
+  assert.equal(warmWillHold({ ...bounded, now: 40 * 60000, lastRealReplyAt: -4 * 60000 }), false, 'bound exactly at the ping')
+  assert.equal(warmWillHold({ ...bounded, now: 40 * 60000, lastRealReplyAt: -4 * 60000 + 1 }), true, 'bound one ms after the ping')
+  assert.equal(warmWillHold({ ...bounded, now: 58 * 60000, lastRealReplyAt: -2 * 60000 }), false, 'already in the lead window and out of bound')
+  assert.equal(warmWillHold({ ...bounded, now: 58 * 60000, lastRealReplyAt: -2 * 60000 + 1 }), true)
+})
+
+test('warmWillHold and shouldPing agree once the ping is due', () => {
+  const cases = [
+    { settings: DEFAULTS }, { warm: { ...warm, stopped: 'x' } }, { memo: null }, { lastRealReplyAt: null },
+    { contextTokens: 29999 }, { now: hour }, { lastRealReplyAt: -3 * hour }, {},
+  ]
+  for (const patch of cases) {
+    const input = { ...holds, now: hour - 100000, ...patch }
+    assert.equal(warmWillHold(input), shouldPing({ ...input, idle: true }).ping, JSON.stringify(patch))
+  }
 })
 
 test('ping updates immutable bookkeeping and counts answered misses while stopping', () => {

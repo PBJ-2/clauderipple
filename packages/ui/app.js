@@ -6262,10 +6262,11 @@ function modCompactCard() {
     cell(t("mod.compactModel"), modSelect("compact-model", modCompactModelItems(), s.compactModel, t("mod.compactModel"), (compactModel) => modPatch({ compactModel })), null, "wide"),
     modCompactChoices(s),
     cell(t("mod.compactAt"), el("div", { class: "mode-until compact-at" }, [preset, custom]), el("span", { class: outOfRange ? "cell-sub warn-text" : undefined, text: hint }), "wide"),
-    // Claude Code's own `idleCompaction` follows this toggle, but the router turns it off while keep-warm is on.
-    // The switch stays editable: the stored choice applies as soon as keep-warm is switched off.
+    // Claude Code's own `idleCompaction` follows this toggle alone. A chat whose keep-warm will hold its
+    // cache skips the idle summary inside the mod, so the second caption says that, always (not only
+    // while the global keep-warm is on: the flame switches it per chat).
     cell(t("mod.idleCompact"), modSwitch("idle-compact", s.idleCompact, t("mod.idleCompact"), (idleCompact) => modPatch({ idleCompact })),
-      [modCap(t("mod.idleCompactHint")), s.keepWarm ? el("span", { class: "cell-sub warn-text", "data-key": "idle-compact-note", text: t("mod.idleCompactKeepWarm") }) : null]),
+      [modCap(t("mod.idleCompactHint")), modCap(t("mod.idleCompactKeepWarm"))]),
   ])]);
 }
 

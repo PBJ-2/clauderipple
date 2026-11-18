@@ -28,20 +28,50 @@ export function secondsLeft(memo: CacheMemo | null, now: number): number | null 
   return memo ? Math.max(0, Math.ceil((memo.expiresAt - now) / 1000)) : null
 }
 
-/** Never pay to revive an expired cache or extend the last-real-reply bound with our own pings. */
-export function shouldPing(input: {
-  settings: Settings; memo: CacheMemo | null; warm: WarmState; now: number; idle: boolean
+type WarmInput = {
+  settings: Settings; memo: CacheMemo | null; warm: WarmState; now: number
   contextTokens: number; lastRealReplyAt: number | null
-}): { ping: true } | { ping: false; reason?: string } {
+}
+
+/** How long before the cache expires the ping goes out. */
+function pingLead(memo: CacheMemo): number {
+  return memo.ttlMs === FIVE_MINUTES ? 60000 : 240000
+}
+
+/**
+ * Why keep-warm will not ping this chat's cache, or null when it may. The one list of conditions
+ * `shouldPing` and `warmWillHold` share, in the order a ping reports them; `idle` is what only the
+ * ping cares about. `settings.keepWarm` is already the chat's effective switch.
+ */
+function warmBlock(input: WarmInput, idle: boolean): string | null {
   const { settings, memo, warm, now } = input
-  if (!settings.keepWarm) return { ping: false, reason: 'keep warm is off' }
-  if (warm.stopped) return { ping: false, reason: warm.stopped }
-  if (!input.idle) return { ping: false, reason: 'chat is busy' }
-  if (!memo || memo.expiresAt <= now) return { ping: false, reason: 'cache is not warm' }
-  if (input.lastRealReplyAt === null || now >= input.lastRealReplyAt + settings.keepWarmHours * HOUR) return { ping: false, reason: 'keep warm time bound reached' }
-  if (input.contextTokens < settings.keepWarmMinTokens) return { ping: false, reason: 'chat is too small' }
-  const lead = memo.ttlMs === FIVE_MINUTES ? 60000 : 240000
-  return memo.expiresAt - now <= lead ? { ping: true } : { ping: false }
+  if (!settings.keepWarm) return 'keep warm is off'
+  if (warm.stopped) return warm.stopped
+  if (!idle) return 'chat is busy'
+  if (!memo || memo.expiresAt <= now) return 'cache is not warm'
+  if (input.lastRealReplyAt === null || now >= input.lastRealReplyAt + settings.keepWarmHours * HOUR) return 'keep warm time bound reached'
+  if (input.contextTokens < settings.keepWarmMinTokens) return 'chat is too small'
+  return null
+}
+
+/** Never pay to revive an expired cache or extend the last-real-reply bound with our own pings. */
+export function shouldPing(input: WarmInput & { idle: boolean }): { ping: true } | { ping: false; reason?: string } {
+  const reason = warmBlock(input, input.idle)
+  if (reason !== null) return { ping: false, reason }
+  return input.memo!.expiresAt - input.now <= pingLead(input.memo!) ? { ping: true } : { ping: false }
+}
+
+/**
+ * Whether keep-warm will still hold this chat's cache through the coming expiry: it is on for the
+ * chat (`settings.keepWarm` already the per-chat switch), not stopped, the memo is warm and the chat
+ * is big enough, and the ping that comes (`pingLead` before the expiry, or now if that is past)
+ * lands before the time bound. Idle or busy does not matter here: the ping waits for the chat to be idle.
+ */
+export function warmWillHold(input: WarmInput): boolean {
+  if (warmBlock(input, true) !== null) return false
+  const memo = input.memo!
+  const pingAt = Math.max(input.now, memo.expiresAt - pingLead(memo))
+  return pingAt < input.lastRealReplyAt! + input.settings.keepWarmHours * HOUR
 }
 
 /** Failed forks stop once; answered cache misses still count the real tokens they spent. */

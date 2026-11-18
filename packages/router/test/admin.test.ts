@@ -624,14 +624,17 @@ test("admin mod-settings returns full defaults before storage, normalizes writes
   });
 });
 
-test("admin mod-settings save derives Claude Code's idleCompaction from the toggle and keep-warm", async () => {
+test("admin mod-settings save derives Claude Code's idleCompaction from the toggle alone", async () => {
   await withAdmin(makeCfg(), async ({ port }) => {
     const file = process.env.CLAUDE_SETTINGS_PATH!;
     fs.writeFileSync(file, JSON.stringify({ model: "opus" }));
     const read = () => JSON.parse(fs.readFileSync(file, "utf8"));
     assert.equal((await putModSettings(port, { settings: { keepWarm: false } })).status, 200);
     assert.deepEqual(read(), { model: "opus" });
+    // Keep-warm is a per-chat decision inside the mod: turning it on globally leaves the key alone.
     assert.equal((await putModSettings(port, { settings: { keepWarm: true } })).status, 200);
+    assert.deepEqual(read(), { model: "opus" });
+    assert.equal((await putModSettings(port, { settings: { keepWarm: true, idleCompact: false } })).status, 200);
     assert.deepEqual(read(), { model: "opus", idleCompaction: false });
     assert.equal((await putModSettings(port, { settings: { keepWarm: false, idleCompact: false } })).status, 200);
     assert.deepEqual(read(), { model: "opus", idleCompaction: false });

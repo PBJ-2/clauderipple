@@ -291,7 +291,7 @@ proxy
     };
     syncCompact();
     // `idleCompaction` in Claude Code's settings.json is derived from the stored mod settings
-    // (toggle on and keep-warm off). Saves keep it right; this fixes it after a hand edit of
+    // (the toggle alone). Saves keep it right; this fixes it after a hand edit of
     // either file or a store that changed while the router was down.
     try { reconcileIdleCompaction(); }
     catch (e) { log!.warn(`idleCompaction: ${(e as Error).message}`); }

@@ -445,16 +445,37 @@ The final word of a field name decides (`apiKey`, `access_token`, `clientSecret`
 `password`, etc.); `keepWarmMinTokens` is a count, not a credential, and is accepted.
 Corrupt storage is an error, never an empty store to overwrite.
 
-**`idleCompaction` is router-derived (2026-11-17).** Claude Code 2.1.325 compacts a long
+**`idleCompaction` is router-derived from the toggle; keep-warm yields per chat in the mod
+(2026-11-17, per-chat 2026-11-18).** Claude Code 2.1.325 compacts a long
 main conversation while it sits idle: with at least 200K context tokens
-(`CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS`, floor 100K) and a 1-hour prompt cache, it writes a
-summary in the background at 90% of the cache TTL (about 54 minutes after the last activity)
-and swaps it in when the user returns. Keep-warm pings 4 minutes before expiry (about 56), so
-with both on the idle summary always wins the race and replaces the full cache keep-warm
-exists to keep. The mod setting `idleCompact` (boolean, default true, normalized like
-`keepWarm`; dashboard "Compact ahead while idle" beside `compactAt`) is the user's choice; the
-router owns settings.json's `idleCompaction` and derives it as `idleCompact && !keepWarm`
-(`mod-settings.ts:idleCompactionWanted`, `writeIdleCompaction`). False is written as
+(`CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS`, floor 100K) and a 1-hour prompt cache, its idle timer
+fires at 90% of the cache TTL (about 54 minutes after the last activity) and starts a
+background summary, which it swaps in when the user returns. Which path it takes depends on the
+session: with no host (headless, the Code tab) the timer writes the summary through
+`session.compact` with `trigger: 'precompute'` (armTrigger `idle`) and swaps it in on return
+("Compacted using a summary written while you were away", the notice Code-tab transcripts show);
+an interactive terminal registers a host whose `compact()` runs `compactConversation` at once,
+`trigger: 'auto'` ("Compacted while idle, before the prompt cache expired"). Both fire with no
+`agentId` and outside any main turn; the other precompute arms (`api_response`, `beside_turn`)
+and the threshold's `auto` run inside a turn (2.1.326 binary, read 2026-11-18). A hook that
+answers `{ skip: reason }` leaves the conversation as it is (engine types, `session.compact`,
+whose own example skips `precompute`). Keep-warm pings 4 minutes before expiry
+(about 56), so with both on the idle summary always wins the race and replaces the full cache
+keep-warm exists to keep. Keep-warm is per chat (the band flame's `warmHere` overrides the
+global `keepWarm`), which the router cannot see, so the decision is split. The mod setting
+`idleCompact` (boolean, default true, normalized like `keepWarm`; dashboard "Compact ahead
+while idle" beside `compactAt`) is the user's choice; the router owns settings.json's
+`idleCompaction` and derives it from `idleCompact` alone
+(`mod-settings.ts:idleCompactionWanted`, `writeIdleCompaction`). The mod's `session.compact`
+hook (`register.tsx`) returns `{ skip }`, without calling `next`, when the trigger is
+`precompute` or `auto`, there is no `agentId`, no main turn is running (`currentTurn` null, set
+at `turn.start` before any step, so a built-in command's turn counts; and `busy` unset), and
+`cache.ts:warmWillHold` says keep-warm will hold the cache: effective keep-warm on (per-chat
+switch included), not stopped, a memo that has not expired, a real reply on record, the ping
+that comes (the same lead as `shouldPing`, 4 minutes, 1 minute for a 5-minute TTL) before the
+`keepWarmHours` bound, and the context at least `keepWarmMinTokens`. `shouldPing` and
+`warmWillHold` share one condition list (`warmBlock`). Every other `session.compact` goes to
+core unchanged. A chat without keep-warm still gets its idle summary. False is written as
 `"idleCompaction": false`; true deletes the key (Claude Code's default is true). It writes only
 when the result differs, with `writeAutoCompactWindow`'s lock, backup and atomic replace, keeps
 every other key, and refuses a settings.json that is not a JSON object (409). Every
@@ -462,8 +483,8 @@ every other key, and refuses a settings.json that is not a JSON object (409). Ev
 panel; a failure there is logged and never fails the save (the store is already saved). The
 router also reconciles once at start (`reconcileIdleCompaction`), so a hand edit or a change
 made while it was down is corrected. A hand-set `idleCompaction: false` is therefore removed
-while the toggle is on and keep-warm off. Only global `keepWarm` counts: the mod's per-chat
-`warmHere` override is invisible to the router. A save whose
+while the toggle is on, and so is the `false` an earlier release wrote for global
+keep-warm (the next save or start removes it). A save whose
 payload lacks the `idleCompact` key (a mod loaded before it existed) keeps the stored value
 instead of the default, so an old mod cannot undo the user's choice (`writeModSettings`). The
 default home's uninstall removes `idleCompaction` from settings.json when it is `false`
@@ -529,8 +550,8 @@ them available as judge candidates. Tests: `test/admin.test.ts`, `test/model-pol
 
 ### 3c. Native compaction, with only its answering model selected (2026-10-31)
 
-The mod always calls `next(e)` for `session.compact`, including workers and
-`precompute`. Claude Code alone builds the summary prompt, chooses the recent
+The mod calls `next(e)` for `session.compact`, including workers and `precompute`, except
+the idle compaction (a `precompute`, or a terminal host's `auto`) that keep-warm's cache would lose (§3b, `idleCompaction`). Claude Code alone builds the summary prompt, chooses the recent
 messages to keep, and reattaches files. There is no mod-side summarizer or
 transcript serialization. The optional card tidy-up is unchanged; it happens
 before invoking core's compactor, not instead of it.
@@ -568,7 +589,7 @@ Session identity is the same on both sides: the 2.1.309 binary's `session.id`
 handler calls `Rpe(...).id`, whose definition returns `String(V())`; the request
 header builder also sets `X-Claude-Code-Session-Id` from `V()`. The generated API
 types call this the transcript file's name (§3a's captured header measurement).
-Precompute is allowed through unchanged and, when it issues the recognized API
+Precompute is allowed through unchanged (bar the idle one §3b skips) and, when it issues the recognized API
 request, follows the same router selection. A core-reused precomputed summary has
 no new API request to intercept, so the mod clears its pick (`model: null`) once
 core's compaction settles, used or not; otherwise it would wait up to ten minutes

@@ -136,7 +136,7 @@ test("a per-model value /autocompact saved is read and preserved by a global das
   } finally { split.restore(); }
 });
 
-// Claude Code's `idleCompaction` is derived: on only when the toggle is on and keep-warm is off.
+// Claude Code's `idleCompaction` is derived from the toggle alone; keep-warm is decided per chat inside the mod.
 test("idleCompact normalizes to true and only a boolean overrides it", () => {
   assert.equal(normalizeSettings(null).idleCompact, true);
   assert.equal(normalizeSettings({ idleCompact: "no" }).idleCompact, true);
@@ -144,9 +144,10 @@ test("idleCompact normalizes to true and only a boolean overrides it", () => {
   assert.equal(normalizeSettings({ idleCompact: true }).idleCompact, true);
 });
 
-test("idleCompaction is wanted only with the toggle on and keep-warm off", () => {
-  for (const [idleCompact, keepWarm, wanted] of [[true, false, true], [true, true, false], [false, false, false], [false, true, false]] as const) {
-    assert.equal(idleCompactionWanted({ idleCompact, keepWarm }), wanted, `toggle ${idleCompact}, keep-warm ${keepWarm}`);
+test("idleCompaction is wanted exactly when the toggle is on, whatever keep-warm says", () => {
+  for (const [idleCompact, keepWarm, wanted] of [[true, false, true], [true, true, true], [false, false, false], [false, true, false]] as const) {
+    const stored = { idleCompact, keepWarm }; // the whole stored shape, as the router passes it
+    assert.equal(idleCompactionWanted(stored), wanted, `toggle ${idleCompact}, keep-warm ${keepWarm}`);
   }
 });
 
@@ -187,15 +188,23 @@ test("writeIdleCompaction refuses a settings.json that is not a JSON object", ()
 test("reconcileIdleCompaction derives the key from the stored mod settings (startup path)", () => {
   const t = withSettingsFile({ model: "opus" });
   try {
-    // No store yet: defaults say toggle on, keep-warm off, so the key stays absent.
+    // No store yet: the default toggle is on, so the key stays absent.
     assert.equal(reconcileIdleCompaction(t.dir), false);
     assert.equal(JSON.parse(fs.readFileSync(t.file, "utf8")).idleCompaction, undefined);
     writeModSettings({ schemaVersion: MOD_SETTINGS_SCHEMA_VERSION, settings: { keepWarm: true } }, t.dir);
-    assert.equal(reconcileIdleCompaction(t.dir), true);
+    assert.equal(reconcileIdleCompaction(t.dir), false, "keep-warm alone no longer turns it off");
+    assert.equal(JSON.parse(fs.readFileSync(t.file, "utf8")).idleCompaction, undefined);
+    writeModSettings({ schemaVersion: MOD_SETTINGS_SCHEMA_VERSION, settings: { keepWarm: true, idleCompact: false } }, t.dir);
+    assert.equal(reconcileIdleCompaction(t.dir), true, "toggle off writes false, keep-warm on or not");
     assert.equal(JSON.parse(fs.readFileSync(t.file, "utf8")).idleCompaction, false);
     writeModSettings({ schemaVersion: MOD_SETTINGS_SCHEMA_VERSION, settings: { keepWarm: false, idleCompact: false } }, t.dir);
     assert.equal(reconcileIdleCompaction(t.dir), false, "toggle off keeps it false");
-    writeModSettings({ schemaVersion: MOD_SETTINGS_SCHEMA_VERSION, settings: { keepWarm: false, idleCompact: true } }, t.dir);
+    writeModSettings({ schemaVersion: MOD_SETTINGS_SCHEMA_VERSION, settings: { keepWarm: true, idleCompact: true } }, t.dir);
+    assert.equal(reconcileIdleCompaction(t.dir), true);
+    assert.deepEqual(JSON.parse(fs.readFileSync(t.file, "utf8")), { model: "opus" });
+    // A false the earlier keep-warm rule wrote is removed once the toggle is on.
+    fs.writeFileSync(t.file, JSON.stringify({ model: "opus", idleCompaction: false }));
+    writeModSettings({ schemaVersion: MOD_SETTINGS_SCHEMA_VERSION, settings: { keepWarm: true, idleCompact: true } }, t.dir);
     assert.equal(reconcileIdleCompaction(t.dir), true);
     assert.deepEqual(JSON.parse(fs.readFileSync(t.file, "utf8")), { model: "opus" });
   } finally { t.restore(); }

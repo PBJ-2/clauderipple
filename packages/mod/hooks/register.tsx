@@ -13,7 +13,7 @@ import { MARKER, agentFilePaths, agentModel, ancestorFolders, definedModel, dele
 import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom, modeKey, modeOver, quotaWindows, resetProvider, routingSettings } from './modes'
 import type { QuotaWindow } from './modes'
 import type { Spawn, WorkerFix } from './worker'
-import { afterPing, cacheMemoryKey, CACHE_MEMORY_PREFIX, laterMemo, liveContextTokens, nextMemo, restoreFromResume, savedMemory, shouldPing, staleMemory } from './cache'
+import { afterPing, cacheMemoryKey, CACHE_MEMORY_PREFIX, laterMemo, liveContextTokens, nextMemo, restoreFromResume, savedMemory, shouldPing, staleMemory, warmWillHold } from './cache'
 import { HEAVY_PERCENT, bandPriority, claudeLimitsFrom, claudeScopedFrom, coldAlert, contextWindow, countsPrecisely, modelCompactWindow, hotAlert, hottest, hotWindowMoved, keptAlert, costFromSummary, localMidnight, routerLimitItems, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
 import type { ScopedLimit } from './session'
 import { QUICK_PROMPT, wrapForNewChat } from './handoff'
@@ -1592,6 +1592,13 @@ async function scheduleCountdown($: EngineInterface): Promise<void> {
   })
   countdownTimer = { at, cancel: () => timer.cancel() }
 }
+/** Whether keep-warm will hold this chat's cache through its coming expiry (the same figures the tick pings by). */
+async function warmHolds($: EngineInterface): Promise<boolean> {
+  const s = { ...await currentSettings($) }
+  s.keepWarm = await keepWarmOn($, s)
+  return warmWillHold({ settings: s, memo: await read($, cache), warm: await read($, warm), now: await $.clock.now(),
+    contextTokens: liveContextTokens((await read($, context))?.tokens, rememberedContext), lastRealReplyAt: await read($, lastRealReplyAt) })
+}
 async function tick($: EngineInterface): Promise<void> {
   const language = await read($, lang)
   if (ticking) return
@@ -2780,6 +2787,21 @@ export const register: Register = on => {
     }
   })
   on('session.compact', async ($, e, next) => {
+    // Claude Code's idle compaction fires about 54 minutes after the last activity, while the main chat
+    // sits idle, and its summary would replace the cache keep-warm keeps (it pings at about 56). A
+    // headless session (the Code tab) writes the summary through a `precompute`; an interactive
+    // terminal compacts at once through its host, an `auto`. When keep-warm will hold this chat's
+    // cache, neither runs. Only outside a main turn: the precomputes armed inside one (`api_response`,
+    // `beside_turn`) and the threshold's own `auto` run while `currentTurn` is set (turn.start, before
+    // any step) or `busy` is, and are left alone.
+    if ((e.trigger === 'precompute' || e.trigger === 'auto') && !e.agentId && currentTurn === null) {
+      try {
+        if (!await read($, busy) && await warmHolds($)) {
+          await $.ui.log('ClaudeRipple: idle compaction skipped, keep warm holds this chat\'s cache', { to: 'debug' })
+          return { skip: 'keep warm holds this chat\'s cache' }
+        }
+      } catch (error) { await report($, 'session.compact warm', error) }
+    }
     // A finished compaction of the main conversation adds one to the Compact icon's count; a skipped
     // one, a subagent's own and the ahead-of-time precompute do not.
     const counted = async (result: SessionCompactResult): Promise<SessionCompactResult> => {
@@ -2815,7 +2837,8 @@ export const register: Register = on => {
       await pick(choice)
     }
     // Core owns the prompt, recent-message preservation and file reattachment, including precompute.
-    // Its ahead-of-time summary uses the same router default; it must never be skipped by this mod.
+    // Its ahead-of-time summary uses the same router default; this mod never skips it, except the
+    // idle one above that keep-warm's cache would lose.
     // A pick core never asked for (it reused that precompute) is forgotten, not left to the next
     // compaction (2026-10-31).
     try { return await next(e).then(counted) }

@@ -2540,7 +2540,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         }
         const result = writeModSettings(parsed);
         if (!result.stale) {
-          // Claude Code's `idleCompaction` follows the saved toggle and keep-warm. The save already
+          // Claude Code's `idleCompaction` follows the saved toggle alone. The save already
           // happened, so a settings.json that cannot be written is logged, not turned into a failed save.
           try { writeIdleCompaction(idleCompactionWanted(result.current.settings)); }
           catch (error) { deps.log.warn(`admin: idleCompaction not synced: ${(error as Error).message}`); }
