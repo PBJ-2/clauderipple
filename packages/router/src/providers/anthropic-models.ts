@@ -62,6 +62,8 @@ type CatalogOptions = {
   fetch?: FetchLike;
   now?: () => number;
   ttlMs?: number;
+  /** The first wait after a lookup that got no list; it doubles on each further miss, up to `ttlMs`. */
+  retryMs?: number;
   timeoutMs?: number;
   warn?: (message: string) => void;
 };
@@ -70,10 +72,17 @@ type CatalogOptions = {
  * The account's model list, fetched at most once per `ttlMs` (an hour by default: Anthropic ships a
  * model every few weeks). A failed lookup keeps the last good list, and null means none was ever
  * had, so a caller falls back to its own.
+ *
+ * A lookup that got no list is tried again after `retryMs` (30 s by default, doubling), not after a
+ * full `ttlMs`. Two seconds after a restart the lookup was answered 401, and the hour that followed
+ * served the fallback list, which has no Mythos and no windows, to the dashboard and to the start-up
+ * adoption pass; ten minutes later the login Claude Code was then sending was answered 200
+ * (2026-11-18). Each credential is tried in turn for the same reason.
  */
 export class ClaudeModelCatalog {
   private last: ClaudeModel[] | null = null;
-  private fetchedAt = Number.NEGATIVE_INFINITY;
+  private nextAt = Number.NEGATIVE_INFINITY;
+  private misses = 0;
   private inFlight: Promise<ClaudeModel[] | null> | null = null;
   private readonly source: CatalogSource;
   private readonly opts: CatalogOptions;
@@ -84,31 +93,45 @@ export class ClaudeModelCatalog {
   }
 
   list(): Promise<ClaudeModel[] | null> {
-    const now = (this.opts.now ?? Date.now)();
-    if (now - this.fetchedAt < (this.opts.ttlMs ?? 60 * 60_000)) return Promise.resolve(this.last);
-    this.inFlight ??= this.fetch().finally(() => {
-      this.fetchedAt = (this.opts.now ?? Date.now)();
-      this.inFlight = null;
-    });
+    if ((this.opts.now ?? Date.now)() < this.nextAt) return Promise.resolve(this.last);
+    this.inFlight ??= this.refresh();
     return this.inFlight;
   }
 
-  private async fetch(): Promise<ClaudeModel[] | null> {
-    let credential: Credential | undefined;
+  private async refresh(): Promise<ClaudeModel[] | null> {
     try {
-      credential = (await this.source.credentials())[0];
+      const got = await this.fetch();
+      const ttl = this.opts.ttlMs ?? 60 * 60_000;
+      const wait = got ? ttl : Math.min(ttl, (this.opts.retryMs ?? 30_000) * 2 ** this.misses++);
+      if (got) this.misses = 0;
+      this.nextAt = (this.opts.now ?? Date.now)() + wait;
+      return this.last;
+    } finally {
+      this.inFlight = null;
+    }
+  }
+
+  /** True when this lookup got a list. */
+  private async fetch(): Promise<boolean> {
+    let credentials: Credential[];
+    try {
+      credentials = await this.source.credentials();
     } catch (e) {
       this.opts.warn?.(`claude models: no credentials: ${(e as Error).message}`);
-      return this.last;
+      return false;
     }
-    if (!credential) return this.last;
-    try {
-      const models = await fetchClaudeModels(`https://${this.opts.upstream()}`, credential.headers, this.opts.fetch, this.opts.timeoutMs);
-      if (models.length) this.last = models;
-    } catch (e) {
-      this.opts.warn?.(`claude models: ${(e as Error).message}`);
+    for (const credential of credentials) {
+      try {
+        const models = await fetchClaudeModels(`https://${this.opts.upstream()}`, credential.headers, this.opts.fetch, this.opts.timeoutMs);
+        if (models.length) {
+          this.last = models;
+          return true;
+        }
+      } catch (e) {
+        this.opts.warn?.(`claude models: ${(e as Error).message}`);
+      }
     }
-    return this.last;
+    return false;
   }
 }
 

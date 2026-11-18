@@ -72,3 +72,68 @@ test("ClaudeModelCatalog asks once per hour with the account's headers and keeps
   assert.equal((await catalog.list())?.length, 6, "a failed refresh keeps the last good list");
   assert.equal(calls, 2);
 });
+
+// The lookup two seconds after a restart was answered 401, and the failure was then held for the
+// whole hour (2026-11-18).
+test("ClaudeModelCatalog tries a failed lookup again within seconds, backing off, and an hour after it succeeds", async () => {
+  let now = 0;
+  let calls = 0;
+  let fail = true;
+  const catalog = new ClaudeModelCatalog(
+    { credentials: async () => [{ id: "current", headers: { authorization: "Bearer t" } } as never] },
+    {
+      upstream: () => "api.anthropic.com",
+      now: () => now,
+      fetch: async () => {
+        calls++;
+        return fail ? new Response("{}", { status: 401 }) : new Response(JSON.stringify(BODY), { status: 200 });
+      },
+    },
+  );
+  assert.equal(await catalog.list(), null, "no list was ever had");
+  now = 29_000;
+  await catalog.list();
+  assert.equal(calls, 1, "not before the first retry is due");
+  now = 30_000;
+  assert.equal(await catalog.list(), null);
+  assert.equal(calls, 2, "tried again 30 s after the miss");
+  now = 30_000 + 59_000;
+  await catalog.list();
+  assert.equal(calls, 2, "the second miss waits twice as long");
+  now = 30_000 + 60_000;
+  fail = false;
+  assert.equal((await catalog.list())?.[0]?.id, "claude-haiku-5-5");
+  assert.equal(calls, 3);
+  now += 59 * 60_000;
+  await catalog.list();
+  assert.equal(calls, 3, "a good list is kept for the hour");
+  now += 60_000;
+  fail = true;
+  await catalog.list();
+  assert.equal(calls, 4);
+  now += 30_000;
+  assert.equal((await catalog.list())?.length, 6, "the backoff starts again from 30 s, and the last good list stays");
+  assert.equal(calls, 5);
+});
+
+test("ClaudeModelCatalog tries the next credential when one is refused", async () => {
+  const tried: string[] = [];
+  const catalog = new ClaudeModelCatalog(
+    {
+      credentials: async () => [
+        { id: "current", headers: { authorization: "Bearer stale" } } as never,
+        { id: "stored", headers: { authorization: "Bearer good" } } as never,
+      ],
+    },
+    {
+      upstream: () => "api.anthropic.com",
+      fetch: async (_url, init) => {
+        const auth = (init.headers as Record<string, string>).authorization!;
+        tried.push(auth);
+        return auth === "Bearer good" ? new Response(JSON.stringify(BODY), { status: 200 }) : new Response("{}", { status: 401 });
+      },
+    },
+  );
+  assert.equal((await catalog.list())?.length, 6);
+  assert.deepEqual(tried, ["Bearer stale", "Bearer good"]);
+});
