@@ -487,6 +487,9 @@ while the toggle is on, and so is the `false` an earlier release wrote for globa
 keep-warm (the next save or start removes it). A save whose
 payload lacks the `idleCompact` key (a mod loaded before it existed) keeps the stored value
 instead of the default, so an old mod cannot undo the user's choice (`writeModSettings`). The
+same holds for `bandLimits` (2026-11-19); both keys are listed in `KEPT_WHEN_ABSENT`, and the
+rule needs both halves: the PUT handler deletes an absent key after normalizing (which fills the
+default), and `writeModSettings` then keeps the stored value. The schema version stays 2. The
 default home's uninstall removes `idleCompaction` from settings.json when it is `false`
 (`settings.ts:removeProxyEnvLocked`); any other value is left, and a non-default home's
 uninstall never touches it, like the other account-wide state. The 200K minimum is deliberately not a
@@ -1574,8 +1577,15 @@ tight, and nothing at 100 or more.
     another's usage comes and goes), each stored one with its `label`, and `inUse: true` on the
     pool's in-use account (none marked while that account's usage is unknown, so no reader shows
     another account's figures as it). ChatGPT and Antigravity entries carry `label` and `inUse` the
-    same way. The mod's limits pane draws every account; its band row and the remote's status keep
-    to the in-use Claude account (the first when none is marked).
+    same way. The mod's limits pane draws every account. Its band row keeps, of each provider, the
+    in-use account (the first when none is marked; every provider since 2026-11-05, Claude alone
+    before), unless the mod setting `bandLimits` (chosen on the dashboard's Look card, 2026-11-19)
+    says otherwise for that provider: `off` leaves it out, `all` draws every account read (the
+    in-use one first, so a narrow row drops the others first), `accounts` only the listed owner
+    ids (`/api/limits` account `id`, never the shifting `account` number), with no other account
+    drawn in place of one that has no reading. OpenCode Go, MiniMax and Grok rows carry no id, so
+    only `off`/`all` apply to them. The remote's status keeps to the in-use Claude account and
+    lists every other provider's accounts; it does not follow `bandLimits`.
     Login account PATCH bodies accept boolean `preferred`/`paused` and `clearCooldown: true`;
     Claude's existing PUT preference API remains supported. External Codex/current-Claude logins
     still cannot be renamed or removed; the current Claude login also accepts a pause.
