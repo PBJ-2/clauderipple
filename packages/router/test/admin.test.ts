@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { DEFAULTS, type Config, type ProviderModel } from "../src/config.ts";
 import { Logger } from "../src/log.ts";
-import { backfillContextWindows, effortLevelsForModel, googleHealth, measureUnsettledModels, parseUpdateCheck, startAdmin, type AdminDeps, type LimitsProvider } from "../src/admin.ts";
+import { adoptNewClaudeModels, backfillContextWindows, effortLevelsForModel, googleHealth, measureUnsettledModels, parseUpdateCheck, startAdmin, type AdminDeps, type LimitsProvider } from "../src/admin.ts";
 import type { ImageRequest } from "../src/providers/chatgpt/index.ts";
 import type { GoogleAccountStatus } from "../src/providers/google/index.ts";
 import type { QuotaGroup } from "../src/providers/google/usage.ts";
@@ -3346,6 +3346,56 @@ test("backfillContextWindows fills a provider with no catalogue block from the s
     assert.equal("contextWindow" in (models.find((m) => m.id === "jev-1.13") ?? {}), false, "a model the catalogue does not list stays blank");
     assert.ok(lines.some((line) => line === "admin: hive/deepseek-ai/deepseek-v4.1-flash-1017 context window 256000 (catalogue)"), `expected the catalogue log line, got ${JSON.stringify(lines)}`);
   } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// models.dev files no `claude-mythos-5-1` or `claude-mythos-5-2`, so the backfill above never gave
+// them a window, and the adoption pass used to declare a release with its id and name alone. The
+// account's own list states `max_input_tokens` for both (1,000,000, measured 2026-11-18).
+test("adoptNewClaudeModels gives native Claude models the window the account's list states", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-adopt-"));
+  const prevHome = process.env.CLAUDERIPPLE_HOME;
+  process.env.CLAUDERIPPLE_HOME = home;
+  try {
+    const cfg = makeCfg({
+      providers: {
+        anthropic: {
+          type: "anthropic",
+          auth: "claude-code",
+          models: [
+            { id: "claude-mythos-5-1", name: "Mythos 5.1" },
+            { id: "claude-opus-5-5", name: "Opus 5.5", contextWindow: 500000 },
+            { id: "claude-haiku-4-5-20251001", name: "Haiku 4.5", contextWindow: null as unknown as number },
+            { id: "claude-unlisted", name: "Unlisted" },
+          ],
+        },
+      },
+    });
+    const configFile = path.join(home, "config.json");
+    fs.writeFileSync(configFile, JSON.stringify(cfg, null, 2));
+    const lines: string[] = [];
+    const log = new Logger(null, 1_000_000, 1, false);
+    log.info = (msg: string) => { lines.push(msg); };
+    const live = [
+      { id: "claude-mythos-5-2", name: "Mythos 5.2", line: "mythos", createdAt: Date.parse("2026-11-10T00:00:00Z"), contextWindow: 1000000 },
+      { id: "claude-opus-5-5", name: "Opus 5.5", line: "opus", createdAt: Date.parse("2026-09-21T00:00:00Z"), contextWindow: 1000000 },
+      { id: "claude-mythos-5-1", name: "Mythos 5.1", line: "mythos", createdAt: Date.parse("2026-10-14T00:00:00Z"), contextWindow: 1000000 },
+      { id: "claude-haiku-4-5", name: "Haiku 4.5", line: "haiku", createdAt: Date.parse("2025-10-15T00:00:00Z"), contextWindow: 200000 },
+    ];
+    const deps = { config: () => cfg, configFile, log, claudeModels: async () => live } as unknown as AdminDeps;
+    assert.deepEqual(await adoptNewClaudeModels(deps), ["anthropic/claude-mythos-5-2"]);
+    const models = (JSON.parse(fs.readFileSync(configFile, "utf8")) as Config).providers.anthropic!.models!;
+    assert.equal(models.find((m) => m.id === "claude-mythos-5-2")?.contextWindow, 1000000, "a release is declared with its window");
+    assert.equal(models.find((m) => m.id === "claude-mythos-5-1")?.contextWindow, 1000000, "a declared model without one gets it");
+    assert.equal(models.find((m) => m.id === "claude-haiku-4-5-20251001")?.contextWindow, 200000, "a dated id takes its alias's window");
+    assert.equal(models.find((m) => m.id === "claude-opus-5-5")?.contextWindow, 500000, "a window already set stands");
+    assert.equal("contextWindow" in (models.find((m) => m.id === "claude-unlisted") ?? {}), false, "a model the list does not have stays blank");
+    assert.ok(lines.includes("admin: anthropic/claude-mythos-5-1 context window 1000000 (Claude model list)"), `expected the fill log line, got ${JSON.stringify(lines)}`);
+    assert.deepEqual(await adoptNewClaudeModels(deps), [], "a second pass declares nothing");
+  } finally {
+    if (prevHome === undefined) delete process.env.CLAUDERIPPLE_HOME;
+    else process.env.CLAUDERIPPLE_HOME = prevHome;
     fs.rmSync(home, { recursive: true, force: true });
   }
 });

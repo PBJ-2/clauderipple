@@ -1982,7 +1982,14 @@ export async function backfillContextWindows(deps: AdminDeps): Promise<string[]>
  * was ticked when the provider was saved, so Opus 5.5, Sonnet 5.5 and Haiku 5.5 stayed off it for
  * weeks while Claude Code had them (2026-10-08). A model offered once is remembered in
  * `claude-models-offered.json` and never offered again, so unticking a new model sticks.
- * Returns the `provider/model` ids it declared.
+ *
+ * A declared model saved without a context window also gets the one the account's list states
+ * (`max_input_tokens`), and a new release is declared with it. This pass used to write the id and
+ * name alone, so only the start-up backfill could give an adopted model a window, from models.dev.
+ * That reached Opus, Sonnet, Haiku and Fable, but models.dev files no `claude-mythos-5-1` or
+ * `claude-mythos-5-2` (only `claude-mythos-5`, under Azure), so both stayed blank and the dashboard
+ * called their window unknown while the API states 1,000,000 for each (2026-11-18). Only into a
+ * blank field, so a window the user set stands. Returns the `provider/model` ids it declared.
  */
 export async function adoptNewClaudeModels(deps: AdminDeps): Promise<string[]> {
   const live = await deps.claudeModels?.().catch(() => null);
@@ -2000,22 +2007,33 @@ export async function adoptNewClaudeModels(deps: AdminDeps): Promise<string[]> {
     deps.log.warn(`admin: claude models not adopted: could not read config: ${errorText(e)}`);
     return [];
   }
+  const byId = new Map(live.map((model) => [model.id, model]));
   const added: string[] = [];
+  const filled: string[] = [];
   for (const [name, provider] of Object.entries(current.providers)) {
     if (provider.type !== "anthropic" || !provider.models?.length) continue;
+    for (const model of provider.models) {
+      // A saved `null` is as blank as a missing field, as in the backfill.
+      if (model.contextWindow != null) continue;
+      const stated = byId.get(model.id.replace(/-\d{8}$/, ""))?.contextWindow;
+      if (stated === undefined) continue;
+      model.contextWindow = stated;
+      filled.push(`${name}/${model.id}`);
+      deps.log.info(`admin: ${name}/${model.id} context window ${stated} (Claude model list)`);
+    }
     for (const model of newClaudeReleases(live, provider.models.map((entry) => entry.id), offered)) {
-      provider.models.push({ id: model.id, name: model.name ?? model.id });
+      provider.models.push({ id: model.id, name: model.name ?? model.id, ...(model.contextWindow !== undefined ? { contextWindow: model.contextWindow } : {}) });
       added.push(`${name}/${model.id}`);
     }
   }
-  if (added.length) {
+  if (added.length || filled.length) {
     const errors = validate(current);
     if (errors.length > 0) {
       deps.log.warn(`admin: claude models not adopted: config did not validate: ${errors[0]}`);
       return [];
     }
     writeConfigFile(deps.configFile, current);
-    deps.log.info(`admin: declared new Claude model(s): ${added.join(", ")}`);
+    if (added.length) deps.log.info(`admin: declared new Claude model(s): ${added.join(", ")}`);
   }
   fs.writeFileSync(stateFile, JSON.stringify({ offered: [...new Set([...offered, ...live.map((model) => model.id)])].sort() }, null, 2) + "\n");
   return added;
