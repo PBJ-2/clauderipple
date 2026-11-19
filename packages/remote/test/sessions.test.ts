@@ -2787,7 +2787,7 @@ test("a Remote Control app session whose mod predates slash commands still sends
 // and a slash command as kind "command" (name, arguments), to a mod that announced it runs them.
 const PNG = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.from("pixels")]);
 const photo = (sessions: Sessions, id: string, bytes: Buffer = PNG, name = "photo.png") => ({ blob: sessions.log(id).image(bytes.toString("base64")), name, mediaType: "image/png" });
-const photoLines = (dir: string, id: string, item: string, count = 1) => Array.from({ length: count }, (_, i) => `[Attached photo: ${path.join(dir, "mod-photos", id, `${item}-${i + 1}.png`)} — open it with the Read tool to see it]`);
+const photoLines = (dir: string, id: string, item: string, count = 1) => Array.from({ length: count }, (_, i) => `📷 Photo (open with Read): ${path.join(dir, "mod-photos", id, `${item}-${i + 1}.png`)}`);
 
 test("a Remote Control app session's photo goes through the mod as a file the text names, and sends nothing over the bridge", async t => {
   const f = appRcModFixture(t);
@@ -2833,7 +2833,7 @@ test("a mod-run photo shows once on the phone, as the person's text with its thu
   const submitted = f.sessions.modInbox.pending(APP_ID).find(o => o.itemId === "rc-pic")!.text;
   assert.equal(f.sessions.modInbox.claim("rc-pic"), true);
   assert.equal(f.sessions.modInbox.result("rc-pic", "submitted"), true);
-  const shown = () => reduce(f.sessions.log(APP_ID).readAfter(0).events).items.filter(item => item.type === "user" && (item.text.includes("Look at this") || item.text.includes("Attached photo")));
+  const shown = () => reduce(f.sessions.log(APP_ID).readAfter(0).events).items.filter(item => item.type === "user" && (item.text.includes("Look at this") || item.text.includes("📷 Photo")));
   assert.equal(shown().length, 1, "the host's own event is on the timeline right away");
   fs.appendFileSync(f.file, transcriptLine({ type: "user", uuid: "app-pic", cwd: f.cwd, message: { content: submitted } }));
   await f.sessions.pollDesktop();
@@ -2843,7 +2843,7 @@ test("a mod-run photo shows once on the phone, as the person's text with its thu
   assert.equal(user.text, "Look at this", "not a path line");
   assert.equal(user.images?.length, 1, "the thumbnail is there");
   const events = f.sessions.log(APP_ID).readAfter(0).events;
-  assert.equal(events.some(event => event.kind === "user" && JSON.stringify(event).includes("Attached photo")), false);
+  assert.equal(events.some(event => event.kind === "user" && JSON.stringify(event).includes("📷 Photo")), false);
   assert.ok(events.some(event => event.kind === "user" && event.clientMsgId === "rc-pic" && event.src === "app-pic"));
 });
 
@@ -3025,7 +3025,7 @@ test("a mod-run photo is not shown twice when the host restarts before the app's
   f.instances.push(recovered); recovered.recover();
   fs.appendFileSync(f.file, transcriptLine({ type: "user", uuid: "app-pic", cwd: f.cwd, message: { content: submitted } }));
   await recovered.pollDesktop();
-  const users = reduce(recovered.log(APP_ID).readAfter(0).events).items.filter(item => item.type === "user" && (item.text.includes("Look at this") || item.text.includes("Attached photo")));
+  const users = reduce(recovered.log(APP_ID).readAfter(0).events).items.filter(item => item.type === "user" && (item.text.includes("Look at this") || item.text.includes("📷 Photo")));
   assert.equal(users.length, 1, "one message, not the host's copy and the transcript's");
   assert.equal((users[0] as { text: string }).text, "Look at this");
 });
@@ -3048,7 +3048,7 @@ test("a mod-run photo's echo match survives a host stopped for days, and is boun
   f.instances.push(recovered); recovered.recover();
   fs.appendFileSync(f.file, transcriptLine({ type: "user", uuid: "app-pic", cwd: f.cwd, message: { content: submitted } }));
   await recovered.pollDesktop();
-  const users = reduce(recovered.log(APP_ID).readAfter(0).events).items.filter(item => item.type === "user" && (item.text.includes("Look at this") || item.text.includes("Attached photo")));
+  const users = reduce(recovered.log(APP_ID).readAfter(0).events).items.filter(item => item.type === "user" && (item.text.includes("Look at this") || item.text.includes("📷 Photo")));
   assert.equal(users.length, 1, "one message, not the host's copy and the transcript's");
   const saved = JSON.parse(fs.readFileSync(path.join(f.dir, "mod-photo-echoes.json"), "utf8")) as { itemId: string }[];
   assert.ok(saved.length <= 200);

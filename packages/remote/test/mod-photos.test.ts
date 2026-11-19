@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
-import { modPhotoText, photoLine, readModPhotoText, writeModPhotos } from "../src/mod-photos.ts";
+import { modPhotoText, photoLine, readModPhotoText, splitPhotoLines, withReadHint, writeModPhotos } from "../src/mod-photos.ts";
 
 const PNG = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.from("pixels")]).toString("base64");
 const JPEG = Buffer.from([255, 216, 255, 224, 1, 2, 3]).toString("base64");
@@ -33,7 +33,7 @@ test("the text is the person's words, a blank line, then one line per photo; the
   const files = writeModPhotos(dir, "s", "i", [PNG, JPEG]);
   const text = modPhotoText("Look at these\nplease", files);
   assert.equal(text, `Look at these\nplease\n\n${photoLine(files[0]!)}\n${photoLine(files[1]!)}`);
-  assert.match(photoLine("/x/y.png"), /^\[Attached photo: \/x\/y\.png — open it with the Read tool to see it\]$/);
+  assert.equal(photoLine("/x/y.png"), "📷 Photo (open with Read): /x/y.png", "the line carries the instruction, for a model no router adds the image for");
   const view = readModPhotoText(dir, "s", text)!;
   assert.equal(view.text, "Look at these\nplease");
   assert.deepEqual(view.photos.map(p => [p.data, p.mediaType]), [[PNG, "image/png"], [JPEG, "image/jpeg"]]);
@@ -63,4 +63,22 @@ test("a photo line is an attachment only for the session whose folder holds the 
   assert.equal(readModPhotoText(dir, "mine", modPhotoText("Look", [theirs!])), null);
   assert.equal(readModPhotoText(dir, "theirs", modPhotoText("Look", [mine!])), null);
   assert.equal(readModPhotoText(dir, "mine", modPhotoText("Look", [mine!, theirs!])), null, "one foreign path makes the whole text typed");
+});
+
+test("transcripts written with the earlier wording still show their photos", t => {
+  const dir = root(t);
+  const [file] = writeModPhotos(dir, "s", "i", [PNG]);
+  const old = (name: string) => `[Attached photo: ${name} — open it with the Read tool to see it]`;
+  const view = readModPhotoText(dir, "s", `Look\n\n${old(file!)}`)!;
+  assert.equal(view.text, "Look");
+  assert.deepEqual(view.photos.map(p => p.data), [PNG]);
+  assert.equal(readModPhotoText(dir, "s", `${old(file!)}\n${photoLine(file!)}`)!.photos.length, 2, "a message may hold both wordings");
+  assert.deepEqual(splitPhotoLines(`Hi\n\n${old("/a/b.png")}\n${photoLine("/c/d.png")}`), { head: "Hi", files: ["/a/b.png", "/c/d.png"] });
+  assert.equal(splitPhotoLines("📷 Photo of the beach"), null);
+  const short = `📷 Photo: ${file}`;
+  assert.equal(readModPhotoText(dir, "s", `Look\n\n${short}`)!.photos.length, 1, "the short wording from local testing is read too");
+  assert.deepEqual(splitPhotoLines(`Hi\n\n${short}`), { head: "Hi", files: [file] });
+  assert.equal(withReadHint(`Look\n\n${short}\n${old("/a/b.png")}`), `Look\n\n${photoLine(file!)}\n${old("/a/b.png")}`, "only the short lines are reworded");
+  assert.equal(withReadHint(`Look\n\n${photoLine(file!)}`), `Look\n\n${photoLine(file!)}`);
+  assert.equal(withReadHint("📷 Photo of the beach"), "📷 Photo of the beach", "text that only looks like a line is left");
 });
