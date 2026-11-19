@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.12.44 — 2026-11-19
+
+### Fixed
+
+- **Photos and slash commands from the phone reach Claude app sessions with Remote Control on.**
+  Like plain text in 0.12.43, they now go through the ripple mod. A photo is saved on the computer and
+  its file is named in the message; on native Claude models the router sends it to the model as the
+  image itself, so Claude sees it as it would a pasted one (other models open the file). The Claude
+  app shows a short `📷 Photo` line where the phone shows the thumbnail. A photo sent with a slash
+  command runs the command with the photo's file among its arguments. Slash commands run as if typed
+  in the app, and `/clear` empties the same session.
+- **A phone message no longer shows twice, or as sent when it never ran (#177).** When the mod did
+  not answer, a message to a Remote Control session was still posted to Remote Control, which now
+  drops it, and the phone kept a copy that never ran. Such a message now fails with a notice saying
+  the ripple mod is not answering, and nothing is left behind. "Interrupt" sends stop the running turn
+  through the mod and go next.
+- **The compaction summary no longer appears on the phone as your message.** The Claude app hides it;
+  the phone now does too, and a `/compact` at rest no longer looks like an unfinished turn.
+- **The remote web page is no longer blank in the installed package or on the relay (#174).** Three
+  browser modules the page loads were left out of the npm package, and one of them out of the relay.
+- **Background work a restarted Claude app lost no longer stays "running" on the phone (#176).** A
+  Monitor or background shell started before the session's current Claude process moves to Recent as
+  unknown, and a stop answered with "No task found" ends the task.
+
 ## 0.12.43 — 2026-11-19
 
 ### Fixed
