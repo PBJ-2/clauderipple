@@ -30,9 +30,13 @@ function fixture(t: import("node:test").TestContext) {
   fs.mkdirSync(project, { recursive: true });
   const excluded = new Set<string>();
   let now = Date.now();
-  const desktop = new DesktopSessions({ projects, summarize, excluded: () => excluded, now: () => now, processes: () => "" });
+  const registry = new Map<string, DesktopProcess>();
+  const options: ConstructorParameters<typeof DesktopSessions>[0] = { projects, summarize, excluded: () => excluded, now: () => now, processes: () => "" };
+  const desktop = new DesktopSessions(options);
   t.after(() => { desktop.close(); fs.rmSync(root, { recursive: true, force: true }); });
-  return { root, projects, project, desktop, excluded, advance: () => { now += 6000; } };
+  /** The Claude app holds the conversation: what it started may still run. Until called, the registry is read from disk. */
+  const live = (sessionId = id) => { options.registry = () => registry; registry.set(sessionId, { sessionId, pid: 42, status: "idle" }); };
+  return { root, projects, project, desktop, excluded, registry, live, advance: () => { now += 6000; } };
 }
 
 test("background task list carries the launch description, command fallback and start time", () => {
@@ -155,6 +159,7 @@ test("a background task ends on a queued notification and on TaskStop", () => {
 
 test("background tasks survive bounded summary tails and incremental partial records", t => {
   const f = fixture(t);
+  f.live();
   const file = path.join(f.project, `${id}.jsonl`);
   const launched = line({ type: "assistant", message: { content: [{ type: "tool_use", id: "a", name: "Agent", input: {} }] } }) +
     line({ type: "user", toolUseResult: { isAsync: true, agentId: "worker" }, message: { content: [{ type: "tool_result", tool_use_id: "a", content: "async" }] } });
@@ -500,6 +505,7 @@ test("a Mac session opens a worker with the model its own transcript answered on
 
 test("a Mac session's worker effort reaches the background list, the timeline and the overview row, and is never guessed", t => {
   const f = fixture(t);
+  f.live();
   subagent(f.project, "effort", { toolUseId: "toolu_effort", model: "gpt-6.1-sol@high", description: "Sol·high · Review the diff" }, [
     assistantTurn("gpt-6.1-sol", "tool_use", [{ type: "tool_use", id: "t", name: "Read", input: {} }]),
   ]);
@@ -579,6 +585,7 @@ test("a running worker with a known model emits progress as only its own transcr
 for (const content of ["[Request interrupted by user]", [{ type: "text", text: "[Request interrupted by user for tool use]" }]]) {
   test(`an interrupted worker closes without a notification (${typeof content}) on import, tail and reconnect`, t => {
     const f = fixture(t);
+    f.live();
     const worker = "interrupted";
     const file = path.join(f.project, `${id}.jsonl`);
     const workerFile = path.join(f.project, id, "subagents", `agent-${worker}.jsonl`);
@@ -1044,4 +1051,25 @@ test("an assistant's final reply is not the turn's end until its Stop hook repor
   fs.appendFileSync(file, line({ type: "system", subtype: "stop_hook_summary", timestamp: "2026-11-19T12:40:05.000Z" }));
   assert.equal(desktop.liveProcess(id)?.status, "idle", "the hook let the turn end");
   assert.equal(desktop.liveProcess(id)?.turnEndedAt, Date.parse("2026-11-19T12:40:05.000Z"));
+});
+
+test("a wakeup past its time has fired, and a conversation no process holds runs nothing it started", t => {
+  const f = fixture(t);
+  const file = path.join(f.project, `${id}.jsonl`);
+  const call = (tool: string, tid: string, when: string, input: Record<string, unknown>, result: Record<string, unknown>): string => [
+    line({ type: "assistant", timestamp: when, message: { id: `m-${tid}`, model: "test-model", content: [{ type: "tool_use", id: tid, name: tool, input }] } }),
+    line({ type: "user", timestamp: when, toolUseResult: result, message: { content: [{ type: "tool_result", tool_use_id: tid, content: "ok" }] } }),
+  ].join("");
+  const wakeAt = Date.now() - 11 * 60_000;
+  fs.writeFileSync(file, line(user)
+    + call("ScheduleWakeup", "wake", new Date(wakeAt - 60_000).toISOString(), { reason: "Waiting on the publish job", prompt: "check" }, { scheduledFor: wakeAt })
+    + call("Monitor", "mon", new Date(wakeAt).toISOString(), { description: "Rank check", command: "tail -f x" }, { taskId: "mon-1" })
+    + call("CronCreate", "cron", new Date(wakeAt).toISOString(), { prompt: "daily", cron: "0 9 * * *" }, { id: "cron-1" }));
+  f.desktop.list();
+  f.live();
+  assert.deepEqual(f.desktop.backgroundTaskList(id).map(task => task.id), ["mon-1", "cron-1"], "the fired wakeup left; the live process may still run the rest");
+  assert.deepEqual(f.desktop.backgroundTaskHistory(id).map(task => [task.id, task.state]), [["dynamic-wakeup", "done"]]);
+  f.registry.delete(id);
+  assert.deepEqual(f.desktop.backgroundTaskList(id).map(task => task.id), ["cron-1"], "a durable schedule outlives its process");
+  assert.deepEqual(f.desktop.backgroundTaskHistory(id).map(task => [task.id, task.state]), [["dynamic-wakeup", "done"], ["mon-1", "unknown"]]);
 });

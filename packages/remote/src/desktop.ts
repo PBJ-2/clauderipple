@@ -23,6 +23,10 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const WINDOW = 256 * 1024;
 /** How long an assistant's final reply waits for its Stop hook summary before it is taken as the turn's end. */
 const STOP_HOOK_GRACE_MS = 60_000;
+/** background-activity.ts's id for the model's own ScheduleWakeup, of which one is pending at a time. */
+const WAKEUP_ID = "dynamic-wakeup";
+/** How long past its time a wakeup is taken as fired: the prompt waits for a running turn to end first. */
+const WAKEUP_FIRED_MS = 10 * 60_000;
 const RECENT_MS = 14 * 24 * 60 * 60 * 1000;
 /** How long a session the host was told of (DesktopSessions.rediscover) stays listed while the sidebar lags. */
 const NAMED_MS = 10 * 60 * 1000;
@@ -814,12 +818,21 @@ export class DesktopSessions {
     // Work begun before the live process started cannot still run in it: a restarted app or CLI
     // lost it without writing an end to the transcript (#176). The registry's startedAt is the
     // process's own start; schedules are left alone (a durable cron outlives its process).
-    const processStart = this.registered(id)?.startedAt;
+    // A wakeup the model scheduled for itself (ScheduleWakeup) is one-shot and lives in its process, as
+    // other work does; once its time is a few minutes past it has fired, and only a new call would
+    // schedule another (2026-11-20: a 11-09 wakeup still read "running"). With no process holding the
+    // conversation at all, nothing it started runs (a session closed for days kept its monitors listed).
+    const registered = this.registered(id);
+    const processStart = registered?.startedAt;
+    const gone = !registered && !this.externalProcess(id);
+    const now = (this.opts.now ?? Date.now)();
+    const inProcess = (task: BackgroundTask) => task.kind !== "schedule" || task.id === WAKEUP_ID;
     const active: BackgroundTask[] = [], history = (tracker?.history ?? []).map(withEffort), lost: BackgroundTask[] = [];
     for (const task of (tracker?.list ?? []).map(withEffort)) {
       const state = source && task.kind === "agent" ? agentStatus(path.join(this.subagentsDir(source), `agent-${task.id}.jsonl`)) : null;
       if (state) history.unshift({ ...task, state });
-      else if (processStart !== undefined && task.kind !== "schedule" && task.startedAt !== null && task.startedAt < processStart) lost.push({ ...task, state: "unknown" });
+      else if (task.id === WAKEUP_ID && task.nextAt !== undefined && now - task.nextAt > WAKEUP_FIRED_MS) history.unshift({ ...task, state: "done", endedAt: task.nextAt });
+      else if (inProcess(task) && (gone || processStart !== undefined && task.startedAt !== null && task.startedAt < processStart)) lost.push({ ...task, state: "unknown" });
       else active.push(task);
     }
     // The existing entries keep their order (a worker known finished only from its own transcript has no
