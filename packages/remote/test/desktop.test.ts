@@ -882,7 +882,7 @@ test("the registry reader sorts live CLIs outside the app from the app's own wri
     fs.writeFileSync(path.join(dir, `${pid}.json`), JSON.stringify({ pid, sessionId, cwd: "/synthetic", status: "idle", kind: "interactive", ...over }));
   entry(process.pid, outside, { entrypoint: "sdk-cli" });
   entry(dead, other, { entrypoint: "cli" });
-  entry(process.ppid, linked, { entrypoint: "claude-desktop" });
+  entry(process.ppid, linked, { entrypoint: "claude-desktop", startedAt: 1794992681859 });
   const headless = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"]);
   t.after(() => { headless.kill(); });
   entry(headless.pid!, id, { entrypoint: "sdk-cli", kind: "headless" });
@@ -891,6 +891,7 @@ test("the registry reader sorts live CLIs outside the app from the app's own wri
   assert.deepEqual([...external.keys()], [outside], "a dead pid, a headless run and the app's writer are not listed");
   assert.equal(external.get(outside)?.external, true);
   assert.deepEqual([...liveDesktopProcesses(dir, 0, "darwin", none).keys()], [linked], "the app's registry read holds the app's writer only");
+  assert.equal(liveDesktopProcesses(dir, 0, "darwin", none).get(linked)?.startedAt, 1794992681859, "the process's own start time is read from its registry entry (#176)");
 });
 
 test("an Artifact call's result carries the published page, and its row reads as the title", () => {
@@ -920,4 +921,34 @@ test("an Artifact call's result carries the published page, and its row reads as
   assert.ok(none({ url: "https://claude.ai/chat/1", title: "WebFetch page" }), "another tool's result");
   assert.ok(none(published, true), "a failed call");
   assert.ok(none(undefined), "no structured result");
+});
+
+test("a background task begun before the live process started is no longer running; one begun after it stays (#176)", t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "desktop-test-"));
+  const projects = path.join(root, "projects");
+  const project = path.join(projects, "project");
+  fs.mkdirSync(project, { recursive: true });
+  const registry = new Map<string, DesktopProcess>();
+  const desktop = new DesktopSessions({ projects, summarize, excluded: () => new Set(), now: Date.now, processes: () => "", registry: () => registry });
+  t.after(() => { desktop.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  const processStart = Date.parse("2026-11-18T09:00:00.000Z");
+  const launch = (tool: string, tid: string, taskId: string, when: string, input: Record<string, unknown>, result: Record<string, unknown>): string => [
+    line({ type: "assistant", timestamp: when, message: { id: `m-${tid}`, model: "test-model", content: [{ type: "tool_use", id: tid, name: tool, input }] } }),
+    line({ type: "user", timestamp: when, toolUseResult: result, message: { content: [{ type: "tool_result", tool_use_id: tid, content: `started ${taskId}` }] } }),
+  ].join("");
+  fs.writeFileSync(path.join(project, `${id}.jsonl`), line(user)
+    + launch("Monitor", "old-monitor", "mon-old", "2026-11-12T01:00:00.000Z", { description: "Old watch", command: "tail -f x" }, { taskId: "mon-old" })
+    + launch("Bash", "old-shell", "sh-old", "2026-11-18T08:59:59.000Z", { command: "sleep 9999", run_in_background: true }, { backgroundTaskId: "sh-old" })
+    + launch("Monitor", "new-monitor", "mon-new", "2026-11-18T09:30:00.000Z", { description: "New watch", command: "tail -f y" }, { taskId: "mon-new" }));
+  desktop.list();
+  // The registry names no start time: nothing can be said, so the transcript's tasks stay as read.
+  registry.set(id, { sessionId: id, pid: 42, status: "idle", bridgeSessionId: "cse_x" });
+  assert.deepEqual(desktop.backgroundTaskList(id).map(task => task.id), ["mon-old", "sh-old", "mon-new"]);
+  registry.set(id, { sessionId: id, pid: 42, status: "idle", bridgeSessionId: "cse_x", startedAt: processStart });
+  assert.deepEqual(desktop.backgroundTaskList(id).map(task => task.id), ["mon-new"], "only the current process's task is running");
+  assert.deepEqual(desktop.backgroundTaskHistory(id).map(task => [task.id, task.state]), [["sh-old", "unknown"], ["mon-old", "unknown"]]);
+  const summary = desktop.list().find(s => s.id === id);
+  assert.deepEqual(summary?.taskList?.map(task => task.id), ["mon-new"]);
+  assert.equal(summary?.tasks, 1);
+  assert.deepEqual(summary?.taskHistory?.map(task => task.id), ["sh-old", "mon-old"]);
 });

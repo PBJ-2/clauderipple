@@ -91,3 +91,17 @@ test("a worker's model reaches the task list and survives an event that does not
   items[0] = { ...items[0]!, model: "gemini-3.8-flash" } as TimelineItem;
   assert.equal(activityOverview(items).active[0]?.model, "gemini-3.8-flash");
 });
+
+test("a TaskStop answered 'No task found' ends the task as unknown; other failed stops leave it running (#176)", () => {
+  const activity = new BackgroundActivity();
+  launch(activity, "m", "Monitor", { description: "Watch", command: "tail -f x" }, { taskId: "gone" });
+  launch(activity, "s", "Bash", { command: "sleep 1", run_in_background: true }, { backgroundTaskId: "other" });
+  activity.call("stop-other", "TaskStop", { task_id: "other" });
+  activity.result("stop-other", false, "<tool_use_error>Permission denied</tool_use_error>", 15);
+  assert.deepEqual(activity.active.map(task => task.id), ["gone", "other"]);
+  // The text Claude Code writes into the transcript (verified in real session records, 2026-10).
+  activity.call("stop-gone", "TaskStop", { task_id: "gone" });
+  activity.result("stop-gone", false, "<tool_use_error>No task found with ID: gone</tool_use_error>", 20);
+  assert.deepEqual(activity.active.map(task => task.id), ["other"]);
+  assert.deepEqual(activity.history.map(task => [task.id, task.state, task.endedAt]), [["gone", "unknown", 20]]);
+});

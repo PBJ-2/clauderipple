@@ -32,8 +32,15 @@ export class BackgroundActivity {
     const call = this.calls.get(id);
     if (!call) return;
     this.calls.delete(id);
-    if (!ok) return;
     const { name, input } = call;
+    // Claude Code answers a stop for a task it no longer holds with
+    // `<tool_use_error>No task found with ID: <id></tool_use_error>` (transcripts, 2026-10): the
+    // task is gone, whatever ended it, and no notification will follow (#176).
+    if (!ok) {
+      const stopped = idOf(input.task_id) || idOf(input.shell_id);
+      if (name === "TaskStop" && stopped && /No task found with ID/i.test(text)) this.end(stopped, "unknown", at);
+      return;
+    }
     const result = structured ?? parse(text) ?? {};
     if (name === "TaskStop") { this.end(idOf(input.task_id) || idOf(input.shell_id), "stopped", at); return; }
     if (name === "CronDelete") { this.end(idOf(result.id) || idOf(input.id), "stopped", at); return; }

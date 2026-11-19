@@ -28,7 +28,7 @@ type RecordValue = Record<string, unknown>;
 type Summarize = (tool: string, input: RecordValue, cwd: string) => string;
 interface Source { file: string; size: number; mtime: number; unfinished: boolean; summary: SessionSummary }
 interface Imported { size: number; mtime: number; log: EventLog; dir: string; children?: Map<string, SubagentState> }
-export interface DesktopProcess { sessionId: string; pid: number; status: "busy" | "shell" | "idle" | "waiting"; bridgeSessionId?: string; /** The folder the app's worker runs in, as its registry records it. */ cwd?: string; /** A CLI running outside the Claude app, not one of the app's writers. */ external?: true }
+export interface DesktopProcess { sessionId: string; pid: number; status: "busy" | "shell" | "idle" | "waiting"; bridgeSessionId?: string; /** The folder the app's worker runs in, as its registry records it. */ cwd?: string; /** A CLI running outside the Claude app, not one of the app's writers. */ external?: true; /** When this process started (epoch ms), as its registry records it. Work begun before it is not running in it. */ startedAt?: number }
 
 /**
  * pid → the start time `ps` reported for it. A pid's start time never changes while it lives, and
@@ -109,7 +109,7 @@ function readRegistry(dir: string, maxAgeMs: number, platform: string, processes
     if (value.entrypoint !== "claude-desktop" && !external) continue;
     if (!["busy", "shell", "idle", "waiting"].includes(str(value.status))) continue;
     const status = value.status as DesktopProcess["status"];
-    candidates.push({ pid, procStart: value.procStart, entry: { sessionId: value.sessionId, pid, status, ...(external ? { external: true as const } : {}), ...(typeof value.bridgeSessionId === "string" ? { bridgeSessionId: value.bridgeSessionId } : {}), ...(typeof value.cwd === "string" && value.cwd ? { cwd: value.cwd } : {}) } });
+    candidates.push({ pid, procStart: value.procStart, entry: { sessionId: value.sessionId, pid, status, ...(external ? { external: true as const } : {}), ...(typeof value.bridgeSessionId === "string" ? { bridgeSessionId: value.bridgeSessionId } : {}), ...(typeof value.cwd === "string" && value.cwd ? { cwd: value.cwd } : {}), ...(typeof value.startedAt === "number" && Number.isFinite(value.startedAt) && value.startedAt > 0 ? { startedAt: value.startedAt } : {}) } });
   }
   if (!candidates.length) return result;
   const alive = platform === "win32" ? windowsAlive(processes) : darwinAlive();
@@ -773,12 +773,18 @@ export class DesktopSessions {
       const effort = source && task.kind === "agent" ? this.recordedEffort(source, task.id) : undefined;
       return effort ? { ...task, effort } : task;
     };
-    const active: BackgroundTask[] = [], history = (tracker?.history ?? []).map(withEffort);
+    // Work begun before the live process started cannot still run in it: a restarted app or CLI
+    // lost it without writing an end to the transcript (#176). The registry's startedAt is the
+    // process's own start; schedules are left alone (a durable cron outlives its process).
+    const processStart = this.liveProcess(id)?.startedAt;
+    const active: BackgroundTask[] = [], history = (tracker?.history ?? []).map(withEffort), lost: BackgroundTask[] = [];
     for (const task of (tracker?.list ?? []).map(withEffort)) {
       const state = source && task.kind === "agent" ? agentStatus(path.join(this.subagentsDir(source), `agent-${task.id}.jsonl`)) : null;
       if (state) history.unshift({ ...task, state });
+      else if (processStart !== undefined && task.kind !== "schedule" && task.startedAt !== null && task.startedAt < processStart) lost.push({ ...task, state: "unknown" });
       else active.push(task);
     }
+    history.unshift(...lost.sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0)));
     return { active, history: history.slice(0, 40) };
   }
 
