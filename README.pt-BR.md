@@ -251,7 +251,7 @@ modelo faz o raciocínio.
 | Cache de prompt em provedores traduzidos | **94–99%** medido | não medido | não medido | varia | não se aplica |
 | Subagentes identificados pelo modelo real no painel de tarefas | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Interface gráfica de configuração, sem precisar de terminal | ✅ | ✅ | ❌ | ❌ | ❌ |
-| App assinado e notarizado, com runtime próprio | ✅ | ✅ | ❌ | ❌ | – |
+| App de desktop com runtime próprio | ✅ | ✅ | ❌ | ❌ | – |
 
 ¹ O README do opencodex mostrava o Claude Desktop em uma demo, mas não publicava passos de
 configuração para ele, nem no repositório nem no site de documentação (verificado em
@@ -304,18 +304,42 @@ que você mapeia vão para o seu provedor, e todo o resto vai para a Anthropic b
   chamadas de ferramentas e imagens preservadas na ida e na volta, esforço de raciocínio
   limitado ao que cada modelo aceita, campos exclusivos da Anthropic removidos para
   fornecedores compatíveis.
-- **Um log de requisições de verdade.** Quem pediu, qual modelo respondeu, tokens de
-  entrada / em cache / de saída, latência e status de cada requisição, com um resumo da
-  última hora.
+- **Um log de requisições de verdade.** Quem pediu, qual modelo e qual conta responderam,
+  tokens de entrada / em cache / de saída, velocidade de saída, latência e status de cada
+  requisição, e o uso de qualquer período em todos os provedores.
+- **Saiba como estão seus limites.** Contas de Claude, ChatGPT, Gemini, OpenCode Go, MiniMax
+  e Grok têm cada uma um medidor a partir dos limites que o provedor informa, com o horário
+  de reinício quando ele é conhecido. Depois que tiver passado tempo suficiente desde o início
+  de uma janela para avaliar o ritmo, a que estiver a caminho de chegar a 100% antes de reiniciar avisa (em âmbar, e em
+  vermelho se isso for acontecer em menos de uma hora). Requisições a modelos com preço
+  conhecido são calculadas pelas tarifas da API (estimativas marcadas com `≈`), para você ver
+  quanto valem suas assinaturas.
+- **Cache quente enquanto você se afasta.** O Manter quente manda pings a um chat parado
+  para segurar o cache de prompt dele, chat por chat, pela chama da faixa (por padrão em
+  chats com mais de 30k tokens, até duas horas depois da última resposta), e quando você volta,
+  um cartão mostra o que foi preservado no cache.
+- **Contas sob o seu controle.** Coloque uma conta em primeiro lugar, pause outra, limpe um
+  período de espera, dê várias chaves de API a um provedor ou fixe um worker em uma conta
+  específica.
+- **Rápido para o GPT.** Dois botões mandam as requisições GPT da sessão principal ou dos
+  subagentes pelo nível rápido do Codex, e o log marca cada requisição FAST.
+- **Atualiza sozinho.** Instalado pelo script ou pelo npm, o roteador verifica a cada 12
+  horas e instala uma nova versão depois de 10 minutos sem atividade; a notificação abre o
+  que mudou. Dá para desligar na tela **Sobre** do painel.
 - **Identificação dos subagentes.** O painel de tarefas em segundo plano mostra
   `Terra·high · Review` em vez de um "Agent" genérico.
 - **O mod ripple, acima do prompt.** Uma faixa mostra o esforço de raciocínio, o contexto, o
   timer do cache e qual modelo respondeu sua última requisição, com o acerto de cache. Um
   pequeno modelo juiz (Haiku 5.5 ou Jev) lê cada prompt junto com os turnos recentes e define
-  o esforço, de low a max. O trabalho delegado vai para `ripple:auto`, e o juiz manda cada
-  tarefa para um worker conforme a dificuldade: o leve para DeepSeek ou GLM, o difícil para
-  GPT ou Opus. Cartões avisam quando o cache esfriou, o contexto ficou pesado ou uma janela do
-  plano passou de 80%, e oferecem compactar a sessão.
+  o esforço, de low a max, e pedir um nível no chat ("use xhigh nisto") define o esforço
+  daquela mensagem, dentro do teto de economia da assinatura se você o ativou. O trabalho
+  delegado vai para `ripple:auto` com um nível de dificuldade, e a ordem de prioridade que você
+  configura no painel determina o worker de cada nível: o leve para DeepSeek ou GLM, o difícil para GPT ou Opus.
+  Cartões avisam quando o cache esfriou, o contexto ficou pesado ou uma janela do plano
+  passou de 80%. Clique no chip de contexto para ver o que o ocupa; **Compactar** arruma antes
+  e deixa você escolher o modelo que escreve o resumo; **Repasse** abre uma sessão nova com
+  uma nota para retomar. O painel **Agentes** acompanha cada worker, comando em segundo plano
+  e monitoramento.
   `Log` (ou `/ripple-log`) abre o log de requisições em um painel lateral. Basta um botão na
   tela **Clientes**, ou `clauderipple mod on`.
 - **Imagens pela sua assinatura do ChatGPT.** `clauderipple image "<prompt>"`, com imagens
@@ -335,7 +359,9 @@ que você mapeia vão para o seu provedor, e todo o resto vai para a Anthropic b
 - **Feito para quem não quer saber de terminal.** Presets de provedores com teste de conexão
   em um clique e descoberta de modelos, mapeamento de modelos em menus suspensos, salvamento
   automático, interface em coreano e inglês. Um app de barra de menus que traz o próprio
-  runtime e se configura sozinho na primeira execução. Assinado e notarizado.
+  runtime e se configura sozinho na primeira execução, sem permissões de administrador.
+  Quando algo quebra, a tela Status aponta o problema e a solução, e a tela de reparo
+  funciona mesmo com o roteador fora do ar.
 
 <p align="center">
   <img src="docs/media/mapping.png" width="880" alt="Mapeamento de modelos: qual modelo responde por cada nome do Claude, com esforço de raciocínio por modelo">
@@ -367,18 +393,26 @@ qual for o modelo que as executa, no seu celular — e sem te derrubar depois de
 - **Combina com os recursos do notebook.** Com a [tampa fechada e o Acesso Pessoal do
   celular](#tampa-fechada-e-o-acesso-pessoal-do-celular) ativados, o notebook continua
   trabalhando dentro da mochila e fica online quando o Wi-Fi não tem internet.
+- **Responda às sessões do app sem Remote Control.** Mande uma mensagem, aprove, limpe ou
+  interrompa uma sessão aberta no app do Claude; o turno dela e qualquer artefato que ela
+  publicar aparecem no celular.
+- **Avisa quando o computador cai.** Se ele dormir ou ficar offline no meio de uma tarefa,
+  o celular recebe um push, e outro quando ele voltar.
 - **Privado por princípio.** Mensagens, anexos e notificações são criptografados de ponta
   a ponta; nem o relay nem o serviço de push conseguem lê-los. Sem conta, sem anúncios,
   sem rastreamento, grátis.
 
 Instale o ClaudeRipple no computador, abra a visão **Celular** do painel e escaneie o
 código QR uma vez. iPhone: [App Store](https://apps.apple.com/br/app/id6823063731). Android:
-[Google Play](https://play.google.com/store/apps/details?id=com.clauderipple.remote&hl=pt-BR). As sessões do app do Claude funcionam no macOS;
+[Google Play](https://play.google.com/store/apps/details?id=com.clauderipple.remote&hl=pt-BR). As sessões do app do Claude funcionam no macOS e no Windows;
 o app tem uma demonstração para testar sem computador.
 
 ## Roteiro
 
-O plano completo, com as issues por trás de cada item, está em [docs/ROADMAP.md](docs/ROADMAP.md) (em inglês). Nesta ordem:
+Já entregue dos planos anteriores: medidores de limite por conta, um aviso de ritmo antes que uma
+janela se esgote, custo a preços de API com histórico de uso, troca de conta em caso de falha e o
+notebook acordado com a tampa fechada.
+O plano completo, com as issues por trás de cada item, está em [docs/ROADMAP.md](docs/ROADMAP.md) (em inglês). A seguir, nesta ordem:
 
 1. **Ver como sua cota é consumida.** Por que uma requisição não aproveitou o cache, do que cada requisição é feita, uma previsão de quando sua cota vai se esgotar, com alertas, alertas de tarefa concluída, uma proteção contra comandos perigosos e descrições de imagens para modelos que não leem imagens.
 2. **Configurações em um só lugar.** Uma página para plugins, servidores MCP, skills e hooks, com os tokens que cada um realmente custa; pacotes populares em um clique; um único arquivo de regras para Claude e Codex.
@@ -452,7 +486,10 @@ de 270 MB baixados uma única vez; defina `CLAUDERIPPLE_NO_TRAY=1` antes do coma
 para pular. No Linux, ou depois de instalar só pelo npm, `clauderipple tray --install` o adiciona.
 Todo o resto funciona sem ele.
 
-**Atualização.** A bandeja oferece a nova versão quando houver uma (**Verificar atualizações…**), ou:
+**Atualização.** Uma instalação feita pelo script ou pelo npm se atualiza sozinha: verifica 10
+minutos depois de iniciar e a cada 12 horas, e instala quando nada estiver em andamento há 10
+minutos (dá para desligar na tela **Sobre** do painel). Para atualizar agora, use
+**Verificar atualizações…** na bandeja, ou:
 
 ```sh
 clauderipple update
@@ -660,6 +697,7 @@ começa durante a troca espera um momento em vez de falhar.
 | Assinatura do Grok | proxy de chat da CLI do Grok | o login da CLI do Grok (`grok login`), renovado pela CLI | lida da sua assinatura (Grok 4.7, 4.7 Fast, 4.6, 4.5) | traduzido (Chat Completions), esforço low…xhigh; canal próprio da CLI, não uma API publicada ([§4e](docs/ARCHITECTURE.md#4e-grok-providers-implemented-2026-10-08)) |
 | OpenRouter | compatível com Anthropic | chave de API | mais de 400, descoberta automática | suporte a esforço por modelo lido da API |
 | DeepSeek, Kimi, Z.ai GLM, MiniMax, Qwen (intl / cn) | compatível com Anthropic | chave de API | preset | conferido com a documentação do fornecedor |
+| OpenCode Go, OpenCode Zen | compatível com OpenAI (protocolo da Anthropic para alguns modelos; protocolo do Google no Go) | chave de API | preset | cota da assinatura do Go e preços por modelo exibidos |
 | xAI Grok, Mistral, Groq, Together, Fireworks | compatível com OpenAI | chave de API | descoberta automática | traduzido (Chat Completions / Responses) |
 | Ollama, LM Studio | compatível com OpenAI, local | nenhuma | descoberta automática | |
 | Anthropic | nativo | login(s) do Claude ou chave de API | modelos Claude | rodízio opcional, com a conversa fixa na conta, para Claude Desktop/Code; o Codex escolhe um login |
@@ -708,8 +746,7 @@ Em uso diário pelo autor, mas ainda jovem. Espere algumas arestas:
 
 - **O suporte a Windows é novo (2026-09-14).** Instalação, configuração, o roteador, o login,
   o seletor e uma chamada real ao GPT foram verificados em hardware x64; a recuperação após
-  falhas, em arm64. A janela ainda usa a barra de título padrão do Windows. Os builds para
-  Windows não são assinados; veja a observação em Instalação.
+  falhas, em arm64. A janela ainda usa a barra de título padrão do Windows.
 - **O suporte a Linux é novo (2026-09-24)**, uma contribuição acompanhada de medições no
   Ubuntu 24.04 x64 (instalação, uma requisição da aba Code, reinício no meio do streaming,
   modo seletor, desinstalação). Exige uma sessão de usuário do systemd; outras distribuições
@@ -727,8 +764,12 @@ Perguntas e relatos de bugs ficam no Discord: [https://discord.gg/R8ZgGSNHjw](ht
 
 ## Patrocinadores
 
-Se o ClaudeRipple economiza seu tempo, você pode apoiar o desenvolvimento pelo
-[GitHub Sponsors](https://github.com/sponsors/PBJ-2). Quem apoia com $10 por mês ou mais aparece aqui.
+O ClaudeRipple é gratuito e licenciado sob GPL, sem plano pago e sem telemetria. Desde setembro de
+2026 já saíram mais de 70 versões para acompanhar os novos modelos e cada atualização do Claude Code
+e do Codex, e ele roda sobre infraestrutura paga, como o relay do Ripple Remote. Se ele economiza
+uma assinatura ou uma noite de configuração para você,
+**[patrocine no GitHub](https://github.com/sponsors/PBJ-2)**, a partir de $3 por mês ou uma única
+vez. Quem apoia com $10 por mês ou mais aparece aqui.
 
 <!-- Supporter and Backer tier sponsors: add each name here (Backers with a link). -->
 _Ainda não há patrocinadores. O seu pode ser o primeiro._
