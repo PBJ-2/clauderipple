@@ -2277,7 +2277,8 @@ export class Sessions {
     if (offer.kind === "clear") return this.finishClear(id, offer, outcome);
     // What the person sent, as queued: a photo's text the mod submitted carries path lines, a command's offer only its arguments.
     const queued = this.sendQueue.items(id).find(item => item.id === offer.itemId);
-    if (outcome === "submitted" || offer.kind === "command" && outcome === "unknown") this.modSubmitted.set(offer.sessionId, this.now());
+    // A prompt's turn starts after the mod's answer; a command answers once it has run (a /compact starts no turn).
+    if (outcome === "submitted" && (offer.kind === undefined || offer.kind === "prompt")) this.modSubmitted.set(offer.sessionId, this.now());
     if (offer.kind === "command" && outcome === "unknown") {
       // It may have run: not held, not marked sent. The item leaves the queue and the timeline says so; a resend is the person's call.
       this.dropModEcho(offer.itemId);
