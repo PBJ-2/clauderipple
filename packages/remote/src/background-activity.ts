@@ -64,7 +64,9 @@ export class BackgroundActivity {
     if (name === "CronCreate" && typeof result.id === "string") {
       this.put({ id: result.id, kind: "schedule", label: stringField(input, "prompt") || name, startedAt: at, schedule: stringField(input, "cron"), state: "running" }); return;
     }
-    const asyncAgent = result.isAsync === true || /(?:launched asynchronously|async(?: agent)? launched)/i.test(text);
+    // Only a worker's own launch result says so: a shell's or monitor's output that quotes those words
+    // (a test file, a log) launched nothing (2026-11-20: a sed of desktop.test.ts listed a running shell).
+    const asyncAgent = (name === "Agent" || name === "Task") && (result.isAsync === true || /(?:launched asynchronously|async(?: agent)? launched)/i.test(text));
     let taskId = name === "Monitor" ? idOf(result.taskId) : name === "Bash" ? idOf(result.backgroundTaskId) : asyncAgent ? idOf(result.agentId) || idOf(result.taskId) : "";
     if (!taskId && name === "Bash" && input.run_in_background === true) taskId = /(?:ID|id):\s*([\w-]+)/.exec(text)?.[1] ?? "";
     if (!taskId && asyncAgent) taskId = /(?:agentId|task[_ -]?id):\s*([\w-]+)/i.exec(text)?.[1] ?? "";

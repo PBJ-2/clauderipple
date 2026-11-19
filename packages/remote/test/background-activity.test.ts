@@ -135,3 +135,13 @@ test("tasks the host moved to history as unknown render under Recent, not among 
   // Tasks with no state and `running` tasks are unchanged.
   assert.deepEqual(activityOverview([], [{ id: "x", kind: "agent", label: "x", startedAt: null }]).active.map(task => task.id), ["x"]);
 });
+
+test("a shell's output that quotes a worker's launch words launched nothing", () => {
+  const activity = new BackgroundActivity();
+  activity.call("sed", "Bash", { command: "sed -n 1,20p desktop.test.ts", description: "Read the tests" });
+  activity.result("sed", true, 'content: "Async agent launched"\n  agentId: worker }', 10, { stdout: "…", interrupted: false });
+  assert.equal(activity.active.length, 0);
+  activity.call("agent", "Agent", { description: "Review", run_in_background: true });
+  activity.result("agent", true, "Async agent launched successfully\nagentId: real-worker", 10, {});
+  assert.deepEqual(activity.active.map(task => [task.id, task.kind]), [["real-worker", "agent"]]);
+});

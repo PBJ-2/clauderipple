@@ -24,10 +24,7 @@ const WINDOW = 256 * 1024;
 /** How long an assistant's final reply waits for its Stop hook summary before it is taken as the turn's end. */
 const STOP_HOOK_GRACE_MS = 60_000;
 /** background-activity.ts's id for the model's own ScheduleWakeup, of which one is pending at a time. */
-const WAKEUP_ID = "dynamic-wakeup";
-/** How long past its time a wakeup is taken as fired: the prompt waits for a running turn to end first. */
-const WAKEUP_FIRED_MS = 10 * 60_000;
-const RECENT_MS = 14 * 24 * 60 * 60 * 1000;
+const WAKEUP_ID = "dynamic-wakeup";const RECENT_MS = 14 * 24 * 60 * 60 * 1000;
 /** How long a session the host was told of (DesktopSessions.rediscover) stays listed while the sidebar lags. */
 const NAMED_MS = 10 * 60 * 1000;
 type RecordValue = Record<string, unknown>;
@@ -553,6 +550,15 @@ export class BackgroundTasks {
   turnEndedAt: number | null = null;
   /** The end seen is an assistant's final reply whose Stop hook has not reported yet. */
   turnEndPending = false;
+  /** The last main turns that ended, oldest first: when each began and ended, and whether its Stop hook had yet to report. */
+  private turns: { start: number; end: number; pending: boolean }[] = [];
+  private openedAt: number | null = null;
+
+  /** Whether a main turn begun at or after `at` has ended, its Stop hook done (or a minute past): a
+   * wakeup due at `at` waits for the turn running then, so this turn is the one that ran its prompt. */
+  turnRanSince(at: number, now: number): boolean {
+    return this.turns.some(turn => turn.start >= at && (!turn.pending || now - turn.end >= STOP_HOOK_GRACE_MS));
+  }
 
   accept(line: string): void {
     const r = record(line);
@@ -563,6 +569,18 @@ export class BackgroundTasks {
     if (step !== null) {
       this.turnEndedAt = step || !Number.isFinite(at) ? null : at;
       this.turnEndPending = !step && r.type === "assistant";
+      const last = this.turns.at(-1);
+      if (step && this.openedAt === null) {
+        // A Stop hook that sends the turn on continues it: the same turn, not a new one.
+        if (r.type === "system" && last?.pending) { this.turns.pop(); this.openedAt = last.start; }
+        else if (Number.isFinite(at)) this.openedAt = at;
+      } else if (!step && Number.isFinite(at)) {
+        if (this.openedAt !== null) {
+          this.turns.push({ start: this.openedAt, end: at, pending: r.type === "assistant" });
+          this.openedAt = null;
+          if (this.turns.length > 50) this.turns.shift();
+        } else if (last?.pending) Object.assign(last, { end: at, pending: r.type === "assistant" });
+      }
     }
     // A phone message the ripple mod submits as the person's is written as a plugin origin with asUser;
     // it starts the person's turn the same as one typed in the app (2026-11-19: the last turn's
@@ -832,8 +850,8 @@ export class DesktopSessions {
       const state = source && task.kind === "agent" ? agentStatus(path.join(this.subagentsDir(source), `agent-${task.id}.jsonl`)) : null;
       if (state) history.unshift({ ...task, state });
       else if (inProcess(task) && (gone || processStart !== undefined && task.startedAt !== null && task.startedAt < processStart)) lost.push({ ...task, state: "unknown" });
-      // Its prompt waits for a running turn: only an ended turn well past its time says it fired.
-      else if (task.id === WAKEUP_ID && task.nextAt !== undefined && now - task.nextAt > WAKEUP_FIRED_MS && tracker?.turnEndedAt != null) history.unshift({ ...task, state: "done", endedAt: task.nextAt });
+      // Its prompt waits for a running turn, then runs as the next one: that turn's end says it fired.
+      else if (task.id === WAKEUP_ID && task.nextAt !== undefined && tracker?.turnRanSince(task.nextAt, now)) history.unshift({ ...task, state: "done", endedAt: task.nextAt });
       else active.push(task);
     }
     // The existing entries keep their order (a worker known finished only from its own transcript has no

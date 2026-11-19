@@ -1060,7 +1060,7 @@ test("a wakeup past its time has fired, and a conversation no process holds runs
     line({ type: "assistant", timestamp: when, message: { id: `m-${tid}`, model: "test-model", content: [{ type: "tool_use", id: tid, name: tool, input }] } }),
     line({ type: "user", timestamp: when, toolUseResult: result, message: { content: [{ type: "tool_result", tool_use_id: tid, content: "ok" }] } }),
   ].join("");
-  const wakeAt = Date.now() - 11 * 60_000;
+  const wakeAt = Date.now() - 30_000;
   fs.writeFileSync(file, line(user)
     + call("ScheduleWakeup", "wake", new Date(wakeAt - 60_000).toISOString(), { reason: "Waiting on the publish job", prompt: "check" }, { scheduledFor: wakeAt })
     + call("Monitor", "mon", new Date(wakeAt).toISOString(), { description: "Rank check", command: "tail -f x" }, { taskId: "mon-1" })
@@ -1069,9 +1069,19 @@ test("a wakeup past its time has fired, and a conversation no process holds runs
   f.live();
   // The turn that scheduled it still runs: its prompt waits for that turn, so it has not fired.
   assert.deepEqual(f.desktop.backgroundTaskList(id).map(task => task.id), ["dynamic-wakeup", "mon-1", "cron-1"]);
-  fs.appendFileSync(file, line({ type: "assistant", timestamp: new Date(wakeAt).toISOString(), message: { id: "m-end", model: "test-model", stop_reason: "end_turn", content: [{ type: "text", text: "Done." }] } })
-    + line({ type: "system", subtype: "stop_hook_summary", timestamp: new Date(wakeAt).toISOString() }));
+  const at = (ms: number) => new Date(wakeAt + ms).toISOString();
+  const end = (when: string, hook = true) => line({ type: "assistant", timestamp: when, message: { id: `m-${when}`, model: "test-model", stop_reason: "end_turn", content: [{ type: "text", text: "Done." }] } })
+    + (hook ? line({ type: "system", subtype: "stop_hook_summary", timestamp: when }) : "");
+  fs.appendFileSync(file, end(at(0)));
+  assert.ok(f.desktop.backgroundTaskList(id).some(task => task.id === "dynamic-wakeup"), "that turn began before the wakeup was due; its prompt has not run");
+  // The wakeup's prompt runs as the next turn; until its Stop hook reports, the turn may go on.
+  fs.appendFileSync(file, line({ type: "user", timestamp: at(1000), message: { content: "check" } }) + end(at(2000), false));
+  assert.ok(f.desktop.backgroundTaskList(id).some(task => task.id === "dynamic-wakeup"));
+  fs.appendFileSync(file, line({ type: "system", subtype: "stop_hook_summary", timestamp: at(2000) }));
   assert.deepEqual(f.desktop.backgroundTaskList(id).map(task => task.id), ["mon-1", "cron-1"], "the fired wakeup left; the live process may still run the rest");
+  // A later turn does not bring it back.
+  fs.appendFileSync(file, line({ type: "user", timestamp: at(3000), origin: { kind: "human" }, message: { content: "Next" } }));
+  assert.deepEqual(f.desktop.backgroundTaskList(id).map(task => task.id), ["mon-1", "cron-1"]);
   assert.deepEqual(f.desktop.backgroundTaskHistory(id).map(task => [task.id, task.state]), [["dynamic-wakeup", "done"]]);
   f.registry.delete(id);
   assert.deepEqual(f.desktop.backgroundTaskList(id).map(task => task.id), ["cron-1"], "a durable schedule outlives its process");
