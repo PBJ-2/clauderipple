@@ -80,8 +80,13 @@ test("the Windows registry sends a phone's message to the Claude app session", a
   const dir = windowsRegistry(t);
   const registry = liveDesktopProcesses(dir, 0, "win32", await windowsSnapshot([{ pid: 42, started: CREATED_AT }]));
   const f = bridgeFixture(t, { registry: () => registry });
+  // The registry makes it a Remote Control app session, whose bridge drops a host post (#177): the message
+  // goes to its ripple mod instead, and without a mod it is refused.
+  await assert.rejects(Promise.resolve().then(() => f.sessions.send(bridgeId, "phone-offline", "hello without a mod")), (error: unknown) => (error as { code?: unknown }).code === "desktop_mod_offline");
+  f.sessions.modInbox.listen(bridgeId, f.now());
   await f.sessions.send(bridgeId, "phone-uuid", "hello from the phone");
-  assert.equal(f.posts.length, 1, "the message went through the Remote Control bridge");
+  assert.ok(f.sessions.modInbox.pending(bridgeId).some(offer => offer.itemId === "phone-uuid" && offer.text === "hello from the phone"), "the message was offered to the mod");
+  assert.equal(f.posts.length, 0, "and nothing went through the Remote Control bridge");
 });
 
 const one = JSON.stringify([{ ProcessId: 42, CommandLine: "claude.exe", CreationDate: CREATED_AT }]);

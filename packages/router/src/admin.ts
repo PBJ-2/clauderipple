@@ -74,7 +74,7 @@ import { statusModEnabled, syncModelSlots } from "../../cli/src/settings.ts";
 import { ClaudeOAuthSession, type ClaudeOAuthState } from "./providers/claude-oauth.ts";
 import { readClaudeAuthFile } from "./providers/anthropic-token-file.ts";
 import { isCurrentClaudeAccountPaused, listClaudeAccounts, listClaudeAccountsWithSubject, removeClaudeAccount, updateClaudeAccount, setCurrentClaudeAccountPaused, setPreferredClaudeAccount } from "./providers/anthropic-accounts.ts";
-import { storedAccountsFor } from "./pinned-accounts.ts";
+import { pinnableAccountsFor, storedAccountsFor } from "./pinned-accounts.ts";
 import { CODEX_LOGIN_ID, readChatGptAccounts, removeChatGptAccount, summarize as summarizeChatGptAccount, updateChatGptAccount } from "./providers/chatgpt/accounts.ts";
 import { exhaustedForMs, IMAGE_ASPECTS, IMAGE_BACKGROUNDS, IMAGE_FORMATS, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
 import type { GoogleAccountStatus } from "./providers/google/index.ts";
@@ -951,7 +951,7 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
   const credentials = deps.credentials?.() ?? {};
   const health = deps.providerHealth?.() ?? {};
   const catalog = effortLevels(cfg).providers;
-  const agents: ModOptions["agents"] = generatedAgents(cfg, deps.agentDir, undefined, deps.log, (provider) => storedAccountsFor(provider, homeDir())).map(a => ({
+  const agents: ModOptions["agents"] = generatedAgents(cfg, deps.agentDir, undefined, deps.log, (provider) => pinnableAccountsFor(provider, homeDir())).map(a => ({
     ...a,
     efforts: modEfforts(catalog[a.provider]?.models?.[a.model] ?? catalog[a.provider]?.default),
     billing: billingOf(cfg.providers[a.provider] as { type: string; auth?: string; preset?: string; url?: string }, a.model),
@@ -2312,10 +2312,15 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         if (method !== (isList ? "GET" : "POST")) { sendJson(res, 404, { error: "unknown phone endpoint or method" }); return; }
         let body: string | undefined;
         let session: string | undefined;
+        let caps: string | undefined;
         if (isList) {
           const query = new URL(url, "http://127.0.0.1").searchParams;
           session = query.get("session") ?? undefined;
           if (!session || session.length > 200 || query.getAll("session").length !== 1) { sendJson(res, 400, { error: "invalid session" }); return; }
+          // What the mod can run beyond a prompt (a mod that predates it sends none).
+          const announced = query.getAll("caps");
+          if (announced.length > 1 || announced.length === 1 && !/^[a-z]{1,20}(,[a-z]{1,20}){0,7}$/.test(announced[0]!)) { sendJson(res, 400, { error: "invalid caps" }); return; }
+          caps = announced[0];
         } else {
           try { body = (await readBody(req, 4096, new Error("inbox body too large"))).toString("utf8"); }
           catch { sendJson(res, 400, { error: "invalid inbox request" }); return; }
@@ -2329,7 +2334,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           }
         }
         const route = isList ? "inbox" : `inbox/${pathname.endsWith("/claim") ? "claim" : "result"}`;
-        const result = await phoneRequest(route, method, body, deps.phone, session);
+        const result = await phoneRequest(route, method, body, deps.phone, session, undefined, caps);
         sendJson(res, result.status, result.body);
         return;
       }

@@ -22,7 +22,7 @@ import { SLOW_VISIBLE_MS, VISIBLE_MS } from "../src/push.ts";
 import { windowsDrives } from "../src/folders.ts";
 import { Sessions } from "../src/sessions.ts";
 import type { QueryFn, SdkUserMessage } from "../src/sessions.ts";
-import { bridgeFixture, bridgeId, tick } from "./bridge-fixture.ts";
+import { bridgeFixture, bridgeId, environmentSession, tick } from "./bridge-fixture.ts";
 import { claudeAppData } from "./app-data.ts";
 
 // Limits for a stalled test, not for a slow one: a passing test never waits them out. 4.5 s and 2 s
@@ -197,6 +197,9 @@ test("idle refresh reservation refuses in-flight commands and blocks new turns a
 
 test("refresh cannot race a queued bridge send before its running state is recorded", async t => {
   const f = bridgeFixture(t);
+  // Only a session Ripple created in a Remote Control environment still gets a bridge post (#177).
+  f.sessions.log(bridgeId);
+  environmentSession(f);
   const server = new HostServer({ listen: "127.0.0.1", port: 0, token, webDir, sessions: f.sessions, router,
     hostName: "test", version: "test", recentCli: async () => [] });
   await server.listen();
@@ -205,6 +208,31 @@ test("refresh cannot race a queued bridge send before its running state is recor
   assert.equal(server.prepareRefresh(), false, "a queue send awaiting upstream acceptance is not idle");
   await tick();
   assert.equal(f.posts.length, 1);
+});
+
+test("a send refused with a machine code answers that code, not the generic send error (#177)", async t => {
+  // A Remote Control app session whose mod does not answer: the host cannot deliver it.
+  const f = bridgeFixture(t);
+  const server = new HostServer({ listen: "127.0.0.1", port: 0, token, webDir, sessions: f.sessions, router,
+    hostName: "test", version: "test", recentCli: async () => [] });
+  const peer = new MemoryPeer();
+  t.after(() => server.close());
+  server.connected(peer);
+  peer.receive({ t: "hello", token, clientId: "coded-phone" });
+  await peer.take("ready");
+  peer.receive({ t: "send", session: bridgeId, clientMsgId: "no-mod", text: "Hello" });
+  for (let attempt = 0; attempt < 200 && !peer.frames.some(frame => frame.t === "error"); attempt++) await delay(5);
+  const error = await peer.take("error");
+  assert.equal(error.code, "desktop_mod_offline");
+  assert.equal(error.clientMsgId, "no-mod");
+  assert.equal(error.session, bridgeId);
+  assert.match(error.message, /리플 모드가 응답하지 않아/);
+  assert.equal(peer.frames.some(frame => frame.t === "ack"), false);
+  assert.deepEqual(f.posts, []);
+  // A failure without a machine code keeps the generic one.
+  peer.receive({ t: "send", session: "gone-session", clientMsgId: "plain", text: "Hello" });
+  for (let attempt = 0; attempt < 200 && !peer.frames.some(frame => frame.t === "error"); attempt++) await delay(5);
+  assert.equal((await peer.take("error")).code, "send");
 });
 
 test("refresh freezes deferred internal queue drains before they start a new turn", async t => {
@@ -795,6 +823,9 @@ test("a message past the chunk bound is not split; the existing too_large answer
 test("queued desktop sends catch a one-second idle gap with no phone and no full or network poll", async t => {
   t.mock.timers.enable({ apis: ["setInterval"] });
   const f = bridgeFixture(t);
+  // Only a session Ripple created in a Remote Control environment still gets a bridge post (#177).
+  f.sessions.log(bridgeId);
+  environmentSession(f);
   f.registry.get(bridgeId)!.status = "busy";
   f.status("running");
   await f.sessions.pollDesktop();
@@ -1200,6 +1231,9 @@ for (const { textSize, count, poll } of [{ textSize: 20, count: 120, poll: false
     assert.equal((await peer.take("events")).events.at(-1)?.seq, 100);
   }
   registry.get(id)!.bridgeSessionId = "bridge";
+  // The send rebases the log through a bridge post, which only runs for a session Ripple created in a Remote
+  // Control environment (#177); the poll rebases an app session the person opened.
+  if (!poll) (sessions as unknown as { records: Map<string, { environmentBridgeId?: string }> }).records.get(id)!.environmentBridgeId = "bridge";
   if (poll) await sessions.pollDesktop();
   else await sessions.send(id, "new-phone-message", "continue");
   const log = sessions.log(id);

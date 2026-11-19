@@ -9,26 +9,29 @@ import { promisify } from "node:util";
 import { Worker } from "node:worker_threads";
 import { deliveredFiles, EventLog, imageBlobId } from "./eventlog.ts";
 import { creationDateToFileTime, parseFileTime, processCommands, processSnapshot, sameFileTime, type ProcessSnapshot } from "./processes.ts";
-import { fileImages, messageContent, sessionFileTool, unshownFiles, type ImageSink } from "./images.ts";
+import { fileImages, messageContent, sessionFileTool, unshownFiles, type ImageMediaType, type ImageSink } from "./images.ts";
 import { narrationBody } from "./narration.ts";
 import { artifactOf } from "./artifact.ts";
 import { PERMISSION_MODES, type BackgroundTask, type EventBody, type Figures, type PermissionMode, type PlanStep, type SessionSummary, type ToolCall } from "./protocol.ts";
 import { WRAP_TOOL, wrapUpFields, type WrapUpFields } from "./wrap-up.ts";
-import { TaskPlan } from "./task-plan.ts";
+import { shownPlan, TaskPlan } from "./task-plan.ts";
 import { BackgroundActivity } from "./background-activity.ts";
 import { toolInput } from "./tool-details.ts";
 export { nextPlan } from "./task-plan.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const WINDOW = 256 * 1024;
-const RECENT_MS = 14 * 24 * 60 * 60 * 1000;
+/** How long an assistant's final reply waits for its Stop hook summary before it is taken as the turn's end. */
+const STOP_HOOK_GRACE_MS = 60_000;
+/** background-activity.ts's id for the model's own ScheduleWakeup, of which one is pending at a time. */
+const WAKEUP_ID = "dynamic-wakeup";const RECENT_MS = 14 * 24 * 60 * 60 * 1000;
 /** How long a session the host was told of (DesktopSessions.rediscover) stays listed while the sidebar lags. */
 const NAMED_MS = 10 * 60 * 1000;
 type RecordValue = Record<string, unknown>;
 type Summarize = (tool: string, input: RecordValue, cwd: string) => string;
 interface Source { file: string; size: number; mtime: number; unfinished: boolean; summary: SessionSummary }
 interface Imported { size: number; mtime: number; log: EventLog; dir: string; children?: Map<string, SubagentState> }
-export interface DesktopProcess { sessionId: string; pid: number; status: "busy" | "shell" | "idle" | "waiting"; bridgeSessionId?: string; /** The folder the app's worker runs in, as its registry records it. */ cwd?: string; /** A CLI running outside the Claude app, not one of the app's writers. */ external?: true }
+export interface DesktopProcess { sessionId: string; pid: number; status: "busy" | "shell" | "idle" | "waiting"; bridgeSessionId?: string; /** The folder the app's worker runs in, as its registry records it. */ cwd?: string; /** A CLI running outside the Claude app, not one of the app's writers. */ external?: true; /** When this process started (epoch ms), as its registry records it. Work begun before it is not running in it. */ startedAt?: number; /** When the registry last changed `status` (epoch ms). */ statusAt?: number; /** The registry says busy, but the main turn ended after it said so: only background work runs. `status` reads idle then. */ backgroundOnly?: true; /** With backgroundOnly: when that main turn ended (epoch ms). */ turnEndedAt?: number }
 
 /**
  * pid → the start time `ps` reported for it. A pid's start time never changes while it lives, and
@@ -109,7 +112,7 @@ function readRegistry(dir: string, maxAgeMs: number, platform: string, processes
     if (value.entrypoint !== "claude-desktop" && !external) continue;
     if (!["busy", "shell", "idle", "waiting"].includes(str(value.status))) continue;
     const status = value.status as DesktopProcess["status"];
-    candidates.push({ pid, procStart: value.procStart, entry: { sessionId: value.sessionId, pid, status, ...(external ? { external: true as const } : {}), ...(typeof value.bridgeSessionId === "string" ? { bridgeSessionId: value.bridgeSessionId } : {}), ...(typeof value.cwd === "string" && value.cwd ? { cwd: value.cwd } : {}) } });
+    candidates.push({ pid, procStart: value.procStart, entry: { sessionId: value.sessionId, pid, status, ...(external ? { external: true as const } : {}), ...(typeof value.bridgeSessionId === "string" ? { bridgeSessionId: value.bridgeSessionId } : {}), ...(typeof value.cwd === "string" && value.cwd ? { cwd: value.cwd } : {}), ...(typeof value.startedAt === "number" && Number.isFinite(value.startedAt) && value.startedAt > 0 ? { startedAt: value.startedAt } : {}), ...(typeof value.statusUpdatedAt === "number" && Number.isFinite(value.statusUpdatedAt) && value.statusUpdatedAt > 0 ? { statusAt: value.statusUpdatedAt } : {}) } });
   }
   if (!candidates.length) return result;
   const alive = platform === "win32" ? windowsAlive(processes) : darwinAlive();
@@ -157,6 +160,9 @@ export interface DesktopOptions {
   /** The phone's id for a user line the app's mod typed in (by the line's uuid and text), so the
    * phone can tell its own message when it comes back in a rebuilt snapshot. */
   userId?: (id: string, uuid: string, text: string) => string | undefined;
+  /** What the person sent when a user line is a message the mod ran with its photos as files named in the text:
+   * the text without those lines, and the photos. The phone shows the photos, not the path lines. */
+  userPhotos?: (id: string, text: string) => { text: string; photos: { data: string; mediaType: ImageMediaType }[] } | undefined;
 }
 
 /** The ids a process listing names through session flags, tokenized once per listing: the host asks
@@ -203,6 +209,9 @@ function text(content: unknown): string {
 }
 function prompt(r: RecordValue): string {
   if (r.type !== "user" || r.isSidechain === true || r.isMeta === true) return "";
+  // The summary compaction writes is a user line the app hides (isCompactSummary, isVisibleInTranscriptOnly;
+  // seen 2026-11-19): it is neither the person's words nor the start of a turn.
+  if (r.isCompactSummary === true || r.isVisibleInTranscriptOnly === true) return "";
   const message = object(r.message);
   const body = text(message?.content).trim();
   // CLI-generated command/context messages are not the person's first prompt.
@@ -434,24 +443,30 @@ function unfinishedTurn(lines: string[]): boolean {
   let unfinished = false;
   for (const line of lines) {
     const r = record(line);
-    if (!r || r.isSidechain === true || r.isMeta === true) continue;
-    if (r.type === "result" || (r.type === "system" && r.subtype === "turn_duration")) {
-      unfinished = false;
-    } else if (r.type === "system" && r.subtype === "stop_hook_summary") {
-      unfinished = r.preventedContinuation === true;
-    } else if (r.type === "user") {
-      const content = object(r.message)?.content;
-      if (typeof content === "string" && /^\[Request interrupted/.test(content)) unfinished = false;
-      else if (prompt(r) || (Array.isArray(content) && content.some(b => object(b)?.type === "tool_result"))) unfinished = true;
-    } else if (r.type === "assistant") {
-      const message = object(r.message);
-      if (!message || !Array.isArray(message.content)) continue;
-      unfinished = message.content.some(b => object(b)?.type === "tool_use") ||
-        (message.stop_reason !== "end_turn" && message.stop_reason !== "stop_sequence" &&
-          ("stop_reason" in message || !message.content.some(b => object(b)?.type === "text")));
-    }
+    const step = r ? turnStep(r) : null;
+    if (step !== null) unfinished = step;
   }
   return unfinished;
+}
+
+/** One record's say on the main turn: true it runs (or goes on), false it ended, null nothing. */
+function turnStep(r: RecordValue): boolean | null {
+  if (r.isSidechain === true || r.isMeta === true) return null;
+  if (r.type === "result" || (r.type === "system" && r.subtype === "turn_duration")) return false;
+  if (r.type === "system" && r.subtype === "stop_hook_summary") return r.preventedContinuation === true;
+  if (r.type === "user") {
+    const content = object(r.message)?.content;
+    if (typeof content === "string" && /^\[Request interrupted/.test(content)) return false;
+    return prompt(r) || (Array.isArray(content) && content.some(b => object(b)?.type === "tool_result")) ? true : null;
+  }
+  if (r.type === "assistant") {
+    const message = object(r.message);
+    if (!message || !Array.isArray(message.content)) return null;
+    return message.content.some(b => object(b)?.type === "tool_use") ||
+      (message.stop_reason !== "end_turn" && message.stop_reason !== "stop_sequence" &&
+        ("stop_reason" in message || !message.content.some(b => object(b)?.type === "text")));
+  }
+  return null;
 }
 
 /** Complete lines only: a partial head/tail record must not be interpreted. */
@@ -531,13 +546,47 @@ export class BackgroundTasks {
   get history(): BackgroundTask[] { return this.activity.history; }
   get plan(): PlanStep[] { return this.planState.list; }
   turnStartedAt: number | null = null;
+  /** When the main turn last ended, while it stays ended; null while one runs or none was seen. */
+  turnEndedAt: number | null = null;
+  /** The end seen is an assistant's final reply whose Stop hook has not reported yet. */
+  turnEndPending = false;
+  /** The last main turns that ended, oldest first: when each began and ended, and whether its Stop hook had yet to report. */
+  private turns: { start: number; end: number; pending: boolean }[] = [];
+  private openedAt: number | null = null;
+
+  /** Whether a main turn begun at or after `at` has ended, its Stop hook done (or a minute past): a
+   * wakeup due at `at` waits for the turn running then, so this turn is the one that ran its prompt. */
+  turnRanSince(at: number, now: number): boolean {
+    return this.turns.some(turn => turn.start >= at && (!turn.pending || now - turn.end >= STOP_HOOK_GRACE_MS));
+  }
 
   accept(line: string): void {
     const r = record(line);
     if (!r || r.isSidechain === true) return;
     const content = object(r.message)?.content;
     const at = typeof r.timestamp === "string" ? Date.parse(r.timestamp) : NaN;
-    if (r.type === "user" && object(r.origin)?.kind === "human") {
+    const step = turnStep(r);
+    if (step !== null) {
+      this.turnEndedAt = step || !Number.isFinite(at) ? null : at;
+      this.turnEndPending = !step && r.type === "assistant";
+      const last = this.turns.at(-1);
+      if (step && this.openedAt === null) {
+        // A Stop hook that sends the turn on continues it: the same turn, not a new one.
+        if (r.type === "system" && last?.pending) { this.turns.pop(); this.openedAt = last.start; }
+        else if (Number.isFinite(at)) this.openedAt = at;
+      } else if (!step && Number.isFinite(at)) {
+        if (this.openedAt !== null) {
+          this.turns.push({ start: this.openedAt, end: at, pending: r.type === "assistant" });
+          this.openedAt = null;
+          if (this.turns.length > 50) this.turns.shift();
+        } else if (last?.pending) Object.assign(last, { end: at, pending: r.type === "assistant" });
+      }
+    }
+    // A phone message the ripple mod submits as the person's is written as a plugin origin with asUser;
+    // it starts the person's turn the same as one typed in the app (2026-11-19: the last turn's
+    // finished plan stayed on the phone under the next message).
+    const origin = object(r.origin);
+    if (r.type === "user" && (origin?.kind === "human" || origin?.kind === "plugin" && origin.asUser === true)) {
       if (Number.isFinite(at)) this.turnStartedAt = at;
       this.planState.newTurn();
     }
@@ -644,7 +693,28 @@ export class DesktopSessions {
   }
 
   liveProcess(id: string, maxAgeMs = 1000): DesktopProcess | undefined {
+    return this.settled(id, this.registered(id, maxAgeMs));
+  }
+
+  /** The registry's own entry, status as written: for its folder and start time, which need no transcript read. */
+  private registered(id: string, maxAgeMs = 1000): DesktopProcess | undefined {
     return (this.opts.registry?.() ?? liveDesktopProcesses(path.join(path.dirname(this.projects), "sessions"), maxAgeMs)).get(id);
+  }
+
+  /** The app's registry stays "busy" while background agents run, through the main turn's end and
+   * the turns after it (2026-11-20: a session read busy for three hours, so the phone showed it
+   * working and sent a question card's answer as an interruption the mod never took). A busy set
+   * before the transcript's own turn end is that background work: the main turn is idle. A busy set
+   * after it is a new turn whose prompt the transcript may not have yet. An assistant's last reply
+   * is written before the Stop hook runs, and the hook may send the turn on: only its summary, or a
+   * minute without one, ends the turn. */
+  private settled(id: string, p: DesktopProcess | undefined): DesktopProcess | undefined {
+    if (p?.status !== "busy" || p.statusAt === undefined) return p;
+    const tracker = this.scan(id);
+    const ended = tracker?.turnEndedAt;
+    if (ended == null || ended < p.statusAt) return p;
+    if (tracker!.turnEndPending && (this.opts.now ?? Date.now)() - ended < STOP_HOOK_GRACE_MS) return p;
+    return { ...p, status: "idle", backgroundOnly: true, turnEndedAt: ended };
   }
 
   /** The CLIs alive outside the Claude app, minus any session the app's own registry holds: the app's writer wins. */
@@ -733,7 +803,7 @@ export class DesktopSessions {
       const copies = this.tailCopies.get(id);
       const next = scanLines(fd, size, line => {
         if (copies?.recorded(line)) return;
-        for (const body of transcriptEvents(line, this.liveProcess(id)?.cwd ?? source.summary.cwd, this.opts.summarize, sink, { state, resolve }, seen).bodies) visit(body);
+        for (const body of transcriptEvents(line, this.registered(id)?.cwd ?? source.summary.cwd, this.opts.summarize, sink, { state, resolve }, seen).bodies) visit(body);
       }, offset);
       // Worker transcripts grow independently of the parent, even once their model is known.
       for (const [toolUseId, running] of state) {
@@ -763,12 +833,31 @@ export class DesktopSessions {
       const effort = source && task.kind === "agent" ? this.recordedEffort(source, task.id) : undefined;
       return effort ? { ...task, effort } : task;
     };
-    const active: BackgroundTask[] = [], history = (tracker?.history ?? []).map(withEffort);
+    // Work begun before the live process started cannot still run in it: a restarted app or CLI
+    // lost it without writing an end to the transcript (#176). The registry's startedAt is the
+    // process's own start; schedules are left alone (a durable cron outlives its process).
+    // A wakeup the model scheduled for itself (ScheduleWakeup) is one-shot and lives in its process, as
+    // other work does; once its time is a few minutes past it has fired, and only a new call would
+    // schedule another (2026-11-20: a 11-09 wakeup still read "running"). With no process holding the
+    // conversation at all, nothing it started runs (a session closed for days kept its monitors listed).
+    const registered = this.registered(id);
+    const processStart = registered?.startedAt;
+    const gone = !registered && !this.externalProcess(id);
+    const now = (this.opts.now ?? Date.now)();
+    const inProcess = (task: BackgroundTask) => task.kind !== "schedule" || task.id === WAKEUP_ID;
+    const active: BackgroundTask[] = [], history = (tracker?.history ?? []).map(withEffort), lost: BackgroundTask[] = [];
     for (const task of (tracker?.list ?? []).map(withEffort)) {
       const state = source && task.kind === "agent" ? agentStatus(path.join(this.subagentsDir(source), `agent-${task.id}.jsonl`)) : null;
       if (state) history.unshift({ ...task, state });
+      else if (inProcess(task) && (gone || processStart !== undefined && task.startedAt !== null && task.startedAt < processStart)) lost.push({ ...task, state: "unknown" });
+      // Its prompt waits for a running turn, then runs as the next one: that turn's end says it fired.
+      else if (task.id === WAKEUP_ID && task.nextAt !== undefined && tracker?.turnRanSince(task.nextAt, now)) history.unshift({ ...task, state: "done", endedAt: task.nextAt });
       else active.push(task);
     }
+    // The existing entries keep their order (a worker known finished only from its own transcript has no
+    // endedAt, so a time sort would rank it by launch). Lost work began before the live process, so it is
+    // older than everything it ran: after them, newest first, so the 40-row cap cuts it first.
+    history.push(...lost.sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0)));
     return { active, history: history.slice(0, 40) };
   }
 
@@ -788,7 +877,7 @@ export class DesktopSessions {
     return effort;
   }
   turnStartedAt(id: string): number | null { return this.scan(id)?.turnStartedAt ?? null; }
-  plan(id: string): PlanStep[] { return this.scan(id)?.plan ?? []; }
+  plan(id: string): PlanStep[] { return shownPlan(this.scan(id)?.plan ?? []); }
 
   /** A subagent transcript lives beside its session file: `<projects>/<proj>/<id>/subagents/agent-<agentId>.jsonl`. */
   private subagentsDir(source: Source): string {
@@ -908,7 +997,7 @@ export class DesktopSessions {
     const resolve = (toolUseId: string, input: RecordValue) => this.subInfo(id, toolUseId, input);
     try {
       scanLines(fd, fs.fstatSync(fd).size, line => {
-        const parsed = transcriptEvents(line, this.liveProcess(id)?.cwd ?? source.summary.cwd, this.opts.summarize, data => log.image(data), { allowSidechain: true, state, resolve }, (src, hash) => log.lineSeen(src, hash));
+        const parsed = transcriptEvents(line, this.registered(id)?.cwd ?? source.summary.cwd, this.opts.summarize, data => log.image(data), { allowSidechain: true, state, resolve }, (src, hash) => log.lineSeen(src, hash));
         at = parsed.at ?? at;
         for (const body of parsed.bodies) log.append(body.kind === "user" && !body.clientMsgId ? { ...body, clientMsgId: `desktop-${log.lastSeq + 1}` } : body);
       });
@@ -978,7 +1067,7 @@ export class DesktopSessions {
     if (!file) return false;
     // The same checks as every transcript read; the worker opens the path again, without following a link.
     fs.closeSync(this.open(file));
-    const folder = this.liveProcess(id)?.cwd ?? this.sources.get(id)?.summary.cwd ?? cwd;
+    const folder = this.registered(id)?.cwd ?? this.sources.get(id)?.summary.cwd ?? cwd;
     const ext = path.extname(fileURLToPath(import.meta.url));
     const worker = new Worker(new URL(`./file-repair-worker${ext}`, import.meta.url), { workerData: { file, want: { lines: [...want.lines], calls: [...want.calls] }, cwd: folder, epoch } });
     try {
@@ -1131,12 +1220,14 @@ export class DesktopSessions {
       source.size = scanLines(fd, fs.fstatSync(fd).size, line => {
         // The whole conversation is rebuilt here, and a bridge reconnect may already have copied an
         // old block into it: convert each uuid once, as the live tail does (#126).
-        const parsed = transcriptEvents(line, this.liveProcess(id)?.cwd ?? source.summary.cwd, this.opts.summarize, data => log.image(data), { state, resolve }, (src, hash) => log.lineSeen(src, hash));
+        const parsed = transcriptEvents(line, this.registered(id)?.cwd ?? source.summary.cwd, this.opts.summarize, data => log.image(data), { state, resolve }, (src, hash) => log.lineSeen(src, hash));
         at = parsed.at ?? at;
         for (const body of parsed.bodies) {
           if (body.kind !== "user") { log.append(body); continue; }
           const phoneId = body.clientMsgId ? this.opts.userId?.(id, body.clientMsgId, body.text) : undefined;
-          log.append({ ...body, clientMsgId: phoneId ?? (body.clientMsgId || `desktop-${log.lastSeq + 1}`) });
+          const sent = body.images?.length || body.files?.length ? undefined : this.opts.userPhotos?.(id, body.text);
+          const shown = sent ? { text: sent.text, images: sent.photos.map(photo => ({ type: "image" as const, blob: log.image(photo.data), mediaType: photo.mediaType })) } : {};
+          log.append({ ...body, ...shown, clientMsgId: phoneId ?? (body.clientMsgId || `desktop-${log.lastSeq + 1}`) });
         }
       });
       // A worker's own final answer or interruption closes it even when the parent never got
@@ -1177,7 +1268,7 @@ export class DesktopSessions {
       if (!source) { this.sources.delete(id); continue; }
       // A CLI outside the app owns its conversation: the phone may read it, never resume it (#171).
       const owner = external.get(id);
-      const live = registry.get(id) ?? owner;
+      const live = this.settled(id, registry.get(id)) ?? owner;
       source.summary = { ...ownedBy(source.summary, owner), state: live ? live.status === "waiting" ? "waiting" : live.status === "idle" ? "idle" : "running" : processHasSession(processes, id) &&
         (now - source.mtime <= 10_000 || source.unfinished) ? "running" : "stopped" };
       this.sources.set(id, source);

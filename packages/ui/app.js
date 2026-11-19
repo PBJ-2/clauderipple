@@ -5791,13 +5791,23 @@ function modTicked(choice) {
   const known = modState.settings.allowKnown || [];
   return !allow.length || allow.includes(modTickKey(choice)) || allow.includes(choice.provider) || known.length > 0 && !known.includes(modTickKey(choice));
 }
-/** Ticks one model; every model on again is stored as [], and the last one on cannot go off. */
+/**
+ * Ticks one model; every model on again is stored as [], and the last one on cannot go off. A model
+ * the list knew but does not offer now (its account paused or waiting for a sign-in) keeps its tick
+ * or its untick, so it comes back as it was rather than as a new model ticked on.
+ */
 function modTick(choice, on) {
   const all = modTickable();
-  const known = all.map(modTickKey);
+  const offered = all.map(modTickKey);
   const kept = new Set(all.filter((model) => modTicked(model)).map(modTickKey));
   if (on) kept.add(modTickKey(choice)); else kept.delete(modTickKey(choice));
-  const allow = kept.size === known.length ? [] : known.filter((key) => kept.has(key));
+  const was = modState.settings.allow || [];
+  const away = (modState.settings.allowKnown || []).filter((key) => !offered.includes(key));
+  // With no list written yet (every model on), a model away now was on too.
+  const awayOn = away.filter((key) => !was.length || was.includes(key));
+  const known = [...offered, ...away];
+  const everything = kept.size === offered.length && awayOn.length === away.length;
+  const allow = everything ? [] : [...offered.filter((key) => kept.has(key)), ...awayOn];
   modPatch({ allow, allowKnown: allow.length ? known : [] });
 }
 function modTickRows() {

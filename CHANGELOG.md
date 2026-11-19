@@ -1,5 +1,73 @@
 # Changelog
 
+## 0.12.45 — 2026-11-20
+
+### Fixed
+
+- **A Claude app session whose turn ended no longer shows "working" while its background agents run.**
+  The app keeps a session busy for as long as any background agent runs, so the phone showed it
+  working for hours, and a question card's answer went as an interruption that could not stop
+  anything and stayed queued with "the mod is not responding". The phone now goes by the
+  conversation's own turn end (after its Stop hook), sends answers straight in, and holds a second
+  queued message until the turn the first one started has shown. The computer still counts the
+  background work as work.
+- **A finished task list leaves the phone.** A plan with every step done no longer stays under the
+  last message.
+- **Finished background work no longer piles up as "running" on the phone.** A wakeup the model
+  scheduled for itself moves to Recent once the turn it ran in has ended; the work of a conversation
+  no Claude process holds any more moves to Recent as unknown (a durable cron schedule stays); and a
+  shell command whose output merely quotes a worker's launch message is no longer listed as running.
+
+## 0.12.44 — 2026-11-19
+
+### Fixed
+
+- **Photos and slash commands from the phone reach Claude app sessions with Remote Control on.**
+  Like plain text in 0.12.43, they now go through the ripple mod. A photo is saved on the computer and
+  its file is named in the message; on native Claude models the router sends it to the model as the
+  image itself, so Claude sees it as it would a pasted one (other models open the file). The Claude
+  app shows a short `📷 Photo` line where the phone shows the thumbnail. A photo sent with a slash
+  command runs the command with the photo's file among its arguments. Slash commands run as if typed
+  in the app, and `/clear` empties the same session.
+- **A phone message no longer shows twice, or as sent when it never ran (#177).** When the mod did
+  not answer, a message to a Remote Control session was still posted to Remote Control, which now
+  drops it, and the phone kept a copy that never ran. Such a message now fails with a notice saying
+  the ripple mod is not answering, and nothing is left behind. "Interrupt" sends stop the running turn
+  through the mod and go next.
+- **The compaction summary no longer appears on the phone as your message.** The Claude app hides it;
+  the phone now does too, and a `/compact` at rest no longer looks like an unfinished turn.
+- **The remote web page is no longer blank in the installed package or on the relay (#174).** Three
+  browser modules the page loads were left out of the npm package, and one of them out of the relay.
+- **Background work a restarted Claude app lost no longer stays "running" on the phone (#176).** A
+  Monitor or background shell started before the session's current Claude process moves to Recent as
+  unknown, and a stop answered with "No task found" ends the task.
+
+## 0.12.43 — 2026-11-19
+
+### Fixed
+
+- **Phone messages reach Claude app sessions with Remote Control on again.** Since 2026-11-18,
+  Anthropic's server no longer marks a message the phone host posts to Remote Control as typed by a
+  person, so Claude Code treated it as a message from another session and never ran it: the phone
+  showed "thinking" and nothing happened. Plain text for such a session now goes through the ripple
+  mod inside the Claude app, as it already did for sessions without Remote Control, and waits in the
+  queue while the session is busy. Sending a new message still replaces an open permission prompt.
+  Photos and slash commands, and sessions without the mod, still go over Remote Control, so they do
+  not arrive until Anthropic accepts them again; messages from the official Claude app are not affected.
+- **The last turn's finished task list no longer stays under a new phone message.** A message the mod
+  runs for the phone now starts a new turn on the phone like one typed in the app.
+
+## 0.12.42 — 2026-11-18
+
+### Fixed
+
+- **A paused account no longer has workers in the worker menus.** A worker pinned to a paused
+  ChatGPT, Google or Claude account was still listed and could be picked for a worker rung, but a paused
+  account never runs a turn, so the work quietly went to another account. Those workers now leave the
+  menus while the account is paused and come back when you resume it. A rung that already names one shows
+  it as unavailable and is skipped until then. The "models to use" list remembers whether such a worker
+  was ticked, so it comes back as you left it.
+
 ## 0.12.41 — 2026-11-18
 
 ### Changed

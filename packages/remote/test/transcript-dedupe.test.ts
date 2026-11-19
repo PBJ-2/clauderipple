@@ -8,6 +8,7 @@ import { BridgeClient } from "../src/bridge-client.ts";
 import { PermissionQueue } from "../src/permissions.ts";
 import { EventLog } from "../src/eventlog.ts";
 import type { DesktopProcess } from "../src/desktop.ts";
+import { environmentSession } from "./bridge-fixture.ts";
 import { transcriptEvents, type SubagentState } from "../src/desktop.ts";
 
 // Claude Desktop's Remote Control re-appends an already written block of the transcript, under the
@@ -125,6 +126,8 @@ test("a prompt sent from the phone is not shown again when the app re-appends it
   const f = fixture(t);
   const sessions = f.open();
   sessions.log(id);
+  // A bridge post only runs in a session Ripple created in a Remote Control environment (#177).
+  environmentSession({ sessions }, id);
   await sessions.send(id, "phone-1", "hello from the phone");
   const uuid = (f.posts[0] as { events: { payload: { uuid: string } }[] }).events[0]!.payload.uuid;
   const echo = line({ type: "user", uuid, message: { content: "hello from the phone" } });

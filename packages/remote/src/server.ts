@@ -55,6 +55,7 @@ export const SHARED: Record<string, (pkgDir: string) => string> = {
   "src/chunks.ts": (pkg) => path.join(pkg, "src", "chunks.ts"),
   "src/tool-details.ts": (pkg) => path.join(pkg, "src", "tool-details.ts"),
   "src/wrap-up.ts": (pkg) => path.join(pkg, "src", "wrap-up.ts"),
+  "src/settings-notice.ts": (pkg) => path.join(pkg, "src", "settings-notice.ts"),
   "src/e2ee.ts": (pkg) => path.join(pkg, "src", "e2ee.ts"),
   "vendor/nacl-fast.min.js": () => require.resolve("tweetnacl/nacl-fast.min.js"),
 };
@@ -605,7 +606,8 @@ export class HostServer {
           if (e instanceof OutcomeUnknownError) {
             this.send(c, { t: "error", code: "outcome_unknown", message: e.message, clientMsgId: msg.clientMsgId, session: msg.session });
           } else {
-            this.send(c, { t: "error", code: "send", message: (e as Error).message, clientMsgId: msg.clientMsgId, session: msg.session });
+            // A failure with a machine code of its own (`desktop_mod_offline`, `desktop_busy`) keeps it, as decide does.
+            this.send(c, { t: "error", code: machineCode(e) ?? "send", message: (e as Error).message, clientMsgId: msg.clientMsgId, session: msg.session });
           }
         }
         return;

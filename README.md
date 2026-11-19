@@ -22,6 +22,7 @@
   <a href="https://apps.apple.com/us/app/id6823063731"><img height="40" alt="App Store" src="https://img.shields.io/badge/App%20Store-Download-0D96F6?style=for-the-badge&logo=apple&logoColor=white"></a>
   <a href="https://play.google.com/store/apps/details?id=com.clauderipple.remote&hl=en"><img height="40" alt="Google Play" src="https://img.shields.io/badge/Google%20Play-Download-01875F?style=for-the-badge&logo=googleplay&logoColor=white"></a>
   <a href="https://discord.gg/R8ZgGSNHjw"><img height="40" alt="Discord" src="https://img.shields.io/badge/Discord-Join-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
+  <a href="https://github.com/sponsors/PBJ-2"><img height="40" alt="GitHub Sponsors" src="https://img.shields.io/badge/Sponsor-%E2%99%A5-DB61A2?style=for-the-badge&logo=githubsponsors&logoColor=white"></a>
 </p>
 
 <p align="center">
@@ -248,7 +249,7 @@ and claude.ai connectors keep working while another model does the thinking.
 | Prompt cache on translated providers | **94–99 %** measured | not measured | not measured | varies | n/a |
 | Subagents named by real model in the task panel | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Settings GUI, no terminal needed | ✅ | ✅ | ❌ | ❌ | ❌ |
-| Signed, notarized app with its own runtime | ✅ | ✅ | ❌ | ❌ | – |
+| Desktop app with its own runtime | ✅ | ✅ | ❌ | ❌ | – |
 
 ¹ opencodex's README showed Claude Desktop in a demo but published no setup steps for it,
 in the repository or on its documentation site (checked 2026-09-16). At the time the only
@@ -300,19 +301,40 @@ you map go to your provider, everything else goes to Anthropic byte for byte.
   and stable OpenAI prefixes), Claude Code's server-side threads handled, tool calls
   and images round-tripped, reasoning effort clamped to what each model accepts,
   Anthropic-only request fields stripped for compatible vendors.
-- **A real request log.** Who asked, which model answered, tokens in / cached / out,
-  latency, status, per request, with a one-hour summary.
+- **A real request log.** Who asked, which model and account answered, tokens in /
+  cached / out, output speed, latency and status per request, and usage for any period
+  across every provider.
+- **Know where your limits stand.** Claude, ChatGPT, Gemini, OpenCode Go, MiniMax and
+  Grok accounts each get a gauge from the limits their provider reports, with the reset
+  time when it is known. Once a window has run long enough to judge its pace, one on
+  course to hit 100% before it resets says so (amber, then red within the hour). Requests
+  to models with a known price are costed at API rates (estimates marked `≈`), so you see
+  what your subscriptions are worth.
+- **A warm cache while you step away.** Keep-warm pings an idle chat to hold its prompt
+  cache, chat by chat with the band's flame (by default for chats over 30k tokens, up to
+  two hours after the last reply), and a card tells you what it held when you come back.
+- **Accounts under your control.** Put one account first, pause another, clear a
+  cooldown, give a provider several API keys, or pin a worker to an exact account.
+- **Fast for GPT.** Two switches send the main session's or subagents' GPT requests on
+  Codex's fast tier, and the log marks each FAST request.
+- **Updates itself.** Installed with the script or npm, the router checks every 12 hours
+  and installs a new version after 10 quiet minutes; the notification opens what changed.
+  Off in the dashboard's About view.
 - **Subagent name tags.** The background-task panel shows `Terra·high · Review`
   instead of a generic "Agent".
 - **The ripple mod, above the prompt.** A band shows the reasoning effort, context, cache
   timer, and which model answered your last request with its cache hit. A small judge
   model (Haiku 5.5 or Jev) reads each prompt with the recent turns and sets the effort,
-  low through max. Delegated work goes to `ripple:auto`, and the judge sends each task to
-  a worker by difficulty: light work to DeepSeek or GLM, hard work to GPT or Opus. Cards
-  warn when the cache has gone cold, the context gets heavy or a plan window passes 80%,
-  and offer a compaction in place. `Log` (or
-  `/ripple-log`) opens the request log in a side pane. One switch on the Clients screen,
-  or `clauderipple mod on`.
+  low through max, and asking for a level in chat ("use xhigh for this") sets it for that
+  message, within the subscription-saving cap if you turned that on. Delegated
+  work goes to `ripple:auto` with a difficulty tier, and your ladder in the dashboard
+  picks the worker for each tier: light work to DeepSeek or GLM, hard work to GPT or Opus.
+  Cards warn when the cache has gone cold, the context gets heavy or a plan window passes
+  80%. Press the context chip to see what fills it; **Compact** tidies up first and lets
+  you pick the model that writes the summary; **Handoff** opens a fresh session with a
+  resume note. The **Agents** pane follows every worker, background command and watch.
+  `Log` (or `/ripple-log`) opens the request log in a side pane. One switch on the
+  Clients screen, or `clauderipple mod on`.
 - **Images from your ChatGPT subscription.** `clauderipple image "<prompt>"`, with
   reference images and transparent backgrounds. Subagents are told how, so a GPT or
   DeepSeek worker can make an image and look at it without an image tool.
@@ -327,7 +349,8 @@ you map go to your provider, everything else goes to Anthropic byte for byte.
 - **Made for people who don't want a terminal.** Provider presets with one-click
   connection tests and model discovery, drop-down model mapping, auto-save, a UI in
   English, Korean, Chinese, Japanese, Spanish and Portuguese. A menu-bar app that carries its own runtime and sets itself up on
-  first launch. Signed and notarized.
+  first launch, with no administrator rights. When something breaks, Status names the
+  problem and its fix, and the repair screen works while the router is down.
 
 <p align="center">
   <img src="docs/media/mapping.png" width="880" alt="Model mapping: which model answers for each Claude name, with per-model reasoning effort">
@@ -357,6 +380,11 @@ runs them, on your phone, and it does not drop you after 30 minutes.
 - **Pairs with the laptop features.** With [lid-closed awake and the phone
   hotspot](#lid-closed-and-the-phone-hotspot), the laptop keeps working in a bag and stays
   online when the Wi-Fi does not.
+- **Answer the app's sessions without Remote Control.** Send a message, approve, clear or
+  interrupt a session open in the Claude app; its turn and any artifact it publishes show
+  on the phone.
+- **Told when your computer drops.** If it goes to sleep or stays offline mid-task, the
+  phone gets a push, and another when it is back.
 - **Private by design.** Messages, attachments and notifications are end-to-end
   encrypted; the relay and the push service cannot read them. No account, no ads, no
   tracking, free.
@@ -364,12 +392,14 @@ runs them, on your phone, and it does not drop you after 30 minutes.
 Install ClaudeRipple on your computer, open the dashboard's **Phone** view and scan the
 QR code once. iPhone: [App Store](https://apps.apple.com/us/app/id6823063731). Android:
 [Google Play](https://play.google.com/store/apps/details?id=com.clauderipple.remote&hl=en).
-Claude app sessions are supported on macOS; the app has a demo you can try without a
+Claude app sessions work on macOS and Windows; the app has a demo you can try without a
 computer.
 
 ## Roadmap
 
-The full plan, with the issues behind each item, is in [docs/ROADMAP.md](docs/ROADMAP.md). In order:
+Already shipped from earlier plans: per-account limit gauges, a pace warning before a window
+runs out, cost at API prices with usage history, account failover and lid-closed awake.
+The full plan, with the issues behind each item, is in [docs/ROADMAP.md](docs/ROADMAP.md). Next, in order:
 
 1. **See where your limit goes.** Why a request missed the cache, what each request is made of, a limit forecast with alerts, task-finished alerts, a guard against dangerous commands, and image descriptions for models that cannot read images.
 2. **Settings in one place.** One page for plugins, MCP servers, skills and hooks, with the tokens each one really costs; popular bundles in one click; one rules file for Claude and Codex.
@@ -440,7 +470,9 @@ On macOS and Windows the install script adds it by default. It runs on Electron,
 fetched once; set `CLAUDERIPPLE_NO_TRAY=1` before the install command to skip it. On Linux, or
 after an npm-only install, `clauderipple tray --install` adds it. Everything else works without it.
 
-**Updating.** The tray offers a new version when there is one (**Check for Updates…**), or:
+**Updating.** An install from the script or npm updates itself: it checks 10 minutes after
+it starts and every 12 hours, and installs once nothing has been in flight for 10 minutes (off
+in the dashboard's About view). To update now, use the tray's **Check for Updates…**, or:
 
 ```sh
 clauderipple update
@@ -670,6 +702,7 @@ provider you configured is available the same way.
 | Grok subscription | Grok CLI chat proxy | the Grok CLI's sign-in (`grok login`), refreshed through the CLI | read from your subscription (Grok 4.7, 4.7 Fast, 4.6, 4.5) | translated (Chat Completions), effort low…xhigh; the CLI's own channel, not a published API ([§4e](docs/ARCHITECTURE.md#4e-grok-providers-implemented-2026-10-08)) |
 | OpenRouter | Anthropic-compatible | API key | 400+, discovered | per-model effort support read from the API |
 | DeepSeek, Kimi, Z.ai GLM, MiniMax, Qwen (intl / cn) | Anthropic-compatible | API key | preset | verified against vendor docs |
+| OpenCode Go, OpenCode Zen | OpenAI-compatible (Anthropic protocol for some models; Google protocol on Go) | API key | preset | Go's subscription quota and per-model prices shown |
 | xAI Grok, Mistral, Groq, Together, Fireworks | OpenAI-compatible | API key | discovered | translated (Chat Completions / Responses) |
 | Ollama, LM Studio | OpenAI-compatible, local | none | discovered | |
 | Anthropic | native | Claude login(s) or API key | Claude models | optional sticky rotation for Claude Desktop/Code; Codex picks one login |
@@ -715,8 +748,7 @@ In daily use by the author, but young. Expect rough edges:
 
 - **Windows support is new (2026-09-14).** Install, setup, the router, signing
   in, the picker and a live GPT call are verified on x64 hardware; crash recovery
-  on arm64. The window still has the stock Windows title bar. Windows builds are
-  unsigned; see the note under Install.
+  on arm64. The window still has the stock Windows title bar.
 - **Linux support is new (2026-09-24)**, contributed with measurements on Ubuntu
   24.04 x64 (install, a Code-tab request, restart mid-stream, picker mode, uninstall).
   It needs a systemd user session; other distributions and arm64 are untested.
@@ -730,6 +762,17 @@ In daily use by the author, but young. Expect rough edges:
 
 Questions and bug reports are on Discord: [https://discord.gg/R8ZgGSNHjw](https://discord.gg/R8ZgGSNHjw).
 What is planned next: [docs/ROADMAP.md](docs/ROADMAP.md).
+
+## Sponsors
+
+ClaudeRipple is free and GPL-licensed, with no paid tier and no telemetry. It has shipped 70+
+releases since September 2026 to keep up with new models and every Claude Code and Codex update,
+and it runs on paid infrastructure such as the Ripple Remote relay. If it saves you a
+subscription or an evening of setup, **[sponsor it on GitHub](https://github.com/sponsors/PBJ-2)**,
+from $3 a month or once. Supporters ($10 a month and up) are listed here.
+
+<!-- Supporter and Backer tier sponsors: add each name here (Backers with a link). -->
+_No sponsors yet. Yours could be the first._
 
 ## Not affiliated
 

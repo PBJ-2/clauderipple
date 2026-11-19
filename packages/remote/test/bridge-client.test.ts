@@ -256,7 +256,7 @@ test("a 5xx to the observed login after a 404 stays a 5xx, an unknown outcome fo
 
 test("loadBridgeAuth hands the observed login along as the alternate only when it is another token", async () => {
   const { loadBridgeAuth } = await import("../src/bridge-client.ts");
-  // `loadBridgeAuth` joins the path with `path.join`, which gives `\h\.claude.json` on Windows.
+  // Keyed by path.join, as the code reads it: on Windows that is "\h\.claude.json", not "/h/.claude.json".
   const files: Record<string, string> = { [path.join("/h", ".claude.json")]: JSON.stringify({ oauthAccount: { organizationUuid: "org-a", accountUuid: "acc-a" } }) };
   const base = { platform: "darwin" as const, userHome: "/h", now: clock, readFile: (f: string) => files[f]! };
   const cli = { accessToken: "keychain-token-b", expiresAt: clock + 3_600_000 };

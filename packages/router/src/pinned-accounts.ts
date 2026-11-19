@@ -12,9 +12,23 @@ import { readGoogleAccounts } from "./providers/google/accounts.ts";
 /** The stored-account fields a pinned worker is named, described and pinned from. */
 export type PinnedAccount = { id: string; label: string; email?: string };
 
-/** The stored accounts one provider may pin a worker to; empty when it has none of its own. */
+/**
+ * The stored accounts one provider keeps and can serve, empty when it has none of its own. The ones
+ * waiting for a sign-in are left out; paused ones are kept, because this is also what the dashboard
+ * numbers its account tabs from. Pinned workers use `pinnableAccountsFor` instead.
+ */
 export function storedAccountsFor(provider: Provider | undefined, home: string): readonly PinnedAccount[] {
   return accountsOf(provider, home).filter((account) => (account as { needsReauth?: boolean }).needsReauth !== true);
+}
+
+/**
+ * The stored accounts a pinned worker may be generated for: `storedAccountsFor` without the paused
+ * ones. A paused account never serves a pinned turn (`pool.pinnedCredential`), so its worker would be
+ * listed and picked while the work ran on another account. Pausing removes the workers on the next
+ * agent-file check and resuming brings them back; both change `storedAccountsSignature`.
+ */
+export function pinnableAccountsFor(provider: Provider | undefined, home: string): readonly PinnedAccount[] {
+  return storedAccountsFor(provider, home).filter((account) => (account as { paused?: boolean }).paused !== true);
 }
 
 /**
@@ -33,7 +47,7 @@ function accountsOf(provider: Provider | undefined, home: string): readonly Pinn
 }
 
 /**
- * A fingerprint of the stored accounts the pinned workers are derived from, and of nothing else.
+ * A fingerprint of the pinnable accounts the pinned workers are derived from, and of nothing else.
  * It holds exactly what a generated file shows: each configured provider, and for its accounts the
  * durable id a worker's name and model pin come from plus the label/email its description, title and
  * dashboard entry come from. A token refresh changes neither, so it never regenerates; a login,
@@ -45,7 +59,7 @@ export function storedAccountsSignature(providers: Record<string, Provider | und
   for (const name of Object.keys(providers).sort()) {
     const provider = providers[name];
     if (!provider) continue;
-    for (const account of storedAccountsFor(provider, home)) {
+    for (const account of pinnableAccountsFor(provider, home)) {
       parts.push([name, account.id, account.label, account.email ?? ""].join("\u0000"));
     }
   }

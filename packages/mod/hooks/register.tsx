@@ -1742,6 +1742,33 @@ async function waitForPhone($: EngineInterface, admin: string, ask: string): Pro
   return await forgetAsk($, admin, ask)
 }
 
+/** The inbox kinds this mod runs beyond a prompt, clear and abort (the host's MOD_CAPS). */
+const INBOX_CAPS = 'command'
+/** The command a claimed phone offer is running, until it settles: the inbox poll goes on meanwhile (it is the host's heartbeat). */
+let phoneCommandRunning = false
+
+/**
+ * Runs the slash command the phone sent (name without its slash, arguments as typed), as if the person typed
+ * it, and reports its real outcome once it settles: submitted when it ran, failed when the engine refused it
+ * or it threw. The caller does not wait for it, so a slow command (/compact) never stops the inbox poll; the
+ * host waits for the result much longer than for a prompt's submit.
+ */
+async function runPhoneCommand($: EngineInterface, admin: string, itemId: string, command: string, args: string): Promise<void> {
+  let outcome: 'submitted' | 'failed' = 'failed'
+  try {
+    await $.command.run({ command, args })
+    outcome = 'submitted'
+  } catch { /* the host shows the failed item for a deliberate resend */ }
+  try {
+    const result = await $.http.fetch(`${admin}/api/phone-inbox/result`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ itemId, outcome }) })
+    // 409: the host already gave this offer up (its result window ran out); that is no poll failure, so polling goes on.
+    if (result.status !== 200 && result.status !== 409) throw new Error(`inbox result HTTP ${result.status}`)
+  } catch {
+    inboxRetryAt = await $.clock.now() + 15_000
+    await report($, 'phone inbox', 'request failed')
+  } finally { phoneCommandRunning = false }
+}
+
 /** A claim is never retried or submitted without a 200: a lost reply may already have claimed it. */
 async function pollPhoneInbox($: EngineInterface): Promise<void> {
   if (inboxPolling) return
@@ -1753,7 +1780,9 @@ async function pollPhoneInbox($: EngineInterface): Promise<void> {
     if (await $.clock.now() < inboxRetryAt) return
     const session = await $.session.id()
     const admin = await adminUrl($)
-    const list = await $.http.fetch(`${admin}/api/phone-inbox?session=${encodeURIComponent(session)}`)
+    // `caps` tells the host which kinds beyond a prompt this mod runs: it offers a slash command only to a mod that says so
+    // (an older mod would submit the arguments as a prompt), and an offer no mod takes expires on the host as it always did.
+    const list = await $.http.fetch(`${admin}/api/phone-inbox?session=${encodeURIComponent(session)}&caps=${INBOX_CAPS}`)
     if (list.status !== 200) throw new Error(`inbox HTTP ${list.status}`)
     const offers = object(JSON.parse(list.text)).offers
     if (!Array.isArray(offers)) throw new Error('invalid inbox response')
@@ -1761,10 +1790,14 @@ async function pollPhoneInbox($: EngineInterface): Promise<void> {
       const offer = object(raw)
       if (offer.sessionId !== session || typeof offer.itemId !== 'string' || !/^[\w-]{1,100}$/.test(offer.itemId) || typeof offer.text !== 'string') throw new Error('invalid inbox offer')
       // `kind` is the host's: an offer without one is a phone message to submit, as before.
-      const kind = offer.kind === 'abort' || offer.kind === 'clear' ? offer.kind : 'prompt'
+      const kind = offer.kind === 'abort' || offer.kind === 'clear' || offer.kind === 'command' ? offer.kind : 'prompt'
       if (await $.session.id() !== session) return
+      // A command with no usable name is left unclaimed: the offer expires and the host keeps the message waiting.
+      if (kind === 'command' && (typeof offer.command !== 'string' || !/^[^\s/]{1,100}$/.test(offer.command))) continue
       // A clear the host cannot be told about is left unclaimed: the offer expires and the /clear waits.
       if (kind === 'clear' && !await moveRouteReady($, admin, session, offer.itemId)) continue
+      // While a command runs the app is busy with it: nothing else is taken (the host keeps what follows queued behind it), except a stop.
+      if (phoneCommandRunning && kind !== 'abort') continue
       const claimAt = await $.clock.now()
       const claim = await $.http.fetch(`${admin}/api/phone-inbox/claim`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ itemId: offer.itemId }) })
       if (claim.status === 409) continue
@@ -1774,6 +1807,12 @@ async function pollPhoneInbox($: EngineInterface): Promise<void> {
         const now = await $.clock.now()
         // A claim answered this late is not submitted: the host may be close to giving up on it.
         if (now >= claimAt && now - claimAt < 10_000 && await $.session.id() === session) {
+          if (kind === 'command') {
+            // Run beside the poll, not inside it: the host reads a silent inbox as a mod that left. It gets the result when the command settles.
+            phoneCommandRunning = true
+            void runPhoneCommand($, admin, offer.itemId, offer.command as string, offer.text)
+            continue
+          }
           if (kind === 'abort') { if (await stopTurn($)) outcome = 'submitted' }
           else if (kind === 'clear') { if (await clearInPlace($, admin, session, offer.itemId)) outcome = 'submitted' }
           else {
@@ -1783,7 +1822,8 @@ async function pollPhoneInbox($: EngineInterface): Promise<void> {
         }
       } catch { /* The host shows the failed item for a deliberate resend. */ }
       const result = await $.http.fetch(`${admin}/api/phone-inbox/result`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ itemId: offer.itemId, outcome }) })
-      if (result.status !== 200) throw new Error(`inbox result HTTP ${result.status}`)
+      // 409: the host already gave this offer up; that is no poll failure, so polling goes on.
+      if (result.status !== 200 && result.status !== 409) throw new Error(`inbox result HTTP ${result.status}`)
     }
     inboxRetryAt = 0
   } catch {

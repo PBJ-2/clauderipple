@@ -95,3 +95,10 @@ test("both clients draw the command row and the turn number, and every wording e
     }
   }
 });
+
+test("a user event the host voided (empty, taken back unrun) is not drawn, and the message's later event takes its place (#177)", () => {
+  const voided = { seq: 1, at: 1, kind: "user" as const, text: "", clientMsgId: "unsent:m1" };
+  assert.deepEqual(reduce([voided]).items.filter(item => item.type === "user"), []);
+  const items = reduce([voided, { seq: 2, at: 2, kind: "user" as const, text: "Run this", clientMsgId: "m1" }]).items.filter(item => item.type === "user");
+  assert.deepEqual(items.map(item => item.type === "user" ? item.text : ""), ["Run this"]);
+});
