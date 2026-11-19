@@ -38,7 +38,8 @@ export class BackgroundActivity {
     // task is gone, whatever ended it, and no notification will follow (#176).
     if (!ok) {
       const stopped = idOf(input.task_id) || idOf(input.shell_id);
-      if (name === "TaskStop" && stopped && /No task found with ID/i.test(text)) this.end(stopped, "unknown", at);
+      // Only a task still running ends this way: one that already ended keeps the state and time it ended with.
+      if (name === "TaskStop" && stopped && /No task found with ID/i.test(text) && (this.entries.get(stopped)?.state ?? "running") === "running") this.end(stopped, "unknown", at);
       return;
     }
     const result = structured ?? parse(text) ?? {};

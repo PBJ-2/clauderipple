@@ -784,7 +784,10 @@ export class DesktopSessions {
       else if (processStart !== undefined && task.kind !== "schedule" && task.startedAt !== null && task.startedAt < processStart) lost.push({ ...task, state: "unknown" });
       else active.push(task);
     }
-    history.unshift(...lost.sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0)));
+    // The existing entries keep their order (a worker known finished only from its own transcript has no
+    // endedAt, so a time sort would rank it by launch). Lost work began before the live process, so it is
+    // older than everything it ran: after them, newest first, so the 40-row cap cuts it first.
+    history.push(...lost.sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0)));
     return { active, history: history.slice(0, 40) };
   }
 

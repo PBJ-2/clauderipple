@@ -952,3 +952,41 @@ test("a background task begun before the live process started is no longer runni
   assert.equal(summary?.tasks, 1);
   assert.deepEqual(summary?.taskHistory?.map(task => task.id), ["sh-old", "mon-old"]);
 });
+
+test("the history keeps the real outcomes ahead of the work the app lost, however old (#176)", t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "desktop-test-"));
+  const projects = path.join(root, "projects");
+  const project = path.join(projects, "project");
+  fs.mkdirSync(project, { recursive: true });
+  const registry = new Map<string, DesktopProcess>();
+  const desktop = new DesktopSessions({ projects, summarize, excluded: () => new Set(), now: Date.now, processes: () => "", registry: () => registry });
+  t.after(() => { desktop.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  const processStart = Date.parse("2026-11-18T09:00:00.000Z");
+  const launch = (tid: string, taskId: string, when: string): string => [
+    line({ type: "assistant", timestamp: when, message: { id: `m-${tid}`, model: "test-model", content: [{ type: "tool_use", id: tid, name: "Bash", input: { command: `job ${taskId}`, run_in_background: true } }] } }),
+    line({ type: "user", timestamp: when, toolUseResult: { backgroundTaskId: taskId }, message: { content: [{ type: "tool_result", tool_use_id: tid, content: `started ${taskId}` }] } }),
+  ].join("");
+  const finish = (taskId: string, when: string): string => line({ type: "user", timestamp: when, message: { content: `<task-notification><task-id>${taskId}</task-id><status>completed</status></task-notification>` } });
+  const minute = (n: number): string => new Date(Date.parse("2026-11-18T10:00:00.000Z") + n * 60_000).toISOString();
+  let transcript = line(user);
+  // Two jobs begun before the process started and never ended: the app lost them.
+  transcript += launch("lost-1", "lost-1", "2026-11-17T08:00:00.000Z") + launch("lost-2", "lost-2", "2026-11-18T08:59:00.000Z");
+  // Forty-one jobs that ended after it started, one a minute, the first of them already done before the lost one began.
+  for (let n = 0; n < 41; n++) transcript += launch(`job-${n}`, `job-${n}`, minute(n)) + finish(`job-${n}`, minute(n));
+  // A worker launched long before the process started and finished: its end is known only from its own
+  // transcript, so it has no endedAt. It must not be ranked by its launch time and cut by the cap.
+  transcript += line({ type: "assistant", timestamp: "2026-11-18T06:00:00.000Z", message: { id: "m-w", model: "test-model", content: [{ type: "tool_use", id: "w", name: "Agent", input: { run_in_background: true } }] } })
+    + line({ type: "user", timestamp: "2026-11-18T06:00:00.000Z", toolUseResult: { isAsync: true, agentId: "w" }, message: { content: [{ type: "tool_result", tool_use_id: "w", content: "Async agent launched" }] } });
+  subagent(project, "w", { toolUseId: "w" }, [assistantTurn("sol", "end_turn", [{ type: "text", text: "done" }])]);
+  fs.writeFileSync(path.join(project, `${id}.jsonl`), transcript);
+  desktop.list();
+  registry.set(id, { sessionId: id, pid: 42, status: "idle", bridgeSessionId: "cse_x", startedAt: processStart });
+  const history = desktop.backgroundTaskHistory(id);
+  assert.equal(history.length, 40);
+  assert.deepEqual(history.map(task => task.id), ["w", ...Array.from({ length: 39 }, (_, n) => `job-${40 - n}`)], "the worker finished by its own transcript leads, then the newest real outcomes; the lost ones come after them and fall off");
+  assert.ok(history.every(task => task.state !== "unknown"));
+  // With room for them, the lost work follows the real outcomes, newest first (all began before the process).
+  fs.writeFileSync(path.join(project, `${id}.jsonl`), line(user) + launch("lost-3", "lost-3", "2026-11-18T08:59:00.000Z")
+    + launch("old", "old", "2026-11-18T07:00:00.000Z") + finish("old", "2026-11-18T08:00:00.000Z") + launch("new", "new", minute(0)) + finish("new", minute(1)));
+  assert.deepEqual(desktop.backgroundTaskHistory(id).map(task => [task.id, task.state]), [["new", "done"], ["old", "done"], ["lost-3", "unknown"]]);
+});
