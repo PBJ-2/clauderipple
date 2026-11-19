@@ -1067,9 +1067,14 @@ test("a wakeup past its time has fired, and a conversation no process holds runs
     + call("CronCreate", "cron", new Date(wakeAt).toISOString(), { prompt: "daily", cron: "0 9 * * *" }, { id: "cron-1" }));
   f.desktop.list();
   f.live();
+  // The turn that scheduled it still runs: its prompt waits for that turn, so it has not fired.
+  assert.deepEqual(f.desktop.backgroundTaskList(id).map(task => task.id), ["dynamic-wakeup", "mon-1", "cron-1"]);
+  fs.appendFileSync(file, line({ type: "assistant", timestamp: new Date(wakeAt).toISOString(), message: { id: "m-end", model: "test-model", stop_reason: "end_turn", content: [{ type: "text", text: "Done." }] } })
+    + line({ type: "system", subtype: "stop_hook_summary", timestamp: new Date(wakeAt).toISOString() }));
   assert.deepEqual(f.desktop.backgroundTaskList(id).map(task => task.id), ["mon-1", "cron-1"], "the fired wakeup left; the live process may still run the rest");
   assert.deepEqual(f.desktop.backgroundTaskHistory(id).map(task => [task.id, task.state]), [["dynamic-wakeup", "done"]]);
   f.registry.delete(id);
   assert.deepEqual(f.desktop.backgroundTaskList(id).map(task => task.id), ["cron-1"], "a durable schedule outlives its process");
-  assert.deepEqual(f.desktop.backgroundTaskHistory(id).map(task => [task.id, task.state]), [["dynamic-wakeup", "done"], ["mon-1", "unknown"]]);
+  // With the process gone, nothing says the wakeup fired: its outcome is unknown, however late it is.
+  assert.deepEqual(f.desktop.backgroundTaskHistory(id).map(task => [task.id, task.state]), [["mon-1", "unknown"], ["dynamic-wakeup", "unknown"]]);
 });

@@ -831,8 +831,9 @@ export class DesktopSessions {
     for (const task of (tracker?.list ?? []).map(withEffort)) {
       const state = source && task.kind === "agent" ? agentStatus(path.join(this.subagentsDir(source), `agent-${task.id}.jsonl`)) : null;
       if (state) history.unshift({ ...task, state });
-      else if (task.id === WAKEUP_ID && task.nextAt !== undefined && now - task.nextAt > WAKEUP_FIRED_MS) history.unshift({ ...task, state: "done", endedAt: task.nextAt });
       else if (inProcess(task) && (gone || processStart !== undefined && task.startedAt !== null && task.startedAt < processStart)) lost.push({ ...task, state: "unknown" });
+      // Its prompt waits for a running turn: only an ended turn well past its time says it fired.
+      else if (task.id === WAKEUP_ID && task.nextAt !== undefined && now - task.nextAt > WAKEUP_FIRED_MS && tracker?.turnEndedAt != null) history.unshift({ ...task, state: "done", endedAt: task.nextAt });
       else active.push(task);
     }
     // The existing entries keep their order (a worker known finished only from its own transcript has no
