@@ -1941,7 +1941,7 @@ async function modFixture(t: TestContext, modOfferMs = 100, modResultMs = 100, w
 
 const transcriptLine = (value: unknown) => JSON.stringify(value) + "\n";
 
-function appNativeModFixture(t: TestContext, modOfferMs = 500, extra: Partial<Pick<SessionsOptions, "away" | "now">> = {}) {
+function appNativeModFixture(t: TestContext, modOfferMs = 500, extra: Partial<Pick<SessionsOptions, "away" | "now" | "bridgeClient">> = {}) {
   const id = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
   const app = claudeAppData(t, id);
   const projects = fs.mkdtempSync(path.join(os.tmpdir(), "app-native-mod-"));
@@ -2683,6 +2683,204 @@ test("send-now on a busy Claude app session answers desktop_busy, and interrupts
   assert.equal(await sent, APP_ID);
   assert.equal(f.sessions.summaryOf(APP_ID)?.queue, undefined, "the message went as the next turn");
 });
+
+// Anthropic's server stopped marking our bridge posts as a person's (2026-11-18): the CLI ran none of them.
+// A Remote Control app session whose mod answers therefore takes plain text through the mod.
+function appRcModFixture(t: TestContext, modOfferMs = 500, now?: () => number) {
+  const posts: string[] = [];
+  const history: unknown[] = [];
+  const bridgeClient = new BridgeClient({ auth: () => ({ accessToken: "fake", organizationUuid: "org", expiresAt: Date.now() + 60_000 }), fetch: async (url, options) => {
+    if (String(url).includes("/stream")) return new Response(new ReadableStream({ start(controller) { options?.signal?.addEventListener("abort", () => controller.close(), { once: true }); } }));
+    if (options?.method === "POST") { posts.push(String(options.body)); return Response.json({}); }
+    return Response.json({ data: history, worker_status: "idle" });
+  } });
+  bridgeClient.control = async () => {};
+  const f = appNativeModFixture(t, modOfferMs, { bridgeClient, ...(now ? { now } : {}) });
+  f.registry.get(f.id)!.bridgeSessionId = "session_rc";
+  return { ...f, posts, history };
+}
+
+test("a Remote Control app session takes plain text through the mod and sends nothing over the bridge", async t => {
+  const f = appRcModFixture(t);
+  f.sessions.modInbox.listen(APP_ID, Date.now());
+  assert.equal(await f.sessions.send(APP_ID, "rc-mod", "Phone message"), APP_ID);
+  assert.equal(f.sessions.takeQueued(APP_ID, "rc-mod"), true, "the ack says queued");
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "rc-mod" && offer.kind === undefined));
+  assert.equal(f.sessions.modInbox.claim("rc-mod"), true);
+  assert.equal(f.sessions.modInbox.result("rc-mod", "submitted"), true);
+  assert.equal(MessageReceipts.open(path.join(f.dir, "receipts.json")).status(`send:${APP_ID}:rc-mod`), "completed");
+  await nextTick();
+  assert.deepEqual(f.posts, [], "a claimed message is not also posted to the bridge");
+  assert.equal(f.sessions.summaryOf(APP_ID)?.queue, undefined);
+  assert.equal(f.boundary.queries.length, 0);
+});
+
+test("a busy Remote Control app session holds plain text as desktop_busy, then offers it to the mod once idle", async t => {
+  const f = appRcModFixture(t);
+  f.sessions.modInbox.listen(APP_ID, Date.now());
+  f.registry.get(APP_ID)!.status = "busy";
+  await f.sessions.send(APP_ID, "rc-busy", "Wait for idle");
+  await waitFor(() => f.sessions.summaryOf(APP_ID)?.queue?.[0]?.wait === "desktop_busy");
+  assert.deepEqual(f.sessions.modInbox.pending(APP_ID), []);
+  await assert.rejects(f.sessions.sendQueued(APP_ID, "rc-busy"), (error: unknown) => (error as { code?: unknown }).code === "desktop_busy");
+  assert.deepEqual(f.posts, [], "nothing goes over the bridge while the app works");
+  f.registry.get(APP_ID)!.status = "idle";
+  f.sessions.pollQueued();
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "rc-busy"));
+  assert.equal(f.sessions.modInbox.claim("rc-busy"), true);
+  assert.equal(f.sessions.modInbox.result("rc-busy", "submitted"), true);
+  assert.deepEqual(f.posts, []);
+});
+
+test("a Remote Control app session whose mod does not claim in time falls back to the bridge send", async t => {
+  const f = appRcModFixture(t, 20);
+  f.sessions.modInbox.listen(APP_ID, Date.now());
+  await f.sessions.send(APP_ID, "rc-unclaimed", "Nobody claims this");
+  await waitFor(() => f.posts.length === 1);
+  assert.match(f.posts[0]!, /Nobody claims this/);
+  assert.equal(f.sessions.modInbox.claim("rc-unclaimed"), false);
+  await waitFor(() => f.sessions.summaryOf(APP_ID)?.queue === undefined);
+});
+
+test("a mod-run message in a Remote Control session the host holds a record for shows once when the transcript echoes it", async t => {
+  let now = 5_000_000;
+  const f = appRcModFixture(t, 500, () => now);
+  await f.sessions.send(APP_ID, "rc-first", "Over the bridge");
+  assert.equal(f.sessions.summaryOf(APP_ID)?.desktopBridge, true, "the first bridge send made a Remote Control record");
+  // The registry may lag a bridge send by a few seconds: the next message waits that out.
+  now += 10_000;
+  f.sessions.modInbox.listen(APP_ID, now);
+  await f.sessions.send(APP_ID, "rc-second", "Through the mod");
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "rc-second"));
+  assert.equal(f.sessions.modInbox.claim("rc-second"), true);
+  assert.equal(f.sessions.modInbox.result("rc-second", "submitted"), true);
+  fs.appendFileSync(f.file, transcriptLine({ type: "user", uuid: "app-echo", cwd: f.cwd, message: { content: "Through the mod" } }));
+  await f.sessions.pollDesktop();
+  const users = reduce(f.sessions.log(APP_ID).readAfter(0).events).items.filter(item => item.type === "user" && item.text === "Through the mod");
+  assert.equal(users.length, 1);
+  assert.equal(f.posts.length, 1, "only the first message used the bridge");
+});
+
+test("a Remote Control app session with no mod sends over the bridge at once, busy or not", async t => {
+  const f = appRcModFixture(t);
+  await f.sessions.send(APP_ID, "rc-nomod", "No mod here");
+  assert.equal(f.posts.length, 1);
+  assert.match(f.posts[0]!, /No mod here/);
+  assert.deepEqual(f.sessions.modInbox.pending(APP_ID), []);
+  f.registry.get(APP_ID)!.status = "busy";
+  await f.sessions.send(APP_ID, "rc-nomod-busy", "Still no mod");
+  assert.equal(f.posts.length, 2);
+  assert.equal(f.sessions.summaryOf(APP_ID)?.queue, undefined);
+});
+
+for (const kind of ["photo", "slash"] as const) test(`a Remote Control app session still sends a ${kind} over the bridge when the mod answers`, async t => {
+  const f = appRcModFixture(t);
+  f.sessions.modInbox.listen(APP_ID, Date.now());
+  const attachments = kind === "photo" ? [{ blob: f.sessions.log(APP_ID).image(Buffer.from("photo").toString("base64")), name: "photo.png", mediaType: "image/png" }] : [];
+  await f.sessions.send(APP_ID, `rc-${kind}`, kind === "slash" ? "/help" : "Look at this", attachments);
+  assert.equal(f.posts.length, 1);
+  assert.deepEqual(f.sessions.modInbox.pending(APP_ID), []);
+  assert.equal(f.sessions.summaryOf(APP_ID)?.queue, undefined);
+});
+
+test("a Remote Control app session's new plain text supersedes an open permission prompt before it queues", async t => {
+  const f = appRcModFixture(t);
+  f.history.push({ payload: { type: "control_request", request_id: "perm-1", request: { subtype: "can_use_tool", tool_name: "Bash", tool_use_id: "tool-perm-1", input: { command: "true" } } } });
+  await f.sessions.syncBridge(APP_ID);
+  await nextTick();
+  assert.equal(f.permissions.pending().length, 1, "the turn waits for an approval");
+  f.sessions.modInbox.listen(APP_ID, Date.now());
+  await f.sessions.send(APP_ID, "rc-supersede", "Carry on");
+  assert.equal(f.permissions.pending().length, 0, "the open prompt was denied by the new message");
+  await waitFor(() => f.posts.some(post => /superseded this/.test(post)));
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "rc-supersede"));
+});
+
+test("a queued item whose bridge send left an unknown receipt is not offered to the mod again", async t => {
+  const f = appRcModFixture(t);
+  f.sessions.modInbox.listen(APP_ID, Date.now());
+  f.registry.get(APP_ID)!.status = "busy";
+  await f.sessions.enqueue(APP_ID, "rc-unknown", "Maybe already sent");
+  await waitFor(() => f.sessions.summaryOf(APP_ID)?.queue?.[0]?.wait === "desktop_busy");
+  // The bridge post left a pending receipt (its answer was lost); the app then went idle.
+  (f.sessions as unknown as { receipts: MessageReceipts }).receipts.begin(`send:${APP_ID}:rc-unknown`, APP_ID);
+  f.registry.get(APP_ID)!.status = "idle";
+  f.sessions.pollQueued();
+  let offered = false;
+  await waitFor(() => { offered ||= f.sessions.modInbox.pending(APP_ID).length > 0; return !!f.sessions.summaryOf(APP_ID)?.queue?.[0]?.error; });
+  assert.equal(offered, false, "the mod is not offered a message that may have run");
+  assert.deepEqual(f.posts, []);
+});
+
+test("an interrupt-and-send for a Remote Control app session whose mod left answers desktop_mod_offline, never a bridge steer", async t => {
+  let now = 5_000_000;
+  const f = appRcModFixture(t, 500, () => now);
+  f.sessions.modInbox.listen(APP_ID, now);
+  f.registry.get(APP_ID)!.status = "busy";
+  await f.sessions.send(APP_ID, "rc-int", "Stop and do this");
+  await waitFor(() => f.sessions.summaryOf(APP_ID)?.queue?.[0]?.wait === "desktop_busy");
+  now += 60_000;
+  await assert.rejects(f.sessions.sendQueued(APP_ID, "rc-int", { interrupt: true }), (error: unknown) => (error as { code?: unknown }).code === "desktop_mod_offline");
+  assert.deepEqual(f.posts, [], "nothing went over the bridge");
+});
+
+test("an interrupt-and-send for a Remote Control app session whose app went idle and mod left still answers desktop_mod_offline", async t => {
+  let now = 5_000_000;
+  const f = appRcModFixture(t, 500, () => now);
+  f.sessions.modInbox.listen(APP_ID, now);
+  f.registry.get(APP_ID)!.status = "busy";
+  await f.sessions.send(APP_ID, "rc-idle", "Stop and do this");
+  await waitFor(() => f.sessions.summaryOf(APP_ID)?.queue?.[0]?.wait === "desktop_busy");
+  now += 60_000;
+  f.registry.get(APP_ID)!.status = "idle";
+  await assert.rejects(f.sessions.sendQueued(APP_ID, "rc-idle", { interrupt: true }), (error: unknown) => (error as { code?: unknown }).code === "desktop_mod_offline");
+  assert.deepEqual(f.posts, [], "nothing went over the bridge");
+});
+
+test("a mod-run message in a Remote Control record persists the transcript uuid of its echo", async t => {
+  let now = 5_000_000;
+  const f = appRcModFixture(t, 500, () => now);
+  await f.sessions.send(APP_ID, "rc-first", "Over the bridge");
+  now += 10_000;
+  f.sessions.modInbox.listen(APP_ID, now);
+  await f.sessions.send(APP_ID, "rc-second", "Through the mod");
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "rc-second"));
+  assert.equal(f.sessions.modInbox.claim("rc-second"), true);
+  assert.equal(f.sessions.modInbox.result("rc-second", "submitted"), true);
+  fs.appendFileSync(f.file, transcriptLine({ type: "user", uuid: "app-echo", cwd: f.cwd, message: { content: "Through the mod" } }));
+  await f.sessions.pollDesktop();
+  const events = f.sessions.log(APP_ID).readAfter(0).events;
+  assert.ok(events.some(event => event.kind === "user" && event.clientMsgId === "rc-second" && event.src === "app-echo"), "the uuid is on a stored event, so a restart still knows the line");
+  assert.equal(reduce(events).items.filter(item => item.type === "user" && item.text === "Through the mod").length, 1);
+});
+
+test("a full queue rejects a Remote Control app session's new text and leaves the open permission prompt alone", async t => {
+  const f = appRcModFixture(t);
+  f.history.push({ payload: { type: "control_request", request_id: "perm-1", request: { subtype: "can_use_tool", tool_name: "Bash", tool_use_id: "tool-perm-1", input: { command: "true" } } } });
+  await f.sessions.syncBridge(APP_ID);
+  await nextTick();
+  assert.equal(f.permissions.pending().length, 1);
+  f.registry.get(APP_ID)!.status = "busy";
+  for (let i = 0; i < 20; i++) await f.sessions.enqueue(APP_ID, `rc-full-${i}`, `Message ${i}`);
+  assert.throws(() => f.sessions.enqueue(APP_ID, "rc-full-x", "One too many"), /at most 20/);
+  f.sessions.modInbox.listen(APP_ID, Date.now());
+  await assert.rejects(Promise.resolve().then(() => f.sessions.send(APP_ID, "rc-full-over", "Over the cap")), /at most 20/);
+  assert.equal(f.permissions.pending().length, 1, "the prompt is still open");
+  assert.equal(f.posts.some(post => /superseded this/.test(post)), false);
+});
+
+test("an interrupt-and-send of an item with a send receipt is never offered to the mod", async t => {
+  const f = appRcModFixture(t);
+  f.sessions.modInbox.listen(APP_ID, Date.now());
+  f.registry.get(APP_ID)!.status = "busy";
+  await f.sessions.enqueue(APP_ID, "rc-receipt", "Maybe already sent");
+  await waitFor(() => f.sessions.summaryOf(APP_ID)?.queue?.[0]?.wait === "desktop_busy");
+  (f.sessions as unknown as { receipts: MessageReceipts }).receipts.begin(`send:${APP_ID}:rc-receipt`, APP_ID);
+  await assert.rejects(f.sessions.sendQueued(APP_ID, "rc-receipt", { interrupt: true }));
+  assert.deepEqual(f.sessions.modInbox.pending(APP_ID), [], "no offer for a message that may have run");
+  assert.deepEqual(f.posts, []);
+});
+
 
 test("a stop the mod cannot report leaves the message queued with its error code", async t => {
   const f = appNativeModFixture(t, 20);

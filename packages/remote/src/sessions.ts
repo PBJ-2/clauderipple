@@ -1055,7 +1055,7 @@ export class Sessions {
       }
       // Our own Remote Control echo: drop it from the bounded set and skip it, once.
       if (body.kind === "user" && (this.bridgeEchoes.delete(body.clientMsgId) || r.environmentBridgeId && body.clientMsgId === (UUID_RE.test(r.createdBy) ? r.createdBy : uuidFrom(r.createdBy)) && this.seen(r.id, r.createdBy))) return;
-      if (!r.desktopBridge && body.kind === "user" && !body.images?.length && !body.files?.length) {
+      if (body.kind === "user" && !body.images?.length && !body.files?.length) {
         const echo = this.takeModEcho(r.id, body.text);
         if (echo) {
           if (this.seen(r.id, echo)) {
@@ -1065,7 +1065,12 @@ export class Sessions {
             // message into a second one. Nothing is written: a marker event would take a slot in the
             // phone's 120-event cache and move lastSeq with nothing to show, so after a host restart
             // such a line may duplicate once (issue #126, 2026-11-05).
-            if (body.src && body.srcHash !== undefined) log.remember(body.src, body.srcHash);
+            // A Remote Control record persists it, as the bridge send does (`src`): the same user
+            // event again (same clientMsgId, so the timeline item is replaced, not doubled) carries the uuid to disk.
+            if (body.src && body.srcHash !== undefined) {
+              if (r.desktopBridge) this.append(r.id, { ...body, clientMsgId: echo });
+              else log.remember(body.src, body.srcHash);
+            }
           } else {
             this.personMessage(r.id);
             this.append(r.id, { ...body, clientMsgId: echo });
@@ -1742,8 +1747,15 @@ export class Sessions {
       };
       mayGo();
       const desktopId = this.records.get(id)?.sdkSessionId ?? id;
-      const busy = this.appModSession(id, desktopId) && this.appBusy(desktopId);
-      if (busy && options.interrupt && plainText(item.text, item.attachments)) {
+      // A Remote Control session's plain text never rides a bridge steer (the server drops it), so an
+      // interrupt stays on the mod path even when the mod has left since the message was queued.
+      const rcInterrupt = !!options.interrupt && plainText(item.text, item.attachments) && !!item.text.trim() && this.rcAppSession(id, desktopId);
+      // An item with a send receipt (a bridge post whose answer was lost) is never offered to the mod.
+      const receipted = this.receipts.status(`send:${id}:${itemId}`) !== null;
+      // Even when the app went idle meanwhile: no mod, no run for a Remote Control session's plain text.
+      if (rcInterrupt && !receipted && !this.modConnected(desktopId)) throw new CodedError("desktop_mod_offline", DESKTOP_MOD_OFFLINE);
+      const busy = (this.modBound(id, desktopId, item) || rcInterrupt) && this.appBusy(desktopId);
+      if (busy && options.interrupt && plainText(item.text, item.attachments) && !receipted) {
         if (!this.modConnected(desktopId) || !await this.modAbort(desktopId)) throw new CodedError("desktop_mod_offline", DESKTOP_MOD_OFFLINE);
         mayGo();
         // The stopped turn ends as `aborted`; the mod submits this text as the turn after it.
@@ -1792,9 +1804,39 @@ export class Sessions {
       !!(process || this.desktop?.externalProcess(desktopId) || this.desktop?.isOpen(desktopId));
   }
 
-  /** An idle app session without Remote Control can receive plain text through its mod. */
+  /**
+   * A Claude app session with Remote Control on whose mod answers now. Anthropic's server no longer
+   * marks a message we post to its bridge as a person's (2026-11-18), so the CLI treats it as a peer
+   * message and never runs it: plain text goes through the mod instead. Without a mod (or while it
+   * is away) nothing here changes and the bridge send stands.
+   */
+  private rcModSession(id: string, desktopId: string): boolean {
+    return this.rcAppSession(id, desktopId) && this.modConnected(desktopId);
+  }
+
+  /** A Claude app session with Remote Control on, whether or not its mod answers now. */
+  private rcAppSession(id: string, desktopId: string): boolean {
+    const process = this.desktop?.liveProcess(desktopId);
+    return !!process?.bridgeSessionId && !this.live.has(id) && !this.handingOff.has(id);
+  }
+
+  /** Whether this queued item reaches the Claude app session through its mod: any item of a session
+   * without Remote Control (the app owns the writer), plain text of one with it whose mod answers. */
+  private modBound(id: string, desktopId: string, item: QueueItem): boolean {
+    return this.appModSession(id, desktopId) || this.rcModText(id, desktopId, item.text, item.attachments);
+  }
+
+  /** Plain text for a Remote Control session whose mod answers: no photo, no slash command. */
+  private rcModText(id: string, desktopId: string, text: string, attachments: readonly unknown[]): boolean {
+    return plainText(text, attachments) && !!text.trim() && this.rcModSession(id, desktopId);
+  }
+
+  /** An idle app session can receive plain text through its mod, with Remote Control on or off. */
   private modEligible(id: string, desktopId: string, item: QueueItem): boolean {
-    return this.appModSession(id, desktopId) && !this.appBusy(desktopId) && !item.attachments.length && !item.text.trimStart().startsWith("/");
+    // An item with a send receipt (a bridge post whose answer was lost) is not offered again: the
+    // dispatch below answers it from the receipt, as the bridge path does.
+    return this.modBound(id, desktopId, item) && !this.appBusy(desktopId) && plainText(item.text, item.attachments) &&
+      this.receipts.status(`send:${id}:${item.id}`) === null;
   }
 
   resumeQueue(id0: string): void {
@@ -1892,7 +1934,7 @@ export class Sessions {
     if (!head || head.claimedBy) return;
     const desktopId = this.records.get(id)?.sdkSessionId ?? id;
     const process = this.desktop?.liveProcess(desktopId);
-    if (this.appModSession(id, desktopId) && this.appBusy(desktopId)) {
+    if (this.modBound(id, desktopId, head) && this.appBusy(desktopId)) {
       if (this.sendQueue.wait(id, head.id, "desktop_busy")) this.opts.onSessions();
       return;
     }
@@ -2519,6 +2561,17 @@ export class Sessions {
     // The phone sends "steer" on every send (composer.tsx); with nothing running here it is a plain send.
     if (eligible && behavior !== "interrupt" && !attachments.length && text.trim() && !text.trimStart().startsWith("/") && !this.appBusy(desktopId)) {
       this.enqueue(id, clientMsgId, text, attachments);
+      return id;
+    }
+    // A Remote Control session whose mod answers takes plain text through the mod, busy or not: the
+    // queue holds it while the app runs a turn. Photos and slash commands keep going over the bridge.
+    if (behavior !== "interrupt" && this.rcModText(id, desktopId, text, attachments) && !this.seen(id, clientMsgId)) {
+      // As the bridge send did: a new message supersedes the open permission prompts, so the turn
+      // that waits for approval goes on and the queued message runs after it.
+      // Only once the queue took it: a full queue rejects the message and the prompts stay open.
+      const prior = this.bridges.get(id);
+      this.enqueue(id, clientMsgId, text, attachments);
+      if (prior?.bridgeId === this.desktop?.liveProcess(desktopId)?.bridgeSessionId && prior?.permissions.size) this.supersedeBridge(id, prior);
       return id;
     }
     return this.deliver(id, clientMsgId, text, attachments, behavior ?? "steer", false, token);
