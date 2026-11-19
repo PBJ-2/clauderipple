@@ -182,6 +182,8 @@ test("defensive transcript conversion preserves users, tools, failure and result
   assert.equal(result?.kind === "tool_result" && result.ok, false);
   assert.deepEqual(transcriptEvents(line({ type: "system", subtype: "turn_duration", durationMs: 99 }), "", summarize).bodies, [{ kind: "result", ok: true, ms: 99, turns: 1 }]);
   assert.equal(transcriptEvents(line({ ...user, isMeta: true }), "", summarize).bodies.length, 0);
+  // The summary compaction writes is hidden in the app, so it is not drawn on the phone either.
+  assert.equal(transcriptEvents(line({ ...user, isCompactSummary: true, isVisibleInTranscriptOnly: true }), "", summarize).bodies.length, 0);
 });
 
 test("desktop Agent and Task calls preserve prompts behind compact descriptions", () => {

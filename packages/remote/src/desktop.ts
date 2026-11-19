@@ -206,6 +206,9 @@ function text(content: unknown): string {
 }
 function prompt(r: RecordValue): string {
   if (r.type !== "user" || r.isSidechain === true || r.isMeta === true) return "";
+  // The summary compaction writes is a user line the app hides (isCompactSummary, isVisibleInTranscriptOnly;
+  // seen 2026-11-19): it is neither the person's words nor the start of a turn.
+  if (r.isCompactSummary === true || r.isVisibleInTranscriptOnly === true) return "";
   const message = object(r.message);
   const body = text(message?.content).trim();
   // CLI-generated command/context messages are not the person's first prompt.
