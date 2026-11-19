@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
-import { bridgeFixture, bridgeId, line, tick } from "./bridge-fixture.ts";
+import { bridgeFixture, bridgeId, environmentSession, line, tick } from "./bridge-fixture.ts";
 import type { SessionEvent } from "../src/protocol.ts";
 
 const answer = (id: string) => line({ type: "assistant", uuid: id, message: { model: "test", content: [{ type: "text", text: id }] } });
@@ -11,8 +11,13 @@ async function until(predicate: () => boolean): Promise<void> {
   while (!predicate()) { assert.ok(performance.now() < deadline, "notification arrived before the 3 s poll"); await delay(10); }
 }
 
+// A phone's post to a bridge only runs for a session Ripple created itself in a Remote Control environment: the
+// CLI of an app session the person opened drops it (#177), and its messages go through the mod. So the sends
+// below are to that kind of session.
 test("accepted bridge send pushes running immediately and masks cached/eventually consistent idle", async t => {
   const f = bridgeFixture(t);
+  f.sessions.log(bridgeId);
+  environmentSession(f);
   await f.sessions.pollDesktop();
   assert.equal(f.sessions.summaryOf(bridgeId)?.state, "idle");
   const calls = f.onSessions(), reads = f.stateReads();
@@ -35,6 +40,8 @@ test("accepted bridge send pushes running immediately and masks cached/eventuall
 test("an idle read started before the send cannot revert accepted running", async t => {
   let resolve!: (response: Response) => void;
   const f = bridgeFixture(t, { stateResponse: () => new Promise(r => { resolve = r; }) });
+  f.sessions.log(bridgeId);
+  environmentSession(f);
   const poll = f.sessions.pollDesktop();
   await tick();
   await f.sessions.send(bridgeId, "inflight", "hello");
@@ -49,6 +56,8 @@ test("another accepted bridge send never synthesizes idle or loses optimism on s
   let bodyless = false;
   const events: SessionEvent[] = [];
   const f = bridgeFixture(t, { streamBodyless: () => bodyless, onEvent: (_id, event) => events.push(event) });
+  f.sessions.log(bridgeId);
+  environmentSession(f);
   await f.sessions.pollDesktop();
   await f.sessions.send(bridgeId, "first", "hello");
   await tick();
@@ -69,8 +78,11 @@ test("another accepted bridge send never synthesizes idle or loses optimism on s
 
 test("failed bridge send leaves no optimistic running", async t => {
   const f = bridgeFixture(t, { failSend: true });
+  f.sessions.log(bridgeId);
+  environmentSession(f);
   await f.sessions.pollDesktop();
-  await assert.rejects(async () => f.sessions.send(bridgeId, "failed", "hello"));
+  await assert.rejects(async () => f.sessions.send(bridgeId, "failed", "hello"), /전송 결과를 확인할 수 없음/);
+  assert.equal(f.posts.length, 1, "the post was really attempted (not refused before it)");
   assert.equal(f.sessions.summaryOf(bridgeId)?.state, "idle");
 });
 
@@ -150,9 +162,9 @@ test("an attached bridged session stays watched while its registry names no brid
   const events: SessionEvent[] = [];
   let armed = 0, closed = 0, changed = () => {};
   const f = bridgeFixture(t, { watchTranscript: (_id, notify) => { armed++; changed = notify; return () => { closed++; }; }, onEvent: (_id, e) => events.push(e) });
-  // A phone's first send makes the Desktop session a bridged record; the bridge id then arms its watch.
+  // The phone opening the Desktop session makes it a bridged record; the bridge id then arms its watch.
   await f.sessions.pollDesktop();
-  await f.sessions.send(bridgeId, "arm", "hello");
+  f.sessions.log(bridgeId);
   await f.sessions.pollDesktop();
   assert.equal(armed, 1, "the bridge id arms the watch as before");
   // The same Desktop process, with its registry entry no longer naming a bridge.
@@ -176,7 +188,7 @@ test("an attached bridged session whose watch cannot arm is tailed on the 1 s ti
   const events: SessionEvent[] = [];
   const f = bridgeFixture(t, { watchTranscript: () => null, onEvent: (_id, e) => events.push(e) });
   await f.sessions.pollDesktop();
-  await f.sessions.send(bridgeId, "unarmed", "hello");
+  f.sessions.log(bridgeId); // the phone opening the session makes it a bridged record
   f.sessions.watchAttached(new Set([bridgeId]));
   assert.equal(f.sessions.unarmedWatchMs(), 0);
   fs.appendFileSync(f.file, answer("unarmed"));

@@ -22,7 +22,7 @@ import { artifactOf } from "./artifact.ts";
 import { DesktopSessions, type DesktopProcess, type TurnWrapUp } from "./desktop.ts";
 import { firstSentence, STATUS_CAP } from "./wrap-up.ts";
 import { DesktopSidebar, PHONE_GROUP, type SidebarOptions } from "./sidebar.ts";
-import { BridgeAuthError, BridgeClient, bridgeCreateNotCreated, bridgeWriteUnknown, CLI_NOT_LOGGED_IN, CodedError, DESKTOP_BLOCKED, DESKTOP_BUSY, DESKTOP_BUSY_NOW, DESKTOP_MOD_OFFLINE, DESKTOP_WAITING, DesktopBlockedError, DesktopBusyError, isLoginRefusal, object, permissionSuppression, slashCommands, type BridgeFrame } from "./bridge-client.ts";
+import { BridgeAuthError, BridgeClient, bridgeCreateNotCreated, bridgeWriteUnknown, CLI_NOT_LOGGED_IN, CodedError, DESKTOP_BLOCKED, DESKTOP_BUSY, DESKTOP_BUSY_NOW, DESKTOP_MOD_OFFLINE, DESKTOP_MOD_OFFLINE_SEND, DESKTOP_WAITING, DesktopBlockedError, DesktopBusyError, isLoginRefusal, object, permissionSuppression, slashCommands, type BridgeFrame } from "./bridge-client.ts";
 import { APPROVAL_LOCAL_REASON, APPROVAL_WAIT_MS, Approvals, type ApprovalAnswer, type ApprovalState } from "./mod-approval.ts";
 import type { HandoffRunner } from "./handoff.ts";
 import { isDirectory, macConsent, readableFolder } from "./folders.ts";
@@ -367,7 +367,7 @@ function createFingerprint(req: { cwd: string; model: string; effort: Effort | n
   return digest({ cwd: req.cwd, model: req.model, effort: req.effort, text: req.text, mode: req.permissionMode ?? "auto", isolation: req.isolation ?? "local", branch: req.baseBranch ?? null });
 }
 /** A stable v4-shaped UUID for a phone message id. */
-function uuidFrom(text: string): string {
+export function uuidFrom(text: string): string {
   const h = createHash("sha256").update(text).digest("hex");
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-${((parseInt(h[16]!, 16) & 3) | 8).toString(16)}${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
@@ -1693,7 +1693,7 @@ export class Sessions {
 
   /** Queue a message; a session that is not busy takes it at once. An id still being sent answers
    * with that send, so its failure reaches the phone rather than an "it is queued". */
-  enqueue(id0: string, clientMsgId: string, text: string, attachments: Attachment[] = []): Promise<void> | undefined {
+  enqueue(id0: string, clientMsgId: string, text: string, attachments: Attachment[] = [], front = false): Promise<void> | undefined {
     const id = this.followed(id0);
     if (!this.has(id)) throw new Error("no such session");
     if (!/^[\w-]{1,100}$/.test(clientMsgId)) throw new Error("Invalid message id.");
@@ -1721,7 +1721,7 @@ export class Sessions {
     // would wait there for good (#171). The phone's queue button comes here, not through send().
     const desktopId = this.records.get(id)?.sdkSessionId ?? id;
     if (!this.live.has(id) && this.desktop?.externalProcess(desktopId)) throw new CodedError("desktop_external", DESKTOP_EXTERNAL);
-    if (!this.sendQueue.add(id, { id: clientMsgId, text, attachments: files }, this.now(), desktopId)) return;
+    if (!this.sendQueue.add(id, { id: clientMsgId, text, attachments: files }, this.now(), desktopId, front)) return;
     this.noteQueued(id, clientMsgId);
     this.watchQueueRegistry();
     this.opts.onSessions();
@@ -2703,6 +2703,32 @@ export class Sessions {
       if (prior?.bridgeId === this.desktop?.liveProcess(desktopId)?.bridgeSessionId && prior?.permissions.size) this.supersedeBridge(id, prior);
       return id;
     }
+    // An interrupt-and-send to a Remote Control session whose mod answers (and can run this kind) is the
+    // send-now path of sendQueued: the mod stops the app's running turn (if it runs one), then the message
+    // goes in through the mod like any other. The bridge's interrupt/post pair is not used (#177).
+    if (behavior === "interrupt" && this.rcModItem(id, desktopId, text, attachments) && !this.seen(id, clientMsgId)) {
+      const prior = this.bridges.get(id);
+      // At the head of the queue: the person interrupted to send this now, so no older queued message runs first.
+      const submit = (): string => {
+        this.enqueue(id, clientMsgId, text, attachments, true);
+        if (prior?.bridgeId === this.desktop?.liveProcess(desktopId)?.bridgeSessionId && prior?.permissions.size) this.supersedeBridge(id, prior);
+        return id;
+      };
+      if (!this.appBusy(desktopId)) return submit();
+      return this.modAbort(desktopId).then(stopped => {
+        if (!stopped) throw new CodedError("desktop_mod_offline", DESKTOP_MOD_OFFLINE_SEND);
+        token?.check();
+        return submit();
+      });
+    }
+    // Without a mod that answers, a Remote Control session has no way in: the bridge accepts the post
+    // but the CLI drops it (rcAppSession), and the phone kept a message that never ran, which a resend
+    // then showed twice (#177, 2026-11-19). Refused, so the phone says so; a retry of a message already
+    // delivered keeps its plain answer. A /clear (/new) with no mod forks a fresh host session and /exit
+    // archives: neither posts to the bridge (deliver), so they are not refused. A session Ripple created
+    // itself in a Remote Control environment (environmentBridgeId) keeps its bridge send, unchanged.
+    const noPost = CLEAR_TEXT.test(text) && !attachments.length || /^\/exit\s*$/.test(text);
+    if (this.rcAppSession(id, desktopId) && !this.records.get(id)?.environmentBridgeId && !noPost && !this.seen(id, clientMsgId)) throw new CodedError("desktop_mod_offline", DESKTOP_MOD_OFFLINE_SEND);
     return this.deliver(id, clientMsgId, text, attachments, behavior ?? "steer", false, token);
   }
 
@@ -2795,14 +2821,11 @@ export class Sessions {
     const desktopId = existing?.sdkSessionId ?? id;
     if (this.desktop && !this.live.has(id) && !this.handingOff.has(id) && (existing?.sdkSessionId || this.desktop.has(id))) {
       const process = this.desktop.liveProcess(desktopId);
-      if (process?.bridgeSessionId) {
-        const key = `${id}/${clientMsgId}`;
-        const pending = this.bridgeSends.get(key);
-        if (pending) return pending;
-        const sending = this.sendBridge(id, clientMsgId, text, attachments, process.bridgeSessionId, token).finally(() => this.bridgeSends.delete(key));
-        this.bridgeSends.set(key, sending);
-        return sending;
-      }
+      // A Remote Control app session (rcAppSession): the bridge accepts a host post but the CLI drops it,
+      // so no path ends in a post here. Everything that reaches this point without the mod (a queued item
+      // the mod did not claim in time, a send-now, a photo or command without a mod) fails visibly instead,
+      // with no phone user event (#177, 2026-11-19). The queue shows the text on the item.
+      if (process?.bridgeSessionId) throw new CodedError("desktop_mod_offline", DESKTOP_MOD_OFFLINE_SEND);
       if (this.appModSession(id, desktopId)) {
         // Preserve the legacy handed-off fallback, but never adopt an app-created writer.
         if (!this.handedOff(id)) throw new DesktopBlockedError();
@@ -3952,11 +3975,27 @@ export class Sessions {
       this.desktop?.poll();
       const bridgeId = this.desktop?.liveProcess(r.sdkSessionId!)?.bridgeSessionId;
       if (bridgeId) {
-        // The app is now the writer. Use the existing send path, never resume a second SDK.
-        if (!r.desktopBridge) this.rebaseDesktop(r);
+        // The app is now the writer: never resume a second SDK. A post to its bridge would be dropped by
+        // its CLI (rcAppSession), so each input goes back to the send queue, the path a normal send takes:
+        // the mod runs it when it answers, otherwise the item fails visibly on its row (desktop_mod_offline)
+        // with its text kept. The user event its acceptance appended is voided, as the input has not run.
+        // Each input stands alone: one the queue cannot take (it is full) fails visibly by itself and
+        // never costs a later input its row.
+        const failures: string[] = [];
         for (const message of messages) {
-          const content = messageContent(message.message.content, data => this.log(r.id).image(data));
-          await this.sendBridge(r.id, message.uuid!, content.text, content.images.map(image => ({ blob: image.blob!, name: "photo", mediaType: image.mediaType })), bridgeId);
+          try { this.requeueTransferred(r, message); }
+          catch (error) {
+            const text = error instanceof Error ? error.message : String(error);
+            (this.opts.log ?? console.error)(`[desktop handoff ${r.id}] queued input refused: ${text}`);
+            this.append(r.id, { kind: "result", ok: false, error: text, ms: 0, turns: 0 });
+            failures.push(text);
+          }
+        }
+        // The writer that ran these inputs is gone; the queue waits for an idle session. With no input
+        // taken at all, nothing is left to run and the session shows the failure.
+        if (r.state === "running" || r.state === "waiting") {
+          if (failures.length === messages.length) this.setState(r, "error", failures.at(-1));
+          else this.setState(r, "idle");
         }
         return;
       }
@@ -3970,6 +4009,39 @@ export class Sessions {
       this.append(r.id, { kind: "result", ok: false, error: text, ms: 0, turns: 0 });
       this.setState(r, "error", text);
     }
+  }
+
+  /**
+   * An input the host's writer accepted (its user event is in the log, its receipt completed) and never
+   * ran, given back to the send queue under its own phone id. The user event is voided: it is
+   * replaced by an empty one under another id, which the timeline does not draw (the phone shows the
+   * message as a queue row, or as the user event the mod's run appends). A queue that cannot take it
+   * (full) throws after voiding it all the same, and the id stays known so a resend is not run twice.
+   */
+  private requeueTransferred(r: SessionRecord, message: SdkUserMessage): void {
+    const log = this.log(r.id);
+    let found: { seq: number; clientMsgId: string; text: string; images: ImagePart[] } | null = null;
+    for (let pages = 0, before = log.lastSeq + 1; !found && pages < 8 && before > 1; pages++) {
+      const page = log.before(before);
+      for (const e of page.events) {
+        if (e.kind === "user" && e.clientMsgId && uuidFrom(e.clientMsgId) === message.uuid) found = { seq: e.seq, clientMsgId: e.clientMsgId, text: e.text, images: e.images ?? [] };
+      }
+      if (!page.hasOlder || !page.events.length) break;
+      before = page.events[0]!.seq;
+    }
+    const content = found ? null : messageContent(message.message.content, data => log.image(data));
+    const clientMsgId = found?.clientMsgId ?? message.uuid!;
+    const text = found?.text ?? content!.text;
+    const attachments = (found?.images ?? content!.images).flatMap(image => image.blob ? [{ blob: image.blob, name: "photo", mediaType: image.mediaType }] : []);
+    const key = `send:${r.id}:${clientMsgId}`;
+    this.seenIds.get(r.id)?.delete(clientMsgId);
+    this.receipts.abandon(key);
+    const voidEvent = (): void => { if (found) log.substitute(found.seq, { kind: "user", text: "", clientMsgId: `unsent:${clientMsgId}` }); };
+    // A refused input (queue full) did not run either: its event is voided the same way, and it fails
+    // visibly in the caller. Its id stays known so a resend is not run twice.
+    try { this.enqueue(r.id, clientMsgId, text, attachments); }
+    catch (error) { this.rememberClientMsgId(r.id, clientMsgId); voidEvent(); throw error; }
+    voidEvent();
   }
 
   private subAssistant(r: SessionRecord, live: Live, parent: string, message: { id?: string; model?: string; content?: { type: string; text?: string; thinking?: string; signature?: string; id?: string; name?: string; input?: Record<string, unknown> }[] }): void {

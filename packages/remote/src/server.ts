@@ -606,7 +606,8 @@ export class HostServer {
           if (e instanceof OutcomeUnknownError) {
             this.send(c, { t: "error", code: "outcome_unknown", message: e.message, clientMsgId: msg.clientMsgId, session: msg.session });
           } else {
-            this.send(c, { t: "error", code: "send", message: (e as Error).message, clientMsgId: msg.clientMsgId, session: msg.session });
+            // A failure with a machine code of its own (`desktop_mod_offline`, `desktop_busy`) keeps it, as decide does.
+            this.send(c, { t: "error", code: machineCode(e) ?? "send", message: (e as Error).message, clientMsgId: msg.clientMsgId, session: msg.session });
           }
         }
         return;

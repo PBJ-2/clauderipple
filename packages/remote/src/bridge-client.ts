@@ -44,6 +44,8 @@ export class DesktopBusyError extends DesktopBlockedError {
 export const DESKTOP_BUSY_NOW = "Claude 앱에서 작업이 진행 중이어서 지금은 메시지를 보낼 수 없습니다. 작업이 완료된 후 다시 시도해 주세요.";
 /** The app's turn is running and no mod answers to stop it, so a send-now cannot interrupt it. */
 export const DESKTOP_MOD_OFFLINE = "Claude 앱과 연결된 모드가 응답하지 않아 진행 중인 작업을 중단할 수 없습니다. Claude 앱에서 직접 중단한 뒤 다시 시도해 주세요.";
+/** A Remote Control app session whose mod does not answer: a message posted to its bridge would be dropped. */
+export const DESKTOP_MOD_OFFLINE_SEND = "Claude 앱의 리플 모드가 응답하지 않아 메시지를 보내지 못했습니다. 컴퓨터에서 Claude 앱이 열려 있고 대시보드에서 리플 모드가 켜져 있는지 확인한 뒤 다시 보내 주세요.";
 /** A failure with a machine code of its own (`res.code`), for the phone to word. */
 export class CodedError extends Error {
   readonly code: string;
