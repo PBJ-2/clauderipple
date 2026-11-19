@@ -45,6 +45,8 @@ test("newClaudeReleases offers each family's newer models once, and never a fami
   assert.deepEqual(newClaudeReleases(live, ["claude-opus-5-5"], new Set()), []);
 });
 
+const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+
 test("ClaudeModelCatalog asks once per hour with the account's headers and keeps the last good list", async () => {
   let now = 0;
   let calls = 0;
@@ -69,8 +71,10 @@ test("ClaudeModelCatalog asks once per hour with the account's headers and keeps
   assert.equal(calls, 1, "cached within the hour");
   now = 61 * 60_000;
   fail = true;
-  assert.equal((await catalog.list())?.length, 6, "a failed refresh keeps the last good list");
+  assert.equal((await catalog.list())?.length, 6, "a stale cache is served while its failed refresh runs");
+  await settle();
   assert.equal(calls, 2);
+  assert.equal((await catalog.list())?.length, 6, "a failed refresh keeps the last good list");
 });
 
 // The lookup two seconds after a restart was answered 401, and the failure was then held for the
@@ -109,14 +113,16 @@ test("ClaudeModelCatalog tries a failed lookup again within seconds, backing off
   assert.equal(calls, 3, "a good list is kept for the hour");
   now += 60_000;
   fail = true;
-  await catalog.list();
+  assert.equal((await catalog.list())?.length, 6);
+  await settle();
   assert.equal(calls, 4);
   now += 30_000;
   assert.equal((await catalog.list())?.length, 6, "the backoff starts again from 30 s, and the last good list stays");
+  await settle();
   assert.equal(calls, 5);
 });
 
-test("ClaudeModelCatalog tries the next credential when one is refused", async () => {
+test("ClaudeModelCatalog asks only the current login, never another account's credential", async () => {
   const tried: string[] = [];
   const catalog = new ClaudeModelCatalog(
     {
@@ -134,6 +140,120 @@ test("ClaudeModelCatalog tries the next credential when one is refused", async (
       },
     },
   );
+  assert.equal(await catalog.list(), null);
+  assert.deepEqual(tried, ["Bearer stale"]);
+});
+
+test("ClaudeModelCatalog waits out Retry-After", async () => {
+  let now = 0;
+  let calls = 0;
+  const catalog = new ClaudeModelCatalog(
+    { credentials: async () => [{ id: "current", headers: {} } as never] },
+    {
+      upstream: () => "api.anthropic.com",
+      now: () => now,
+      retryMs: 30_000,
+      fetch: async () => {
+        calls++;
+        return calls === 1
+          ? new Response("{}", { status: 429, headers: { "retry-after": "120" } })
+          : new Response(JSON.stringify(BODY), { status: 200 });
+      },
+    },
+  );
+  assert.equal(await catalog.list(), null);
+  assert.equal(calls, 1);
+  now = 31_000;
+  assert.equal(await catalog.list(), null);
+  assert.equal(calls, 1, "the ordinary retry time does not override Retry-After");
+  now = 121_000;
   assert.equal((await catalog.list())?.length, 6);
-  assert.deepEqual(tried, ["Bearer stale", "Bearer good"]);
+  assert.equal(calls, 2, "one request is made per lookup");
+});
+
+test("ClaudeModelCatalog serves its cached list while a refresh runs", async () => {
+  let now = 0;
+  let calls = 0;
+  let resolveRefresh!: (response: Response) => void;
+  const newer = structuredClone(BODY);
+  newer.data[0]!.id = "claude-haiku-5-6";
+  const catalog = new ClaudeModelCatalog(
+    { credentials: async () => [{ id: "current", headers: {} } as never] },
+    {
+      upstream: () => "api.anthropic.com",
+      now: () => now,
+      ttlMs: 100,
+      fetch: async () => {
+        calls++;
+        if (calls === 1) return new Response(JSON.stringify(BODY), { status: 200 });
+        return new Promise<Response>((resolve) => { resolveRefresh = resolve; });
+      },
+    },
+  );
+  assert.equal((await catalog.list())?.[0]?.id, "claude-haiku-5-5");
+  now = 101;
+  assert.equal((await catalog.list())?.[0]?.id, "claude-haiku-5-5");
+  await settle();
+  assert.equal(calls, 2);
+  resolveRefresh(new Response(JSON.stringify(newer), { status: 200 }));
+  await settle();
+  assert.equal((await catalog.list())?.[0]?.id, "claude-haiku-5-6");
+  assert.equal(calls, 2, "only one refresh runs");
+});
+
+test("ClaudeModelCatalog caps the wait when it has no list yet", async () => {
+  let calls = 0;
+  const catalog = new ClaudeModelCatalog(
+    { credentials: async () => [{ id: "current", headers: {} } as never] },
+    {
+      upstream: () => "api.anthropic.com",
+      waitMs: 20,
+      fetch: async () => {
+        calls++;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        return new Response(JSON.stringify(BODY), { status: 200 });
+      },
+    },
+  );
+  const started = Date.now();
+  assert.equal(await catalog.list(), null);
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed >= 10 && elapsed < 150, `waited ${elapsed} ms`);
+  await new Promise((resolve) => setTimeout(resolve, 220));
+  assert.equal((await catalog.list())?.length, 6);
+  assert.equal(calls, 1);
+});
+
+test("ClaudeModelCatalog calls onFirstList once, on the first list", async () => {
+  let now = 0;
+  let calls = 0;
+  let notified = 0;
+  const warnings: string[] = [];
+  const catalog = new ClaudeModelCatalog(
+    { credentials: async () => [{ id: "current", headers: {} } as never] },
+    {
+      upstream: () => "api.anthropic.com",
+      now: () => now,
+      ttlMs: 10,
+      retryMs: 5,
+      warn: (message) => warnings.push(message),
+      fetch: async () => {
+        calls++;
+        return calls === 1 ? new Response("{}", { status: 500 }) : new Response(JSON.stringify(BODY), { status: 200 });
+      },
+    },
+  );
+  catalog.onFirstList(() => { throw new Error("listener broke"); });
+  catalog.onFirstList(() => { notified++; });
+  assert.equal(await catalog.list(), null);
+  assert.equal(notified, 0);
+  now = 5;
+  assert.equal((await catalog.list())?.length, 6);
+  assert.equal(notified, 1);
+  assert.ok(warnings.some((message) => message.includes("listener broke")));
+  now = 16;
+  assert.equal((await catalog.list())?.length, 6);
+  await settle();
+  assert.equal(notified, 1);
+  assert.equal(calls, 3);
 });

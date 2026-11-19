@@ -6,7 +6,7 @@
 // Code login as well as an API key, newest first, and each entry states its effort ladder and
 // context window (measured 2026-10-08 with the observed login: 14 models, `claude-haiku-5-5` first).
 import type { ProviderModel } from "../config.ts";
-import type { Credential } from "../pool.ts";
+import { retryAfterMs as parseRetryAfterMs, type Credential } from "../pool.ts";
 
 export type ClaudeModel = ProviderModel & {
   /** The family (`opus`, `sonnet`, `haiku`, `fable`, `mythos`), as the API names it. */
@@ -65,25 +65,26 @@ type CatalogOptions = {
   /** The first wait after a lookup that got no list; it doubles on each further miss, up to `ttlMs`. */
   retryMs?: number;
   timeoutMs?: number;
+  /** How long list() waits for the first list before returning null. */
+  waitMs?: number;
   warn?: (message: string) => void;
 };
 
 /**
- * The account's model list, fetched at most once per `ttlMs` (an hour by default: Anthropic ships a
- * model every few weeks). A failed lookup keeps the last good list, and null means none was ever
- * had, so a caller falls back to its own.
- *
- * A lookup that got no list is tried again after `retryMs` (30 s by default, doubling), not after a
- * full `ttlMs`. Two seconds after a restart the lookup was answered 401, and the hour that followed
- * served the fallback list, which has no Mythos and no windows, to the dashboard and to the start-up
- * adoption pass; ten minutes later the login Claude Code was then sending was answered 200
- * (2026-11-18). Each credential is tried in turn for the same reason.
+ * The current Claude login's model list, fetched at most once per `ttlMs` (an hour by default:
+ * Anthropic ships a model every few weeks). Another account is never asked because its list would be
+ * applied to providers that do not use it. A failed lookup keeps the last good list, serves that cache
+ * while refreshing, and honours Retry-After. With no cache, list() waits at most `waitMs` (two seconds
+ * by default) while the fetch continues. A miss is tried again after `retryMs` (30 s by default,
+ * doubling); this still recovers the case observed on 2026-11-18 because the current slot becomes the
+ * login Claude Code sends once it sends one. `onFirstList` notifies callers when the first list arrives.
  */
 export class ClaudeModelCatalog {
   private last: ClaudeModel[] | null = null;
   private nextAt = Number.NEGATIVE_INFINITY;
   private misses = 0;
   private inFlight: Promise<ClaudeModel[] | null> | null = null;
+  private readonly firstListListeners = new Set<() => void>();
   private readonly source: CatalogSource;
   private readonly opts: CatalogOptions;
 
@@ -95,15 +96,33 @@ export class ClaudeModelCatalog {
   list(): Promise<ClaudeModel[] | null> {
     if ((this.opts.now ?? Date.now)() < this.nextAt) return Promise.resolve(this.last);
     this.inFlight ??= this.refresh();
-    return this.inFlight;
+    if (this.last !== null) return Promise.resolve(this.last);
+    const inFlight = this.inFlight;
+    let timer: ReturnType<typeof setTimeout>;
+    const timeout = new Promise<ClaudeModel[] | null>((resolve) => {
+      timer = setTimeout(() => resolve(this.last), this.opts.waitMs ?? 2_000);
+      timer.unref();
+    });
+    return Promise.race([inFlight, timeout]).finally(() => clearTimeout(timer));
+  }
+
+  /** Call `listener` once, right after the first lookup that gets a list; never once a list is had. */
+  onFirstList(listener: () => void): void {
+    if (this.last === null) this.firstListListeners.add(listener);
   }
 
   private async refresh(): Promise<ClaudeModel[] | null> {
     try {
-      const got = await this.fetch();
+      const result = await this.fetch();
       const ttl = this.opts.ttlMs ?? 60 * 60_000;
-      const wait = got ? ttl : Math.min(ttl, (this.opts.retryMs ?? 30_000) * 2 ** this.misses++);
-      if (got) this.misses = 0;
+      let wait: number;
+      if (result.got) {
+        this.misses = 0;
+        wait = ttl;
+      } else {
+        wait = Math.max(Math.min(ttl, (this.opts.retryMs ?? 30_000) * 2 ** this.misses), result.retryAfterMs ?? 0);
+        this.misses++;
+      }
       this.nextAt = (this.opts.now ?? Date.now)() + wait;
       return this.last;
     } finally {
@@ -111,27 +130,45 @@ export class ClaudeModelCatalog {
     }
   }
 
-  /** True when this lookup got a list. */
-  private async fetch(): Promise<boolean> {
-    let credentials: Credential[];
+  private async fetch(): Promise<{ got: boolean; retryAfterMs?: number }> {
+    let credential: Credential | undefined;
     try {
-      credentials = await this.source.credentials();
+      credential = (await this.source.credentials())[0];
     } catch (e) {
       this.opts.warn?.(`claude models: no credentials: ${(e as Error).message}`);
-      return false;
+      return { got: false };
     }
-    for (const credential of credentials) {
-      try {
-        const models = await fetchClaudeModels(`https://${this.opts.upstream()}`, credential.headers, this.opts.fetch, this.opts.timeoutMs);
-        if (models.length) {
-          this.last = models;
-          return true;
+    if (!credential) return { got: false };
+    try {
+      const models = await fetchClaudeModels(`https://${this.opts.upstream()}`, credential.headers, this.opts.fetch, this.opts.timeoutMs);
+      if (!models.length) return { got: false };
+      const first = this.last === null;
+      this.last = models;
+      if (first) {
+        const listeners = [...this.firstListListeners];
+        this.firstListListeners.clear();
+        for (const listener of listeners) {
+          try { listener(); }
+          catch (e) { this.opts.warn?.(`claude models: onFirstList listener: ${(e as Error).message}`); }
         }
-      } catch (e) {
-        this.opts.warn?.(`claude models: ${(e as Error).message}`);
       }
+      return { got: true };
+    } catch (e) {
+      this.opts.warn?.(`claude models: ${(e as Error).message}`);
+      return { got: false, ...(e instanceof ClaudeModelsHttpError && e.retryAfterMs !== undefined ? { retryAfterMs: e.retryAfterMs } : {}) };
     }
-    return false;
+  }
+}
+
+export class ClaudeModelsHttpError extends Error {
+  readonly status: number;
+  readonly retryAfterMs: number | undefined;
+
+  constructor(status: number, retryAfterMs: number | undefined) {
+    super(`HTTP ${status}`);
+    this.name = "ClaudeModelsHttpError";
+    this.status = status;
+    this.retryAfterMs = retryAfterMs;
   }
 }
 
@@ -143,7 +180,7 @@ export async function fetchClaudeModels(origin: string, headers: Record<string, 
     signal: AbortSignal.timeout(timeoutMs),
   });
   // The status alone: the body of an auth failure is not worth the risk of echoing.
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) throw new ClaudeModelsHttpError(res.status, parseRetryAfterMs({ "retry-after": res.headers.get("retry-after") ?? undefined }));
   return claudeModelsFromBody(await res.json());
 }
 
