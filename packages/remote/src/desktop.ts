@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { Worker } from "node:worker_threads";
 import { deliveredFiles, EventLog, imageBlobId } from "./eventlog.ts";
 import { creationDateToFileTime, parseFileTime, processCommands, processSnapshot, sameFileTime, type ProcessSnapshot } from "./processes.ts";
-import { fileImages, messageContent, sessionFileTool, unshownFiles, type ImageSink } from "./images.ts";
+import { fileImages, messageContent, sessionFileTool, unshownFiles, type ImageMediaType, type ImageSink } from "./images.ts";
 import { narrationBody } from "./narration.ts";
 import { artifactOf } from "./artifact.ts";
 import { PERMISSION_MODES, type BackgroundTask, type EventBody, type Figures, type PermissionMode, type PlanStep, type SessionSummary, type ToolCall } from "./protocol.ts";
@@ -157,6 +157,9 @@ export interface DesktopOptions {
   /** The phone's id for a user line the app's mod typed in (by the line's uuid and text), so the
    * phone can tell its own message when it comes back in a rebuilt snapshot. */
   userId?: (id: string, uuid: string, text: string) => string | undefined;
+  /** What the person sent when a user line is a message the mod ran with its photos as files named in the text:
+   * the text without those lines, and the photos. The phone shows the photos, not the path lines. */
+  userPhotos?: (id: string, text: string) => { text: string; photos: { data: string; mediaType: ImageMediaType }[] } | undefined;
 }
 
 /** The ids a process listing names through session flags, tokenized once per listing: the host asks
@@ -1140,7 +1143,9 @@ export class DesktopSessions {
         for (const body of parsed.bodies) {
           if (body.kind !== "user") { log.append(body); continue; }
           const phoneId = body.clientMsgId ? this.opts.userId?.(id, body.clientMsgId, body.text) : undefined;
-          log.append({ ...body, clientMsgId: phoneId ?? (body.clientMsgId || `desktop-${log.lastSeq + 1}`) });
+          const sent = body.images?.length || body.files?.length ? undefined : this.opts.userPhotos?.(id, body.text);
+          const shown = sent ? { text: sent.text, images: sent.photos.map(photo => ({ type: "image" as const, blob: log.image(photo.data), mediaType: photo.mediaType })) } : {};
+          log.append({ ...body, ...shown, clientMsgId: phoneId ?? (body.clientMsgId || `desktop-${log.lastSeq + 1}`) });
         }
       });
       // A worker's own final answer or interruption closes it even when the parent never got

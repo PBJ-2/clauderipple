@@ -4005,6 +4005,115 @@ test('phone inbox handles offers in order and refuses a different session', asyn
   expect(events).toHaveLength(6)
 })
 
+// A slash command from the phone: the host offers it as kind "command" (name, arguments in text) only to a mod that announced `caps=command`.
+function commandInbox(on: On, offers: unknown[], events: string[]) {
+  on('http.fetch', { url: /\/api\/phone-inbox/ }, ($, e) => {
+    const url = new URL(e.url)
+    if (url.pathname === '/api/phone-inbox') {
+      events.push(`poll:caps=${url.searchParams.get('caps')}`)
+      return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify({ offers: offers.splice(0) }) } }
+    }
+    const body = JSON.parse(e.init?.body ?? '{}')
+    events.push(url.pathname.endsWith('/claim') ? `claim:${body.itemId}` : `result:${body.itemId}:${body.outcome}`)
+    return { value: { ok: true, status: 200, headers: {}, text: '{}' } }
+  })
+}
+test('a phone slash command runs as that command with its arguments, and is never submitted as a prompt', async ($, on) => {
+  const events: string[] = []
+  const b = boundaries(on, {}, { env: APP_ENV, phoneSubmit: text => { events.push(`submit:${text}`); return 'submitted' } })
+  on('command.run', { command: 'hello' }, ($, e) => { events.push(`run:${e.command}:${JSON.stringify(e.args)}`); return { text: 'hi' } })
+  // One command at a time: the second is offered on a later poll, after the first reported.
+  const offers: unknown[] = [{ sessionId: 'session-test', itemId: 'cmd-1', text: 'two words', command: 'hello', kind: 'command', offeredAt: NOW }]
+  commandInbox(on, offers, events)
+  http(on)
+  await start($)
+  await b.clock.advance(1500)
+  offers.push({ sessionId: 'session-test', itemId: 'cmd-2', text: '', command: 'hello', kind: 'command', offeredAt: NOW })
+  await b.clock.advance(1500)
+  expect(events).toEqual(['poll:caps=command', 'claim:cmd-1', 'run:hello:"two words"', 'result:cmd-1:submitted', 'poll:caps=command', 'claim:cmd-2', 'run:hello:""', 'result:cmd-2:submitted'])
+  expect(b.submitted).toEqual([])
+})
+test('a phone slash command the engine refuses is reported failed after its claim', async ($, on) => {
+  const events: string[] = []
+  const b = boundaries(on, {}, { env: APP_ENV })
+  on('command.run', { command: 'broken' }, () => { throw new Error('Unknown command') })
+  commandInbox(on, [{ sessionId: 'session-test', itemId: 'cmd-1', text: '', command: 'broken', kind: 'command', offeredAt: NOW }], events)
+  http(on)
+  await start($)
+  await b.clock.advance(1500)
+  expect(events).toEqual(['poll:caps=command', 'claim:cmd-1', 'result:cmd-1:failed'])
+  expect(b.submitted).toEqual([])
+})
+test('a slow phone slash command does not stop the inbox poll, holds the next offer, and reports its real result when it settles', async ($, on) => {
+  const events: string[] = []
+  const b = boundaries(on, {}, { env: APP_ENV })
+  let release: (() => void) | undefined
+  on('command.run', { command: 'compact' }, async () => { events.push('run:compact'); await new Promise<void>(resolve => { release = resolve }); return { text: 'done' } })
+  on('command.run', { command: 'hello' }, () => { events.push('run:hello'); return { text: 'hi' } })
+  const offers: unknown[] = [{ sessionId: 'session-test', itemId: 'cmd-1', text: '', command: 'compact', kind: 'command', offeredAt: NOW }]
+  commandInbox(on, offers, events)
+  http(on)
+  await start($)
+  await b.clock.advance(1500)
+  expect(events).toEqual(['poll:caps=command', 'claim:cmd-1', 'run:compact'])
+  // Two minutes of a running command: the mod keeps polling (the host's heartbeat) and takes nothing else, no result is sent early.
+  offers.push({ sessionId: 'session-test', itemId: 'cmd-2', text: '', command: 'hello', kind: 'command', offeredAt: NOW })
+  await b.clock.advance(60_000)
+  expect(events.filter(e => e.startsWith('poll')).length).toBeGreaterThan(10)
+  expect(events.filter(e => e.startsWith('claim') || e.startsWith('result'))).toEqual(['claim:cmd-1'])
+  release!()
+  await b.clock.settle()
+  expect(events.filter(e => e.startsWith('result'))).toEqual(['result:cmd-1:submitted'])
+})
+test('a phone slash command that fails after running a while is reported failed, not submitted', async ($, on) => {
+  const events: string[] = []
+  const b = boundaries(on, {}, { env: APP_ENV })
+  on('command.run', { command: 'compact' }, async () => { await b.clock.sleep(45_000); throw new Error('compaction failed') })
+  commandInbox(on, [{ sessionId: 'session-test', itemId: 'cmd-1', text: '', command: 'compact', kind: 'command', offeredAt: NOW }], events)
+  http(on)
+  await start($)
+  await b.clock.advance(1500)
+  await b.clock.advance(40_000)
+  expect(events.filter(e => e.startsWith('result'))).toEqual([])
+  await b.clock.advance(10_000)
+  expect(events.filter(e => e.startsWith('result'))).toEqual(['result:cmd-1:failed'])
+})
+test('a result post the host answers 409 (offer already expired) does not pause the inbox poll', async ($, on) => {
+  const events: string[] = []
+  const b = boundaries(on, {}, { env: APP_ENV })
+  on('command.run', { command: 'compact' }, async () => { await b.clock.sleep(20_000); return { text: 'done' } })
+  on('command.run', { command: 'hello' }, () => { events.push('run:hello'); return { text: 'hi' } })
+  const offers: unknown[] = [{ sessionId: 'session-test', itemId: 'cmd-1', text: '', command: 'compact', kind: 'command', offeredAt: NOW }]
+  on('http.fetch', { url: /\/api\/phone-inbox/ }, ($, e) => {
+    const url = new URL(e.url)
+    if (url.pathname === '/api/phone-inbox') { events.push('poll'); return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify({ offers: offers.splice(0) }) } } }
+    const body = JSON.parse(e.init?.body ?? '{}')
+    if (url.pathname.endsWith('/claim')) { events.push(`claim:${body.itemId}`); return { value: { ok: true, status: 200, headers: {}, text: '{}' } } }
+    events.push(`result:${body.itemId}`)
+    return { value: { ok: false, status: 409, headers: {}, text: '{}' } }
+  })
+  http(on)
+  await start($)
+  await b.clock.advance(1500)
+  await b.clock.advance(20_000)
+  expect(events).toContain('result:cmd-1')
+  offers.push({ sessionId: 'session-test', itemId: 'cmd-2', text: '', command: 'hello', kind: 'command', offeredAt: NOW })
+  const before = events.length
+  await b.clock.advance(3000)
+  expect(events.slice(before)).toContain('claim:cmd-2')
+  expect(b.logs.join('\n')).not.toContain('phone inbox')
+})
+test('a phone slash command with no usable name is left unclaimed', async ($, on) => {
+  const events: string[] = []
+  const b = boundaries(on, {}, { env: APP_ENV })
+  commandInbox(on, [{ sessionId: 'session-test', itemId: 'cmd-1', text: 'x', kind: 'command', offeredAt: NOW }, { sessionId: 'session-test', itemId: 'cmd-2', text: 'x', command: 'a/b', kind: 'command', offeredAt: NOW }], events)
+  http(on)
+  await start($)
+  await b.clock.advance(1500)
+  expect(events).toEqual(['poll:caps=command'])
+  expect(b.submitted).toEqual([])
+})
+
 test('a claim response delayed past the safe window never submits the message', async ($, on) => {
   const b = boundaries(on, {}, { env: APP_ENV })
   const results: string[] = []

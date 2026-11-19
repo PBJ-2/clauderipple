@@ -11,7 +11,7 @@ export type ImageMediaType = "image/png" | "image/jpeg" | "image/gif" | "image/w
 export type InputBlock = { type: "text"; text: string } | { type: "image"; source: { type: "base64"; media_type: ImageMediaType; data: string } };
 
 /** The four raster types an image block may carry, read from the bytes rather than the sender's label. */
-function imageMediaType(bytes: Buffer): ImageMediaType | null {
+export function imageMediaType(bytes: Buffer): ImageMediaType | null {
   if (bytes.subarray(0, 4).equals(Buffer.from([137, 80, 78, 71]))) return "image/png";
   if (bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) return "image/jpeg";
   if (bytes.subarray(0, 4).toString("latin1") === "GIF8") return "image/gif";

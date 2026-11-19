@@ -119,7 +119,7 @@ function controlledQueries(readInputs = true, waitForExit = false) {
   return { queryFn, queries };
 }
 
-function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {}, extra: Partial<Pick<SessionsOptions, "handoff" | "log" | "queryFn" | "desktopProjects" | "desktopRegistry" | "desktopExternalRegistry" | "desktopProcesses" | "bridgeClient" | "desktopSidebar" | "now" | "onSessions" | "onLoginProblem" | "environmentRoot" | "environmentWaitMs" | "environmentPollMs" | "environmentModeMs" | "modOfferMs" | "modResultMs" | "away">> = {}) {
+function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {}, extra: Partial<Pick<SessionsOptions, "handoff" | "log" | "queryFn" | "desktopProjects" | "desktopRegistry" | "desktopExternalRegistry" | "desktopProcesses" | "bridgeClient" | "desktopSidebar" | "now" | "onSessions" | "onLoginProblem" | "environmentRoot" | "environmentWaitMs" | "environmentPollMs" | "environmentModeMs" | "modOfferMs" | "modResultMs" | "modCommandResultMs" | "away">> = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-sessions-"));
   const cwd = path.join(dir, "project");
   fs.mkdirSync(cwd);
@@ -1941,7 +1941,7 @@ async function modFixture(t: TestContext, modOfferMs = 100, modResultMs = 100, w
 
 const transcriptLine = (value: unknown) => JSON.stringify(value) + "\n";
 
-function appNativeModFixture(t: TestContext, modOfferMs = 500, extra: Partial<Pick<SessionsOptions, "away" | "now" | "bridgeClient">> = {}) {
+function appNativeModFixture(t: TestContext, modOfferMs = 500, extra: Partial<Pick<SessionsOptions, "away" | "now" | "bridgeClient" | "modCommandResultMs">> = {}) {
   const id = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
   const app = claudeAppData(t, id);
   const projects = fs.mkdtempSync(path.join(os.tmpdir(), "app-native-mod-"));
@@ -2686,7 +2686,7 @@ test("send-now on a busy Claude app session answers desktop_busy, and interrupts
 
 // Anthropic's server stopped marking our bridge posts as a person's (2026-11-18): the CLI ran none of them.
 // A Remote Control app session whose mod answers therefore takes plain text through the mod.
-function appRcModFixture(t: TestContext, modOfferMs = 500, now?: () => number) {
+function appRcModFixture(t: TestContext, modOfferMs = 500, now?: () => number, commandResultMs?: number) {
   const posts: string[] = [];
   const history: unknown[] = [];
   const bridgeClient = new BridgeClient({ auth: () => ({ accessToken: "fake", organizationUuid: "org", expiresAt: Date.now() + 60_000 }), fetch: async (url, options) => {
@@ -2695,7 +2695,7 @@ function appRcModFixture(t: TestContext, modOfferMs = 500, now?: () => number) {
     return Response.json({ data: history, worker_status: "idle" });
   } });
   bridgeClient.control = async () => {};
-  const f = appNativeModFixture(t, modOfferMs, { bridgeClient, ...(now ? { now } : {}) });
+  const f = appNativeModFixture(t, modOfferMs, { bridgeClient, ...(now ? { now } : {}), ...(commandResultMs !== undefined ? { modCommandResultMs: commandResultMs } : {}) });
   f.registry.get(f.id)!.bridgeSessionId = "session_rc";
   return { ...f, posts, history };
 }
@@ -2773,14 +2773,317 @@ test("a Remote Control app session with no mod sends over the bridge at once, bu
   assert.equal(f.sessions.summaryOf(APP_ID)?.queue, undefined);
 });
 
-for (const kind of ["photo", "slash"] as const) test(`a Remote Control app session still sends a ${kind} over the bridge when the mod answers`, async t => {
+test("a Remote Control app session whose mod predates slash commands still sends one over the bridge, and the mod never sees it", async t => {
   const f = appRcModFixture(t);
+  // An older mod reads its inbox with no capabilities: it would submit a command's arguments as a prompt.
   f.sessions.modInbox.listen(APP_ID, Date.now());
-  const attachments = kind === "photo" ? [{ blob: f.sessions.log(APP_ID).image(Buffer.from("photo").toString("base64")), name: "photo.png", mediaType: "image/png" }] : [];
-  await f.sessions.send(APP_ID, `rc-${kind}`, kind === "slash" ? "/help" : "Look at this", attachments);
+  await f.sessions.send(APP_ID, "rc-slash", "/help");
   assert.equal(f.posts.length, 1);
   assert.deepEqual(f.sessions.modInbox.pending(APP_ID), []);
   assert.equal(f.sessions.summaryOf(APP_ID)?.queue, undefined);
+});
+
+// Photos and slash commands from the phone: the host hands a photo to the app session as a file the text names,
+// and a slash command as kind "command" (name, arguments), to a mod that announced it runs them.
+const PNG = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.from("pixels")]);
+const photo = (sessions: Sessions, id: string, bytes: Buffer = PNG, name = "photo.png") => ({ blob: sessions.log(id).image(bytes.toString("base64")), name, mediaType: "image/png" });
+const photoLines = (dir: string, id: string, item: string, count = 1) => Array.from({ length: count }, (_, i) => `[Attached photo: ${path.join(dir, "mod-photos", id, `${item}-${i + 1}.png`)} — open it with the Read tool to see it]`);
+
+test("a Remote Control app session's photo goes through the mod as a file the text names, and sends nothing over the bridge", async t => {
+  const f = appRcModFixture(t);
+  f.sessions.modInbox.listen(APP_ID, Date.now());
+  assert.equal(await f.sessions.send(APP_ID, "rc-photo", "Look at this", [photo(f.sessions, APP_ID)]), APP_ID);
+  assert.equal(f.sessions.takeQueued(APP_ID, "rc-photo"), true);
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "rc-photo"));
+  const offer = f.sessions.modInbox.pending(APP_ID).find(o => o.itemId === "rc-photo")!;
+  assert.equal(offer.kind, undefined, "a photo is a prompt to an older mod too");
+  assert.equal(offer.text, `Look at this\n\n${photoLines(f.dir, APP_ID, "rc-photo")[0]}`);
+  const file = path.join(f.dir, "mod-photos", APP_ID, "rc-photo-1.png");
+  assert.ok(fs.readFileSync(file).equals(PNG), "the file holds the photo's bytes");
+  assert.equal(fs.statSync(file).mode & 0o077, 0, "only the owner reads it");
+  assert.equal(f.sessions.modInbox.claim("rc-photo"), true);
+  assert.equal(f.sessions.modInbox.result("rc-photo", "submitted"), true);
+  assert.equal(MessageReceipts.open(path.join(f.dir, "receipts.json")).status(`send:${APP_ID}:rc-photo`), "completed");
+  assert.deepEqual(f.posts, []);
+  assert.equal(f.sessions.summaryOf(APP_ID)?.queue, undefined);
+});
+
+test("a photo alone is just its lines, two photos get one line each, and a retry writes the same files", async t => {
+  const f = appRcModFixture(t);
+  f.sessions.modInbox.listen(APP_ID, Date.now());
+  await f.sessions.send(APP_ID, "rc-two", "", [photo(f.sessions, APP_ID), photo(f.sessions, APP_ID, Buffer.concat([PNG, Buffer.from("2")]), "b.png")]);
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "rc-two"));
+  assert.equal(f.sessions.modInbox.pending(APP_ID)[0]!.text, photoLines(f.dir, APP_ID, "rc-two", 2).join("\n"));
+  assert.deepEqual(fs.readdirSync(path.join(f.dir, "mod-photos", APP_ID)).sort(), ["rc-two-1.png", "rc-two-2.png"]);
+  // The same item offered again (its offer expired, or the host restarted) names and rewrites the same files.
+  f.sessions.modInbox.withdraw("rc-two");
+  await f.sessions.sendQueued(APP_ID, "rc-two").catch(() => {});
+  assert.deepEqual(fs.readdirSync(path.join(f.dir, "mod-photos", APP_ID)).sort(), ["rc-two-1.png", "rc-two-2.png"]);
+});
+
+test("a mod-run photo shows once on the phone, as the person's text with its thumbnail, when the transcript echoes it", async t => {
+  let now = 5_000_000;
+  const f = appRcModFixture(t, 500, () => now);
+  await f.sessions.send(APP_ID, "rc-first", "Over the bridge");
+  assert.equal(f.sessions.summaryOf(APP_ID)?.desktopBridge, true);
+  now += 10_000;
+  f.sessions.modInbox.listen(APP_ID, now);
+  await f.sessions.send(APP_ID, "rc-pic", "Look at this", [photo(f.sessions, APP_ID)]);
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "rc-pic"));
+  const submitted = f.sessions.modInbox.pending(APP_ID).find(o => o.itemId === "rc-pic")!.text;
+  assert.equal(f.sessions.modInbox.claim("rc-pic"), true);
+  assert.equal(f.sessions.modInbox.result("rc-pic", "submitted"), true);
+  const shown = () => reduce(f.sessions.log(APP_ID).readAfter(0).events).items.filter(item => item.type === "user" && (item.text.includes("Look at this") || item.text.includes("Attached photo")));
+  assert.equal(shown().length, 1, "the host's own event is on the timeline right away");
+  fs.appendFileSync(f.file, transcriptLine({ type: "user", uuid: "app-pic", cwd: f.cwd, message: { content: submitted } }));
+  await f.sessions.pollDesktop();
+  const users = shown();
+  assert.equal(users.length, 1, "the transcript echo adds no second copy");
+  const user = users[0]! as { text: string; images?: unknown[] };
+  assert.equal(user.text, "Look at this", "not a path line");
+  assert.equal(user.images?.length, 1, "the thumbnail is there");
+  const events = f.sessions.log(APP_ID).readAfter(0).events;
+  assert.equal(events.some(event => event.kind === "user" && JSON.stringify(event).includes("Attached photo")), false);
+  assert.ok(events.some(event => event.kind === "user" && event.clientMsgId === "rc-pic" && event.src === "app-pic"));
+});
+
+test("a mod-run photo in a session without a record shows once as text with its thumbnail", async t => {
+  const f = appNativeModFixture(t);
+  f.sessions.modInbox.listen(f.id, Date.now());
+  assert.equal(await f.sessions.send(f.id, "native-pic", "Look at this", [photo(f.sessions, f.id)]), f.id);
+  await waitFor(() => f.sessions.modInbox.pending(f.id).some(offer => offer.itemId === "native-pic"));
+  const submitted = f.sessions.modInbox.pending(f.id)[0]!.text;
+  assert.equal(f.sessions.modInbox.claim("native-pic"), true);
+  fs.appendFileSync(f.file, transcriptLine({ type: "user", uuid: "app-pic", cwd: f.cwd, message: { content: submitted } }));
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.modInbox.result("native-pic", "submitted"), true);
+  const events = f.sessions.log(f.id).readAfter(0).events;
+  const users = reduce(events).items.filter(item => item.type === "user" && item.text !== "From the app");
+  assert.equal(users.length, 1);
+  assert.equal((users[0] as { text: string }).text, "Look at this");
+  assert.equal((users[0] as { images?: unknown[] }).images?.length, 1);
+  assert.deepEqual(events.flatMap(e => e.kind === "user" && e.text === "Look at this" ? [e.clientMsgId] : []), ["native-pic"], "the phone's id is on the line");
+  assert.equal(f.boundary.queries.length, 0);
+});
+
+test("a photo that is not an image fails its queued item with a visible error and is never offered", async t => {
+  const f = appRcModFixture(t);
+  f.sessions.modInbox.listen(APP_ID, Date.now());
+  await f.sessions.send(APP_ID, "rc-bad", "What is this", [photo(f.sessions, APP_ID, Buffer.from("not an image"))]);
+  await waitFor(() => !!f.sessions.summaryOf(APP_ID)?.queue?.[0]?.error);
+  assert.match(f.sessions.summaryOf(APP_ID)!.queue![0]!.error!, /사진/);
+  assert.deepEqual(f.sessions.modInbox.pending(APP_ID), []);
+  assert.deepEqual(f.posts, []);
+});
+
+test("an app session without Remote Control takes a photo through the mod, and keeps blocking it without one", async t => {
+  const f = appNativeModFixture(t);
+  assert.throws(() => f.sessions.send(f.id, "no-mod-pic", "Look", [photo(f.sessions, f.id)]), DesktopBlockedError);
+  f.sessions.modInbox.listen(f.id, Date.now());
+  await f.sessions.send(f.id, "mod-pic", "Look", [photo(f.sessions, f.id)]);
+  await waitFor(() => f.sessions.modInbox.pending(f.id).some(offer => offer.itemId === "mod-pic"));
+  assert.equal(f.sessions.modInbox.pending(f.id)[0]!.text, `Look\n\n${photoLines(f.dir, f.id, "mod-pic")[0]}`);
+});
+
+for (const rc of [true, false]) test(`a slash command goes to the mod as a command with its arguments (Remote Control ${rc ? "on" : "off"}), and runs once`, async t => {
+  const f = rc ? appRcModFixture(t) : { ...appNativeModFixture(t), posts: [] as string[] };
+  const id = rc ? APP_ID : f.id;
+  f.sessions.modInbox.listen(id, Date.now(), ["command"]);
+  assert.equal(await f.sessions.send(id, "cmd-1", "/compact  keep the plan"), id);
+  assert.equal(f.sessions.takeQueued(id, "cmd-1"), true);
+  await waitFor(() => f.sessions.modInbox.pending(id).some(offer => offer.itemId === "cmd-1"));
+  const offer = f.sessions.modInbox.pending(id)[0]!;
+  assert.deepEqual([offer.kind, offer.command, offer.text], ["command", "compact", "keep the plan"]);
+  assert.equal(f.sessions.modInbox.claim("cmd-1"), true);
+  assert.equal(f.sessions.modInbox.result("cmd-1", "submitted"), true);
+  assert.equal(MessageReceipts.open(path.join(f.dir, "receipts.json")).status(`send:${id}:cmd-1`), "completed");
+  assert.deepEqual(f.posts, []);
+  assert.equal(f.sessions.summaryOf(id)?.queue, undefined);
+  assert.equal(await f.sessions.send(id, "cmd-1", "/compact  keep the plan"), id);
+  assert.deepEqual(f.sessions.modInbox.pending(id), [], "a resend of a run command is not offered again");
+});
+
+test("a bare slash command carries empty arguments, and a path or /exit is not a command", async t => {
+  const f = appRcModFixture(t);
+  f.sessions.modInbox.listen(APP_ID, Date.now(), ["command"]);
+  await f.sessions.send(APP_ID, "cmd-bare", "/help");
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "cmd-bare"));
+  assert.deepEqual([f.sessions.modInbox.pending(APP_ID)[0]!.command, f.sessions.modInbox.pending(APP_ID)[0]!.text], ["help", ""]);
+  await f.sessions.send(APP_ID, "cmd-path", "/usr/bin/env is missing");
+  assert.equal(f.posts.length, 1, "a path goes over the bridge as before");
+  assert.equal(f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "cmd-path"), false);
+});
+
+test("a slash command the mod fails is a visible error on the queued item, never silent", async t => {
+  const f = appRcModFixture(t);
+  f.sessions.modInbox.listen(APP_ID, Date.now(), ["command"]);
+  await f.sessions.send(APP_ID, "cmd-bad", "/nosuchcommand now");
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "cmd-bad"));
+  assert.equal(f.sessions.modInbox.claim("cmd-bad"), true);
+  assert.equal(f.sessions.modInbox.result("cmd-bad", "failed"), true);
+  const row = f.sessions.summaryOf(APP_ID)?.queue?.[0];
+  assert.match(row?.error ?? "", /\/nosuchcommand/);
+  assert.equal(row?.id, "cmd-bad");
+  assert.deepEqual(f.posts, []);
+});
+
+test("a claimed slash command is waited for past the prompt's two-minute window, and its real result decides", async t => {
+  const f = appRcModFixture(t);
+  f.sessions.modInbox.listen(APP_ID, Date.now(), ["command"]);
+  await f.sessions.send(APP_ID, "cmd-slow", "/compact");
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "cmd-slow"));
+  assert.equal(f.sessions.modInbox.claim("cmd-slow"), true);
+  await delay(700); // the fixture's prompt result window is 500 ms
+  assert.equal(f.sessions.modInbox.claimed("cmd-slow"), true, "still running: not given up on");
+  assert.equal(f.sessions.summaryOf(APP_ID)?.queue?.some(item => item.error), undefined);
+  assert.equal(f.sessions.modInbox.result("cmd-slow", "failed"), true, "a failure after a long run is reported as it is");
+  assert.match(f.sessions.summaryOf(APP_ID)?.queue?.[0]?.error ?? "", /\/compact/);
+});
+
+test("a message sent while a claimed command runs waits behind it and is offered only after the command's result", async t => {
+  const f = appRcModFixture(t);
+  f.sessions.modInbox.listen(APP_ID, Date.now(), ["command"]);
+  await f.sessions.send(APP_ID, "cmd-run", "/compact");
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "cmd-run"));
+  assert.equal(f.sessions.modInbox.claim("cmd-run"), true);
+  await f.sessions.send(APP_ID, "after-cmd", "And then this");
+  await delay(100);
+  assert.deepEqual(f.sessions.modInbox.pending(APP_ID), [], "nothing is offered while the command runs");
+  assert.deepEqual(f.posts, [], "and nothing falls to the bridge");
+  assert.equal(f.sessions.modInbox.result("cmd-run", "submitted"), true);
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "after-cmd"));
+});
+
+const COMMAND_LOST_NOTICE = "/compact 명령의 실행 결과를 확인하지 못했습니다. Claude 앱에서 명령이 실행됐는지 확인한 뒤, 실행되지 않았다면 다시 보내 주세요.";
+const lostCommand = async (f: ReturnType<typeof appRcModFixture>) => {
+  f.sessions.modInbox.listen(APP_ID, Date.now(), ["command"]);
+  await f.sessions.send(APP_ID, "cmd-lost", "/compact");
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "cmd-lost"));
+  assert.equal(f.sessions.modInbox.claim("cmd-lost"), true);
+  await waitFor(() => f.events.some(row => row.event.kind === "notice" && row.event.text === COMMAND_LOST_NOTICE));
+  assert.equal(f.sessions.summaryOf(APP_ID)?.queue?.some(row => row.id === "cmd-lost") ?? false, false, "the command is gone from the queue");
+};
+
+test("a command whose result timed out leaves the queue with a timeline notice and is never offered again", async t => {
+  const f = appRcModFixture(t, 500, undefined, 150);
+  await lostCommand(f);
+  assert.equal(f.events.some(row => row.event.kind === "notice" && row.event.text === COMMAND_LOST_NOTICE), true, "the timeline says the outcome is unknown");
+  assert.equal(MessageReceipts.open(path.join(f.dir, "receipts.json")).status(`send:${APP_ID}:cmd-lost`), null, "no completed receipt");
+  f.sessions.resumeQueue(APP_ID);
+  await f.sessions.send(APP_ID, "later", "Later message");
+  f.sessions.resumeQueue(APP_ID);
+  await delay(100);
+  assert.deepEqual(f.sessions.modInbox.pending(APP_ID).filter(offer => offer.itemId === "cmd-lost"), [], "not run a second time");
+});
+
+test("a plain message queued behind a command whose result timed out is delivered once the app is idle", async t => {
+  const f = appRcModFixture(t, 500, undefined, 150);
+  f.sessions.modInbox.listen(APP_ID, Date.now(), ["command"]);
+  await f.sessions.send(APP_ID, "cmd-lost", "/compact");
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "cmd-lost"));
+  assert.equal(f.sessions.modInbox.claim("cmd-lost"), true);
+  await f.sessions.send(APP_ID, "plain-behind", "Plain behind");
+  await waitFor(() => f.events.some(row => row.event.kind === "notice" && row.event.text === COMMAND_LOST_NOTICE));
+  assert.equal(f.sessions.summaryOf(APP_ID)?.queue?.some(row => row.error) ?? false, false, "nothing is held");
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "plain-behind"));
+});
+
+test("a late result for a command that timed out is ignored", async t => {
+  const f = appRcModFixture(t, 500, undefined, 150);
+  await lostCommand(f);
+  assert.equal(f.sessions.modInbox.result("cmd-lost", "submitted"), false, "a late result finds no offer");
+  assert.equal(MessageReceipts.open(path.join(f.dir, "receipts.json")).status(`send:${APP_ID}:cmd-lost`), null);
+});
+
+test("a /clear to a Remote Control app session that awaits a permission prompt supersedes the prompt, so the turn ends and /clear runs", async t => {
+  const f = appRcModFixture(t);
+  f.history.push({ payload: { type: "control_request", request_id: "perm-1", request: { subtype: "can_use_tool", tool_name: "Bash", tool_use_id: "tool-perm-1", input: { command: "true" } } } });
+  await f.sessions.syncBridge(APP_ID);
+  await nextTick();
+  assert.equal(f.permissions.pending().length, 1, "the turn waits for an approval");
+  f.sessions.modInbox.listen(APP_ID, Date.now());
+  await f.sessions.send(APP_ID, "rc-clear-perm", "/clear");
+  assert.equal(f.permissions.pending().length, 0, "the open prompt was denied by the /clear");
+  await waitFor(() => f.posts.some(post => /superseded this/.test(post)));
+});
+
+test("a mod-run photo is not shown twice when the host restarts before the app's transcript line is read", async t => {
+  let now = 5_000_000;
+  const f = appRcModFixture(t, 500, () => now);
+  await f.sessions.send(APP_ID, "rc-first", "Over the bridge");
+  now += 10_000;
+  f.sessions.modInbox.listen(APP_ID, now);
+  await f.sessions.send(APP_ID, "rc-pic", "Look at this", [photo(f.sessions, APP_ID)]);
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "rc-pic"));
+  const submitted = f.sessions.modInbox.pending(APP_ID).find(o => o.itemId === "rc-pic")!.text;
+  assert.equal(f.sessions.modInbox.claim("rc-pic"), true);
+  assert.equal(f.sessions.modInbox.result("rc-pic", "submitted"), true);
+  f.sessions.shutdown();
+  now += 90_000; // longer than a plain message's echo is kept
+  const recovered = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: f.boundary.queryFn, coalesceMs: 5, desktopProjects: path.dirname(path.dirname(f.file)), desktopRegistry: () => f.registry,
+    desktopProcesses: () => "", desktopSidebar: { root: f.app.root }, modOfferMs: 500, modResultMs: 500, now: () => now, log() {}, onEvent() {}, onSessions() {} });
+  f.instances.push(recovered); recovered.recover();
+  fs.appendFileSync(f.file, transcriptLine({ type: "user", uuid: "app-pic", cwd: f.cwd, message: { content: submitted } }));
+  await recovered.pollDesktop();
+  const users = reduce(recovered.log(APP_ID).readAfter(0).events).items.filter(item => item.type === "user" && (item.text.includes("Look at this") || item.text.includes("Attached photo")));
+  assert.equal(users.length, 1, "one message, not the host's copy and the transcript's");
+  assert.equal((users[0] as { text: string }).text, "Look at this");
+});
+
+test("a mod-run photo's echo match survives a host stopped for days, and is bounded by count", async t => {
+  let now = 5_000_000;
+  const f = appRcModFixture(t, 500, () => now);
+  await f.sessions.send(APP_ID, "rc-first", "Over the bridge");
+  now += 10_000;
+  f.sessions.modInbox.listen(APP_ID, now);
+  await f.sessions.send(APP_ID, "rc-pic", "Look at this", [photo(f.sessions, APP_ID)]);
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "rc-pic"));
+  const submitted = f.sessions.modInbox.pending(APP_ID).find(o => o.itemId === "rc-pic")!.text;
+  assert.equal(f.sessions.modInbox.claim("rc-pic"), true);
+  assert.equal(f.sessions.modInbox.result("rc-pic", "submitted"), true);
+  f.sessions.shutdown();
+  now += 3 * 24 * 3600_000;
+  const recovered = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: f.boundary.queryFn, coalesceMs: 5, desktopProjects: path.dirname(path.dirname(f.file)), desktopRegistry: () => f.registry,
+    desktopProcesses: () => "", desktopSidebar: { root: f.app.root }, modOfferMs: 500, modResultMs: 500, now: () => now, log() {}, onEvent() {}, onSessions() {} });
+  f.instances.push(recovered); recovered.recover();
+  fs.appendFileSync(f.file, transcriptLine({ type: "user", uuid: "app-pic", cwd: f.cwd, message: { content: submitted } }));
+  await recovered.pollDesktop();
+  const users = reduce(recovered.log(APP_ID).readAfter(0).events).items.filter(item => item.type === "user" && (item.text.includes("Look at this") || item.text.includes("Attached photo")));
+  assert.equal(users.length, 1, "one message, not the host's copy and the transcript's");
+  const saved = JSON.parse(fs.readFileSync(path.join(f.dir, "mod-photo-echoes.json"), "utf8")) as { itemId: string }[];
+  assert.ok(saved.length <= 200);
+});
+
+test("a slash command to an app session without Remote Control whose mod predates commands stays blocked", async t => {
+  const f = appNativeModFixture(t);
+  f.sessions.modInbox.listen(f.id, Date.now());
+  assert.throws(() => f.sessions.send(f.id, "old-mod-cmd", "/help"), DesktopBlockedError);
+  assert.deepEqual(f.sessions.modInbox.pending(f.id), []);
+});
+
+test("a command offer is held back from a mod that did not announce commands, and from one that has left", async t => {
+  let now = 5_000_000;
+  const f = appRcModFixture(t, 500, () => now);
+  f.sessions.modInbox.listen(APP_ID, Date.now(), ["command"]);
+  await f.sessions.send(APP_ID, "cmd-cap", "/help");
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).length === 1);
+  f.sessions.modInbox.listen(APP_ID, Date.now());
+  assert.deepEqual(f.sessions.modInbox.pending(APP_ID), [], "the next read of an older mod sees no command");
+  f.sessions.modInbox.listen(APP_ID, Date.now(), ["command", "unknown"]);
+  assert.equal(f.sessions.modInbox.pending(APP_ID).length, 1);
+});
+
+test("a /clear to a Remote Control app session whose mod answers is offered as a clear in place", async t => {
+  const f = appRcModFixture(t);
+  f.sessions.modInbox.listen(APP_ID, Date.now());
+  assert.equal(await f.sessions.send(APP_ID, "rc-clear", "/clear"), APP_ID);
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "rc-clear" && offer.kind === "clear"));
+  assert.deepEqual(f.posts, [], "nothing over the bridge, and no fresh session");
+  const to = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+  assert.equal(f.sessions.modInbox.claim("rc-clear"), true);
+  assert.equal(f.sessions.reportMoved("rc-clear", APP_ID, to), true);
+  assert.equal(f.sessions.modInbox.result("rc-clear", "submitted"), true);
+  assert.deepEqual(f.posts, []);
 });
 
 test("a Remote Control app session's new plain text supersedes an open permission prompt before it queues", async t => {

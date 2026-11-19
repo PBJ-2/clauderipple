@@ -2294,10 +2294,15 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         if (method !== (isList ? "GET" : "POST")) { sendJson(res, 404, { error: "unknown phone endpoint or method" }); return; }
         let body: string | undefined;
         let session: string | undefined;
+        let caps: string | undefined;
         if (isList) {
           const query = new URL(url, "http://127.0.0.1").searchParams;
           session = query.get("session") ?? undefined;
           if (!session || session.length > 200 || query.getAll("session").length !== 1) { sendJson(res, 400, { error: "invalid session" }); return; }
+          // What the mod can run beyond a prompt (a mod that predates it sends none).
+          const announced = query.getAll("caps");
+          if (announced.length > 1 || announced.length === 1 && !/^[a-z]{1,20}(,[a-z]{1,20}){0,7}$/.test(announced[0]!)) { sendJson(res, 400, { error: "invalid caps" }); return; }
+          caps = announced[0];
         } else {
           try { body = (await readBody(req, 4096, new Error("inbox body too large"))).toString("utf8"); }
           catch { sendJson(res, 400, { error: "invalid inbox request" }); return; }
@@ -2311,7 +2316,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           }
         }
         const route = isList ? "inbox" : `inbox/${pathname.endsWith("/claim") ? "claim" : "result"}`;
-        const result = await phoneRequest(route, method, body, deps.phone, session);
+        const result = await phoneRequest(route, method, body, deps.phone, session, undefined, caps);
         sendJson(res, result.status, result.body);
         return;
       }
