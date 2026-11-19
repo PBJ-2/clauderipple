@@ -6,6 +6,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { DEFAULTS, type Config, type ProviderModel } from "../src/config.ts";
+import { bootstrapWindows } from "../src/bootstrap.ts";
 import { Logger } from "../src/log.ts";
 import { adoptNewClaudeModels, backfillContextWindows, effortLevelsForModel, googleHealth, measureUnsettledModels, parseUpdateCheck, startAdmin, type AdminDeps, type LimitsProvider } from "../src/admin.ts";
 import type { ImageRequest } from "../src/providers/chatgpt/index.ts";
@@ -3352,10 +3353,7 @@ test("backfillContextWindows fills a provider with no catalogue block from the s
   }
 });
 
-// models.dev files no `claude-mythos-5-1` or `claude-mythos-5-2`, so the backfill above never gave
-// them a window, and the adoption pass used to declare a release with its id and name alone. The
-// account's own list states `max_input_tokens` for both (1,000,000, measured 2026-11-18).
-test("adoptNewClaudeModels gives native Claude models the window the account's list states", async () => {
+test("adoptNewClaudeModels writes no window, so a route to the native pool keeps its bootstrap window", async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-adopt-"));
   const prevHome = process.env.CLAUDERIPPLE_HOME;
   process.env.CLAUDERIPPLE_HOME = home;
@@ -3365,37 +3363,64 @@ test("adoptNewClaudeModels gives native Claude models the window the account's l
         anthropic: {
           type: "anthropic",
           auth: "claude-code",
+          accountPool: true,
           models: [
             { id: "claude-mythos-5-1", name: "Mythos 5.1" },
             { id: "claude-opus-5-5", name: "Opus 5.5", contextWindow: 500000 },
-            { id: "claude-haiku-4-5-20251001", name: "Haiku 4.5", contextWindow: null as unknown as number },
-            { id: "claude-unlisted", name: "Unlisted" },
           ],
         },
       },
+      routes: { "claude-mythos-5-1": { provider: "anthropic", model: "claude-mythos-5-1" } },
     });
     const configFile = path.join(home, "config.json");
     fs.writeFileSync(configFile, JSON.stringify(cfg, null, 2));
-    const lines: string[] = [];
+    const before = bootstrapWindows(JSON.parse(fs.readFileSync(configFile, "utf8")) as Config)["claude-mythos-5-1"];
+    assert.equal(before, cfg.cli.autoCompactWindow);
     const log = new Logger(null, 1_000_000, 1, false);
-    log.info = (msg: string) => { lines.push(msg); };
     const live = [
       { id: "claude-mythos-5-2", name: "Mythos 5.2", line: "mythos", createdAt: Date.parse("2026-11-10T00:00:00Z"), contextWindow: 1000000 },
-      { id: "claude-opus-5-5", name: "Opus 5.5", line: "opus", createdAt: Date.parse("2026-09-21T00:00:00Z"), contextWindow: 1000000 },
       { id: "claude-mythos-5-1", name: "Mythos 5.1", line: "mythos", createdAt: Date.parse("2026-10-14T00:00:00Z"), contextWindow: 1000000 },
-      { id: "claude-haiku-4-5", name: "Haiku 4.5", line: "haiku", createdAt: Date.parse("2025-10-15T00:00:00Z"), contextWindow: 200000 },
+      { id: "claude-opus-5-5", name: "Opus 5.5", line: "opus", createdAt: Date.parse("2026-09-21T00:00:00Z"), contextWindow: 1000000 },
     ];
     const deps = { config: () => cfg, configFile, log, claudeModels: async () => live } as unknown as AdminDeps;
     assert.deepEqual(await adoptNewClaudeModels(deps), ["anthropic/claude-mythos-5-2"]);
-    const models = (JSON.parse(fs.readFileSync(configFile, "utf8")) as Config).providers.anthropic!.models!;
-    assert.equal(models.find((m) => m.id === "claude-mythos-5-2")?.contextWindow, 1000000, "a release is declared with its window");
-    assert.equal(models.find((m) => m.id === "claude-mythos-5-1")?.contextWindow, 1000000, "a declared model without one gets it");
-    assert.equal(models.find((m) => m.id === "claude-haiku-4-5-20251001")?.contextWindow, 200000, "a dated id takes its alias's window");
-    assert.equal(models.find((m) => m.id === "claude-opus-5-5")?.contextWindow, 500000, "a window already set stands");
-    assert.equal("contextWindow" in (models.find((m) => m.id === "claude-unlisted") ?? {}), false, "a model the list does not have stays blank");
-    assert.ok(lines.includes("admin: anthropic/claude-mythos-5-1 context window 1000000 (Claude model list)"), `expected the fill log line, got ${JSON.stringify(lines)}`);
+    const reread = JSON.parse(fs.readFileSync(configFile, "utf8")) as Config;
+    const models = reread.providers.anthropic!.models!;
+    assert.deepEqual(models.filter((model) => "contextWindow" in model).map((model) => [model.id, model.contextWindow]), [["claude-opus-5-5", 500000]]);
+    assert.equal(bootstrapWindows(reread)["claude-mythos-5-1"], before);
+    assert.equal(bootstrapWindows(reread)["claude-mythos-5-1"], cfg.cli.autoCompactWindow);
     assert.deepEqual(await adoptNewClaudeModels(deps), [], "a second pass declares nothing");
+    assert.equal(await adoptNewClaudeModels({ ...deps, claudeModels: async () => null }), null);
   } finally {
+    if (prevHome === undefined) delete process.env.CLAUDERIPPLE_HOME;
+    else process.env.CLAUDERIPPLE_HOME = prevHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("adoptNewClaudeModels takes the config lock before changing the file", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-adopt-lock-"));
+  const prevHome = process.env.CLAUDERIPPLE_HOME;
+  process.env.CLAUDERIPPLE_HOME = home;
+  const configFile = path.join(home, "config.json");
+  const cfg = makeCfg({ providers: { anthropic: { type: "anthropic", auth: "claude-code", models: [{ id: "claude-mythos-5-1" }] } } });
+  fs.writeFileSync(configFile, JSON.stringify(cfg, null, 2));
+  const before = fs.readFileSync(configFile);
+  fs.mkdirSync(`${configFile}.lock`);
+  try {
+    const deps = {
+      config: () => cfg,
+      configFile,
+      log: new Logger(null, 1_000_000, 1, false),
+      claudeModels: async () => [
+        { id: "claude-mythos-5-2", line: "mythos", createdAt: 2 },
+        { id: "claude-mythos-5-1", line: "mythos", createdAt: 1 },
+      ],
+    } as unknown as AdminDeps;
+    await assert.rejects(adoptNewClaudeModels(deps), (error: NodeJS.ErrnoException) => error.code === "ELOCKED");
+    assert.deepEqual(fs.readFileSync(configFile), before);
+  } finally {
+    fs.rmSync(`${configFile}.lock`, { recursive: true, force: true });
     if (prevHome === undefined) delete process.env.CLAUDERIPPLE_HOME;
     else process.env.CLAUDERIPPLE_HOME = prevHome;
     fs.rmSync(home, { recursive: true, force: true });
