@@ -742,6 +742,14 @@ El autor lo usa a diario, pero es un proyecto joven. Cuenta con algunas aspereza
 
 Las preguntas y los informes de errores están en Discord: [https://discord.gg/R8ZgGSNHjw](https://discord.gg/R8ZgGSNHjw).
 
+## Patrocinadores
+
+Si ClaudeRipple te ahorra tiempo, puedes apoyar su desarrollo en
+[GitHub Sponsors](https://github.com/sponsors/PBJ-2). Quienes aportan $10 al mes o más aparecen aquí.
+
+<!-- Supporter and Backer tier sponsors: add each name here (Backers with a link). -->
+_Todavía no hay patrocinadores. El tuyo podría ser el primero._
+
 ## Sin afiliación
 
 ClaudeRipple es un proyecto independiente de código abierto. No está afiliado a Anthropic ni

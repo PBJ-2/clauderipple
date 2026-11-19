@@ -445,6 +445,13 @@ Codex app / CLI ──/v1/responses──▶ ClaudeRipple ingress ──▶ Clau
 
 提问和报告问题都在 Discord：[https://discord.gg/R8ZgGSNHjw](https://discord.gg/R8ZgGSNHjw)。
 
+## 赞助
+
+如果 ClaudeRipple 为你节省了时间，欢迎通过 [GitHub Sponsors](https://github.com/sponsors/PBJ-2) 支持它的开发。每月 $10 及以上的赞助者会列在这里。
+
+<!-- Supporter and Backer tier sponsors: add each name here (Backers with a link). -->
+_目前还没有赞助者，欢迎成为第一位。_
+
 ## 无关联声明
 
 ClaudeRipple 是一个独立的开源项目。它与 Anthropic 或 OpenAI 均无关联，也未获得二者的认可或赞助。Claude 和 Claude Code 是 Anthropic, PBC 的商标。ChatGPT 和 Codex 是 OpenAI 的商标。

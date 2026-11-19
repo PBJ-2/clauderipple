@@ -22,6 +22,7 @@
   <a href="https://apps.apple.com/us/app/id6823063731"><img height="40" alt="App Store" src="https://img.shields.io/badge/App%20Store-Download-0D96F6?style=for-the-badge&logo=apple&logoColor=white"></a>
   <a href="https://play.google.com/store/apps/details?id=com.clauderipple.remote&hl=en"><img height="40" alt="Google Play" src="https://img.shields.io/badge/Google%20Play-Download-01875F?style=for-the-badge&logo=googleplay&logoColor=white"></a>
   <a href="https://discord.gg/R8ZgGSNHjw"><img height="40" alt="Discord" src="https://img.shields.io/badge/Discord-Join-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
+  <a href="https://github.com/sponsors/PBJ-2"><img height="40" alt="GitHub Sponsors" src="https://img.shields.io/badge/Sponsor-%E2%99%A5-DB61A2?style=for-the-badge&logo=githubsponsors&logoColor=white"></a>
 </p>
 
 <p align="center">
@@ -730,6 +731,14 @@ In daily use by the author, but young. Expect rough edges:
 
 Questions and bug reports are on Discord: [https://discord.gg/R8ZgGSNHjw](https://discord.gg/R8ZgGSNHjw).
 What is planned next: [docs/ROADMAP.md](docs/ROADMAP.md).
+
+## Sponsors
+
+If ClaudeRipple saves you time, you can support its development on
+[GitHub Sponsors](https://github.com/sponsors/PBJ-2). Supporters ($10 a month and up) are listed here.
+
+<!-- Supporter and Backer tier sponsors: add each name here (Backers with a link). -->
+_No sponsors yet. Yours could be the first._
 
 ## Not affiliated
 
