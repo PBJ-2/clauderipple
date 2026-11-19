@@ -158,6 +158,8 @@ async function nativeRig(reply: (seen: Seen, attempt: number) => Reply, claude: 
 
   return {
     home,
+    /** The live configuration the proxy reads on every request; replace its fields to change it mid-test. */
+    cfg,
     stored,
     third,
     seen,
@@ -477,6 +479,75 @@ test("a thread continue follows the conversation that produced its previous mess
     assert.deepEqual(rig.seen.map((item) => item.authorization),
       ["Bearer stored-token", "Bearer current-token", "Bearer current-token"],
       "the continue stays on the account holding its thread although another is preferred");
+  } finally {
+    await rig.stop();
+  }
+});
+
+// Anthropic keeps a thread's `output_config` and answers a `continue` whose own differs with 400
+// "differing field(s): output_config". A Workflow worker's `[[ripple: x@xhigh]]` sits in its task
+// prompt, which a continue does not carry, so the model id's `@high` decided the continue: every
+// turn was refused and replayed whole (requests.jsonl, 579 times 2026-11-13..19).
+const effortRig = () => {
+  let answered = 0;
+  return nativeRig((seen) => {
+    answered++;
+    return { status: 200, body: JSON.stringify({ id: `msg_effort_${answered}`, type: "message", role: "assistant", model: seen.body.model, content: [], usage: {} }) };
+  });
+};
+const sentEffort = (rig: Awaited<ReturnType<typeof nativeRig>>, index: number) =>
+  (rig.seen[index]!.body.output_config as { effort?: string } | undefined)?.effort;
+
+test("a thread continue repeats the effort its previous answer went out with", async () => {
+  const rig = await effortRig();
+  const effortOf = (index: number) => sentEffort(rig, index);
+  try {
+    // Two workers on one model id, interleaved: thread A's task prompt carries a marker, B's does not.
+    assert.equal(await rig.send("thread-a", { model: "claude-opus-5@high", content: "[[ripple: claude-opus-5@xhigh]]\nreview this" }), 200);
+    assert.equal(effortOf(0), "xhigh", "the marker decides A's full request");
+    assert.equal(await rig.send("thread-b", { model: "claude-opus-5@high", content: "review that" }), 200);
+    assert.equal(effortOf(1), "high", "B has no marker");
+
+    assert.equal(await rig.send("thread-a", { model: "claude-opus-5@high", content: "a tool result", previous: "msg_effort_1" }), 200);
+    assert.equal(effortOf(2), "xhigh", "A's continue carries no marker and still goes out as its thread did");
+    assert.equal(rig.seen[2]!.body.thread !== undefined, true, "the thread itself is still forwarded");
+    assert.equal(await rig.send("thread-b", { model: "claude-opus-5@high", content: "a tool result", previous: "msg_effort_2" }), 200);
+    assert.equal(effortOf(3), "high", "B's continue, right after A's, keeps B's own effort");
+    assert.equal(await rig.send("thread-c", { model: "claude-opus-5@high", content: "a tool result", previous: "msg_unknown" }), 200);
+    assert.equal(effortOf(4), "high", "an unknown previous answer keeps the resolved effort, though A answered last but one");
+
+    assert.equal(await rig.send("thread-a", { model: "claude-opus-5@high", content: "another tool result", previous: "msg_effort_3" }), 200);
+    assert.equal(effortOf(5), "xhigh", "A's continue's own answer is remembered in turn");
+    assert.equal(await rig.send("thread-a", { model: "claude-opus-5@medium", content: "a tool result", previous: "msg_effort_6" }), 200);
+    assert.equal(effortOf(6), "medium", "a changed model id is the client's own change and is sent as asked");
+  } finally {
+    await rig.stop();
+  }
+});
+
+test("a thread continue follows a changed configured effort, which no marker set", async () => {
+  const rig = await effortRig();
+  try {
+    rig.cfg.routes = { ...rig.cfg.routes, "claude-opus-4-8": { provider: "claude", model: "claude-opus-5", effort: "high" } };
+    assert.equal(await rig.send("slot", { model: "claude-opus-4-8" }), 200);
+    assert.equal(sentEffort(rig, 0), "high");
+    rig.cfg.routes = { ...rig.cfg.routes, "claude-opus-4-8": { provider: "claude", model: "claude-opus-5", effort: "medium" } };
+    assert.equal(await rig.send("slot", { model: "claude-opus-4-8", content: "a tool result", previous: "msg_effort_1" }), 200);
+    assert.equal(sentEffort(rig, 1), "medium", "the setting reaches the running thread, as it does without the router");
+  } finally {
+    await rig.stop();
+  }
+});
+
+test("a thread continue repeats the clamped effort its thread was sent with, after the clamp changes", async () => {
+  const rig = await effortRig();
+  try {
+    rig.cfg.effortClamp = { xhigh: "high" };
+    assert.equal(await rig.send("clamped", { model: "claude-opus-5@medium", content: "[[ripple: claude-opus-5@xhigh]]\nreview this" }), 200);
+    assert.equal(sentEffort(rig, 0), "high", "the marker's xhigh went out clamped");
+    rig.cfg.effortClamp = {};
+    assert.equal(await rig.send("clamped", { model: "claude-opus-5@medium", content: "a tool result", previous: "msg_effort_1" }), 200);
+    assert.equal(sentEffort(rig, 1), "high", "the continue repeats what the thread stored, not the unclamped marker or the model id");
   } finally {
     await rig.stop();
   }
