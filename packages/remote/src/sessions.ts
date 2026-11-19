@@ -493,7 +493,9 @@ export class Sessions {
   private unarmedLoggedMs = 0;
   /** The last state seen per non-bridged Mac session, for the away-alert transitions. The first
    * sight of a session only seeds it: a host start must not push for turns that ended before it. */
-  private macStates = new Map<string, { state: SessionState; permission: boolean }>();
+  private macStates = new Map<string, { state: SessionState; permission: boolean; background?: boolean }>();
+  /** Claude app conversation id → when the mod last submitted a phone message into it (modTurnUnseen). */
+  private modSubmitted = new Map<string, number>();
   /** Claude app sessions: the status line read from the transcript at `size`. Recomputed only when
    * that file grew, so a poll never rereads a transcript it has already read (a 256 KB window). */
   private statuses = new Map<string, { size: number; status: string }>();
@@ -1274,9 +1276,11 @@ export class Sessions {
       seen.add(s.id);
       // A mod approval the phone holds is pushed as its own permission event; reading it as waiting here would push twice.
       const permission = s.state === "waiting" && this.approvals.active(s.id).length === 0 || s.pending > 0;
-      if (permission || BUSY.has(s.state)) this.lastBusyAt = this.now();
+      // Background agents still run after the main turn ended: the computer is still working.
+      const background = s.state === "idle" && this.desktop.liveProcess(s.id)?.backgroundOnly === true;
+      if (permission || BUSY.has(s.state) || background) this.lastBusyAt = this.now();
       const previous = this.macStates.get(s.id);
-      this.macStates.set(s.id, { state: s.state, permission });
+      this.macStates.set(s.id, { state: s.state, permission, ...(background ? { background } : {}) });
       const current = this.attention.get(s.id) ?? null;
       // List-only desktop sessions have no record whose setState would retire the previous
       // turn's attention. Use the same transition contract without generating startup alerts.
@@ -1436,7 +1440,7 @@ export class Sessions {
       if (this.opts.permissions.pending(r.id).length > 0) return true;
     }
     // Claude app sessions the list only alerts on (pollMacAlerts): running, waiting for approval.
-    for (const state of this.macStates.values()) if (BUSY.has(state.state) || state.permission) return true;
+    for (const state of this.macStates.values()) if (BUSY.has(state.state) || state.permission || state.background) return true;
     // A question the Claude app's wrap_up left is a stopped turn that waits for the person (issue #82).
     // Read from the question's own pending state: a phone opening the session clears the attention
     // flag (markSeen), but the session still waits for that answer.
@@ -2273,6 +2277,7 @@ export class Sessions {
     if (offer.kind === "clear") return this.finishClear(id, offer, outcome);
     // What the person sent, as queued: a photo's text the mod submitted carries path lines, a command's offer only its arguments.
     const queued = this.sendQueue.items(id).find(item => item.id === offer.itemId);
+    if (outcome === "submitted" || offer.kind === "command" && outcome === "unknown") this.modSubmitted.set(offer.sessionId, this.now());
     if (offer.kind === "command" && outcome === "unknown") {
       // It may have run: not held, not marked sent. The item leaves the queue and the timeline says so; a resend is the person's call.
       this.dropModEcho(offer.itemId);
@@ -3909,7 +3914,18 @@ export class Sessions {
   private appBusy(desktopId: string): boolean {
     if (!this.desktop) return false;
     const process = this.desktop.liveProcess(desktopId, 0);
+    if (process?.backgroundOnly && this.modTurnUnseen(desktopId, process.turnEndedAt)) return true;
     return process ? process.status !== "idle" : this.desktop.isOpen(desktopId);
+  }
+
+  /** The mod submitted a message after the conversation's last turn end, and the transcript has not
+   * shown that turn yet: while background agents keep the registry busy, nothing else says it runs,
+   * so the next queued message would follow it in at once. A minute without the turn appearing frees it. */
+  private modTurnUnseen(desktopId: string, endedAt: number | undefined): boolean {
+    const at = this.modSubmitted.get(desktopId);
+    if (at === undefined) return false;
+    if (this.now() - at >= 60_000) { this.modSubmitted.delete(desktopId); return false; }
+    return endedAt === undefined || at > endedAt;
   }
 
   /** appBusy, or the app's background agents still run in this conversation after its turn ended: the

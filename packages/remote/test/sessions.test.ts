@@ -3282,6 +3282,25 @@ test("a Remote Control app session whose main turn ended while background agents
   assert.deepEqual(f.posts, []);
 });
 
+test("with background agents holding the registry busy, a second queued message waits for the turn the first one started", async t => {
+  const f = appRcModFixture(t);
+  f.sessions.modInbox.listen(APP_ID, Date.now());
+  const entry = f.registry.get(APP_ID)!;
+  Object.assign(entry, { status: "idle", backgroundOnly: true, turnEndedAt: Date.now() - 60_000 });
+  assert.equal(await f.sessions.send(APP_ID, "rc-bg-1", "First", []), APP_ID);
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "rc-bg-1"));
+  assert.equal(await f.sessions.send(APP_ID, "rc-bg-2", "Second", []), APP_ID);
+  assert.equal(f.sessions.modInbox.claim("rc-bg-1"), true);
+  assert.equal(f.sessions.modInbox.result("rc-bg-1", "submitted"), true);
+  // The first message's prompt is not in the transcript yet: the registry still reads background-only.
+  await delay(30); f.sessions.pollQueued(); await delay(30);
+  assert.equal(f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "rc-bg-2"), false, "the second waits");
+  // That turn ran and ended: the second goes.
+  entry.turnEndedAt = Date.now() + 1;
+  f.sessions.pollQueued();
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "rc-bg-2"));
+});
+
 test("an interrupt send to a Remote Control app session is refused as mod-offline only when no mod answers or it cannot run the kind", async t => {
   const f = appRcModFixture(t, 20);
   // No mod at all: nothing is stopped and nothing is posted.

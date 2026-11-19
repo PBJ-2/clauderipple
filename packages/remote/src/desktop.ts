@@ -21,6 +21,8 @@ export { nextPlan } from "./task-plan.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const WINDOW = 256 * 1024;
+/** How long an assistant's final reply waits for its Stop hook summary before it is taken as the turn's end. */
+const STOP_HOOK_GRACE_MS = 60_000;
 const RECENT_MS = 14 * 24 * 60 * 60 * 1000;
 /** How long a session the host was told of (DesktopSessions.rediscover) stays listed while the sidebar lags. */
 const NAMED_MS = 10 * 60 * 1000;
@@ -28,7 +30,7 @@ type RecordValue = Record<string, unknown>;
 type Summarize = (tool: string, input: RecordValue, cwd: string) => string;
 interface Source { file: string; size: number; mtime: number; unfinished: boolean; summary: SessionSummary }
 interface Imported { size: number; mtime: number; log: EventLog; dir: string; children?: Map<string, SubagentState> }
-export interface DesktopProcess { sessionId: string; pid: number; status: "busy" | "shell" | "idle" | "waiting"; bridgeSessionId?: string; /** The folder the app's worker runs in, as its registry records it. */ cwd?: string; /** A CLI running outside the Claude app, not one of the app's writers. */ external?: true; /** When this process started (epoch ms), as its registry records it. Work begun before it is not running in it. */ startedAt?: number; /** When the registry last changed `status` (epoch ms). */ statusAt?: number; /** The registry says busy, but the main turn ended after it said so: only background work runs. `status` reads idle then. */ backgroundOnly?: true }
+export interface DesktopProcess { sessionId: string; pid: number; status: "busy" | "shell" | "idle" | "waiting"; bridgeSessionId?: string; /** The folder the app's worker runs in, as its registry records it. */ cwd?: string; /** A CLI running outside the Claude app, not one of the app's writers. */ external?: true; /** When this process started (epoch ms), as its registry records it. Work begun before it is not running in it. */ startedAt?: number; /** When the registry last changed `status` (epoch ms). */ statusAt?: number; /** The registry says busy, but the main turn ended after it said so: only background work runs. `status` reads idle then. */ backgroundOnly?: true; /** With backgroundOnly: when that main turn ended (epoch ms). */ turnEndedAt?: number }
 
 /**
  * pid → the start time `ps` reported for it. A pid's start time never changes while it lives, and
@@ -545,6 +547,8 @@ export class BackgroundTasks {
   turnStartedAt: number | null = null;
   /** When the main turn last ended, while it stays ended; null while one runs or none was seen. */
   turnEndedAt: number | null = null;
+  /** The end seen is an assistant's final reply whose Stop hook has not reported yet. */
+  turnEndPending = false;
 
   accept(line: string): void {
     const r = record(line);
@@ -552,7 +556,10 @@ export class BackgroundTasks {
     const content = object(r.message)?.content;
     const at = typeof r.timestamp === "string" ? Date.parse(r.timestamp) : NaN;
     const step = turnStep(r);
-    if (step !== null) this.turnEndedAt = step || !Number.isFinite(at) ? null : at;
+    if (step !== null) {
+      this.turnEndedAt = step || !Number.isFinite(at) ? null : at;
+      this.turnEndPending = !step && r.type === "assistant";
+    }
     // A phone message the ripple mod submits as the person's is written as a plugin origin with asUser;
     // it starts the person's turn the same as one typed in the app (2026-11-19: the last turn's
     // finished plan stayed on the phone under the next message).
@@ -664,18 +671,28 @@ export class DesktopSessions {
   }
 
   liveProcess(id: string, maxAgeMs = 1000): DesktopProcess | undefined {
-    return this.settled(id, (this.opts.registry?.() ?? liveDesktopProcesses(path.join(path.dirname(this.projects), "sessions"), maxAgeMs)).get(id));
+    return this.settled(id, this.registered(id, maxAgeMs));
+  }
+
+  /** The registry's own entry, status as written: for its folder and start time, which need no transcript read. */
+  private registered(id: string, maxAgeMs = 1000): DesktopProcess | undefined {
+    return (this.opts.registry?.() ?? liveDesktopProcesses(path.join(path.dirname(this.projects), "sessions"), maxAgeMs)).get(id);
   }
 
   /** The app's registry stays "busy" while background agents run, through the main turn's end and
    * the turns after it (2026-11-20: a session read busy for three hours, so the phone showed it
    * working and sent a question card's answer as an interruption the mod never took). A busy set
    * before the transcript's own turn end is that background work: the main turn is idle. A busy set
-   * after it is a new turn whose prompt the transcript may not have yet. */
+   * after it is a new turn whose prompt the transcript may not have yet. An assistant's last reply
+   * is written before the Stop hook runs, and the hook may send the turn on: only its summary, or a
+   * minute without one, ends the turn. */
   private settled(id: string, p: DesktopProcess | undefined): DesktopProcess | undefined {
     if (p?.status !== "busy" || p.statusAt === undefined) return p;
-    const ended = this.scan(id)?.turnEndedAt;
-    return ended != null && ended >= p.statusAt ? { ...p, status: "idle", backgroundOnly: true } : p;
+    const tracker = this.scan(id);
+    const ended = tracker?.turnEndedAt;
+    if (ended == null || ended < p.statusAt) return p;
+    if (tracker!.turnEndPending && (this.opts.now ?? Date.now)() - ended < STOP_HOOK_GRACE_MS) return p;
+    return { ...p, status: "idle", backgroundOnly: true, turnEndedAt: ended };
   }
 
   /** The CLIs alive outside the Claude app, minus any session the app's own registry holds: the app's writer wins. */
@@ -764,7 +781,7 @@ export class DesktopSessions {
       const copies = this.tailCopies.get(id);
       const next = scanLines(fd, size, line => {
         if (copies?.recorded(line)) return;
-        for (const body of transcriptEvents(line, this.liveProcess(id)?.cwd ?? source.summary.cwd, this.opts.summarize, sink, { state, resolve }, seen).bodies) visit(body);
+        for (const body of transcriptEvents(line, this.registered(id)?.cwd ?? source.summary.cwd, this.opts.summarize, sink, { state, resolve }, seen).bodies) visit(body);
       }, offset);
       // Worker transcripts grow independently of the parent, even once their model is known.
       for (const [toolUseId, running] of state) {
@@ -797,7 +814,7 @@ export class DesktopSessions {
     // Work begun before the live process started cannot still run in it: a restarted app or CLI
     // lost it without writing an end to the transcript (#176). The registry's startedAt is the
     // process's own start; schedules are left alone (a durable cron outlives its process).
-    const processStart = this.liveProcess(id)?.startedAt;
+    const processStart = this.registered(id)?.startedAt;
     const active: BackgroundTask[] = [], history = (tracker?.history ?? []).map(withEffort), lost: BackgroundTask[] = [];
     for (const task of (tracker?.list ?? []).map(withEffort)) {
       const state = source && task.kind === "agent" ? agentStatus(path.join(this.subagentsDir(source), `agent-${task.id}.jsonl`)) : null;
@@ -948,7 +965,7 @@ export class DesktopSessions {
     const resolve = (toolUseId: string, input: RecordValue) => this.subInfo(id, toolUseId, input);
     try {
       scanLines(fd, fs.fstatSync(fd).size, line => {
-        const parsed = transcriptEvents(line, this.liveProcess(id)?.cwd ?? source.summary.cwd, this.opts.summarize, data => log.image(data), { allowSidechain: true, state, resolve }, (src, hash) => log.lineSeen(src, hash));
+        const parsed = transcriptEvents(line, this.registered(id)?.cwd ?? source.summary.cwd, this.opts.summarize, data => log.image(data), { allowSidechain: true, state, resolve }, (src, hash) => log.lineSeen(src, hash));
         at = parsed.at ?? at;
         for (const body of parsed.bodies) log.append(body.kind === "user" && !body.clientMsgId ? { ...body, clientMsgId: `desktop-${log.lastSeq + 1}` } : body);
       });
@@ -1018,7 +1035,7 @@ export class DesktopSessions {
     if (!file) return false;
     // The same checks as every transcript read; the worker opens the path again, without following a link.
     fs.closeSync(this.open(file));
-    const folder = this.liveProcess(id)?.cwd ?? this.sources.get(id)?.summary.cwd ?? cwd;
+    const folder = this.registered(id)?.cwd ?? this.sources.get(id)?.summary.cwd ?? cwd;
     const ext = path.extname(fileURLToPath(import.meta.url));
     const worker = new Worker(new URL(`./file-repair-worker${ext}`, import.meta.url), { workerData: { file, want: { lines: [...want.lines], calls: [...want.calls] }, cwd: folder, epoch } });
     try {
@@ -1171,7 +1188,7 @@ export class DesktopSessions {
       source.size = scanLines(fd, fs.fstatSync(fd).size, line => {
         // The whole conversation is rebuilt here, and a bridge reconnect may already have copied an
         // old block into it: convert each uuid once, as the live tail does (#126).
-        const parsed = transcriptEvents(line, this.liveProcess(id)?.cwd ?? source.summary.cwd, this.opts.summarize, data => log.image(data), { state, resolve }, (src, hash) => log.lineSeen(src, hash));
+        const parsed = transcriptEvents(line, this.registered(id)?.cwd ?? source.summary.cwd, this.opts.summarize, data => log.image(data), { state, resolve }, (src, hash) => log.lineSeen(src, hash));
         at = parsed.at ?? at;
         for (const body of parsed.bodies) {
           if (body.kind !== "user") { log.append(body); continue; }

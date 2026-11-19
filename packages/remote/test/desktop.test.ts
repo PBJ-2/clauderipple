@@ -1023,3 +1023,25 @@ test("a busy the registry set before the main turn ended is background work: the
   registry.set(id, { sessionId: id, pid: 42, status: "busy", bridgeSessionId: "cse_x" });
   assert.equal(desktop.liveProcess(id)?.status, "busy");
 });
+
+test("an assistant's final reply is not the turn's end until its Stop hook reports, or a minute passes without it", t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "desktop-test-"));
+  const projects = path.join(root, "projects");
+  const project = path.join(projects, "project");
+  fs.mkdirSync(project, { recursive: true });
+  const registry = new Map<string, DesktopProcess>();
+  let now = Date.parse("2026-11-19T12:40:10.000Z");
+  const desktop = new DesktopSessions({ projects, summarize, excluded: () => new Set(), now: () => now, processes: () => "", registry: () => registry });
+  t.after(() => { desktop.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  const file = path.join(project, `${id}.jsonl`);
+  fs.writeFileSync(file, line(user) + line({ type: "assistant", timestamp: "2026-11-19T12:40:00.000Z", message: { id: "m-1", model: "test-model", stop_reason: "end_turn", content: [{ type: "text", text: "Done." }] } }));
+  desktop.list();
+  registry.set(id, { sessionId: id, pid: 42, status: "busy", bridgeSessionId: "cse_x", statusAt: Date.parse("2026-11-19T12:36:00.000Z") });
+  assert.equal(desktop.liveProcess(id)?.status, "busy", "the Stop hook may still send the turn on");
+  now = Date.parse("2026-11-19T12:41:01.000Z");
+  assert.equal(desktop.liveProcess(id)?.status, "idle", "a minute without the hook's summary");
+  now = Date.parse("2026-11-19T12:40:10.000Z");
+  fs.appendFileSync(file, line({ type: "system", subtype: "stop_hook_summary", timestamp: "2026-11-19T12:40:05.000Z" }));
+  assert.equal(desktop.liveProcess(id)?.status, "idle", "the hook let the turn end");
+  assert.equal(desktop.liveProcess(id)?.turnEndedAt, Date.parse("2026-11-19T12:40:05.000Z"));
+});
