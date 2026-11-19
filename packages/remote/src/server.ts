@@ -55,6 +55,7 @@ export const SHARED: Record<string, (pkgDir: string) => string> = {
   "src/chunks.ts": (pkg) => path.join(pkg, "src", "chunks.ts"),
   "src/tool-details.ts": (pkg) => path.join(pkg, "src", "tool-details.ts"),
   "src/wrap-up.ts": (pkg) => path.join(pkg, "src", "wrap-up.ts"),
+  "src/settings-notice.ts": (pkg) => path.join(pkg, "src", "settings-notice.ts"),
   "src/e2ee.ts": (pkg) => path.join(pkg, "src", "e2ee.ts"),
   "vendor/nacl-fast.min.js": () => require.resolve("tweetnacl/nacl-fast.min.js"),
 };
