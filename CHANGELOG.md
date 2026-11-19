@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.12.43 — 2026-11-19
+
+### Fixed
+
+- **Phone messages reach Claude app sessions with Remote Control on again.** Since 2026-11-18,
+  Anthropic's server no longer marks a message the phone host posts to Remote Control as typed by a
+  person, so Claude Code treated it as a message from another session and never ran it: the phone
+  showed "thinking" and nothing happened. Plain text for such a session now goes through the ripple
+  mod inside the Claude app, as it already did for sessions without Remote Control, and waits in the
+  queue while the session is busy. Sending a new message still replaces an open permission prompt.
+  Photos and slash commands, and sessions without the mod, still go over Remote Control, so they do
+  not arrive until Anthropic accepts them again; messages from the official Claude app are not affected.
+- **The last turn's finished task list no longer stays under a new phone message.** A message the mod
+  runs for the phone now starts a new turn on the phone like one typed in the app.
+
 ## 0.12.42 — 2026-11-18
 
 ### Fixed
