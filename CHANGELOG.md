@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.12.45 — 2026-11-20
+
+### Fixed
+
+- **A Claude app session whose turn ended no longer shows "working" while its background agents run.**
+  The app keeps a session busy for as long as any background agent runs, so the phone showed it
+  working for hours, and a question card's answer went as an interruption that could not stop
+  anything and stayed queued with "the mod is not responding". The phone now goes by the
+  conversation's own turn end (after its Stop hook), sends answers straight in, and holds a second
+  queued message until the turn the first one started has shown. The computer still counts the
+  background work as work.
+- **A finished task list leaves the phone.** A plan with every step done no longer stays under the
+  last message.
+- **Finished background work no longer piles up as "running" on the phone.** A wakeup the model
+  scheduled for itself moves to Recent once the turn it ran in has ended; the work of a conversation
+  no Claude process holds any more moves to Recent as unknown (a durable cron schedule stays); and a
+  shell command whose output merely quotes a worker's launch message is no longer listed as running.
+
 ## 0.12.44 — 2026-11-19
 
 ### Fixed
