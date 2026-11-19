@@ -73,6 +73,13 @@ test("the turn's task list follows update_plan as the app applies it, and the ne
   assert.equal(tasks.plan.length, 15);
   tasks.accept(line({ type: "user", timestamp: "2026-10-23T01:00:00.000Z", origin: { kind: "human" }, message: { content: "next" } }));
   assert.deepEqual(tasks.plan, []);
+  // A phone message the ripple mod submits as the person's starts a new turn too; another plugin's prompt does not.
+  plan({ items: [{ content: "Ship it", status: "completed" }] });
+  tasks.accept(line({ type: "user", timestamp: "2026-10-23T02:00:00.000Z", origin: { kind: "plugin", name: "other" }, message: { content: "note" } }));
+  assert.equal(tasks.plan.length, 1);
+  tasks.accept(line({ type: "user", timestamp: "2026-10-23T03:00:00.000Z", origin: { kind: "plugin", name: "ripple", asUser: true }, message: { content: "여긴 리플리모트" } }));
+  assert.deepEqual(tasks.plan, []);
+  assert.equal(tasks.turnStartedAt, Date.parse("2026-10-23T03:00:00.000Z"));
 });
 
 test("the main turn starts at the person's message, not a compaction summary or task notification", () => {

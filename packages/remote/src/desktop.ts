@@ -537,7 +537,11 @@ export class BackgroundTasks {
     if (!r || r.isSidechain === true) return;
     const content = object(r.message)?.content;
     const at = typeof r.timestamp === "string" ? Date.parse(r.timestamp) : NaN;
-    if (r.type === "user" && object(r.origin)?.kind === "human") {
+    // A phone message the ripple mod submits as the person's is written as a plugin origin with asUser;
+    // it starts the person's turn the same as one typed in the app (2026-11-19: the last turn's
+    // finished plan stayed on the phone under the next message).
+    const origin = object(r.origin);
+    if (r.type === "user" && (origin?.kind === "human" || origin?.kind === "plugin" && origin.asUser === true)) {
       if (Number.isFinite(at)) this.turnStartedAt = at;
       this.planState.newTurn();
     }
