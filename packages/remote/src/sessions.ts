@@ -324,9 +324,12 @@ type ModItemKind = "prompt" | "command" | "clear";
 function modItemKind(text: string, attachments: readonly { mediaType?: string }[]): ModItemKind | null {
   if (CLEAR_TEXT.test(text) && !attachments.length) return "clear";
   const slash = text.trimStart().startsWith("/");
-  // A photo's caption that starts with "/" would run as a command, not reach Claude as the person's words.
-  if (attachments.length) return !slash && attachments.every(a => PHOTO_TYPES.includes(a?.mediaType ?? "")) ? "prompt" : null;
-  if (slash) return COMMAND_TEXT.test(text) && !HOST_COMMAND.test(text) ? "command" : null;
+  const command = slash && COMMAND_TEXT.test(text) && !HOST_COMMAND.test(text);
+  // A photo whose caption is a slash command runs that command with the photos' file lines after its
+  // arguments, as a command typed in the app with a pasted path would (2026-11-19: "/context" with a
+  // photo had no way in). Other "/" captions would run as commands the person did not mean.
+  if (attachments.length) return attachments.every(a => PHOTO_TYPES.includes(a?.mediaType ?? "")) ? !slash ? "prompt" : command ? "command" : null : null;
+  if (slash) return command ? "command" : null;
   return text.trim() ? "prompt" : null;
 }
 /** The command's name and its arguments exactly as typed after the name (COMMAND_TEXT matched). */
@@ -2081,8 +2084,8 @@ export class Sessions {
     const what = kind ?? (modItemKind(item.text, item.attachments) === "command" ? "command" : "prompt");
     let text = item.text;
     let command: string | undefined;
-    if (what === "command") { const parsed = commandOf(item.text); command = parsed.name; text = parsed.args; }
-    else if (item.attachments.length) text = this.photoText(id, sessionId, item);
+    if (what === "command") { const parsed = commandOf(item.text); command = parsed.name; text = item.attachments.length ? this.photoText(id, sessionId, item, parsed.args) : parsed.args; }
+    else if (item.attachments.length) text = this.photoText(id, sessionId, item, item.text);
     this.modOwners.set(item.id, id);
     if (kind === "clear") this.clearFrom.set(item.id, sessionId);
     const offered = this.modInbox.offer({ sessionId, itemId: item.id, text, offeredAt: this.now(), ...(what === "prompt" ? {} : { kind: what }), ...(command !== undefined ? { command } : {}) }, this.opts.modOfferMs ?? 6000);
@@ -2090,15 +2093,15 @@ export class Sessions {
     return offered.then(state => { if (state !== "claimed") { this.modOwners.delete(item.id); this.clearFrom.delete(item.id); } return state; });
   }
 
-  /** The text the mod submits for a queued photo message: the person's words, then where each photo is. */
-  private photoText(id: string, sessionId: string, item: QueueItem): string {
+  /** The text the mod submits for a queued photo message (`base`: the person's words, or a command's arguments), then where each photo is. */
+  private photoText(id: string, sessionId: string, item: QueueItem, base: string): string {
     try {
       const photos = item.attachments.map(a => {
         const data = this.sendQueue.data(a);
         if (!data) throw new Error("Attachment missing.");
         return data;
       });
-      return modPhotoText(item.text, writeModPhotos(this.photoRoot, sessionId, item.id, photos));
+      return modPhotoText(base, writeModPhotos(this.photoRoot, sessionId, item.id, photos));
     } catch {
       this.sendQueue.fail(id, item.id, MOD_PHOTO_FAILED);
       this.opts.onSessions();
@@ -2285,9 +2288,11 @@ export class Sessions {
       // Its user event must come from the app: appending here would duplicate it until rebuild.
       if (this.records.has(id) && !this.seen(id, offer.itemId)) {
         // The phone shows the message as the person sent it: a photo's thumbnails, not the lines that name its files.
-        const sent = offer.kind === "command" ? undefined : readModPhotoText(this.photoRoot, offer.sessionId, offer.text);
+        // A command shows as typed ("/name args"), with its photos' thumbnails when it carried any.
+        const sent = readModPhotoText(this.photoRoot, offer.sessionId, offer.text);
         const log = sent ? this.log(id) : undefined;
-        this.append(id, { kind: "user", text: sent ? sent.text : offer.kind === "command" ? queued?.text ?? offer.text : offer.text, clientMsgId: offer.itemId, images: sent ? sent.photos.map(photo => ({ type: "image" as const, blob: log!.image(photo.data), mediaType: photo.mediaType })) : [] });
+        const shown = offer.kind === "command" ? queued?.text ?? offer.text : sent ? sent.text : offer.text;
+        this.append(id, { kind: "user", text: shown, clientMsgId: offer.itemId, images: sent ? sent.photos.map(photo => ({ type: "image" as const, blob: log!.image(photo.data), mediaType: photo.mediaType })) : [] });
         this.rememberClientMsgId(id, offer.itemId);
       }
       if (!this.records.has(id)) {

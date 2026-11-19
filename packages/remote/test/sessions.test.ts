@@ -2984,6 +2984,26 @@ test("a bare slash command carries empty arguments, and a path or /exit is not a
   assert.equal(f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "cmd-path"), false);
 });
 
+test("a photo whose caption is a slash command runs the command with the photo's file line in its arguments", async t => {
+  const f = appRcModFixture(t);
+  f.sessions.log(APP_ID);
+  f.sessions.modInbox.listen(APP_ID, Date.now(), ["command"]);
+  await f.sessions.send(APP_ID, "cmd-pic", "/review this screen", [photo(f.sessions, APP_ID)]);
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "cmd-pic"));
+  const offer = f.sessions.modInbox.pending(APP_ID).find(o => o.itemId === "cmd-pic")!;
+  assert.equal(offer.kind, "command");
+  assert.equal(offer.command, "review");
+  assert.match(offer.text, /^this screen\n\n📷 Photo \(open with Read\): .+cmd-pic-1\.png$/);
+  assert.equal(f.sessions.modInbox.claim("cmd-pic"), true);
+  assert.equal(f.sessions.modInbox.result("cmd-pic", "submitted"), true);
+  const user = reduce(f.sessions.log(APP_ID).readAfter(0).events).items.find(item => item.type === "user" && item.text.startsWith("/review")) as { text: string; images?: unknown[] } | undefined;
+  assert.equal(user?.text, "/review this screen", "shown as typed, not with the file line");
+  assert.equal(user?.images?.length, 1, "with its thumbnail");
+  // A "/" caption that is no command still has no way in.
+  await assert.rejects(Promise.resolve().then(() => f.sessions.send(APP_ID, "path-pic", "/usr/bin/env is missing", [photo(f.sessions, APP_ID)])), modOffline);
+  assert.deepEqual(f.posts, []);
+});
+
 test("a slash command the mod fails is a visible error on the queued item, never silent", async t => {
   const f = appRcModFixture(t);
   f.sessions.modInbox.listen(APP_ID, Date.now(), ["command"]);
