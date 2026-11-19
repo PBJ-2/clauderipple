@@ -11,7 +11,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { EventLog } from "./eventlog.ts";
 import { repairRefusedFiles } from "./file-repair.ts";
 import { narrationBody } from "./narration.ts";
-import { TaskPlan } from "./task-plan.ts";
+import { shownPlan, TaskPlan } from "./task-plan.ts";
 import { BackgroundActivity } from "./background-activity.ts";
 import { toolInput } from "./tool-details.ts";
 import type { PushContext } from "./push-content.ts";
@@ -511,7 +511,7 @@ export class Sessions {
   /** The registry says busy (it counts background work) while the main turn itself is not running. */
   private background(process: DesktopProcess): boolean {
     const state = this.bridgeState(process);
-    return (process.status === "busy" || process.status === "shell") && state !== "running" && state !== "waiting";
+    return (process.status === "busy" || process.status === "shell" || process.backgroundOnly === true) && state !== "running" && state !== "waiting";
   }
 
   private bridgeState(process: DesktopProcess, bridgeId = process.bridgeSessionId): SessionState {
@@ -520,6 +520,8 @@ export class Sessions {
     if (sent !== undefined && this.now() - sent < 9000) return "running";
     if (id) this.bridgeRunning.delete(id);
     const cached = id ? this.bridgeStates.get(id)?.state : undefined;
+    // The bridge's worker status follows the same busy the registry keeps for background agents.
+    if (process.backgroundOnly && cached !== "waiting") return "idle";
     return cached ?? (process.status === "waiting" ? "waiting" : process.status === "idle" ? "idle" : "running");
   }
 
@@ -1430,7 +1432,7 @@ export class Sessions {
       if (!r.desktopBridge && !this.canTailHandoff(r) && this.hasBackgroundWork(r.id)) return true;
       // A tailed or handed-off Claude app conversation keeps its state in the app's registry.
       const process = this.desktop?.liveProcess(r.sdkSessionId ?? r.id);
-      if (process && process.status !== "idle") return true;
+      if (process && (process.status !== "idle" || process.backgroundOnly)) return true;
       if (this.opts.permissions.pending(r.id).length > 0) return true;
     }
     // Claude app sessions the list only alerts on (pollMacAlerts): running, waiting for approval.
@@ -1526,7 +1528,7 @@ export class Sessions {
     const taskList = r.desktopBridge ? this.desktop?.backgroundTaskList(r.sdkSessionId ?? r.id) ?? [] : activity?.active ?? [];
     const taskHistory = r.desktopBridge ? this.desktop?.backgroundTaskHistory(r.sdkSessionId ?? r.id) ?? [] : activity?.history ?? [];
     const turnStartedAt = working ? this.desktop?.turnStartedAt(r.sdkSessionId ?? r.id) ?? null : null;
-    const plan = r.desktopBridge ? this.desktop?.plan(r.sdkSessionId ?? r.id) ?? [] : this.taskState(r.id).tracker.list;
+    const plan = r.desktopBridge ? this.desktop?.plan(r.sdkSessionId ?? r.id) ?? [] : shownPlan(this.taskState(r.id).tracker.list);
     // The desktop launcher confirms opening, not permissions. Retain the SDK choice for a
     // future host resume, but do not advertise it as the app's current mode after handoff.
     const hostMode = this.live.has(r.id) || r.desktopHandoff !== "attempted" && r.desktopHandoff !== "opening";
@@ -2454,7 +2456,7 @@ export class Sessions {
    * only until the sweep's next look.
    */
   private sweepApprovals(): void {
-    const stale = this.approvals.sweep(desktopId => this.appBusy(desktopId));
+    const stale = this.approvals.sweep(desktopId => this.appWorking(desktopId));
     for (const ask of stale) {
       if (!ask.recordId) continue;
       this.opts.permissions.expire(ask.recordId, "stale");
@@ -2834,7 +2836,7 @@ export class Sessions {
       if (this.appModSession(id, desktopId)) {
         // Preserve the legacy handed-off fallback, but never adopt an app-created writer.
         if (!this.handedOff(id)) throw new DesktopBlockedError();
-        if (this.appBusy(desktopId)) throw new DesktopBusyError();
+        if (this.appWorking(desktopId)) throw new DesktopBusyError();
       }
       if (existing?.desktopBridge) { this.closeBridge(id); existing.desktopBridge = false; this.save(); }
     }
@@ -3608,7 +3610,7 @@ export class Sessions {
   private start(r: SessionRecord): Live {
     if (r.sdkSessionId && this.desktop?.isOpen(r.sdkSessionId)) {
       if (!this.handedOff(r.id)) throw new DesktopBlockedError();
-      if (this.appBusy(r.sdkSessionId)) throw new DesktopBusyError();
+      if (this.appWorking(r.sdkSessionId)) throw new DesktopBusyError();
     }
     this.invalidateActivity(r.id);
     const abort = new AbortController();
@@ -3908,6 +3910,12 @@ export class Sessions {
     if (!this.desktop) return false;
     const process = this.desktop.liveProcess(desktopId, 0);
     return process ? process.status !== "idle" : this.desktop.isOpen(desktopId);
+  }
+
+  /** appBusy, or the app's background agents still run in this conversation after its turn ended: the
+   * host must not resume it beside them, and their approval prompts are not stale. */
+  private appWorking(desktopId: string): boolean {
+    return this.appBusy(desktopId) || this.desktop?.liveProcess(desktopId, 0)?.backgroundOnly === true;
   }
 
   private sdkIdle(r: SessionRecord, live = this.live.get(r.id)): boolean {

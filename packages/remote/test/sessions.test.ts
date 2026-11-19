@@ -13,6 +13,7 @@ import { INLINE_CAP, WATCH_IDLE_MS } from "../src/protocol.ts";
 import type { Effort, SessionEvent } from "../src/protocol.ts";
 import { Sessions, modelArg, nextAttention, summarize, uuidFrom } from "../src/sessions.ts";
 import { APPROVAL_FRESH_MS } from "../src/mod-approval.ts";
+import { shownPlan } from "../src/task-plan.ts";
 import { BridgeClient, CLI_NOT_LOGGED_IN, DESKTOP_MOD_OFFLINE, DESKTOP_MOD_OFFLINE_SEND, DesktopBlockedError } from "../src/bridge-client.ts";
 import { transcriptEvents, type DesktopProcess, type SubagentState } from "../src/desktop.ts";
 import type { CanUseTool, PermissionAnswer, QueryFn, SdkUserMessage, SessionsOptions } from "../src/sessions.ts";
@@ -393,17 +394,24 @@ test("SDK task snapshots normalize confirmed tools, survive turn completion and 
     query.emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: call, content: text }] } });
   };
   tool("create", "TaskCreate", { subject: "First\nexact subject" }, "Task #1 created successfully: First");
+  tool("create2", "TaskCreate", { subject: "Second" }, "Task #2 created successfully: Second");
   tool("start", "TaskUpdate", { taskId: "1", status: "in_progress" }, "Updated task #1 status");
   await waitFor(() => f.sessions.summaryOf(id)?.plan?.[0]?.status === "in_progress");
   tool("done", "TaskUpdate", { taskId: "1", status: "completed" }, "Updated task #1 status");
   query.emit({ type: "result", subtype: "success" });
   await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
-  const expected = [{ id: "1", text: "First\nexact subject", status: "completed" }];
+  const expected = [{ id: "1", text: "First\nexact subject", status: "completed" }, { id: "2", text: "Second", status: "pending" }];
   assert.deepEqual(f.sessions.summaryOf(id)?.plan, expected);
   f.sessions.stop(id); await nextTick();
   const recovered = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: boundary.queryFn, onEvent() {}, onSessions() {} });
   f.instances.push(recovered);
   assert.deepEqual(recovered.summaryOf(id)?.plan, expected);
+});
+
+test("a plan with every step done is finished work and no longer shown", () => {
+  assert.deepEqual(shownPlan([{ text: "a", status: "completed" }, { text: "b", status: "completed" }]), []);
+  const open = [{ text: "a", status: "completed" as const }, { text: "b", status: "in_progress" as const }];
+  assert.deepEqual(shownPlan(open), open);
 });
 
 test("nested SDK workers publish launch, progress and terminal status only in their parent's log", async t => {
@@ -3259,6 +3267,18 @@ test("an interrupt send to an idle Remote Control app session whose mod answers 
   assert.equal(await f.sessions.send(APP_ID, "rc-int-idle", "Do this now", [], "interrupt"), APP_ID);
   await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "rc-int-idle"));
   assert.equal(f.sessions.modInbox.pending(APP_ID).some(offer => offer.kind === "abort"), false);
+  assert.deepEqual(f.posts, []);
+});
+
+test("a Remote Control app session whose main turn ended while background agents run reads idle and takes an answer without a stop", async t => {
+  const f = appRcModFixture(t);
+  f.sessions.modInbox.listen(APP_ID, Date.now());
+  // The registry's busy that only background agents hold (desktop.ts settled()).
+  Object.assign(f.registry.get(APP_ID)!, { status: "idle", backgroundOnly: true });
+  assert.equal(f.sessions.summaryOf(APP_ID)?.state, "idle");
+  assert.equal(await f.sessions.send(APP_ID, "rc-bg-answer", "늙은 거북", [], "interrupt"), APP_ID);
+  await waitFor(() => f.sessions.modInbox.pending(APP_ID).some(offer => offer.itemId === "rc-bg-answer"));
+  assert.equal(f.sessions.modInbox.pending(APP_ID).some(offer => offer.kind === "abort"), false, "no turn to stop");
   assert.deepEqual(f.posts, []);
 });
 

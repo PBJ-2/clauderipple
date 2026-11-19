@@ -14,7 +14,7 @@ import { narrationBody } from "./narration.ts";
 import { artifactOf } from "./artifact.ts";
 import { PERMISSION_MODES, type BackgroundTask, type EventBody, type Figures, type PermissionMode, type PlanStep, type SessionSummary, type ToolCall } from "./protocol.ts";
 import { WRAP_TOOL, wrapUpFields, type WrapUpFields } from "./wrap-up.ts";
-import { TaskPlan } from "./task-plan.ts";
+import { shownPlan, TaskPlan } from "./task-plan.ts";
 import { BackgroundActivity } from "./background-activity.ts";
 import { toolInput } from "./tool-details.ts";
 export { nextPlan } from "./task-plan.ts";
@@ -28,7 +28,7 @@ type RecordValue = Record<string, unknown>;
 type Summarize = (tool: string, input: RecordValue, cwd: string) => string;
 interface Source { file: string; size: number; mtime: number; unfinished: boolean; summary: SessionSummary }
 interface Imported { size: number; mtime: number; log: EventLog; dir: string; children?: Map<string, SubagentState> }
-export interface DesktopProcess { sessionId: string; pid: number; status: "busy" | "shell" | "idle" | "waiting"; bridgeSessionId?: string; /** The folder the app's worker runs in, as its registry records it. */ cwd?: string; /** A CLI running outside the Claude app, not one of the app's writers. */ external?: true; /** When this process started (epoch ms), as its registry records it. Work begun before it is not running in it. */ startedAt?: number }
+export interface DesktopProcess { sessionId: string; pid: number; status: "busy" | "shell" | "idle" | "waiting"; bridgeSessionId?: string; /** The folder the app's worker runs in, as its registry records it. */ cwd?: string; /** A CLI running outside the Claude app, not one of the app's writers. */ external?: true; /** When this process started (epoch ms), as its registry records it. Work begun before it is not running in it. */ startedAt?: number; /** When the registry last changed `status` (epoch ms). */ statusAt?: number; /** The registry says busy, but the main turn ended after it said so: only background work runs. `status` reads idle then. */ backgroundOnly?: true }
 
 /**
  * pid → the start time `ps` reported for it. A pid's start time never changes while it lives, and
@@ -109,7 +109,7 @@ function readRegistry(dir: string, maxAgeMs: number, platform: string, processes
     if (value.entrypoint !== "claude-desktop" && !external) continue;
     if (!["busy", "shell", "idle", "waiting"].includes(str(value.status))) continue;
     const status = value.status as DesktopProcess["status"];
-    candidates.push({ pid, procStart: value.procStart, entry: { sessionId: value.sessionId, pid, status, ...(external ? { external: true as const } : {}), ...(typeof value.bridgeSessionId === "string" ? { bridgeSessionId: value.bridgeSessionId } : {}), ...(typeof value.cwd === "string" && value.cwd ? { cwd: value.cwd } : {}), ...(typeof value.startedAt === "number" && Number.isFinite(value.startedAt) && value.startedAt > 0 ? { startedAt: value.startedAt } : {}) } });
+    candidates.push({ pid, procStart: value.procStart, entry: { sessionId: value.sessionId, pid, status, ...(external ? { external: true as const } : {}), ...(typeof value.bridgeSessionId === "string" ? { bridgeSessionId: value.bridgeSessionId } : {}), ...(typeof value.cwd === "string" && value.cwd ? { cwd: value.cwd } : {}), ...(typeof value.startedAt === "number" && Number.isFinite(value.startedAt) && value.startedAt > 0 ? { startedAt: value.startedAt } : {}), ...(typeof value.statusUpdatedAt === "number" && Number.isFinite(value.statusUpdatedAt) && value.statusUpdatedAt > 0 ? { statusAt: value.statusUpdatedAt } : {}) } });
   }
   if (!candidates.length) return result;
   const alive = platform === "win32" ? windowsAlive(processes) : darwinAlive();
@@ -440,24 +440,30 @@ function unfinishedTurn(lines: string[]): boolean {
   let unfinished = false;
   for (const line of lines) {
     const r = record(line);
-    if (!r || r.isSidechain === true || r.isMeta === true) continue;
-    if (r.type === "result" || (r.type === "system" && r.subtype === "turn_duration")) {
-      unfinished = false;
-    } else if (r.type === "system" && r.subtype === "stop_hook_summary") {
-      unfinished = r.preventedContinuation === true;
-    } else if (r.type === "user") {
-      const content = object(r.message)?.content;
-      if (typeof content === "string" && /^\[Request interrupted/.test(content)) unfinished = false;
-      else if (prompt(r) || (Array.isArray(content) && content.some(b => object(b)?.type === "tool_result"))) unfinished = true;
-    } else if (r.type === "assistant") {
-      const message = object(r.message);
-      if (!message || !Array.isArray(message.content)) continue;
-      unfinished = message.content.some(b => object(b)?.type === "tool_use") ||
-        (message.stop_reason !== "end_turn" && message.stop_reason !== "stop_sequence" &&
-          ("stop_reason" in message || !message.content.some(b => object(b)?.type === "text")));
-    }
+    const step = r ? turnStep(r) : null;
+    if (step !== null) unfinished = step;
   }
   return unfinished;
+}
+
+/** One record's say on the main turn: true it runs (or goes on), false it ended, null nothing. */
+function turnStep(r: RecordValue): boolean | null {
+  if (r.isSidechain === true || r.isMeta === true) return null;
+  if (r.type === "result" || (r.type === "system" && r.subtype === "turn_duration")) return false;
+  if (r.type === "system" && r.subtype === "stop_hook_summary") return r.preventedContinuation === true;
+  if (r.type === "user") {
+    const content = object(r.message)?.content;
+    if (typeof content === "string" && /^\[Request interrupted/.test(content)) return false;
+    return prompt(r) || (Array.isArray(content) && content.some(b => object(b)?.type === "tool_result")) ? true : null;
+  }
+  if (r.type === "assistant") {
+    const message = object(r.message);
+    if (!message || !Array.isArray(message.content)) return null;
+    return message.content.some(b => object(b)?.type === "tool_use") ||
+      (message.stop_reason !== "end_turn" && message.stop_reason !== "stop_sequence" &&
+        ("stop_reason" in message || !message.content.some(b => object(b)?.type === "text")));
+  }
+  return null;
 }
 
 /** Complete lines only: a partial head/tail record must not be interpreted. */
@@ -537,12 +543,16 @@ export class BackgroundTasks {
   get history(): BackgroundTask[] { return this.activity.history; }
   get plan(): PlanStep[] { return this.planState.list; }
   turnStartedAt: number | null = null;
+  /** When the main turn last ended, while it stays ended; null while one runs or none was seen. */
+  turnEndedAt: number | null = null;
 
   accept(line: string): void {
     const r = record(line);
     if (!r || r.isSidechain === true) return;
     const content = object(r.message)?.content;
     const at = typeof r.timestamp === "string" ? Date.parse(r.timestamp) : NaN;
+    const step = turnStep(r);
+    if (step !== null) this.turnEndedAt = step || !Number.isFinite(at) ? null : at;
     // A phone message the ripple mod submits as the person's is written as a plugin origin with asUser;
     // it starts the person's turn the same as one typed in the app (2026-11-19: the last turn's
     // finished plan stayed on the phone under the next message).
@@ -654,7 +664,18 @@ export class DesktopSessions {
   }
 
   liveProcess(id: string, maxAgeMs = 1000): DesktopProcess | undefined {
-    return (this.opts.registry?.() ?? liveDesktopProcesses(path.join(path.dirname(this.projects), "sessions"), maxAgeMs)).get(id);
+    return this.settled(id, (this.opts.registry?.() ?? liveDesktopProcesses(path.join(path.dirname(this.projects), "sessions"), maxAgeMs)).get(id));
+  }
+
+  /** The app's registry stays "busy" while background agents run, through the main turn's end and
+   * the turns after it (2026-11-20: a session read busy for three hours, so the phone showed it
+   * working and sent a question card's answer as an interruption the mod never took). A busy set
+   * before the transcript's own turn end is that background work: the main turn is idle. A busy set
+   * after it is a new turn whose prompt the transcript may not have yet. */
+  private settled(id: string, p: DesktopProcess | undefined): DesktopProcess | undefined {
+    if (p?.status !== "busy" || p.statusAt === undefined) return p;
+    const ended = this.scan(id)?.turnEndedAt;
+    return ended != null && ended >= p.statusAt ? { ...p, status: "idle", backgroundOnly: true } : p;
   }
 
   /** The CLIs alive outside the Claude app, minus any session the app's own registry holds: the app's writer wins. */
@@ -807,7 +828,7 @@ export class DesktopSessions {
     return effort;
   }
   turnStartedAt(id: string): number | null { return this.scan(id)?.turnStartedAt ?? null; }
-  plan(id: string): PlanStep[] { return this.scan(id)?.plan ?? []; }
+  plan(id: string): PlanStep[] { return shownPlan(this.scan(id)?.plan ?? []); }
 
   /** A subagent transcript lives beside its session file: `<projects>/<proj>/<id>/subagents/agent-<agentId>.jsonl`. */
   private subagentsDir(source: Source): string {
@@ -1198,7 +1219,7 @@ export class DesktopSessions {
       if (!source) { this.sources.delete(id); continue; }
       // A CLI outside the app owns its conversation: the phone may read it, never resume it (#171).
       const owner = external.get(id);
-      const live = registry.get(id) ?? owner;
+      const live = this.settled(id, registry.get(id)) ?? owner;
       source.summary = { ...ownedBy(source.summary, owner), state: live ? live.status === "waiting" ? "waiting" : live.status === "idle" ? "idle" : "running" : processHasSession(processes, id) &&
         (now - source.mtime <= 10_000 || source.unfinished) ? "running" : "stopped" };
       this.sources.set(id, source);

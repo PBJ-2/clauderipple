@@ -990,3 +990,36 @@ test("the history keeps the real outcomes ahead of the work the app lost, howeve
     + launch("old", "old", "2026-11-18T07:00:00.000Z") + finish("old", "2026-11-18T08:00:00.000Z") + launch("new", "new", minute(0)) + finish("new", minute(1)));
   assert.deepEqual(desktop.backgroundTaskHistory(id).map(task => [task.id, task.state]), [["new", "done"], ["old", "done"], ["lost-3", "unknown"]]);
 });
+
+test("a busy the registry set before the main turn ended is background work: the session reads idle, its work still counts", t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "desktop-test-"));
+  const projects = path.join(root, "projects");
+  const project = path.join(projects, "project");
+  fs.mkdirSync(project, { recursive: true });
+  const registry = new Map<string, DesktopProcess>();
+  const desktop = new DesktopSessions({ projects, summarize, excluded: () => new Set(), now: Date.now, processes: () => "", registry: () => registry });
+  t.after(() => { desktop.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  const file = path.join(project, `${id}.jsonl`);
+  const prompt = (at: string, text: string) => line({ type: "user", timestamp: at, origin: { kind: "human" }, message: { content: text } });
+  const answer = (at: string) => line({ type: "assistant", timestamp: at, message: { id: `m-${at}`, model: "test-model", stop_reason: "end_turn", content: [{ type: "text", text: "Done." }] } })
+    + line({ type: "system", subtype: "stop_hook_summary", timestamp: at });
+  fs.writeFileSync(file, line(user) + answer("2026-11-19T12:40:00.000Z"));
+  desktop.list();
+  const busySince = Date.parse("2026-11-19T12:36:00.000Z");
+  registry.set(id, { sessionId: id, pid: 42, status: "busy", bridgeSessionId: "cse_x", statusAt: busySince });
+  const live = desktop.liveProcess(id);
+  assert.equal(live?.status, "idle", "the turn ended after the busy was set");
+  assert.equal(live?.backgroundOnly, true);
+  assert.equal(desktop.list().find(s => s.id === id)?.turnStartedAt, null);
+  // A busy set after the turn ended is a new turn, even before its prompt reaches the transcript.
+  registry.set(id, { sessionId: id, pid: 42, status: "busy", bridgeSessionId: "cse_x", statusAt: Date.parse("2026-11-19T12:41:00.000Z") });
+  assert.equal(desktop.liveProcess(id)?.status, "busy");
+  // The busy stays set across a new prompt while background agents run: the open turn is real work.
+  registry.set(id, { sessionId: id, pid: 42, status: "busy", bridgeSessionId: "cse_x", statusAt: busySince });
+  fs.appendFileSync(file, prompt("2026-11-19T12:50:00.000Z", "Next"));
+  assert.equal(desktop.liveProcess(id)?.status, "busy");
+  // No status time in the registry: nothing can be said, so busy stays busy.
+  fs.appendFileSync(file, answer("2026-11-19T12:55:00.000Z"));
+  registry.set(id, { sessionId: id, pid: 42, status: "busy", bridgeSessionId: "cse_x" });
+  assert.equal(desktop.liveProcess(id)?.status, "busy");
+});

@@ -63,6 +63,12 @@ function taskList(text: string): PlanStep[] | null {
   return parsed.flatMap(line => line ? [{ id: line[1]!, text: line[3]!, status: statusOf(line[2]) }] : []);
 }
 
+/** The steps a phone shows: a list with every step done is finished work, so none (2026-11-20: a
+ * checked-off plan stayed under the last message for hours after the turn). */
+export function shownPlan(steps: PlanStep[]): PlanStep[] {
+  return steps.every(step => step.status === "completed") ? [] : steps;
+}
+
 export class TaskPlan {
   private calls = new Map<string, { name: string; input: Input }>();
   private applied = new Set<string>();
