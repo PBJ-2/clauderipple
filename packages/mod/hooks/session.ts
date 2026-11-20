@@ -197,6 +197,24 @@ export function routerLimitItems(body: unknown, now: number): LimitItem[] {
   return out
 }
 
+/** How many of the router's Claude provider names the mod keeps: as many providers as bandLimits holds choices for. */
+export const CLAUDE_PROVIDERS_MAX = 16
+
+/**
+ * The config names of the router's Claude providers (type 'anthropic') that an answer lists, in its
+ * order: `GET /api/limits` lists `providers: [{provider, type}]`, `GET /api/status` `providers:
+ * {name: {type}}`. The limits leave out a provider none of whose accounts was read (its only account
+ * paused), so the mod keeps every name either answer gave (register.tsx limitsClaude) and the band
+ * still knows a bandLimits choice for that provider is Claude's (view.ts bandClaudeLimit, 2026-11-20).
+ */
+export function claudeProvidersFrom(body: unknown): string[] {
+  const providers = asRecord(body).providers
+  const typed: [string, unknown][] = Array.isArray(providers)
+    ? providers.map(asRecord).map(p => [typeof p.provider === 'string' ? p.provider : '', p.type])
+    : Object.entries(asRecord(providers)).map(([name, p]) => [name, asRecord(p).type])
+  return [...new Set(typed.filter(([name, type]) => name !== '' && type === 'anthropic').map(([name]) => name))]
+}
+
 /**
  * The reset is read in the person's own clock: `offsetMinutes` is `Date#getTimezoneOffset` (minutes
  * behind UTC), passed in so tests do not depend on the machine's zone.

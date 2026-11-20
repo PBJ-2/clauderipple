@@ -380,6 +380,10 @@ const SCENES: Scene[] = [
   // The owner chose every GPT account for the band (bandLimits, 2026-11-19): the one in use first,
   // each numbered as in the pane; Claude, not named, keeps its one account in use.
   { name: 'band-limits-chosen-94', columns: 94, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 32, resetsAt: '2026-10-16T09:00:00', save: false }, extras: ['context', 'limits'], limits: LIMITS_ACCOUNTS, bandLimits: [{ provider: 'chatgpt', show: 'all' }] }) },
+  // Every provider hidden from the band (2026-11-20 review): no second row, and the first row keeps
+  // the way into the limits pane, the gauge alone and lit under the pointer (Claude hidden, so no
+  // reading of the host's stands in).
+  { name: 'band-limits-hidden-94', columns: 94, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 32, resetsAt: '2026-10-16T09:00:00', save: false }, extras: ['context', 'limits'], limits: LIMITS_ACCOUNTS, bandLimits: [{ provider: 'anthropic', show: 'off' }, { provider: 'chatgpt', show: 'off' }] }) },
   // Every readable provider (2026-10-15): Claude, GPT, Gemini and OpenCode Go in one row, at the
   // two real widths. Narrow, the later providers' scoped windows go first, then a later provider's
   // group, and Claude's Fable last; the windows that fit again come back after the groups.

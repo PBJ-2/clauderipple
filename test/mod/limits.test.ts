@@ -1,18 +1,46 @@
 // The limits row's data: the router's per-model weeklies, the ChatGPT accounts, and how the
-// band names and groups them. Follows test/mod/modes.test.ts for extensionless imports.
+// band names and groups them. Follows test/mod/modes.test.ts for extensionless imports, and
+// test/mod/agents.test.ts for drawing the band's TSX as a plain tree (the engine's JSX factory is an
+// external boundary; packages/mod/tests/ui.test.tsx mounts the band through the engine itself).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { existsSync, readFileSync } from 'node:fs'
 import { registerHooks } from 'node:module'
-import type { BandLimit } from '../../packages/mod/types/index.d.ts'
-registerHooks({ resolve(specifier, context, next) {
-  const source = context.parentURL?.includes('/packages/mod/hooks/')
-  return next(source && /^\.\.?\//.test(specifier) && !/\.[a-z]+$/.test(specifier) ? `${specifier}.ts` : specifier, context)
-} })
-const { claudeScopedFrom, CLAUDE_USAGE_STALE_MS, COST_MODELS, costFromSummary, localMidnight, routerLimitItems } = await import('../../packages/mod/hooks/session.ts')
+import ts from 'typescript'
+import type { BandLimit, LimitItem } from '../../packages/mod/types/index.d.ts'
+import type { BandActions, DashboardView, Frame } from '../../packages/mod/hooks/ui/view.ts'
+type Tree = { type: string; props: Record<string, unknown>; children: (Tree | string)[] }
+function h(type: string, props: Record<string, unknown> | null, ...children: unknown[]): Tree {
+  const flatten = (value: unknown): (Tree | string)[] => {
+    if (Array.isArray(value)) return value.flatMap(flatten)
+    if (value === null || value === undefined || typeof value === 'boolean') return []
+    return [typeof value === 'number' ? String(value) : value as Tree | string]
+  }
+  return { type, props: props ?? {}, children: children.flatMap(flatten) }
+}
+Object.assign(globalThis, { h })
+registerHooks({
+  resolve(specifier, context, next) {
+    if (context.parentURL?.includes('/packages/mod/hooks/') && /^\.\.?\//.test(specifier) && !/\.[a-z]+$/.test(specifier)) {
+      const url = new URL(specifier, context.parentURL)
+      return next(specifier + (existsSync(new URL(url.href + '.tsx')) ? '.tsx' : '.ts'), context)
+    }
+    return next(specifier, context)
+  },
+  load(url, context, next) {
+    if (!url.endsWith('.tsx')) return next(url, context)
+    return { format: 'module', shortCircuit: true, source: ts.transpileModule(readFileSync(new URL(url), 'utf8'), {
+      compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext, jsx: ts.JsxEmit.React, jsxFactory: 'h' },
+    }).outputText }
+  },
+})
+const { claudeProvidersFrom, claudeScopedFrom, CLAUDE_USAGE_STALE_MS, COST_MODELS, costFromSummary, localMidnight, routerLimitItems } = await import('../../packages/mod/hooks/session.ts')
 const { t } = await import('../../packages/mod/hooks/i18n.ts')
 const { chatgptProviders, gptLimitsFrom } = await import('../../packages/mod/hooks/modes.ts')
-const { providerDisplayName, costFigure, costText, exhaustLeft, exhaustSentence, exhaustShort, exhaustShortWidest, limitItemTone, bandLimitGroups, bandLimitNumbered, claudeBandOff, firstOfProvider, limitAccountLabel, limitGroupAccount, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTip, narrowLimitGroups, paceLabel, paceLevel, resetMoment, resetShort, timeLeft } = await import('../../packages/mod/hooks/ui/view.ts')
+const { normalizeSettings } = await import('../../packages/mod/hooks/settings.ts')
+const { providerDisplayName, costFigure, costText, exhaustLeft, exhaustSentence, exhaustShort, exhaustShortWidest, limitItemTone, bandClaudeLimit, bandLimitGroups, bandLimitNumbered, bandLimitsHidden, firstOfProvider, limitAccountLabel, limitGroupAccount, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTip, narrowLimitGroups, paceLabel, paceLevel, resetMoment, resetShort, timeLeft } = await import('../../packages/mod/hooks/ui/view.ts')
 const { barArt } = await import('../../packages/mod/hooks/ui/art.ts')
+const { limitFact, renderBand, renderFooter } = await import('../../packages/mod/hooks/ui/band.tsx')
 
 const NOW = Date.parse('2026-10-15T00:00:00Z')
 
@@ -463,6 +491,8 @@ const IDS = { providers: [
   ] },
 ] }
 const choose = (...choices: BandLimit[]): BandLimit[] => choices
+/** The host's own Claude reading (DashboardView.limit): this session's, whichever account the app is logged into; save mode on. */
+const HOST: NonNullable<DashboardView['limit']> = { kind: 'seven_day', percent: 70, save: true }
 const bandNames = (groups: ReturnType<typeof limitGroups>, choices: BandLimit[]) => {
   const band = bandLimitGroups(groups, choices)
   const numbered = bandLimitNumbered(groups, band, choices)
@@ -572,26 +602,230 @@ test('save mode\'s word follows the first Claude group only, and Claude off hide
   assert.deepEqual(band.map(firstOfProvider(band)), [true, true, true])
   // Compared by key: the narrow row draws copies.
   assert.equal(firstOfProvider(several)({ ...several[0]!, items: [] }), true)
-  // Only when every Claude provider the limits name is off.
-  const off = (bandLimits?: BandLimit[]) => claudeBandOff({ limits: items, ...(bandLimits ? { bandLimits } : {}) })
-  assert.equal(off(choose({ provider: 'anthropic', show: 'off' })), true)
-  assert.equal(off(), false)
-  assert.equal(off([]), false)
-  assert.equal(off(choose({ provider: 'anthropic', show: 'all' })), false)
-  assert.equal(off(choose({ provider: 'anthropic', show: 'accounts', accounts: ['current'] })), false)
-  // Chosen accounts none of which was read: the first row's chip would show the account in use, which was not chosen.
-  assert.equal(off(choose({ provider: 'anthropic', show: 'accounts', accounts: ['gone'] })), true)
-  assert.equal(off(choose({ provider: 'anthropic', show: 'all' }, { provider: 'chatgpt', show: 'accounts', accounts: ['gone'] })), false)
-  assert.equal(off(choose({ provider: 'chatgpt', show: 'off' })), false)
-  // Two Claude providers: both must be off.
+  // The first row's chip: the host's reading unless a choice for Claude names other accounts or none.
+  const chip = (bandLimits?: BandLimit[]) => bandClaudeLimit({ limit: HOST, limits: items, ...(bandLimits ? { bandLimits } : {}) })
+  assert.equal(chip(choose({ provider: 'anthropic', show: 'off' })), null)
+  assert.equal(chip(), HOST)
+  assert.equal(chip([]), HOST)
+  assert.equal(chip(choose({ provider: 'anthropic', show: 'all' })), HOST)
+  // Chosen accounts: the chosen one's own reading (the app login's 81%), never the host's.
+  assert.deepEqual(chip(choose({ provider: 'anthropic', show: 'accounts', accounts: ['current'] })), { kind: 'five_hour', percent: 81, save: true })
+  // Chosen accounts none of which was read: nothing, and the account in use does not stand in.
+  assert.equal(chip(choose({ provider: 'anthropic', show: 'accounts', accounts: ['gone'] })), null)
+  assert.equal(chip(choose({ provider: 'anthropic', show: 'all' }, { provider: 'chatgpt', show: 'accounts', accounts: ['gone'] })), HOST)
+  assert.equal(chip(choose({ provider: 'chatgpt', show: 'off' })), HOST)
+  // Two Claude providers read: one with no choice keeps the host's reading, as its row would show.
   const twice = [...items, { ...items[0]!, provider: 'anthropic-2' }]
-  assert.equal(claudeBandOff({ limits: twice, bandLimits: choose({ provider: 'anthropic', show: 'off' }) }), false)
-  assert.equal(claudeBandOff({ limits: twice, bandLimits: choose({ provider: 'anthropic', show: 'off' }, { provider: 'anthropic-2', show: 'off' }) }), true)
-  // The fallback path's 'claude' provider is no 'anthropic'; and nothing read is nothing hidden.
+  assert.equal(bandClaudeLimit({ limit: HOST, limits: twice, bandLimits: choose({ provider: 'anthropic', show: 'off' }) }), HOST)
+  assert.equal(bandClaudeLimit({ limit: HOST, limits: twice, bandLimits: choose({ provider: 'anthropic', show: 'off' }, { provider: 'anthropic-2', show: 'off' }) }), null)
+  // The fallback path's 'claude' provider, read with no choice, keeps the host's reading.
   const fallback = [{ provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: 'five_hour' as const, label: '', percent: 3 }]
-  assert.equal(claudeBandOff({ limits: fallback, bandLimits: choose({ provider: 'anthropic', show: 'off' }) }), false)
-  assert.equal(claudeBandOff({ bandLimits: choose({ provider: 'anthropic', show: 'off' }) }), false)
-  assert.equal(claudeBandOff({ limits: [], bandLimits: choose({ provider: 'anthropic', show: 'off' }) }), false)
+  assert.equal(bandClaudeLimit({ limit: HOST, limits: fallback, bandLimits: choose({ provider: 'anthropic', show: 'off' }) }), HOST)
+  // No host reading: a chosen account still shows its own reading, which is the router's (second
+  // review, 2026-11-20), without save mode's word, which comes with the host's reading; no choice and
+  // Hide show nothing, as they always did.
+  assert.deepEqual(bandClaudeLimit({ limit: null, limits: items, bandLimits: choose({ provider: 'anthropic', show: 'accounts', accounts: ['current'] }) }), { kind: 'five_hour', percent: 81, save: false })
+  assert.equal(bandClaudeLimit({ limit: null, limits: items, bandLimits: choose({ provider: 'anthropic', show: 'accounts', accounts: ['gone'] }) }), null)
+  assert.equal(bandClaudeLimit({ limit: null, limits: items, bandLimits: choose({ provider: 'anthropic', show: 'off' }) }), null)
+  assert.equal(bandClaudeLimit({ limit: null, limits: items }), null)
+})
+
+// 2026-11-20 review: the host's reading (`limit`) is Claude Code's own for the session and names no
+// account. Under an explicit choice for Claude the first row's chip, the terminal's fact and the
+// minimal footer show the chosen account's reading or nothing, whether or not the limits list Claude.
+const EL = { Box: 'Box', Text: 'Text', Button: 'Button', Markdown: 'Markdown', Svg: 'Svg' } as unknown as Parameters<typeof renderBand>[0]
+const frameOf = (surface: Frame['surface'], columns = 100): Frame => ({ surface, columns, maxRows: 12, now: NOW, appearance: 'auto', skin: 'deep', lang: 'en' })
+const DASH: DashboardView = {
+  effort: { level: 'high', mode: 'auto' }, model: 'Opus 5.5', context: null, cache: null, warm: { on: false, pings: 0, cost: 0 },
+  limit: HOST, route: null, notice: null, auto: true, agents: { live: 0, total: 0 }, compactions: 0,
+  logOpen: false, agentsOpen: false, effortMenu: false, hide: [], extras: ['limits'], isWorking: false,
+}
+const noop = () => undefined
+const ACTIONS: BandActions = { toggleAuto: noop, toggleWarm: noop, compact: noop, clear: noop, handoff: noop, toggleLog: noop, toggleAgents: noop, openSettings: noop, toggleEffortMenu: noop, pickEffort: noop, toggleLimits: noop }
+function treeNodes(tree: unknown): Tree[] {
+  const out: Tree[] = []
+  const visit = (value: unknown) => {
+    if (!value || typeof value !== 'object' || !('type' in value)) return
+    out.push(value as Tree)
+    ;(value as Tree).children.forEach(visit)
+  }
+  visit(tree)
+  return out
+}
+const treeText = (tree: unknown): string => treeNodes(tree).flatMap(n => n.children.filter((c): c is string => typeof c === 'string')).join(' ')
+const byKey = (tree: unknown, key: string): Tree | undefined => treeNodes(tree).find(n => n.props.key === key)
+/** Claude's three accounts alone, as on a Claude-only install. */
+const CLAUDE_ONLY = { providers: [IDS.providers[0]!] }
+/** No Claude row at all: the only router account paused, the host still reading its own login. */
+const NO_CLAUDE = { providers: [IDS.providers[1]!] }
+
+test('a chosen Claude account\'s own reading is the chip\'s, the one in use first, its fuller window', () => {
+  const items = routerLimitItems(IDS, NOW)
+  const chosen = (...accounts: string[]) => bandClaudeLimit({ limit: HOST, limits: items, bandLimits: choose({ provider: 'anthropic', show: 'accounts', accounts }) })
+  // B (stored-a, the one in use) chosen while the host reads its own login at 70%: B's 15%, save mode kept.
+  assert.deepEqual(chosen('stored-a'), { kind: 'five_hour', percent: 15, save: true })
+  // Of two chosen, the one in use whatever the list's order; with none in use, the first the router read.
+  assert.deepEqual(chosen('stored-c', 'stored-a'), { kind: 'five_hour', percent: 15, save: true })
+  assert.deepEqual(chosen('stored-c', 'current'), { kind: 'five_hour', percent: 81, save: true })
+  assert.deepEqual(chosen('stored-c'), { kind: 'five_hour', percent: 40, save: true })
+  // The fuller of the 5-hour and weekly windows, with its reset; a per-model window is never the chip's.
+  const reset = (NOW + 5 * 3_600_000) / 1000
+  const body = { providers: [{ provider: 'anthropic', type: 'anthropic', title: 'Claude', accounts: [
+    { account: 0, id: 'current', at: NOW, windows: [{ kind: 'scoped', label: 'Fable', used_percent: 2, window_minutes: 10080 }] },
+    { account: 1, id: 'b', at: NOW, windows: [
+      { kind: 'five_hour', used_percent: 20, window_minutes: 300 },
+      { kind: 'seven_day', used_percent: 64, window_minutes: 10080, reset_at: reset },
+      { kind: 'scoped', label: 'Fable', used_percent: 99, window_minutes: 10080 },
+    ] },
+  ] }] }
+  const two = routerLimitItems(body, NOW)
+  const pick = (accounts: string[]) => bandClaudeLimit({ limit: HOST, limits: two, bandLimits: choose({ provider: 'anthropic', show: 'accounts', accounts }) })
+  assert.deepEqual(pick(['b']), { kind: 'seven_day', percent: 64, resetsAt: new Date(reset * 1000).toISOString(), save: true })
+  // An account read only for a per-model window has no reading for the chip: the next chosen one, else none.
+  assert.deepEqual(pick(['current', 'b']), { kind: 'seven_day', percent: 64, resetsAt: new Date(reset * 1000).toISOString(), save: true })
+  assert.equal(pick(['current']), null)
+  // A chosen account named on the login's row (sameAs) is that row's reading.
+  const aliased = routerLimitItems({ providers: [{ ...IDS.providers[0]!, accounts: [{ ...IDS.providers[0]!.accounts[0]!, sameAs: ['stored-a'] }] }] }, NOW)
+  assert.deepEqual(bandClaudeLimit({ limit: HOST, limits: aliased, bandLimits: choose({ provider: 'anthropic', show: 'accounts', accounts: ['stored-a'] }) }), { kind: 'five_hour', percent: 81, save: true })
+})
+
+test('a Claude choice holds when the limits list no Claude row: Hide hides, chosen accounts not read show nothing', () => {
+  const items = routerLimitItems(NO_CLAUDE, NOW)
+  const view = (bandLimits: BandLimit[], extra: Partial<DashboardView> = {}): DashboardView => ({ ...DASH, limits: items, bandLimits, ...extra })
+  for (const choice of [choose({ provider: 'anthropic', show: 'off' }), choose({ provider: 'anthropic', show: 'accounts', accounts: ['stored-a'] })]) {
+    assert.equal(bandClaudeLimit(view(choice)), null)
+    // Nothing read yet, a router just restarted: the same.
+    assert.equal(bandClaudeLimit(view(choice, { limits: [] })), null)
+    assert.equal(bandClaudeLimit({ ...DASH, bandLimits: choice }), null)
+    // The terminal's fact, the desktop's, and the minimal footer.
+    assert.equal(limitFact(frameOf('terminal'), view(choice)), null)
+    assert.equal(limitFact(frameOf('desktop'), view(choice)), null)
+    assert.ok(!treeText(renderFooter(EL, frameOf('terminal'), view(choice), ACTIONS)).includes('70%'))
+    assert.ok(!treeText(renderBand(EL, frameOf('terminal', 160), view(choice), ACTIONS)).includes('70%'))
+    // The desktop draws GPT's row; the first row has no chip of Claude's either way.
+    for (const columns of [100, 30]) {
+      const band = renderBand(EL, frameOf('desktop', columns), view(choice), ACTIONS)
+      assert.equal(byKey(band, 'fact-limit'), undefined, 'columns ' + columns)
+      assert.ok(!treeText(band).includes('70%'), 'columns ' + columns)
+    }
+    // GPT hidden too, so no row draws: the first row's limit stays away (only the pane's way in is left).
+    const both = renderBand(EL, frameOf('desktop'), view([...choice, { provider: 'chatgpt', show: 'off' }]), ACTIONS)
+    assert.equal(byKey(both, 'band-limits'), undefined)
+    assert.equal(byKey(both, 'fact-limit'), undefined)
+    assert.ok(!treeText(both).includes('70%'))
+  }
+  // A Claude provider of another name the router listed earlier (register.tsx limitsClaude): known as Claude's.
+  const named = choose({ provider: 'claude-max', show: 'off' })
+  assert.equal(bandClaudeLimit(view(named, { claudeProviders: ['claude-max'] })), null)
+  // Unknown and not a default name: no choice for Claude as far as the band can tell, so the host's reading.
+  assert.equal(bandClaudeLimit(view(named)), HOST)
+  // A provider the limits list as another kind is never Claude's, whatever the names kept.
+  assert.equal(bandClaudeLimit(view(choose({ provider: 'chatgpt', show: 'off' }), { claudeProviders: ['chatgpt'] })), HOST)
+})
+
+test('with no choice for Claude the first row keeps the host\'s reading, as before', () => {
+  for (const body of [IDS, NO_CLAUDE, CLAUDE_ONLY, { providers: [] }]) {
+    const items = routerLimitItems(body, NOW)
+    for (const bandLimits of [undefined, [], choose({ provider: 'chatgpt', show: 'off' }), choose({ provider: 'chatgpt', show: 'accounts', accounts: ['team-id'] }), choose({ provider: 'anthropic', show: 'all' })]) {
+      const view: DashboardView = { ...DASH, limits: items, ...(bandLimits ? { bandLimits } : {}) }
+      assert.equal(bandClaudeLimit(view), HOST)
+      assert.deepEqual(limitFact(frameOf('terminal'), view)?.value.text, 'Weekly 70%')
+      assert.ok(treeText(renderFooter(EL, frameOf('terminal'), view, ACTIONS)).includes('Weekly 70%'))
+    }
+  }
+  // The desktop's chip where the row does not draw: no limits read at all, the host's 70%.
+  const band = renderBand(EL, frameOf('desktop'), { ...DASH, limits: [] }, ACTIONS)
+  assert.ok(byKey(band, 'fact-limit'))
+  assert.ok(treeText(byKey(band, 'fact-limit')).includes('70%'))
+})
+
+test('where the chosen account\'s row is not drawn, the first row\'s limit is that account\'s reading', () => {
+  const view: DashboardView = { ...DASH, limits: routerLimitItems(CLAUDE_ONLY, NOW), bandLimits: choose({ provider: 'anthropic', show: 'accounts', accounts: ['stored-a'] }) }
+  // The terminal and the minimal footer never draw the row: their limit is B's, not the host's 70%.
+  assert.equal(limitFact(frameOf('terminal'), view)?.value.text, '5-hour 15%')
+  assert.ok(!treeText(renderBand(EL, frameOf('terminal', 160), view, ACTIONS)).includes('70%'))
+  assert.ok(treeText(renderBand(EL, frameOf('terminal', 160), view, ACTIONS)).includes('5-hour 15%'))
+  assert.ok(treeText(renderFooter(EL, frameOf('terminal'), view, ACTIONS)).includes('5-hour 15%'))
+  // The desktop's chip, which stands in when the row does not fit, reads the same (limitDrawn shares
+  // limitFact's reading); with save mode on, its word stays beside it.
+  const desk = limitFact(frameOf('desktop'), view)!
+  assert.equal(desk.value.text, '15%')
+  assert.deepEqual(desk.tail?.map(run => run.text), [t('en', 'band.save')])
+  assert.ok(desk.card?.[0]?.includes('5-hour'))
+  // Wide enough, the row draws B and the first row has no chip.
+  const wide = renderBand(EL, frameOf('desktop', 160), view, ACTIONS)
+  assert.ok(byKey(wide, 'band-limits'))
+  assert.equal(byKey(wide, 'fact-limit'), undefined)
+  assert.ok(!treeText(wide).includes('70%'))
+})
+
+test('a choice that leaves the row empty keeps a pressable way into the limits pane, the band no taller', () => {
+  const opened: string[] = []
+  const actions: BandActions = { ...ACTIONS, toggleLimits: () => { opened.push('limits') } }
+  const hidden: DashboardView = { ...DASH, limits: routerLimitItems(CLAUDE_ONLY, NOW), bandLimits: choose({ provider: 'anthropic', show: 'off' }) }
+  assert.equal(bandLimitsHidden(hidden), true)
+  const band = renderBand(EL, frameOf('desktop'), hidden, actions)
+  assert.equal(byKey(band, 'band-limits'), undefined)
+  // The gauge alone (Claude hidden: no reading to show), lit under the pointer, its press the pane's.
+  const entry = byKey(band, 'fact-limits-open')!
+  assert.ok(entry)
+  assert.equal((entry.props.hover as { scope?: string }).scope, 'ripple-tip-limits-open')
+  assert.ok(treeNodes(entry).some(n => n.type === 'Svg' && n.props.alt === t('en', 'limits.title')))
+  assert.ok(!treeText(band).includes('70%'))
+  const button = treeNodes(entry).find(n => n.type === 'Button' && n.props.key === 'limits-open')!
+  ;(button.props.onPress as () => void)()
+  assert.deepEqual(opened, ['limits'])
+  // Its tip is the row's, under the row's key.
+  const tip = treeNodes(band).find(n => (n.props.hover as { scope?: string } | undefined)?.scope === 'ripple-tip-limits-open' && n.props.display === 'none')
+  assert.ok(tip && treeText(tip).includes(t('en', 'band.limitsOpen')))
+  // The band is as tall as with no limits row: the same capsule, sea and all.
+  const plain = renderBand(EL, frameOf('desktop'), { ...hidden, limits: [] }, actions)
+  assert.deepEqual(byKey(band, 'band-sea'), byKey(plain, 'band-sea'))
+  // Every provider hidden while the host reads Claude and no Claude row is listed: the chip itself is the way in.
+  const gptOff: DashboardView = { ...DASH, limits: routerLimitItems(NO_CLAUDE, NOW), bandLimits: choose({ provider: 'chatgpt', show: 'off' }) }
+  assert.equal(bandLimitsHidden(gptOff), true)
+  const chip = byKey(renderBand(EL, frameOf('desktop'), gptOff, actions), 'fact-limits-open')!
+  assert.ok(treeText(chip).includes('70%'))
+  assert.ok(treeNodes(chip).some(n => n.type === 'Button' && n.props.key === 'limits-open'))
+  // No choice is the band as it was: the row is the way in, and no entry of its own.
+  const plainView: DashboardView = { ...DASH, limits: routerLimitItems(CLAUDE_ONLY, NOW) }
+  assert.equal(bandLimitsHidden(plainView), false)
+  const usual = renderBand(EL, frameOf('desktop'), plainView, actions)
+  assert.ok(byKey(usual, 'band-limits'))
+  assert.equal(byKey(usual, 'fact-limits-open'), undefined)
+  // No limits known yet: nothing to open, as before; the limits extra off: no entry either.
+  assert.equal(bandLimitsHidden({ ...hidden, limits: [] }), false)
+  assert.equal(treeNodes(plain).some(n => n.type === 'Button' && n.props.key === 'limits-open'), false)
+  assert.equal(bandLimitsHidden({ ...hidden, extras: [] }), false)
+  assert.equal(byKey(renderBand(EL, frameOf('desktop'), { ...hidden, extras: [] }, actions), 'fact-limits-open'), undefined)
+})
+
+test('a saved account the router no longer lists stays saved and matches nothing; no other account stands in', () => {
+  const saved = choose({ provider: 'anthropic', show: 'accounts', accounts: ['paused-id'] }, { provider: 'chatgpt', show: 'accounts', accounts: ['paused-gpt', 'team-id'] })
+  const copy = structuredClone(saved)
+  // The settings keep it: nothing there knows which accounts the router reads now.
+  assert.deepEqual(normalizeSettings({ bandLimits: saved }).bandLimits, copy)
+  const items = routerLimitItems(IDS, NOW)
+  const band = bandLimitGroups(limitGroups(items), saved)
+  // Claude's paused choice draws nothing (not the account in use); GPT keeps only the one still read.
+  assert.deepEqual(band.map(g => g.key), ['chatgpt#1', 'opencode-go#0'])
+  assert.deepEqual(bandNames(limitGroups(items), saved), ['GPT 2', 'Go'])
+  assert.equal(bandClaudeLimit({ limit: HOST, limits: items, bandLimits: saved }), null)
+  // Read again later, the same account comes back by its id.
+  const back = routerLimitItems({ providers: [{ ...IDS.providers[0]!, accounts: [...IDS.providers[0]!.accounts, { account: 4, id: 'paused-id', at: NOW, windows: [{ kind: 'seven_day', used_percent: 33, window_minutes: 10080 }] }] }] }, NOW)
+  assert.deepEqual(bandLimitGroups(limitGroups(back), saved).map(g => g.key), ['anthropic#4'])
+  assert.deepEqual(bandClaudeLimit({ limit: HOST, limits: back, bandLimits: saved }), { kind: 'seven_day', percent: 33, save: true })
+  // The band never rewrites the choice it reads.
+  assert.deepEqual(saved, copy)
+})
+
+test('the router\'s Claude providers are read from /api/limits and /api/status alike', () => {
+  assert.deepEqual(claudeProvidersFrom(IDS), ['anthropic'])
+  assert.deepEqual(claudeProvidersFrom({ providers: [{ provider: 'claude-max', type: 'anthropic' }, { provider: 'chatgpt', type: 'chatgpt' }, { provider: 'claude-max', type: 'anthropic' }, { type: 'anthropic' }] }), ['claude-max'])
+  assert.deepEqual(claudeProvidersFrom({ providers: { anthropic: { type: 'anthropic' }, chatgpt: { type: 'chatgpt' }, zai: { type: 'anthropic-compatible' }, work: { type: 'anthropic' } } }), ['anthropic', 'work'])
+  assert.deepEqual(claudeProvidersFrom({}), [])
+  assert.deepEqual(claudeProvidersFrom(null), [])
+  assert.deepEqual(claudeProvidersFrom({ providers: 'none' }), [])
 })
 
 // 2026-11-09: the router forecasts a window that will reach 100% before it resets (`exhaust_at`).

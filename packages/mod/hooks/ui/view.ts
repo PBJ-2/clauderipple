@@ -81,6 +81,12 @@ export type DashboardView = {
   limits?: LimitItem[]
   /** Which providers and accounts the second row draws (Settings.bandLimits); absent or [] is the default row. */
   bandLimits?: readonly BandLimit[]
+  /**
+   * The router's Claude plan providers by config name, as the mod has read them (register.tsx
+   * limitsClaude): kept after `limits` stops listing one, so a bandLimits choice for it still reads as
+   * Claude's (claudeProvider). Absent: the limits' own rows and the default names alone say which.
+   */
+  claudeProviders?: readonly string[]
   route: RouteView | null
   /** A line from the router side ("router not answering"), shown in place of the route. */
   notice: string | null
@@ -674,24 +680,67 @@ export function firstOfProvider(groups: readonly LimitGroup[]): (group: LimitGro
 }
 
 /**
- * Whether the owner's choice leaves Claude out of the band's row: every Claude provider among the
- * limits read is 'off' in `bandLimits`, or set to chosen accounts none of which the router answered
- * for. The first row's Claude limit chip, which returns whenever the second row draws nothing, then
- * stays away too: it shows the account in use, which such a choice did not name, so it would be
- * another account's figure standing in (2026-11-19 review). False while no Claude window is known,
- * so the default band, and the fallback path's 'claude' provider no choice names, are as they were.
+ * Whether `provider` is one of Claude's own plan providers, for the owner's bandLimits choice. One the
+ * limits read lists is judged by its rows' type, as its groups are (isClaude). One it lists nothing of
+ * (its only account paused, its usage not read yet, the router just restarted) is judged by the names
+ * the mod remembers the router listing as Claude (`claudeProviders`), else by the names Claude's
+ * provider has by default, 'anthropic' on the router and 'claude' on the fallback path: a Hide stopped
+ * hiding the first row's chip once the limits had no Claude row (2026-11-20 review).
  */
-export function claudeBandOff(view: Pick<DashboardView, 'limits' | 'bandLimits'>): boolean {
+function claudeProvider(view: Pick<DashboardView, 'limits' | 'claudeProviders'>, provider: string): boolean {
+  const rows = (view.limits ?? []).filter(item => item.provider === provider)
+  if (rows.length) return rows.some(isClaude)
+  return (view.claudeProviders ?? []).includes(provider) || provider === 'anthropic' || provider === 'claude'
+}
+
+/** An account's 5-hour or weekly window, the fuller one (the first on a tie), as the host's own reading is picked (register.tsx refreshUsage). */
+function mainWindow(group: LimitGroup): LimitItem | undefined {
+  return group.items.reduce<LimitItem | undefined>((top, item) => (item.kind === 'five_hour' || item.kind === 'seven_day') && (!top || item.percent > top.percent) ? item : top, undefined)
+}
+
+/**
+ * The Claude limit the first row shows (the desktop's chip, the terminal's fact, the minimal footer)
+ * under the owner's bandLimits choice. The host's reading (`limit`) is Claude Code's own for this
+ * session and says nothing of whose account it is: with stored account B chosen and the app logged
+ * into A, the chip that stands in when the second row does not fit showed A's figure, and with Claude
+ * hidden and no Claude row in the limits (its only account paused) the chip came back (2026-11-20
+ * review). So once a Claude provider is set to 'off' or to chosen accounts, the host's reading is
+ * never shown: 'off' shows none; chosen accounts show the reading of the one in use among them, else
+ * of the first with a 5-hour or weekly window, its fuller window, save mode as the host's reading has
+ * it; none when no chosen account was read (one paused or removed matches nothing, and no other
+ * account stands in for it). A Claude provider the limits list with no choice, one set to 'all', and
+ * no choice for Claude at all keep the host's reading as before, and so show none while the host has
+ * none. A chosen account's reading shows whether or not the host has one (second review, 2026-11-20:
+ * a session on a routed non-Claude model has none, and the chosen account's figure is the router's
+ * anyway); save mode's word comes with the host's reading, which is where its state is kept.
+ */
+export function bandClaudeLimit(view: Pick<DashboardView, 'limit' | 'limits' | 'bandLimits' | 'claudeProviders'>): DashboardView['limit'] {
+  const limit = view.limit
   const choices = view.bandLimits ?? []
-  const chosen = bandChoices(choices)
+  const chosen = [...bandChoices(choices).values()].filter(c => claudeProvider(view, c.provider))
   const items = view.limits ?? []
-  const claude = new Set(items.filter(isClaude).map(item => item.provider))
-  if (!claude.size) return false
-  const drawn = new Set(bandLimitGroups(limitGroups(items), choices).map(g => g.provider))
-  return [...claude].every(provider => {
-    const choice = chosen.get(provider)
-    return choice?.show === 'off' || (choice?.show === 'accounts' && !drawn.has(provider))
-  })
+  // A Claude provider read with no choice draws its account in use, which the host's reading has
+  // always stood for; 'all' draws every account, the host's among them.
+  const listed = new Set(items.filter(isClaude).map(item => item.provider))
+  const open = chosen.some(c => c.show === 'all') || [...listed].some(provider => !chosen.some(c => c.provider === provider))
+  if (!chosen.length || open) return limit
+  const named = new Set(chosen.filter(c => c.show === 'accounts').map(c => c.provider))
+  const readable = bandLimitGroups(limitGroups(items), choices).filter(g => named.has(g.provider) && mainWindow(g))
+  const group = readable.find(g => g.inUse) ?? readable[0]
+  const top = group && mainWindow(group)
+  return top ? { kind: top.kind, percent: top.percent, ...(top.resetsAt ? { resetsAt: top.resetsAt } : {}), save: limit?.save ?? false } : null
+}
+
+/**
+ * Whether the owner's bandLimits choice, not a lack of readings, leaves the limits row nothing to
+ * draw: the limits extra on and windows read, none of them chosen. The row was the band's way into
+ * the limits pane, and on a Claude-only install with Claude hidden nothing on the band opened it any
+ * more (2026-11-20 review), so the first row then keeps that way (band.tsx limitDrawn). Never with no
+ * choice, which always draws a window when there is one.
+ */
+export function bandLimitsHidden(view: Pick<DashboardView, 'limits' | 'bandLimits' | 'extras'>): boolean {
+  const items = view.limits ?? []
+  return view.extras.includes('limits') && items.length > 0 && !bandLimitGroups(limitGroups(items), view.bandLimits).length
 }
 
 /**

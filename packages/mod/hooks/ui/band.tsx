@@ -43,7 +43,7 @@ import type { Els } from './parts'
 import type { Face } from './ripple'
 import { cacheTone, chOf, clip, contextTone, displayWidth, limitTone, providerColor, textTone } from './theme'
 import type { BandActions, DashboardView, Frame, LimitGroup } from './view'
-import { EFFORTS, bandLimitGroups, bandLimitNumbered, claudeBandOff, compactNumber, effortIndex, effortLabel, effortName, exhaustLeft, exhaustSentence, exhaustShort, exhaustShortWidest, firstOfProvider, isRich, limitGroupName, limitGroups, limitItemName, limitItemTip, limitItemTone, limitName, minutesLeft, modelName, narrowLimitGroups, rateText, resetsLabel, seconds } from './view'
+import { EFFORTS, bandClaudeLimit, bandLimitGroups, bandLimitNumbered, bandLimitsHidden, compactNumber, effortIndex, effortLabel, effortName, exhaustLeft, exhaustSentence, exhaustShort, exhaustShortWidest, firstOfProvider, isRich, limitGroupName, limitGroups, limitItemName, limitItemTip, limitItemTone, limitName, minutesLeft, modelName, narrowLimitGroups, rateText, resetsLabel, seconds } from './view'
 
 /** Growing ripples: low → max. */
 const RIPPLE_CHAR = ['·', '∘', '○', '◎', '◉']
@@ -231,9 +231,10 @@ export function contextFact(frame: Frame, view: DashboardView): Fact | null {
 }
 
 export function limitFact(frame: Frame, view: DashboardView): Fact | null {
-  const limit = view.limit
-  // Claude hidden from the limits row (bandLimits) is hidden here too.
-  if (!limit || !view.extras.includes('limits') || claudeBandOff(view)) return null
+  // Under the owner's choice for Claude (bandLimits): the chosen account's reading or none, never
+  // the host's, which names no account (bandClaudeLimit).
+  const limit = bandClaudeLimit(view)
+  if (!limit || !view.extras.includes('limits')) return null
   const tone = limitTone(limit.percent)
   const rich = isRich(frame)
   const save = t(frame.lang, 'band.save')
@@ -518,22 +519,41 @@ function cacheDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | nul
   ], tip)
 }
 
-function limitDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | null {
-  const limit = view.limit
-  // Claude hidden from the limits row (bandLimits) does not come back here when that row draws nothing.
-  if (!limit || !view.extras.includes('limits') || claudeBandOff(view)) return null
+/**
+ * The first row's plan limit: its window as a gauge, its share, and save mode's word while that is on.
+ * `onPress` is given while the owner's choice leaves the limits row nothing to draw (bandLimitsHidden):
+ * the chip is then the way into the limits pane the row was, lit and pressed as the context chip is,
+ * under the row's own tip and key, and with no reading to show it is the gauge alone. Hiding every
+ * provider left a Claude-only band nothing that opened the pane (2026-11-20 review).
+ */
+function limitDrawn(el: Els, frame: Frame, view: DashboardView, onPress?: () => void): DrawnFact | null {
+  if (!view.extras.includes('limits')) return null
+  // Under the owner's choice for Claude (bandLimits) the chosen account's reading or none, never the
+  // host's, which names no account: it showed account A where B was chosen (bandClaudeLimit).
+  const limit = bandClaudeLimit(view)
+  const k = lookOf(frame)
+  const open = t(frame.lang, 'band.limitsOpen')
+  if (!limit) {
+    if (!onPress) return null
+    const cells = 16 / CELL_PX + PRESS_PAD * 2
+    const gauge = pic(el, 'limits-open-gauge', k.art.gauge('five_hour'), t(frame.lang, 'limits.title'), 16, 16)
+    return { ...drawnFact(el, 'limits-open', cells, [gauge, press(el, 'limits-open', cells * CELL_PX, onPress)], open, frame), press: onPress }
+  }
   const { Text } = el
   const save = t(frame.lang, 'band.save')
   // The window is a gauge (art.ts), not its word: at 100 columns the name "주간"/"Weekly" was cut
   // to "g…" beside the route, and the window's name and reset stay in the tip (2026-10-14). Save's
   // word takes room only while save mode is on: reserved always, it cost the limit its place on a
   // band near 95 columns (2026-10-14).
-  const cells = (16 + FACT_GAP * CELL_PX + textPx('100%') + (limit.save ? FACT_GAP * CELL_PX + textPx(save) : 0)) / CELL_PX
-  return drawnFact(el, 'limit', cells, [
-    pic(el, 'limit', lookOf(frame).art.gauge(limit.kind), t(frame.lang, 'band.limit'), 16, 16),
+  const cells = (16 + FACT_GAP * CELL_PX + textPx('100%') + (limit.save ? FACT_GAP * CELL_PX + textPx(save) : 0)) / CELL_PX + (onPress ? PRESS_PAD * 2 : 0)
+  const children = [
+    pic(el, 'limit', k.art.gauge(limit.kind), t(frame.lang, 'band.limit'), 16, 16),
     <Text key="limit-value" {...figure(frame, limitTone(limit.percent))}>{Math.round(limit.percent) + '%'}</Text>,
-    limit.save ? <Text key="limit-save" color={lookOf(frame).tone('violet')}>{save}</Text> : '',
-  ], limitFact(frame, view)?.card?.join(' · '))
+    limit.save ? <Text key="limit-save" color={k.tone('violet')}>{save}</Text> : '',
+  ]
+  const card = limitFact(frame, view)?.card ?? []
+  if (!onPress) return drawnFact(el, 'limit', cells, children, card.join(' · '))
+  return { ...drawnFact(el, 'limits-open', cells, [...children, press(el, 'limits-open', cells * CELL_PX, onPress)], [open, ...card].join(' · '), frame), press: onPress }
 }
 
 function modeDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | null {
@@ -559,7 +579,9 @@ function modeDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | null
 // then the later providers' whole groups, and only then Claude's per-model windows (Fable): Claude's
 // own windows outlast every later provider (the owner, 2026-11-10). Then the scoped windows that fit
 // again come back (the refill). What is left not fitting means no second row, and the first row
-// keeps its limit fact as before, unless the owner hid Claude from the row (claudeBandOff).
+// keeps its limit fact as before; under the owner's choice for Claude that fact is the chosen
+// account's reading or none (bandClaudeLimit). A row the choice leaves empty hands its press to that
+// fact, which then opens the pane (bandLimitsHidden).
 //
 // A window the router expects to run out before it resets (`exhaustsAt`) is the one exception to
 // "the share alone": its tone is at least amber, red within the hour, and after its figure the row
@@ -1049,7 +1071,9 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
   // The second row is decided before the first row's budget: when it draws, the first row's limit
   // fact steps aside and the route takes its room.
   const limitsRow = limitsRowDrawn(el, frame, view, cols - CREST_CELLS, actions.toggleLimits)
-  const optional = [modeDrawn(el, frame, view), contextDrawn(el, frame, view, actions.toggleContext), cacheDrawn(el, frame, view), ...(limitsRow ? [] : [limitDrawn(el, frame, view)])].filter((f): f is DrawnFact => f !== null)
+  // A row the owner's choice emptied leaves its press with the first row's limit (limitDrawn).
+  const limitsOpen = !limitsRow && bandLimitsHidden(view) ? actions.toggleLimits : undefined
+  const optional = [modeDrawn(el, frame, view), contextDrawn(el, frame, view, actions.toggleContext), cacheDrawn(el, frame, view), ...(limitsRow ? [] : [limitDrawn(el, frame, view, limitsOpen)])].filter((f): f is DrawnFact => f !== null)
   // The Auto word is its control: it never loses its shape, so no word of it is dropped, and the
   // spare words (the icons' beside it) go first when the row narrows.
   let words: readonly string[] = [...WORDLESS]
@@ -1282,6 +1306,8 @@ export function renderFooter(el: Els, frame: Frame, view: DashboardView, actions
     mode === 'deciding' ? t(frame.lang, 'band.decidingText') : (idx >= 0 ? RIPPLE_CHAR[idx]! : '○') + ' ' + (level ? effortName(level, frame.lang).toLowerCase() : '—') + (mode === 'auto' ? '' : mode === 'paused' ? t(frame.lang, 'band.footerPaused') : mode === 'off' ? t(frame.lang, 'band.footerOff') : t(frame.lang, 'band.footerManual'))
   const left = view.cache ? view.cache.expiresAt - frame.now : 0
   const ctxTone = view.context ? contextTone(view.context.percent) : 'ink'
+  // Claude's limit as the band's chip has it: under the owner's choice, never the host's own reading.
+  const limit = bandClaudeLimit(view)
   return (
     <Box flexDirection="row" flexWrap="wrap" columnGap={2} alignItems="center">
       <Text color={mode === 'deciding' || mode === 'auto' ? tone.accent : undefined} dimColor={mode === 'paused' || mode === 'off'}>
@@ -1294,7 +1320,7 @@ export function renderFooter(el: Els, frame: Frame, view: DashboardView, actions
         </Text>
       ) : null}
       {view.cache && !view.hide.includes('timer') ? <Text dimColor>{'⧗ ' + minutesLeft(left, frame.lang) + (view.warm.on ? ' ≈' : '')}</Text> : null}
-      {view.limit && view.extras.includes('limits') && !claudeBandOff(view) ? <Text dimColor>{limitName(view.limit.kind, frame.lang) + ' ' + Math.round(view.limit.percent) + '%'}</Text> : null}
+      {limit && view.extras.includes('limits') ? <Text dimColor>{limitName(limit.kind, frame.lang) + ' ' + Math.round(limit.percent) + '%'}</Text> : null}
       {textButton(el, 'auto', t(frame.lang, 'band.auto') + (view.auto ? ' ●' : ' ○'), actions.toggleAuto)}
       {textButton(el, 'settings', '⚙', actions.openSettings)}
       {pinText(el, frame, view, actions, 60)}

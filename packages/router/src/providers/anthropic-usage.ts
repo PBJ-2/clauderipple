@@ -10,6 +10,7 @@
 // so the GUI and the tray read one format for every account.
 
 import { retryAfterMs, type Credential } from "../pool.ts";
+import { loginAuthKey } from "./anthropic-identity.ts";
 
 type Window = { utilization?: unknown; resets_at?: unknown } | null | undefined;
 
@@ -156,6 +157,12 @@ type UsageOptions = {
   ttlMs?: number;
   timeoutMs?: number;
   warn?: (message: string) => void;
+  /**
+   * The account behind a `loginAuthKey`, as far as the identity lookup's cache knows it (its subject
+   * hash), never a request; null when it does not. It tells a token refresh of one login from a switch
+   * to another (observeAnswer). Absent in tests that do not care.
+   */
+  loginOf?: (key: string) => string | null;
 };
 
 type UsageFailure = { status: number; retryAfterMs?: number };
@@ -186,6 +193,17 @@ export class ClaudeUsage {
   /** Header readings stored per account. A refresh captures this before it collects credentials and
    * a failure compares it: timestamps tie within one millisecond, so this is what orders them (2026-11-05). */
   private readonly readings = new Map<string, number>();
+  /**
+   * The login each snapshot was read with, as its `loginAuthKey` (a hash, never the header), keyed by
+   * the snapshot object itself. "current" keeps its owner across an account switch, so until the next
+   * reading its figures are the previous login's; this is what tells a reader so (2026-11-20). Keyed by
+   * the object, not the owner: a reader holds a snapshot across awaits while a newer one may replace
+   * it, and the login it looks up must be the one behind the figures it holds (review, 2026-11-20).
+   * Kept beside the snapshot rather than in it, because `/api/status` and `/api/claude-accounts` send
+   * the snapshot object as it is. A header reading whose caller did not say which auth it sent has no
+   * entry: unknown, never a guess.
+   */
+  private readonly readWithKeys = new WeakMap<object, string>();
   private inFlight: Promise<Record<string, Record<string, unknown>>> | null = null;
   private fetchedAt = Number.NEGATIVE_INFINITY;
   private readonly source: UsageSource;
@@ -220,18 +238,50 @@ export class ClaudeUsage {
    * A body reading is fresh for one refresh interval and no longer: once the next refresh is due but
    * has not run yet (nobody polls), it is as old as a failed lookup's, so an answer's headers replace
    * it (2026-11-05).
+   *
+   * `sentWith` is the request's own headers, which name the login that answered; without them the
+   * stored reading's login is unknown (`readWith`), since "current" may have switched accounts.
    */
-  observeAnswer(owner: string, headers: Record<string, string | string[] | undefined>): void {
+  observeAnswer(owner: string, headers: Record<string, string | string[] | undefined>, sentWith?: Record<string, string>): void {
     const now = (this.opts.now ?? Date.now)();
     const snapshot = claudeUsageFromHeaders(headers, now);
     if (!snapshot) return;
     const previous = this.last.get(owner);
     const readAt = typeof previous?.at === "number" ? previous.at : Number.NEGATIVE_INFINITY;
     const aged = now - readAt >= (this.opts.ttlMs ?? 5 * 60_000);
-    if (previous && previous.stale !== true && !aged && !this.fromHeaders.has(owner)) return;
+    const key = sentWith ? loginAuthKey(sentWith) : null;
+    // A fresh body reading taken on another login says nothing about this one: after the app switches
+    // accounts, "current" kept the previous login's figures for the rest of the interval while this
+    // login's own answers were dropped (2026-11-20 review). A token is not a login: one login's
+    // refreshed token keeps its fresh body reading (and the per-model weeklies only a body carries)
+    // when the identity cache places both tokens on the same account; one it cannot place counts as
+    // another login, since showing a reading that may be another account's is the worse mistake.
+    const before = previous ? this.readWithKeys.get(previous) : undefined;
+    const otherLogin = key !== null && before !== undefined && before !== key && !this.sameLogin(before, key);
+    if (previous && previous.stale !== true && !aged && !this.fromHeaders.has(owner) && !otherLogin) return;
     this.last.set(owner, snapshot);
     this.readings.set(owner, (this.readings.get(owner) ?? 0) + 1);
     this.fromHeaders.add(owner);
+    if (key) this.readWithKeys.set(snapshot, key);
+  }
+
+  /**
+   * The `loginAuthKey` of the login an owner's current snapshot was read with, or undefined when that
+   * is not known. A refused refresh keeps the old figures and so keeps their login too.
+   */
+  readWith(owner: string): string | undefined {
+    return this.readWithOf(this.last.get(owner));
+  }
+
+  /** Whether two `loginAuthKey`s are known to be one account (`loginOf`); false when either is not placed. */
+  private sameLogin(a: string, b: string): boolean {
+    const account = this.opts.loginOf?.(a) ?? null;
+    return account !== null && account === (this.opts.loginOf?.(b) ?? null);
+  }
+
+  /** The `loginAuthKey` behind one snapshot that `snapshot()` returned, or undefined when not known. */
+  readWithOf(snapshot: Record<string, unknown> | undefined): string | undefined {
+    return snapshot ? this.readWithKeys.get(snapshot) : undefined;
   }
 
   private async fetchAll(): Promise<Record<string, Record<string, unknown>>> {
@@ -260,6 +310,8 @@ export class ClaudeUsage {
       if (outcome.ok) {
         if (outcome.snapshot) {
           this.last.set(owner, outcome.snapshot);
+          const key = loginAuthKey(credential.headers);
+          if (key) this.readWithKeys.set(outcome.snapshot, key);
           this.scopedReadings.set(owner, {
             account: durableAccount(credential),
             windows: (outcome.snapshot.scoped as Record<string, number | string>[] | undefined) ?? [],
@@ -329,7 +381,13 @@ export class ClaudeUsage {
     // returns 429: stamping that newer snapshot with an earlier failure would claim a live reading
     // is old. The timestamps tie within the same millisecond, so the per-account count of stored
     // readings is what orders them (issue #123, 2026-11-05).
-    if (previous && (this.readings.get(owner) ?? 0) === readingsAtStart) this.last.set(owner, { ...previous, stale: true, failed_at: at, failed_status: failure.status });
+    if (previous && (this.readings.get(owner) ?? 0) === readingsAtStart) {
+      const kept = { ...previous, stale: true, failed_at: at, failed_status: failure.status };
+      // The old figures keep the login they were read with.
+      const key = this.readWithKeys.get(previous);
+      if (key) this.readWithKeys.set(kept, key);
+      this.last.set(owner, kept);
+    }
   }
 
   private async fetchOne(credential: Credential, at: number): Promise<FetchOutcome> {

@@ -1581,11 +1581,33 @@ tight, and nothing at 100 or more.
     in-use account (the first when none is marked; every provider since 2026-11-05, Claude alone
     before), unless the mod setting `bandLimits` (chosen on the dashboard's Look card, 2026-11-19)
     says otherwise for that provider: `off` leaves it out, `all` draws every account read (the
-    in-use one first, so a narrow row drops the others first), `accounts` only the listed owner
-    ids (`/api/limits` account `id`, never the shifting `account` number), with no other account
-    drawn in place of one that has no reading. OpenCode Go, MiniMax and Grok rows carry no id, so
-    only `off`/`all` apply to them. The remote's status keeps to the in-use Claude account and
-    lists every other provider's accounts; it does not follow `bandLimits`.
+    in-use one first; a narrow row may fit fewer accounts, narrowLimitGroups deciding which), `accounts`
+    only the listed owner ids (`/api/limits` account `id`, never the shifting `account` number),
+    with no other account drawn in place of one that has no reading. OpenCode Go, MiniMax and Grok
+    rows carry no id, so only `off`/`all` apply to them. A Claude choice also governs the band's
+    compact Claude figure (the first row's chip, the terminal fact, the minimal footer), which
+    otherwise shows the host's own reading of the session's login, an account it does not name:
+    under `off` there is none, under `accounts` it is a chosen account's router reading (the in-use
+    one, else the first read) or none, never the host's, shown whether or not the host has a
+    reading (save mode's word comes only with the host's reading, where its state is kept); with
+    no Claude choice, or `all`, it is the host's as before. This holds when the feed lists no
+    Claude row at all, so the mod remembers which provider names `/api/limits` and `/api/status`
+    gave as Claude, and reads `/api/status` once per process for a chosen name neither has listed
+    yet (2026-11-20 review). When the choices hide every row while Limits is on, the first row's
+    limit keeps the press into the limits pane. Claude's `current` row carries `sameAs`, the stored
+    copies of the login hidden behind it, only for copies that can serve (not paused, signed out
+    or expired) and only while the `current` reading was taken on the login the identity lookup
+    names now. `ClaudeUsage` records which auth each reading went out with (a hash, keyed by the
+    snapshot object, so a reader that held a snapshot across an await looks up the login behind
+    that snapshot, not behind a newer one), and `/api/limits` maps it back through the identity
+    cache without a request. Figures read on another login, or on a token the cache cannot place
+    (which may be this login's token from before a refresh), take no name, alias nothing and are
+    not marked `inUse` until the next reading. An answer's headers on a token the cache does not
+    place on the fresh body reading's account replace that reading at once; a refreshed token of
+    the same account keeps it (2026-11-20 review). A saved id the router no longer
+    lists stays saved and matches nothing; the dashboard shows it as unavailable. The remote's
+    status keeps to the in-use Claude account and lists every other provider's accounts; it does
+    not follow `bandLimits`.
     Login account PATCH bodies accept boolean `preferred`/`paused` and `clearCooldown: true`;
     Claude's existing PUT preference API remains supported. External Codex/current-Claude logins
     still cannot be renamed or removed; the current Claude login also accepts a pause.

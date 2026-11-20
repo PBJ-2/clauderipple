@@ -449,7 +449,9 @@ export type LimitItem = {
   /**
    * Other owner ids the same account answers to: on Claude's "current" row, the stored copies of the
    * app login the router hides behind it (`/api/limits` `sameAs`, 2026-11-19). A choice that named a
-   * stored account keeps finding it once the app logs into that account.
+   * stored account keeps finding it once the app logs into that account. The router lists only
+   * copies that can serve (not paused, signed out or expired), and only while the row's reading was
+   * taken on that same login, so a choice never takes another login's figures (2026-11-20 review).
    */
   accountAliases?: string[]
   /** The account the router serves new turns with now; absent on the others and on older routers. */
@@ -617,6 +619,12 @@ declare module 'claude-code' {
       limit: Hot | null
       /** Every provider's plan windows for the limits row, from `GET /api/limits`. Null until read. */
       limits: LimitItem[] | null
+      /**
+       * The router's Claude providers by config name, every one `/api/limits` or `/api/status` has
+       * listed, kept after the limits stop listing one (its only account paused): the band reads a
+       * bandLimits choice for it as Claude's (register.tsx noteClaudeProviders, 2026-11-20).
+       */
+      limitsClaude: string[]
       /** What requests cost at API prices, today and over the last seven days, for the limits pane. Null until read. */
       cost: { today: CostSummary | null; week: CostSummary | null } | null
       demo: 'cold' | 'swamp' | 'hot' | 'down' | 'kept' | null
