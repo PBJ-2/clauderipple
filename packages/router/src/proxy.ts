@@ -29,7 +29,7 @@ import { readWorkerLadder, type WorkerLadderRoute } from "../../mod/hooks/ladder
 import { routingSettings } from "../../mod/hooks/modes.ts";
 import { candidateKey, isAllowed } from "../../mod/hooks/settings.ts";
 import { readCompactModel, readModRoutingSettings } from "./mod-settings.ts";
-import { CompactPicks, THREAD_UNSUPPORTED, continuesTranslatedTurn, decide, effortOf, isSmallFastSideRequest, markerOverride, requestKind, resolve, rewriteBody, stripThreadFields, threadDecision, type RequestKind, type Resolved } from "./routing.ts";
+import { CompactPicks, THREAD_UNSUPPORTED, continuesTranslatedTurn, decide, effortOf, isSmallFastSideRequest, requestKind, resolve, rewriteBody, stripThreadFields, threadDecision, type RequestKind, type Resolved } from "./routing.ts";
 import { defaultAgentDir, imageLine, withAgentAliases } from "./agents.ts";
 import { forwardCompatibleHeader, resolveCompatibleCaps, sanitizeForCompatible } from "./compat.ts";
 import { applyIdentityToAnthropicBody, promptAdditions } from "./identity.ts";
@@ -86,6 +86,8 @@ type ThreadEffort = {
   asked: string; provider: string; model: string;
   /** The effort on the wire, after the clamp. */
   effort: string | undefined;
+  /** The client's own `output_config.effort`, before any rewrite. */
+  clientEffort: string | undefined;
   /** A `[[ripple: …@effort]]` marker set it (or the thread it continues), so a delta cannot repeat it. */
   marked: boolean;
 };
@@ -1474,15 +1476,19 @@ export class Proxy {
           // Only the marker's: an effort the configuration decided follows the configuration, so a
           // changed setting still reaches the thread as it would without the router.
           threadRoute = undefined;
-          const marked = provider.type === "anthropic" && !override ? markerOverride(json, cfg.aliases)?.effort : undefined;
+          const threaded = provider.type === "anthropic" && !override;
+          const clientEffort = threaded ? effortOf(json) : undefined;
           rewriteBody(json, route, cfg.effortClamp);
-          if (provider.type === "anthropic" && !override) {
-            const kept = this.continuedEffort(json, route, log);
+          if (threaded) {
+            const kept = this.continuedEffort(json, route, clientEffort, log);
             threadRoute = {
               asked: route.asked, provider: route.provider, model: route.model,
               // After the clamp: the value on the wire is what the thread stores and must see again.
               effort: effortOf(json),
-              marked: kept !== undefined || (marked !== undefined && marked === route.effort),
+              clientEffort,
+              // Routing says whether the marker chose the effort; equal values do not (a slot ignores
+              // a marker that happens to name its own effort).
+              marked: kept !== undefined || route.effortFromMarker === true,
             };
           }
           if (provider.type === "chatgpt") {
@@ -2276,6 +2282,10 @@ export class Proxy {
           typeof upRes.headers["content-encoding"] === "string" ? upRes.headers["content-encoding"] : undefined,
           status >= 200 && status < 300 && pathname === "/v1/messages"
             ? block => this.thinkingOrigins.remember(route?.provider ?? "anthropic", block) : undefined,
+          // The thread's effort is remembered as soon as the answer is whole: the client can send
+          // its `continue` before the upstream closes the stream. The end below covers the rest.
+          threadRoute && status >= 200 && status < 300
+            ? messageId => { if (threadRoute) this.threadEffort.remember(messageId, threadRoute); } : undefined,
         );
         // An error body is the only thing that says why the provider refused; keep its head for the
         // log and the Logs page. A DeepSeek 401 went unexplained for a day because only the status
@@ -2577,6 +2587,8 @@ export class Proxy {
       provider: f.provider,
       model: f.model,
       effort: f.effort ?? resolved.effort,
+      // An effort it takes from the primary is still the marker's, when the marker chose it.
+      ...(f.effort === undefined && resolved.effortFromMarker ? { effortFromMarker: true as const } : {}),
       // A fallback to a pinned worker goes out on that worker's account, as a direct pick would.
       ...(f.accountPin ? { accountPin: f.accountPin } : {}),
       tag: `${resolved.asked}->${f.model} (failover from ${resolved.provider})`,
@@ -2692,17 +2704,21 @@ export class Proxy {
 
   /**
    * Put back, on a native `continue` already rewritten for its route, the effort its thread's
-   * previous answer was sent with — when a marker set that effort and the answer was asked for
-   * under the same model id and went to the same provider and model. Returns the entry applied.
-   * Anything else — an unknown id, an effort the configuration decided, a picker change of
-   * `@effort` in the model id, another target — leaves the body as resolved, so a real change
-   * still reaches Anthropic (which refuses it once and the CLI starts over, as without the router).
+   * previous answer was sent with — only when the missing marker is all that explains the
+   * difference: a marker set that effort, the continue's own marker chose none, and the continue
+   * was asked for under the same model id, with the same client effort, for the same provider and
+   * model. Returns the entry applied. Anything else — an unknown id, an effort the configuration
+   * decided, a newly honoured marker, a changed `@effort` in the model id or a changed explicit
+   * `output_config.effort`, another target — leaves the body as resolved, so a real change still
+   * reaches Anthropic (which refuses it once and the CLI starts over, as without the router).
    */
-  private continuedEffort(json: Record<string, unknown>, route: Resolved, log: Logger): ThreadEffort | undefined {
+  private continuedEffort(json: Record<string, unknown>, route: Resolved, clientEffort: string | undefined, log: Logger): ThreadEffort | undefined {
     const thread = json.thread as { type?: unknown; previous_message_id?: unknown } | undefined;
     if (!thread || typeof thread !== "object" || thread.type !== "continue" || typeof thread.previous_message_id !== "string") return undefined;
+    if (route.effortFromMarker) return undefined;
     const kept = this.threadEffort.lookup(thread.previous_message_id);
     if (!kept?.marked || kept.asked !== route.asked || kept.provider !== route.provider || kept.model !== route.model) return undefined;
+    if (kept.clientEffort !== clientEffort) return undefined;
     const now = effortOf(json);
     if (kept.effort === now) return kept;
     // Written after the clamp, as it was sent: clamping it again could move it a second step.
