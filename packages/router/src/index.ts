@@ -355,6 +355,11 @@ proxy
       claudeUsage: () => proxy.claudeUsage.snapshot(),
       claudeModels: () => proxy.claudeModels.list(),
       claudeIdentity: () => proxy.claudeIdentity.identify(),
+      // The usage cache names the login a reading came from only as a hash; the identity cache maps it back.
+      claudeReadingIdentity: (reading) => {
+        const key = proxy.claudeUsage.readWithOf(reading);
+        return key === undefined ? undefined : proxy.claudeIdentity.cachedFor(key);
+      },
       opencodeUsage: (name, credentialId) => proxy.opencodeLimits(name, credentialId),
       minimaxUsage: (name, credentialId) => proxy.minimaxLimits(name, credentialId),
       grokUsage: (name: string) => proxy.grokLimits(name),

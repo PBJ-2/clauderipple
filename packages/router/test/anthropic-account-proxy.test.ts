@@ -17,6 +17,7 @@ import { Logger } from "../src/log.ts";
 import { ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
 import { ClaudeCodeAuthStore } from "../src/providers/anthropic.ts";
 import { readClaudeAccountsFile, removeClaudeAccount, replaceClaudeOAuthAccount, saveClaudeOAuthAccount, updateClaudeAccount } from "../src/providers/anthropic-accounts.ts";
+import { loginAuthKey } from "../src/providers/anthropic-identity.ts";
 import { Proxy } from "../src/proxy.ts";
 import { RequestLog } from "../src/requestlog.ts";
 import { createCa, createLeaf } from "../src/x509.ts";
@@ -592,6 +593,30 @@ test("an un-routed answer on the app's own login feeds its unified limit headers
     assert.equal(rig.seen[0]?.body.model, "claude-sonnet-5", "the native model id passed through un-routed");
     const usage = (await rig.proxy.claudeUsage.snapshot()).current as { rate_limits: { primary: { used_percent: number } } };
     assert.equal(usage.rate_limits.primary.used_percent, 42, "the answer's headers became the current login's reading");
+    // The reading says which login it is, as the limits' `sameAs` needs (PR 179 review, 2026-11-20).
+    assert.equal(rig.proxy.claudeUsage.readWith("current"), loginAuthKey({ authorization: "Bearer current-token" }));
+  } finally {
+    globalThis.fetch = realFetch;
+    await rig.stop();
+  }
+});
+
+// A routed answer's reading names the credential that answered, by the auth it went out with: the
+// limits alias a stored copy only to figures read on that login (PR 179 review, 2026-11-20).
+test("a routed answer's unified limit headers name the login they were read on", async () => {
+  const rig = await nativeRig(() => ({
+    status: 200,
+    headers: { "anthropic-ratelimit-unified-status": "allowed", "anthropic-ratelimit-unified-5h-utilization": "0.3" },
+  }));
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response("no", { status: 429 })) as typeof fetch;
+  try {
+    assert.equal(await rig.send(), 200);
+    const sent = rig.seen[0]?.authorization;
+    assert.ok(sent, "the turn went out on a pool credential");
+    const usage = (await rig.proxy.claudeUsage.snapshot()).current as { rate_limits: { primary: { used_percent: number } } } | undefined;
+    assert.equal(usage?.rate_limits.primary.used_percent, 30);
+    assert.equal(rig.proxy.claudeUsage.readWith("current"), loginAuthKey({ authorization: sent }));
   } finally {
     globalThis.fetch = realFetch;
     await rig.stop();

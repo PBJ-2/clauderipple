@@ -59,6 +59,7 @@ test('defaults are deeply independent after normalization', () => {
   first.hide.push('timer'); first.providers.chatgpt = false
   first.rules.general.rungs.light![0]!.target.agent = 'changed'
   first.allow.push('changed'); first.fallback.agent = 'changed'
+  first.bandLimits.push({ provider: 'chatgpt', show: 'all' })
   assert.deepEqual(normalizeSettings(null), DEFAULTS)
 })
 test('old tiers migrate the general ladder once, explicit new rules win, the design pin is dropped', () => {
@@ -283,6 +284,59 @@ test('normalization folds the domain ladders only: the general ladder keeps its 
   // One filled row runs every rung of the domain ladder.
   const u = [{ target: { agent: 'u' }, effort: 'low' }]
   assert.deepEqual(s.domainRules!.ui!.rungs, { light: u, standard: u, hard: u, plan: u })
+})
+
+test('the band limits choice is [] by default and every normalized settings object carries it', () => {
+  assert.deepEqual(DEFAULTS.bandLimits, [])
+  for (const value of [null, undefined, {}, { bandLimits: 'all' }, { bandLimits: { chatgpt: 'all' } }, { bandLimits: null }]) {
+    const s = normalizeSettings(value)
+    assert.equal(Object.hasOwn(s, 'bandLimits'), true)
+    assert.deepEqual(s.bandLimits, [])
+  }
+})
+
+test('band limits keep off, all and accounts, trimmed, and drop what they cannot read', () => {
+  const s = normalizeSettings({ bandLimits: [
+    { provider: ' chatgpt ', show: 'all' },
+    { provider: 'opencode-go', show: 'off', accounts: ['a'], extra: 1 },
+    { provider: 'claude-anthropic', show: 'accounts', accounts: ['current'] },
+    { provider: 'chatgpt', show: 'off' },
+    { provider: '', show: 'all' }, { provider: '   ', show: 'all' }, { provider: 'x'.repeat(65), show: 'all' }, { provider: 7, show: 'all' },
+    { provider: 'grok', show: 'some' }, { provider: 'minimax' },
+    null, 'chatgpt', ['chatgpt', 'all'], 4,
+  ] })
+  // The first entry for a provider wins; off and all keep only the provider and the choice.
+  assert.deepEqual(s.bandLimits, [
+    { provider: 'chatgpt', show: 'all' },
+    { provider: 'opencode-go', show: 'off' },
+    { provider: 'claude-anthropic', show: 'accounts', accounts: ['current'] },
+  ])
+  assert.deepEqual(normalizeSettings({ bandLimits: [{ provider: 'x'.repeat(64), show: 'off' }] }).bandLimits, [{ provider: 'x'.repeat(64), show: 'off' }])
+  assert.deepEqual(normalizeSettings(JSON.parse(JSON.stringify(s))).bandLimits, s.bandLimits)
+})
+
+test('a chosen account list is trimmed, distinct, at most eight, and its entry goes when none is left', () => {
+  const long = 'a'.repeat(129)
+  const ids = [' 7c8ef9dc ', '7c8ef9dc', '', '  ', 3, null, long, 'b'.repeat(128), 'c1', 'c2', 'c3', 'c4', 'c5', 'c6', 'c7']
+  const s = normalizeSettings({ bandLimits: [{ provider: 'chatgpt', show: 'accounts', accounts: ids }] })
+  // An id over 128 characters is dropped, never cut into another id.
+  assert.deepEqual(s.bandLimits, [{ provider: 'chatgpt', show: 'accounts', accounts: ['7c8ef9dc', 'b'.repeat(128), 'c1', 'c2', 'c3', 'c4', 'c5', 'c6'] }])
+  for (const accounts of [[], [long, '', 4], undefined, 'current']) {
+    assert.deepEqual(normalizeSettings({ bandLimits: [{ provider: 'chatgpt', show: 'accounts', accounts }] }).bandLimits, [], JSON.stringify(accounts))
+  }
+})
+
+test('band limits keep at most sixteen providers', () => {
+  const raw = Array.from({ length: 20 }, (_, i) => ({ provider: `p${i}`, show: 'off' }))
+  assert.deepEqual(normalizeSettings({ bandLimits: raw }).bandLimits.map(b => b.provider), raw.slice(0, 16).map(b => b.provider))
+})
+
+test('the mod\'s rebase keeps the band limits the router holds', () => {
+  const before = normalizeSettings(null)
+  const remote = normalizeSettings({ ...before, bandLimits: [{ provider: 'chatgpt', show: 'accounts', accounts: ['fa928bf4'] }] })
+  const rebased = applySettingsChanges(remote, settingsChanges(before, { ...before, language: 'ja' }))
+  assert.deepEqual(rebased.bandLimits, remote.bandLimits)
+  assert.equal(rebased.language, 'ja')
 })
 
 test('the heavy-context band and optional chips are off unless switched on', () => {
