@@ -113,6 +113,7 @@ test('a reset moment reads exactly, in local time, and the time left to the minu
   assert.equal(resetMoment(at, 'ja'), '10月30日（金）午後3:35')
   assert.equal(resetMoment(at, 'es'), 'vie 30 oct, 15:35')
   assert.equal(resetMoment(at, 'pt'), 'sex, 30 de out, 15:35')
+  assert.equal(resetMoment(at, 'fr'), 'ven. 30 oct., 15:35')
   // Midnight and noon on a twelve-hour clock; the early hours zero-padded on a twenty-four-hour one.
   assert.equal(resetMoment(new Date(2026, 0, 2, 0, 5).getTime(), 'ko'), '1월 2일 (금) 오전 12:05')
   assert.equal(resetMoment(new Date(2026, 0, 2, 12, 0).getTime(), 'en'), 'Fri, Jan 2, 12:00 PM')
@@ -688,7 +689,7 @@ test('the cost tile names a provider as the limits pane does, and keeps the id w
 })
 
 test('every language says the forecast and the cost, with the placeholders the code fills', () => {
-  for (const lang of ['en', 'ko', 'zh', 'ja', 'es', 'pt'] as const) {
+  for (const lang of ['en', 'ko', 'zh', 'ja', 'es', 'pt', 'fr'] as const) {
     assert.match(t(lang, 'limits.exhaust', { time: 'T' }), /T/, lang)
     assert.match(t(lang, 'limits.paceProjected', { percent: 'P' }), /P/, lang)
     for (const key of ['cost.title', 'cost.today', 'cost.week', 'cost.providers', 'cost.models', 'cost.note', 'cost.unavailable']) assert.notEqual(t(lang, key), key, lang + ' ' + key)

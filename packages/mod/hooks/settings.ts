@@ -346,7 +346,7 @@ export function normalizeSettings(raw: unknown, workers?: readonly Worker[]): Se
     delegation: ['normal', 'eager'],
     ceiling: EFFORTS, agentAuto: ['off', 'auto', 'all'], keepWarmHours: [1, 2, 4, 8],
     layout: ['dashboard', 'minimal'],
-    appearance: ['auto', 'dark', 'light'], skin: SKINS, language: ['auto', 'ko', 'en', 'zh', 'ja', 'es', 'pt'],
+    appearance: ['auto', 'dark', 'light'], skin: SKINS, language: ['auto', 'ko', 'en', 'zh', 'ja', 'es', 'pt', 'fr'],
   } as const
   for (const key of Object.keys(choices) as (keyof typeof choices)[]) if ((choices[key] as readonly unknown[]).includes(value[key])) Object.assign(result, { [key]: value[key] })
   if (typeof value.judgeModel === 'string' && value.judgeModel.trim()) result.judgeModel = value.judgeModel.trim()

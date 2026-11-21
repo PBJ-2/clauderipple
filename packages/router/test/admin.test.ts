@@ -621,7 +621,11 @@ test("admin mod-settings returns full defaults before storage, normalizes writes
     const file = path.join(home, "mod-settings.json");
     assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { settings, revision: 1, stored: true });
     if (process.platform !== "win32") assert.equal(fs.statSync(file).mode & 0o777, 0o600);
-    assert.equal((await (await putModSettings(port, { settings })).json() as ModSettingsSnapshot).revision, 2);
+    const french = await putModSettings(port, { settings: { ...settings, language: "fr" }, revision: 1 });
+    assert.equal(french.status, 200);
+    const updated = { ...snapshot, revision: 2, settings: { ...settings, language: "fr" } };
+    assert.deepEqual(await french.json(), updated);
+    assert.deepEqual(await (await fetch(`${base()}:${port}/api/mod-settings`)).json(), updated);
     assert.deepEqual(fs.readdirSync(home).filter(name => /mod-settings.*(tmp|lock)/.test(name)), []);
   });
 });
