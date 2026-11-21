@@ -169,44 +169,93 @@ export class ClaudeAccountAuthPool {
     return isCurrentClaudeAccountPaused(this.home);
   }
 
-  /** Current projection without network I/O, used by status and pre-routing health checks. */
-  peekCredentials(): Credential[] {
-    const out: Credential[] = [];
-    const accounts = readClaudeOAuthAccounts(this.home);
+  /**
+   * The current login as a credential, paused or not, with its token. A pause only keeps it out of
+   * routing; reading what the account holds (its limit resets) still needs the credential.
+   */
+  private currentProjection(observedCliVersion: string | null): { credential: Credential; token: string } | null {
     const current = this.current.get();
-    // A request from Claude Code itself names the newest version this machine runs; manufactured
-    // headers may use it while the observation is recent (issue #103).
-    const observedCliVersion = this.current.observedCliVersion();
-    let currentToken: string | undefined;
-    if (!(current instanceof Error)) {
-      // The observed snapshot and the Claude Code keychain/file are the same machine login, which
-      // Claude Code's config names; env and ClaudeRipple's own token file may be another account, so
-      // those fall back to the runtime generation (a refresh may revive a rest, but never moves it).
-      const durable = current.source === "observed" || current.source === "stored"
-        ? this.loginKey() ?? undefined
-        : undefined;
-      if (current.source === "observed") {
-        currentToken = current.observed.authorization.replace(/^Bearer\s+/i, "");
-        const id = credentialId("current", currentToken);
-        out.push({
+    if (current instanceof Error) return null;
+    // The observed snapshot and the Claude Code keychain/file are the same machine login, which
+    // Claude Code's config names; env and ClaudeRipple's own token file may be another account, so
+    // those fall back to the runtime generation (a refresh may revive a rest, but never moves it).
+    const durable = current.source === "observed" || current.source === "stored"
+      ? this.loginKey() ?? undefined
+      : undefined;
+    if (current.source === "observed") {
+      const token = current.observed.authorization.replace(/^Bearer\s+/i, "");
+      const id = credentialId("current", token);
+      return {
+        token,
+        credential: {
           id,
           ownerId: "current",
           healthKey: durable ?? id,
           label: "Current Claude session",
           headers: observedAnthropicHeaders(current.observed),
-        });
-      } else {
-        currentToken = current.credentials.accessToken;
-        const id = credentialId("current", currentToken);
-        out.push({
-          id,
-          ownerId: "current",
-          healthKey: durable ?? id,
-          label: "Current Claude login",
-          headers: nativeAnthropicHeaders({ type: "anthropic", auth: "claude-code" }, current.credentials, { observed: observedCliVersion }),
-        });
-      }
+        },
+      };
     }
+    const token = current.credentials.accessToken;
+    const id = credentialId("current", token);
+    return {
+      token,
+      credential: {
+        id,
+        ownerId: "current",
+        healthKey: durable ?? id,
+        label: "Current Claude login",
+        headers: nativeAnthropicHeaders({ type: "anthropic", auth: "claude-code" }, current.credentials, { observed: observedCliVersion }),
+      },
+    };
+  }
+
+  private accountProjection(account: ClaudeOAuthAccount, observedCliVersion: string | null): Credential {
+    return {
+      id: credentialId(account.id, account.token, account.refreshToken),
+      ownerId: account.id,
+      label: account.label,
+      preferred: account.preferred === true,
+      headers: nativeAnthropicHeaders(
+        { type: "anthropic", auth: "claude-code" },
+        { accessToken: account.token, expiresAt: account.expiresAt },
+        { observed: observedCliVersion },
+      ),
+    };
+  }
+
+  /**
+   * One account's credential for a lookup that is about the account and not about routing (its
+   * limit resets): a stored account or the current login, paused or not. A stored account whose
+   * access token is due is refreshed first. "needs-login" when it must sign in again, null when no
+   * such account exists or has a login to read.
+   */
+  async accountCredential(ownerId: string): Promise<Credential | null | "needs-login"> {
+    // A request from Claude Code itself names the newest version this machine runs; manufactured
+    // headers may use it while the observation is recent (issue #103).
+    const observedCliVersion = this.current.observedCliVersion();
+    if (ownerId === "current") return this.currentProjection(observedCliVersion)?.credential ?? null;
+    let account = readClaudeOAuthAccounts(this.home).find((candidate) => candidate.id === ownerId);
+    if (!account) return null;
+    if (!account.needsReauth && this.now() >= account.expiresAt - CLAUDE_OAUTH.refreshLeadMs) {
+      await this.refresh(account);
+      account = readClaudeOAuthAccounts(this.home).find((candidate) => candidate.id === ownerId);
+      if (!account) return null;
+    }
+    if (account.needsReauth || this.now() >= account.expiresAt) return "needs-login";
+    return this.accountProjection(account, observedCliVersion);
+  }
+
+  /** Current projection without network I/O, used by status and pre-routing health checks. */
+  peekCredentials(): Credential[] {
+    const out: Credential[] = [];
+    const accounts = readClaudeOAuthAccounts(this.home);
+    // A request from Claude Code itself names the newest version this machine runs; manufactured
+    // headers may use it while the observation is recent (issue #103).
+    const observedCliVersion = this.current.observedCliVersion();
+    const projection = this.currentProjection(observedCliVersion);
+    const currentToken = projection?.token;
+    if (projection) out.push(projection.credential);
     const currentAccount = accounts.find((account) => account.token === currentToken);
     if (this.currentPaused() || currentAccount?.paused) out.length = 0;
     else if (currentAccount && out[0]) out[0].preferred = currentAccount.preferred === true;
@@ -215,17 +264,7 @@ export class ClaudeAccountAuthPool {
       // The legacy single-account file is also what ClaudeCodeAuthStore read as current. Until the
       // first migration write, omit that duplicate instead of trying the same token twice.
       if (currentToken && account.token === currentToken) continue;
-      const credential: Credential = {
-        id: credentialId(account.id, account.token, account.refreshToken),
-        ownerId: account.id,
-        label: account.label,
-        preferred: account.preferred === true,
-        headers: nativeAnthropicHeaders(
-          { type: "anthropic", auth: "claude-code" },
-          { accessToken: account.token, expiresAt: account.expiresAt },
-          { observed: observedCliVersion },
-        ),
-      };
+      const credential = this.accountProjection(account, observedCliVersion);
       // The pool tries credentials in this order, so the account the user chose goes ahead of the
       // current login. A conversation already held by another account stays there (its cache).
       if (account.preferred) out.unshift(credential);

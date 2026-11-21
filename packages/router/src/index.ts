@@ -350,6 +350,15 @@ proxy
       credentials: () => proxy.credentialHealth(),
       clearCredentialCooldown: (provider, id) => proxy.clearCredentialCooldown(provider, id),
       claudeClearCooldown: (id) => proxy.claudeClearCooldown(id),
+      claudeResets: {
+        status: (id, force) => proxy.claudeResets.status(id, { force }),
+        claim: async (id, grantId) => {
+          const outcome = await proxy.claudeResets.claim(id, grantId);
+          // A refilled account is usable again: lift the rest that an earlier limit put on it.
+          if (outcome.ok && outcome.value.claim.result === "reset") proxy.claudeClearCooldown(id);
+          return outcome;
+        },
+      },
       picker: () => ({ enabled: !!store.get().picker?.enabled, hosts: terminateHosts(store.get()).slice(1), last: proxy.lastPickerInjection }),
       observedClaudeCodeAuth,
       claudeUsage: () => proxy.claudeUsage.snapshot(),

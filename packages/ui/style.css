@@ -830,6 +830,12 @@ label.check input { margin-top: 2px; }
 .account-meter.tone-warn .account-meter-figure { color: var(--warn); }
 .account-meter.tone-bad .account-meter-figure, .account-meter.tone-bad .account-meter-reset { color: var(--bad); }
 .account-card-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }
+/* The limit resets one Claude account holds (the "Resets" button on its card). */
+.resets-panel { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; padding: 10px 12px; border-radius: 10px; background: var(--fill); }
+.resets-panel[hidden] { display: none; }
+.resets-head, .resets-grant { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.resets-grant-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 220px; }
+.resets-grant-copy strong { color: var(--label); font-size: var(--fs-sub); font-weight: 600; overflow-wrap: anywhere; }
 /* Its state as tags, as on Status: the account in use outlined in violet, first place in ink, a pause grey, a warning tinted. */
 .account-card-badges .badge { display: inline-flex; max-width: 100%; padding: 1px 7px; border-radius: 999px; background: var(--fill); color: var(--label-2); font-size: 11px; font-weight: 500; line-height: 16px; white-space: normal; overflow-wrap: anywhere; }
 .account-card-badges .badge::before { display: none; }
