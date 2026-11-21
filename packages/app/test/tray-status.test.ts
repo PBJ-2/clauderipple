@@ -16,6 +16,7 @@ exports.inspectTray = (status, language, fakeTray) => { last = status; L = STRIN
 exports.health = healthy;
 exports.showFailure = (language, message, output, retry) => { L = STRINGS[language]; return showFailure(message, output, retry); };
 exports.strings = STRINGS;
+exports.uiLang = uiLang;
 `, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
 
 type MessageBox = { type?: string; title?: string; message: string; detail?: string; buttons?: string[]; defaultId?: number; cancelId?: number };
@@ -28,7 +29,7 @@ type Fixture = {
   chatgpt?: { quota: Record<string, { plan_type?: string; rate_limits?: { primary?: WindowQuota | null; secondary?: WindowQuota | null } } | null> };
 };
 const good = (): Fixture => ({ settings: { HTTPS_PROXY: "http://127.0.0.1:1" }, listen: { host: "127.0.0.1", port: 1 }, providers: { test: { reachable: true } }, consecutiveUpstreamFailures: 0 });
-function harness() {
+function harness(preferredLanguage = "ko") {
   const labels: string[] = [];
   let image = "", tooltip = "";
   const forbidden = () => { throw new Error("Unexpected OS, filesystem, CLI or network access"); };
@@ -41,7 +42,7 @@ function harness() {
   };
   const modules: Record<string, object> = {
     electron: {
-      app: { requestSingleInstanceLock: () => true, on() {}, whenReady: () => ({ then() {} }), isPackaged: true, getLoginItemSettings: () => ({ openAtLogin: false }), getPreferredSystemLanguages: () => ["ko"], getSystemLocale: () => "ko", getLocale: () => "ko" },
+      app: { requestSingleInstanceLock: () => true, on() {}, whenReady: () => ({ then() {} }), isPackaged: true, getLoginItemSettings: () => ({ openAtLogin: false }), getPreferredSystemLanguages: () => [preferredLanguage], getSystemLocale: () => "ko", getLocale: () => "ko" },
       Menu: { buildFromTemplate: (items: object[]) => items },
       nativeImage: { createFromPath: (file: string) => ({ file, setTemplateImage() {} }) },
       // Copied out of the module's realm, whose arrays deepEqual would not take for this realm's.
@@ -59,7 +60,8 @@ function harness() {
     inspectTray?: (status: Fixture, lang: string, tray: typeof fakeTray) => void;
     health?: (status: Fixture | null) => string;
     showFailure?: (lang: string, message: string, output: string, retry?: () => Promise<void>) => Promise<void>;
-    strings?: Record<string, { failures: Record<string, [string, string]> }>;
+    strings?: Record<string, Record<string, unknown> & { failures: Record<string, [string, string]> }>;
+    uiLang?: () => string;
   } = {};
   runInNewContext(compiled, {
     exports, require: (id: string) => { assert.ok(id in modules, id); return modules[id]; },
@@ -70,10 +72,12 @@ function harness() {
   assert.ok(exports.health);
   assert.ok(exports.showFailure);
   assert.ok(exports.strings);
+  assert.ok(exports.uiLang);
   const inspect = exports.inspectTray;
+  const uiLang = exports.uiLang;
   return {
     health: exports.health,
-    render: (status: Fixture, lang = "ko") => { inspect(status, lang, fakeTray); return { labels, image, tooltip }; },
+    render: (status: Fixture, lang = uiLang()) => { inspect(status, lang, fakeTray); return { labels, image, tooltip }; },
     showFailure: exports.showFailure,
     strings: exports.strings,
     answers, shown, copied,
@@ -194,8 +198,18 @@ test("other periods are formatted as minutes, and missing periods are never call
   assert.ok(app.render(quotaStatus({}, null)).labels.every(label => !label.includes("ChatGPT plus")));
 });
 
+test("a French system locale localizes the tray menu and keeps the English string contract", () => {
+  const app = harness("fr-CA");
+  assert.ok(app.render(good()).labels.includes("Quitter"));
+  const english = app.strings.en!;
+  const french = app.strings.fr!;
+  assert.deepEqual(Object.keys(french).sort(), Object.keys(english).sort());
+  for (const key of Object.keys(english)) assert.equal(typeof french[key], typeof english[key], key);
+  assert.match(String(french.aboutDetail), /n’est affilié ni à Anthropic ni à OpenAI/);
+});
+
 test("all existing tray translations use the five-hour and weekly window labels", () => {
-  const expected = { en: ["5h", "weekly"], ko: ["5시간", "주간"], zh: ["5 小时", "每周"], ja: ["5時間", "週間"], es: ["5 h", "semanal"], pt: ["5h", "semanal"] };
+  const expected = { en: ["5h", "weekly"], ko: ["5시간", "주간"], zh: ["5 小时", "每周"], ja: ["5時間", "週間"], es: ["5 h", "semanal"], pt: ["5h", "semanal"], fr: ["5 h", "hebdomadaire"] };
   const app = harness();
   for (const [lang, [fiveHour, week]] of Object.entries(expected)) {
     const shown = app.render(quotaStatus({ used_percent: 3, window_minutes: 300 }, { used_percent: 7, window_minutes: 10080 }), lang);

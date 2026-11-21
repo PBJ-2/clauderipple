@@ -1,7 +1,7 @@
 // The mod's shared shapes. The design and the reasons are in docs/specs/2026-10-10-ripple-mod.md.
 
 // Engine contracts must be self-contained; i18n re-exports this language type.
-export type Lang = 'ko' | 'en' | 'zh' | 'ja' | 'es' | 'pt'
+export type Lang = 'ko' | 'en' | 'zh' | 'ja' | 'es' | 'pt' | 'fr'
 
 export type StatusLine = string | null
 

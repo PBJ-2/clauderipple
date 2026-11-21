@@ -27,9 +27,8 @@ function el(tag, attrs, children) {
 const APP = window.rippleApp || null;
 if (APP) {
   document.documentElement.classList.add("in-app", `platform-${APP.platform}`);
-  // Korean wraps between words in the app's own sentences (style.css :lang(ko)).
-  document.documentElement.lang = CURRENT_LANG;
 }
+document.documentElement.lang = CURRENT_LANG;
 /** The router's admin API answered 503 "routerDown" (the app's way of saying it is not running). */
 let routerDown = false;
 /** What the app last said about the connection (doctor, a running repair, …); see renderConnection. */
@@ -5307,7 +5306,7 @@ const MOD_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const MOD_PARTS = ["timer", "route"];
 const MOD_EXTRAS = ["context", "limits"];
 // Named in themselves, as the mod's own Look card lists them.
-const MOD_LANGUAGES = [["ko", "한국어"], ["en", "English"], ["zh", "简体中文"], ["ja", "日本語"], ["es", "Español"], ["pt", "Português"]];
+const MOD_LANGUAGES = [["ko", "한국어"], ["en", "English"], ["zh", "简体中文"], ["ja", "日本語"], ["es", "Español"], ["pt", "Português"], ["fr", "Français"]];
 // Claude Code's own agent with a model: what the mod offers besides the generated workers, smallest
 // first, and their current model ids (packages/mod/hooks/settings.ts CLAUDE_WORKERS).
 const MOD_CLAUDE_MODELS = ["haiku", "sonnet", "opus", "fable"];
