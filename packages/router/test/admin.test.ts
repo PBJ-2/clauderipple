@@ -38,6 +38,7 @@ async function withAdmin(
     credentials?: NonNullable<AdminDeps["credentials"]>;
     clearCredentialCooldown?: NonNullable<AdminDeps["clearCredentialCooldown"]>;
     claudeClearCooldown?: NonNullable<AdminDeps["claudeClearCooldown"]>;
+    claudeResets?: NonNullable<AdminDeps["claudeResets"]>;
     providerHealth?: NonNullable<AdminDeps["providerHealth"]>;
     modelHealth?: NonNullable<AdminDeps["modelHealth"]>;
     processPriority?: NonNullable<AdminDeps["processPriority"]>;
@@ -4267,4 +4268,61 @@ test("a Claude login without an account pool reports the app login's limits, wha
     const pausedLimits = await (await fetch(`${base()}:${port}/api/limits`)).json() as typeof limits;
     assert.deepEqual(pausedLimits.providers[0]!.accounts.map((a) => [a.account, a.inUse]), [[0, undefined]]);
   }, { claudeUsage: async () => usage, observedClaudeCodeAuth: observed });
+});
+
+test("a Claude account's limit resets are read on request, and a use needs a confirmed, well-formed grant", async () => {
+  const cfg = makeCfg({ providers: { anthropic: { type: "anthropic", auth: "claude-code", accountPool: true } } });
+  const status = { eligible: true, ineligibleReason: null, atLimit: false, exhausted: [], grants: [], nextGrantId: null, weeklyResetsAt: null, cooldownUntil: null };
+  const asked: string[] = [];
+  const claimed: string[] = [];
+  await withAdmin(cfg, async ({ port }) => {
+    const url = (id: string) => `${base()}:${port}/api/claude-accounts/${id}/resets`;
+    const post = (id: string, body: unknown) => fetch(url(id), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+    const read = await fetch(url("acct"));
+    assert.equal(read.status, 200);
+    assert.deepEqual(await read.json(), { status });
+    assert.equal((await fetch(`${url("acct")}?refresh=1`)).status, 200);
+    assert.deepEqual(asked, ["acct:false", "acct:true"], "only ?refresh=1 forces a new lookup");
+
+    assert.equal((await fetch(url("ghost"))).status, 404);
+    assert.equal((await fetch(url("stale"))).status, 409);
+    const limited = await fetch(url("slow"));
+    assert.equal(limited.status, 429);
+    assert.deepEqual(await limited.json(), { error: "http", upstreamStatus: 429, retryAfterSeconds: 90 });
+
+    // A use that is not confirmed, or names a malformed grant, never reaches Anthropic.
+    assert.equal((await post("acct", { grantId: "full-reset-2611" })).status, 400);
+    assert.equal((await post("acct", { grantId: "full-reset-2611", confirm: "yes" })).status, 400);
+    assert.equal((await post("acct", { grantId: "Bad Grant", confirm: true })).status, 400);
+    assert.equal((await post("acct", { confirm: true })).status, 400);
+    assert.deepEqual(claimed, []);
+
+    const used = await post("acct", { grantId: "full-reset-2611", confirm: true });
+    assert.equal(used.status, 200);
+    assert.deepEqual(await used.json(), { claim: { result: "reset", reason: null, resetsLeft: 0, cleared: ["five_hour"], weeklyResetsAt: null }, status });
+    assert.deepEqual(claimed, ["acct:full-reset-2611"]);
+    assert.equal((await post("ghost", { grantId: "full-reset-2611", confirm: true })).status, 404);
+  }, {
+    claudeResets: {
+      status: async (id, force) => {
+        asked.push(`${id}:${force}`);
+        if (id === "ghost") return { ok: false, error: { kind: "unknown-account" } };
+        if (id === "stale") return { ok: false, error: { kind: "needs-login" } };
+        if (id === "slow") return { ok: false, error: { kind: "http", status: 429, retryAfterSeconds: 90 } };
+        return { ok: true, value: status };
+      },
+      claim: async (id, grantId) => {
+        if (id === "ghost") return { ok: false, error: { kind: "unknown-account" } };
+        claimed.push(`${id}:${grantId}`);
+        return { ok: true, value: { claim: { result: "reset", reason: null, resetsLeft: 0, cleared: ["five_hour"], weeklyResetsAt: null }, status } };
+      },
+    },
+  });
+});
+
+test("the limit resets answer 501 where the router cannot read them", async () => {
+  await withAdmin(makeCfg(), async ({ port }) => {
+    assert.equal((await fetch(`${base()}:${port}/api/claude-accounts/current/resets`)).status, 501);
+  });
 });

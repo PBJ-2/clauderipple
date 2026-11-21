@@ -59,6 +59,7 @@ import { ClaudeAccountAuthPool } from "./providers/anthropic-account-pool.ts";
 import { ClaudeModelCatalog } from "./providers/anthropic-models.ts";
 import { ClaudeUsage, claudeLimitResetMs, claudeModelFamily } from "./providers/anthropic-usage.ts";
 import { ClaudeCurrentIdentity, LoginEmailWatch, PendingRowWrites } from "./providers/anthropic-identity.ts";
+import { ClaudeLimitResets } from "./providers/anthropic-resets.ts";
 import { dropForeignThinking, ThinkingOrigins } from "./thinking.ts";
 
 const MAX_BODY = 64 * 1024 * 1024;
@@ -311,6 +312,8 @@ export class Proxy {
   readonly claudeModels: ClaudeModelCatalog;
   /** Who the current Claude login is (never a token), so admin can spot a stored copy of it. */
   readonly claudeIdentity: ClaudeCurrentIdentity;
+  /** The limit resets Anthropic grants to a Claude account, and using one (the dashboard's per-account menu). */
+  readonly claudeResets: ClaudeLimitResets;
   /** Each OpenCode Go provider's usage windows, for the status bar's limits row (never a key). */
   private readonly opencodeUsage: OpenCodeUsage;
   /** Each MiniMax plan provider's usage windows, for the status bar's limits row (never a key). */
@@ -662,6 +665,10 @@ export class Proxy {
     this.claudeIdentity = new ClaudeCurrentIdentity(this.claudeAccounts, {
       upstream: () => this.deps.config().upstream,
       ...(deps.claudeProfileFetch ? { fetch: deps.claudeProfileFetch } : {}),
+      warn: (message) => deps.log.warn(message),
+    });
+    this.claudeResets = new ClaudeLimitResets({ credential: (ownerId) => this.claudeAccounts.accountCredential(ownerId) }, {
+      upstream: () => this.deps.config().upstream,
       warn: (message) => deps.log.warn(message),
     });
     this.opencodeUsage = new OpenCodeUsage({ warn: (message) => deps.log.warn(message) });
