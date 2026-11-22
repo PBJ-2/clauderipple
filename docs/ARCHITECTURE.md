@@ -1777,8 +1777,14 @@ tight, and nothing at 100 or more.
   endpoint's rate limit so it is read on request and kept 30 s, and the organization
   uuid lives in memory only. A use that returns `reset` lifts the router's rest on
   that account. Admin: `GET /api/claude-accounts/<id|current>/resets[?refresh=1]` and
-  `POST` the same path with `{grantId, confirm: true}`; the dashboard's account
-  cards have a "Resets" button.
+  `POST` the same path with `{grantId, confirm: true}`. The dashboard checks the
+  visible accounts on the Accounts tab, no more than once per account every five
+  minutes automatically, and enables "Resets" only when a grant can be used.
+  Claude Code 2.1.326 treats `gives_back_weekly` as returning Fable's share to the
+  all-model weekly limit, not clearing that limit. The preview distinguishes that
+  partial effect from a full refill (`clears`) and does not guess the returned
+  amount: `percent_used` describes current usage, and `seven_day_overage_included`
+  is Fable's own limit, not its share of the all-model limit.
 - **Metered keys serve what names them (2026-10-30).** A native `anthropic`
   provider on an API key (`auth: "api-key"`, no `accountPool`) and the `openai`
   preset (the OpenAI API) bill per token for models the person also reaches on a

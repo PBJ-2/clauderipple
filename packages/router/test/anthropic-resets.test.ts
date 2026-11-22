@@ -98,6 +98,20 @@ test("the status block of a usage body becomes grants, dropping what is malforme
   assert.equal(claudeResetsFromBody({ cedar_ember: { next_grant_id: "ghost", grants: [] } })!.nextGrantId, null);
 });
 
+test("a Fable grant can preview the weekly total without claiming it is cleared", () => {
+  const status = claudeResetsFromBody({
+    seven_day: { utilization: 72.5 },
+    seven_day_overage_included: { utilization: 91 },
+    five_hour: { utilization: 10 },
+    cedar_ember: { grants: [{ id: "fable", resets_left: 1, clears: ["seven_day_overage_included"], percent_used: { seven_day_overage_included: 94 }, gives_back_weekly: true }] },
+  });
+  const grant = status?.grants[0];
+  assert.ok(grant);
+  assert.equal(grant.givesBackWeekly, true);
+  assert.deepEqual(grant.clears, ["seven_day_overage_included"]);
+  assert.deepEqual(grant.percentUsed, { seven_day_overage_included: 94, seven_day: 72.5 });
+});
+
 test("an account the program does not reach has no resets, and a block that is not an object is unreadable", () => {
   const none = claudeResetsFromBody({ five_hour: null });
   assert.deepEqual({ eligible: none!.eligible, grants: none!.grants }, { eligible: false, grants: [] });

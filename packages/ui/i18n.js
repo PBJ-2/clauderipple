@@ -2,6 +2,7 @@
 
 const I18N = {
   ko: {
+    "resets.window.seven_day_fable": "주간 Fable 한도", "resets.fableGiveback": "주간 한도에서 Fable 사용량만 돌려받습니다. 반환되는 양은 표시되지 않습니다.",
     "quota.remainingLine": "{window} {percent}% 남음", "quota.showUsed": "사용량으로 보기", "quota.showRemaining": "남은 한도로 보기",
     "limits.active": "사용 중", "limits.stale": "오래된 정보",
     "limits.fiveHour": "5시간", "limits.weekly": "주간", "limits.resetUnknown": "초기화 시간을 알 수 없습니다",
@@ -267,6 +268,7 @@ const I18N = {
     "mod.modeRemoveConfirm": "‘{name}’ 모드를 삭제하시겠습니까?",
   },
   en: {
+    "resets.window.seven_day_fable": "Weekly Fable limit", "resets.fableGiveback": "Only Fable usage is returned to the weekly limit; the amount is not provided.",
     "quota.remainingLine": "{window} {percent}% remaining", "quota.showUsed": "Show usage", "quota.showRemaining": "Show remaining limits",
     "limits.active": "Active", "limits.stale": "Stale",
     "limits.fiveHour": "5-hour", "limits.weekly": "Weekly", "limits.resetUnknown": "Reset time unknown",
@@ -532,6 +534,7 @@ const I18N = {
     "mod.modeRemoveConfirm": "Delete the mode “{name}”?",
   },
   zh: {
+    "resets.window.seven_day_fable": "Fable 每周限额", "resets.fableGiveback": "每周总限额仅返还 Fable 的用量，未提供具体返还额度。",
     "quota.remainingLine": "{window} 剩余 {percent}%", "quota.showUsed": "显示用量", "quota.showRemaining": "显示剩余额度",
     "limits.active": "使用中", "limits.stale": "数据已过期",
     "limits.fiveHour": "5 小时", "limits.weekly": "每周", "limits.resetUnknown": "重置时间未知",
@@ -1101,6 +1104,7 @@ const I18N = {
     "mod.modeRemoveConfirm": "要删除模式“{name}”吗？",
   },
   ja: {
+    "resets.window.seven_day_fable": "Fable の週次上限", "resets.fableGiveback": "週次上限に戻るのは Fable の使用分だけです。戻る量は表示されません。",
     "quota.remainingLine": "{window} 残り {percent}%", "quota.showUsed": "使用量を表示", "quota.showRemaining": "残りの上限を表示",
     "limits.active": "使用中", "limits.stale": "古い情報",
     "limits.fiveHour": "5時間", "limits.weekly": "週間", "limits.resetUnknown": "リセット時刻は不明です",
@@ -1670,6 +1674,7 @@ const I18N = {
     "mod.modeRemoveConfirm": "モード「{name}」を削除しますか？",
   },
   es: {
+    "resets.window.seven_day_fable": "Límite semanal de Fable", "resets.fableGiveback": "Al límite semanal solo se le devuelve el uso de Fable. No se indica la cantidad.",
     "quota.remainingLine": "{window} {percent}% restante", "quota.showUsed": "Mostrar uso", "quota.showRemaining": "Mostrar límites restantes",
     "limits.active": "En uso", "limits.stale": "Datos desactualizados",
     "limits.fiveHour": "5 horas", "limits.weekly": "semanal", "limits.resetUnknown": "Hora de reinicio desconocida",
@@ -2239,6 +2244,7 @@ const I18N = {
     "mod.modeRemoveConfirm": "¿Quieres eliminar el modo «{name}»?",
   },
   pt: {
+    "resets.window.seven_day_fable": "Limite semanal do Fable", "resets.fableGiveback": "Apenas o uso do Fable é devolvido ao limite semanal. A quantidade não é informada.",
     "quota.remainingLine": "{window} {percent}% restante", "quota.showUsed": "Mostrar uso", "quota.showRemaining": "Mostrar limites restantes",
     "limits.active": "Em uso", "limits.stale": "Dados desatualizados",
     "limits.fiveHour": "5 horas", "limits.weekly": "semanal", "limits.resetUnknown": "Horário de redefinição desconhecido",

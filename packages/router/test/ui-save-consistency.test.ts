@@ -502,16 +502,26 @@ test('the current Claude card uses the pool pause controls without rename, remov
   assert.equal(refreshed, 2);
 });
 
-test('an account\'s limit resets open on demand, and a use needs a click, a confirmation and a usable grant', async () => {
+test('reset availability is read before opening, and a use needs explicit confirmation', async () => {
   const calls: { url: string; method: string; body?: string }[] = [];
   const toasts: string[] = [];
   let modal: DomNode | null = null;
   const modalContent = () => { assert.ok(modal); return modal; };
   const grant = (id: string, extra: Record<string, unknown> = {}) => ({ id, label: `Reset ${id}`, left: 1, total: 1, endsAt: '2026-12-10T22:00:00+00:00', clears: ['five_hour', 'seven_day'], paused: false, usableNow: true, ...extra });
   const status = { grants: [grant('usable', { percentUsed: { five_hour: 42 } }), grant('spent', { left: 0, usableNow: false })] };
+  const fableOnly = { grants: [grant('fable', {
+    clears: ['seven_day_overage_included'], givesBackWeekly: true, percentUsed: { seven_day_overage_included: 94, seven_day: 72.5 },
+  })] };
   const after = { grants: [grant('usable', { left: 0, usableNow: false })] };
   const api = async (url: string, options?: { method?: string; body?: string }) => {
     calls.push({ url, method: options?.method ?? 'GET', ...(options?.body ? { body: options.body } : {}) });
+    if (url.includes('/unreadable/') || url.endsWith('?refresh=1')) throw new Error('unreadable');
+    if (url.includes('/empty/')) return { status: { grants: [] } };
+    if (url.includes('/not-usable/')) return { status: { grants: [
+      grant('paused', { paused: true }), grant('expired', { endsAt: '2000-01-01T00:00:00Z' }), grant('not-limited', { usableNow: false }),
+    ] } };
+    if (url.includes('/spent/')) return { status: after };
+    if (url.includes('/fable/')) return { status: fableOnly };
     return options?.method === 'POST' ? { claim: { result: 'reset', resetsLeft: 0 }, status: after } : { status };
   };
   const make = new Function('document', 'Node', 'api', 'refreshClaudeAccountPanel', 'showModal', 'closeModal', 'toast', `
@@ -520,27 +530,35 @@ test('an account\'s limit resets open on demand, and a use needs a click, a conf
     ${block('function $(', '// Inside the ClaudeRipple app')}
     ${block('function durationText(', 'async function patchChatgptAccount(')}
     ${block('const claudeResetsState =', 'function accountPoolActions(')}
-    return { claudeResetsControl, claudeResetsStateOf };
+    return { claudeResetsControl, refreshClaudeResetsControls };
   `);
   let refreshed = 0;
-  const { claudeResetsControl } = make(
+  const { claudeResetsControl, refreshClaudeResetsControls } = make(
     { createElement: (tag: string) => new DomNode(tag.toUpperCase()), querySelector: () => null }, DomNode,
     api, async () => { refreshed++; }, (content: DomNode) => { modal = content; }, () => { modal = null; }, (message: string) => toasts.push(message),
-  ) as { claudeResetsControl: (provider: string, id: string, label: string) => { button: DomNode; panel: DomNode } };
+  ) as {
+    claudeResetsControl: (provider: string, id: string, label: string, needsLogin?: boolean) => { button: DomNode; panel: DomNode };
+    refreshClaudeResetsControls: (target: DomNode) => void;
+  };
   const flush = () => new Promise(resolve => setImmediate(resolve));
   const { button, panel } = claudeResetsControl('claude', 'acct', 'Emilie');
+  const target = new DomNode('DIV');
+  target.append(button, panel);
   assert.equal(panel.hidden, true, 'closed until asked for');
-  assert.equal(calls.length, 0, 'nothing is read before the button is pressed');
-
-  button.emit('click'); await flush();
+  assert.equal(button.disabled, true, 'unknown availability cannot be opened');
+  refreshClaudeResetsControls(target);
+  refreshClaudeResetsControls(target);
+  await flush();
+  assert.equal(button.disabled, false);
+  assert.deepEqual(calls, [{ url: '/api/claude-accounts/acct/resets', method: 'GET' }], 'prefetch once without forcing it');
+  button.click();
   assert.equal(panel.hidden, false);
-  assert.deepEqual(calls, [{ url: '/api/claude-accounts/acct/resets', method: 'GET' }], 'the first opening reads the list without forcing it');
   const uses = panel.querySelectorAll('button').filter(node => node.textContent === 'resets.use');
   assert.deepEqual(uses.map(node => node.disabled), [false], 'a spent grant is not listed');
 
   uses[0]!.emit('click'); await flush();
   assert.ok(modalContent().descendants().some(node => node.textContent.includes('Emilie') && node.textContent.includes('Reset usable')));
-  assert.deepEqual(modalContent().querySelectorAll('li').map(node => node.textContent), ['resets.window.five_hour: 42% → 0%', 'resets.window.seven_day: common.notAvailable']);
+  assert.deepEqual(modalContent().querySelectorAll('li').map(node => node.textContent), ['resets.window.five_hour: 42% → 0%', 'resets.window.seven_day: common.notAvailable → 0%']);
   assert.equal(calls.length, 1, 'opening the modal sends nothing');
   modalContent().querySelectorAll('button').find(node => node.textContent === 'common.cancel')!.emit('click');
   assert.equal(modal, null);
@@ -554,9 +572,47 @@ test('an account\'s limit resets open on demand, and a use needs a click, a conf
   assert.deepEqual(toasts, ['resets.result.reset{"left":0}']);
   assert.deepEqual(panel.querySelectorAll('button').filter(node => node.textContent === 'resets.use').map(node => node.disabled), [], 'the used grant leaves the list');
 
-  button.emit('click'); await flush();
-  assert.equal(panel.hidden, true, 'the button closes the list again');
-  assert.equal(calls.filter(call => call.method === 'GET').length, 1, 'closing the list does not read again');
+  assert.equal(button.disabled, true, 'the last use disables the button');
+  assert.equal(panel.hidden, true, 'the empty list closes');
+  refreshClaudeResetsControls(target);
+  assert.equal(calls.filter(call => call.method === 'GET').length, 1, 'account polling reuses recent availability');
+
+  const unavailable = [
+    ['empty', 'resets.none'], ['spent', 'resets.none'], ['not-usable', 'resets.notUsable'],
+    ['unreadable', 'resets.unavailable'], ['login', 'resets.needsLogin'],
+  ] as const;
+  const controls = unavailable.map(([id]) => claudeResetsControl('claude', id, id, id === 'login'));
+  const readable = claudeResetsControl('claude', 'readable', 'Readable');
+  target.append(...controls.flatMap(({ button, panel }) => [button, panel]), readable.button, readable.panel);
+  refreshClaudeResetsControls(target);
+  await flush();
+  assert.equal(calls.some(call => call.url.includes('/login/')), false, 'do not look up an account known to need sign-in');
+  for (const [i, [, title]] of unavailable.entries()) {
+    const control = controls[i]!;
+    assert.equal(control.button.disabled, true, title);
+    assert.equal(control.button.attrs.title, title);
+    control.button.click();
+    assert.equal(control.panel.hidden, true, title);
+  }
+  readable.button.click();
+  readable.panel.querySelectorAll('button').find(node => node.textContent === 'resets.refresh')!.click();
+  await flush();
+  assert.equal(readable.button.disabled, true, 'a failed refresh invalidates a previous good result');
+  assert.equal(readable.button.attrs.title, 'resets.unavailable');
+  assert.equal(readable.panel.hidden, true);
+
+  const fable = claudeResetsControl('claude', 'fable', 'Fable');
+  target.append(fable.button, fable.panel);
+  refreshClaudeResetsControls(target);
+  await flush();
+  fable.button.click();
+  assert.ok(fable.panel.descendants().some(node => node.textContent === 'resets.fableGiveback'));
+  fable.panel.querySelectorAll('button').find(node => node.textContent === 'resets.use')!.click();
+  assert.deepEqual(modalContent().querySelectorAll('li').map(node => node.textContent), [
+    'resets.window.seven_day_fable: 94% → 0%',
+    'resets.window.seven_day: 72.5% · resets.fableGiveback',
+  ]);
+  assert.deepEqual(calls.filter(call => call.method === 'POST'), posts, 'previewing Fable does not redeem it');
 });
 
 test('the dashboard recognises Ollama so an empty ladder there is measured, not a decision', () => {
