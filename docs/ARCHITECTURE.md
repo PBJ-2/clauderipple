@@ -976,6 +976,27 @@ must preserve **Data: Artificial Analysis (artificialanalysis.ai)** attribution.
     one snapshot (the account that answers next — the tray and other readers
     want one number) and adds `chatgpt.accounts` per account; `/wham/usage` is
     asked for every account.
+  - **Per-account usage cap (2026-11-23, issue #184).** ChatGPT's own per-app
+    limits do not list ClaudeRipple (it signs in as the Codex CLI), so the owner
+    can cap an account here: `usageCap`, one whole percent 1–99 in
+    `chatgpt-accounts.json` (absent = 100 = the behaviour above), set with
+    `PATCH /api/chatgpt-accounts/:id {usageCap: n | null}` or the account row's
+    button, never on the borrowed Codex login. It applies to both the 5-hour and
+    the weekly window: `exhaustedForMs(snapshot, now, credits, cap)` counts a
+    window as spent at `used_percent >= cap`, and under a cap credits do not keep
+    the account usable (they are only spent past 100%). The cap is read from
+    every quota reading (response headers, `/wham/usage`), so it is judged after
+    each answer: one request can go slightly over, and after a restart the
+    startup `/wham/usage` read restores it. The rest is a `CredentialPool` *hold*
+    until the window that is over frees, not a cooldown: a cooldown is clamped to
+    6 h (`MAX_COOLDOWN_MS`), and a weekly window days away would otherwise bring
+    the account back every 6 h to spend one more real request. A hold is lifted
+    by a reading under the cap, the reset passing, or the cap being changed or
+    cleared (the dashboard re-judges the held reading at once); none of that
+    touches a genuine 429 cooldown. The real-429 wait ignores the cap. One
+    `router.log` line per transition (`account <id8> at 72% of weekly (cap 70%);
+    resting until <ISO>, next account`); `chatgpt.accounts[].capRest` carries the
+    window and reading for the dashboard.
   - **The prompt cache is keyed on the conversation's identity, not on
     `prompt_cache_key` (since mid-September 2026).** Five turns with byte-identical
     instructions, tools and input prefix, 3–6s apart under one key, all came back

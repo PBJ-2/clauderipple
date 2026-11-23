@@ -192,6 +192,12 @@ spent one rests until its window resets; a conversation stays on the account tha
 answered, to keep its prompt cache. This applies to the Claude Desktop Code tab, Claude
 Code, and GPT in the Codex app and CLI.
 
+To keep part of an account's allowance for ChatGPT itself, set a **usage cap** on its row
+(a whole percent from 1 to 99). When either the 5-hour or the weekly usage reaches it, the
+account is left out until that window resets, and the next account answers. An account
+with a cap does not spend credits. Usage updates after each answer, so one request can go
+slightly over the cap.
+
 ### Can I use Claude inside Codex?
 
 Yes. `clauderipple codex on` adds ClaudeRipple as a provider, and Claude models appear in
