@@ -290,10 +290,14 @@ function savedContextWindow(modelId) {
 // A model whose window neither its provider nor the live Codex catalogue states runs on the global
 // fallback (`cli.autoCompactWindow`) — a number nobody measured for it. Saying so on the model's own
 // row is the only place it shows: Hive's `/models` lists ids and nothing else, and a silent fallback
-// is what made a 1M model compact at a quarter of its window.
-function modelWindowNote(model) {
+// is what made a 1M model compact at a quarter of its window. A native Claude model on a provider
+// that signs in as Claude Code takes its window from that login's own model list, which
+// `/api/context-windows` resolves and the config never stores (models.dev has no Mythos, 2026-11-18).
+function modelWindowNote(model, provider) {
   if (Number.isFinite(model.contextWindow)) return null;
   if (Number.isFinite(pickerContextWindows.catalogWindows[model.id])) return null;
+  if (provider && provider.type === "anthropic" && provider.auth === "claude-code"
+    && Number.isFinite(pickerContextWindows.windows[model.id.replace(/-\d{8}$/, "")])) return null;
   const fallback = currentConfig && currentConfig.cli ? currentConfig.cli.autoCompactWindow : undefined;
   return Number.isFinite(fallback)
     ? t("providers.windowUnknown", { fallback: formatNumber(fallback) })
@@ -3451,7 +3455,7 @@ function providerModelsPanel(name, provider) {
     section(t("providers.selectedModels"), models.length
       ? models.map((model) => {
           const tag = modelEffortTag(model);
-          const note = modelWindowNote(model);
+          const note = modelWindowNote(model, provider);
           return cell(labelOf(model), tag ? el("span", { class: `model-effort-tag ${model.effortLevels.length ? "has-effort" : "no-effort"}`, text: tag }) : null, [
             el("span", { class: "cell-sub mono", text: model.id }),
             note ? el("span", { class: "cell-sub warn-text", text: note }) : null,
