@@ -17,7 +17,7 @@ import { shownPlan } from "../src/task-plan.ts";
 import { BridgeClient, CLI_NOT_LOGGED_IN, DESKTOP_MOD_OFFLINE, DESKTOP_MOD_OFFLINE_SEND, DesktopBlockedError } from "../src/bridge-client.ts";
 import { transcriptEvents, type DesktopProcess, type SubagentState } from "../src/desktop.ts";
 import type { CanUseTool, PermissionAnswer, QueryFn, SdkUserMessage, SessionsOptions } from "../src/sessions.ts";
-import { posixPaths } from "../../../test/capabilities.ts";
+import { posixModes, posixPaths } from "../../../test/capabilities.ts";
 import { claudeAppData } from "./app-data.ts";
 import { signatureOf } from "./narration-signature.ts";
 
@@ -2877,7 +2877,8 @@ test("a Remote Control app session's photo goes through the mod as a file the te
   assert.equal(offer.text, `Look at this\n\n${photoLines(f.dir, APP_ID, "rc-photo")[0]}`);
   const file = path.join(f.dir, "mod-photos", APP_ID, "rc-photo-1.png");
   assert.ok(fs.readFileSync(file).equals(PNG), "the file holds the photo's bytes");
-  assert.equal(fs.statSync(file).mode & 0o077, 0, "only the owner reads it");
+  // Windows keeps no POSIX permission bits: there the mode reads 0o666 whatever was asked for.
+  if (posixModes) assert.equal(fs.statSync(file).mode & 0o077, 0, "only the owner reads it");
   assert.equal(f.sessions.modInbox.claim("rc-photo"), true);
   assert.equal(f.sessions.modInbox.result("rc-photo", "submitted"), true);
   assert.equal(MessageReceipts.open(path.join(f.dir, "receipts.json")).status(`send:${APP_ID}:rc-photo`), "completed");

@@ -496,9 +496,12 @@ export function pinnedCredential<T extends Credential>(provider: string, credent
  * turn spent a 404 `thread_not_found` and a full replay). Remembering the producing conversation's
  * key lets the continue ask the pool for that same key. Process memory only, bounded by the same
  * TTL as an idle conversation and by a size cap; an unknown id keeps the computed key.
+ *
+ * The value is a conversation key by default. The proxy keeps a second instance for the effort a
+ * native answer went out with (`ThreadEffort` in proxy.ts), which a continue must repeat.
  */
-export class ThreadAffinity {
-  private readonly entries = new Map<string, { key: string; at: number }>();
+export class ThreadAffinity<T = string> {
+  private readonly entries = new Map<string, { key: T; at: number }>();
   private readonly now: () => number;
   private readonly ttlMs: number;
   private readonly maxEntries: number;
@@ -509,7 +512,7 @@ export class ThreadAffinity {
     this.maxEntries = opts.maxEntries ?? 20_000;
   }
 
-  remember(messageId: string, conversation: string): void {
+  remember(messageId: string, conversation: T): void {
     this.prune();
     // Re-insert so the oldest-eviction order reflects the latest use.
     this.entries.delete(messageId);
@@ -520,7 +523,7 @@ export class ThreadAffinity {
     }
   }
 
-  lookup(messageId: string): string | undefined {
+  lookup(messageId: string): T | undefined {
     const entry = this.entries.get(messageId);
     if (!entry) return undefined;
     if (entry.at < this.now() - this.ttlMs) {

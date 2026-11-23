@@ -359,6 +359,11 @@ proxy
       claudeUsage: () => proxy.claudeUsage.snapshot(),
       claudeModels: () => proxy.claudeModels.list(),
       claudeIdentity: () => proxy.claudeIdentity.identify(),
+      // The usage cache names the login a reading came from only as a hash; the identity cache maps it back.
+      claudeReadingIdentity: (reading) => {
+        const key = proxy.claudeUsage.readWithOf(reading);
+        return key === undefined ? undefined : proxy.claudeIdentity.cachedFor(key);
+      },
       opencodeUsage: (name, credentialId) => proxy.opencodeLimits(name, credentialId),
       minimaxUsage: (name, credentialId) => proxy.minimaxLimits(name, credentialId),
       grokUsage: (name: string) => proxy.grokLimits(name),
@@ -398,8 +403,13 @@ proxy
         .finally(() => measureUnsettledModels(adminDeps));
     }, 60_000).unref();
     // Claude releases reach the declared models without a ClaudeRipple release: checked a minute in,
-    // then every six hours (the catalogue itself is cached for an hour).
-    const adopt = () => void adoptNewClaudeModels(adminDeps).catch((e: Error) => log!.warn(`claude models: ${e.message}`));
+    // then every six hours. A missed pass also runs when the catalogue first gets a list.
+    let adoptionMissed = false;
+    const adopt = () => void adoptNewClaudeModels(adminDeps)
+      .then((declared) => { adoptionMissed = declared === null; })
+      .catch((e: Error) => log!.warn(`claude models: ${e.message}`));
+    // A pass that found no list runs again as soon as the first list arrives, not six hours later.
+    proxy.claudeModels.onFirstList(() => { if (adoptionMissed) adopt(); });
     setTimeout(adopt, 60_000).unref();
     setInterval(adopt, 6 * 60 * 60_000).unref();
   })

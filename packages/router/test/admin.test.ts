@@ -6,8 +6,9 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { DEFAULTS, type Config, type ProviderModel } from "../src/config.ts";
+import { bootstrapWindows } from "../src/bootstrap.ts";
 import { Logger } from "../src/log.ts";
-import { backfillContextWindows, effortLevelsForModel, googleHealth, measureUnsettledModels, parseUpdateCheck, startAdmin, type AdminDeps, type LimitsProvider } from "../src/admin.ts";
+import { adoptNewClaudeModels, backfillContextWindows, effortLevelsForModel, googleHealth, measureUnsettledModels, parseUpdateCheck, startAdmin, type AdminDeps, type LimitsProvider } from "../src/admin.ts";
 import type { ImageRequest } from "../src/providers/chatgpt/index.ts";
 import type { GoogleAccountStatus } from "../src/providers/google/index.ts";
 import type { QuotaGroup } from "../src/providers/google/usage.ts";
@@ -16,7 +17,10 @@ import { MiniMaxUsage } from "../src/providers/minimax-usage.ts";
 import { RequestLog } from "../src/requestlog.ts";
 import { PRESETS } from "../src/presets.ts";
 import { saveClaudeAuthFile, saveClaudeOAuthFile } from "../src/providers/anthropic-token-file.ts";
-import { listClaudeAccounts, markClaudeAccountNeedsReauth, readClaudeAccountsFile, readClaudeOAuthAccounts, saveClaudeOAuthAccount, setCurrentClaudeAccountPaused, setPreferredClaudeAccount, subjectHash } from "../src/providers/anthropic-accounts.ts";
+import { listClaudeAccounts, markClaudeAccountNeedsReauth, readClaudeAccountsFile, readClaudeOAuthAccounts, saveClaudeOAuthAccount, setCurrentClaudeAccountPaused, setPreferredClaudeAccount, subjectHash, updateClaudeAccount } from "../src/providers/anthropic-accounts.ts";
+import { ClaudeUsage } from "../src/providers/anthropic-usage.ts";
+import { ClaudeCurrentIdentity } from "../src/providers/anthropic-identity.ts";
+import type { Credential } from "../src/pool.ts";
 import { PinnedAgentSync, syncAgentFiles } from "../src/agents.ts";
 import { ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
 import type { ModOptions } from "../src/admin.ts";
@@ -61,6 +65,7 @@ async function withAdmin(
     minimaxUsage?: NonNullable<AdminDeps["minimaxUsage"]>;
     claudeUsage?: NonNullable<AdminDeps["claudeUsage"]>;
     claudeIdentity?: NonNullable<AdminDeps["claudeIdentity"]>;
+    claudeReadingIdentity?: NonNullable<AdminDeps["claudeReadingIdentity"]>;
     claudeModels?: NonNullable<AdminDeps["claudeModels"]>;
     googleOAuthFetch?: (url: string, init?: RequestInit) => Promise<Response>;
     googleOAuthPort?: number;
@@ -657,6 +662,33 @@ test("admin mod-settings save derives Claude Code's idleCompaction from the togg
     fs.writeFileSync(file, "[1]");
     assert.equal((await putModSettings(port, { settings: { keepWarm: true } })).status, 200);
     assert.equal(fs.readFileSync(file, "utf8"), "[1]");
+  });
+});
+
+test("admin mod-settings keeps the band limits choice when an older mod's save leaves the key out; a named [] clears it", async () => {
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const chosen = [{ provider: "chatgpt", show: "accounts", accounts: ["fa928bf4-0000-4000-8000-000000000000"] }, { provider: "claude-anthropic", show: "all" }];
+    const get = async () => ((await (await fetch(`${base()}:${port}/api/mod-settings`)).json()) as ModSettingsSnapshot).settings;
+    const saved = await putModSettings(port, { settings: { bandLimits: chosen } });
+    assert.equal(saved.status, 200);
+    assert.deepEqual((await saved.json() as ModSettingsSnapshot).settings.bandLimits, chosen);
+    // The body an older mod sends: the admin handler normalizes first, which must not fill [] in.
+    const legacy = await putModSettings(port, { settings: { keepWarm: false } });
+    assert.equal(legacy.status, 200);
+    assert.deepEqual((await legacy.json() as ModSettingsSnapshot).settings.bandLimits, chosen);
+    assert.deepEqual((await get()).bandLimits, chosen);
+    const cleared = await putModSettings(port, { settings: { bandLimits: [] } });
+    assert.equal(cleared.status, 200);
+    assert.deepEqual((await cleared.json() as ModSettingsSnapshot).settings.bandLimits, []);
+    assert.deepEqual((await get()).bandLimits, []);
+  });
+});
+
+test("admin mod-settings saves a provider whose name ends in -key: the choice is a value, not a credential field", async () => {
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const response = await putModSettings(port, { settings: { bandLimits: [{ provider: "openai-key", show: "off" }] } });
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json() as ModSettingsSnapshot).settings.bandLimits, [{ provider: "openai-key", show: "off" }]);
   });
 });
 
@@ -3353,6 +3385,80 @@ test("backfillContextWindows fills a provider with no catalogue block from the s
   }
 });
 
+test("adoptNewClaudeModels writes no window, so a route to the native pool keeps its bootstrap window", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-adopt-"));
+  const prevHome = process.env.CLAUDERIPPLE_HOME;
+  process.env.CLAUDERIPPLE_HOME = home;
+  try {
+    const cfg = makeCfg({
+      providers: {
+        anthropic: {
+          type: "anthropic",
+          auth: "claude-code",
+          accountPool: true,
+          models: [
+            { id: "claude-mythos-5-1", name: "Mythos 5.1" },
+            { id: "claude-opus-5-5", name: "Opus 5.5", contextWindow: 500000 },
+          ],
+        },
+      },
+      routes: { "claude-mythos-5-1": { provider: "anthropic", model: "claude-mythos-5-1" } },
+    });
+    const configFile = path.join(home, "config.json");
+    fs.writeFileSync(configFile, JSON.stringify(cfg, null, 2));
+    const before = bootstrapWindows(JSON.parse(fs.readFileSync(configFile, "utf8")) as Config)["claude-mythos-5-1"];
+    assert.equal(before, cfg.cli.autoCompactWindow);
+    const log = new Logger(null, 1_000_000, 1, false);
+    const live = [
+      { id: "claude-mythos-5-2", name: "Mythos 5.2", line: "mythos", createdAt: Date.parse("2026-11-10T00:00:00Z"), contextWindow: 1000000 },
+      { id: "claude-mythos-5-1", name: "Mythos 5.1", line: "mythos", createdAt: Date.parse("2026-10-14T00:00:00Z"), contextWindow: 1000000 },
+      { id: "claude-opus-5-5", name: "Opus 5.5", line: "opus", createdAt: Date.parse("2026-09-21T00:00:00Z"), contextWindow: 1000000 },
+    ];
+    const deps = { config: () => cfg, configFile, log, claudeModels: async () => live } as unknown as AdminDeps;
+    assert.deepEqual(await adoptNewClaudeModels(deps), ["anthropic/claude-mythos-5-2"]);
+    const reread = JSON.parse(fs.readFileSync(configFile, "utf8")) as Config;
+    const models = reread.providers.anthropic!.models!;
+    assert.deepEqual(models.filter((model) => "contextWindow" in model).map((model) => [model.id, model.contextWindow]), [["claude-opus-5-5", 500000]]);
+    assert.equal(bootstrapWindows(reread)["claude-mythos-5-1"], before);
+    assert.equal(bootstrapWindows(reread)["claude-mythos-5-1"], cfg.cli.autoCompactWindow);
+    assert.deepEqual(await adoptNewClaudeModels(deps), [], "a second pass declares nothing");
+    assert.equal(await adoptNewClaudeModels({ ...deps, claudeModels: async () => null }), null);
+  } finally {
+    if (prevHome === undefined) delete process.env.CLAUDERIPPLE_HOME;
+    else process.env.CLAUDERIPPLE_HOME = prevHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("adoptNewClaudeModels takes the config lock before changing the file", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-adopt-lock-"));
+  const prevHome = process.env.CLAUDERIPPLE_HOME;
+  process.env.CLAUDERIPPLE_HOME = home;
+  const configFile = path.join(home, "config.json");
+  const cfg = makeCfg({ providers: { anthropic: { type: "anthropic", auth: "claude-code", models: [{ id: "claude-mythos-5-1" }] } } });
+  fs.writeFileSync(configFile, JSON.stringify(cfg, null, 2));
+  const before = fs.readFileSync(configFile);
+  fs.mkdirSync(`${configFile}.lock`);
+  try {
+    const deps = {
+      config: () => cfg,
+      configFile,
+      log: new Logger(null, 1_000_000, 1, false),
+      claudeModels: async () => [
+        { id: "claude-mythos-5-2", line: "mythos", createdAt: 2 },
+        { id: "claude-mythos-5-1", line: "mythos", createdAt: 1 },
+      ],
+    } as unknown as AdminDeps;
+    await assert.rejects(adoptNewClaudeModels(deps), (error: NodeJS.ErrnoException) => error.code === "ELOCKED");
+    assert.deepEqual(fs.readFileSync(configFile), before);
+  } finally {
+    fs.rmSync(`${configFile}.lock`, { recursive: true, force: true });
+    if (prevHome === undefined) delete process.env.CLAUDERIPPLE_HOME;
+    else process.env.CLAUDERIPPLE_HOME = prevHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
 // The same fold on the measurement path, which is what a provider saved by hand goes through.
 test("measurement gives a provider with no catalogue block the window its model has elsewhere", async () => {
   const cfg = makeCfg({
@@ -4123,6 +4229,8 @@ test("GET /api/limits names the current login and leaves out stored copies of it
   let usage: Awaited<ReturnType<NonNullable<AdminDeps["claudeUsage"]>>> = {};
   type Identity = { email: string; subjectHash: string } | null;
   let lookup: () => Promise<Identity> = async () => ({ email: "Person@Example.Test", subjectHash: subjectHash(uuid)! });
+  // The login's cached reading was taken with that same login (2026-11-20: a copy is hidden only then).
+  const reading: Identity = { email: "Person@Example.Test", subjectHash: subjectHash(uuid)! };
   let reports: ReturnType<NonNullable<AdminDeps["credentials"]>> = {};
   await withAdmin(cfg, async ({ port, home }) => {
     saveClaudeAuthFile(home, "current-login-token", "2026-10-23T00:00:00.000Z");
@@ -4134,6 +4242,8 @@ test("GET /api/limits names the current login and leaves out stored copies of it
 
     let got = await rows();
     assert.deepEqual(got.map((a) => [a.account, a.id, a.label]), [[0, "current", "Person@Example.Test"], [2, other.id, "person@example.test"]], "the login carries its email; its stored copy is gone; the other keeps number 3");
+    // The login's row names the copy it stands for, so the band's bandLimits choice of that stored account still finds it.
+    assert.deepEqual(got.map((a) => a.sameAs), [[copy.id], undefined]);
 
     // The pool answering on the copy is the login's account spending: the remaining row carries the mark.
     reports = { anthropic: [{ id: copy.id, state: "ready", failures: 0, inUse: true }] };
@@ -4151,10 +4261,287 @@ test("GET /api/limits names the current login and leaves out stored copies of it
     lookup = async () => null;
     got = await rows();
     assert.deepEqual(got.map((a) => [a.account, a.id, a.label]), [[0, "current", undefined], [1, copy.id, "copy@example.test"], [2, other.id, "person@example.test"]]);
+    assert.ok(got.every((a) => a.sameAs === undefined), "no copy hidden, none named");
     lookup = async () => { throw new Error("offline"); };
     got = await rows();
     assert.deepEqual(got.map((a) => a.id), ["current", copy.id, other.id]);
-  }, { claudeIdentity: () => lookup(), claudeUsage: async () => usage, credentials: () => reports });
+  }, { claudeIdentity: () => lookup(), claudeReadingIdentity: () => reading, claudeUsage: async () => usage, credentials: () => reports });
+});
+
+// Review of PR 179 (2026-11-20): the usage cache keeps the owner "current" across an account switch,
+// so right after the app moves from A to B it still holds A's figures while the identity lookup
+// already sees B. Hiding B's stored row behind them and naming B in `sameAs` showed A's numbers to a
+// band pinned to B. Real usage and identity caches, wired as index.ts wires them.
+test("GET /api/limits hides a stored copy behind the login only while the login's cached reading is that login's own", async () => {
+  let now = Date.now();
+  const cfg = makeCfg({ providers: { anthropic: { type: "anthropic", auth: "claude-code", accountPool: true } } });
+  // Every token reads figures of its own, so a row's number says which token it was read with.
+  const used: Record<string, number> = { "login-a": 81, "stored-a": 80, "login-b": 15, "stored-b": 14 };
+  const profiles: Record<string, { uuid: string; email: string }> = {
+    "login-a": { uuid: "uuid-a", email: "a@example.test" },
+    "login-b": { uuid: "uuid-b", email: "b@example.test" },
+  };
+  const tokenOf = (init: RequestInit): string => (init.headers as Record<string, string>).authorization!.replace(/^Bearer /, "");
+  let login = "login-a";
+  let refuse = false;
+  let ids = { a: "a", b: "b" };
+  const credentials = async (): Promise<Credential[]> => [
+    { id: `current:${login}`, ownerId: "current", headers: { authorization: `Bearer ${login}` } },
+    { id: `${ids.a}:1`, ownerId: ids.a, headers: { authorization: "Bearer stored-a" } },
+    { id: `${ids.b}:1`, ownerId: ids.b, headers: { authorization: "Bearer stored-b" } },
+  ];
+  const usage = new ClaudeUsage({ credentials }, {
+    upstream: () => "api.example.test",
+    now: () => now,
+    ttlMs: 60_000,
+    fetch: async (_url, init) => refuse
+      ? new Response("no", { status: 429, headers: { "retry-after": "3600" } })
+      : Response.json({ five_hour: { utilization: used[tokenOf(init)] }, seven_day: null }),
+  });
+  let profileAsks = 0;
+  const identity = new ClaudeCurrentIdentity({ credentials }, {
+    upstream: () => "api.example.test",
+    now: () => now,
+    fetch: async (_url, init) => { profileAsks++; return Response.json({ account: profiles[tokenOf(init)] }); },
+  });
+  const unified = (fraction: number) => ({
+    "anthropic-ratelimit-unified-status": "allowed",
+    "anthropic-ratelimit-unified-5h-utilization": String(fraction),
+  });
+  await withAdmin(cfg, async ({ port, home }) => {
+    saveClaudeAuthFile(home, "current-login-token", "2026-11-20T00:00:00.000Z");
+    const grant = (n: number, accountId: string, email: string) => ({ accessToken: `a${n}`, refreshToken: `r${n}`, expiresAt: now + 3_600_000, accountId, email });
+    ids = { a: saveClaudeOAuthAccount(home, grant(1, "uuid-a", "a@example.test")).id, b: saveClaudeOAuthAccount(home, grant(2, "uuid-b", "b@example.test")).id };
+    const rows = async () => (await (await fetch(`${base()}:${port}/api/limits`)).json() as { providers: LimitsProvider[] }).providers[0]!.accounts
+      .map((a) => ({ id: a.id, used: a.windows[0]!.used_percent, ...(a.label ? { label: a.label } : {}), ...(a.sameAs ? { sameAs: a.sameAs } : {}) }));
+
+    // Signed in to A: A's stored copy stands behind the login's row and is named there.
+    assert.deepEqual(await rows(), [
+      { id: "current", used: 81, label: "a@example.test", sameAs: [ids.a] },
+      { id: ids.b, used: 14, label: "b@example.test" },
+    ]);
+
+    // The app switches to B inside the usage interval: "current" still holds A's 81. Nothing names B
+    // there, B keeps its own row and reading, and A's figures do not take B's name.
+    login = "login-b";
+    assert.deepEqual(await rows(), [
+      { id: "current", used: 81 },
+      { id: ids.a, used: 80, label: "a@example.test" },
+      { id: ids.b, used: 14, label: "b@example.test" },
+    ]);
+
+    // The next reading is B's own: now B's copy stands behind the login's row.
+    now += 61_000;
+    assert.deepEqual(await rows(), [
+      { id: "current", used: 15, label: "b@example.test", sameAs: [ids.b] },
+      { id: ids.a, used: 80, label: "a@example.test" },
+    ]);
+    assert.equal(profileAsks, 2, "one profile lookup per login; which login a reading came from costs no request");
+
+    // A refused refresh keeps B's figures, and with them the login they were read with.
+    refuse = true;
+    now += 61_000;
+    assert.deepEqual((await rows()).map((r) => [r.id, r.sameAs]), [["current", [ids.b]], [ids.a, undefined]]);
+    // An answer's headers that do not say which auth they came from: their login is unknown, so no copy
+    // is hidden or named; the login keeps its name, as it did before readings named their login.
+    usage.observeAnswer("current", unified(0.5));
+    assert.deepEqual(await rows(), [
+      { id: "current", used: 50, label: "b@example.test" },
+      { id: ids.a, used: 80, label: "a@example.test" },
+      { id: ids.b, used: 14, label: "b@example.test" },
+    ]);
+    // The same answer from a caller that passes the headers it sent is B's again.
+    usage.observeAnswer("current", unified(0.6), { authorization: "Bearer login-b" });
+    assert.deepEqual((await rows()).map((r) => [r.id, r.used, r.sameAs]), [["current", 60, [ids.b]], [ids.a, 80, undefined]]);
+  }, {
+    claudeUsage: () => usage.snapshot(),
+    claudeIdentity: () => identity.identify(),
+    claudeReadingIdentity: (reading) => { const key = usage.readWithOf(reading); return key === undefined ? undefined : identity.cachedFor(key); },
+  });
+});
+
+// Second review of the fix (2026-11-20): /api/limits holds the usage it read across the identity
+// lookup's await. The first lookup of a new login is a request, and an answer on that login can store
+// a newer reading meanwhile; the login read afterwards was the newer reading's, while the figures shown
+// were still the old login's, so A's numbers went out under B's name with B in `sameAs`.
+test("GET /api/limits names the login of the figures it shows, not of a reading stored while it looked up the identity", async () => {
+  let now = Date.now();
+  const cfg = makeCfg({ providers: { anthropic: { type: "anthropic", auth: "claude-code", accountPool: true } } });
+  const used: Record<string, number> = { "login-a": 81, "stored-a": 80, "login-b": 15, "stored-b": 14 };
+  const profiles: Record<string, { uuid: string; email: string }> = {
+    "login-a": { uuid: "uuid-a", email: "a@example.test" },
+    "login-b": { uuid: "uuid-b", email: "b@example.test" },
+  };
+  const tokenOf = (init: RequestInit): string => (init.headers as Record<string, string>).authorization!.replace(/^Bearer /, "");
+  let login = "login-a";
+  let refuse = false;
+  let ids = { a: "a", b: "b" };
+  const credentials = async (): Promise<Credential[]> => [
+    { id: `current:${login}`, ownerId: "current", headers: { authorization: `Bearer ${login}` } },
+    { id: `${ids.a}:1`, ownerId: ids.a, headers: { authorization: "Bearer stored-a" } },
+    { id: `${ids.b}:1`, ownerId: ids.b, headers: { authorization: "Bearer stored-b" } },
+  ];
+  const usage = new ClaudeUsage({ credentials }, {
+    upstream: () => "api.example.test",
+    now: () => now,
+    ttlMs: 60_000,
+    fetch: async (_url, init) => refuse
+      ? new Response("no", { status: 429, headers: { "retry-after": "3600" } })
+      : Response.json({ five_hour: { utilization: used[tokenOf(init)] }, seven_day: null }),
+  });
+  const identity = new ClaudeCurrentIdentity({ credentials }, {
+    upstream: () => "api.example.test",
+    now: () => now,
+    fetch: async (_url, init) => {
+      const token = tokenOf(init);
+      // B's first answer lands while B's profile is being looked up.
+      if (token === "login-b") usage.observeAnswer("current", {
+        "anthropic-ratelimit-unified-status": "allowed",
+        "anthropic-ratelimit-unified-5h-utilization": "0.15",
+      }, { authorization: "Bearer login-b" });
+      return Response.json({ account: profiles[token] });
+    },
+  });
+  await withAdmin(cfg, async ({ port, home }) => {
+    saveClaudeAuthFile(home, "current-login-token", "2026-11-20T00:00:00.000Z");
+    const grant = (n: number, accountId: string, email: string) => ({ accessToken: `a${n}`, refreshToken: `r${n}`, expiresAt: now + 3_600_000, accountId, email });
+    ids = { a: saveClaudeOAuthAccount(home, grant(1, "uuid-a", "a@example.test")).id, b: saveClaudeOAuthAccount(home, grant(2, "uuid-b", "b@example.test")).id };
+    const rows = async () => (await (await fetch(`${base()}:${port}/api/limits`)).json() as { providers: LimitsProvider[] }).providers[0]!.accounts
+      .map((a) => ({ id: a.id, used: a.windows[0]!.used_percent, ...(a.label ? { label: a.label } : {}), ...(a.sameAs ? { sameAs: a.sameAs } : {}) }));
+
+    assert.deepEqual((await rows()).map((r) => [r.id, r.used, r.sameAs]), [["current", 81, [ids.a]], [ids.b, 14, undefined]]);
+    // The usage endpoint refuses: A's 81 stays, marked stale, so an answer's headers may replace it.
+    refuse = true;
+    now += 61_000;
+    assert.deepEqual((await rows()).map((r) => [r.id, r.used, r.sameAs]), [["current", 81, [ids.a]], [ids.b, 14, undefined]]);
+
+    // The app switches to B. This poll holds A's 81 while B's profile is looked up and B's answer
+    // stores 15: the 81 it shows is A's, so it names nobody and B keeps its own row.
+    login = "login-b";
+    assert.deepEqual(await rows(), [
+      { id: "current", used: 81 },
+      { id: ids.a, used: 80, label: "a@example.test" },
+      { id: ids.b, used: 14, label: "b@example.test" },
+    ]);
+    // The next poll shows B's own 15, and now B stands behind the login's row.
+    assert.deepEqual((await rows()).map((r) => [r.id, r.used, r.label, r.sameAs]), [["current", 15, "b@example.test", [ids.b]], [ids.a, 80, "a@example.test", undefined]]);
+  }, {
+    claudeUsage: () => usage.snapshot(),
+    claudeIdentity: () => identity.identify(),
+    claudeReadingIdentity: (reading) => { const key = usage.readWithOf(reading); return key === undefined ? undefined : identity.cachedFor(key); },
+  });
+});
+
+// Second review (2026-11-20): a reading can be taken on a login whose identity was never looked up
+// (the usage was read for /api/status alone, or the lookup failed). The current login was looked up on
+// this very poll, so a login the cache cannot place is another one: its figures take no name.
+test("GET /api/limits gives the login's name to no figures read on a login the identity cache cannot place", async () => {
+  const cfg = makeCfg({ providers: { anthropic: { type: "anthropic", auth: "claude-code", accountPool: true } } });
+  const used: Record<string, number> = { "login-a": 81, "stored-a": 80, "login-b": 15, "stored-b": 14 };
+  const tokenOf = (init: RequestInit): string => (init.headers as Record<string, string>).authorization!.replace(/^Bearer /, "");
+  let login = "login-a";
+  let ids = { a: "a", b: "b" };
+  const credentials = async (): Promise<Credential[]> => [
+    { id: `current:${login}`, ownerId: "current", headers: { authorization: `Bearer ${login}` } },
+    { id: `${ids.a}:1`, ownerId: ids.a, headers: { authorization: "Bearer stored-a" } },
+    { id: `${ids.b}:1`, ownerId: ids.b, headers: { authorization: "Bearer stored-b" } },
+  ];
+  const usage = new ClaudeUsage({ credentials }, {
+    upstream: () => "api.example.test",
+    ttlMs: 60_000,
+    fetch: async (_url, init) => Response.json({ five_hour: { utilization: used[tokenOf(init)] }, seven_day: null }),
+  });
+  const identity = new ClaudeCurrentIdentity({ credentials }, {
+    upstream: () => "api.example.test",
+    fetch: async () => Response.json({ account: { uuid: "uuid-b", email: "b@example.test" } }),
+  });
+  await withAdmin(cfg, async ({ port, home }) => {
+    saveClaudeAuthFile(home, "current-login-token", "2026-11-20T00:00:00.000Z");
+    const grant = (n: number, accountId: string, email: string) => ({ accessToken: `a${n}`, refreshToken: `r${n}`, expiresAt: Date.now() + 3_600_000, accountId, email });
+    ids = { a: saveClaudeOAuthAccount(home, grant(1, "uuid-a", "a@example.test")).id, b: saveClaudeOAuthAccount(home, grant(2, "uuid-b", "b@example.test")).id };
+    // A's figures are read (the status asked for them); nothing looks A's identity up.
+    await usage.snapshot();
+    login = "login-b";
+    const rows = (await (await fetch(`${base()}:${port}/api/limits`)).json() as { providers: LimitsProvider[] }).providers[0]!.accounts
+      .map((a) => ({ id: a.id, used: a.windows[0]!.used_percent, ...(a.label ? { label: a.label } : {}), ...(a.sameAs ? { sameAs: a.sameAs } : {}) }));
+    assert.deepEqual(rows, [
+      { id: "current", used: 81 },
+      { id: ids.a, used: 80, label: "a@example.test" },
+      { id: ids.b, used: 14, label: "b@example.test" },
+    ]);
+  }, {
+    claudeUsage: () => usage.snapshot(),
+    claudeIdentity: () => identity.identify(),
+    claudeReadingIdentity: (reading) => { const key = usage.readWithOf(reading); return key === undefined ? undefined : identity.cachedFor(key); },
+  });
+});
+
+// Second-round review (2026-11-20): without an account pool the router always spends on the app's
+// login, so "current" is marked in use; figures there that are another login's are not the spending
+// account's, and a reader that follows the mark (the mod's default band) took them for it.
+test("GET /api/limits marks no row in use while the login's figures are another login's", async () => {
+  const cfg = makeCfg({ providers: { anthropic: { type: "anthropic", auth: "claude-code" } } });
+  const used: Record<string, number> = { "login-a": 81, "login-b": 15 };
+  const tokenOf = (init: RequestInit): string => (init.headers as Record<string, string>).authorization!.replace(/^Bearer /, "");
+  let now = Date.now();
+  let login = "login-a";
+  const credentials = async (): Promise<Credential[]> => [{ id: `current:${login}`, ownerId: "current", headers: { authorization: `Bearer ${login}` } }];
+  const usage = new ClaudeUsage({ credentials }, {
+    upstream: () => "api.example.test",
+    now: () => now,
+    ttlMs: 60_000,
+    fetch: async (_url, init) => Response.json({ five_hour: { utilization: used[tokenOf(init)] }, seven_day: null }),
+  });
+  const identity = new ClaudeCurrentIdentity({ credentials }, {
+    upstream: () => "api.example.test",
+    now: () => now,
+    fetch: async (_url, init) => Response.json({ account: { uuid: `uuid-${tokenOf(init)}`, email: `${tokenOf(init)}@example.test` } }),
+  });
+  await withAdmin(cfg, async ({ port, home }) => {
+    saveClaudeAuthFile(home, "current-login-token", "2026-11-20T00:00:00.000Z");
+    const rows = async () => (await (await fetch(`${base()}:${port}/api/limits`)).json() as { providers: LimitsProvider[] }).providers[0]!.accounts
+      .map((a) => [a.id, a.windows[0]!.used_percent, a.label, a.inUse]);
+    assert.deepEqual(await rows(), [["current", 81, "login-a@example.test", true]]);
+    login = "login-b";
+    assert.deepEqual(await rows(), [["current", 81, undefined, undefined]], "A's figures: neither B's name nor the in-use mark");
+    now += 61_000;
+    assert.deepEqual(await rows(), [["current", 15, "login-b@example.test", true]]);
+  }, {
+    claudeUsage: () => usage.snapshot(),
+    claudeIdentity: () => identity.identify(),
+    claudeReadingIdentity: (reading) => { const key = usage.readWithOf(reading); return key === undefined ? undefined : identity.cachedFor(key); },
+  });
+});
+
+test("GET /api/limits names no paused, signed-out or expired stored copy of the login in sameAs", async () => {
+  const now = Date.now();
+  const uuid = "current-login-uuid";
+  const cfg = makeCfg({ providers: { anthropic: { type: "anthropic", auth: "claude-code", accountPool: true } } });
+  const quota = (used: number) => ({ at: now, rate_limits: { primary: { used_percent: used, window_minutes: 300 } } });
+  const person = { email: "Person@Example.Test", subjectHash: subjectHash(uuid)! };
+  let usage: Awaited<ReturnType<NonNullable<AdminDeps["claudeUsage"]>>> = {};
+  await withAdmin(cfg, async ({ port, home }) => {
+    saveClaudeAuthFile(home, "current-login-token", "2026-11-20T00:00:00.000Z");
+    // One copy by subject; the others predate subject hashes and match by email (one subject is one stored account).
+    const grant = (n: number, extra: { accountId?: string; expiresAt?: number }) => ({ accessToken: `a${n}`, refreshToken: `r${n}`, expiresAt: now + 3_600_000, email: "person@example.test", ...extra });
+    const live = saveClaudeOAuthAccount(home, grant(1, { accountId: uuid }));
+    const paused = saveClaudeOAuthAccount(home, grant(2, {}));
+    const signedOut = saveClaudeOAuthAccount(home, grant(3, {}));
+    const expired = saveClaudeOAuthAccount(home, grant(4, { expiresAt: now - 60_000 }));
+    assert.equal(updateClaudeAccount(home, paused.id, { paused: true }), true);
+    assert.equal(markClaudeAccountNeedsReauth(home, signedOut.id, "r3"), true);
+    // The usage cache keeps a paused or signed-out account's last figures for a while.
+    usage = { current: quota(81), [live.id]: quota(81), [paused.id]: quota(81), [signedOut.id]: quota(81), [expired.id]: quota(81) };
+    const rows = async () => (await (await fetch(`${base()}:${port}/api/limits`)).json() as { providers: LimitsProvider[] }).providers[0]!.accounts;
+
+    let got = await rows();
+    assert.deepEqual(got.map((a) => [a.id, a.sameAs]), [["current", [live.id]]], "only the copy that can answer is named; the others have no row either");
+
+    // Pausing the last live copy takes it out of sameAs too: the band's saved choice of it no longer finds a reading.
+    assert.equal(updateClaudeAccount(home, live.id, { paused: true }), true);
+    got = await rows();
+    assert.deepEqual(got.map((a) => [a.id, a.sameAs]), [["current", undefined]]);
+  }, { claudeIdentity: async () => person, claudeReadingIdentity: () => person, claudeUsage: async () => usage });
 });
 
 test("GET /api/limits lists every Claude account with usage, in a stable order, with labels and the in-use mark", async () => {

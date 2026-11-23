@@ -38,7 +38,7 @@ import { adminPort, headerValueProblem, homeDir, searchProviderFor, ssidProblem,
 export { adminPort } from "./config.ts";
 import { accountDisplayName, agentRenames, generatedAgents } from "./agents.ts";
 import { isJudgeOnlyModel } from "./model-policy.ts";
-import { ModSettingsInputError, idleCompactionWanted, readModSettings, validateSettings, validateSettingsSchema, writeAutoCompactWindow, writeIdleCompaction, writeModSettings } from "./mod-settings.ts";
+import { KEPT_WHEN_ABSENT, ModSettingsInputError, idleCompactionWanted, readModSettings, validateSettings, validateSettingsSchema, writeAutoCompactWindow, writeIdleCompaction, writeModSettings } from "./mod-settings.ts";
 import { billingOf, claudeChoices, fillLadder, ladderNeedsFill } from "../../mod/hooks/ladder.ts";
 import { latestClaudeIds, normalizeSettings, twoLevelRungs } from "../../mod/hooks/settings.ts";
 import type { Billing, DomainRules, Effort, LadderChoice, Rungs, Settings, Step } from "../../mod/types/index.d.ts";
@@ -238,6 +238,17 @@ export type AdminDeps = {
    * Null when the login's identity is unknown. Absent in tests.
    */
   claudeIdentity?: () => Promise<{ email: string; subjectHash: string } | null>;
+  /**
+   * The identity of the login one usage reading (a value `claudeUsage()` returned) was taken with,
+   * from the identity lookup's cache alone (never a request). It matters for "current", whose owner
+   * stays the same across an account switch while the cache still holds the previous login's figures
+   * (2026-11-20). It takes the reading itself, not the owner: a newer reading may replace the one a
+   * caller holds while it awaits the identity, and the login must be the one behind the figures it
+   * shows (review, 2026-11-20). Undefined when the reading names no login (an answer's headers that
+   * did not say which auth they came from); null when it names one the cache cannot place (never
+   * looked up, or its lookup failed). Absent in tests.
+   */
+  claudeReadingIdentity?: (reading: Record<string, unknown>) => { email: string; subjectHash: string } | null | undefined;
   /** The Claude models the signed-in account can use (`GET /v1/models`); null until one answer. Absent in tests. */
   claudeModels?: () => Promise<ClaudeModel[] | null>;
   /** An OpenCode Go provider's usage windows, for the status bar's limits row (`/api/limits`). Absent in tests. */
@@ -405,9 +416,14 @@ export type LimitsWindow = { kind: "five_hour" | "seven_day" | "scoped" | "windo
  * (Claude's app login is "current"), so a reader joins the two by id, never by position. `label` is the
  * name the owner gave it (absent for the Claude app login); `inUse` marks the account the router serves
  * new turns with now. `stale` is set while the reading is kept from before a refused refresh: its
- * figures are the last ones read, not the current ones.
+ * figures are the last ones read, not the current ones. `sameAs` (2026-11-19), on Claude's "current"
+ * row only, names the stored accounts hidden behind it as copies of the same login: a choice that
+ * named one of them (the mod's `bandLimits`) still finds it after the app logs into that account.
+ * Since 2026-11-20 it names only stored accounts that are numbered (not paused, needing a login or
+ * expired), and only while the row's reading is known to be the login's that the identity lookup sees
+ * now; otherwise it is absent and every stored account keeps its own row.
  */
-export type LimitsAccount = { account: number; id?: string; label?: string; inUse?: true; stale?: true; windows: LimitsWindow[]; at: number };
+export type LimitsAccount = { account: number; id?: string; sameAs?: string[]; label?: string; inUse?: true; stale?: true; windows: LimitsWindow[]; at: number };
 export type LimitsProvider = { provider: string; type: string; title: string; accounts: LimitsAccount[] };
 
 /** A `{used_percent, window_minutes, reset_at}` snapshot window as `/api/limits` reads it, or null. */
@@ -466,7 +482,8 @@ function numberedAccounts<T extends { state: string }>(accounts: readonly T[]): 
 /**
  * Whether a stored Claude account is the app's current login: by subject hash when it has one, by
  * email (case-insensitive) when it predates hashes. The dashboard's `sameAsCurrent` and the limits
- * share this, so a copy is hidden in one place exactly when it is flagged in the other.
+ * share this, so the limits hide only a copy the dashboard flags; they also ask that the copy be
+ * numbered and that the login's reading be its own (anthropicLimitAccounts, 2026-11-20).
  */
 function isSameAsCurrentLogin(account: { subjectHash?: string | undefined; email?: string | undefined }, identity: { email: string; subjectHash: string }): boolean {
   return account.subjectHash !== undefined
@@ -480,6 +497,14 @@ function isSameAsCurrentLogin(account: { subjectHash?: string | undefined; email
  * known are listed; `inUse` marks the one the pool serves with now (claudeInUseId), and when that
  * one's usage is not known yet no entry is marked, so no reader takes another account's figures
  * for the one that is actually spending.
+ *
+ * A stored copy of the app's login is hidden behind the login's row, and named in its `sameAs`, only
+ * when the login's identity is known, the cached "current" reading is known to be that same login's,
+ * and the copy is one of the numbered accounts (2026-11-20). The usage cache keeps the owner "current"
+ * across an account switch, so right after the app moves from A to B it still holds A's figures while
+ * the identity lookup already sees B: hiding B's own row behind them and naming B there showed A's
+ * numbers to a band pinned to B. A paused or signed-out copy has no row to hide, and naming it would
+ * let a choice of it look available. Otherwise every stored account keeps its own row and reading.
  */
 async function anthropicLimitAccounts(deps: AdminDeps, name: string): Promise<LimitsAccount[]> {
   let usage: Record<string, Record<string, unknown>>;
@@ -493,26 +518,50 @@ async function anthropicLimitAccounts(deps: AdminDeps, name: string): Promise<Li
   // lookup fails or the login is unreadable the rows stay exactly as they were.
   let identity: { email: string; subjectHash: string } | null = null;
   if (claudeAuthStore(deps).describeSource()) identity = (await deps.claudeIdentity?.().catch(() => null)) ?? null;
+  // The login the cached "current" figures were read with, from the identity cache (no request).
+  // Undefined: the reading names no login (a header reading whose caller gave no auth). Null: it names
+  // one the identity cache cannot place. The current login's token was just looked up and is in that
+  // cache, so such a reading is another login's or this login's earlier token (read before a refresh,
+  // or pushed out of the cache); nothing here can tell which, so it takes no name and aliases nothing
+  // until the next reading, which is this token's (2026-11-20 review).
+  let readOn: { email: string; subjectHash: string } | null | undefined;
+  if (identity && usage.current) {
+    try {
+      readOn = deps.claudeReadingIdentity?.(usage.current);
+    } catch {
+      readOn = undefined;
+    }
+  }
+  const ownReading = !!readOn && identity !== null && readOn.subjectHash === identity.subjectHash;
+  // Figures read on another login, or on one that cannot be placed, do not take this login's name;
+  // figures that name no login keep it, as before readings named their login.
+  const otherLogin = readOn !== undefined && !ownReading;
   const copies = new Set<string>();
   // A copy is hidden only behind a current row that will be shown; without the login's own reading
   // the copy's figures are the only ones there are for that account.
   const currentShown = owners.some((owner) => owner.id === "current") && !!usage.current && claudeLimitWindows(usage.current).length > 0;
-  if (identity && currentShown) for (const stored of listClaudeAccountsWithSubject(homeDir())) if (isSameAsCurrentLogin(stored, identity)) copies.add(stored.id);
+  const numbered = new Set(owners.map((owner) => owner.id));
+  if (identity && ownReading && currentShown) {
+    for (const stored of listClaudeAccountsWithSubject(homeDir())) if (numbered.has(stored.id) && isSameAsCurrentLogin(stored, identity)) copies.add(stored.id);
+  }
   // The pool spending on a stored copy is spending on the login's account, which is the row left.
   const served = claudeInUseId(deps, name);
-  const inUse = served !== undefined && copies.has(served) ? "current" : served;
+  // "current" figures that are not this login's are not the spending account's: no row is marked, as
+  // while that account's usage is unknown, so no reader takes them for it (2026-11-20 review).
+  const inUse = served !== undefined && copies.has(served) ? "current" : served === "current" && otherLogin ? undefined : served;
   const out: LimitsAccount[] = [];
   owners.forEach((owner, account) => {
     const quota = usage[owner.id];
     if (!quota) return;
     // The same upstream account as the login: its figures are the login's, listed once. The number stays.
     if (copies.has(owner.id)) return;
-    const label = owner.id === "current" && identity ? identity.email : owner.label;
+    const label = owner.id === "current" && identity && !otherLogin ? identity.email : owner.label;
     const windows = claudeLimitWindows(quota);
     if (!windows.length) return;
     const at = typeof quota.at === "number" ? quota.at : Date.now();
     // A refused refresh keeps the last reading and marks it stale (anthropic-usage.ts), so the figures say so.
-    out.push({ account, id: owner.id, ...(label ? { label } : {}), ...(owner.id === inUse ? { inUse: true as const } : {}), ...(quota.stale === true ? { stale: true as const } : {}), windows, at });
+    const sameAs = owner.id === "current" ? [...copies] : [];
+    out.push({ account, id: owner.id, ...(sameAs.length ? { sameAs } : {}), ...(label ? { label } : {}), ...(owner.id === inUse ? { inUse: true as const } : {}), ...(quota.stale === true ? { stale: true as const } : {}), windows, at });
   });
   return out;
 }
@@ -1324,13 +1373,7 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
   res.end(out);
 }
 
-/** Write the config file atomically under its lock. The one save path: the GUI's PUT, the
- * capability measurements and the CLI's picker toggle all go through it or take the same lock, so
- * the router never picks up a half-written file and two writers never replace it mid-change. */
-function writeConfigFile(configFile: string, config: Config): void {
-  withFileLock(configFile, () => writeConfigFileLocked(configFile, config));
-}
-
+/** Write the config file atomically. Callers hold its lock and read the file inside that lock. */
 function writeConfigFileLocked(configFile: string, config: Config): void {
   writeJsonAtomic(configFile, config);
 }
@@ -1871,30 +1914,32 @@ function ollamaBase(p: Provider): string | null {
  * edit is refused rather than written.
  */
 function applyMeasurements(configFile: string, providerName: string, results: Measured[], options: { replaceEmptyEffort?: boolean } = {}): { applied: number } | { error: string } {
-  let current: Config;
-  try {
-    current = JSON.parse(fs.readFileSync(configFile, "utf8")) as Config;
-  } catch (e) {
-    return { error: `could not re-read config: ${errorText(e)}` };
-  }
-  const provider = current.providers[providerName];
-  if (!provider?.models) return { applied: 0 };
-  let applied = 0;
-  for (const result of results) {
-    if (result.error || !result.wire) continue;
-    const model = provider.models.find((entry) => entry.id === result.id);
-    if (!model) continue;
-    const before = `${model.wire ?? ""}|${model.effortLevels ? model.effortLevels.join(",") : "∅"}|${model.contextWindow ?? "∅"}`;
-    if (model.wire === undefined) model.wire = result.wire;
-    const blankEffort = model.effortLevels === undefined || (options.replaceEmptyEffort === true && model.effortLevels.length === 0);
-    if (blankEffort && result.effortLevels !== undefined) model.effortLevels = result.effortLevels;
-    if (model.contextWindow == null && result.contextWindow !== undefined) model.contextWindow = result.contextWindow;
-    if (`${model.wire ?? ""}|${model.effortLevels ? model.effortLevels.join(",") : "∅"}|${model.contextWindow ?? "∅"}` !== before) applied++;
-  }
-  const errors = validate(current);
-  if (errors.length > 0) return { error: `measured config did not validate: ${errors[0]}` };
-  writeConfigFile(configFile, current);
-  return { applied };
+  return withFileLock(configFile, () => {
+    let current: Config;
+    try {
+      current = JSON.parse(fs.readFileSync(configFile, "utf8")) as Config;
+    } catch (e) {
+      return { error: `could not re-read config: ${errorText(e)}` };
+    }
+    const provider = current.providers[providerName];
+    if (!provider?.models) return { applied: 0 };
+    let applied = 0;
+    for (const result of results) {
+      if (result.error || !result.wire) continue;
+      const model = provider.models.find((entry) => entry.id === result.id);
+      if (!model) continue;
+      const before = `${model.wire ?? ""}|${model.effortLevels ? model.effortLevels.join(",") : "∅"}|${model.contextWindow ?? "∅"}`;
+      if (model.wire === undefined) model.wire = result.wire;
+      const blankEffort = model.effortLevels === undefined || (options.replaceEmptyEffort === true && model.effortLevels.length === 0);
+      if (blankEffort && result.effortLevels !== undefined) model.effortLevels = result.effortLevels;
+      if (model.contextWindow == null && result.contextWindow !== undefined) model.contextWindow = result.contextWindow;
+      if (`${model.wire ?? ""}|${model.effortLevels ? model.effortLevels.join(",") : "∅"}|${model.contextWindow ?? "∅"}` !== before) applied++;
+    }
+    const errors = validate(current);
+    if (errors.length > 0) return { error: `measured config did not validate: ${errors[0]}` };
+    writeConfigFileLocked(configFile, current);
+    return { applied };
+  });
 }
 
 /** Register a measurement job and run it detached; returns the id a caller polls. */
@@ -1951,35 +1996,42 @@ export async function backfillContextWindows(deps: AdminDeps): Promise<string[]>
     deps.log.warn("admin: context windows not backfilled: the catalogue could not be had");
     return [];
   }
-  let current: Config;
-  try {
-    current = JSON.parse(fs.readFileSync(deps.configFile, "utf8")) as Config;
-  } catch (e) {
-    deps.log.warn(`admin: context windows not backfilled: could not read config: ${errorText(e)}`);
-    return [];
-  }
-  const filled: string[] = [];
-  for (const [name, provider] of Object.entries(current.providers)) {
-    if (!("models" in provider) || !provider.models) continue;
-    const preset = "preset" in provider ? provider.preset : undefined;
-    for (const model of provider.models) {
-      // A saved `null` is as blank as a missing field (configs written by older dashboards carry it).
-      if (model.contextWindow != null) continue;
-      const stated = catalogEntry(catalog, preset, model.id)?.contextWindow ?? catalogueWindow(catalog, model.id);
-      if (stated === undefined) continue;
-      model.contextWindow = stated;
-      filled.push(`${name}/${model.id}`);
-      deps.log.info(`admin: ${name}/${model.id} context window ${stated} (catalogue)`);
+  let warning: string | undefined;
+  const result = withFileLock(deps.configFile, () => {
+    let current: Config;
+    try {
+      current = JSON.parse(fs.readFileSync(deps.configFile, "utf8")) as Config;
+    } catch (e) {
+      warning = `admin: context windows not backfilled: could not read config: ${errorText(e)}`;
+      return { filled: [] as string[], logs: [] as string[] };
     }
-  }
-  if (filled.length === 0) return [];
-  const errors = validate(current);
-  if (errors.length > 0) {
-    deps.log.warn(`admin: context windows not backfilled: config did not validate: ${errors[0]}`);
-    return [];
-  }
-  writeConfigFile(deps.configFile, current);
-  return filled;
+    const filled: string[] = [];
+    const logs: string[] = [];
+    for (const [name, provider] of Object.entries(current.providers)) {
+      if (!("models" in provider) || !provider.models) continue;
+      const preset = "preset" in provider ? provider.preset : undefined;
+      for (const model of provider.models) {
+        // A saved `null` is as blank as a missing field (configs written by older dashboards carry it).
+        if (model.contextWindow != null) continue;
+        const stated = catalogEntry(catalog, preset, model.id)?.contextWindow ?? catalogueWindow(catalog, model.id);
+        if (stated === undefined) continue;
+        model.contextWindow = stated;
+        filled.push(`${name}/${model.id}`);
+        logs.push(`admin: ${name}/${model.id} context window ${stated} (catalogue)`);
+      }
+    }
+    if (filled.length === 0) return { filled, logs };
+    const errors = validate(current);
+    if (errors.length > 0) {
+      warning = `admin: context windows not backfilled: config did not validate: ${errors[0]}`;
+      return { filled: [] as string[], logs: [] as string[] };
+    }
+    writeConfigFileLocked(deps.configFile, current);
+    return { filled, logs };
+  });
+  if (warning) deps.log.warn(warning);
+  for (const line of result.logs) deps.log.info(line);
+  return result.filled;
 }
 
 /**
@@ -1988,41 +2040,51 @@ export async function backfillContextWindows(deps: AdminDeps): Promise<string[]>
  * was ticked when the provider was saved, so Opus 5.5, Sonnet 5.5 and Haiku 5.5 stayed off it for
  * weeks while Claude Code had them (2026-10-08). A model offered once is remembered in
  * `claude-models-offered.json` and never offered again, so unticking a new model sticks.
- * Returns the `provider/model` ids it declared.
+ * The pass never writes a context window; the dashboard reads the account's list for native Claude
+ * models, so config.json holds only windows a person set (or the models.dev backfill wrote) and the
+ * bootstrap window of a route to the native pool does not change. Returns null when no account list
+ * was available, otherwise the `provider/model` ids it declared.
  */
-export async function adoptNewClaudeModels(deps: AdminDeps): Promise<string[]> {
+export async function adoptNewClaudeModels(deps: AdminDeps): Promise<string[] | null> {
   const live = await deps.claudeModels?.().catch(() => null);
-  if (!live?.length) return [];
+  if (!live?.length) return null;
   const stateFile = path.join(homeDir(), "claude-models-offered.json");
   let offered = new Set<string>();
   try {
     const saved = JSON.parse(fs.readFileSync(stateFile, "utf8")) as { offered?: unknown };
     if (Array.isArray(saved.offered)) offered = new Set(saved.offered.filter((id): id is string => typeof id === "string"));
   } catch { /* first run: nothing offered yet */ }
-  let current: Config;
-  try {
-    current = JSON.parse(fs.readFileSync(deps.configFile, "utf8")) as Config;
-  } catch (e) {
-    deps.log.warn(`admin: claude models not adopted: could not read config: ${errorText(e)}`);
-    return [];
-  }
-  const added: string[] = [];
-  for (const [name, provider] of Object.entries(current.providers)) {
-    if (provider.type !== "anthropic" || !provider.models?.length) continue;
-    for (const model of newClaudeReleases(live, provider.models.map((entry) => entry.id), offered)) {
-      provider.models.push({ id: model.id, name: model.name ?? model.id });
-      added.push(`${name}/${model.id}`);
+  let warning: string | undefined;
+  const added = withFileLock(deps.configFile, () => {
+    let current: Config;
+    try {
+      current = JSON.parse(fs.readFileSync(deps.configFile, "utf8")) as Config;
+    } catch (e) {
+      warning = `admin: claude models not adopted: could not read config: ${errorText(e)}`;
+      return [] as string[];
     }
-  }
-  if (added.length) {
+    const declared: string[] = [];
+    for (const [name, provider] of Object.entries(current.providers)) {
+      if (provider.type !== "anthropic" || !provider.models?.length) continue;
+      for (const model of newClaudeReleases(live, provider.models.map((entry) => entry.id), offered)) {
+        provider.models.push({ id: model.id, name: model.name ?? model.id });
+        declared.push(`${name}/${model.id}`);
+      }
+    }
+    if (declared.length === 0) return declared;
     const errors = validate(current);
     if (errors.length > 0) {
-      deps.log.warn(`admin: claude models not adopted: config did not validate: ${errors[0]}`);
-      return [];
+      warning = `admin: claude models not adopted: config did not validate: ${errors[0]}`;
+      return [] as string[];
     }
-    writeConfigFile(deps.configFile, current);
-    deps.log.info(`admin: declared new Claude model(s): ${added.join(", ")}`);
+    writeConfigFileLocked(deps.configFile, current);
+    return declared;
+  });
+  if (warning) {
+    deps.log.warn(warning);
+    return [];
   }
+  if (added.length) deps.log.info(`admin: declared new Claude model(s): ${added.join(", ")}`);
   fs.writeFileSync(stateFile, JSON.stringify({ offered: [...new Set([...offered, ...live.map((model) => model.id)])].sort() }, null, 2) + "\n");
   return added;
 }
@@ -2533,11 +2595,11 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         if (body && typeof body === "object" && body.settings && typeof body.settings === "object" && !Array.isArray(body.settings)) {
           // Checked before normalizing, which would drop a credential field the check is there to refuse.
           validateSettings(body.settings);
-          // Normalizing fills a missing `idleCompact` with the default; an older mod's save leaves it
-          // out, and writeModSettings keeps the stored value only while the key stays absent.
-          const idleAbsent = !Object.hasOwn(body.settings, "idleCompact");
+          // Normalizing fills a missing `idleCompact` or `bandLimits` with the default; an older mod's
+          // save leaves it out, and writeModSettings keeps the stored value only while the key stays absent.
+          const absent = KEPT_WHEN_ABSENT.filter(key => !Object.hasOwn(body.settings as object, key));
           const normalized: Partial<Settings> = await withFilledLadder(deps, scores, normalizeSettings(body.settings));
-          if (idleAbsent) delete normalized.idleCompact;
+          for (const key of absent) delete normalized[key];
           body.settings = normalized;
         }
         if (!body || typeof body !== "object" || body.settings === undefined) {
@@ -2749,26 +2811,33 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           sendJson(res, 400, { errors: ["configRevision must be a SHA-256 hex string"] });
           return;
         }
-        // No await between comparison and atomic rename: two admin windows cannot both win.
-        const current = configSnapshot(deps);
-        if (configRevision !== undefined && configRevision !== current.configRevision) {
-          sendJson(res, 409, { error: "config revision conflict", ...current });
+        // The revision is compared and the file written under the config lock, so a CLI write
+        // (`remote add`, `power`, `picker`) cannot land between the two and be overwritten; no await
+        // between comparison and atomic rename, so two admin windows cannot both win either.
+        const outcome = withFileLock(deps.configFile, (): { conflict: ReturnType<typeof configSnapshot> } | { errors: string[] } | { configRevision: string } => {
+          const current = configSnapshot(deps);
+          if (configRevision !== undefined && configRevision !== current.configRevision) return { conflict: current };
+          const errors = validate(parsed);
+          if (errors.length > 0) return { errors };
+          writeConfigFileLocked(deps.configFile, parsed);
+          return { configRevision: configSnapshot(deps).configRevision };
+        });
+        if ("conflict" in outcome) {
+          sendJson(res, 409, { error: "config revision conflict", ...outcome.conflict });
           return;
         }
-        const errors = validate(parsed);
-        if (errors.length > 0) {
-          sendJson(res, 400, { errors });
+        if ("errors" in outcome) {
+          sendJson(res, 400, { errors: outcome.errors });
           return;
         }
         if (configRevision === undefined) deps.log.warn("admin: accepting legacy PUT /api/config without configRevision; conflict protection unavailable");
-        writeConfigFile(deps.configFile, parsed);
         deps.log.info(`admin: config saved via GUI (${Object.keys(parsed.routes).length} routes, ${Object.keys(parsed.providers).length} providers)`);
         // `cli.models` cannot take effect through the router at all: Claude Code reads the slots
         // before a request exists. So a GUI save has to write them to settings.json itself;
         // otherwise the Clients screen shows a choice that only a later `install` would honour.
         const slotWarning = syncModelSlotsForGui(parsed, deps.agentDir);
         const warnings = [...(slotWarning ? [slotWarning] : []), ...targetWarnings(parsed)];
-        sendJson(res, 200, { ok: true, configRevision: configSnapshot(deps).configRevision, ...(warnings.length ? { warning: warnings.join("\n") } : {}) });
+        sendJson(res, 200, { ok: true, configRevision: outcome.configRevision, ...(warnings.length ? { warning: warnings.join("\n") } : {}) });
         return;
       }
       if (pathname === "/api/codex" && method === "GET") {

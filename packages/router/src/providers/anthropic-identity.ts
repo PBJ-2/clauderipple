@@ -116,6 +116,16 @@ function authHeaderValue(headers: Record<string, string>): string | null {
 }
 
 /**
+ * The key a login's identity is cached under: a one-way hash of its auth header, never the header.
+ * The usage cache stamps its readings with the same key (anthropic-usage.ts), so a reading can be
+ * matched to the login that produced it without asking anyone (2026-11-20). Null without an auth header.
+ */
+export function loginAuthKey(headers: Record<string, string>): string | null {
+  const auth = authHeaderValue(headers);
+  return auth ? crypto.createHash("sha256").update(auth).digest("hex") : null;
+}
+
+/**
  * The current login's identity, asked once per token: a success is kept for the token's life, a failure
  * for `ttlMs` (ten minutes). The cache
  * is keyed on a hash of the auth header rather than on time alone, so a fresh login asks again
@@ -151,9 +161,8 @@ export class ClaudeCurrentIdentity {
    * that login, which need not be the pool's copy, so the caller passes the headers it sent.
    */
   async identifyWith(headers: Record<string, string>): Promise<ClaudeLoginIdentity | null> {
-    const auth = authHeaderValue(headers);
-    if (!auth) return null;
-    const key = crypto.createHash("sha256").update(auth).digest("hex");
+    const key = loginAuthKey(headers);
+    if (!key) return null;
     const now = (this.opts.now ?? Date.now)();
     // A token's identity does not change, so a success lasts the token's life (a day here); a failure
     // is retried after ten minutes.
@@ -167,6 +176,16 @@ export class ClaudeCurrentIdentity {
       if (oldest !== undefined) this.cache.delete(oldest);
     }
     return value;
+  }
+
+  /**
+   * The identity already looked up for one login (a `loginAuthKey`), from this cache alone: no request
+   * is made, so `/api/limits` can ask which login produced a cached usage reading without a profile
+   * lookup of its own (2026-11-20). A token's identity does not change, so an entry past its cache time
+   * still answers; a key never looked up, or one whose last lookup failed, is null.
+   */
+  cachedFor(key: string | undefined): ClaudeLoginIdentity | null {
+    return key ? this.cache.get(key)?.value ?? null : null;
   }
 
   private async fetchProfile(headers: Record<string, string>): Promise<ClaudeLoginIdentity | null> {

@@ -6,7 +6,8 @@
 // (2026-10-29): the reset as a local date and time to the minute and the time left, both.
 //
 // Every account the owner added has its tile, Claude's stored accounts too (2026-11-04: the pane
-// showed only the Claude account in use); the band's row keeps to that one (view.ts bandLimitGroups).
+// showed only the Claude account in use). The band's row keeps to the account in use unless the
+// owner's bandLimits choice says otherwise (view.ts bandLimitGroups); the pane lists every one.
 //
 // The desktop draws one capsule, as the Context pane does: a dial of the window closest to its cap
 // with the pane's title and how many windows are past 80%, then a tile per provider account (its

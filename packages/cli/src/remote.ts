@@ -8,7 +8,7 @@
 import fs from "node:fs";
 import { defaultAgentDir } from "../../router/src/agents.ts";
 import { ConfigStore, adminPort, configPath, homeDir } from "../../router/src/config.ts";
-import { writeJsonAtomic } from "../../router/src/locked-file.ts";
+import { withFileLock, writeJsonAtomic } from "../../router/src/locked-file.ts";
 import {
   DEFAULT_REMOTE_PORT, REMOTE_DIR, SETTINGS_BACKUP_SUFFIX, SshConnectError, assetLines, hostProblem, inspectRemote, planAgents, portProblem,
   readLocalAssets, remoteCaPath, remoteProxyUrl, runRemoteScript, script, settingsGuardLine, settingsWriteLines, spawnSsh,
@@ -107,14 +107,16 @@ export function configuredHosts(configFile: string): HostEntry[] {
 }
 
 /** Rewrite `remote.hosts` in config.json, everything else as it was; atomic, as the router hot-reloads it. */
-function updateHosts(configFile: string, mutate: (hosts: HostEntry[]) => HostEntry[]): void {
-  if (!fs.existsSync(configFile)) throw new Error(`no config at ${configFile}; run \`clauderipple install\` first`);
-  const raw = JSON.parse(fs.readFileSync(configFile, "utf8")) as Record<string, unknown>;
-  const remote = (raw.remote && typeof raw.remote === "object" ? raw.remote : {}) as Record<string, unknown>;
-  const hosts = mutate(Array.isArray(remote.hosts) ? (remote.hosts as HostEntry[]) : []);
-  if (hosts.length > 0) raw.remote = { ...remote, hosts };
-  else delete raw.remote;
-  writeJsonAtomic(configFile, raw);
+export function updateHosts(configFile: string, mutate: (hosts: HostEntry[]) => HostEntry[]): void {
+  withFileLock(configFile, () => {
+    if (!fs.existsSync(configFile)) throw new Error(`no config at ${configFile}; run \`clauderipple install\` first`);
+    const raw = JSON.parse(fs.readFileSync(configFile, "utf8")) as Record<string, unknown>;
+    const remote = (raw.remote && typeof raw.remote === "object" ? raw.remote : {}) as Record<string, unknown>;
+    const hosts = mutate(Array.isArray(remote.hosts) ? (remote.hosts as HostEntry[]) : []);
+    if (hosts.length > 0) raw.remote = { ...remote, hosts };
+    else delete raw.remote;
+    writeJsonAtomic(configFile, raw);
+  });
 }
 
 // ---- the router ----------------------------------------------------------------------------

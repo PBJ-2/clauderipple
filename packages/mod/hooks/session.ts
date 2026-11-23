@@ -68,7 +68,7 @@ const KINDS = ['five_hour', 'seven_day', 'scoped', 'window'] as const
 type LimitKind = (typeof KINDS)[number]
 
 /** What every window of one `GET /api/limits` account shares: its provider and the account itself. */
-type LimitOwner = Pick<LimitItem, 'provider' | 'type' | 'title' | 'account' | 'accountLabel' | 'inUse'>
+type LimitOwner = Pick<LimitItem, 'provider' | 'type' | 'title' | 'account' | 'accountId' | 'accountAliases' | 'accountLabel' | 'inUse'>
 
 /** One window of `GET /api/limits` as a limits-row item, or null when it carries nothing to show. */
 function limitItemFromWindow(w: unknown, owner: LimitOwner, now: number): LimitItem | null {
@@ -174,11 +174,17 @@ export function routerLimitItems(body: unknown, now: number): LimitItem[] {
       const windows = account.windows
       if (!Array.isArray(windows)) continue
       // The account's label and in-use mark are newer (2026-11-04); an older router sends neither.
+      // Its owner id is what the band's bandLimits choice names an account by; the OpenCode Go,
+      // MiniMax and Grok rows carry none.
+      // Claude's login row names the stored copies hidden behind it, so a choice of one still matches.
+      const aliases = Array.isArray(account.sameAs) ? account.sameAs.filter((id): id is string => typeof id === 'string' && id !== '') : []
       const owner: LimitOwner = {
         provider,
         ...(type ? { type } : {}),
         ...(title ? { title } : {}),
         account: typeof account.account === 'number' ? account.account : 0,
+        ...(typeof account.id === 'string' && account.id ? { accountId: account.id } : {}),
+        ...(aliases.length ? { accountAliases: aliases } : {}),
         ...(typeof account.label === 'string' && account.label ? { accountLabel: account.label } : {}),
         ...(account.inUse === true ? { inUse: true as const } : {}),
       }
@@ -189,6 +195,24 @@ export function routerLimitItems(body: unknown, now: number): LimitItem[] {
     }
   }
   return out
+}
+
+/** How many of the router's Claude provider names the mod keeps: as many providers as bandLimits holds choices for. */
+export const CLAUDE_PROVIDERS_MAX = 16
+
+/**
+ * The config names of the router's Claude providers (type 'anthropic') that an answer lists, in its
+ * order: `GET /api/limits` lists `providers: [{provider, type}]`, `GET /api/status` `providers:
+ * {name: {type}}`. The limits leave out a provider none of whose accounts was read (its only account
+ * paused), so the mod keeps every name either answer gave (register.tsx limitsClaude) and the band
+ * still knows a bandLimits choice for that provider is Claude's (view.ts bandClaudeLimit, 2026-11-20).
+ */
+export function claudeProvidersFrom(body: unknown): string[] {
+  const providers = asRecord(body).providers
+  const typed: [string, unknown][] = Array.isArray(providers)
+    ? providers.map(asRecord).map(p => [typeof p.provider === 'string' ? p.provider : '', p.type])
+    : Object.entries(asRecord(providers)).map(([name, p]) => [name, asRecord(p).type])
+  return [...new Set(typed.filter(([name, type]) => name !== '' && type === 'anthropic').map(([name]) => name))]
 }
 
 /**

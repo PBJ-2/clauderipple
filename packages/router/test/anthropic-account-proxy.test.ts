@@ -17,6 +17,7 @@ import { Logger } from "../src/log.ts";
 import { ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
 import { ClaudeCodeAuthStore } from "../src/providers/anthropic.ts";
 import { readClaudeAccountsFile, removeClaudeAccount, replaceClaudeOAuthAccount, saveClaudeOAuthAccount, updateClaudeAccount } from "../src/providers/anthropic-accounts.ts";
+import { loginAuthKey } from "../src/providers/anthropic-identity.ts";
 import { Proxy } from "../src/proxy.ts";
 import { RequestLog } from "../src/requestlog.ts";
 import { createCa, createLeaf } from "../src/x509.ts";
@@ -34,7 +35,8 @@ function freePort(): Promise<number> {
 }
 
 type Seen = { authorization?: string; apiKey?: string; currentOnly?: string; beta?: string; body: Record<string, unknown> };
-type Reply = { status: number; headers?: Record<string, string>; body?: string };
+/** `chunks`, when given, are written one by one as an event stream, and the end waits `holdEndMs`. */
+type Reply = { status: number; headers?: Record<string, string>; body?: string; chunks?: string[]; holdEndMs?: number };
 
 const POOL: Config["providers"][string] = { type: "anthropic", auth: "claude-code", accountPool: true, models: [{ id: "claude-opus-5" }] };
 
@@ -66,6 +68,12 @@ async function nativeRig(reply: (seen: Seen, attempt: number) => Reply, claude: 
       };
       seen.push(item);
       const response = reply(item, seen.length);
+      if (response.chunks) {
+        res.writeHead(response.status, { "content-type": "text/event-stream", ...(response.headers ?? {}) });
+        for (const chunk of response.chunks) res.write(chunk);
+        setTimeout(() => res.end(), response.holdEndMs ?? 0);
+        return;
+      }
       res.writeHead(response.status, { "content-type": "application/json", ...(response.headers ?? {}) });
       res.end(response.body ?? JSON.stringify({ id: "msg", type: "message", role: "assistant", model: body.model, content: [], usage: {} }));
     });
@@ -119,7 +127,7 @@ async function nativeRig(reply: (seen: Seen, attempt: number) => Reply, claude: 
   await proxy.listen();
 
   let lastHeaders: Record<string, string> = {};
-  const send = async (conversation = "conversation-1", options: { content?: string; previous?: string; model?: string; auth?: string; path?: string } = {}): Promise<number> => {
+  const send = async (conversation = "conversation-1", options: { content?: string; previous?: string; model?: string; auth?: string; path?: string; effort?: string; stream?: boolean; until?: string } = {}): Promise<number> => {
     const socket = net.connect(proxyPort, "127.0.0.1");
     await new Promise<void>((resolve) => socket.once("connect", resolve));
     socket.write("CONNECT localhost:443 HTTP/1.1\r\nHost: localhost:443\r\n\r\n");
@@ -134,6 +142,8 @@ async function nativeRig(reply: (seen: Seen, attempt: number) => Reply, claude: 
       tool_choice: { type: "tool", name: "web_search" },
       messages: [{ role: "user", content: options.content ?? "find this" }],
       ...(options.previous ? { thread: { type: "continue", previous_message_id: options.previous } } : {}),
+      ...(options.effort ? { output_config: { effort: options.effort } } : {}),
+      ...(options.stream ? { stream: true } : {}),
     });
     secure.write(
       `POST ${options.path ?? "/v1/messages"} HTTP/1.1\r\n` +
@@ -144,7 +154,23 @@ async function nativeRig(reply: (seen: Seen, attempt: number) => Reply, claude: 
       `anthropic-beta: ${clientBeta}\r\n` +
       `content-length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
     );
-    const first = await new Promise<Buffer>((resolve) => secure.once("data", (chunk: Buffer) => setTimeout(() => resolve(chunk), 30)));
+    // With `until`, read until that text has arrived (and no longer: the stream may still be open).
+    // A refusal never carries it, so a non-200 head ends the read too, and nothing waits past 5 s.
+    const first = options.until !== undefined
+      ? await new Promise<Buffer>((resolve) => {
+        const parts: Buffer[] = [];
+        const done = (): void => { secure.off("data", onData); clearTimeout(timer); resolve(Buffer.concat(parts)); };
+        const onData = (chunk: Buffer) => {
+          parts.push(chunk);
+          const text = Buffer.concat(parts).toString("latin1");
+          const status = /^HTTP\/1\.1 (\d{3})/.exec(text)?.[1];
+          if (text.includes(options.until!)) done();
+          else if (status !== undefined && status !== "200") setTimeout(done, 30);
+        };
+        const timer = setTimeout(done, 5_000);
+        secure.on("data", onData);
+      })
+      : await new Promise<Buffer>((resolve) => secure.once("data", (chunk: Buffer) => setTimeout(() => resolve(chunk), 30)));
     secure.destroy();
     const head = first.toString("latin1").split("\r\n\r\n")[0] ?? "";
     const parsed: Record<string, string> = {};
@@ -158,6 +184,8 @@ async function nativeRig(reply: (seen: Seen, attempt: number) => Reply, claude: 
 
   return {
     home,
+    /** The live configuration the proxy reads on every request; replace its fields to change it mid-test. */
+    cfg,
     stored,
     third,
     seen,
@@ -482,6 +510,168 @@ test("a thread continue follows the conversation that produced its previous mess
   }
 });
 
+// Anthropic keeps a thread's `output_config` and answers a `continue` whose own differs with 400
+// "differing field(s): output_config". A Workflow worker's `[[ripple: x@xhigh]]` sits in its task
+// prompt, which a continue does not carry, so the model id's `@high` decided the continue: every
+// turn was refused and replayed whole (requests.jsonl, 579 times 2026-11-13..19).
+//
+// The upstream here keeps threads the way Anthropic does: a request without `continue` creates one
+// with its `output_config`, a continue must name a stored answer and carry the same `output_config`,
+// and every answer joins its thread. `stream: true` answers as an event stream whose end is held
+// back after `message_stop`, as a client may act on the answer before the upstream closes it.
+const STREAM_HOLD_MS = 400;
+const threadRig = () => {
+  let answered = 0;
+  const threads = new Map<string, string>();
+  return nativeRig((seen) => {
+    const config = JSON.stringify(seen.body.output_config ?? null);
+    const thread = seen.body.thread as { type?: string; previous_message_id?: string } | undefined;
+    if (thread?.type === "continue") {
+      const stored = threads.get(thread.previous_message_id ?? "");
+      if (stored === undefined) {
+        return { status: 404, body: JSON.stringify({ type: "error", error: { type: "not_found_error", message: "No thread state was found for the requested `previous_message_id`." } }) };
+      }
+      if (stored !== config) {
+        return { status: 400, body: JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "thread: the request does not match the stored Thread for the requested `previous_message_id`; differing field(s): output_config." } }) };
+      }
+    }
+    const id = `msg_effort_${++answered}`;
+    threads.set(id, config);
+    if (seen.body.stream === true) {
+      const event = (name: string, data: unknown) => `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`;
+      return { status: 200, holdEndMs: STREAM_HOLD_MS, chunks: [
+        event("message_start", { type: "message_start", message: { id, type: "message", role: "assistant", model: seen.body.model, content: [], usage: { input_tokens: 1, output_tokens: 0 } } }),
+        event("message_delta", { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } }),
+        event("message_stop", { type: "message_stop" }),
+      ] };
+    }
+    return { status: 200, body: JSON.stringify({ id, type: "message", role: "assistant", model: seen.body.model, content: [], usage: {} }) };
+  });
+};
+const sentEffort = (rig: Awaited<ReturnType<typeof nativeRig>>, index: number) =>
+  (rig.seen[index]!.body.output_config as { effort?: string } | undefined)?.effort;
+
+test("a thread continue repeats the effort its previous answer went out with", async () => {
+  const rig = await threadRig();
+  const effortOf = (index: number) => sentEffort(rig, index);
+  try {
+    // Two workers on one model id, interleaved: thread A's task prompt carries a marker, B's does not.
+    assert.equal(await rig.send("thread-a", { model: "claude-opus-5@high", content: "[[ripple: claude-opus-5@xhigh]]\nreview this" }), 200);
+    assert.equal(effortOf(0), "xhigh", "the marker decides A's full request");
+    assert.equal(await rig.send("thread-b", { model: "claude-opus-5@high", content: "review that" }), 200);
+    assert.equal(effortOf(1), "high", "B has no marker");
+
+    assert.equal(await rig.send("thread-a", { model: "claude-opus-5@high", content: "a tool result", previous: "msg_effort_1" }), 200,
+      "A's continue carries no marker and still goes out as its thread did");
+    assert.equal(effortOf(2), "xhigh");
+    assert.equal(rig.seen[2]!.body.thread !== undefined, true, "the thread itself is still forwarded");
+    assert.equal(await rig.send("thread-b", { model: "claude-opus-5@high", content: "a tool result", previous: "msg_effort_2" }), 200,
+      "B's continue, right after A's, keeps B's own effort");
+    assert.equal(effortOf(3), "high");
+    assert.equal(await rig.send("thread-c", { model: "claude-opus-5@high", content: "a tool result", previous: "msg_unknown" }), 404);
+    assert.equal(effortOf(4), "high", "an unknown previous answer keeps the resolved effort, though A answered last but one");
+
+    assert.equal(await rig.send("thread-a", { model: "claude-opus-5@high", content: "another tool result", previous: "msg_effort_3" }), 200,
+      "A's continue's own answer is remembered in turn");
+    assert.equal(effortOf(5), "xhigh");
+    assert.equal(await rig.send("thread-a", { model: "claude-opus-5@medium", content: "a tool result", previous: "msg_effort_5" }), 400,
+      "a changed model id is the client's own change: it is sent as asked, and the thread refuses it as it would without the router");
+    assert.equal(effortOf(6), "medium");
+  } finally {
+    await rig.stop();
+  }
+});
+
+test("a thread continue keeps a newly honoured marker of its own", async () => {
+  const rig = await threadRig();
+  try {
+    assert.equal(await rig.send("remarked", { model: "claude-opus-5@high", content: "[[ripple: claude-opus-5@xhigh]]\nreview this" }), 200);
+    assert.equal(await rig.send("remarked", { model: "claude-opus-5@high", content: "[[ripple: claude-opus-5@low]]\nnow this", previous: "msg_effort_1" }), 400,
+      "the continue's own marker chose low: that reaches the thread, which refuses it as it would without the router");
+    assert.equal(sentEffort(rig, 1), "low");
+  } finally {
+    await rig.stop();
+  }
+});
+
+test("a thread continue keeps a changed explicit effort under a bare model id", async () => {
+  const rig = await threadRig();
+  try {
+    assert.equal(await rig.send("bare", { model: "claude-opus-5", effort: "high", content: "[[ripple: claude-opus-5@xhigh]]\nreview this" }), 200);
+    assert.equal(sentEffort(rig, 0), "xhigh", "the marker overrides the client's effort");
+    assert.equal(await rig.send("bare", { model: "claude-opus-5", effort: "high", content: "a tool result", previous: "msg_effort_1" }), 200,
+      "the same client effort: only the marker's absence differs, so the thread's effort is repeated");
+    assert.equal(sentEffort(rig, 1), "xhigh");
+    assert.equal(await rig.send("bare", { model: "claude-opus-5", effort: "low", content: "a tool result", previous: "msg_effort_2" }), 400,
+      "a changed explicit effort is the client's own change and is sent as asked");
+    assert.equal(sentEffort(rig, 2), "low");
+    assert.equal(await rig.send("bare", { model: "claude-opus-5", content: "a tool result", previous: "msg_effort_2" }), 400,
+      "a dropped explicit effort is a change too: nothing is put back");
+    assert.equal(sentEffort(rig, 3), undefined);
+  } finally {
+    await rig.stop();
+  }
+});
+
+test("a thread continue follows a changed configured effort, which no marker set", async () => {
+  const rig = await threadRig();
+  try {
+    rig.cfg.routes = { ...rig.cfg.routes, "claude-opus-4-8": { provider: "claude", model: "claude-opus-5", effort: "high" } };
+    assert.equal(await rig.send("slot", { model: "claude-opus-4-8" }), 200);
+    assert.equal(sentEffort(rig, 0), "high");
+    rig.cfg.routes = { ...rig.cfg.routes, "claude-opus-4-8": { provider: "claude", model: "claude-opus-5", effort: "medium" } };
+    assert.equal(await rig.send("slot", { model: "claude-opus-4-8", content: "a tool result", previous: "msg_effort_1" }), 400,
+      "the setting reaches the running thread, as it does without the router");
+    assert.equal(sentEffort(rig, 1), "medium");
+  } finally {
+    await rig.stop();
+  }
+});
+
+test("a slot that ignored a marker naming its own effort still follows a changed configured effort", async () => {
+  const rig = await threadRig();
+  try {
+    // The slot decides `high` and ignores the marker; that the marker also says `high` is coincidence.
+    rig.cfg.routes = { ...rig.cfg.routes, "claude-opus-4-8": { provider: "claude", model: "claude-opus-5", effort: "high" } };
+    assert.equal(await rig.send("slot-marker", { model: "claude-opus-4-8", content: "[[ripple: claude-opus-5@high]]\nreview this" }), 200);
+    assert.equal(sentEffort(rig, 0), "high");
+    rig.cfg.routes = { ...rig.cfg.routes, "claude-opus-4-8": { provider: "claude", model: "claude-opus-5", effort: "medium" } };
+    assert.equal(await rig.send("slot-marker", { model: "claude-opus-4-8", content: "a tool result", previous: "msg_effort_1" }), 400,
+      "the configured medium is sent: the marker did not choose the thread's effort");
+    assert.equal(sentEffort(rig, 1), "medium");
+  } finally {
+    await rig.stop();
+  }
+});
+
+test("a thread continue repeats the clamped effort its thread was sent with, after the clamp changes", async () => {
+  const rig = await threadRig();
+  try {
+    rig.cfg.effortClamp = { xhigh: "high" };
+    assert.equal(await rig.send("clamped", { model: "claude-opus-5@medium", content: "[[ripple: claude-opus-5@xhigh]]\nreview this" }), 200);
+    assert.equal(sentEffort(rig, 0), "high", "the marker's xhigh went out clamped");
+    rig.cfg.effortClamp = {};
+    assert.equal(await rig.send("clamped", { model: "claude-opus-5@medium", content: "a tool result", previous: "msg_effort_1" }), 200,
+      "the continue repeats what the thread stored, not the unclamped marker or the model id");
+    assert.equal(sentEffort(rig, 1), "high");
+  } finally {
+    await rig.stop();
+  }
+});
+
+test("a streamed answer's effort is remembered at message_stop, before the upstream closes the stream", async () => {
+  const rig = await threadRig();
+  try {
+    assert.equal(await rig.send("streamed", { model: "claude-opus-5@high", stream: true, until: "message_stop", content: "[[ripple: claude-opus-5@xhigh]]\nreview this" }), 200);
+    // Sent while the first answer's stream is still open (its end is held back STREAM_HOLD_MS).
+    assert.equal(await rig.send("streamed", { model: "claude-opus-5@high", stream: true, until: "message_stop", content: "a tool result", previous: "msg_effort_1" }), 200,
+      "the continue already finds its thread's effort");
+    assert.equal(sentEffort(rig, 1), "xhigh");
+  } finally {
+    await rig.stop();
+  }
+});
+
 test("a third account does not regain the first session's identity headers", async () => {
   const rig = await nativeRig((_seen, attempt) => attempt < 3
     ? { status: 429, headers: { "retry-after": "300" }, body: "{}" }
@@ -592,6 +782,30 @@ test("an un-routed answer on the app's own login feeds its unified limit headers
     assert.equal(rig.seen[0]?.body.model, "claude-sonnet-5", "the native model id passed through un-routed");
     const usage = (await rig.proxy.claudeUsage.snapshot()).current as { rate_limits: { primary: { used_percent: number } } };
     assert.equal(usage.rate_limits.primary.used_percent, 42, "the answer's headers became the current login's reading");
+    // The reading says which login it is, as the limits' `sameAs` needs (PR 179 review, 2026-11-20).
+    assert.equal(rig.proxy.claudeUsage.readWith("current"), loginAuthKey({ authorization: "Bearer current-token" }));
+  } finally {
+    globalThis.fetch = realFetch;
+    await rig.stop();
+  }
+});
+
+// A routed answer's reading names the credential that answered, by the auth it went out with: the
+// limits alias a stored copy only to figures read on that login (PR 179 review, 2026-11-20).
+test("a routed answer's unified limit headers name the login they were read on", async () => {
+  const rig = await nativeRig(() => ({
+    status: 200,
+    headers: { "anthropic-ratelimit-unified-status": "allowed", "anthropic-ratelimit-unified-5h-utilization": "0.3" },
+  }));
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response("no", { status: 429 })) as typeof fetch;
+  try {
+    assert.equal(await rig.send(), 200);
+    const sent = rig.seen[0]?.authorization;
+    assert.ok(sent, "the turn went out on a pool credential");
+    const usage = (await rig.proxy.claudeUsage.snapshot()).current as { rate_limits: { primary: { used_percent: number } } } | undefined;
+    assert.equal(usage?.rate_limits.primary.used_percent, 30);
+    assert.equal(rig.proxy.claudeUsage.readWith("current"), loginAuthKey({ authorization: sent }));
   } finally {
     globalThis.fetch = realFetch;
     await rig.stop();

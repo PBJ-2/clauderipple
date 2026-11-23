@@ -15,7 +15,7 @@ const work = fs.mkdtempSync(path.join(os.tmpdir(), "cr-remote-cli-"));
 process.env.CLAUDERIPPLE_HOME = path.join(work, "never-used-home");
 process.env.CLAUDE_SETTINGS_PATH = path.join(work, "never-used-settings.json");
 delete process.env.CLAUDERIPPLE_SSH_OPTIONS;
-const { remoteAdd, remoteRemove, configuredHosts, mergeRemoteSettings } = await import("../src/remote.ts");
+const { remoteAdd, remoteRemove, configuredHosts, mergeRemoteSettings, updateHosts } = await import("../src/remote.ts");
 
 const CA = "-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----\n";
 const noSh = process.platform === "win32" ? "needs a POSIX sh" : false;
@@ -184,6 +184,21 @@ test("bad hosts never reach ssh", async () => {
   }
   assert.equal(ran, 0);
   await assert.rejects(remoteAdd("box", { ...f.opts, run, port: 0 }), /--port/);
+});
+
+test("updateHosts takes the config lock before changing the file", () => {
+  const root = path.join(work, "host-lock");
+  fs.mkdirSync(root, { recursive: true });
+  const file = path.join(root, "config.json");
+  fs.writeFileSync(file, JSON.stringify({ providers: {}, remote: { hosts: [] } }, null, 2));
+  const before = fs.readFileSync(file);
+  fs.mkdirSync(`${file}.lock`);
+  try {
+    assert.throws(() => updateHosts(file, (hosts) => [...hosts, { host: "box", port: 18791 }]), (error: NodeJS.ErrnoException) => error.code === "ELOCKED");
+    assert.deepEqual(fs.readFileSync(file), before);
+  } finally {
+    fs.rmSync(`${file}.lock`, { recursive: true, force: true });
+  }
 });
 
 test("mergeRemoteSettings is idempotent and keeps unrelated keys", () => {

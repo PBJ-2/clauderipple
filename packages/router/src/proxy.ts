@@ -83,6 +83,17 @@ const ERROR_HEAD_MAX = 4096;
 /** Methods safe to send twice (RFC 9110 §9.2.2), and so the only ones resent after a stale socket. */
 const IDEMPOTENT = new Set(["GET", "HEAD", "OPTIONS"]);
 
+/** What a native answer went out as, so a `continue` of its thread can go out the same way. */
+type ThreadEffort = {
+  asked: string; provider: string; model: string;
+  /** The effort on the wire, after the clamp. */
+  effort: string | undefined;
+  /** The client's own `output_config.effort`, before any rewrite. */
+  clientEffort: string | undefined;
+  /** A `[[ripple: …@effort]]` marker set it (or the thread it continues), so a delta cannot repeat it. */
+  marked: boolean;
+};
+
 export type AbsoluteProxyRequest = { host: string; port: number; path: string; head: Buffer; tls: boolean };
 
 /**
@@ -331,6 +342,8 @@ export class Proxy {
   private readonly routedMessageIds = new Set<string>();
   /** Which conversation each native pool answer belonged to, for a later `continue` of that thread. */
   private readonly threadAffinity = new ThreadAffinity();
+  /** The effort each native answer went out with, which a `continue` of its thread must repeat. */
+  private readonly threadEffort = new ThreadAffinity<ThreadEffort>();
   private readonly thinkingOrigins = new ThinkingOrigins();
   readonly providerHealth = new ProviderHealth();
   readonly modelHealth = new ModelHealth();
@@ -659,6 +672,8 @@ export class Proxy {
       backoff: claudeUsageBackoff,
       upstream: () => this.deps.config().upstream,
       warn: (message) => deps.log.warn(message),
+      // Called only once an answer arrives, by when the identity lookup below exists.
+      loginOf: (key) => this.claudeIdentity.cachedFor(key)?.subjectHash ?? null,
     });
     this.claudeModels = new ClaudeModelCatalog(this.claudeAccounts, {
       upstream: () => this.deps.config().upstream,
@@ -1437,6 +1452,8 @@ export class Proxy {
       let ownLogin = false;
       /** This attempt goes out on a native Claude account-pool credential, so its answer names a thread. */
       let poolAnswer = false;
+      /** The route this attempt's native answer is remembered under, for a later `continue` of its thread. */
+      let threadRoute: ThreadEffort | undefined;
       let target: { protocol: "http:" | "https:"; host: string; port: number; agent: http.Agent | https.Agent; extraHeaders: Record<string, string>; basePath?: string; dropClientAuth?: boolean; dropHeaders?: Set<string>; dropHeaderPrefixes?: string[] };
       // Re-enter only for the one unwritten Google turn (prompt refusal or no model capacity). Each target sees the original
       // request, not the primary's rewritten effort, stripped thread, or translated body.
@@ -1475,7 +1492,30 @@ export class Proxy {
           }
           // Only the Google adapter can return a turn unwritten, so only it pays for the copy.
           if (!pristine && provider.type === "google") pristine = structuredClone(json);
+          // Anthropic stores a thread's `output_config` and refuses a `continue` whose own differs
+          // (400 "differing field(s): output_config"). A continue carries only its delta, so a
+          // `[[ripple: x@xhigh]]` marker in the task prompt is not there to be read and the model
+          // id's own `@high` decided instead: every turn of such a worker was refused and replayed
+          // whole (579 times, 2026-11-13..19, Workflow agents on claude-opus-5-5). A continue of a
+          // thread whose effort a marker set repeats the effort its previous answer was sent with.
+          // Only the marker's: an effort the configuration decided follows the configuration, so a
+          // changed setting still reaches the thread as it would without the router.
+          threadRoute = undefined;
+          const threaded = provider.type === "anthropic" && !override;
+          const clientEffort = threaded ? effortOf(json) : undefined;
           rewriteBody(json, route, cfg.effortClamp);
+          if (threaded) {
+            const kept = this.continuedEffort(json, route, clientEffort, log);
+            threadRoute = {
+              asked: route.asked, provider: route.provider, model: route.model,
+              // After the clamp: the value on the wire is what the thread stores and must see again.
+              effort: effortOf(json),
+              clientEffort,
+              // Routing says whether the marker chose the effort; equal values do not (a slot ignores
+              // a marker that happens to name its own effort).
+              marked: kept !== undefined || route.effortFromMarker === true,
+            };
+          }
           if (provider.type === "chatgpt") {
             const td = threadDecision(json);
             if (td === "refuse") {
@@ -2169,13 +2209,14 @@ export class Proxy {
             // (issue #123, 2026-11-05). A message answer also states its window usage in the
             // unified limit headers, the only reading available while the usage endpoint refuses.
             this.claudeAccounts.noteAnswer(penalised.id, status);
-            this.claudeUsage.observeAnswer(penalised.id.split(":", 1)[0]!, upRes.headers);
+            // The headers it went out with say which login the reading is (the limits' `sameAs`, 2026-11-20).
+            this.claudeUsage.observeAnswer(penalised.id.split(":", 1)[0]!, upRes.headers, chosen?.headers);
           }
         } else if (ownLogin) {
           // No pool credential answered: the app's own login did. Its unified limit headers are the
           // only fresh reading of that account while GET /api/oauth/usage refuses; without them the
           // current login's card kept an old number through the whole backoff (2026-11-05).
-          this.claudeUsage.observeAnswer("current", upRes.headers);
+          this.claudeUsage.observeAnswer("current", upRes.headers, loginHeaders(req.headers));
         }
 
         // The API refused an image (too big, unreadable, wrong type) in a turn that carried the phone's
@@ -2324,6 +2365,10 @@ export class Proxy {
           typeof upRes.headers["content-encoding"] === "string" ? upRes.headers["content-encoding"] : undefined,
           status >= 200 && status < 300 && pathname === "/v1/messages"
             ? block => this.thinkingOrigins.remember(route?.provider ?? "anthropic", block) : undefined,
+          // The thread's effort is remembered as soon as the answer is whole: the client can send
+          // its `continue` before the upstream closes the stream. The end below covers the rest.
+          threadRoute && status >= 200 && status < 300
+            ? messageId => { if (threadRoute) this.threadEffort.remember(messageId, threadRoute); } : undefined,
         );
         // An error body is the only thing that says why the provider refused; keep its head for the
         // log and the Logs page. A DeepSeek 401 went unexplained for a day because only the status
@@ -2364,6 +2409,9 @@ export class Proxy {
           // carrying only its delta, finds the account whose server-side thread holds it.
           if (poolAnswer && affinity !== undefined && observed.messageId !== undefined && status >= 200 && status < 300) {
             this.threadAffinity.remember(observed.messageId, affinity);
+          }
+          if (threadRoute && observed.messageId !== undefined && status >= 200 && status < 300) {
+            this.threadEffort.remember(observed.messageId, threadRoute);
           }
           res.end();
           const errorBody = status >= 400 ? decodeBodyToText(Buffer.concat(errorHead), upRes.headers["content-encoding"]) : "";
@@ -2622,6 +2670,8 @@ export class Proxy {
       provider: f.provider,
       model: f.model,
       effort: f.effort ?? resolved.effort,
+      // An effort it takes from the primary is still the marker's, when the marker chose it.
+      ...(f.effort === undefined && resolved.effortFromMarker ? { effortFromMarker: true as const } : {}),
       // A fallback to a pinned worker goes out on that worker's account, as a direct pick would.
       ...(f.accountPin ? { accountPin: f.accountPin } : {}),
       tag: `${resolved.asked}->${f.model} (failover from ${resolved.provider})`,
@@ -2733,6 +2783,35 @@ export class Proxy {
     const thread = json.thread as { type?: unknown; previous_message_id?: unknown } | undefined;
     if (!thread || typeof thread !== "object" || thread.type !== "continue") return undefined;
     return typeof thread.previous_message_id === "string" ? this.threadAffinity.lookup(thread.previous_message_id) : undefined;
+  }
+
+  /**
+   * Put back, on a native `continue` already rewritten for its route, the effort its thread's
+   * previous answer was sent with — only when the missing marker is all that explains the
+   * difference: a marker set that effort, the continue's own marker chose none, and the continue
+   * was asked for under the same model id, with the same client effort, for the same provider and
+   * model. Returns the entry applied. Anything else — an unknown id, an effort the configuration
+   * decided, a newly honoured marker, a changed `@effort` in the model id or a changed explicit
+   * `output_config.effort`, another target — leaves the body as resolved, so a real change still
+   * reaches Anthropic (which refuses it once and the CLI starts over, as without the router).
+   */
+  private continuedEffort(json: Record<string, unknown>, route: Resolved, clientEffort: string | undefined, log: Logger): ThreadEffort | undefined {
+    const thread = json.thread as { type?: unknown; previous_message_id?: unknown } | undefined;
+    if (!thread || typeof thread !== "object" || thread.type !== "continue" || typeof thread.previous_message_id !== "string") return undefined;
+    if (route.effortFromMarker) return undefined;
+    const kept = this.threadEffort.lookup(thread.previous_message_id);
+    if (!kept?.marked || kept.asked !== route.asked || kept.provider !== route.provider || kept.model !== route.model) return undefined;
+    if (kept.clientEffort !== clientEffort) return undefined;
+    const now = effortOf(json);
+    if (kept.effort === now) return kept;
+    // Written after the clamp, as it was sent: clamping it again could move it a second step.
+    const output = { ...(json.output_config as Record<string, unknown> | undefined) };
+    if (kept.effort === undefined) delete output.effort;
+    else output.effort = kept.effort;
+    if (Object.keys(output).length > 0) json.output_config = output;
+    else delete json.output_config;
+    log.info(`thread continue keeps effort ${kept.effort ?? "-"} (resolved ${now ?? "-"}) for ${route.asked}`);
+    return kept;
   }
 
   clearCredentialCooldown(provider: string, id: string): void {

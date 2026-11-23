@@ -232,8 +232,27 @@ export type Settings = {
   hide: string[]
   /** Band chips switched on, off by default: 'context' | 'limits'. */
   extras: string[]
+  /**
+   * What the band's limits row shows of each provider, chosen in the dashboard (2026-11-19). A
+   * provider with no entry keeps the default, its account in use (the first when none is marked);
+   * [] is today's row. The limits pane always lists every account. Kept when a writer that predates
+   * it leaves the key out (packages/router/src/mod-settings.ts KEPT_WHEN_ABSENT).
+   */
+  bandLimits: BandLimit[]
   setupDone: boolean
 }
+
+/**
+ * One provider's choice for the band's limits row. `provider` is the config name `/api/limits`
+ * sends (not the type). 'off' leaves the provider out of the row, 'all' draws every account the
+ * router read, 'accounts' only those whose owner id (`/api/limits` account `id`: a UUID, "current",
+ * "codex", "legacy") is listed, never another account in their place. A list of objects, not a map
+ * keyed by provider: the router refuses a settings key that ends in "key"/"token"/…, and a provider
+ * name is a free slug.
+ */
+export type BandLimit =
+  | { provider: string; show: 'off' | 'all' }
+  | { provider: string; show: 'accounts'; accounts: string[] }
 
 /** The admin API always returns a complete normalized settings object. */
 export type ModSettingsSnapshot = {
@@ -421,6 +440,20 @@ export type LimitItem = {
   account: number
   /** The account's own name as the owner gave it (an email, often); absent for the Claude app login. */
   accountLabel?: string
+  /**
+   * The account's owner id as `/api/limits` sends it (a UUID, "current", "codex", "legacy"): stable
+   * across another account pausing, unlike `account`. Absent where the router sends none (OpenCode
+   * Go, MiniMax, Grok rows) and on the fallback path. The band's `bandLimits` choice matches on it.
+   */
+  accountId?: string
+  /**
+   * Other owner ids the same account answers to: on Claude's "current" row, the stored copies of the
+   * app login the router hides behind it (`/api/limits` `sameAs`, 2026-11-19). A choice that named a
+   * stored account keeps finding it once the app logs into that account. The router lists only
+   * copies that can serve (not paused, signed out or expired), and only while the row's reading was
+   * taken on that same login, so a choice never takes another login's figures (2026-11-20 review).
+   */
+  accountAliases?: string[]
   /** The account the router serves new turns with now; absent on the others and on older routers. */
   inUse?: true
   kind: 'five_hour' | 'seven_day' | 'scoped' | 'window'
@@ -586,6 +619,12 @@ declare module 'claude-code' {
       limit: Hot | null
       /** Every provider's plan windows for the limits row, from `GET /api/limits`. Null until read. */
       limits: LimitItem[] | null
+      /**
+       * The router's Claude providers by config name, every one `/api/limits` or `/api/status` has
+       * listed, kept after the limits stop listing one (its only account paused): the band reads a
+       * bandLimits choice for it as Claude's (register.tsx noteClaudeProviders, 2026-11-20).
+       */
+      limitsClaude: string[]
       /** What requests cost at API prices, today and over the last seven days, for the limits pane. Null until read. */
       cost: { today: CostSummary | null; week: CostSummary | null } | null
       demo: 'cold' | 'swamp' | 'hot' | 'down' | 'kept' | null

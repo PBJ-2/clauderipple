@@ -160,9 +160,21 @@ test("direct prefix keeps model, parses @effort", () => {
 test("regression: a Claude marker reaches an undeclared target through its direct prefix", () => {
   const configured: Config = { ...cfg, aliases: { sol: "gpt-6.1-sol" } };
   assert.deepEqual(resolve("claude-sonnet-5-5", body("[[ripple: sol@high]] do it"), configured), {
-    provider: "chatgpt", model: "gpt-6.1-sol", effort: "high",
+    provider: "chatgpt", model: "gpt-6.1-sol", effort: "high", effortFromMarker: true,
     tag: "claude-sonnet-5-5->gpt-6.1-sol (marker)", kind: "turn", asked: "claude-sonnet-5-5",
   });
+});
+
+// A thread `continue` carries no marker; the proxy repeats a thread's effort only when routing says
+// the marker chose it. Equal values are no evidence: a slot ignores the marker (PR 180 review).
+test("a route says when its effort is the marker's, and a slot never does", () => {
+  assert.equal(resolve("gpt-5.6-terra@high", body("[[ripple: luna@xhigh]] do it"), cfg)!.effortFromMarker, true);
+  assert.equal(resolve("gpt-5.6-terra@high", body("[[ripple: luna]] do it"), cfg)!.effortFromMarker, undefined,
+    "a marker without a level leaves the model id's effort");
+  assert.equal(resolve("gpt-5.6-terra@high", body("do it"), cfg)!.effortFromMarker, undefined);
+  const slot = resolve("claude-opus-4-6", body("[[ripple: luna@high]] do it"), cfg)!;
+  assert.equal(slot.effort, "high");
+  assert.equal(slot.effortFromMarker, undefined, "the slot's own high, though the ignored marker names the same level");
 });
 
 test("marker overrides direct models only, ignores system-reminder blocks", () => {
