@@ -3532,7 +3532,10 @@ function accountPoolActions(account, patch) {
   };
   if (!account.external) add(t(account.preferred ? "providers.preferClear" : "providers.preferAction"), { preferred: !account.preferred });
   add(t(account.paused ? "providers.chatgptResume" : "providers.chatgptPause"), { paused: !account.paused });
-  if (!account.external && (account.state === "cooling" || account.cooldownSeconds > 0)) add(t("providers.chatgptClearCooldown"), { clearCooldown: true });
+  // An account the owner's usage cap holds has nothing refused to end: "use now" would only be undone by
+  // the same cap, so its way out is changing or clearing the cap. A backend refusal beside a cap keeps the action.
+  const heldByCapOnly = Boolean(account.capRest) && !(account.restSeconds > 0);
+  if (!account.external && !heldByCapOnly && (account.state === "cooling" || account.cooldownSeconds > 0)) add(t("providers.chatgptClearCooldown"), { clearCooldown: true });
   return actions;
 }
 
@@ -3649,11 +3652,96 @@ function renderClaudeAccountRows(target, data, name, generation) {
  * without reopening the tab; an unchanged answer is not redrawn, so a button under the pointer stays.
  */
 const accountRowsDrawn = new WeakMap();
+/** How each list was last drawn, so a row's editor opening or closing redraws at once from the same answer. */
+const accountRowsDraw = new WeakMap();
 function drawAccountRows(target, data, draw) {
   const json = JSON.stringify(data);
   if (accountRowsDrawn.get(target) === json) return;
   accountRowsDrawn.set(target, json);
+  accountRowsDraw.set(target, draw);
+  paintAccountRows(target, draw);
+}
+function redrawAccountRows(target) {
+  const draw = accountRowsDraw.get(target);
+  if (draw) paintAccountRows(target, draw);
+}
+/** Draws a list and keeps the cursor in an open row editor: the list is drawn again while someone types. */
+function paintAccountRows(target, draw) {
+  const active = document.activeElement;
+  const typing = Boolean(active && active.classList && active.classList.contains("account-inline-input") && target.contains(active));
   draw();
+  const input = target.querySelector(".account-inline-input");
+  if (!input || !(typing || (accountEdit && accountEdit.focus))) return;
+  input.focus();
+  // Opening selects what is there, so typing replaces it; a redraw leaves the cursor at the end.
+  if (accountEdit && accountEdit.focus) { accountEdit.focus = false; input.select(); return; }
+  try { const end = input.value.length; input.setSelectionRange(end, end); } catch { /* a number box has no selection to set */ }
+}
+
+/**
+ * The account row being edited in place, if any: `{provider, kind, id, text, focus}`, where `kind` is
+ * "cap" (a ChatGPT account's usage cap) and `text` is what has been typed. It lives here, not in the row,
+ * because the open list is fetched again every ten seconds and a cooldown counting down is a changed answer.
+ * The dashboard also runs inside the desktop app, where `prompt()` is not available, so a row never asks
+ * the browser for a dialog.
+ */
+let accountEdit = null;
+function accountEditOf(provider, kind, id) {
+  return accountEdit && accountEdit.provider === provider && accountEdit.kind === kind && accountEdit.id === id ? accountEdit : null;
+}
+function openAccountEdit(target, provider, kind, id, text) {
+  accountEdit = { provider, kind, id, text, focus: true };
+  redrawAccountRows(target);
+}
+function closeAccountEdit(target) {
+  accountEdit = null;
+  redrawAccountRows(target);
+}
+
+/**
+ * What a row shows in place of its buttons while one of its fields is edited: the field, Save, Clear
+ * when there is something to clear, and Cancel. Enter saves and Escape cancels (not while an input
+ * method is still composing, which uses Enter to commit its text). The field starts from, and keeps
+ * writing to, `edit.text`.
+ * @param {{edit: {text: string}, label: string, number?: boolean, check?: (text: string) => string,
+ *   save: (text: string) => Promise<unknown>, clear?: () => Promise<unknown>, clearText?: string, cancel: () => void}} options
+ */
+function inlineAccountEditor(options) {
+  const { edit } = options;
+  const input = el("input", { class: "account-inline-input", type: options.number ? "number" : "text", "aria-label": options.label, autocomplete: "off", ...(options.number ? { min: "1", max: "99", step: "1", inputmode: "numeric" } : { maxlength: "80" }) });
+  input.value = edit.text;
+  const message = el("span", { class: "small bad-text account-inline-message", role: "alert" });
+  const save = el("button", { class: "btn compact", type: "button", text: t("common.save") });
+  const clear = options.clear ? el("button", { class: "btn secondary compact", type: "button", text: options.clearText }) : null;
+  const cancel = el("button", { class: "btn secondary compact", type: "button", text: t("common.cancel") });
+  let busy = false;
+  const sync = () => {
+    save.disabled = busy || !input.value.trim();
+    if (clear) clear.disabled = busy;
+  };
+  sync();
+  // Once the request has been made the row is drawn again, so the buttons only need to hold still meanwhile.
+  const run = async (action) => {
+    if (busy) return;
+    busy = true; sync();
+    try { await action(); } finally { busy = false; sync(); }
+  };
+  const submit = () => {
+    const problem = options.check ? options.check(input.value) : "";
+    message.textContent = problem;
+    if (problem) { input.focus(); return; }
+    void run(() => options.save(input.value.trim()));
+  };
+  input.addEventListener("input", () => { edit.text = input.value; message.textContent = ""; sync(); });
+  input.addEventListener("keydown", (event) => {
+    if (event.isComposing || event.keyCode === 229) return;
+    if (event.key === "Enter") { event.preventDefault(); if (!save.disabled) submit(); }
+    else if (event.key === "Escape") { event.preventDefault(); options.cancel(); }
+  });
+  save.addEventListener("click", submit);
+  if (clear) clear.addEventListener("click", () => void run(options.clear));
+  cancel.addEventListener("click", () => options.cancel());
+  return el("div", { class: "account-inline-edit", role: "group", "aria-label": options.label }, [input, save, clear, cancel, message]);
 }
 function accountRowsFailed(target, error) {
   accountRowsDrawn.delete(target);
@@ -3786,11 +3874,14 @@ function chatgptStateBadge(account) {
   return el("span", { class: account.inUse ? "badge ok in-use" : "badge ok", text: account.inUse ? t("providers.chatgptInUse") : t("providers.chatgptStandby") });
 }
 
-async function patchChatgptAccount(name, id, change) {
+/** True once the router has taken the change; `applied` runs just before the list is drawn again from the router's answer. */
+async function patchChatgptAccount(name, id, change, applied) {
   try {
     await api(`/api/chatgpt-accounts/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(change) });
-    await refreshChatgptAccountPanel(name);
-  } catch (error) { toast(t("common.actionFailed"), true, error.message); }
+  } catch (error) { toast(t("common.actionFailed"), true, error.message); return false; }
+  if (applied) applied();
+  await refreshChatgptAccountPanel(name);
+  return true;
 }
 
 function renderChatgptAccountRows(target, data, name, generation) {
@@ -3823,28 +3914,34 @@ function renderChatgptAccountRows(target, data, name, generation) {
         try { await api(`/api/chatgpt-accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" }); await refreshChatgptAccountPanel(name); }
         catch (error) { toast(t("common.actionFailed"), true, error.message); }
       });
-      // One whole percent for both windows; an empty answer clears it (back to 100%, as before).
+      // One whole percent for both windows, typed in the row; "remove cap" is back to 100%, as before.
       const cap = el("button", { class: "btn secondary compact", type: "button", text: account.usageCap ? t("providers.chatgptCapEdit", { cap: account.usageCap }) : t("providers.chatgptCapSet") });
-      cap.addEventListener("click", () => {
-        const answer = prompt(t("providers.chatgptCapPrompt"), account.usageCap ? String(account.usageCap) : "");
-        if (answer === null) return;
-        const text = answer.trim();
-        if (!text && !account.usageCap) return;
-        const value = text ? Number(text) : null;
-        if (value !== null && !(Number.isInteger(value) && value >= 1 && value <= 99)) { toast(t("providers.chatgptCapInvalid"), true); return; }
-        if (value === account.usageCap) return;
-        void patchChatgptAccount(name, account.id, { usageCap: value });
-      });
+      cap.addEventListener("click", () => openAccountEdit(target, name, "cap", account.id, account.usageCap ? String(account.usageCap) : ""));
       actions.push(cap, rename, remove);
     }
+    const capEdit = own ? accountEditOf(name, "cap", account.id) : null;
+    const done = () => { accountEdit = null; };
+    const capEditor = capEdit ? inlineAccountEditor({
+      edit: capEdit,
+      label: t("providers.chatgptCapInputLabel"),
+      number: true,
+      check: (text) => { const value = Number(text); return Number.isInteger(value) && value >= 1 && value <= 99 ? "" : t("providers.chatgptCapInvalid"); },
+      save: async (text) => {
+        if (Number(text) === account.usageCap) { closeAccountEdit(target); return; }
+        await patchChatgptAccount(name, account.id, { usageCap: Number(text) }, done);
+      },
+      ...(account.usageCap ? { clear: () => patchChatgptAccount(name, account.id, { usageCap: null }, done), clearText: t("providers.chatgptCapClear") } : {}),
+      cancel: () => closeAccountEdit(target),
+    }) : null;
     const quota = chatgptQuotaText(account.quota);
     const detail = [account.email && account.email !== account.label ? account.email : null, account.planType || null].filter(Boolean).join(" · ");
     // How an account added here is kept is said once under the list (chatgptAccountsPanel); a row says only what is its own.
     const help = account.state === "needs-login" || account.state === "quarantined" ? t("providers.chatgptReauthHelp") : own ? "" : t("providers.chatgptCodexHelp");
     // The cap in force, from the router's own record of the account; while it is the reason the account rests, that reading instead.
-    const capName = (window) => t(window === "weekly" ? "quota.windowWeek" : "quota.window5h");
+    // The window is named by its length, as the meters name it: a weekly-only plan reports its weekly window first.
+    const capName = (rest) => rest.windowMinutes ? quotaWindowName({ window_minutes: rest.windowMinutes }) : t(rest.window === "weekly" ? "quota.windowWeek" : "quota.window5h");
     const capText = account.usageCap
-      ? account.capRest ? t("providers.chatgptCapRest", { window: capName(account.capRest.window), used: Math.round(account.capRest.used), cap: account.usageCap }) : t("providers.chatgptCapLine", { cap: account.usageCap })
+      ? account.capRest ? t("providers.chatgptCapRest", { window: capName(account.capRest), used: Math.round(account.capRest.used), cap: account.usageCap }) : t("providers.chatgptCapLine", { cap: account.usageCap })
       : "";
     return el("article", { class: `cell account-card${account.inUse ? " current" : ""}` }, [
       el("div", { class: "cell-text account-card-copy" }, [
@@ -3853,7 +3950,7 @@ function renderChatgptAccountRows(target, data, name, generation) {
         quota ? quotaMeters([account.quota.rate_limits.primary, account.quota.rate_limits.secondary], account.quota.at) : null,
         capText ? hint(capText) : null,
         help ? hint(help) : null,
-        actions.length ? el("div", { class: "account-card-actions" }, actions) : null,
+        capEditor || (actions.length ? el("div", { class: "account-card-actions" }, actions) : null),
       ]),
       el("div", { class: "account-card-badges" }, accountPoolBadges(account)),
     ]);
