@@ -150,7 +150,7 @@ export function retryAfterMs(headers: Record<string, string | string[] | undefin
 export type Credential = { id: string; headers: Record<string, string>; label?: string; ownerId?: string; healthKey?: string; preferred?: boolean; paused?: boolean };
 
 /** Cooldowns and failures belong to the durable account, so a token refresh never clears a rest. */
-type Health = { cooldownUntil: number; failures: number };
+type Health = { cooldownUntil: number; failures: number; windows?: Set<string> };
 
 export type CredentialReport = {
   id: string;
@@ -337,13 +337,20 @@ export class CredentialPool {
    * group is spent, not that the credential is. Every other failure (a refused credential, a 402, a
    * broken upstream) is still about the whole credential and rests all of it.
    */
-  penalise(provider: string, id: string, status: number, retryAfterMs?: number, body = "", scope?: string): Verdict {
+  penalise(provider: string, id: string, status: number, retryAfterMs?: number, body = "", scope?: string, windows?: readonly string[]): Verdict {
     const verdict = classify(status, retryAfterMs, body);
     if (!verdict.retryable) return verdict;
     const h = scope && verdict.kind === "rate-limit" ? this.scopedHealthOf(provider, id, scope) : this.healthOf(provider, id);
     h.failures++;
     if (verdict.quarantine) this.quarantined.add(this.key(provider, id));
-    else h.cooldownUntil = Math.max(h.cooldownUntil, this.now() + verdict.cooldownMs);
+    else {
+      const now = this.now();
+      if (!scope && windows?.length && verdict.kind === "rate-limit") {
+        if (h.cooldownUntil <= now) h.windows = new Set(windows);
+        else if (h.windows) for (const window of windows) h.windows.add(window);
+      } else delete h.windows;
+      h.cooldownUntil = Math.max(h.cooldownUntil, now + verdict.cooldownMs);
+    }
     return verdict;
   }
 
@@ -412,6 +419,18 @@ export class CredentialPool {
       this.accounts.delete(runtime);
     }
     for (const key of [...this.quarantined]) if (key === account || key.startsWith(`${account}:`)) this.quarantined.delete(key);
+  }
+
+  /** A refill does not clear unrelated rests or credential quarantine. */
+  refillWindows(provider: string, credential: Credential, windows: readonly string[], scopes: readonly string[]): void {
+    this.remember(provider, [credential]);
+    const key = this.key(provider, this.accountOf(provider, credential.id));
+    const account = this.health.get(key);
+    if (account?.windows) {
+      for (const window of windows) account.windows.delete(window);
+      if (account.windows.size === 0) this.health.delete(key);
+    }
+    for (const scope of scopes) this.health.delete(this.scopedKey(provider, credential.id, scope));
   }
 
   /** Seconds until each resting scope of one credential is usable again; empty when none rests. */

@@ -3510,6 +3510,246 @@ function claudePreferButton(name, id, disabled) {
 }
 
 /**
+ * Anthropic's limit resets for one Claude account: what Claude Desktop lists under Settings → Limit
+ * resets. They are read with the account's own login, which never starts a limit window, and a reset
+ * used here refills the limits at once and cannot be taken back, so each use asks first. The state
+ * outlives the account list's redraws (the open list is fetched again on a timer).
+ */
+const claudeResetsState = new Map();
+const claudeResetsControls = new Map();
+// Availability reads share Anthropic's OAuth usage budget; do not make one on every account poll.
+const CLAUDE_RESETS_READ_INTERVAL_MS = 5 * 60_000;
+const CLAUDE_RESET_WINDOWS = {
+  five_hour: "resets.window.five_hour",
+  seven_day: "resets.window.seven_day",
+  seven_day_overage_included: "resets.window.seven_day_fable",
+  seven_day_opus: "resets.window.seven_day_opus",
+  seven_day_sonnet: "resets.window.seven_day_sonnet",
+};
+
+function claudeResetsStateOf(id) {
+  let state = claudeResetsState.get(id);
+  if (!state) {
+    state = { open: false, loading: false, using: null, status: null, readAt: 0, nextReadAt: 0, error: null, recoverable: false, needsLogin: false, provider: "", label: "" };
+    claudeResetsState.set(id, state);
+  }
+  return state;
+}
+
+function claudeResetsErrorText(error) {
+  const body = (error && error.body) || {};
+  if (body.error === "needs-login") return t("resets.needsLogin");
+  if (body.error === "unknown-account") return t("resets.unknownAccount");
+  if (body.error === "http" && body.upstreamStatus === 429) return body.retryAfterSeconds ? t("resets.rateLimitedFor", { duration: durationText(body.retryAfterSeconds) }) : t("resets.rateLimited");
+  return t("resets.unavailable");
+}
+
+function claudeResetClaimText(claim) {
+  if (claim.result === "reset") return claim.resetsLeft !== null && claim.resetsLeft !== undefined ? t("resets.result.reset", { left: claim.resetsLeft }) : t("resets.result.resetNoCount");
+  return t(`resets.result.${claim.result}`);
+}
+
+function claudeResetUsable(grant, now = Date.now()) {
+  return grant.usableNow && grant.left > 0 && !grant.paused && !(Date.parse(grant.endsAt) <= now);
+}
+
+function rememberClaudeResets(state, status) {
+  state.status = status;
+  state.recoverable = false;
+  state.readAt = Date.now();
+  state.nextReadAt = state.readAt + CLAUDE_RESETS_READ_INTERVAL_MS;
+}
+
+function forgetClaudeResets(state, error) {
+  state.status = null;
+  state.recoverable ||= state.open;
+  state.error = claudeResetsErrorText(error);
+  const retryAfter = error?.body?.upstreamStatus === 429 ? Number(error.body.retryAfterSeconds) || 0 : 0;
+  state.nextReadAt = Date.now() + Math.max(CLAUDE_RESETS_READ_INTERVAL_MS, retryAfter * 1000);
+}
+
+async function loadClaudeResets(id, force) {
+  const state = claudeResetsStateOf(id);
+  if (state.needsLogin || state.loading || state.using || (!force && Date.now() < state.nextReadAt)) return;
+  state.loading = true;
+  state.error = null;
+  renderClaudeResets(id);
+  try {
+    const data = await api(`/api/claude-accounts/${encodeURIComponent(id)}/resets${force ? "?refresh=1" : ""}`);
+    rememberClaudeResets(state, data.status);
+  } catch (error) {
+    forgetClaudeResets(state, error);
+  } finally {
+    state.loading = false;
+    renderClaudeResets(id);
+  }
+}
+
+function claudeResetWindowLabel(window) {
+  return Object.hasOwn(CLAUDE_RESET_WINDOWS, window) ? t(CLAUDE_RESET_WINDOWS[window]) : window;
+}
+
+function confirmClaudeReset(id, grant) {
+  const state = claudeResetsStateOf(id);
+  if (state.needsLogin || state.loading || state.using || !claudeResetUsable(grant)) return;
+  const percent = new Intl.NumberFormat(CURRENT_LANG, { style: "percent", maximumFractionDigits: 2 });
+  const usedIn = (window) => {
+    const used = grant.percentUsed?.[window];
+    return Number.isFinite(used) ? percent.format(used / 100) : t("common.notAvailable");
+  };
+  const impact = [...new Set(grant.clears)].map((window) => el("li", {
+    text: `${claudeResetWindowLabel(window)}: ${usedIn(window)} → ${percent.format(0)}`,
+  }));
+  if (claudeResetReturnsFableUsage(grant)) {
+    impact.push(el("li", { text: `${t("resets.window.seven_day")}: ${usedIn("seven_day")} · ${t("resets.fableGiveback")}` }));
+  }
+  const proceed = el("button", { class: "btn", type: "button", text: t("resets.use"), onclick: () => {
+    const latest = claudeResetsStateOf(id);
+    if (latest.needsLogin || latest.loading || latest.using || !latest.status?.grants.includes(grant) || !claudeResetUsable(grant)) {
+      toast(t("resets.notUsable"), true);
+      renderClaudeResets(id);
+      return;
+    }
+    closeModal();
+    void useClaudeReset(id, grant);
+  } });
+  showModal(el("div", {}, [
+    el("h1", { id: "modal-title", text: t("resets.title") }),
+    el("p", { text: t("resets.confirm", { account: state.label, reset: grant.label || t("resets.fullReset") }) }),
+    impact.length ? el("ul", {}, impact) : null,
+    el("div", { class: "actions end" }, [el("button", { class: "btn secondary", type: "button", text: t("common.cancel"), onclick: closeModal }), proceed]),
+  ]));
+}
+
+async function useClaudeReset(id, grant) {
+  const state = claudeResetsStateOf(id);
+  const current = state.status?.grants.find((candidate) => candidate.id === grant.id);
+  if (state.needsLogin || state.loading || state.using || current !== grant || !claudeResetUsable(grant)) return;
+  state.using = grant.id;
+  state.error = null;
+  renderClaudeResets(id);
+  let reload = false;
+  try {
+    const data = await api(`/api/claude-accounts/${encodeURIComponent(id)}/resets`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ grantId: grant.id, previewId: state.status.previewId, confirm: true }) });
+    if (data.status) rememberClaudeResets(state, data.status);
+    else {
+      state.status = null;
+      reload = true;
+    }
+    if (data.claim.result === "unconfirmed") {
+      state.status = null;
+      state.recoverable = true;
+      state.error = claudeResetClaimText(data.claim);
+      reload = false;
+    }
+    toast(claudeResetClaimText(data.claim), data.claim.result !== "reset");
+    if (data.claim.result === "reset") await refreshClaudeAccountPanel(state.provider);
+  } catch (error) {
+    forgetClaudeResets(state, error);
+    if (!error?.body?.error || error.status === 500 || error.status >= 503) state.error = t("resets.result.unconfirmed");
+    toast(state.error, true);
+  } finally {
+    state.using = null;
+    renderClaudeResets(id);
+  }
+  if (reload) void loadClaudeResets(id, true);
+}
+
+// `clears` lists full refills. `givesBackWeekly` separately returns Fable's share of the
+// weekly total; the Fable window's percent uses a different denominator, so do not subtract it.
+function claudeResetReturnsFableUsage(grant) {
+  return grant.givesBackWeekly && !grant.clears.includes("seven_day");
+}
+
+function claudeResetGrantRow(id, state, grant) {
+  const windows = [...new Set(grant.clears)].map(claudeResetWindowLabel);
+  const usable = claudeResetUsable(grant);
+  const use = el("button", { class: "btn compact", type: "button", text: t(state.using === grant.id ? "resets.using" : "resets.use") });
+  use.disabled = !usable || state.loading || Boolean(state.using);
+  use.addEventListener("click", () => confirmClaudeReset(id, grant));
+  const why = usable ? null : t(grant.paused ? "resets.paused" : grant.left < 1 ? "resets.spent" : "resets.notUsable");
+  return el("div", { class: "resets-grant" }, [
+    el("div", { class: "resets-grant-copy" }, [
+      el("strong", { text: grant.label || t("resets.fullReset") }),
+      el("span", { class: "small", text: [t("resets.left", { left: grant.left, total: grant.total }), grant.endsAt ? t("resets.expires", { date: new Date(grant.endsAt).toLocaleString(CURRENT_LANG, { month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit" }) }) : null].filter(Boolean).join(" · ") }),
+      windows.length ? el("span", { class: "small", text: t("resets.refills", { windows: windows.join(", ") }) }) : null,
+      claudeResetReturnsFableUsage(grant) ? el("span", { class: "small", text: t("resets.fableGiveback") }) : null,
+      why ? el("span", { class: "small", text: why }) : null,
+    ]),
+    use,
+  ]);
+}
+
+/** Update both the availability button and the open reset list. */
+function renderClaudeResets(id) {
+  const control = claudeResetsControls.get(id);
+  if (!control) return;
+  const { button, panel } = control;
+  const state = claudeResetsStateOf(id);
+  const hasUsable = !state.needsLogin && state.status?.grants.some((grant) => claudeResetUsable(grant));
+  const canRecover = !state.needsLogin && state.recoverable;
+  button.disabled = !(hasUsable || canRecover) || state.loading || Boolean(state.using);
+  button.setAttribute("title", state.needsLogin ? t("resets.needsLogin")
+    : state.error || (state.loading || !state.status ? t("resets.loading")
+      : hasUsable ? "" : t(state.status.grants.some((grant) => grant.left > 0) ? "resets.notUsable" : "resets.none")));
+  if (!hasUsable && !canRecover && !state.loading && !state.using) state.open = false;
+  button.setAttribute("aria-expanded", String(state.open));
+  panel.hidden = !state.open;
+  if (!state.open) return;
+  const refresh = el("button", { class: "btn secondary compact", type: "button", text: t("resets.refresh") });
+  refresh.disabled = state.loading || Boolean(state.using);
+  refresh.addEventListener("click", () => void loadClaudeResets(id, true));
+  const rows = [el("div", { class: "resets-head" }, [el("strong", { text: t("resets.title") }), refresh])];
+  if (state.loading && !state.status) rows.push(el("div", { class: "small", text: t("resets.loading") }));
+  if (state.error) rows.push(el("div", { class: "bad-text small", text: state.error }));
+  if (state.status) {
+    // A grant with no use left is spent: Anthropic still lists it, but there is nothing to do with it.
+    const grants = state.status.grants.filter((grant) => grant.left > 0);
+    if (!grants.length) rows.push(el("div", {}, [el("div", { text: t("resets.none") }), hint(t("resets.noneHint"))]));
+    for (const grant of grants) rows.push(claudeResetGrantRow(id, state, grant));
+    rows.push(el("div", { class: "small", text: t("resets.updated", { time: new Date(state.readAt).toLocaleTimeString(CURRENT_LANG) }) }));
+  }
+  panel.replaceChildren(...rows);
+}
+
+/** The "Resets" button and the panel it opens, for one stored Claude account or the current login. */
+function claudeResetsControl(name, id, label, needsLogin = false) {
+  // Authentication changed: do not show an old status or accept its in-flight response.
+  if (claudeResetsState.get(id)?.needsLogin !== needsLogin) {
+    claudeResetsState.delete(id);
+    claudeResetsControls.delete(id);
+  }
+  const state = claudeResetsStateOf(id);
+  state.needsLogin = needsLogin;
+  state.provider = name;
+  state.label = label;
+  const existing = claudeResetsControls.get(id);
+  if (existing) return existing;
+  const panel = el("div", { class: "resets-panel", hidden: "" });
+  const button = el("button", { class: "btn secondary compact", type: "button", text: t("resets.action") });
+  const control = { button, panel };
+  claudeResetsControls.set(id, control);
+  button.addEventListener("click", () => {
+    if (button.disabled) return;
+    state.open = !state.open;
+    renderClaudeResets(id);
+  });
+  renderClaudeResets(id);
+  return control;
+}
+
+/** Only displayed accounts need an availability read, and each respects its own read interval. */
+function refreshClaudeResetsControls(target) {
+  for (const [id, { panel }] of claudeResetsControls) {
+    if (!target.contains(panel)) continue;
+    const state = claudeResetsStateOf(id);
+    if (document.activeElement && panel.contains(document.activeElement)) continue;
+    if (!state.open) renderClaudeResets(id);
+    void loadClaudeResets(id, false);
+  }
+}
+
+/**
  * The same pool controls for stored logins and API keys; the external Claude login only pauses.
  * @param {{preferred?: boolean, paused?: boolean, state?: string, cooldownSeconds?: number, external?: boolean}} account
  * @param {(change: {preferred?: boolean, paused?: boolean, clearCooldown?: true}) => Promise<unknown>} patch
@@ -3583,17 +3823,19 @@ function renderClaudeAccountRows(target, data, name, generation) {
       } catch (error) { removeOld.disabled = false; toast(t("common.actionFailed"), true, error.message); }
     });
   }
+  const currentResets = data.current ? claudeResetsControl(name, "current", t("providers.anthropicCurrentLogin"), data.current.state === "needs-login") : null;
   const currentActions = [data.current && choosable && leader !== "current" && !data.current.paused ? claudePreferButton(name, null, false) : null,
     ...(data.current ? accountPoolActions(data.current, async (change) => {
       await api("/api/claude-accounts/current", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(change) });
       await refreshClaudeAccountPanel(name);
-    }) : []), removeOld].filter(Boolean);
+    }) : []), currentResets ? currentResets.button : null, removeOld].filter(Boolean);
   const currentRow = data.current ? el("article", { class: "cell account-card current" }, [
     el("div", { class: "cell-text account-card-copy" }, [
       el("strong", { text: t("providers.anthropicCurrentLogin") }), data.current.email ? el("span", { class: "small", text: data.current.email }) : null,
       el("span", { class: "small", text: anthropicSourceText(data.current.source) }), claudeQuotaNode(data.current), hint(t("providers.currentAccountHelp")),
       duplicates.length ? hint(t("providers.anthropicOldSignIn")) : null,
       currentActions.length ? el("div", { class: "account-card-actions" }, currentActions) : null,
+      currentResets ? currentResets.panel : null,
     ]),
     el("div", { class: "account-card-badges" }, accountPoolBadges({ ...data.current, preferred: choosable && leader === "current" && !data.current.paused })),
   ]) : null;
@@ -3613,10 +3855,11 @@ function renderClaudeAccountRows(target, data, name, generation) {
       try { await api(`/api/claude-accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" }); await refreshClaudeAccountPanel(name); }
       catch (error) { toast(t("common.actionFailed"), true, error.message); }
     });
+    const resets = claudeResetsControl(name, account.id, claudeAccountLabel(account), Boolean(unavailable || account.state === "needs-login"));
     const actions = [...accountPoolActions(account, async (change) => {
       await api(`/api/claude-accounts/${encodeURIComponent(account.id)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(change) });
       await refreshClaudeAccountPanel(name);
-    }), rename, remove];
+    }), resets.button, rename, remove];
     if (unavailable) {
       const reauth = el("button", { class: "btn secondary compact", type: "button", text: t("providers.reauthAction") });
       reauth.addEventListener("click", () => openClaudeAccountConsent(name, account.id));
@@ -3626,6 +3869,7 @@ function renderClaudeAccountRows(target, data, name, generation) {
       el("div", { class: "cell-text account-card-copy" }, [
         el("strong", { text: claudeAccountLabel(account) }), account.email && account.email !== account.label ? el("span", { class: "small", text: account.email }) : null, claudeQuotaNode(account),
         el("div", { class: "account-card-actions" }, actions),
+        resets.panel,
       ]),
       el("div", { class: "account-card-badges" }, accountPoolBadges({ ...account, state: account.state || (unavailable ? "needs-login" : "ready"), preferred: account.preferred || (choosable && account.id === leader) })),
     ]));
@@ -3660,8 +3904,14 @@ async function refreshClaudeAccountPanel(name) {
   const target = $("#claude-account-rows");
   if (!target || selectedProviderName !== name || providerDetailTab !== "accounts") return;
   const generation = providerDetailGeneration;
-  try { const data = await api("/api/claude-accounts"); drawAccountRows(target, data, () => renderClaudeAccountRows(target, data, name, generation)); }
-  catch (error) { if (generation === providerDetailGeneration) accountRowsFailed(target, error); }
+  try {
+    const data = await api("/api/claude-accounts");
+    if (generation !== providerDetailGeneration || $("#claude-account-rows") !== target) return;
+    const focused = document.activeElement;
+    drawAccountRows(target, data, () => renderClaudeAccountRows(target, data, name, generation));
+    if (focused && focused !== document.activeElement && target.contains(focused)) focused.focus();
+    refreshClaudeResetsControls(target);
+  } catch (error) { if (generation === providerDetailGeneration) accountRowsFailed(target, error); }
 }
 
 function anthropicAccountsPanel(name, provider) {

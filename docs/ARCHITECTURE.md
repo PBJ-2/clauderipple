@@ -1789,6 +1789,42 @@ tight, and nothing at 100 or more.
   Wire facts are behaviorally measured (the reference implementations do the
   same flow); they are not an Anthropic guarantee, and reuse of one or multiple
   subscriptions is subject to Anthropic's terms and possible account restrictions.
+- **Limit resets are read and used with the account's own login (2026-11-20,
+  `providers/anthropic-resets.ts`).** Anthropic grants some accounts refills of the
+  5-hour and weekly limits ("Limit resets" in Claude Desktop's settings,
+  `/limit-reset` in Claude Code 2.1.326, behind its `tengu_cedar_ember` flag).
+  Read from that client's own code, and the read half checked on one stored account
+  (HTTP 200, three grants, one expiring 2026-12-10T22:00Z, matching Desktop's panel):
+  `GET /api/oauth/usage?cedar_ember=1&skip_spend=1` carries `cedar_ember`
+  (`eligible`, `at_limit`, `next_grant_id`, `weekly_resets_at`, `cooldown_until`,
+  `grants[]` of `id`, `label`, `resets_left`, `resets_total`, `starts_at`, `ends_at`,
+  `clears[]`, `paused`, `usable_now`, `use_requires_limit`, `percent_used`,
+  `gives_back_weekly`, `unavailable_reason`); a use is `POST
+  /api/organizations/<organization.uuid of /api/oauth/profile>/reset_rate_limits`
+  with `{"program":"cedar_ember","grant_id","request_id"}`, answered
+  `{"result": reset|already_used|not_limited|cooldown|ineligible|unavailable,
+  "reason", "resets_left", "cleared", "weekly_resets_at"}`. The pool's OAuth token
+  is accepted on all three, so no Claude Desktop login is needed for an account's
+  resets, and a paused account or the paused current login can still be read and used
+  (a pause only keeps it out of routing). **The use path was not exercised** (it
+  spends a grant that cannot be given back); it follows the client's request shape.
+  Guards: a preview carries an opaque binding to the login that was read. The
+  claim checks that binding before and after the fresh eligibility read and sends
+  the same credential throughout. Only one claim per upstream organization can
+  run at a time, even across duplicate dashboard rows. A claim is never retried;
+  an unanswered claim is `unconfirmed` and followed by a fresh status. Status is
+  kept 30 s and shares the ordinary usage lookup's 429 backoff. On success only
+  rests attributable to refilled windows are lifted; pre-reset scoped usage for
+  those windows is retired and the post-reset reading updates the usage cache.
+  Admin: `GET /api/claude-accounts/<id|current>/resets[?refresh=1]` and `POST` the
+  same path with `{grantId, previewId, confirm: true}`. The dashboard checks the
+  visible accounts on the Accounts tab, no more than once per account every five
+  minutes automatically, and enables "Resets" only when a grant can be used.
+  Claude Code 2.1.326 treats `gives_back_weekly` as returning Fable's share to the
+  all-model weekly limit, not clearing that limit. The preview distinguishes that
+  partial effect from a full refill (`clears`) and does not guess the returned
+  amount: `percent_used` describes current usage, and `seven_day_overage_included`
+  is Fable's own limit, not its share of the all-model limit.
 - **Metered keys serve what names them (2026-10-30).** A native `anthropic`
   provider on an API key (`auth: "api-key"`, no `accountPool`) and the `openai`
   preset (the OpenAI API) bill per token for models the person also reaches on a

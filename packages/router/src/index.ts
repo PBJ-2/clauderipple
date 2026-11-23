@@ -350,6 +350,10 @@ proxy
       credentials: () => proxy.credentialHealth(),
       clearCredentialCooldown: (provider, id) => proxy.clearCredentialCooldown(provider, id),
       claudeClearCooldown: (id) => proxy.claudeClearCooldown(id),
+      claudeResets: {
+        status: (id, force) => proxy.claudeResets.status(id, { force }),
+        claim: (id, grantId, previewId) => proxy.claudeResets.claim(id, grantId, previewId),
+      },
       picker: () => ({ enabled: !!store.get().picker?.enabled, hosts: terminateHosts(store.get()).slice(1), last: proxy.lastPickerInjection }),
       observedClaudeCodeAuth,
       claudeUsage: () => proxy.claudeUsage.snapshot(),

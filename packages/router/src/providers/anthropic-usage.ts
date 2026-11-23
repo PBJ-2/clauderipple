@@ -92,21 +92,26 @@ export function claudeUsageFromHeaders(headers: Record<string, string | string[]
  * `used_percent`/`reset_at` stay display facts of `claudeUsageFromHeaders`; this is the wait.
  */
 export function claudeLimitResetMs(headers: Record<string, string | string[] | undefined>, at = Date.now()): number | undefined {
+  const waits = claudeRejectedWindows(headers, at);
+  return waits.length ? Math.min(...waits.map(({ wait }) => wait)) : undefined;
+}
+
+export function claudeRejectedWindows(headers: Record<string, string | string[] | undefined>, at = Date.now()): { window: string; wait: number }[] {
   const pick = (name: string): string | undefined => {
     const value = headers[name];
     return Array.isArray(value) ? value[0] : value;
   };
-  if (pick("anthropic-ratelimit-unified-status") !== "rejected") return undefined;
-  let soonest: number | undefined;
+  if (pick("anthropic-ratelimit-unified-status") !== "rejected") return [];
+  const windows: { window: string; wait: number }[] = [];
   for (const prefix of ["5h", "7d"] as const) {
     const used = Number(pick(`anthropic-ratelimit-unified-${prefix}-utilization`));
     const reset = Number(pick(`anthropic-ratelimit-unified-${prefix}-reset`));
     if (!Number.isFinite(used) || used < 1 || !Number.isFinite(reset)) continue;
     const wait = reset * 1000 - at;
     if (wait <= 0) continue;
-    soonest = soonest === undefined ? wait : Math.min(soonest, wait);
+    windows.push({ window: prefix === "5h" ? "five_hour" : "seven_day", wait });
   }
-  return soonest;
+  return windows;
 }
 
 /**
@@ -147,6 +152,21 @@ function durableAccount(credential: Credential): string {
   return credential.healthKey ?? credential.ownerId ?? credential.id;
 }
 
+/** Shared rate-limit budget for the two forms of the OAuth usage endpoint. */
+export class ClaudeUsageBackoff {
+  private readonly until = new Map<string, number>();
+
+  remaining(owner: string, now: number): number {
+    const wait = (this.until.get(owner) ?? 0) - now;
+    if (wait <= 0) this.until.delete(owner);
+    return Math.max(0, wait);
+  }
+
+  block(owner: string, until: number): void {
+    this.until.set(owner, Math.max(until, this.until.get(owner) ?? 0));
+  }
+}
+
 type UsageSource = { credentials(): Promise<Credential[]> };
 type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 type UsageOptions = {
@@ -155,6 +175,7 @@ type UsageOptions = {
   fetch?: FetchLike;
   now?: () => number;
   ttlMs?: number;
+  backoff?: ClaudeUsageBackoff;
   timeoutMs?: number;
   warn?: (message: string) => void;
   /**
@@ -179,7 +200,7 @@ export class ClaudeUsage {
   /** Consecutive refusals per account, for the doubling wait after a 429 without `retry-after`. */
   private readonly failures = new Map<string, number>();
   /** Per-account "do not ask again before", from a 429 or its `retry-after`. */
-  private readonly blockedUntil = new Map<string, number>();
+  private readonly backoff: ClaudeUsageBackoff;
   /**
    * The per-model weekly windows of each account's latest body reading. Kept apart from `last`
    * because a header reading replaces that snapshot and carries no per-model window, while a spent
@@ -193,6 +214,8 @@ export class ClaudeUsage {
   /** Header readings stored per account. A refresh captures this before it collects credentials and
    * a failure compares it: timestamps tie within one millisecond, so this is what orders them (2026-11-05). */
   private readonly readings = new Map<string, number>();
+  private resetVersion = 0;
+  private readonly resets = new Map<string, number>();
   /**
    * The login each snapshot was read with, as its `loginAuthKey` (a hash, never the header), keyed by
    * the snapshot object itself. "current" keeps its owner across an account switch, so until the next
@@ -212,6 +235,7 @@ export class ClaudeUsage {
   constructor(source: UsageSource, opts: UsageOptions) {
     this.source = source;
     this.opts = opts;
+    this.backoff = opts.backoff ?? new ClaudeUsageBackoff();
   }
 
   /** Snapshots by account owner id ("current" for the Claude Code login). */
@@ -289,11 +313,8 @@ export class ClaudeUsage {
     // the credential list is still being collected, and the refusal that follows must not mark that
     // newer reading stale. An owner not in this map had no reading then, so it starts at 0
     // (2026-11-05).
-    // Capture the counters before the first await: a Messages answer can store a header reading while
-    // the credential list is still being collected, and the refusal that follows must not mark that
-    // newer reading stale. An owner not in this map had no reading then, so it starts at 0
-    // (2026-11-05).
     const readingsAtStart = new Map(this.readings);
+    const resetVersion = this.resetVersion;
     let credentials: Credential[];
     try {
       credentials = await this.source.credentials();
@@ -305,8 +326,9 @@ export class ClaudeUsage {
     await Promise.all(credentials.map(async (credential) => {
       const owner = credential.ownerId ?? credential.id;
       // A 429 stops only the account it refused; the others keep their normal schedule.
-      if ((this.blockedUntil.get(owner) ?? 0) > now) return;
+      if (this.backoff.remaining(owner, now) > 0) return;
       const outcome = await this.fetchOne(credential, now);
+      if ((this.resets.get(owner) ?? 0) > resetVersion) return;
       if (outcome.ok) {
         if (outcome.snapshot) {
           this.last.set(owner, outcome.snapshot);
@@ -320,7 +342,6 @@ export class ClaudeUsage {
           this.fromHeaders.delete(owner);
         }
         this.failures.delete(owner);
-        this.blockedUntil.delete(owner);
       } else this.noteFailure(owner, outcome.failure, now, readingsAtStart.get(owner) ?? 0);
     }));
     // An account that was removed must not keep its old numbers on the screen.
@@ -329,12 +350,40 @@ export class ClaudeUsage {
       if (owners.has(owner)) continue;
       this.last.delete(owner);
       this.failures.delete(owner);
-      this.blockedUntil.delete(owner);
       this.fromHeaders.delete(owner);
       this.readings.delete(owner);
       this.scopedReadings.delete(owner);
     }
     return Object.fromEntries(this.last);
+  }
+
+  /** Retire pre-reset data immediately; the reset status read supplies the replacement. */
+  invalidateRefilledUsage(credential: Credential, scopes: readonly string[]): void {
+    const owner = credential.ownerId ?? credential.id;
+    this.resets.set(owner, ++this.resetVersion);
+    const previous = this.last.get(owner);
+    if (previous) {
+      const kept = { ...previous, stale: true };
+      // The old figures keep the login they were read with.
+      const key = this.readWithKeys.get(previous);
+      if (key) this.readWithKeys.set(kept, key);
+      this.last.set(owner, kept);
+    }
+    const reading = this.scopedReadings.get(owner);
+    if (reading?.account === durableAccount(credential)) {
+      reading.windows = reading.windows.filter(({ name }) => typeof name !== "string" || !scopes.some(scope => scope === claudeModelFamily(name)));
+    }
+  }
+
+  observeUsageBody(credential: Credential, body: unknown): void {
+    const owner = credential.ownerId ?? credential.id;
+    const snapshot = claudeUsageFromBody(body, (this.opts.now ?? Date.now)());
+    if (!snapshot) return;
+    this.last.set(owner, snapshot);
+    const key = loginAuthKey(credential.headers);
+    if (key) this.readWithKeys.set(snapshot, key);
+    this.scopedReadings.set(owner, { account: durableAccount(credential), windows: (snapshot.scoped as Record<string, number | string>[] | undefined) ?? [] });
+    this.fromHeaders.delete(owner);
   }
 
   /**
@@ -373,7 +422,7 @@ export class ClaudeUsage {
     if (failure.status === 429) {
       const base = this.opts.ttlMs ?? 5 * 60_000;
       const backoff = failure.retryAfterMs ?? Math.min(MAX_BACKOFF_MS, base * 2 ** (count - 1));
-      this.blockedUntil.set(owner, at + backoff);
+      this.backoff.block(owner, at + backoff);
     }
     const previous = this.last.get(owner);
     // Mark the last reading stale only when no header reading replaced it since this refresh

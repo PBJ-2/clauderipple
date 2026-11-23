@@ -73,6 +73,7 @@ import { desktopClaudeCodeDirs } from "../../cli/src/claude-auth.ts";
 import { statusModEnabled, syncModelSlots } from "../../cli/src/settings.ts";
 import { ClaudeOAuthSession, type ClaudeOAuthState } from "./providers/claude-oauth.ts";
 import { readClaudeAuthFile } from "./providers/anthropic-token-file.ts";
+import type { ClaudeResetClaim, ClaudeResetsError, ClaudeResetsOutcome, ClaudeResetStatus } from "./providers/anthropic-resets.ts";
 import { isCurrentClaudeAccountPaused, listClaudeAccounts, listClaudeAccountsWithSubject, removeClaudeAccount, updateClaudeAccount, setCurrentClaudeAccountPaused, setPreferredClaudeAccount } from "./providers/anthropic-accounts.ts";
 import { pinnableAccountsFor, storedAccountsFor } from "./pinned-accounts.ts";
 import { CODEX_LOGIN_ID, readChatGptAccounts, removeChatGptAccount, summarize as summarizeChatGptAccount, updateChatGptAccount } from "./providers/chatgpt/accounts.ts";
@@ -184,6 +185,11 @@ export type AdminDeps = {
   credentials?: () => Record<string, CredentialRow[]>;
   clearCredentialCooldown?: (provider: string, id: string) => void;
   claudeClearCooldown?: (id: string) => void;
+  /** Optional: the limit resets Anthropic granted to a Claude account, and using one (see anthropic-resets.ts). */
+  claudeResets?: {
+    status: (id: string, force: boolean) => Promise<ClaudeResetsOutcome<ClaudeResetStatus>>;
+    claim: (id: string, grantId: string, previewId: string) => Promise<ClaudeResetsOutcome<{ claim: ClaudeResetClaim; status: ClaudeResetStatus | null }>>;
+  };
   /** Optional: picker-mode state and the last bootstrap injection. */
   picker?: () => { enabled: boolean; hosts: string[]; last: unknown };
   /** Optional: observed CLI credentials held by the live proxy, never serialized directly. */
@@ -3039,6 +3045,54 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         }
         deps.log.info(`admin: Claude accounts now try ${preferred === null ? "the current login" : `account ${preferred.slice(0, 8)}`} first`);
         sendJson(res, 200, { ok: true });
+        return;
+      }
+      // The limit resets Anthropic granted to one Claude account (a stored account or "current"), and
+      // using one: what Claude Desktop shows under Settings → Limit resets. Reading is the account's own
+      // lookup with its own login and never starts a limit window; using a reset refills the limits and
+      // cannot be taken back, so it needs `confirm: true` and is never retried.
+      const resetsRoute = /^\/api\/claude-accounts\/([^/]+)\/resets$/.exec(pathname);
+      if (resetsRoute && (method === "GET" || method === "POST")) {
+        if (!deps.claudeResets) {
+          sendJson(res, 501, { error: "limit resets unavailable" });
+          return;
+        }
+        let id: string;
+        try {
+          id = decodeURIComponent(resetsRoute[1]!);
+        } catch {
+          sendJson(res, 400, { error: "invalid account id" });
+          return;
+        }
+        const failed = (error: ClaudeResetsError): void => {
+          const status = error.kind === "unknown-account" ? 404 : (error.kind === "needs-login" || error.kind === "account-changed") ? 409 : error.kind === "http" && error.status === 429 ? 429 : 502;
+          sendJson(res, status, { error: error.kind, ...(error.status !== undefined ? { upstreamStatus: error.status } : {}), ...(error.retryAfterSeconds !== undefined ? { retryAfterSeconds: error.retryAfterSeconds } : {}) });
+        };
+        if (method === "GET") {
+          const refresh = new URL(url, "http://127.0.0.1").searchParams.get("refresh") === "1";
+          const outcome = await deps.claudeResets.status(id, refresh);
+          if (!outcome.ok) failed(outcome.error);
+          else sendJson(res, 200, { status: outcome.value });
+          return;
+        }
+        let input: { grantId?: unknown; previewId?: unknown; confirm?: unknown };
+        try {
+          input = JSON.parse((await readBody(req, 4096)).toString("utf8")) as typeof input;
+        } catch {
+          sendJson(res, 400, { error: "invalid JSON" });
+          return;
+        }
+        if (!input || typeof input.grantId !== "string" || !/^[a-z0-9_-]{1,40}$/.test(input.grantId) || typeof input.previewId !== "string" || !/^[a-f0-9]{64}$/.test(input.previewId) || input.confirm !== true) {
+          sendJson(res, 400, { error: "expected {grantId: string, previewId: string, confirm: true}" });
+          return;
+        }
+        const outcome = await deps.claudeResets.claim(id, input.grantId, input.previewId);
+        if (!outcome.ok) {
+          failed(outcome.error);
+          return;
+        }
+        deps.log.info(`admin: Claude limit reset on account ${id.slice(0, 8)}, grant ${input.grantId}: ${outcome.value.claim.result}`);
+        sendJson(res, 200, outcome.value);
         return;
       }
       if (pathname.startsWith("/api/claude-accounts/") && (method === "PATCH" || method === "DELETE")) {
