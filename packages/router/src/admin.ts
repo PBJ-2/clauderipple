@@ -53,7 +53,7 @@ import type { RequestLog, RequestRecord } from "./requestlog.ts";
 import { PRESETS, type ProviderPreset } from "./presets.ts";
 import { answersWebSearch, effortLevels, targetWarnings } from "./targets.ts";
 export { effortLevels } from "./targets.ts";
-import { redactErrorText } from "./redact.ts";
+import { redactErrorText, redactTokenLike } from "./redact.ts";
 import { CHATGPT_FALLBACK_MODELS } from "./providers/chatgpt/catalog.ts";
 import { contextWindowSnapshot, syncContextWindows } from "./context-windows.ts";
 import { measureModel, ollamaApiBase, ollamaModelFacts, refusedByPlan, type Measured, type WireCandidate } from "./capabilities.ts";
@@ -1374,12 +1374,14 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
 /**
  * Why a CLI run failed, for the dashboard and the router log: the last non-empty output line, which
  * the CLI ends on (`error: <message>`). Redacted and bounded, because the output of a login command
- * may echo what it was given.
+ * may echo what it was given, and a parse error may quote a malformed credential from Claude Code's
+ * settings.json: anything token-shaped is masked too, and only then is the line cut, so the cut
+ * cannot leave the start of a token showing.
  */
 export function cliFailureReason(output: string): string {
   const lines = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const last = lines[lines.length - 1];
-  return last ? redactErrorText(last, [], 300) : "the command ended without any output";
+  return last ? redactTokenLike(redactErrorText(last, [], Infinity)).slice(0, 300) : "the command ended without any output";
 }
 
 /**

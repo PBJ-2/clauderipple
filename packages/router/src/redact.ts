@@ -48,3 +48,20 @@ export function redactErrorText(value: string, secrets: readonly string[] = [], 
     .replace(/\b((?:api[-_]?key|access[-_]?token|refresh[-_]?token|id[-_]?token|client[-_]?secret|token|secret|password)\s*[:=]\s*)[^\s,"'};]+/gi, `$1${REDACTED}`)
     .slice(0, max);
 }
+
+/**
+ * Masks anything shaped like a credential in text that came from another program's output, on top of
+ * what redactErrorText already knows: a JSON parse diagnostic can quote a malformed value from
+ * Claude Code's settings.json (`"ANTHROPIC_AUTH_TOKEN": "sk-ant-…"`), which no configured secret
+ * names. Long unbroken runs of token characters (24 or more of [A-Za-z0-9_.-]), `sk-` keys, `Bearer`
+ * values and JWT-shaped strings are replaced. A path or a sentence has breaks well inside 24
+ * characters, so ordinary messages pass unchanged. Not bounded: callers cut afterwards, so a cut
+ * never leaves the front of a token showing.
+ */
+export function redactTokenLike(text: string): string {
+  return text
+    .replace(/\b(Bearer)\s+[A-Za-z0-9._~+/=-]{8,}/gi, `$1 ${REDACTED}`)
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/g, REDACTED)
+    .replace(/\bsk-[A-Za-z0-9][A-Za-z0-9._-]{6,}/g, REDACTED)
+    .replace(/[A-Za-z0-9_.-]{24,}/g, REDACTED);
+}

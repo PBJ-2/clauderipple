@@ -2229,6 +2229,40 @@ test("CLI-backed routes answer a failure with its reason in `error`, and log it 
   }, { runCli: async () => ({ ok: false, output: "" }) });
 });
 
+test("a token-shaped string in the CLI's last line reaches neither `error` nor the log (#183)", async (t) => {
+  const lines: string[] = [];
+  t.mock.method(Logger.prototype, "info", (msg: string) => { lines.push(msg); });
+  const key = "sk-ant-oat01-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+  const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r";
+  const opaque = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4";
+  // A JSON parse diagnostic quoting a malformed credential from settings.json, and the ways another
+  // layer may print one; each sits where the 300-character cut could otherwise leave its front showing.
+  const cases: [string, string][] = [
+    [`error: Unexpected token 'x', ..."AUTH_TOKEN": "${key}" x"... is not valid JSON`, key],
+    [`error: bad value ${jwt} in settings`, jwt],
+    [`error: header was Authorization: Bearer ${opaque}`, opaque],
+    [`error: ${"w ".repeat(140)}${opaque}${opaque}`, opaque.slice(0, 12)],
+    [`error: ANTHROPIC_AUTH_TOKEN ${opaque}-tail`, opaque],
+  ];
+  for (const [last, secret] of cases) {
+    const runCli = async () => ({ ok: false, output: `step 1\n${last}\n` });
+    await withAdmin(makeCfg(), async ({ port }) => {
+      const res = await fetch(`${base()}:${port}/api/picker`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: true }) });
+      const answer = await res.json() as { error: string };
+      assert.equal(answer.error.includes(secret), false, `error: ${answer.error}`);
+      assert.match(answer.error, /^error: /, "the reason is still the CLI's own line");
+      assert.ok(answer.error.length <= 300);
+    }, { runCli });
+    assert.equal(lines.some((line) => line.includes(secret)), false, `log: ${lines.at(-1)}`);
+  }
+  // Ordinary reasons pass through untouched: paths and sentences have breaks well inside 24 characters.
+  const plain = "error: certutil failed: certutil: function failed: SEC_ERROR_READ_ONLY: attempt to write a read-only database (/home/u/.pki/nssdb)";
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const res = await fetch(`${base()}:${port}/api/picker`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: true }) });
+    assert.equal((await res.json() as { error: string }).error, plain);
+  }, { runCli: async () => ({ ok: false, output: plain }) });
+});
+
 test("status says whether the Claude desktop app has been on this computer (#183)", async () => {
   await withAdmin(makeCfg(), async ({ port }) => {
     const status = await (await fetch(`${base()}:${port}/api/status`)).json() as { picker: { enabled: boolean; desktopPresent: boolean } };
