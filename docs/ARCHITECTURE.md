@@ -1013,8 +1013,16 @@ must preserve **Data: Artificial Analysis (artificialanalysis.ai)** attribution.
     snapshot's own `at`), so a stale reading in `/api/mod-options` cannot keep a
     provider unusable. (5) With every resting account held by a cap the answer
     names the caps, gives the date when the reset is not today, and carries
-    `x-should-retry: false`; with no cap involved wording and headers are
-    unchanged.
+    `x-should-retry: false`; when a cap holds only some and another account is on
+    a short backend rest, the cap is named too but the headers are main's (no
+    `x-should-retry`, `retry-after` the soonest rest); with no cap
+    involved wording and headers are unchanged. (6) An adapter sets or releases a
+    hold only for an account whose record it can read in the store: a provider on
+    the borrowed Codex login keeps no store (`ownAccounts()` is empty in
+    `borrow-codex`), and "no record" there means "not my business", never "cap
+    cleared", or it would release a hold another provider just set. (7) The meter,
+    `accountStatus()` and `lastRateLimits` read the account's newest reading on the
+    pool (`quotaOf`), the one the cap notice is judged on.
   - **The prompt cache is keyed on the conversation's identity, not on
     `prompt_cache_key` (since mid-September 2026).** Five turns with byte-identical
     instructions, tools and input prefix, 3–6s apart under one key, all came back
