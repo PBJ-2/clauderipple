@@ -208,16 +208,34 @@ export function finishedByNotice(agents: readonly AgentRec[], ends: readonly Tas
   }).map(agent => agent.id)
 }
 
+/** One entry of a Stop's `background_tasks`: its id, and its status where the engine says one. */
+export type StopEntry = { id: string; status?: string }
+
+/** An entry the engine lists as ended (the word read as endState reads a notice's): not in flight any more. */
+function listedEnded(entry: StopEntry): boolean {
+  return /^(completed|done|failed|error|killed|stopped|cancel+ed)$/i.test((entry.status ?? '').trim())
+}
+
 /**
- * The waiting agents a Stop's `background_tasks` (ids `inFlight`) leaves nothing of: neither the agent
- * nor any command of its own (in `tasks`) is listed, so nothing is left to wake it or to say it ended.
- * A wait opened only by the engine's notice (no command of its own known) ends this way, and so does
- * one a hot reload left behind. They end done, the wait counted in their time.
+ * The waiting agents a Stop's `background_tasks` (`listed`) leaves nothing of: neither the agent nor
+ * any command of its own (in `tasks`) is listed, so nothing is left to wake it or to say it ended.
+ * One a hot reload left behind ends this way, done, the wait counted in its time.
+ *
+ * A wait the engine's notice alone opened (no command of its own tracked) also needs the list to
+ * hold no running entry we cannot place: engine 2.1.330 lists running work without owner ids, and
+ * an agent that gave the waiting notice is internally completed, so a command of its own whose start
+ * the mod missed is listed unattributed. An entry is placed when it is another known agent or a task
+ * the mod tracks (the main session's, or another agent's); an explicitly empty list ends the wait.
  */
-export function agentsAfterStop(agents: readonly AgentRec[], inFlight: readonly string[], tasks: readonly BgTask[], now: number): AgentRec[] {
+export function agentsAfterStop(agents: readonly AgentRec[], listed: readonly StopEntry[], tasks: readonly BgTask[], now: number): AgentRec[] {
+  const inFlight = listed.map(entry => entry.id)
+  const known = new Set([...agents.map(a => a.id), ...tasks.map(task => task.id)])
+  const unplaced = listed.some(entry => !listedEnded(entry) && !known.has(entry.id))
   return agents.map(agent => {
     if (!agent.waiting || inFlight.includes(agent.id)) return agent
-    if (tasks.some(task => task.agentId === agent.id && !task.endsWithAgent && inFlight.includes(task.id))) return agent
+    const own = tasks.filter(task => task.agentId === agent.id && !task.endsWithAgent)
+    if (own.some(task => inFlight.includes(task.id))) return agent
+    if (!own.length && unplaced) return agent
     return endWaiting(agent, 'done', now)
   })
 }

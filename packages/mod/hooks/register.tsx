@@ -2125,10 +2125,11 @@ async function wakeCard($: EngineInterface, id: string): Promise<(() => Promise<
   if (before?.state === 'running' && !before.waiting) return undefined
   const info = before ? undefined : (await $.agent.list()).find(a => a.id === id)
   const woken: AgentRec = before ? wakeAgent(before, now) : { id, ...(info ? { description: info.description, type: info.type } : {}), state: 'running', startedAt: now, ranMs: 0, cost: 0 }
+  // A waiting card knew a command of its own that kept it waiting (none known: its wait came on the engine's word alone).
+  // Read before the card is written: a command that ends after the write is one the refusal must still reconcile.
+  const hadOwn = ownRunning(await read($, bgTasks), id).length > 0
   await update($, agents, list => retainAgents([...list.filter(a => a.id !== id), woken]))
   await countAgents($)
-  // A waiting card knew a command of its own that kept it waiting (none known: its wait came on the engine's word alone).
-  const hadOwn = ownRunning(await read($, bgTasks), id).length > 0
   // Only a card still as written goes back: nothing of a run ran on it.
   return async () => {
     await update($, agents, list => {
@@ -2150,7 +2151,7 @@ async function wakeCard($: EngineInterface, id: string): Promise<(() => Promise<
 async function endIdleWait($: EngineInterface, id: string): Promise<void> {
   if (ownRunning(await read($, bgTasks), id).length) return
   const now = await $.clock.now()
-  await update($, agents, list => list.map(a => a.id === id && a.waiting ? endWaiting(a, 'done', now) : a))
+  await update($, agents, list => retainAgents(list.map(a => a.id === id && a.waiting ? endWaiting(a, 'done', now) : a)))
   await countAgents($)
 }
 /**
@@ -2572,13 +2573,14 @@ export const register: Register = on => {
         }
         // A wait the Stop leaves nothing of (neither the agent nor a command of its own listed) has
         // nothing to end it: one the engine's notice alone opened, with no command of ours to end, or
-        // one a hot reload left behind. It ends here, done.
+        // one a hot reload left behind. It ends here, done; a notice-only wait only when the list holds
+        // no running entry we cannot place (the engine lists running work without owner ids).
         const cards = await read($, agents)
         if (cards.some(a => a.waiting)) {
           const now = await $.clock.now()
           const tasks = await read($, bgTasks)
-          if (!same(agentsAfterStop(cards, inFlight, tasks, now), cards)) {
-            await update($, agents, current => retainAgents(agentsAfterStop(current, inFlight, tasks, now)))
+          if (!same(agentsAfterStop(cards, e.background_tasks, tasks, now), cards)) {
+            await update($, agents, current => retainAgents(agentsAfterStop(current, e.background_tasks!, tasks, now)))
             await countAgents($)
           }
         }

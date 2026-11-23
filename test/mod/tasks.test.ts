@@ -115,17 +115,38 @@ test('a Stop that holds neither a waiting agent nor a command of its own ends it
   const own: BgTask = { ...shell, id: 'b3', agentId: 'worker' }
   const bound: BgTask = { ...shell, id: 'b4', agentId: 'worker', endsWithAgent: true }
   const ended: AgentRec = { id: 'worker', state: 'done', startedAt: 1, cost: 0, endedAt: 6 }
+  const listed = (...ids: string[]) => ids.map(id => ({ id }))
   assert.deepEqual(agentsAfterStop([card], [], [], 6), [ended])
-  // No command of its own known (the notice alone opened the wait): another task listed is not the agent's.
-  assert.deepEqual(agentsAfterStop([card], ['b1'], [shell], 6), [ended])
+  // No command of its own known (the notice alone opened the wait): another task the mod tracks is not the agent's.
+  assert.deepEqual(agentsAfterStop([card], listed('b1'), [shell], 6), [ended])
   // Its command listed, or the agent itself: the Stop holds it.
-  assert.deepEqual(agentsAfterStop([card], ['b3'], [own], 6), [card])
-  assert.deepEqual(agentsAfterStop([card], ['worker'], [], 6), [card])
+  assert.deepEqual(agentsAfterStop([card], listed('b3'), [own], 6), [card])
+  assert.deepEqual(agentsAfterStop([card], listed('worker'), [], 6), [card])
   // A command bound to its final response is not what it waits on.
-  assert.deepEqual(agentsAfterStop([card], ['b4'], [bound], 6), [ended])
+  assert.deepEqual(agentsAfterStop([card], listed('b4'), [bound], 6), [ended])
   // An agent that is not waiting is none of this.
   const running: AgentRec = { id: 'worker', state: 'running', startedAt: 1, cost: 0 }
   assert.deepEqual(agentsAfterStop([running], [], [], 6), [running])
+})
+
+test('a notice-only wait survives a Stop that lists running work the mod cannot place, and a wait with its own command does not', () => {
+  const card: AgentRec = { id: 'worker', state: 'running', startedAt: 1, cost: 0, waiting: true }
+  const other: AgentRec = { id: 'other', state: 'running', startedAt: 1, cost: 0 }
+  const own: BgTask = { ...shell, id: 'b3', agentId: 'worker' }
+  const ended: AgentRec = { id: 'worker', state: 'done', startedAt: 1, cost: 0, endedAt: 6 }
+  // The engine lists a running command without an owner: one of the waiting agent's whose start the mod missed.
+  assert.deepEqual(agentsAfterStop([card], [{ id: 'unseen', status: 'running' }], [shell], 6), [card])
+  assert.deepEqual(agentsAfterStop([card], [{ id: 'unseen' }, { id: 'b1', status: 'running' }], [shell], 6), [card])
+  assert.deepEqual(agentsAfterStop([card], [{ id: 'unseen', status: 'pending' }], [], 6), [card])
+  // Entries the mod can place (the main session's task, another agent) or the engine lists as ended hold nothing.
+  assert.deepEqual(agentsAfterStop([card], [{ id: 'b1', status: 'running' }], [shell], 6), [ended])
+  assert.deepEqual(agentsAfterStop([card, other], [{ id: 'other', status: 'running' }], [], 6), [ended, other])
+  assert.deepEqual(agentsAfterStop([card], [{ id: 'unseen', status: 'completed' }, { id: 'gone', status: 'killed' }], [], 6), [ended])
+  // An explicitly empty list ends it.
+  assert.deepEqual(agentsAfterStop([card], [], [], 6), [ended])
+  // A wait with a command of its own tracked keeps its rule: an unplaced entry does not hold it, its command does.
+  assert.deepEqual(agentsAfterStop([card], [{ id: 'unseen', status: 'running' }], [own], 6), [ended])
+  assert.deepEqual(agentsAfterStop([card], [{ id: 'b3', status: 'running' }, { id: 'unseen', status: 'running' }], [own], 6), [card])
 })
 
 test('the list keeps every running task and drops the oldest ended past its bound', () => {

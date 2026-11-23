@@ -831,15 +831,21 @@ test('a resumed run that ends or calls a tool before its spawn answers is settle
 // spawn); it may wake by itself when the command ends. The mod ended its card at the turn's end.
 const NOTICE = (id: string, status: string, summary: string) => `<task-notification>\n<task-id>${id}</task-id>\n<status>${status}</status>\n<summary>${summary}</summary>\n</task-notification>`
 /** A worker that has started `b-child`, a command left running in the background, at the clock's NOW + 1000. */
-async function workerWithChild($: Engine, on: On, background = true) {
+async function workerWithChild($: Engine, on: On, background = true, seed: AgentRec[] = []) {
   const b = boundaries(on)
   http(on)
   judgeStub(on)
+  // Records the session already holds when it starts (`seed`), until the first one it writes.
+  let seeded = seed.length > 0
+  if (seeded) on('state.get', { plugin: 'ripple', key: 'agents' }, ($, e, next) => seeded ? { value: { value: seed, version: 0 } } : next(e))
   // A resume the test refuses (`refuse`) after running `during` (something that happens while it is pending).
-  const gate: { refuse: boolean; during?: () => Promise<void>; beforeWrite?: (agents: AgentRec[]) => Promise<void> } = { refuse: false }
+  const gate: { refuse: boolean; during?: () => Promise<void>; beforeWrite?: (agents: AgentRec[]) => Promise<void>; afterWrite?: (agents: AgentRec[]) => Promise<void> } = { refuse: false }
   on('state.set', { plugin: 'ripple', key: 'agents' }, async ($, e, next) => {
+    seeded = false
     await gate.beforeWrite?.(e.value as AgentRec[])
-    return next(e)
+    const result = await next(e)
+    await gate.afterWrite?.(e.value as AgentRec[])
+    return result
   })
   on('agent.spawn', async ($, e) => {
     if (e.resume && gate.refuse) { await gate.during?.(); return { deny: 'parked' } }
@@ -998,7 +1004,7 @@ test("the engine's word that a waiting agent finished ends it with its own comma
   expect(seen.counts()?.live).toBe(0)
 })
 
-test('a wait only the notice opened ends at a Stop that lists neither the agent nor a command of its own; one that lists either keeps it', async ($, on) => {
+test('a wait only the notice opened ends at a Stop that lists nothing in flight; one that lists the agent, or running work the mod cannot place, keeps it', async ($, on) => {
   const { b, seen, card, answered } = await workerWithChild($, on, false)
   await answered()
   await $.prompt.submit(FINISHED('worker-1', 'Rename variable is waiting on its own background work'))
@@ -1007,8 +1013,12 @@ test('a wait only the notice opened ends at a Stop that lists neither the agent 
   await $.classic.Stop({ stop_hook_active: false, background_tasks: [{ id: 'worker-1' }] } as never)
   expect(card()).toMatchObject({ state: 'running', waiting: true })
   await b.clock.advance(9000)
-  // Another task is listed, nothing of the agent's: its command's end can never come, so the wait is over.
-  await $.classic.Stop({ stop_hook_active: false, background_tasks: [{ id: 'elsewhere' }] } as never)
+  // A running command is listed with no owner, which the mod never saw start: it may be the agent's.
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [{ id: 'unseen', type: 'shell', status: 'running', description: 'Build' }] })
+  expect(card()).toMatchObject({ state: 'running', waiting: true })
+  expect(seen.counts()?.live).toBe(1)
+  // Nothing in flight at all: its command's end can never come, so the wait is over.
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [] })
   expect(card()).toMatchObject({ state: 'done', endedAt: NOW + 10000 })
   expect(card().waiting).toBeUndefined()
   expect(seen.counts()?.live).toBe(0)
@@ -1052,6 +1062,48 @@ test("a refused resume leaves a waiting agent waiting only while a command of it
   expect(first.card()).toMatchObject({ state: 'done' })
   expect(first.card().waiting).toBeUndefined()
   expect(first.seen.counts()?.live).toBe(0)
+})
+
+test("a refused resume reconciles a wait whose last command ended right after the wake was written", async ($, on) => {
+  const { b, card, child, answered, notice, gate, seen } = await workerWithChild($, on)
+  await answered()
+  expect(card()).toMatchObject({ state: 'running', waiting: true })
+  let fired = false
+  // The command's notice lands once the optimistic wake is written, before the resume is refused.
+  gate.afterWrite = async agents => {
+    const woken = agents.find(a => a.id === 'worker-1')
+    if (!fired && woken && !woken.waiting && woken.startedAt !== NOW) {
+      fired = true
+      await notice(NOTICE('b-child', 'completed', 'Background command "Build" completed (exit code 0)'))
+    }
+  }
+  gate.refuse = true
+  await b.clock.advance(5000)
+  await $.agent.spawn({ ...SPAWN, prompt: 'Refused.', resume: { agentId: 'worker-1' } } as AgentSpawnInput)
+  await b.clock.settle()
+  expect(fired).toBe(true)
+  expect(child()?.state).toBe('done')
+  expect(card()).toMatchObject({ state: 'done' })
+  expect(card().waiting).toBeUndefined()
+  expect(seen.counts()?.live).toBe(0)
+})
+
+test('a waiting card ended by a refused resume counts toward the finished-card limit', async ($, on) => {
+  const old: AgentRec[] = Array.from({ length: 40 }, (_, i) => ({ id: 'old-' + i, state: 'done', startedAt: NOW - 500_000 + i, endedAt: NOW - 400_000 + i, cost: 0 }))
+  const { b, card, child, answered, notice, gate, seen } = await workerWithChild($, on, true, old)
+  await answered()
+  expect(seen.records()).toHaveLength(41)
+  gate.during = async () => { await notice(NOTICE('b-child', 'completed', 'Background command "Build" completed (exit code 0)')) }
+  gate.refuse = true
+  await b.clock.advance(5000)
+  await $.agent.spawn({ ...SPAWN, prompt: 'Refused.', resume: { agentId: 'worker-1' } } as AgentSpawnInput)
+  await b.clock.settle()
+  expect(child()?.state).toBe('done')
+  expect(card()).toMatchObject({ state: 'done' })
+  // Forty finished cards are kept: the oldest of the forty-one is the one dropped.
+  expect(seen.records()).toHaveLength(40)
+  expect(seen.records().some(a => a.id === 'old-0')).toBe(false)
+  expect(seen.records().some(a => a.id === 'old-1')).toBe(true)
 })
 
 test('a description that mentions the waiting words does not bring a finished agent back, or keep a waiting one', async ($, on) => {
