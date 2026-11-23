@@ -365,7 +365,7 @@ export class ChatGptAdapter {
     this.capHolds.set(ownerId, { until, window: spent.name, used: spent.used, cap });
     this.pool.hold(this.name, { id: ownerId, ownerId, headers: {} }, until);
     if (held && held.until > now) return;
-    this.log.info(`chatgpt ${this.name}: account ${ownerId.slice(0, 8)} at ${Math.floor(spent.used)}% of ${spent.name} (cap ${cap}%); resting until ${new Date(until).toISOString()}, next account`);
+    this.log.info(`chatgpt ${this.name}: account ${ownerId.slice(0, 8)} at ${Math.round(spent.used)}% of ${spent.name} (cap ${cap}%); resting until ${new Date(until).toISOString()}, next account`);
   }
 
   /**

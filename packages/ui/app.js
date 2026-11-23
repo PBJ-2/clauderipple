@@ -3780,6 +3780,8 @@ function chatgptStateBadge(account) {
   if (account.paused || account.state === "paused") return el("span", { class: "badge", text: t("providers.chatgptPaused") });
   if (account.state === "needs-login" || account.state === "quarantined") return el("span", { class: "badge bad", text: t("providers.anthropicReauth") });
   if (account.state === "needs-verification") return el("span", { class: "badge warn", text: t("providers.googleVerifyNeeded") });
+  // An account resting at its own usage cap says so, rather than looking refused by the backend.
+  if (account.state === "cooling" && account.capRest) return el("span", { class: "badge warn", text: t("providers.chatgptCapBadge", { duration: durationText(account.cooldownSeconds) }) });
   if (account.state === "cooling") return el("span", { class: "badge warn", text: t("pool.coolingFor", { duration: durationText(account.cooldownSeconds) }) });
   return el("span", { class: account.inUse ? "badge ok in-use" : "badge ok", text: account.inUse ? t("providers.chatgptInUse") : t("providers.chatgptStandby") });
 }
@@ -3821,17 +3823,35 @@ function renderChatgptAccountRows(target, data, name, generation) {
         try { await api(`/api/chatgpt-accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" }); await refreshChatgptAccountPanel(name); }
         catch (error) { toast(t("common.actionFailed"), true, error.message); }
       });
-      actions.push(rename, remove);
+      // One whole percent for both windows; an empty answer clears it (back to 100%, as before).
+      const cap = el("button", { class: "btn secondary compact", type: "button", text: account.usageCap ? t("providers.chatgptCapEdit", { cap: account.usageCap }) : t("providers.chatgptCapSet") });
+      cap.addEventListener("click", () => {
+        const answer = prompt(t("providers.chatgptCapPrompt"), account.usageCap ? String(account.usageCap) : "");
+        if (answer === null) return;
+        const text = answer.trim();
+        if (!text && !account.usageCap) return;
+        const value = text ? Number(text) : null;
+        if (value !== null && !(Number.isInteger(value) && value >= 1 && value <= 99)) { toast(t("providers.chatgptCapInvalid"), true); return; }
+        if (value === account.usageCap) return;
+        void patchChatgptAccount(name, account.id, { usageCap: value });
+      });
+      actions.push(cap, rename, remove);
     }
     const quota = chatgptQuotaText(account.quota);
     const detail = [account.email && account.email !== account.label ? account.email : null, account.planType || null].filter(Boolean).join(" · ");
     // How an account added here is kept is said once under the list (chatgptAccountsPanel); a row says only what is its own.
     const help = account.state === "needs-login" || account.state === "quarantined" ? t("providers.chatgptReauthHelp") : own ? "" : t("providers.chatgptCodexHelp");
+    // The cap in force, from the router's own record of the account; while it is the reason the account rests, that reading instead.
+    const capName = (window) => t(window === "weekly" ? "quota.windowWeek" : "quota.window5h");
+    const capText = account.usageCap
+      ? account.capRest ? t("providers.chatgptCapRest", { window: capName(account.capRest.window), used: Math.round(account.capRest.used), cap: account.usageCap }) : t("providers.chatgptCapLine", { cap: account.usageCap })
+      : "";
     return el("article", { class: `cell account-card${account.inUse ? " current" : ""}` }, [
       el("div", { class: "cell-text account-card-copy" }, [
         el("strong", { text: account.label }),
         detail ? el("span", { class: "small", text: detail }) : null,
         quota ? quotaMeters([account.quota.rate_limits.primary, account.quota.rate_limits.secondary], account.quota.at) : null,
+        capText ? hint(capText) : null,
         help ? hint(help) : null,
         actions.length ? el("div", { class: "account-card-actions" }, actions) : null,
       ]),
@@ -4002,6 +4022,7 @@ function chatgptAccountsPanel(name) {
       waiting,
       el("p", { class: "group-footer", text: t("providers.chatgptAccountsSubtitle") }),
       el("p", { class: "group-footer", text: t("providers.chatgptOwnHelp") }),
+      el("p", { class: "group-footer", text: t("providers.chatgptCapHelp") }),
     ]),
   ]);
   queueMicrotask(() => void refreshChatgptAccountPanel(name));
