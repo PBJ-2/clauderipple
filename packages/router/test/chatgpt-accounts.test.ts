@@ -7,7 +7,7 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { ChatGptAdapter, exhaustedForMs } from "../src/providers/chatgpt/index.ts";
+import { ChatGptAdapter, exhaustedForMs, windowName, windowsAtLeast } from "../src/providers/chatgpt/index.ts";
 import {
   ChatGptAccountPool,
   chatgptAccountsPath,
@@ -127,7 +127,7 @@ test("store: a usage cap is a whole percent 1-99; null clears it; a re-login kee
   assert.equal(readChatGptAccounts(home)[0]!.usageCap, 70, "signing in again keeps the cap");
   const pool = new ChatGptAccountPool({ home, mode: "own", log });
   updateChatGptAccount(home, a.id, { paused: false });
-  assert.equal(pool.peekCredentials()[0]!.usageCap, 70, "the credential carries it");
+  assert.equal("usageCap" in pool.peekCredentials()[0]!, false, "a credential does not carry the cap: a turn that outlives a change would judge by the old one");
   assert.equal(pool.summaries()[0]!.usageCap, 70);
   assert.equal(updateChatGptAccount(home, a.id, { usageCap: null }), true);
   assert.equal(readChatGptAccounts(home)[0]!.usageCap, undefined);
@@ -195,7 +195,7 @@ test("pool: the Codex CLI login takes part last, unless it is one of ours alread
 // ---------------------------------------------------------------------------------------------
 // Rotation through the adapter
 
-type Behaviour = { status: number; headers?: Record<string, string>; body?: string };
+type Behaviour = { status: number; headers?: Record<string, string>; body?: string; /** Runs when the request reaches the backend, before it answers: the owner acting while the turn is in flight. */ before?: () => void };
 const behaviour = new Map<string, Behaviour | Behaviour[]>();
 const hits: { token: string; turnState?: string; conversation?: string }[] = [];
 let turn = 0;
@@ -216,6 +216,7 @@ const backend = http.createServer((req, res) => {
     hits.push({ token, ...(req.headers["x-codex-turn-state"] ? { turnState: String(req.headers["x-codex-turn-state"]) } : {}), conversation: String(req.headers["session-id"] ?? "") });
     const planned = behaviour.get(token);
     const next = Array.isArray(planned) ? (planned.length > 1 ? planned.shift()! : planned[0]!) : planned;
+    next?.before?.();
     if (next && next.status !== 200) {
       res.writeHead(next.status, { "content-type": "application/json", ...(next.headers ?? {}) }).end(next.body ?? JSON.stringify({ error: { message: `status ${next.status}` } }));
       return;
@@ -253,7 +254,7 @@ function call(conversation: string, text?: string): Promise<{ status: number; bo
   });
 }
 
-type Rig = { home: string; ids: string[]; refreshes: string[]; logFile: string };
+type Rig = { home: string; ids: string[]; refreshes: string[]; logFile: string; pool: CredentialPool; tokenEndpoint: (url: string, init?: RequestInit) => Promise<Response>; now: (() => number) | undefined };
 function rig(count: number, tokenFor: (i: number) => string = (i) => `tok-${i}`, opts: { now?: () => number; caps?: Record<number, number> } = {}): Rig {
   const home = tempHome();
   const ids: string[] = [];
@@ -266,10 +267,11 @@ function rig(count: number, tokenFor: (i: number) => string = (i) => `tok-${i}`,
     refreshes.push(rt);
     return new Response(JSON.stringify({ access_token: `${rt}-fresh`, refresh_token: `${rt}-next`, expires_in: 3600 }), { status: 200 });
   };
-  adapter = new ChatGptAdapter("chatgpt", { type: "chatgpt", auth: "own", url: backendUrl }, home, new Logger(logFile, 1e9, 0, false), new CredentialPool(opts.now ? { now: opts.now } : {}), tokenEndpoint, opts.now);
+  const pool = new CredentialPool(opts.now ? { now: opts.now } : {});
+  adapter = new ChatGptAdapter("chatgpt", { type: "chatgpt", auth: "own", url: backendUrl }, home, new Logger(logFile, 1e9, 0, false), pool, tokenEndpoint, opts.now);
   behaviour.clear();
   hits.length = 0;
-  return { home, ids, refreshes, logFile };
+  return { home, ids, refreshes, logFile, pool, tokenEndpoint, now: opts.now };
 }
 
 /** An answered turn that reports these plan windows (weekly = the secondary window) in its headers. */
@@ -427,7 +429,7 @@ test("usage cap: an account at its cap rests until the window resets, and is not
   assert.deepEqual(hits.map((h) => h.token), ["tok-0"], "the turn that carried the reading is answered, one request over the cap at most");
   const status = adapter.accountStatus()[0]!;
   assert.equal(status.state, "cooling");
-  assert.deepEqual(status.capRest, { window: "weekly", used: 72, cap: 70 });
+  assert.deepEqual(status.capRest, { window: "weekly", windowMinutes: 10080, used: 72, cap: 70 });
   assert.ok(Math.abs((status.cooldownSeconds ?? 0) - 3 * 86_400) <= 2, "the rest is the window's real reset, not the pool's six hours");
   await call("conv-a", "again");
   await call("conv-b");
@@ -512,6 +514,242 @@ test("usage cap: changing or clearing it takes effect at once; a genuine 429 res
   adapter.usageCapChanged(s.ids[0]!);
   assert.equal(adapter.accountStatus()[0]!.state, "cooling", "still resting: the backend refused it");
   assert.ok((adapter.accountStatus()[0]!.cooldownSeconds ?? 0) > 3000);
+});
+
+// ---- Red-team round (#184): the cap as stored now, one hold per account, and what the client is told
+
+/** 09:00 local on a fixed day, so "later today" and "another day" do not depend on when the suite runs. */
+const morning = (): number => new Date(2026, 10, 25, 9, 0, 0).getTime();
+const stored = (home: string, id: string): number | undefined => readChatGptAccounts(home).find((account) => account.id === id)?.usageCap;
+
+test("usage cap: a turn in flight is judged by the cap as it stands when its answer arrives", async () => {
+  // Lowered while the turn runs: the hold the change started is not undone by the older cap's verdict.
+  const r = rig(2, undefined, { caps: { 0: 90 } });
+  behaviour.set("tok-0", reading({ weekly: 60 }));
+  await call("conv-a");
+  assert.equal(adapter.accountStatus()[0]!.state, "ready", "60% is under a 90% cap");
+  behaviour.set("tok-0", { ...reading({ weekly: 61 }), before: () => { updateChatGptAccount(r.home, r.ids[0]!, { usageCap: 50 }); adapter.usageCapChanged(r.ids[0]!); } });
+  await call("conv-a", "again");
+  assert.equal(stored(r.home, r.ids[0]!), 50);
+  assert.equal(adapter.accountStatus()[0]!.state, "cooling", "the answer that finished after the change does not release it");
+  assert.equal(adapter.accountStatus()[0]!.capRest?.cap, 50);
+
+  // Cleared while the turn runs: the answer does not put the old cap back on.
+  const s = rig(2, undefined, { caps: { 0: 70 } });
+  behaviour.set("tok-0", { ...reading({ weekly: 85 }), before: () => { updateChatGptAccount(s.home, s.ids[0]!, { usageCap: null }); adapter.usageCapChanged(s.ids[0]!); } });
+  await call("conv-b");
+  assert.equal(adapter.accountStatus()[0]!.state, "ready");
+  assert.equal(adapter.accountStatus()[0]!.capRest, undefined);
+  await call("conv-b", "more");
+  assert.equal(hits.at(-1)!.token, "tok-0", "no cap, so the account keeps serving at 85%");
+  assert.equal(capLines(s.logFile).length, 0, "and nothing was logged as a transition");
+});
+
+test("usage cap: a hold set by the cap has no 'use now'; a backend refusal keeps its own, and ending it leaves the cap hold", async () => {
+  const r = rig(2, undefined, { caps: { 0: 70 } });
+  behaviour.set("tok-0", reading({ weekly: 72 }));
+  await call("conv-a");
+  const held = adapter.accountStatus()[0]!;
+  assert.equal(held.state, "cooling");
+  assert.ok(held.capRest, "the row says why");
+  assert.equal(held.restSeconds, undefined, "nothing the backend refused, so nothing for 'use now' to end");
+  assert.ok((held.cooldownSeconds ?? 0) > 0);
+  adapter.clearCooldown(r.ids[0]!);
+  assert.equal(adapter.accountStatus()[0]!.state, "cooling", "'use now' cannot lift a cap hold; changing the cap does");
+
+  // Refused by the backend as well: that rest keeps its action, and ending it leaves the cap hold.
+  const s = rig(2, undefined, { caps: { 0: 70 } });
+  behaviour.set("tok-0", usageLimit(3600));
+  await call("conv-b");
+  const both = adapter.accountStatus()[0]!;
+  assert.ok(both.capRest);
+  assert.ok((both.restSeconds ?? 0) > 3000, "the genuine rest is there to be ended");
+  adapter.clearCooldown(s.ids[0]!);
+  const after = adapter.accountStatus()[0]!;
+  assert.equal(after.restSeconds, undefined);
+  assert.equal(after.state, "cooling");
+  assert.ok(after.capRest);
+
+  // No cap at all: exactly the old row.
+  rig(2);
+  behaviour.set("tok-0", usageLimit(3600));
+  await call("conv-c");
+  const plain = adapter.accountStatus()[0]!;
+  assert.equal(plain.capRest, undefined);
+  assert.ok((plain.restSeconds ?? 0) > 3000);
+});
+
+test("usage cap: image generation and web search never fall back to an account the cap holds", async () => {
+  const r = rig(2, undefined, { caps: { 0: 70, 1: 70 } });
+  behaviour.set("tok-0", reading({ weekly: 72 }));
+  behaviour.set("tok-1", reading({ weekly: 75 }));
+  await call("conv-a");
+  await call("conv-b");
+  assert.deepEqual(adapter.accountStatus().map((a) => a.state), ["cooling", "cooling"]);
+  hits.length = 0;
+  await assert.rejects(adapter.generateImage("gpt-6-sol", { prompt: "a fox" }), /usage cap/);
+  await assert.rejects(adapter.webSearch("gpt-6-sol").search({ query: "fox" }), /usage cap/);
+  assert.equal(hits.length, 0, "no request was spent on a held account");
+
+  // One account held by its cap, the other resting after a refusal: the refused one is the fallback, as it always was.
+  const s = rig(2, undefined, { caps: { 0: 70 } });
+  behaviour.set("tok-0", reading({ weekly: 72 }));
+  behaviour.set("tok-1", usageLimit(3600));
+  await call("conv-c");
+  await call("conv-d");
+  assert.deepEqual(adapter.accountStatus().map((a) => a.state), ["cooling", "cooling"]);
+  hits.length = 0;
+  await adapter.generateImage("gpt-6-sol", { prompt: "a fox" }).catch(() => undefined);
+  assert.deepEqual(hits.map((h) => h.token), ["tok-1"], "the account the cap holds is not the one tried");
+  void r; void s;
+});
+
+test("usage cap: the hold is the account's, so every provider on it honours it, and it outlives a rebuilt adapter", async () => {
+  const clock = morning();
+  const r = rig(2, undefined, { now: () => clock, caps: { 0: 70 } });
+  const build = (name: string) => new ChatGptAdapter(name, { type: "chatgpt", auth: "own", url: backendUrl }, r.home, new Logger(r.logFile, 1e9, 0, false), r.pool, r.tokenEndpoint, r.now);
+  const first = adapter;
+  const other = build("chatgpt-b");
+  behaviour.set("tok-0", reading({ weekly: 72 }));
+  await call("conv-a");
+  assert.equal(first.accountStatus()[0]!.state, "cooling");
+  assert.equal(other.accountStatus()[0]!.state, "cooling", "the second provider sees the account the first one held");
+  assert.ok(other.accountStatus()[0]!.capRest);
+  adapter = other;
+  await call("conv-b");
+  assert.equal(hits.at(-1)!.token, "tok-1", "and does not send its turn there");
+  assert.equal(capLines(r.logFile).length, 1, "one transition, one line");
+
+  // A provider edit rebuilds the adapter; the hold is still there, and clearing the cap still lifts it.
+  const rebuilt = build("chatgpt");
+  adapter = rebuilt;
+  assert.equal(rebuilt.accountStatus()[0]!.state, "cooling");
+  updateChatGptAccount(r.home, r.ids[0]!, { usageCap: null });
+  rebuilt.usageCapChanged(r.ids[0]!);
+  assert.equal(rebuilt.accountStatus()[0]!.state, "ready");
+  assert.equal(other.accountStatus()[0]!.state, "ready", "one release serves every provider");
+  assert.equal(first.accountStatus()[0]!.state, "ready");
+
+  // The newest reading survives the rebuild too: a cap set again is judged on it at once.
+  updateChatGptAccount(r.home, r.ids[0]!, { usageCap: 60 });
+  rebuilt.usageCapChanged(r.ids[0]!);
+  assert.equal(rebuilt.accountStatus()[0]!.state, "cooling");
+  assert.equal(other.accountStatus()[0]!.state, "cooling");
+  assert.equal(capLines(r.logFile).length, 2);
+});
+
+test("usage cap: when every account is held by its cap the answer says so, with the date, and is not retried", async () => {
+  const clock = morning();
+  rig(2, undefined, { now: () => clock, caps: { 0: 70, 1: 70 } });
+  behaviour.set("tok-0", reading({ weekly: 72 }));
+  behaviour.set("tok-1", reading({ weekly: 75 }, { fiveHour: 3600, weekly: 2 * 86_400 }));
+  await call("conv-a");
+  await call("conv-b");
+  hits.length = 0;
+  const res = await call("conv-c");
+  assert.equal(res.status, 429);
+  assert.equal(res.headers["x-should-retry"], "false");
+  assert.ok(Math.abs(Number(res.headers["retry-after"]) - 2 * 86_400) <= 2, "the wait is the soonest window's reset");
+  const message = JSON.parse(res.body).error.message as string;
+  assert.match(message, /usage cap/);
+  assert.doesNotMatch(message, /at its usage limit/);
+  assert.match(message, /usable again on \S+ \d+ at /, "two days out: the date is named");
+  assert.equal(hits.length, 0);
+
+  // The same day: the time alone, as before.
+  rig(2, undefined, { now: () => clock, caps: { 0: 50, 1: 50 } });
+  behaviour.set("tok-0", reading({ fiveHour: 60, weekly: 10 }));
+  behaviour.set("tok-1", reading({ fiveHour: 70, weekly: 10 }));
+  await call("conv-d");
+  await call("conv-e");
+  const today = await call("conv-f");
+  assert.equal(today.headers["x-should-retry"], "false");
+  assert.match(JSON.parse(today.body).error.message, /usage cap set for it\. The first is usable again at \S+/);
+  assert.doesNotMatch(JSON.parse(today.body).error.message, / on /);
+
+  // A cap beside a backend refusal: the cap is named too, and the answer is just as final.
+  rig(2, undefined, { now: () => clock, caps: { 0: 70 } });
+  behaviour.set("tok-0", reading({ weekly: 72 }));
+  behaviour.set("tok-1", usageLimit(3600));
+  await call("conv-g");
+  await call("conv-h");
+  const mixed = await call("conv-i");
+  assert.equal(mixed.status, 429);
+  assert.equal(mixed.headers["x-should-retry"], "false");
+  assert.match(JSON.parse(mixed.body).error.message, /usage limit or the usage cap/);
+
+  // No cap anywhere: the old words and the old headers, nothing added.
+  rig(2, undefined, { now: () => clock });
+  behaviour.set("tok-0", usageLimit(600));
+  behaviour.set("tok-1", usageLimit(1200));
+  await call("conv-j");
+  const plain = await call("conv-k");
+  assert.equal(plain.status, 429);
+  assert.equal(plain.headers["x-should-retry"], undefined);
+  assert.match(JSON.parse(plain.body).error.message, /^ChatGPT: every signed-in account is at its usage limit\. The first is usable again at /);
+});
+
+test("usage cap: a window is named by its length, so a weekly-only plan's weekly window is 'weekly'", async () => {
+  assert.equal(windowName(300, "primary"), "5-hour");
+  assert.equal(windowName(10_080, "primary"), "weekly", "weekly-only plans report the weekly window in `primary`");
+  assert.equal(windowName(10_080, "secondary"), "weekly");
+  assert.equal(windowName(43_200, "primary"), "monthly");
+  assert.equal(windowName(1_440, "secondary"), "24-hour");
+  assert.equal(windowName(undefined, "primary"), "5-hour", "no length: the slot decides");
+  assert.equal(windowName(undefined, "secondary"), "weekly");
+  const weeklyOnly = { rate_limits: { primary: { used_percent: 80, window_minutes: 10_080, reset_after_seconds: 86_400 }, secondary: null } };
+  assert.deepEqual(windowsAtLeast(weeklyOnly, 70, 0).map((w) => [w.name, w.windowMinutes]), [["weekly", 10_080]]);
+
+  const r = rig(2, undefined, { caps: { 0: 70 } });
+  behaviour.set("tok-0", { status: 200, headers: { "x-codex-primary-used-percent": "72", "x-codex-primary-window-minutes": "10080", "x-codex-primary-reset-after-seconds": String(3 * 86_400) } });
+  await call("conv-a");
+  assert.equal(adapter.accountStatus()[0]!.capRest?.window, "weekly");
+  assert.equal(adapter.accountStatus()[0]!.capRest?.windowMinutes, 10_080);
+  assert.match(capLines(r.logFile)[0]!, /at 72% of weekly \(cap 70%\)/);
+});
+
+test("exhaustedForMs: under a cap a reading whose reset has passed is not over the cap; without a cap nothing changes", () => {
+  const now = 10 * 86_400_000;
+  const weekly = (at: number | undefined) => ({ ...(at !== undefined ? { at } : {}), rate_limits: { primary: { used_percent: 20, reset_after_seconds: 60 }, secondary: { used_percent: 72, window_minutes: 10_080, reset_after_seconds: 3 * 86_400 } } });
+  assert.equal(exhaustedForMs(weekly(now - 86_400_000), now, true, 70), 2 * 86_400_000, "read a day ago: two days are left");
+  assert.equal(exhaustedForMs(weekly(now - 4 * 86_400_000), now, true, 70), undefined, "read four days ago: the window has reset since");
+  assert.equal(exhaustedForMs(weekly(undefined), now, true, 70), 3 * 86_400_000, "no reading time: taken as just now");
+  const absolute = (resetAt: number) => ({ rate_limits: { primary: { used_percent: 72, reset_at: resetAt } } });
+  assert.equal(exhaustedForMs(absolute((now - 1000) / 1000), now, true, 70), undefined, "a stated reset time that is past ends it");
+  assert.equal(exhaustedForMs(absolute((now + 5000) / 1000), now, true, 70), 5000);
+  // Uncapped: a full window is read as it always was, however old the reading.
+  const full = { at: now - 9 * 86_400_000, rate_limits: { primary: { used_percent: 100, reset_after_seconds: 3600 } } };
+  assert.equal(exhaustedForMs(full, now), 3_600_000);
+});
+
+test("pool: a hold is the account's for every provider, and 'clear' leaves it", () => {
+  let clock = 1_000_000;
+  const pool = new CredentialPool({ now: () => clock });
+  const credential = { id: "acct", ownerId: "acct", headers: {} };
+  pool.hold("acct", clock + 600_000, { why: "cap" });
+  for (const provider of ["a", "b"]) {
+    assert.equal(pool.hasUsable(provider, [credential]), false, provider);
+    assert.equal(pool.pick(provider, [credential]), null, provider);
+    const row = pool.report(provider, [credential])[0]!;
+    assert.equal(row.state, "cooling");
+    assert.equal(row.holdSeconds, 600);
+    assert.equal(row.restSeconds, undefined);
+  }
+  pool.clear("a", "acct");
+  pool.clear("a");
+  assert.equal(pool.hasUsable("b", [credential]), false, "clearing a provider's rests does not lift an owner's hold");
+  pool.penalise("a", "acct", 429, 120_000);
+  const both = pool.report("a", [credential])[0]!;
+  assert.equal(both.restSeconds, 120);
+  assert.equal(both.holdSeconds, 600);
+  assert.equal(both.cooldownSeconds, 600);
+  assert.deepEqual(pool.heldAccount("acct")?.detail, { why: "cap" });
+  clock += 601_000;
+  assert.equal(pool.heldAccount("acct"), undefined, "the time passing ends it");
+  assert.equal(pool.hasUsable("b", [credential]), true);
+  pool.hold("acct", clock + 1000);
+  assert.equal(pool.releaseHold("acct"), true);
+  assert.equal(pool.releaseHold("acct"), false);
 });
 
 test("cleanup", () => {

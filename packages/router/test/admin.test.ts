@@ -220,6 +220,28 @@ test("chatgpt account PATCH: usageCap is a whole percent 1-99, null clears it, a
   }, { chatgpt: () => ({ quota: {}, auth: {}, usageCapChanged: (id) => { changed.push(id); } }) });
 });
 
+test("mod-options: a ChatGPT account over its usage cap is out only while the reading's reset is still ahead", async () => {
+  const day = 86_400_000;
+  let readAt = Date.now();
+  const account = () => ({
+    id: "a", label: "A", expiresAt: Date.now() + 10_000, needsReauth: false, paused: false, preferred: false, inUse: false, source: "own" as const, state: "ready" as const, usageCap: 70, active: false,
+    quota: { at: readAt, rate_limits: { primary: { used_percent: 10, window_minutes: 300, reset_after_seconds: 600 }, secondary: { used_percent: 72, window_minutes: 10_080, reset_after_seconds: 3 * 86_400 } } },
+  });
+  const cfg = makeCfg({ providers: { codex: { type: "chatgpt", models: [{ id: "gpt-6.1-sol" }] } }, routes: {}, direct: [], aliases: {} });
+  await withAdmin(cfg, async ({ port }) => {
+    const usable = async () => {
+      const res = await fetch(`${base()}:${port}/api/mod-options`);
+      assert.equal(res.status, 200);
+      return ((await res.json()) as ModOptions).providers.find((p) => p.name === "codex")?.usable;
+    };
+    assert.equal(await usable(), false, "read just now at 72% of a 70% cap, three days to the reset");
+    readAt = Date.now() - 4 * day;
+    assert.equal(await usable(), true, "the same reading taken four days ago: its window has reset since, so it is no evidence of anything");
+    readAt = Date.now() - 1 * day;
+    assert.equal(await usable(), false, "a day old, two days still to run");
+  }, { chatgpt: () => ({ quota: {}, auth: {}, accounts: () => ({ codex: [account()] }) }), modelScoresFetch: async () => new Response("{}") });
+});
+
 // Pinned worker files are named and pinned from the stored accounts, so the admin endpoints that
 // change an account re-derive them instead of waiting for a restart or a config save. The
 // regeneration is a `PinnedAgentSync`, whose notify is what resyncs remote hosts over the tunnels

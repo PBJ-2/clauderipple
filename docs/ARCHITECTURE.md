@@ -993,10 +993,28 @@ must preserve **Data: Artificial Analysis (artificialanalysis.ai)** attribution.
     the account back every 6 h to spend one more real request. A hold is lifted
     by a reading under the cap, the reset passing, or the cap being changed or
     cleared (the dashboard re-judges the held reading at once); none of that
-    touches a genuine 429 cooldown. The real-429 wait ignores the cap. One
-    `router.log` line per transition (`account <id8> at 72% of weekly (cap 70%);
-    resting until <ISO>, next account`); `chatgpt.accounts[].capRest` carries the
-    window and reading for the dashboard.
+    touches a genuine 429 cooldown, and the dashboard's "Use now" ends only a
+    genuine rest (`restSeconds`), never a hold. The real-429 wait ignores the cap.
+    One `router.log` line per transition (`account <id8> at 72% of weekly (cap
+    70%); resting until <ISO>, next account`); `chatgpt.accounts[].capRest`
+    carries the window (named by its length, not its slot: a weekly-only plan
+    reports its weekly window in `primary`) and reading for the dashboard.
+    **Rules that are easy to break:** (1) A hold is keyed by the stored account
+    (owner id), not by provider, and lives in the one `CredentialPool`: two
+    chatgpt providers on the same accounts share usage, and a provider edit that
+    rebuilds an adapter must not lose it. The newest reading per account is
+    shared the same way (`readingsOf(pool)`). (2) Every reading is judged against
+    the cap **as stored when it arrives** (`currentCap`), never one captured when
+    the turn began: a turn outlives the owner's change. (3) Calls that spend
+    usage with no conversation (image generation, web search) never fall back to
+    a cap-held account (`anyCredential(true)`); a resting account the backend
+    refused is still their last resort, as before. (4) A reading whose reset time
+    has passed is not over the cap (`exhaustedForMs` under a cap reads the
+    snapshot's own `at`), so a stale reading in `/api/mod-options` cannot keep a
+    provider unusable. (5) With every resting account held by a cap the answer
+    names the caps, gives the date when the reset is not today, and carries
+    `x-should-retry: false`; with no cap involved wording and headers are
+    unchanged.
   - **The prompt cache is keyed on the conversation's identity, not on
     `prompt_cache_key` (since mid-September 2026).** Five turns with byte-identical
     instructions, tools and input prefix, 3–6s apart under one key, all came back

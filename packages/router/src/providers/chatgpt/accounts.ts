@@ -352,7 +352,7 @@ export async function refreshChatGptGrant(refreshToken: string, previous: { acco
 const refreshing = new Map<string, Promise<void>>();
 
 /** The credential one account presents, as the shared CredentialPool sees it. */
-export type ChatGptCredential = Credential & { ownerId: string; accountId: string; accessToken: string; usageCap?: number };
+export type ChatGptCredential = Credential & { ownerId: string; accountId: string; accessToken: string };
 
 function credentialOf(ownerId: string, label: string, accessToken: string, accountId: string): ChatGptCredential {
   // The runtime id is the account itself, not its token: a usage limit belongs to the account, and
@@ -417,7 +417,7 @@ export class ChatGptAccountPool {
     const out: ChatGptCredential[] = [];
     for (const account of this.ownAccounts()) {
       if (account.paused || account.needsReauth || this.now() >= account.expiresAt) continue;
-      out.push({ ...credentialOf(account.id, account.label, account.accessToken, account.accountId), preferred: account.preferred === true, ...(account.usageCap ? { usageCap: account.usageCap } : {}) });
+      out.push({ ...credentialOf(account.id, account.label, account.accessToken, account.accountId), preferred: account.preferred === true });
     }
     const codex = this.codexLogin();
     if (codex && this.now() < codex.expiresAt) out.push(credentialOf(CODEX_LOGIN_ID, identityFromTokens(codex).email ?? "Codex CLI login", codex.accessToken, codex.accountId));

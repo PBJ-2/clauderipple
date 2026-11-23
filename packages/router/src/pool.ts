@@ -149,6 +149,9 @@ export function retryAfterMs(headers: Record<string, string | string[] | undefin
  */
 export type Credential = { id: string; headers: Record<string, string>; label?: string; ownerId?: string; healthKey?: string; preferred?: boolean; paused?: boolean };
 
+/** An owner's hold on one durable account: until when, and what the dashboard should say about it. */
+export type AccountHold = { until: number; detail?: Record<string, unknown> };
+
 /** Cooldowns and failures belong to the durable account, so a token refresh never clears a rest. */
 type Health = { cooldownUntil: number; failures: number };
 
@@ -158,6 +161,14 @@ export type CredentialReport = {
   state: "ready" | "cooling" | "quarantined";
   /** Seconds until this credential is usable again; absent when it is ready or quarantined. */
   cooldownSeconds?: number;
+  /**
+   * Seconds a genuine rest (a refusal the vendor answered) still has to run, when there is one. Under
+   * `state: "cooling"` it tells a rest the dashboard can end ("use now") from an account the owner
+   * is holding back, where ending it would only start the same hold again.
+   */
+  restSeconds?: number;
+  /** Seconds an owner's hold (a usage cap the account has reached) still has to run, when there is one. */
+  holdSeconds?: number;
   /**
    * Seconds each resting quota scope (a Claude model family's weekly window) still has to run. A scope
    * rests only its own models, so `state` stays `ready`. Filled by the caller that knows its scopes
@@ -195,8 +206,12 @@ export class CredentialPool {
    * keyed like `health`. Not a failure and not clamped to `MAX_COOLDOWN_MS`: a weekly window that
    * resets in three days must not come back every six hours to spend one more real request. Kept apart
    * from `health` so lifting it (cap changed, fresh reading under the cap) never erases a genuine 429 rest.
+   *
+   * Keyed by the durable account (owner id) alone, not by provider: two providers that share stored
+   * accounts share the account's usage, so a hold one of them set binds both. The pool outlives
+   * every adapter, so a provider edit that rebuilds an adapter leaves the hold where it was.
    */
-  private readonly holds = new Map<string, number>();
+  private readonly holds = new Map<string, AccountHold>();
   /** Runtime credential id → the durable account whose cooldowns and failures it shares. */
   private readonly accounts = new Map<string, { ownerId: string; healthKey: string }>();
   /** Runtime credential ids whose token generation a 401 parked; a new generation starts unparked. */
@@ -255,8 +270,13 @@ export class CredentialPool {
     return h;
   }
 
+  /** The durable login behind a runtime credential, which is what a hold is keyed by. */
+  private ownerOf(provider: string, id: string): string {
+    return this.accounts.get(this.key(provider, id))?.ownerId ?? id;
+  }
+
   private heldUntil(provider: string, id: string): number {
-    return this.holds.get(this.key(provider, this.accountOf(provider, id))) ?? 0;
+    return this.holds.get(this.ownerOf(provider, id))?.until ?? 0;
   }
 
   private usable(provider: string, id: string, scope?: string): boolean {
@@ -372,17 +392,23 @@ export class CredentialPool {
   }
 
   /**
-   * Keep one account out of `pick` and `hasUsable` until `untilMs` (epoch ms), with no failure charged
-   * and no six-hour clamp. `releaseHold` lifts it; so does the time passing.
+   * Keep one durable account (by owner id) out of `pick` and `hasUsable` for every provider until
+   * `untilMs` (epoch ms), with no failure charged and no six-hour clamp. `detail` is what the
+   * dashboard says about the hold. `releaseHold` lifts it; so does the time passing.
    */
-  hold(provider: string, credential: Credential, untilMs: number): void {
-    this.remember(provider, [credential]);
-    this.holds.set(this.key(provider, this.accountOf(provider, credential.id)), untilMs);
+  hold(ownerId: string, untilMs: number, detail?: Record<string, unknown>): void {
+    this.holds.set(ownerId, { until: untilMs, ...(detail ? { detail } : {}) });
   }
 
-  /** Lift a hold early. Leaves cooldowns and quarantines alone. */
-  releaseHold(provider: string, id: string): void {
-    this.holds.delete(this.key(provider, this.accountOf(provider, id)));
+  /** Lift a hold early. Leaves cooldowns and quarantines alone; true when there was one. */
+  releaseHold(ownerId: string): boolean {
+    return this.holds.delete(ownerId);
+  }
+
+  /** The hold on an account that is still running, if any. */
+  heldAccount(ownerId: string): AccountHold | undefined {
+    const held = this.holds.get(ownerId);
+    return held && held.until > this.now() ? held : undefined;
   }
 
   /**
@@ -402,19 +428,21 @@ export class CredentialPool {
     if (scoped && scoped.cooldownUntil <= this.now()) this.health.delete(this.scopedKey(provider, id, scope!));
   }
 
-  /** Operator action from the dashboard: give a parked credential, and all its scopes, another chance now. */
+  /**
+   * Operator action from the dashboard: give a parked credential, and all its scopes, another chance now.
+   * An owner's hold is not a parked credential and stays: it ends when the owner changes the cap that
+   * set it, or when its time passes.
+   */
   clear(provider: string, id?: string): void {
     if (id) {
       const runtime = this.key(provider, id);
       this.quarantined.delete(runtime);
       const account = this.key(provider, this.accounts.get(runtime)?.healthKey ?? id);
       this.health.delete(account);
-      this.holds.delete(account);
       for (const k of [...this.health.keys()]) if (k.startsWith(`${account}#`)) this.health.delete(k);
       return;
     }
     for (const key of [...this.health.keys()]) if (key.startsWith(`${provider}/`)) this.health.delete(key);
-    for (const key of [...this.holds.keys()]) if (key.startsWith(`${provider}/`)) this.holds.delete(key);
     for (const key of [...this.quarantined]) if (key.startsWith(`${provider}/`)) this.quarantined.delete(key);
   }
 
@@ -428,12 +456,11 @@ export class CredentialPool {
     for (const key of [...this.health.keys()]) {
       if (key === account || key.startsWith(`${account}#`) || key.startsWith(`${account}:`)) this.health.delete(key);
     }
-    this.holds.delete(account);
+    this.holds.delete(ownerId);
     for (const [runtime, record] of [...this.accounts]) {
       // Two providers can share one login ("current"): each clear forgets only its own mappings.
       if (record.ownerId !== ownerId || !runtime.startsWith(`${provider}/`)) continue;
       const health = this.key(provider, record.healthKey);
-      this.holds.delete(health);
       for (const key of [...this.health.keys()]) {
         if (key === health || key.startsWith(`${health}#`) || key.startsWith(`${health}:`)) this.health.delete(key);
       }
@@ -462,13 +489,16 @@ export class CredentialPool {
     return credentials.map((c) => {
       const h = this.healthOf(provider, c.id);
       const quarantined = this.quarantined.has(this.key(provider, c.id));
-      const until = Math.max(h.cooldownUntil, this.heldUntil(provider, c.id));
+      const held = this.heldUntil(provider, c.id);
+      const until = Math.max(h.cooldownUntil, held);
       const cooling = !quarantined && until > now;
       return {
         id: c.id,
         ...(c.label ? { label: c.label } : {}),
         state: quarantined ? "quarantined" : cooling ? "cooling" : "ready",
         ...(cooling ? { cooldownSeconds: Math.ceil((until - now) / 1000) } : {}),
+        ...(cooling && h.cooldownUntil > now ? { restSeconds: Math.ceil((h.cooldownUntil - now) / 1000) } : {}),
+        ...(cooling && held > now ? { holdSeconds: Math.ceil((held - now) / 1000) } : {}),
         failures: h.failures,
         paused: c.paused === true,
         preferred: c.preferred === true,
