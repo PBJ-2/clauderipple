@@ -511,6 +511,13 @@ export class Proxy {
     }
   }
 
+  /** Dashboard action: a ChatGPT account's usage cap changed; every chatgpt provider re-judges its last reading of it now. */
+  chatgptUsageCapChanged(ownerId: string): void {
+    for (const [name, p] of Object.entries(this.deps.config().providers)) {
+      if (p.type === "chatgpt") this.chatgpt(name, p).usageCapChanged(ownerId);
+    }
+  }
+
   private chatgpt(name: string, cfg: Extract<Config["providers"][string], { type: "chatgpt" }>): ChatGptAdapter {
     const key = JSON.stringify(cfg);
     const cur = this.chatgptAdapters.get(name);

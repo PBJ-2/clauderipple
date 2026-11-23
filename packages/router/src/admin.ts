@@ -7,7 +7,7 @@
 //   POST /api/chatgpt-login  begin ChatGPT browser login (adds an account) without holding the request open
 //   GET  /api/chatgpt-login  ChatGPT browser login state and credential status
 //   GET  /api/chatgpt-accounts?provider=   signed-in ChatGPT accounts, rotation state, quota (no tokens)
-//   PATCH/DELETE /api/chatgpt-accounts/:id rename, pause/resume, clear a cooldown; remove
+//   PATCH/DELETE /api/chatgpt-accounts/:id rename, pause/resume, usage cap (1-99, null clears), clear a cooldown; remove
 //   POST /api/google-login   begin a Google (Antigravity) browser sign-in; GET polls the state
 //   POST /api/google-login/code  paste the code when no loopback callback could be used
 //   GET  /api/google-accounts?provider=   signed-in Google accounts, rotation state (no tokens)
@@ -75,7 +75,7 @@ import { ClaudeOAuthSession, type ClaudeOAuthState } from "./providers/claude-oa
 import { readClaudeAuthFile } from "./providers/anthropic-token-file.ts";
 import { isCurrentClaudeAccountPaused, listClaudeAccounts, listClaudeAccountsWithSubject, removeClaudeAccount, updateClaudeAccount, setCurrentClaudeAccountPaused, setPreferredClaudeAccount } from "./providers/anthropic-accounts.ts";
 import { pinnableAccountsFor, storedAccountsFor } from "./pinned-accounts.ts";
-import { CODEX_LOGIN_ID, readChatGptAccounts, removeChatGptAccount, summarize as summarizeChatGptAccount, updateChatGptAccount } from "./providers/chatgpt/accounts.ts";
+import { CODEX_LOGIN_ID, readChatGptAccounts, removeChatGptAccount, summarize as summarizeChatGptAccount, updateChatGptAccount, validUsageCap } from "./providers/chatgpt/accounts.ts";
 import { exhaustedForMs, IMAGE_ASPECTS, IMAGE_BACKGROUNDS, IMAGE_FORMATS, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
 import type { GoogleAccountStatus } from "./providers/google/index.ts";
 import { googleWindowsFromGroups, type QuotaGroup } from "./providers/google/usage.ts";
@@ -157,6 +157,8 @@ export type AdminDeps = {
     accounts?: () => Record<string, ChatGptAccountStatus[]>;
     /** Put one resting account back into rotation now. Absent in tests. */
     clearCooldown?: (accountId: string) => void;
+    /** An account's usage cap was set, changed or cleared: judge its last reading against it now. Absent in tests. */
+    usageCapChanged?: (accountId: string) => void;
   };
   /** Optional: google (Antigravity) providers' accounts and catalogue. Absent in tests. */
   google?: () => {
@@ -1017,7 +1019,7 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
     let usageOut: { reason: "quota_exhausted"; until: number } | undefined;
     if (p.type === "chatgpt") {
       const accounts = chatgpt.accounts[name];
-      usable = accounts ? accounts.some(a => a.state === "ready" && !exhaustedForMs(a.quota))
+      usable = accounts ? accounts.some(a => a.state === "ready" && !exhaustedForMs(a.quota, now, true, a.usageCap))
         : chatgpt.signedIn[name] === true && !exhaustedForMs(chatgpt.quota[name]);
     } else if (p.type === "google") {
       usable = p.auth === "antigravity" ? (google[name] ?? []).some(a => a.state === "ready")
@@ -2952,32 +2954,36 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           sendJson(res, 200, { ok: true });
           return;
         }
-        let change: { label?: unknown; paused?: unknown; preferred?: unknown; clearCooldown?: unknown };
+        let change: { label?: unknown; paused?: unknown; preferred?: unknown; clearCooldown?: unknown; usageCap?: unknown };
         try {
           change = JSON.parse((await readBody(req)).toString("utf8")) as typeof change;
         } catch {
           sendJson(res, 400, { error: "invalid JSON" });
           return;
         }
-        if (!change || (change.label !== undefined && (typeof change.label !== "string" || !change.label.trim())) || (change.paused !== undefined && typeof change.paused !== "boolean") || (change.preferred !== undefined && typeof change.preferred !== "boolean") || (change.clearCooldown !== undefined && change.clearCooldown !== true)) {
-          sendJson(res, 400, { error: "expected {label?: non-empty string, paused?: boolean, preferred?: boolean, clearCooldown?: true}" });
+        if (!change || (change.label !== undefined && (typeof change.label !== "string" || !change.label.trim())) || (change.paused !== undefined && typeof change.paused !== "boolean") || (change.preferred !== undefined && typeof change.preferred !== "boolean") || (change.clearCooldown !== undefined && change.clearCooldown !== true) || (change.usageCap !== undefined && change.usageCap !== null && !validUsageCap(change.usageCap))) {
+          sendJson(res, 400, { error: "expected {label?: non-empty string, paused?: boolean, preferred?: boolean, clearCooldown?: true, usageCap?: whole percent 1-99, or null for no cap}" });
           return;
         }
         if (id !== "codex" && !readChatGptAccounts(homeDir()).some((account) => account.id === id)) {
           sendJson(res, 404, { error: "ChatGPT account not found" });
           return;
         }
-        if (change.label !== undefined || change.paused !== undefined || change.preferred !== undefined) {
+        if (change.label !== undefined || change.paused !== undefined || change.preferred !== undefined || change.usageCap !== undefined) {
           if (id === "codex") {
-            sendJson(res, 409, { error: "the Codex CLI's login cannot be renamed or paused here" });
+            sendJson(res, 409, { error: "the Codex CLI's login cannot be renamed, paused or given a usage cap here" });
             return;
           }
-          if (!updateChatGptAccount(homeDir(), id, { ...(typeof change.label === "string" ? { label: change.label } : {}), ...(typeof change.paused === "boolean" ? { paused: change.paused } : {}), ...(typeof change.preferred === "boolean" ? { preferred: change.preferred } : {}) })) {
+          if (!updateChatGptAccount(homeDir(), id, { ...(typeof change.label === "string" ? { label: change.label } : {}), ...(typeof change.paused === "boolean" ? { paused: change.paused } : {}), ...(typeof change.preferred === "boolean" ? { preferred: change.preferred } : {}), ...(change.usageCap !== undefined ? { usageCap: change.usageCap as number | null } : {}) })) {
             sendJson(res, 404, { error: "ChatGPT account not found" });
             return;
           }
         }
         if (change.clearCooldown === true) deps.chatgpt?.().clearCooldown?.(id);
+        if (change.usageCap !== undefined) {
+          deps.chatgpt?.().usageCapChanged?.(id);
+          deps.log.info(`admin: ChatGPT account ${id.slice(0, 8)} usage cap ${change.usageCap === null ? "cleared" : `${change.usageCap}%`}`);
+        }
         deps.log.info(`admin: updated ChatGPT account ${id.slice(0, 8)}`);
         deps.agentsChanged?.();
         sendJson(res, 200, { ok: true });

@@ -185,6 +185,41 @@ for (const kind of ["chatgpt", "claude", "google"]) {
   });
 }
 
+test("chatgpt account PATCH: usageCap is a whole percent 1-99, null clears it, and the borrowed Codex login refuses it", async () => {
+  const changed: string[] = [];
+  await withAdmin(makeCfg(), async ({ port, home }) => {
+    const chatgpt = await import("../src/providers/chatgpt/accounts.ts");
+    const id = chatgpt.saveChatGptAccount(home, { accessToken: "test-a", refreshToken: "test-refresh-a", expiresAt: Date.now() + 3_600_000, accountId: "a" }).id;
+    const endpoint = `${base()}:${port}/api/chatgpt-accounts`;
+    const patch = (target: string, body: unknown) => fetch(`${endpoint}/${target}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const stored = () => chatgpt.readChatGptAccounts(home)[0]!.usageCap;
+    for (const bad of [0, 100, 101, -1, 1.5, "70", true]) {
+      const res = await patch(id, { usageCap: bad });
+      assert.equal(res.status, 400, `${JSON.stringify(bad)} is refused`);
+      assert.match(((await res.json()) as { error: string }).error, /usageCap/);
+    }
+    assert.equal(stored(), undefined);
+    assert.deepEqual(changed, [], "a refused change tells nobody");
+    assert.equal((await patch(id, { usageCap: 70 })).status, 200);
+    assert.equal(stored(), 70);
+    assert.deepEqual(changed, [id], "the running adapters judge their last reading against it now");
+    const rows = (await (await fetch(endpoint)).json() as { accounts: { id: string; usageCap?: number }[] }).accounts;
+    assert.equal(rows.find((row) => row.id === id)?.usageCap, 70, "the account list shows the cap");
+    assert.equal((await patch(id, { usageCap: 99 })).status, 200);
+    assert.equal(stored(), 99);
+    assert.equal((await patch(id, { paused: true })).status, 200);
+    assert.equal(stored(), 99, "another change leaves the cap");
+    assert.equal((await patch(id, { usageCap: null })).status, 200);
+    assert.equal(stored(), undefined);
+    assert.deepEqual(changed, [id, id, id]);
+    const codex = await patch("codex", { usageCap: 70 });
+    assert.equal(codex.status, 409, "the Codex CLI's login is read-only here");
+    assert.match(((await codex.json()) as { error: string }).error, /usage cap/);
+    assert.equal((await patch("00000000-0000-4000-8000-000000000000", { usageCap: 70 })).status, 404);
+    assert.equal(changed.length, 3);
+  }, { chatgpt: () => ({ quota: {}, auth: {}, usageCapChanged: (id) => { changed.push(id); } }) });
+});
+
 // Pinned worker files are named and pinned from the stored accounts, so the admin endpoints that
 // change an account re-derive them instead of waiting for a restart or a config save. The
 // regeneration is a `PinnedAgentSync`, whose notify is what resyncs remote hosts over the tunnels

@@ -42,6 +42,12 @@ export type ChatGptAccount = {
   /** Left out of rotation by the user. */
   paused?: boolean;
   preferred?: boolean;
+  /**
+   * Stop sending turns to this account once either window (5-hour or weekly) has used this
+   * percent, an integer 1-99. Absent means 100: the account is used until the backend says it is
+   * full. Never set on the borrowed Codex CLI login, which is read-only here.
+   */
+  usageCap?: number;
 };
 
 export type ChatGptAccountSummary = {
@@ -53,6 +59,7 @@ export type ChatGptAccountSummary = {
   needsReauth: boolean;
   paused: boolean;
   preferred: boolean;
+  usageCap?: number;
   /** "codex" for the Codex CLI's own login, which we only read. */
   source: "own" | "codex";
 };
@@ -78,7 +85,13 @@ function validAccount(value: unknown): value is ChatGptAccount {
     && (a.planType === undefined || typeof a.planType === "string")
     && (a.needsReauth === undefined || typeof a.needsReauth === "boolean")
     && (a.paused === undefined || typeof a.paused === "boolean")
-    && (a.preferred === undefined || typeof a.preferred === "boolean");
+    && (a.preferred === undefined || typeof a.preferred === "boolean")
+    && (a.usageCap === undefined || validUsageCap(a.usageCap));
+}
+
+/** A usage cap is a whole percent below 100; 100 is "no cap" and is stored as absence. */
+export function validUsageCap(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 99;
 }
 
 /** The file's accounts; [] when absent, null when unreadable (so a mutation refuses to overwrite it). */
@@ -176,6 +189,7 @@ export function saveChatGptAccount(home: string, grant: ChatGptGrant, now = new 
       updatedAt: now,
       ...(previous?.paused ? { paused: true } : {}),
       ...(previous?.preferred ? { preferred: true } : {}),
+      ...(previous?.usageCap ? { usageCap: previous.usageCap } : {}),
     };
     const next = [...accounts];
     if (index >= 0) next[index] = account;
@@ -217,9 +231,11 @@ export function markChatGptNeedsReauth(home: string, id: string, expectedAccessT
   });
 }
 
-export function updateChatGptAccount(home: string, id: string, change: { label?: string; paused?: boolean; preferred?: boolean }): boolean {
+/** `usageCap: null` clears the cap; a number must pass `validUsageCap`. */
+export function updateChatGptAccount(home: string, id: string, change: { label?: string; paused?: boolean; preferred?: boolean; usageCap?: number | null }): boolean {
   const label = change.label?.replace(/[\x00-\x1f\x7f]/g, "").trim().slice(0, 80);
   if (change.label !== undefined && !label) return false;
+  if (change.usageCap !== undefined && change.usageCap !== null && !validUsageCap(change.usageCap)) return false;
   return mutate(home, (accounts) => {
     const index = accounts.findIndex((account) => account.id === id);
     if (index < 0) return { result: false };
@@ -227,6 +243,8 @@ export function updateChatGptAccount(home: string, id: string, change: { label?:
     next[index] = { ...next[index]!, ...(label ? { label } : {}), paused: change.paused ?? accounts[index]!.paused ?? false, preferred: change.preferred ?? accounts[index]!.preferred ?? false, updatedAt: new Date().toISOString() };
     if (!next[index]!.paused) delete next[index]!.paused;
     if (!next[index]!.preferred) delete next[index]!.preferred;
+    if (change.usageCap === null) delete next[index]!.usageCap;
+    else if (change.usageCap !== undefined) next[index]!.usageCap = change.usageCap;
     return { accounts: next, result: true };
   });
 }
@@ -258,6 +276,7 @@ export function summarize(account: ChatGptAccount): ChatGptAccountSummary {
     needsReauth: account.needsReauth === true,
     paused: account.paused === true,
     preferred: account.preferred === true,
+    ...(account.usageCap ? { usageCap: account.usageCap } : {}),
     source: "own",
   };
 }
@@ -333,7 +352,7 @@ export async function refreshChatGptGrant(refreshToken: string, previous: { acco
 const refreshing = new Map<string, Promise<void>>();
 
 /** The credential one account presents, as the shared CredentialPool sees it. */
-export type ChatGptCredential = Credential & { ownerId: string; accountId: string; accessToken: string };
+export type ChatGptCredential = Credential & { ownerId: string; accountId: string; accessToken: string; usageCap?: number };
 
 function credentialOf(ownerId: string, label: string, accessToken: string, accountId: string): ChatGptCredential {
   // The runtime id is the account itself, not its token: a usage limit belongs to the account, and
@@ -398,7 +417,7 @@ export class ChatGptAccountPool {
     const out: ChatGptCredential[] = [];
     for (const account of this.ownAccounts()) {
       if (account.paused || account.needsReauth || this.now() >= account.expiresAt) continue;
-      out.push({ ...credentialOf(account.id, account.label, account.accessToken, account.accountId), preferred: account.preferred === true });
+      out.push({ ...credentialOf(account.id, account.label, account.accessToken, account.accountId), preferred: account.preferred === true, ...(account.usageCap ? { usageCap: account.usageCap } : {}) });
     }
     const codex = this.codexLogin();
     if (codex && this.now() < codex.expiresAt) out.push(credentialOf(CODEX_LOGIN_ID, identityFromTokens(codex).email ?? "Codex CLI login", codex.accessToken, codex.accountId));

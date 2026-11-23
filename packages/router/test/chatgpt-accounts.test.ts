@@ -113,6 +113,41 @@ test("exhaustedForMs: a full window with credits left is not out; refused anyway
   assert.equal(exhaustedForMs({ rate_limits: full, credits: { has_credits: true, unlimited: false } }, now, false), 10_000);
 });
 
+test("store: a usage cap is a whole percent 1-99; null clears it; a re-login keeps it", () => {
+  const home = tempHome();
+  const a = saveChatGptAccount(home, grant("ws-1", "a@example.test"));
+  assert.equal(a.usageCap, undefined, "no cap is the default, and the summary says nothing");
+  for (const bad of [0, 100, 101, -5, 1.5, Number.NaN]) assert.equal(updateChatGptAccount(home, a.id, { usageCap: bad }), false, `${bad} is not a cap`);
+  assert.equal(readChatGptAccounts(home)[0]!.usageCap, undefined);
+  assert.equal(updateChatGptAccount(home, a.id, { usageCap: 70 }), true);
+  assert.equal(readChatGptAccounts(home)[0]!.usageCap, 70);
+  assert.equal(updateChatGptAccount(home, a.id, { paused: true }), true);
+  assert.equal(readChatGptAccounts(home)[0]!.usageCap, 70, "another change leaves the cap alone");
+  saveChatGptAccount(home, grant("ws-1", "a@example.test", "tok-new", "rt-new"));
+  assert.equal(readChatGptAccounts(home)[0]!.usageCap, 70, "signing in again keeps the cap");
+  const pool = new ChatGptAccountPool({ home, mode: "own", log });
+  updateChatGptAccount(home, a.id, { paused: false });
+  assert.equal(pool.peekCredentials()[0]!.usageCap, 70, "the credential carries it");
+  assert.equal(pool.summaries()[0]!.usageCap, 70);
+  assert.equal(updateChatGptAccount(home, a.id, { usageCap: null }), true);
+  assert.equal(readChatGptAccounts(home)[0]!.usageCap, undefined);
+  assert.equal("usageCap" in pool.summaries()[0]!, false);
+});
+
+test("exhaustedForMs: under a cap a window is used up at the cap, and credits do not keep the account usable", () => {
+  const now = 1_000_000;
+  const at = (weekly: number) => ({ rate_limits: { primary: { used_percent: 20, reset_after_seconds: 10 }, secondary: { used_percent: weekly, reset_after_seconds: 3 * 86_400 } } });
+  assert.equal(exhaustedForMs(at(70), now, true, 70), 3 * 86_400_000, "70% at a 70% cap is spent until the weekly reset");
+  assert.equal(exhaustedForMs(at(69), now, true, 70), undefined);
+  assert.equal(exhaustedForMs(at(70), now), undefined, "no cap: exactly as before");
+  assert.equal(exhaustedForMs(at(99), now, true, undefined), undefined);
+  assert.equal(exhaustedForMs({ rate_limits: { primary: { used_percent: 75, reset_after_seconds: 600 }, secondary: { used_percent: 80, reset_after_seconds: 7200 } } }, now, true, 70), 7_200_000, "the window that frees last decides");
+  const credits = { has_credits: true, unlimited: false };
+  assert.equal(exhaustedForMs({ ...at(100), credits }, now), undefined, "no cap: credits carry a full window, as before");
+  assert.equal(exhaustedForMs({ ...at(100), credits }, now, true, 70), 3 * 86_400_000, "under a cap credits do not");
+  assert.equal(exhaustedForMs({ ...at(80), credits: { has_credits: false, unlimited: true } }, now, true, 70), 3 * 86_400_000);
+});
+
 test("pool: a due account refreshes once however many turns ask; a terminal rejection needs sign-in", async () => {
   const home = tempHome();
   saveChatGptAccount(home, { ...grant("ws-1", "a@example.test"), expiresAt: Date.now() + 60_000 });
@@ -218,22 +253,36 @@ function call(conversation: string, text?: string): Promise<{ status: number; bo
   });
 }
 
-type Rig = { home: string; ids: string[]; refreshes: string[] };
-function rig(count: number, tokenFor: (i: number) => string = (i) => `tok-${i}`): Rig {
+type Rig = { home: string; ids: string[]; refreshes: string[]; logFile: string };
+function rig(count: number, tokenFor: (i: number) => string = (i) => `tok-${i}`, opts: { now?: () => number; caps?: Record<number, number> } = {}): Rig {
   const home = tempHome();
   const ids: string[] = [];
   for (let i = 0; i < count; i++) ids.push(saveChatGptAccount(home, { ...grant(`ws-${i}`, `u${i}@example.test`), accessToken: tokenFor(i), refreshToken: `rt-${i}` }).id);
+  for (const [i, cap] of Object.entries(opts.caps ?? {})) updateChatGptAccount(home, ids[Number(i)]!, { usageCap: cap });
+  const logFile = path.join(home, "router.log");
   const refreshes: string[] = [];
   const tokenEndpoint = async (_url: string, init?: RequestInit): Promise<Response> => {
     const rt = new URLSearchParams(String(init?.body)).get("refresh_token") ?? "";
     refreshes.push(rt);
     return new Response(JSON.stringify({ access_token: `${rt}-fresh`, refresh_token: `${rt}-next`, expires_in: 3600 }), { status: 200 });
   };
-  adapter = new ChatGptAdapter("chatgpt", { type: "chatgpt", auth: "own", url: backendUrl }, home, log, new CredentialPool(), tokenEndpoint);
+  adapter = new ChatGptAdapter("chatgpt", { type: "chatgpt", auth: "own", url: backendUrl }, home, new Logger(logFile, 1e9, 0, false), new CredentialPool(opts.now ? { now: opts.now } : {}), tokenEndpoint, opts.now);
   behaviour.clear();
   hits.length = 0;
-  return { home, ids, refreshes };
+  return { home, ids, refreshes, logFile };
 }
+
+/** An answered turn that reports these plan windows (weekly = the secondary window) in its headers. */
+const reading = (used: { fiveHour?: number; weekly?: number }, resetAfter = { fiveHour: 3600, weekly: 3 * 86_400 }, credits?: boolean): Behaviour => ({
+  status: 200,
+  headers: {
+    "x-codex-primary-used-percent": String(used.fiveHour ?? 10), "x-codex-primary-window-minutes": "300", "x-codex-primary-reset-after-seconds": String(resetAfter.fiveHour),
+    "x-codex-secondary-used-percent": String(used.weekly ?? 10), "x-codex-secondary-window-minutes": "10080", "x-codex-secondary-reset-after-seconds": String(resetAfter.weekly),
+    ...(credits ? { "x-codex-credits-has-credits": "True", "x-codex-credits-unlimited": "False", "x-codex-credits-balance": "12" } : {}),
+  },
+});
+
+const capLines = (file: string): string[] => fs.readFileSync(file, "utf8").split("\n").filter((line) => line.includes("(cap "));
 
 const usageLimit = (resetAfter: number): Behaviour => ({
   status: 429,
@@ -365,6 +414,104 @@ test("rotation: a new token does not bring an account at its limit back early", 
   await call("conv-spent-2");
   assert.equal(hits.at(-1)!.token, "tok-1");
   assert.equal(adapter.accountStatus()[0]!.state, "cooling");
+});
+
+// The owner's usage cap: the first account answers once, its reading shows the weekly window at the
+// cap, and from then on turns go to the next account until that window resets (days, past the pool's
+// six-hour clamp on a rest).
+test("usage cap: an account at its cap rests until the window resets, and is not tried again after six hours", async () => {
+  let clock = Date.now();
+  const r = rig(2, undefined, { now: () => clock, caps: { 0: 70 } });
+  behaviour.set("tok-0", reading({ weekly: 72 }));
+  assert.equal((await call("conv-a")).status, 200);
+  assert.deepEqual(hits.map((h) => h.token), ["tok-0"], "the turn that carried the reading is answered, one request over the cap at most");
+  const status = adapter.accountStatus()[0]!;
+  assert.equal(status.state, "cooling");
+  assert.deepEqual(status.capRest, { window: "weekly", used: 72, cap: 70 });
+  assert.ok(Math.abs((status.cooldownSeconds ?? 0) - 3 * 86_400) <= 2, "the rest is the window's real reset, not the pool's six hours");
+  await call("conv-a", "again");
+  await call("conv-b");
+  assert.deepEqual(hits.slice(1).map((h) => h.token), ["tok-1", "tok-1"], "the capped account is skipped, and the held conversation moves");
+  const lines = capLines(r.logFile);
+  assert.equal(lines.length, 1, "one line for the transition, not one per answer");
+  assert.match(lines[0]!, /chatgpt chatgpt: account [0-9a-f]{8} at 72% of weekly \(cap 70%\); resting until \d{4}-\d\d-\d\dT[\d:.]+Z, next account$/);
+  assert.equal(/@|tok-|rt-/.test(lines[0]!), false, "no email or token in the line");
+  clock += 7 * 3_600_000;
+  await call("conv-c");
+  await call("conv-d");
+  assert.deepEqual(hits.slice(3).map((h) => h.token), ["tok-1", "tok-1"], "six hours on, it is still out: no request is spent to find out");
+  assert.equal(adapter.accountStatus()[0]!.state, "cooling");
+  clock += 3 * 86_400_000;
+  behaviour.set("tok-0", reading({ weekly: 4 }));
+  await call("conv-e");
+  assert.equal(hits.at(-1)!.token, "tok-0", "the window has reset: back in rotation");
+  assert.equal(adapter.accountStatus()[0]!.capRest, undefined);
+  assert.equal(adapter.accountStatus()[0]!.state, "ready");
+  assert.equal(capLines(r.logFile).length, 1);
+});
+
+test("usage cap: without a cap the same reading changes nothing; credits do not carry a capped account", async () => {
+  rig(2);
+  behaviour.set("tok-0", reading({ weekly: 72 }));
+  await call("conv-a");
+  await call("conv-b");
+  assert.deepEqual(hits.map((h) => h.token), ["tok-0", "tok-0"], "no cap: the account keeps serving at 72%");
+  assert.equal(adapter.accountStatus()[0]!.state, "ready");
+  assert.equal(adapter.accountStatus()[0]!.capRest, undefined);
+
+  rig(2, undefined, { caps: { 0: 70 } });
+  behaviour.set("tok-0", reading({ weekly: 85 }, undefined, true));
+  await call("conv-c");
+  await call("conv-d");
+  assert.deepEqual(hits.map((h) => h.token), ["tok-0", "tok-1"], "credits left, but the owner said stop at 70%");
+});
+
+test("usage cap: the five-hour window counts too, and a reading under the cap keeps the account in", async () => {
+  const r = rig(2, undefined, { caps: { 0: 50 } });
+  behaviour.set("tok-0", reading({ fiveHour: 49, weekly: 49 }));
+  await call("conv-a");
+  await call("conv-a", "more");
+  assert.deepEqual(hits.map((h) => h.token), ["tok-0", "tok-0"]);
+  behaviour.set("tok-0", reading({ fiveHour: 55, weekly: 20 }));
+  await call("conv-a", "third");
+  await call("conv-a", "fourth");
+  assert.deepEqual(hits.slice(2).map((h) => h.token), ["tok-0", "tok-1"]);
+  assert.match(capLines(r.logFile)[0]!, /at 55% of 5-hour \(cap 50%\)/);
+  assert.ok((adapter.accountStatus()[0]!.cooldownSeconds ?? 0) <= 3600);
+});
+
+test("usage cap: changing or clearing it takes effect at once; a genuine 429 rest is not cleared with it", async () => {
+  const r = rig(2);
+  behaviour.set("tok-0", reading({ weekly: 72 }));
+  await call("conv-a");
+  assert.equal(adapter.accountStatus()[0]!.state, "ready");
+  updateChatGptAccount(r.home, r.ids[0]!, { usageCap: 70 });
+  adapter.usageCapChanged(r.ids[0]!);
+  assert.equal(adapter.accountStatus()[0]!.state, "cooling", "lowering the cap rests the account from the reading already held");
+  assert.equal(adapter.accountStatus()[0]!.usageCap, 70);
+  assert.equal(capLines(r.logFile).length, 1);
+  await call("conv-b");
+  assert.equal(hits.at(-1)!.token, "tok-1");
+  updateChatGptAccount(r.home, r.ids[0]!, { usageCap: 90 });
+  adapter.usageCapChanged(r.ids[0]!);
+  assert.equal(adapter.accountStatus()[0]!.state, "ready", "raising it above the reading brings the account back");
+  updateChatGptAccount(r.home, r.ids[0]!, { usageCap: 60 });
+  adapter.usageCapChanged(r.ids[0]!);
+  assert.equal(adapter.accountStatus()[0]!.state, "cooling");
+  updateChatGptAccount(r.home, r.ids[0]!, { usageCap: null });
+  adapter.usageCapChanged(r.ids[0]!);
+  assert.equal(adapter.accountStatus()[0]!.state, "ready", "clearing it brings the account back");
+  assert.equal(adapter.accountStatus()[0]!.capRest, undefined);
+
+  // A real usage-limit answer is the backend's rest; lifting the cap must leave it standing.
+  const s = rig(2, undefined, { caps: { 0: 70 } });
+  behaviour.set("tok-0", usageLimit(3600));
+  await call("conv-c");
+  assert.equal(adapter.accountStatus()[0]!.state, "cooling");
+  updateChatGptAccount(s.home, s.ids[0]!, { usageCap: null });
+  adapter.usageCapChanged(s.ids[0]!);
+  assert.equal(adapter.accountStatus()[0]!.state, "cooling", "still resting: the backend refused it");
+  assert.ok((adapter.accountStatus()[0]!.cooldownSeconds ?? 0) > 3000);
 });
 
 test("cleanup", () => {

@@ -190,6 +190,13 @@ export type CredentialReport = {
  */
 export class CredentialPool {
   private readonly health = new Map<string, Health>();
+  /**
+   * Accounts the owner asked to leave alone until a stated time (a usage cap the account has reached),
+   * keyed like `health`. Not a failure and not clamped to `MAX_COOLDOWN_MS`: a weekly window that
+   * resets in three days must not come back every six hours to spend one more real request. Kept apart
+   * from `health` so lifting it (cap changed, fresh reading under the cap) never erases a genuine 429 rest.
+   */
+  private readonly holds = new Map<string, number>();
   /** Runtime credential id → the durable account whose cooldowns and failures it shares. */
   private readonly accounts = new Map<string, { ownerId: string; healthKey: string }>();
   /** Runtime credential ids whose token generation a 401 parked; a new generation starts unparked. */
@@ -248,9 +255,13 @@ export class CredentialPool {
     return h;
   }
 
+  private heldUntil(provider: string, id: string): number {
+    return this.holds.get(this.key(provider, this.accountOf(provider, id))) ?? 0;
+  }
+
   private usable(provider: string, id: string, scope?: string): boolean {
     const h = this.healthOf(provider, id);
-    if (this.quarantined.has(this.key(provider, id)) || h.cooldownUntil > this.now()) return false;
+    if (this.quarantined.has(this.key(provider, id)) || h.cooldownUntil > this.now() || this.heldUntil(provider, id) > this.now()) return false;
     if (!scope) return true;
     return (this.health.get(this.scopedKey(provider, id, scope))?.cooldownUntil ?? 0) <= this.now();
   }
@@ -361,6 +372,20 @@ export class CredentialPool {
   }
 
   /**
+   * Keep one account out of `pick` and `hasUsable` until `untilMs` (epoch ms), with no failure charged
+   * and no six-hour clamp. `releaseHold` lifts it; so does the time passing.
+   */
+  hold(provider: string, credential: Credential, untilMs: number): void {
+    this.remember(provider, [credential]);
+    this.holds.set(this.key(provider, this.accountOf(provider, credential.id)), untilMs);
+  }
+
+  /** Lift a hold early. Leaves cooldowns and quarantines alone. */
+  releaseHold(provider: string, id: string): void {
+    this.holds.delete(this.key(provider, this.accountOf(provider, id)));
+  }
+
+  /**
    * A credential that answered is not rejected, so a quarantine lifts and the failure count resets.
    *
    * An unexpired cooldown is left alone. Requests overlap, and a 200 arriving after a concurrent
@@ -384,10 +409,12 @@ export class CredentialPool {
       this.quarantined.delete(runtime);
       const account = this.key(provider, this.accounts.get(runtime)?.healthKey ?? id);
       this.health.delete(account);
+      this.holds.delete(account);
       for (const k of [...this.health.keys()]) if (k.startsWith(`${account}#`)) this.health.delete(k);
       return;
     }
     for (const key of [...this.health.keys()]) if (key.startsWith(`${provider}/`)) this.health.delete(key);
+    for (const key of [...this.holds.keys()]) if (key.startsWith(`${provider}/`)) this.holds.delete(key);
     for (const key of [...this.quarantined]) if (key.startsWith(`${provider}/`)) this.quarantined.delete(key);
   }
 
@@ -401,10 +428,12 @@ export class CredentialPool {
     for (const key of [...this.health.keys()]) {
       if (key === account || key.startsWith(`${account}#`) || key.startsWith(`${account}:`)) this.health.delete(key);
     }
+    this.holds.delete(account);
     for (const [runtime, record] of [...this.accounts]) {
       // Two providers can share one login ("current"): each clear forgets only its own mappings.
       if (record.ownerId !== ownerId || !runtime.startsWith(`${provider}/`)) continue;
       const health = this.key(provider, record.healthKey);
+      this.holds.delete(health);
       for (const key of [...this.health.keys()]) {
         if (key === health || key.startsWith(`${health}#`) || key.startsWith(`${health}:`)) this.health.delete(key);
       }
@@ -433,12 +462,13 @@ export class CredentialPool {
     return credentials.map((c) => {
       const h = this.healthOf(provider, c.id);
       const quarantined = this.quarantined.has(this.key(provider, c.id));
-      const cooling = !quarantined && h.cooldownUntil > now;
+      const until = Math.max(h.cooldownUntil, this.heldUntil(provider, c.id));
+      const cooling = !quarantined && until > now;
       return {
         id: c.id,
         ...(c.label ? { label: c.label } : {}),
         state: quarantined ? "quarantined" : cooling ? "cooling" : "ready",
-        ...(cooling ? { cooldownSeconds: Math.ceil((h.cooldownUntil - now) / 1000) } : {}),
+        ...(cooling ? { cooldownSeconds: Math.ceil((until - now) / 1000) } : {}),
         failures: h.failures,
         paused: c.paused === true,
         preferred: c.preferred === true,

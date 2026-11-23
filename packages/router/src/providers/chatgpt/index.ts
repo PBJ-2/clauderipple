@@ -246,18 +246,30 @@ function windowResetMs(w: Window, now: number): number | undefined {
  * is full — the account is not out, whatever else the snapshot says — and undefined when the
  * account has credits to spend past the window: the backend keeps serving it, and when the credits
  * run out it says so with a 429, which rests the account the ordinary way.
+ *
+ * With a `cap` (the account's own usage cap, a whole percent below 100) a window counts as used up
+ * at `used_percent >= cap`, and credits never keep the account usable: the cap is the owner saying
+ * "stop here", and credits only start being spent past 100%.
  */
-export function exhaustedForMs(snapshot: Record<string, unknown> | null | undefined, now = Date.now(), creditsCount = true): number | undefined {
+export function exhaustedForMs(snapshot: Record<string, unknown> | null | undefined, now = Date.now(), creditsCount = true, cap?: number): number | undefined {
+  const capped = cap !== undefined && cap < 100;
   const credits = snapshot?.credits as { has_credits?: unknown; unlimited?: unknown; overage_limit_reached?: unknown } | undefined;
-  if (creditsCount && credits && (credits.has_credits === true || credits.unlimited === true) && credits.overage_limit_reached !== true) return undefined;
+  if (creditsCount && !capped && credits && (credits.has_credits === true || credits.unlimited === true) && credits.overage_limit_reached !== true) return undefined;
+  return windowsAtLeast(snapshot, capped ? cap : 100, now)[0]?.resetMs;
+}
+
+/** A plan window at or over a percent, newest-reset first, named the way the dashboard names it. */
+export type SpentWindow = { name: "5-hour" | "weekly"; used: number; resetMs: number };
+
+/** The windows whose `used_percent` is at least `threshold`, the one that frees last first. */
+export function windowsAtLeast(snapshot: Record<string, unknown> | null | undefined, threshold: number, now = Date.now()): SpentWindow[] {
   const limits = (snapshot?.rate_limits ?? null) as { primary?: Window | null; secondary?: Window | null } | null;
-  let out: number | undefined;
-  for (const w of [limits?.primary, limits?.secondary]) {
-    if (!w || typeof w.used_percent !== "number" || w.used_percent < 100) continue;
-    const ms = windowResetMs(w, now) ?? 60_000;
-    out = Math.max(out ?? 0, ms);
+  const out: SpentWindow[] = [];
+  for (const [name, w] of [["5-hour", limits?.primary], ["weekly", limits?.secondary]] as const) {
+    if (!w || typeof w.used_percent !== "number" || w.used_percent < threshold) continue;
+    out.push({ name, used: w.used_percent, resetMs: windowResetMs(w, now) ?? 60_000 });
   }
-  return out;
+  return out.sort((a, b) => b.resetMs - a.resetMs);
 }
 
 /** How a send across the accounts ended. Each caller speaks its own client's wire for the failures. */
@@ -275,6 +287,8 @@ export type ChatGptAccountStatus = ChatGptAccountSummary & {
   state: "ready" | "cooling" | "quarantined" | "paused" | "needs-login";
   cooldownSeconds?: number;
   quota: Record<string, unknown> | null;
+  /** Set while the account rests because a window reached its usage cap (not because the backend refused it). */
+  capRest?: { window: SpentWindow["name"]; used: number; cap: number };
   active: boolean;
   inUse: boolean;
 };
@@ -290,12 +304,18 @@ export class ChatGptAdapter {
   private readonly rateLimitsByAccount = new Map<string, Record<string, unknown>>();
   /** The account that answered last: the one whose quota the single-number readers see. */
   private activeOwner: string | null = null;
+  /** When each account's latest quota snapshot was taken, so a cap changed later is judged against that reading's own reset clock. */
+  private readonly readAt = new Map<string, number>();
+  /** Accounts held out of rotation because a window reached the owner's usage cap, and until when. */
+  private readonly capHolds = new Map<string, { until: number; window: SpentWindow["name"]; used: number; cap: number }>();
+  private readonly now: () => number;
 
-  constructor(name: string, cfg: ChatGptProvider, home: string, log: Logger, pool = new CredentialPool(), fetchImpl?: FetchLike) {
+  constructor(name: string, cfg: ChatGptProvider, home: string, log: Logger, pool = new CredentialPool(), fetchImpl?: FetchLike, now: () => number = Date.now) {
     this.name = name;
     this.cfg = cfg;
     this.log = log;
     this.pool = pool;
+    this.now = now;
     this.accounts = new ChatGptAccountPool({ home, mode: cfg.auth ?? "auto", log, ...(fetchImpl ? { fetch: fetchImpl } : {}) });
   }
 
@@ -318,8 +338,43 @@ export class ChatGptAdapter {
   private noteRateLimits(credential: ChatGptCredential, snapshot: Record<string, unknown> | null): void {
     if (!snapshot) return;
     this.rateLimitsByAccount.set(credential.ownerId, snapshot);
+    this.readAt.set(credential.ownerId, this.now());
     const outMs = exhaustedForMs(snapshot);
     if (outMs !== undefined) this.pool.penalise(this.name, credential.id, 429, outMs);
+    this.applyUsageCap(credential.ownerId, credential.usageCap);
+  }
+
+  /**
+   * Judge an account's latest reading against its usage cap. At or over the cap, the account is held
+   * out until the window that is over frees (not clamped to the pool's six hours, so a weekly window
+   * days away does not bring the account back every six hours to spend one more real request); under
+   * it, or with no cap, any hold is lifted. One log line when a hold starts, never one per reading.
+   * A genuine 429 rest is the pool's own and is not touched here.
+   */
+  private applyUsageCap(ownerId: string, cap: number | undefined): void {
+    const snapshot = this.rateLimitsByAccount.get(ownerId);
+    const readAt = this.readAt.get(ownerId);
+    const now = this.now();
+    const spent = cap && snapshot && readAt !== undefined ? windowsAtLeast(snapshot, cap, readAt)[0] : undefined;
+    const until = spent ? readAt! + spent.resetMs : 0;
+    if (!cap || !spent || until <= now) {
+      if (this.capHolds.delete(ownerId)) this.pool.releaseHold(this.name, ownerId);
+      return;
+    }
+    const held = this.capHolds.get(ownerId);
+    this.capHolds.set(ownerId, { until, window: spent.name, used: spent.used, cap });
+    this.pool.hold(this.name, { id: ownerId, ownerId, headers: {} }, until);
+    if (held && held.until > now) return;
+    this.log.info(`chatgpt ${this.name}: account ${ownerId.slice(0, 8)} at ${Math.floor(spent.used)}% of ${spent.name} (cap ${cap}%); resting until ${new Date(until).toISOString()}, next account`);
+  }
+
+  /**
+   * The dashboard changed (or cleared) an account's usage cap: judge the reading we already hold
+   * against the new cap now, rather than at the next response. Reads the cap from the store, since
+   * a paused account is not among the credentials a turn sees.
+   */
+  usageCapChanged(ownerId: string): void {
+    this.applyUsageCap(ownerId, this.accounts.ownAccounts().find((account) => account.id === ownerId)?.usageCap);
   }
 
   describeAuth(): string {
@@ -345,9 +400,12 @@ export class ChatGptAdapter {
       const credential = credentials.find((c) => c.ownerId === summary.id);
       const report = credential ? reports.get(credential.id) : undefined;
       const state: ChatGptAccountStatus["state"] = summary.paused ? "paused" : !credential ? "needs-login" : report?.state ?? "ready";
+      const held = this.capHolds.get(summary.id);
+      const capRest = held && held.until > this.now() && summary.usageCap ? { window: held.window, used: held.used, cap: held.cap } : undefined;
       return {
         ...summary,
         state,
+        ...(capRest ? { capRest } : {}),
         ...(report?.cooldownSeconds ? { cooldownSeconds: report.cooldownSeconds } : {}),
         quota: this.rateLimitsByAccount.get(summary.id) ?? null,
         active: summary.id === this.activeOwner,
@@ -359,6 +417,7 @@ export class ChatGptAdapter {
   /** Put a cooling account back into rotation now (dashboard action). */
   clearCooldown(ownerId: string): void {
     this.pool.clear(this.name, ownerId);
+    this.capHolds.delete(ownerId);
   }
 
   /**
@@ -700,7 +759,8 @@ export class ChatGptAdapter {
     // limit was reset or the plan topped up, and the account stayed refused until the old reset time
     // otherwise (2026-10-14: credits added at 15:50, still "cooling" until 21:42). Only this asked-for
     // figure does it, never the headers of the 429 that started the cooldown.
-    if (exhaustedForMs(parsed) === undefined && this.accounts.peekCredentials().some((c) => c.id === tokens.id && !this.pool.hasUsable(this.name, [c]))) {
+    // Under a usage cap "room" means room under the cap, so an account the owner capped stays out.
+    if (exhaustedForMs(parsed, this.now(), true, tokens.usageCap) === undefined && this.accounts.peekCredentials().some((c) => c.id === tokens.id && !this.pool.hasUsable(this.name, [c]))) {
       this.pool.clear(this.name, tokens.id);
       this.log.info(`chatgpt ${this.name}: account ${tokens.ownerId.slice(0, 8)} has room again; back in rotation`);
     }

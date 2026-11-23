@@ -339,6 +339,7 @@ proxy
         models: (name) => proxy.chatgptFetchModels(name),
         accounts: () => proxy.chatgptAccounts(),
         clearCooldown: (id) => proxy.chatgptClearCooldown(id),
+        usageCapChanged: (id) => proxy.chatgptUsageCapChanged(id),
       }),
       google: () => ({
         accounts: () => proxy.googleAccounts(),
