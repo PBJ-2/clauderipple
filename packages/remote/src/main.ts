@@ -39,6 +39,7 @@ import { installService, uninstallService, serviceStatus, servicePaths, renderSe
 import { Sessions } from "./sessions.ts";
 import { REMOTE_USAGE } from "./usage.ts";
 import { desktopHandoff } from "./handoff.ts";
+import { installCrashHandlers } from "./crash-guard.ts";
 import { windowsSidebarRoot } from "./sidebar.ts";
 import type { QueryFn } from "./sessions.ts";
 import { claudeBinary, claudeCodeLogin } from "../../cli/src/claude-auth.ts";
@@ -134,6 +135,9 @@ async function runHost(): Promise<void> {
   if (!process.stdout.isTTY) stampLines(process.stdout);
   if (!process.stderr.isTTY) stampLines(process.stderr);
   const log = (line: string): void => { process.stderr.write(`${line}\n`); };
+  // A rejection nobody awaited is logged and the host keeps running; an uncaught exception is logged
+  // and exits non-zero so the supervisor relaunches it (launchd KeepAlive, the Windows launcher loop).
+  installCrashHandlers(process, { log, exit: code => process.exit(code), context: () => ` [${VERSION}, up ${Math.round(process.uptime())}s]` });
   applyProcessPriority(new ConfigStore(routerConfigPath()).get().processPriority, { log });
   // The desktop registry needs the process list to tell a live Claude app session from a closed one
   // (issue #70). Read it in the background while the rest of the setup runs; it is awaited, bounded,

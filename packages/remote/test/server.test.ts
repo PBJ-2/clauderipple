@@ -445,6 +445,49 @@ test("a send racing Stop receives a correlated error, then its retry is acknowle
   assert.deepEqual(users, ["first", "keep this"]);
 });
 
+for (const mode of ["rejects", "never answers"] as const) test(`Stop ends the turn and the phone stays connected when the CLI's interrupt ${mode} (#162)`, async t => {
+  const endTurn = Promise.withResolvers<void>();
+  const users: string[] = [];
+  const closed: number[] = [];
+  let interrupts = 0, queries = 0;
+  const f = await memoryHost(t, params => {
+    const generation = ++queries;
+    return {
+      async *[Symbol.asyncIterator]() {
+        for await (const user of params.prompt) {
+          users.push(String(user.message.content));
+          if (generation === 1) await endTurn.promise;
+          yield { type: "result", subtype: "success" };
+        }
+      },
+      interrupt: () => { interrupts++; return mode === "rejects" ? Promise.reject(new Error("CLI is gone")) : new Promise<void>(() => {}); },
+      setModel: async () => {}, setPermissionMode: async () => {},
+      close: () => { closed.push(generation); endTurn.resolve(); },
+    };
+  });
+  await f.sessions.send(f.id, "first", "first");
+  await nextTick();
+  assert.equal(f.sessions.summaryOf(f.id)?.state, "running");
+  f.peer.receive({ t: "interrupt", session: f.id, reqId: "stop" });
+  // A silent CLI is given its bound (the clock is mocked); a refusing one answers at once.
+  for (let i = 0; i < 50 && !f.peer.frames.some(frame => frame.t === "res"); i++) { await nextTick(); t.mock.timers.tick(10_000); }
+  const stopped = await f.peer.take("res");
+  assert.equal(stopped.reqId, "stop");
+  // A refusal still reaches the phone as the error it is; silence past the bound counts as stopped.
+  assert.equal(stopped.ok, mode !== "rejects");
+  if (!stopped.ok) assert.equal(stopped.error, "CLI is gone");
+  assert.equal(interrupts, 1);
+  assert.deepEqual(closed, [1], "the CLI that would not answer is closed");
+  assert.equal(f.sessions.summaryOf(f.id)?.state, "idle");
+  assert.equal(f.sessions.log(f.id).tail().events.some(e => e.kind === "notice" && e.code === "interrupted"), mode !== "rejects");
+  // The connection survived, and the session takes its next message on a fresh query.
+  f.peer.receive({ t: "ping", n: 7 });
+  assert.equal((await f.peer.take("pong")).n, 7);
+  await f.sessions.send(f.id, "second", "second");
+  for (let i = 0; i < 50 && users.length < 2; i++) await nextTick();
+  assert.deepEqual(users, ["first", "second"]);
+});
+
 test("attachment upload is chunked, checks offsets, and sends image blocks", async t => {
   const f = await fixture(t);
   const id = await f.create();
