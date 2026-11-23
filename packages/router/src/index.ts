@@ -394,8 +394,13 @@ proxy
         .finally(() => measureUnsettledModels(adminDeps));
     }, 60_000).unref();
     // Claude releases reach the declared models without a ClaudeRipple release: checked a minute in,
-    // then every six hours (the catalogue itself is cached for an hour).
-    const adopt = () => void adoptNewClaudeModels(adminDeps).catch((e: Error) => log!.warn(`claude models: ${e.message}`));
+    // then every six hours. A missed pass also runs when the catalogue first gets a list.
+    let adoptionMissed = false;
+    const adopt = () => void adoptNewClaudeModels(adminDeps)
+      .then((declared) => { adoptionMissed = declared === null; })
+      .catch((e: Error) => log!.warn(`claude models: ${e.message}`));
+    // A pass that found no list runs again as soon as the first list arrives, not six hours later.
+    proxy.claudeModels.onFirstList(() => { if (adoptionMissed) adopt(); });
     setTimeout(adopt, 60_000).unref();
     setInterval(adopt, 6 * 60 * 60_000).unref();
   })

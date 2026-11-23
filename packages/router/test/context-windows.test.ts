@@ -122,6 +122,22 @@ test("empty user modelSettings stays untouched and agent-file effort ids share b
   assert.deepEqual(Object.keys(claimsOf(readOwners(f.file).store, f.home)!.compactWindows!).sort(), Object.keys(boot.auto_compact_windows).sort());
 });
 
+test("offline native catalogue falls back to the stored Anthropic window", t => {
+  const f = fixture(t);
+  f.cfg.providers.native!.models = [{ id: "claude-opus-5-5", contextWindow: 500000 }];
+  const snapshot = contextWindowSnapshot(f.cfg, [{ id: "claude-opus-5-5" }], []);
+  assert.equal(snapshot.windows["claude-opus-5-5"], 500000);
+  assert.equal(snapshot.resolvedWindows["claude-opus-5-5"]?.contextWindow, 500000);
+});
+
+test("live native catalogue window wins over the stored Anthropic window", t => {
+  const f = fixture(t);
+  f.cfg.providers.native!.models = [{ id: "claude-opus-5-5", contextWindow: 500000 }];
+  const snapshot = contextWindowSnapshot(f.cfg, [{ id: "claude-opus-5-5", contextWindow: 1000000 }], []);
+  assert.equal(snapshot.windows["claude-opus-5-5"], 1000000);
+  assert.equal(snapshot.resolvedWindows["claude-opus-5-5"]?.contextWindow, 1000000);
+});
+
 test("context API exposes per-model effective windows including native Claude without modifying settings", async t => {
   const f = fixture(t);
   f.save({ autoCompactWindow: 600000, modelSettings: { "gpt-test@high": { autoCompactWindow: 200000 } } });

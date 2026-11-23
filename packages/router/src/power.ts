@@ -10,7 +10,7 @@
 //        until the router restarts.
 
 import fs from "node:fs";
-import { writeJsonAtomic } from "./locked-file.ts";
+import { withFileLock, writeJsonAtomic } from "./locked-file.ts";
 import type { AwakeMode } from "./config.ts";
 import type { AwakeStatus } from "./awake.ts";
 import type { TetherStatus } from "./tether.ts";
@@ -84,26 +84,28 @@ export function persistPowerChange(configFile: string, change: PowerChange): boo
   const awake = change.awake ?? {};
   const tether = change.tether ?? {};
   if (awake.mode === undefined && awake.until === undefined && tether.enabled === undefined && tether.hotspotSsid === undefined) return false;
-  let raw: Record<string, unknown> = {};
-  try {
-    raw = JSON.parse(fs.readFileSync(configFile, "utf8")) as Record<string, unknown>;
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
-  }
-  if (awake.mode !== undefined || awake.until !== undefined) {
-    const next = { ...((raw.awake as Record<string, unknown> | undefined) ?? {}) };
-    if (awake.mode !== undefined) next.mode = awake.mode;
-    if (awake.until === null) delete next.until;
-    else if (awake.until !== undefined) next.until = awake.until;
-    raw.awake = next;
-  }
-  if (tether.enabled !== undefined || tether.hotspotSsid !== undefined) {
-    raw.tether = {
-      ...((raw.tether as Record<string, unknown> | undefined) ?? {}),
-      ...(tether.enabled !== undefined ? { enabled: tether.enabled } : {}),
-      ...(tether.hotspotSsid !== undefined ? { hotspotSsid: tether.hotspotSsid } : {}),
-    };
-  }
-  writeJsonAtomic(configFile, raw);
-  return true;
+  return withFileLock(configFile, () => {
+    let raw: Record<string, unknown> = {};
+    try {
+      raw = JSON.parse(fs.readFileSync(configFile, "utf8")) as Record<string, unknown>;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    }
+    if (awake.mode !== undefined || awake.until !== undefined) {
+      const next = { ...((raw.awake as Record<string, unknown> | undefined) ?? {}) };
+      if (awake.mode !== undefined) next.mode = awake.mode;
+      if (awake.until === null) delete next.until;
+      else if (awake.until !== undefined) next.until = awake.until;
+      raw.awake = next;
+    }
+    if (tether.enabled !== undefined || tether.hotspotSsid !== undefined) {
+      raw.tether = {
+        ...((raw.tether as Record<string, unknown> | undefined) ?? {}),
+        ...(tether.enabled !== undefined ? { enabled: tether.enabled } : {}),
+        ...(tether.hotspotSsid !== undefined ? { hotspotSsid: tether.hotspotSsid } : {}),
+      };
+    }
+    writeJsonAtomic(configFile, raw);
+    return true;
+  });
 }

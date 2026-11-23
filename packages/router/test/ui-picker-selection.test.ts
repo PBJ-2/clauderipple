@@ -871,6 +871,37 @@ test('a model with no known window says so on its provider, naming the fallback 
   assert.deepEqual((single.children[0]!.children[0]!.attrs.sub as NoteNode[]).map((node) => node.attrs.text), ['jev-1.13', 'providers.windowUnknownNoFallback']);
 });
 
+// models.dev files no Mythos, and the router no longer writes the account list's window into the
+// config, so a native Claude model reads it from `/api/context-windows` — on a provider that signs
+// in as Claude Code, whose login that list is. An API-key provider is another account (2026-11-20).
+test('a native Claude model on a Claude Code provider takes its window from the login\'s list, and an API-key provider does not', () => {
+  const source = fs.readFileSync(new URL('../../ui/app.js', import.meta.url), 'utf8');
+  const block = (from: string, to: string): string => {
+    const start = source.indexOf(from), end = source.indexOf(to, start);
+    assert.ok(start >= 0 && end > start, `missing app.js block: ${from}`);
+    return source.slice(start, end);
+  };
+  type NoteNode = { tag: string; attrs: Record<string, unknown>; children: NoteNode[] };
+  const el = (tag: string, attrs: Record<string, unknown> = {}, children: NoteNode[] = []): NoteNode =>
+    ({ tag, attrs, children: children.filter(Boolean) });
+  const cell = (label: string, value: NoteNode | null, sub: NoteNode[] | string | null, extraClass?: string): NoteNode =>
+    el('div', { class: `cell ${extraClass ?? ''}`, label, sub: (Array.isArray(sub) ? sub : [sub]).filter(Boolean) }, [value as NoteNode]);
+  const section = (title: string, rows: NoteNode[], footer?: string, action?: NoteNode): NoteNode => el('section', { title, footer, action }, rows);
+  const panel = new Function('el', 'cell', 'section', 't', 'modelsOf', 'labelOf', 'modelEffortTag', 'openProviderForm', `
+    let currentConfig = { cli: { autoCompactWindow: 200000 } }, pickerContextWindows = { windows: { 'claude-mythos-5-2': 1000000, 'claude-haiku-4-5': 200000 }, catalogWindows: {} };
+    const formatNumber = value => value.toLocaleString('en-US');
+    ${block('function discoveredContextWindow(', 'let currentConfig =')}
+    ${block('function providerModelsPanel(', 'async function saveAnthropicRotation(')}
+    return providerModelsPanel;
+  `)(el, cell, section, (key: string) => key, (provider: { models: unknown[] }) => provider.models, (model: { id: string }) => model.id, () => null, () => {}) as
+    (name: string, provider: { type: string; auth: string; models: { id: string }[] }) => NoteNode;
+  const notes = (rendered: NoteNode): unknown[][] => rendered.children[0]!.children.map((row) =>
+    (row.attrs.sub as NoteNode[]).filter((node) => node.attrs.class === 'cell-sub warn-text').map((node) => node.attrs.text));
+  const models = [{ id: 'claude-mythos-5-2' }, { id: 'claude-haiku-4-5-20251001' }, { id: 'claude-unlisted' }];
+  assert.deepEqual(notes(panel('anthropic', { type: 'anthropic', auth: 'claude-code', models })), [[], [], ['providers.windowUnknown']]);
+  assert.deepEqual(notes(panel('console', { type: 'anthropic', auth: 'api-key', models })), [['providers.windowUnknown'], ['providers.windowUnknown'], ['providers.windowUnknown']]);
+});
+
 test('a repeated status refresh leaves a window being typed and the slot selects in place', async () => {
   const ui = await pickerWindowHarness({});
   ui.render();
