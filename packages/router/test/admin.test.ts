@@ -2239,6 +2239,11 @@ test("a token-shaped string in the CLI's last line reaches neither `error` nor t
   // layer may print one; each sits where the 300-character cut could otherwise leave its front showing.
   const cases: [string, string][] = [
     [`error: Unexpected token 'x', ..."AUTH_TOKEN": "${key}" x"... is not valid JSON`, key],
+    // Node 24 quotes a short excerpt, with or without the leading `...`; the fragment can be too
+    // short for the 24-character run rule, so the excerpt must be dropped whole.
+    [`error: Unexpected token 'a', ..."ANTHROPIC_AUTH_TOKEN": abcd1234ef"... is not valid JSON`, "abcd1234ef"],
+    [`error: Unexpected token ''', ..."ANTHROPIC_AUTH_TOKEN": 'sk-ant-x1"... is not valid JSON`, "sk-ant-x1"],
+    [`error: Unexpected token 'a', "{"env": {"A"... is not valid JSON`, `"{"env"`],
     [`error: bad value ${jwt} in settings`, jwt],
     [`error: header was Authorization: Bearer ${opaque}`, opaque],
     [`error: ${"w ".repeat(140)}${opaque}${opaque}`, opaque.slice(0, 12)],
@@ -2261,6 +2266,12 @@ test("a token-shaped string in the CLI's last line reaches neither `error` nor t
     const res = await fetch(`${base()}:${port}/api/picker`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: true }) });
     assert.equal((await res.json() as { error: string }).error, plain);
   }, { runCli: async () => ({ ok: false, output: plain }) });
+  // An all-capitals constant, even one long enough for the run rule, is an error code and survives.
+  const code = "error: certutil: SEC_ERROR_PKCS11_DEVICE_ERROR: the token reader is not usable";
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const res = await fetch(`${base()}:${port}/api/picker`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: true }) });
+    assert.equal((await res.json() as { error: string }).error, code);
+  }, { runCli: async () => ({ ok: false, output: code }) });
 });
 
 test("status says whether the Claude desktop app has been on this computer (#183)", async () => {
