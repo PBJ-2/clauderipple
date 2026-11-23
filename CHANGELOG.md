@@ -1,5 +1,80 @@
 # Changelog
 
+## 0.12.46 — 2026-11-23
+
+### Added
+
+- **A ChatGPT account can be capped at a share of its plan (#184, thanks @Lahai-Roi).** Each of your
+  own ChatGPT accounts takes a usage cap from 1 to 99 percent. Once either the 5-hour or the weekly
+  window has used that much, the account gets no more turns until that window frees, so part of the
+  shared Codex/ChatGPT allowance stays free for chat. With no cap the account behaves as before. The
+  account row shows the cap, the reading that reached it and a "cap reached" badge with the time left;
+  credits are not used under a cap, and one request can go slightly over it. A cap hold has no "use
+  now", and when every account waits on a cap the answer names the caps and tells the client not to
+  retry. The cap belongs to the account, so every ChatGPT provider on the same account honours it.
+- **The dashboard picks which providers and accounts the band's limits row shows (#179, thanks
+  @csa906).** In the Look card, each provider the limits read lists gets a choice: the account in use
+  (the default), all accounts, chosen accounts, or hidden. The compact Claude figure follows the same
+  choice, and a chosen account that has no reading shows nothing rather than another account's figure.
+  The choice survives a mod that predates this release saving its settings.
+- **`/ripple warm` says what it did, and works without the band (#182, thanks @lucas-distill).** Over
+  SSH, where no band is drawn and the flame cannot be pressed, the command now answers with the new
+  state for this chat and what new chats do. It reads the saved Settings first, so the answer is right
+  just after Keep warm was changed in the dashboard; when the router cannot be read, it says so
+  instead of guessing. The READMEs list it as the way to toggle keep-warm without the band.
+- **A phone session on a host that cannot hand sessions to the Claude app says so (#181, thanks
+  @lucas-distill).** On Linux, and on an SSH server whose Claude app lives on another computer, a
+  session started from the phone stayed "pending" with nothing said. A notice now appears once in the
+  session: it is not in the Claude desktop app, this computer cannot move sessions there, and the
+  phone keeps working.
+
+### Fixed
+
+- **Claude models show the context window the account's own model list states (#178, thanks
+  @115dkk).** `claude-mythos-5-1` and `claude-mythos-5-2` showed an unknown window in the dashboard
+  although the API states 1,000,000 for each. A native Claude model's window now comes from the
+  current login's list, and a window you set yourself is never overwritten.
+- **A failed Claude model lookup is retried within seconds, not after an hour (#178, thanks
+  @115dkk).** One refused lookup right after a restart left the dashboard with only the offline list,
+  with no Mythos and no windows, for the next hour. A failure is now tried again after 30 seconds,
+  waiting longer on repeated misses and honouring a Retry-After from Anthropic; a good list is still
+  kept for the hour, and the last good list stays when a refresh fails.
+- **Saving the configuration from two places at once no longer loses one change (#178, thanks
+  @115dkk).** Every rewrite of `config.json` (the dashboard, the power settings, `clauderipple remote
+  add`, and the router's own background updates) now reads, changes and writes under one lock.
+- **A thread continue keeps the effort set by its `@effort` marker (#180, thanks @csa906).**
+  Anthropic stores a thread's effort and refuses a continue that differs, so a Workflow worker sent
+  with `[[ripple: x@xhigh]]` had every continue refused with a 400 and replayed in full (579 times in
+  one week). A continue now repeats the effort its thread was sent with, but only when that effort
+  came from the marker and nothing else about the request changed, so a real change still reaches
+  Anthropic.
+- **Picker and settings failures say why (#183, thanks @lucas-distill).** On a headless Linux server
+  the dashboard's picker switch flipped back with only "HTTP 500". The picker, Codex, agent-title,
+  status-mod and the Claude and Google login/logout actions now show the command's own last line
+  as the reason. Anything that looks like a credential in that line is masked before it is shown or
+  logged, including a fragment quoted by a JSON error message.
+- **A computer without the Claude desktop app says so, and nothing is refused (#183, thanks
+  @lucas-distill).** The dashboard and `clauderipple picker on` now only advise when the app is not
+  found, since the check is a guess and an app in an unusual place is still valid. A folder holding
+  only what ClaudeRipple itself makes no longer counts as the app.
+- **The host no longer keeps a stale Claude Desktop CLI folder on its PATH (#162, thanks
+  @Lahai-Roi).** After Claude Code updated, a Windows phone host kept starting the old versioned
+  folder. It now drops those folders from its own PATH when it starts, so an installed service
+  recovers without a reinstall, and keeps the rest of the PATH order as it was. The cleanup cannot
+  keep the host from starting, and a configured Claude path still wins.
+- **Stop on the phone no longer ends the host silently (#162, thanks @Lahai-Roi).** Stop waits for
+  the Claude CLI to exit as before, now logging that it asked, how long the answer took, and a line
+  once it has waited 10 seconds. A stray unhandled rejection is logged with its stack and the
+  host exits so the supervisor restarts it, as it already did for an uncaught exception; the crash
+  line is written before the host exits.
+- **Renaming an account and setting the usage cap work in the desktop app (#184, thanks
+  @Lahai-Roi).** Both asked the browser for a dialog, which the desktop app does not support, so the
+  buttons did nothing. They now open a small box in the account row: Enter saves, Escape cancels, and
+  a blank name cannot be saved. What you type, the cursor and an input method's unfinished text stay
+  through the list's ten-second refresh, and a failed refresh leaves an open box alone.
+- **A Korean `/ripple warm` reply says plainly what cannot be known.** When Settings cannot be read,
+  the reply now says it cannot confirm what new chats start with.
+
 ## 0.12.45 — 2026-11-20
 
 ### Fixed
