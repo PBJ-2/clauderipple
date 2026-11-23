@@ -9,8 +9,9 @@ import { PowerHold } from "../src/power.ts";
 import type { Held } from "../src/power.ts";
 import { Notifier, loadVapid, pushFor } from "../src/push.ts";
 import type { Sender } from "../src/push.ts";
-import { LABEL, agentPath, cliLoginWarning, dropStaleClaudePath, install, parseLaunchctlPrint, plist, putClaudeOnPath, specFor, uninstall } from "../src/service.ts";
-import { insideDesktopClaudeCache, withoutDesktopClaudeCache } from "../../cli/src/claude-auth.ts";
+import { LABEL, agentPath, cliLoginWarning, dropStaleClaudePath, findClaude, install, parseLaunchctlPrint, plist, putClaudeOnPath, resolveHostClaude, specFor, uninstall } from "../src/service.ts";
+import { desktopClaudeCacheRoots, insideDesktopClaudeCache, withoutDesktopClaudeCache, type CacheRootOptions } from "../../cli/src/claude-auth.ts";
+import { windowsDesktopRoots } from "../src/desktop-paths.ts";
 import type { EventBody, PushSubscriptionJSON, SessionSummary } from "../src/protocol.ts";
 import { posixModes, posixPaths } from "../../../test/capabilities.ts";
 
@@ -97,6 +98,94 @@ test("a host that starts with a stale PATH entry drops it and puts the launcher 
   const none: Record<string, string | undefined> = {};
   dropStaleClaudePath(none, { platform: "linux", cacheRoots: ["/x"] });
   assert.deepEqual(none, {}, "no PATH stays no PATH");
+});
+
+// A Windows machine whose Claude-Data directory cannot be read, built from a real error: a regular file
+// where the directory should be makes readdir fail with ENOTDIR, not the ENOENT the scan accepts.
+function unreadableProfiles(t: { after(fn: () => void): void }): { rootOptions: CacheRootOptions; localAppData: string } {
+  const dir = tmp(t);
+  const localAppData = path.join(dir, "Local");
+  fs.mkdirSync(localAppData, { recursive: true });
+  fs.writeFileSync(path.join(localAppData, "Claude-Data"), "not a directory");
+  assert.throws(() => windowsDesktopRoots(localAppData), (error: NodeJS.ErrnoException) => error.code === "ENOTDIR");
+  return { localAppData, rootOptions: { platform: "win32", home: dir, env: { LOCALAPPDATA: localAppData, APPDATA: path.join(dir, "Roaming") }, windowsRoots: windowsDesktopRoots } };
+}
+
+test("an unreadable Claude Desktop profile directory never stops the PATH cleanup or the baked PATH (#162)", t => {
+  const { rootOptions, localAppData } = unreadableProfiles(t);
+  const lines: string[] = [];
+  const roots = desktopClaudeCacheRoots({ ...rootOptions, onError: error => lines.push(`scan: ${(error as Error).message}`) });
+  assert.equal(lines.length, 1, "the failed scan is reported, not swallowed");
+  assert.equal(roots.length, 2, "the two fixed legacy roots are still listed");
+  assert.ok(roots.every(root => root.endsWith("claude-code")));
+  assert.ok(localAppData.length > 0);
+
+  // agentPath: no throw, the baked list is still built, and the log says why nothing was stripped for the profiles.
+  const log: string[] = [];
+  const baked = agentPath("C:\\Tools\\claude.exe", "C:\\Program Files\\nodejs\\node.exe", { platform: "win32", pathValue: "C:\\Windows", rootOptions, log: line => log.push(line) });
+  assert.equal(baked, "C:\\Tools;C:\\Program Files\\nodejs;C:\\Windows");
+  assert.equal(log.length, 1);
+  assert.match(log[0]!, /could not list Claude Desktop's CLI cache directories \(.*ENOTDIR.*\)/);
+});
+
+test("the host still starts with the configured CLI, or finds one on PATH, when the profile directory is unreadable (#162)", t => {
+  const { rootOptions } = unreadableProfiles(t);
+  const present = new Set(["C:\\Tools\\claude.exe"]);
+  const find = (pathValue: string) => findClaude(undefined, p => present.has(p), { platform: "win32", home: "C:\\Users\\me", pathValue });
+  const stale = "C:\\Users\\me\\AppData\\Local\\Claude\\claude-code\\2.1.304\\0123456789ab";
+  const log: string[] = [];
+  // An explicitly configured CLI wins, without PATH discovery.
+  const configured: Record<string, string | undefined> = { Path: `${stale};C:\\Tools` };
+  assert.equal(resolveHostClaude("D:\\mine\\claude.exe", configured, { platform: "win32", rootOptions, find: () => { throw new Error("discovery must not run"); }, log: line => log.push(line) }), "D:\\mine\\claude.exe");
+  assert.match(configured.Path!, /^D:\\mine;/);
+  // Without one, PATH discovery still finds the launcher.
+  const discovered: Record<string, string | undefined> = { Path: "C:\\Windows;C:\\Tools" };
+  assert.equal(resolveHostClaude(undefined, discovered, { platform: "win32", rootOptions, find, log: line => log.push(line) }), "C:\\Tools\\claude.exe");
+  assert.equal(discovered.Path, "C:\\Tools;C:\\Windows");
+  assert.ok(log.some(line => /could not list Claude Desktop's CLI cache directories/.test(line)), "nothing silent");
+  // A PATH cleanup that itself fails leaves PATH exactly as it was and the host going.
+  const hostile: Record<string, string | undefined> = { Path: `${stale};C:\\Tools` };
+  const failing = resolveHostClaude(undefined, hostile, { platform: "win32", cacheRoots: new Proxy([], { get(target, key) { if (key === "some") throw new Error("boom"); return Reflect.get(target, key); } }), find, log: line => log.push(line) });
+  assert.equal(failing, "C:\\Tools\\claude.exe");
+  assert.ok(log.some(line => /could not clean Claude Desktop's stale CLI directories off PATH \(boom\)/.test(line)));
+  assert.match(hostile.Path!, /^C:\\Tools;/);
+});
+
+test("ambiguous Windows profiles: when nothing is found without the cache entries, the original PATH is searched again (#162)", () => {
+  // Two complete Desktop profiles: discovery lists no cache directory (it will not pick one), the strip lists both.
+  const cacheA = "C:\\Users\\me\\AppData\\Local\\Claude-Data\\Claude_a\\claude-code";
+  const cacheB = "C:\\Users\\me\\AppData\\Local\\Claude-Data\\Claude_b\\claude-code";
+  const rootOptions: CacheRootOptions = { platform: "win32", home: "C:\\Users\\me", env: { LOCALAPPDATA: "C:\\Users\\me\\AppData\\Local", APPDATA: "C:\\Users\\me\\AppData\\Roaming" },
+    windowsRoots: () => ["C:\\Users\\me\\AppData\\Local\\Claude-Data\\Claude_a", "C:\\Users\\me\\AppData\\Local\\Claude-Data\\Claude_b"] };
+  assert.deepEqual(desktopClaudeCacheRoots(rootOptions).slice(0, 2), [cacheA, cacheB]);
+  const onlyLauncher = `${cacheA}\\2.1.304\\0123456789ab`;
+  const present = new Set([`${onlyLauncher}\\claude.exe`]);
+  const find = (pathValue: string) => findClaude(undefined, p => present.has(p), { platform: "win32", home: "C:\\Users\\me", pathValue });
+  const env: Record<string, string | undefined> = { Path: `${onlyLauncher};C:\\Windows` };
+  const log: string[] = [];
+  const found = resolveHostClaude(undefined, env, { platform: "win32", rootOptions, find, log: line => log.push(line) });
+  assert.equal(found, `${onlyLauncher}\\claude.exe`, "what main found before this cleanup");
+  assert.equal(env.Path, `${onlyLauncher};C:\\Windows`, "the original PATH is back");
+  assert.equal(log.length, 2);
+  assert.match(log[0]!, /no claude found once 1 Claude Desktop CLI directories were dropped from PATH .*PATH restored as it was, looking again/);
+  assert.match(log[1]!, /using .*claude\.exe \(found on the original PATH\)/);
+
+  // With a launcher elsewhere, the stale entry is dropped for good and the log says which one won.
+  present.add("C:\\Tools\\claude.exe");
+  const second: Record<string, string | undefined> = { Path: `${onlyLauncher};C:\\Tools` };
+  const lines: string[] = [];
+  assert.equal(resolveHostClaude(undefined, second, { platform: "win32", rootOptions, find, log: line => lines.push(line) }), "C:\\Tools\\claude.exe");
+  assert.equal(second.Path, "C:\\Tools");
+  assert.equal(lines.length, 1);
+  assert.match(lines[0]!, /dropped 1 stale Claude Desktop CLI directories from PATH .*; using C:\\Tools\\claude\.exe$/);
+
+  // Nothing anywhere: the original PATH is restored and the host goes on without a launcher, as before.
+  const empty: Record<string, string | undefined> = { Path: `${onlyLauncher};C:\\Windows` };
+  present.clear();
+  const none: string[] = [];
+  assert.equal(resolveHostClaude(undefined, empty, { platform: "win32", rootOptions, find, log: line => none.push(line) }), undefined);
+  assert.equal(empty.Path, `${onlyLauncher};C:\\Windows`);
+  assert.match(none.at(-1)!, /no claude found on the original PATH either/);
 });
 
 test("install replaces a loaded agent and bootstraps; uninstall boots out and removes", (t) => {

@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { claudeBinary, claudeLoginHint, desktopClaudeCacheRoots, insideDesktopClaudeCache, withoutDesktopClaudeCache, type ClaudeCodeLogin } from "../../cli/src/claude-auth.ts";
+import { claudeBinary, claudeLoginHint, desktopClaudeCacheRoots, insideDesktopClaudeCache, type CacheRootOptions, type ClaudeCodeLogin } from "../../cli/src/claude-auth.ts";
 import { ownerOf, plistEnvironment } from "../../cli/src/ownership.ts";
 import { assertGeneration, definitionGeneration, readServiceFile, withServiceFile } from "../../cli/src/service-definition.ts";
 
@@ -90,9 +90,9 @@ ${env}
 }
 
 /** PATH for the agent: launchd starts it with almost nothing, and the SDK spawns `claude`, which spawns git, rg, node… */
-export function agentPath(claudePath: string | undefined, nodePath: string, opts: { platform?: NodeJS.Platform; pathValue?: string; cacheRoots?: readonly string[] } = {}): string {
+export function agentPath(claudePath: string | undefined, nodePath: string, opts: { platform?: NodeJS.Platform; pathValue?: string; cacheRoots?: readonly string[]; rootOptions?: CacheRootOptions; log?: (line: string) => void } = {}): string {
   const platform = opts.platform ?? process.platform;
-  const roots = opts.cacheRoots ?? desktopClaudeCacheRoots();
+  const roots = opts.cacheRoots ?? cacheRootsOrNone(opts.log, opts.rootOptions);
   const delimiter = platform === "win32" ? ";" : ":";
   const dir = platform === "win32" ? path.win32.dirname : path.posix.dirname;
   const dirs = platform !== "darwin"
@@ -110,17 +110,79 @@ const pathKey = (env: PathEnv, platform: NodeJS.Platform): string =>
   platform === "win32" ? Object.keys(env).find(key => key.toUpperCase() === "PATH") ?? "PATH" : "PATH";
 
 /**
+ * Claude Desktop's CLI cache roots, for cleaning a PATH. Never throws and never stops the caller: a
+ * root that cannot be worked out (an unreadable `Claude-Data` on Windows) is logged and means
+ * "nothing to strip" for that root.
+ */
+function cacheRootsOrNone(log?: (line: string) => void, opts: CacheRootOptions = {}): readonly string[] {
+  const say = log ?? ((line: string) => console.error(line));
+  try { return desktopClaudeCacheRoots({ ...opts, onError: error => say(`[host] could not list Claude Desktop's CLI cache directories (${errorText(error)}); nothing is stripped for them`) }); }
+  catch (error) { say(`[host] could not list Claude Desktop's CLI cache directories (${errorText(error)}); nothing is stripped`); return []; }
+}
+const errorText = (error: unknown): string => error instanceof Error ? error.message : String(error);
+
+/**
  * At the start of the host, before it looks for `claude`: drop the PATH entries that point into
  * Claude Desktop's versioned CLI cache. A host service installed before agentPath learned to leave
  * them out still carries one (ClaudeRippleHost.ps1 held `...\claude-code\2.1.304\<hash>` after the
  * app moved on, #162), and findClaude scans PATH before that cache, so the stale directory would win
  * at every start. The cache itself is still searched, newest version first.
+ *
+ * Never throws. Returns the PATH as it was and the entries taken out, so the caller can put it back.
  */
-export function dropStaleClaudePath(env: PathEnv = process.env, opts: { platform?: NodeJS.Platform; cacheRoots?: readonly string[] } = {}): void {
+export function dropStaleClaudePath(env: PathEnv = process.env, opts: { platform?: NodeJS.Platform; cacheRoots?: readonly string[]; rootOptions?: CacheRootOptions; log?: (line: string) => void } = {}): { key: string; original: string | undefined; removed: string[] } {
   const platform = opts.platform ?? process.platform;
   const key = pathKey(env, platform);
-  const value = env[key];
-  if (value !== undefined) env[key] = withoutDesktopClaudeCache(value, opts.cacheRoots ?? desktopClaudeCacheRoots(), platform);
+  const original = env[key];
+  const none = { key, original, removed: [] as string[] };
+  if (original === undefined) return none;
+  try {
+    const roots = opts.cacheRoots ?? cacheRootsOrNone(opts.log, opts.rootOptions);
+    const delimiter = platform === "win32" ? ";" : ":";
+    const entries = original.split(delimiter);
+    const removed = entries.filter(entry => insideDesktopClaudeCache(entry, roots, platform));
+    if (removed.length) env[key] = entries.filter(entry => !insideDesktopClaudeCache(entry, roots, platform)).join(delimiter);
+    return { key, original, removed };
+  } catch (error) {
+    (opts.log ?? ((line: string) => console.error(line)))(`[host] could not clean Claude Desktop's stale CLI directories off PATH (${errorText(error)}); PATH is left as it was`);
+    env[key] = original;
+    return none;
+  }
+}
+
+/**
+ * The CLI the host will run, found at the start of `runHost`. An explicitly configured one (host.json
+ * `claudePath`) always wins. Otherwise stale entries in Claude Desktop's versioned cache are taken off
+ * PATH and discovery runs; if it then finds nothing, the original PATH is restored and discovery runs
+ * again, so a host that found a launcher before this cleanup still finds it (ambiguous Windows
+ * profiles list no cache directory to search, and the PATH entry may be the only launcher there is).
+ * Which of these happened is logged. The launcher's directory then leads PATH.
+ */
+export function resolveHostClaude(configured: string | undefined, env: PathEnv = process.env, opts: { platform?: NodeJS.Platform; cacheRoots?: readonly string[]; rootOptions?: CacheRootOptions; find?: (pathValue: string) => string | undefined; log?: (line: string) => void } = {}): string | undefined {
+  const platform = opts.platform ?? process.platform;
+  const log = opts.log ?? ((line: string) => console.error(line));
+  const find = opts.find ?? ((pathValue: string) => findClaude(undefined, undefined, { pathValue }));
+  const { key, original, removed } = dropStaleClaudePath(env, { platform, ...(opts.cacheRoots ? { cacheRoots: opts.cacheRoots } : {}), ...(opts.rootOptions ? { rootOptions: opts.rootOptions } : {}), log });
+  const listed = removed.join(platform === "win32" ? "; " : ", ");
+  let claudePath: string | undefined;
+  if (configured) {
+    claudePath = configured;
+    if (removed.length) log(`[host] dropped ${removed.length} stale Claude Desktop CLI directories from PATH (${listed}); using the configured CLI ${configured}`);
+  } else if (!removed.length) {
+    claudePath = find(env[key] ?? "");
+  } else {
+    try { claudePath = find(env[key] ?? ""); }
+    catch (error) { log(`[host] looking for claude without the stale PATH entries failed (${errorText(error)})`); }
+    if (claudePath) log(`[host] dropped ${removed.length} stale Claude Desktop CLI directories from PATH (${listed}); using ${claudePath}`);
+    else {
+      env[key] = original;
+      log(`[host] no claude found once ${removed.length} Claude Desktop CLI directories were dropped from PATH (${listed}); PATH restored as it was, looking again`);
+      claudePath = find(original ?? "");
+      log(`[host] ${claudePath ? `using ${claudePath} (found on the original PATH)` : "no claude found on the original PATH either"}`);
+    }
+  }
+  putClaudeOnPath(env, claudePath, platform);
+  return claudePath;
 }
 
 /** After `claude` is found: its directory leads the host's PATH, so the CLI's own children (and a later `claude` lookup) agree with the launcher in use. */
@@ -138,7 +200,7 @@ export function paths(home = os.homedir()): Paths {
   return { home, plist: path.join(home, "Library", "LaunchAgents", `${LABEL}.plist`), log: path.join(home, ".clauderipple", "logs", "host.log") };
 }
 
-export function specFor(opts: { script: string; claudePath: string | undefined; node?: string; home?: string; remoteHome?: string }): PlistSpec {
+export function specFor(opts: { script: string; claudePath: string | undefined; node?: string; home?: string; remoteHome?: string; log?: (line: string) => void }): PlistSpec {
   const node = opts.node ?? process.execPath;
   const p = paths(opts.home);
   return {
@@ -151,7 +213,7 @@ export function specFor(opts: { script: string; claudePath: string | undefined; 
     workingDir: path.resolve(path.dirname(opts.script), "..", "..", ".."),
     log: p.log,
     env: {
-      PATH: agentPath(opts.claudePath, node),
+      PATH: agentPath(opts.claudePath, node, opts.log ? { log: opts.log } : {}),
       HOME: p.home,
       ...(process.platform === "win32" ? { USERPROFILE: p.home } : {}),
       CLAUDERIPPLE_HOME: process.env.CLAUDERIPPLE_HOME ?? path.join(p.home, ".clauderipple"),

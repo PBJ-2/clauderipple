@@ -33,23 +33,47 @@ export function desktopClaudeCodeDirs(): string[] {
  * Every directory Claude Desktop may cache a CLI in, for removing stale entries from a PATH. Unlike
  * `desktopClaudeCodeDirs` it still lists them when several Desktop profiles make the choice
  * ambiguous: a stale entry is stale whichever profile it belonged to.
+ *
+ * This never throws: cleaning a PATH must not keep the host from starting or installing. A profile
+ * directory that cannot be read (an unreadable `Claude-Data` on Windows) is reported to `onError` and
+ * counts as "no profile to strip"; the fixed legacy roots are still listed.
  */
-export function desktopClaudeCacheRoots(): string[] {
-  return cacheDirs(true);
+export function desktopClaudeCacheRoots(opts: CacheRootOptions = {}): string[] {
+  try { return cacheDirs(true, opts); }
+  catch (error) { opts.onError?.(error); return []; }
 }
 
-function cacheDirs(allProfiles: boolean): string[] {
+/** Where cache roots are computed from; every field defaults to this machine. Tests inject all of them, nothing is read from `process.platform` then. */
+export interface CacheRootOptions {
+  onError?: (error: unknown) => void;
+  platform?: NodeJS.Platform;
+  home?: string;
+  env?: { LOCALAPPDATA?: string; APPDATA?: string; XDG_CONFIG_HOME?: string };
+  /** The Windows Desktop profile scan (reads the disk); injected to prove an unreadable one is survived. */
+  windowsRoots?: (localAppData: string) => string[];
+}
+
+function cacheDirs(allProfiles: boolean, opts: CacheRootOptions = {}): string[] {
+  const platform = opts.platform ?? process.platform;
+  const env = opts.env ?? process.env;
+  const home = opts.home ?? os.homedir();
+  const p = platform === "win32" ? path.win32 : path.posix;
   // Linux: Electron's userData is $XDG_CONFIG_HOME/Claude (seen with Claude Desktop 2.2553.13 on
   // Ubuntu 24.04: ~/.config/Claude/claude-code/2.1.280/claude, a plain executable).
-  if (process.platform === "linux") return [path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "Claude", "claude-code")];
-  if (!isWindows) return [path.join(os.homedir(), "Library", "Application Support", "Claude", "claude-code")];
+  if (platform === "linux") return [p.join(env.XDG_CONFIG_HOME || p.join(home, ".config"), "Claude", "claude-code")];
+  if (platform !== "win32") return [p.join(home, "Library", "Application Support", "Claude", "claude-code")];
   const roots = [
-    process.env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local"),
-    process.env.APPDATA ?? path.join(os.homedir(), "AppData", "Roaming"),
+    env.LOCALAPPDATA ?? p.join(home, "AppData", "Local"),
+    env.APPDATA ?? p.join(home, "AppData", "Roaming"),
   ];
-  const desktops = windowsDesktopRoots(roots[0]);
+  const scan = opts.windowsRoots ?? ((localAppData: string) => windowsDesktopRoots(localAppData));
+  let desktops: string[];
+  if (allProfiles) {
+    try { desktops = scan(roots[0]!); }
+    catch (error) { opts.onError?.(error); desktops = []; }
+  } else desktops = scan(roots[0]!); // discovery keeps its old behaviour: an unreadable profile directory is an error
   if (desktops.length > 1 && !allProfiles) return []; // Do not silently fall back to an unrelated legacy account.
-  return [...desktops.map(root => path.join(root, "claude-code")), ...roots.map(root => path.join(root, "Claude", "claude-code"))];
+  return [...desktops.map(root => p.join(root, "claude-code")), ...roots.map(root => p.join(root, "Claude", "claude-code"))];
 }
 
 /**

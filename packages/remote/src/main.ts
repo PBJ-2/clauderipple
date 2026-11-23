@@ -34,7 +34,7 @@ import { RouterClient } from "./router.ts";
 import { keepWorkerAccountsFresh } from "./worker-labels.ts";
 import { HostServer } from "./server.ts";
 import { LocalControl } from "./local-control.ts";
-import { findClaude, specFor, cliLoginWarning, dropStaleClaudePath, putClaudeOnPath } from "./service.ts";
+import { findClaude, specFor, cliLoginWarning, resolveHostClaude } from "./service.ts";
 import { installService, uninstallService, serviceStatus, servicePaths, renderService, supervisorName, controlShutdown, refreshPlan, hostStatus, refreshRunningHost } from "./host-service.ts";
 import { Sessions } from "./sessions.ts";
 import { REMOTE_USAGE } from "./usage.ts";
@@ -152,10 +152,9 @@ async function runHost(): Promise<void> {
   let server: HostServer | null = null;
   // An already-installed service still carries a PATH entry into Claude Desktop's old versioned CLI
   // cache; findClaude reads PATH before that cache, so drop it first and put the launcher it finds
-  // at the front (#162).
-  dropStaleClaudePath();
-  const claudePath = findClaude(cfg.claudePath);
-  putClaudeOnPath(process.env, claudePath);
+  // at the front (#162). A configured CLI always wins, and if nothing is found without the stale
+  // entries the original PATH is searched again, as before; what happened is in the log.
+  const claudePath = resolveHostClaude(cfg.claudePath, process.env, { log });
   const power = new PowerHold();
   // A VAPID subject must be an https: or mailto: URL; the relay is this host's one real https origin.
   const vapid = loadVapid(dir, cfg.relay?.startsWith("https:") ? cfg.relay : "mailto:ripple-host@clauderipple.invalid");
@@ -334,7 +333,7 @@ async function installCmd(): Promise<void> {
 }
 
 function hostSpec(claudePath: string | undefined): ReturnType<typeof specFor> {
-  return specFor({ script: fileURLToPath(import.meta.url), claudePath, ...(process.env.RIPPLE_REMOTE_HOME ? { remoteHome: process.env.RIPPLE_REMOTE_HOME } : {}) });
+  return specFor({ script: fileURLToPath(import.meta.url), claudePath, log: line => { process.stderr.write(`${line}\n`); }, ...(process.env.RIPPLE_REMOTE_HOME ? { remoteHome: process.env.RIPPLE_REMOTE_HOME } : {}) });
 }
 
 /** Run from the new files. A busy/unknown host stays pending for the router's independent retry. */
