@@ -2191,6 +2191,38 @@ test('the flame turns keep-warm on for one chat while Settings keep it off: its 
   expect(b.router().settings.keepWarm).toBe(false)
 })
 
+// The band is not drawn everywhere (an SSH remote session shows none), so `/ripple warm` is the only
+// place that answers what the toggle did: for this chat, and for the chats that start next (#182).
+test('/ripple warm answers which way it turned and what new chats do, with Settings off', async ($, on) => {
+  const b = boundaries(on, { keepWarm: false }, { language: 'en' })
+  await start($)
+  expect((await command($, 'warm')).text).toBe('ClaudeRipple: Keep warm is on for this chat only. Settings keep it off, so new chats start with it off. Run /ripple warm again to turn it off.')
+  expect((await command($, 'warm')).text).toBe('ClaudeRipple: Keep warm is off for this chat. Settings have it off, so new chats start with it off. Run /ripple warm to turn it on for this chat only.')
+  expect(b.router().settings.keepWarm).toBe(false)
+})
+
+test('/ripple warm answers which way it turned and what new chats do, with Settings on', async ($, on) => {
+  const b = boundaries(on, { keepWarm: true }, { language: 'en' })
+  http(on)
+  judgeStub(on)
+  stepStub(on)
+  await start($)
+  await step($)
+  await complete($)
+  expect((await command($, 'warm')).text).toBe('ClaudeRipple: Keep warm is off for this chat only. Settings keep it on, so new chats start with it on. Run /ripple warm to turn it back on.')
+  expect((await command($, 'warm')).text).toBe('ClaudeRipple: Keep warm is on for this chat. Settings have it on too, so new chats start with it on. Run /ripple warm to turn it off for this chat only.')
+  expect(b.router().settings.keepWarm).toBe(true)
+})
+
+test('/ripple warm answers in the chat\'s language; the other subcommands keep their own reply', async ($, on) => {
+  boundaries(on, { keepWarm: false }, { language: 'ko' })
+  await start($)
+  const first = (await command($, 'warm')).text
+  expect(first).toBe('리플: 이 대화의 캐시 유지를 켰습니다. 설정에서는 꺼져 있어 새 대화는 꺼진 상태로 시작합니다. 다시 끄려면 /ripple warm을 입력해 주세요.')
+  expect((await command($, 'warm')).text).toBe('리플: 이 대화의 캐시 유지를 껐습니다. 설정에서도 꺼져 있어 새 대화는 꺼진 상태로 시작합니다. 이 대화만 켜려면 /ripple warm을 입력해 주세요.')
+  expect((await command($, 'auto')).text).toBe('리플: auto 완료.')
+})
+
 test('an idle precompute runs once keep-warm has stopped itself', async ($, on) => {
   const b = boundaries(on, { keepWarm: true, keepWarmHours: 1 }, { tokens: 220000 })
   http(on)

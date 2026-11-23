@@ -1131,11 +1131,13 @@ async function toggleAuto($: EngineInterface): Promise<void> {
 async function keepWarmOn($: EngineInterface, s: Settings): Promise<boolean> {
   return await read($, warmHere) ?? s.keepWarm
 }
-async function toggleWarm($: EngineInterface): Promise<void> {
+/** Returns the new state and whether Settings agree with it, so a reply can say what a new chat will do. */
+async function toggleWarm($: EngineInterface): Promise<{ on: boolean, followsSettings: boolean }> {
   const s = await currentSettings($)
   const on = !await keepWarmOn($, s)
   await update($, warmHere, () => on === s.keepWarm ? null : on)
   if (on) await update($, warm, value => ({ ...value, stopped: undefined }))
+  return { on, followsSettings: on === s.keepWarm }
 }
 async function toggleSave($: EngineInterface): Promise<void> {
   const now = await $.clock.now()
@@ -2944,7 +2946,15 @@ export const register: Register = on => {
       if (sub === 'debug') return { text: debugText(language, { judge: (await currentSettings($)).judge, judgeModel: (await currentSettings($)).judgeModel, pick: await read($, pick), paused: await read($, paused), cache: await read($, cache), warm: await read($, warm), lastSpawn: await read($, lastSpawn), lastRequest: await read($, lastRequest), model: await $.session.model(), limit: await read($, limit), hostRateLimits: (await $.session.usage()).rateLimits }) }
       if (sub === 'settings' || sub === 'setup') await startPanel($, sub)
       else if (sub === 'auto') await toggleAuto($)
-      else if (sub === 'warm') await toggleWarm($)
+      else if (sub === 'warm') {
+        // The band's flame is not drawn everywhere (an SSH remote session shows none), so this reply is
+        // the only place the result of the toggle is seen: say what it is for this chat and for new ones.
+        const warmed = await toggleWarm($)
+        const followsSettings = warmed.followsSettings
+        return { text: t(language, warmed.on
+          ? followsSettings ? 'commands.warmOnSettings' : 'commands.warmOnHere'
+          : followsSettings ? 'commands.warmOffSettings' : 'commands.warmOffHere') }
+      }
       else if (sub === 'save') await toggleSave($)
       else if (sub === 'log') await toggleLog($)
       else if (sub === 'agents') await toggleAgents($)

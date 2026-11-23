@@ -333,7 +333,9 @@ you map go to your provider, everything else goes to Anthropic byte for byte.
   80%. Press the context chip to see what fills it; **Compact** tidies up first and lets
   you pick the model that writes the summary; **Handoff** opens a fresh session with a
   resume note. The **Agents** pane follows every worker, background command and watch.
-  `Log` (or `/ripple-log`) opens the request log in a side pane. One switch on the
+  `Log` (or `/ripple-log`) opens the request log in a side pane. Where the band is not
+  drawn (an SSH remote session, for example), `/ripple warm` turns keep-warm on or off for
+  that chat and replies with what it set, for this chat and for new ones. One switch on the
   Clients screen, or `clauderipple mod on`.
 - **Images from your ChatGPT subscription.** `clauderipple image "<prompt>"`, with
   reference images and transparent backgrounds. Subagents are told how, so a GPT or

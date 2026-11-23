@@ -340,8 +340,10 @@ que você mapeia vão para o seu provedor, e todo o resto vai para a Anthropic b
   e deixa você escolher o modelo que escreve o resumo; **Repasse** abre uma sessão nova com
   uma nota para retomar. O painel **Agentes** acompanha cada worker, comando em segundo plano
   e monitoramento.
-  `Log` (ou `/ripple-log`) abre o log de requisições em um painel lateral. Basta um botão na
-  tela **Clientes**, ou `clauderipple mod on`.
+  `Log` (ou `/ripple-log`) abre o log de requisições em um painel lateral. Onde a barra não
+  é exibida (uma sessão remota por SSH, por exemplo), `/ripple warm` ativa ou desativa
+  “Manter quente” naquela conversa e responde o que definiu, para esta conversa e para as
+  novas. Basta um botão na tela **Clientes**, ou `clauderipple mod on`.
 - **Imagens pela sua assinatura do ChatGPT.** `clauderipple image "<prompt>"`, com imagens
   de referência e fundos transparentes. Os subagentes recebem instruções de como fazer,
   então um worker GPT ou DeepSeek consegue criar uma imagem e olhar para ela sem uma

@@ -344,8 +344,10 @@ los modelos que asignas van a tu proveedor, y todo lo demás va a Anthropic byte
   llena; **Compactar** ordena primero y te deja elegir el modelo que escribe el resumen;
   **Traspaso** abre una sesión nueva con una nota para retomar. El panel **Agentes** sigue
   cada worker, comando en segundo plano y vigilancia. `Log` (o `/ripple-log`) abre el
-  registro de solicitudes en un panel lateral. Un solo interruptor en la pantalla Clientes,
-  o `clauderipple mod on`.
+  registro de solicitudes en un panel lateral. Donde la barra no se dibuja (una sesión
+  remota por SSH, por ejemplo), `/ripple warm` activa o desactiva «Mantener caché» en ese
+  chat y responde qué dejó, para este chat y para los nuevos. Un solo interruptor en la
+  pantalla Clientes, o `clauderipple mod on`.
 - **Imágenes con tu suscripción de ChatGPT.** `clauderipple image "<prompt>"`, con
   imágenes de referencia y fondos transparentes. A los subagentes se les explica cómo
   hacerlo, así que un worker de GPT o DeepSeek puede crear una imagen y verla sin una
