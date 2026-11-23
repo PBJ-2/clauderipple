@@ -2195,6 +2195,7 @@ test('the flame turns keep-warm on for one chat while Settings keep it off: its 
 // place that answers what the toggle did: for this chat, and for the chats that start next (#182).
 test('/ripple warm answers which way it turned and what new chats do, with Settings off', async ($, on) => {
   const b = boundaries(on, { keepWarm: false }, { language: 'en' })
+  http(on)
   await start($)
   expect((await command($, 'warm')).text).toBe('ClaudeRipple: Keep warm is on for this chat only. Settings keep it off, so new chats start with it off. Run /ripple warm again to turn it off.')
   expect((await command($, 'warm')).text).toBe('ClaudeRipple: Keep warm is off for this chat. Settings have it off, so new chats start with it off. Run /ripple warm to turn it on for this chat only.')
@@ -2214,8 +2215,31 @@ test('/ripple warm answers which way it turned and what new chats do, with Setti
   expect(b.router().settings.keepWarm).toBe(true)
 })
 
+test('/ripple warm reads the saved Settings fresh, so a change made in the dashboard since this chat started is what it answers with', async ($, on) => {
+  const b = boundaries(on, { keepWarm: false }, { language: 'en' })
+  http(on)
+  await start($)
+  // Keep warm is turned on in the dashboard while this chat is open: its own copy still says off.
+  b.remote({ settings: normalizeSettings({ setupDone: true, keepWarm: true }), revision: 2, stored: true })
+  expect((await command($, 'warm')).text).toBe('ClaudeRipple: Keep warm is off for this chat only. Settings keep it on, so new chats start with it on. Run /ripple warm to turn it back on.')
+  // The per-chat override was judged against the fresh value too: toggling back follows Settings again.
+  expect((await command($, 'warm')).text).toBe('ClaudeRipple: Keep warm is on for this chat. Settings have it on too, so new chats start with it on. Run /ripple warm to turn it off for this chat only.')
+  expect(b.router().settings.keepWarm).toBe(true)
+})
+
+test('/ripple warm says nothing about new chats when Settings cannot be read', async ($, on) => {
+  const b = boundaries(on, { keepWarm: false }, { language: 'en' })
+  http(on)
+  await start($)
+  b.offline(true)
+  const on1 = (await command($, 'warm')).text
+  expect(on1).toBe('ClaudeRipple: Keep warm is on for this chat. Settings could not be read, so what new chats do is not shown. Run /ripple warm to turn it off.')
+  expect((await command($, 'warm')).text).toBe('ClaudeRipple: Keep warm is off for this chat. Settings could not be read, so what new chats do is not shown. Run /ripple warm to turn it on.')
+})
+
 test('/ripple warm answers in the chat\'s language; the other subcommands keep their own reply', async ($, on) => {
   boundaries(on, { keepWarm: false }, { language: 'ko' })
+  http(on)
   await start($)
   const first = (await command($, 'warm')).text
   expect(first).toBe('리플: 이 대화의 캐시 유지를 켰습니다. 설정에서는 꺼져 있어 새 대화는 꺼진 상태로 시작합니다. 다시 끄려면 /ripple warm을 입력해 주세요.')

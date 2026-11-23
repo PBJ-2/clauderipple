@@ -2949,7 +2949,14 @@ export const register: Register = on => {
       else if (sub === 'warm') {
         // The band's flame is not drawn everywhere (an SSH remote session shows none), so this reply is
         // the only place the result of the toggle is seen: say what it is for this chat and for new ones.
+        // A new chat reads the saved Settings when it starts (loadSettings), and this chat's copy can be
+        // older (Keep warm changed in the dashboard since), so read them again first, the same way.
+        // With no answer from the router the reply says nothing about new chats instead of guessing.
+        let fresh = true
+        try { await settingsTask(async () => { await syncSettings($, await adminUrl($)) }) }
+        catch (error) { fresh = false; await report($, 'warm settings', error) }
         const warmed = await toggleWarm($)
+        if (!fresh) return { text: t(language, warmed.on ? 'commands.warmOnNow' : 'commands.warmOffNow') }
         const followsSettings = warmed.followsSettings
         return { text: t(language, warmed.on
           ? followsSettings ? 'commands.warmOnSettings' : 'commands.warmOnHere'
