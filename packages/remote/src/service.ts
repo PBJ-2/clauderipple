@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { claudeBinary, claudeLoginHint, type ClaudeCodeLogin } from "../../cli/src/claude-auth.ts";
+import { claudeBinary, claudeLoginHint, desktopClaudeCacheRoots, insideDesktopClaudeCache, withoutDesktopClaudeCache, type ClaudeCodeLogin } from "../../cli/src/claude-auth.ts";
 import { ownerOf, plistEnvironment } from "../../cli/src/ownership.ts";
 import { assertGeneration, definitionGeneration, readServiceFile, withServiceFile } from "../../cli/src/service-definition.ts";
 
@@ -90,14 +90,47 @@ ${env}
 }
 
 /** PATH for the agent: launchd starts it with almost nothing, and the SDK spawns `claude`, which spawns git, rg, node… */
-export function agentPath(claudePath: string | undefined, nodePath: string): string {
-  if (process.platform !== "darwin") return [...new Set([...(claudePath ? [path.dirname(claudePath)] : []), path.dirname(nodePath), ...((process.env.PATH ?? process.env.Path ?? "").split(path.delimiter))])].join(path.delimiter);
-  const dirs = [
-    ...(claudePath ? [path.dirname(claudePath)] : []),
-    path.dirname(nodePath),
-    "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin",
-  ];
-  return Array.from(new Set(dirs)).join(":");
+export function agentPath(claudePath: string | undefined, nodePath: string, opts: { platform?: NodeJS.Platform; pathValue?: string; cacheRoots?: readonly string[] } = {}): string {
+  const platform = opts.platform ?? process.platform;
+  const roots = opts.cacheRoots ?? desktopClaudeCacheRoots();
+  const delimiter = platform === "win32" ? ";" : ":";
+  const dir = platform === "win32" ? path.win32.dirname : path.posix.dirname;
+  const dirs = platform !== "darwin"
+    ? [...(claudePath ? [dir(claudePath)] : []), dir(nodePath), ...((opts.pathValue ?? process.env.PATH ?? process.env.Path ?? "").split(delimiter))]
+    : [...(claudePath ? [dir(claudePath)] : []), dir(nodePath), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+  // Claude Desktop's CLI cache is versioned (claude-code/<version>/<hash>) and the app deletes the old
+  // version after an update. A directory baked here would outlive it, and findClaude scans PATH before
+  // the cache, so the host would keep looking for a launcher that is gone (#162). The host puts the
+  // directory of the launcher it finds at each start on its own PATH instead (main.ts).
+  return Array.from(new Set(dirs.filter(entry => !insideDesktopClaudeCache(entry, roots, platform)))).join(delimiter);
+}
+
+type PathEnv = Record<string, string | undefined>;
+const pathKey = (env: PathEnv, platform: NodeJS.Platform): string =>
+  platform === "win32" ? Object.keys(env).find(key => key.toUpperCase() === "PATH") ?? "PATH" : "PATH";
+
+/**
+ * At the start of the host, before it looks for `claude`: drop the PATH entries that point into
+ * Claude Desktop's versioned CLI cache. A host service installed before agentPath learned to leave
+ * them out still carries one (ClaudeRippleHost.ps1 held `...\claude-code\2.1.304\<hash>` after the
+ * app moved on, #162), and findClaude scans PATH before that cache, so the stale directory would win
+ * at every start. The cache itself is still searched, newest version first.
+ */
+export function dropStaleClaudePath(env: PathEnv = process.env, opts: { platform?: NodeJS.Platform; cacheRoots?: readonly string[] } = {}): void {
+  const platform = opts.platform ?? process.platform;
+  const key = pathKey(env, platform);
+  const value = env[key];
+  if (value !== undefined) env[key] = withoutDesktopClaudeCache(value, opts.cacheRoots ?? desktopClaudeCacheRoots(), platform);
+}
+
+/** After `claude` is found: its directory leads the host's PATH, so the CLI's own children (and a later `claude` lookup) agree with the launcher in use. */
+export function putClaudeOnPath(env: PathEnv, claudePath: string | undefined, platform: NodeJS.Platform = process.platform): void {
+  if (!claudePath) return;
+  const key = pathKey(env, platform);
+  const delimiter = platform === "win32" ? ";" : ":";
+  const dir = (platform === "win32" ? path.win32 : path.posix).dirname(claudePath);
+  const same = (entry: string): boolean => platform === "win32" ? entry.toLowerCase() === dir.toLowerCase() : entry === dir;
+  env[key] = [dir, ...(env[key] ?? "").split(delimiter).filter(entry => entry && !same(entry))].join(delimiter);
 }
 
 export interface Paths { home: string; plist: string; log: string }

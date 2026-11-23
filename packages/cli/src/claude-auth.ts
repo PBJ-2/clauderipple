@@ -26,6 +26,19 @@ const BINARY_NAMES = isWindows ? ["claude.exe", "claude.cmd", "claude.bat"] : ["
 
 /** Where Claude Desktop caches the CLI it downloads, per platform. */
 export function desktopClaudeCodeDirs(): string[] {
+  return cacheDirs(false);
+}
+
+/**
+ * Every directory Claude Desktop may cache a CLI in, for removing stale entries from a PATH. Unlike
+ * `desktopClaudeCodeDirs` it still lists them when several Desktop profiles make the choice
+ * ambiguous: a stale entry is stale whichever profile it belonged to.
+ */
+export function desktopClaudeCacheRoots(): string[] {
+  return cacheDirs(true);
+}
+
+function cacheDirs(allProfiles: boolean): string[] {
   // Linux: Electron's userData is $XDG_CONFIG_HOME/Claude (seen with Claude Desktop 2.2553.13 on
   // Ubuntu 24.04: ~/.config/Claude/claude-code/2.1.280/claude, a plain executable).
   if (process.platform === "linux") return [path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "Claude", "claude-code")];
@@ -35,8 +48,30 @@ export function desktopClaudeCodeDirs(): string[] {
     process.env.APPDATA ?? path.join(os.homedir(), "AppData", "Roaming"),
   ];
   const desktops = windowsDesktopRoots(roots[0]);
-  if (desktops.length > 1) return []; // Do not silently fall back to an unrelated legacy account.
+  if (desktops.length > 1 && !allProfiles) return []; // Do not silently fall back to an unrelated legacy account.
   return [...desktops.map(root => path.join(root, "claude-code")), ...roots.map(root => path.join(root, "Claude", "claude-code"))];
+}
+
+/**
+ * Whether `dir` is one of Claude Desktop's CLI cache roots or inside one. Those directories are
+ * versioned (claude-code\2.1.304\<hash>) and the app deletes the old version after an update, so a
+ * PATH entry that points into one goes stale. The platform picks the path rules (case and separators
+ * on Windows); nothing is read from the disk.
+ */
+export function insideDesktopClaudeCache(dir: string, roots: readonly string[] = desktopClaudeCacheRoots(), platform: NodeJS.Platform = process.platform): boolean {
+  const p = platform === "win32" ? path.win32 : path.posix;
+  const entry = dir.trim().replace(/^"(.*)"$/, "$1");
+  if (!entry || !p.isAbsolute(entry)) return false;
+  return roots.some((root) => {
+    const relative = p.relative(root, entry);
+    return relative === "" || (relative !== ".." && !relative.startsWith(`..${p.sep}`) && !p.isAbsolute(relative));
+  });
+}
+
+/** `pathValue` without the entries that point into Claude Desktop's CLI cache; the rest keep their order and spelling. */
+export function withoutDesktopClaudeCache(pathValue: string, roots: readonly string[] = desktopClaudeCacheRoots(), platform: NodeJS.Platform = process.platform): string {
+  const delimiter = platform === "win32" ? ";" : ":";
+  return pathValue.split(delimiter).filter((entry) => !insideDesktopClaudeCache(entry, roots, platform)).join(delimiter);
 }
 
 /** Launcher inside one cached version directory. The macOS build nests an .app bundle. */

@@ -7,7 +7,8 @@ import http from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 import { listProcesses, ProcessSnapshot } from "../src/processes.ts";
 import { processHasSession, liveDesktopProcesses } from "../src/desktop.ts";
-import { findClaude, specFor } from "../src/service.ts";
+import { dropStaleClaudePath, findClaude, specFor } from "../src/service.ts";
+import { withoutDesktopClaudeCache } from "../../cli/src/claude-auth.ts";
 import { renderService, TASK, UNIT, controlShutdown, refreshPlan } from "../src/host-service.ts";
 import { keepAwakeCommand, PowerHold, nodeSpawner } from "../src/power.ts";
 import { MAC_CONSENT_DENIED, MAC_CONSENT_PENDING, macConsent, macProtected, noisyFolder } from "../src/folders.ts";
@@ -65,6 +66,30 @@ test("desktop registry liveness is off on Linux and reads the Windows registry",
   const snapshot = new ProcessSnapshot({ platform: "win32", execAsync: async () => JSON.stringify([{ ProcessId: 42, CommandLine: "claude.exe", CreationDate: "2026-10-21T17:14:41.6580790Z" }]) });
   await snapshot.prime();
   assert.equal(liveDesktopProcesses(dir, 0, "win32", snapshot).get(id)?.pid, 42);
+});
+test("a stale Claude Desktop cache directory on PATH no longer wins findClaude (#162)", t => {
+  // Windows spelling, injected paths: the old version's directory still exists beside the new one.
+  const cache = "C:\\Users\\me\\AppData\\Local\\Claude\\claude-code";
+  const stale = `${cache}\\2.1.304\\0123456789ab`;
+  const present = new Set([`${stale}\\claude.exe`, "C:\\Tools\\claude.exe"]);
+  const env: Record<string, string | undefined> = { Path: `${stale};C:\\Tools` };
+  const find = () => findClaude(undefined, p => present.has(p), { platform: "win32", home: "C:\\Users\\me", pathValue: env.Path ?? "" });
+  assert.equal(find(), `${stale}\\claude.exe`, "before the fix the first PATH entry won");
+  dropStaleClaudePath(env, { platform: "win32", cacheRoots: [cache] });
+  assert.equal(find(), "C:\\Tools\\claude.exe");
+
+  // The same on this machine's real files in temp directories.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-stale-path-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const name = process.platform === "win32" ? "claude.exe" : "claude";
+  const root = path.join(dir, "claude-code");
+  const old = path.join(root, "2.1.304", "0123456789ab");
+  const tools = path.join(dir, "tools");
+  for (const folder of [old, tools]) { fs.mkdirSync(folder, { recursive: true }); fs.writeFileSync(path.join(folder, name), ""); fs.chmodSync(path.join(folder, name), 0o755); }
+  const pathValue = [old, tools].join(path.delimiter);
+  const home = path.join(dir, "home");
+  assert.equal(findClaude(undefined, fs.existsSync, { home, pathValue }), path.join(old, name));
+  assert.equal(findClaude(undefined, fs.existsSync, { home, pathValue: withoutDesktopClaudeCache(pathValue, [root]) }), path.join(tools, name));
 });
 test("findClaude discovers each Windows name on PATH and honors an explicit binary", () => {
   for (const name of ["claude.exe", "claude.cmd", "claude.bat"]) {

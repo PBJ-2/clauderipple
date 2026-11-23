@@ -9,7 +9,8 @@ import { PowerHold } from "../src/power.ts";
 import type { Held } from "../src/power.ts";
 import { Notifier, loadVapid, pushFor } from "../src/push.ts";
 import type { Sender } from "../src/push.ts";
-import { LABEL, agentPath, cliLoginWarning, install, parseLaunchctlPrint, plist, specFor, uninstall } from "../src/service.ts";
+import { LABEL, agentPath, cliLoginWarning, dropStaleClaudePath, install, parseLaunchctlPrint, plist, putClaudeOnPath, specFor, uninstall } from "../src/service.ts";
+import { insideDesktopClaudeCache, withoutDesktopClaudeCache } from "../../cli/src/claude-auth.ts";
 import type { EventBody, PushSubscriptionJSON, SessionSummary } from "../src/protocol.ts";
 import { posixModes, posixPaths } from "../../../test/capabilities.ts";
 
@@ -50,6 +51,52 @@ test("the plist runs this checkout's main.ts with an absolute node, KeepAlive, a
 // The launchd agent's PATH: other platforms pass the inherited PATH through.
 test("agentPath has no duplicates and works without a claude", { skip: process.platform !== "darwin" && "launchd only" }, () => {
   assert.equal(agentPath(undefined, "/usr/local/bin/node"), "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin");
+});
+
+// #162: the Windows launcher kept `...\claude-code\2.1.304\<hash>` on PATH after the app moved on,
+// and findClaude reads PATH before the cache.
+const WIN_CACHE = ["C:\\Users\\me\\AppData\\Local\\Claude\\claude-code", "C:\\Users\\me\\AppData\\Local\\Claude-Data\\Claude_x\\claude-code"];
+const STALE_WIN = "C:\\Users\\me\\AppData\\Local\\Claude\\claude-code\\2.1.304\\0123456789ab";
+
+test("agentPath leaves Claude Desktop's versioned CLI cache out of the baked PATH on every platform", () => {
+  const baked = agentPath(`${STALE_WIN}\\claude.exe`, "C:\\Program Files\\nodejs\\node.exe", { platform: "win32", cacheRoots: WIN_CACHE, pathValue: `${STALE_WIN};C:\\Tools;c:\\users\\me\\appdata\\local\\claude\\claude-code\\2.1.310\\ffff;C:\\Tools;"C:\\Program Files\\Git\\cmd"` });
+  assert.equal(baked, 'C:\\Program Files\\nodejs;C:\\Tools;"C:\\Program Files\\Git\\cmd"');
+  assert.equal(agentPath("/usr/local/bin/claude", "/usr/bin/node", { platform: "linux", cacheRoots: ["/home/me/.config/Claude/claude-code"], pathValue: "/home/me/.config/Claude/claude-code/2.1.304:/home/me/bin:/usr/bin" }), "/usr/local/bin:/usr/bin:/home/me/bin");
+  // macOS bakes a fixed list; a launcher inside the app's cache is the one entry it must not keep.
+  const mac = "/Users/me/Library/Application Support/Claude/claude-code";
+  assert.equal(agentPath(`${mac}/2.1.304/claude.app/Contents/MacOS/claude`, "/opt/node/bin/node", { platform: "darwin", cacheRoots: [mac] }), "/opt/node/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin");
+});
+
+test("only directories inside the cache are stale: lookalike names, other drives and relative entries stay", () => {
+  const root = WIN_CACHE[0]!;
+  assert.equal(insideDesktopClaudeCache(root, WIN_CACHE, "win32"), true);
+  assert.equal(insideDesktopClaudeCache(`${root}\\`, WIN_CACHE, "win32"), true);
+  assert.equal(insideDesktopClaudeCache(`"${STALE_WIN}"`, WIN_CACHE, "win32"), true);
+  assert.equal(insideDesktopClaudeCache(STALE_WIN.toUpperCase(), WIN_CACHE, "win32"), true, "Windows paths compare without case");
+  assert.equal(insideDesktopClaudeCache(`${root}-old\\2.1.304`, WIN_CACHE, "win32"), false);
+  assert.equal(insideDesktopClaudeCache("D:\\Claude\\claude-code\\2.1.304", WIN_CACHE, "win32"), false);
+  assert.equal(insideDesktopClaudeCache("claude-code\\2.1.304", WIN_CACHE, "win32"), false);
+  assert.equal(insideDesktopClaudeCache("", WIN_CACHE, "win32"), false);
+  assert.equal(insideDesktopClaudeCache("/home/me/.config/claude/claude-code/2.1.304", ["/home/me/.config/Claude/claude-code"], "linux"), false, "POSIX paths are case-sensitive");
+  assert.equal(insideDesktopClaudeCache("/home/me/.config/Claude/claude-code-2/2.1.304", ["/home/me/.config/Claude/claude-code"], "linux"), false);
+  assert.equal(withoutDesktopClaudeCache(`${STALE_WIN};;C:\\Tools`, WIN_CACHE, "win32"), ";C:\\Tools", "an empty entry keeps its place");
+});
+
+test("a host that starts with a stale PATH entry drops it and puts the launcher it found first", () => {
+  const env: Record<string, string | undefined> = { Path: `${STALE_WIN};C:\\Tools;C:\\Windows\\System32` };
+  dropStaleClaudePath(env, { platform: "win32", cacheRoots: WIN_CACHE });
+  assert.deepEqual(env, { Path: "C:\\Tools;C:\\Windows\\System32" }, "the Windows spelling of the variable is kept");
+  putClaudeOnPath(env, "C:\\Users\\me\\AppData\\Local\\Claude\\claude-code\\2.1.310\\aaaa1111bbbb\\claude.exe", "win32");
+  assert.equal(env.Path, "C:\\Users\\me\\AppData\\Local\\Claude\\claude-code\\2.1.310\\aaaa1111bbbb;C:\\Tools;C:\\Windows\\System32");
+  putClaudeOnPath(env, "c:\\tools\\claude.exe", "win32");
+  assert.equal(env.Path, "c:\\tools;C:\\Users\\me\\AppData\\Local\\Claude\\claude-code\\2.1.310\\aaaa1111bbbb;C:\\Windows\\System32", "the directory moves to the front, never twice");
+  const posix: Record<string, string | undefined> = { PATH: "/a:/usr/bin" };
+  putClaudeOnPath(posix, "/usr/bin/claude", "linux");
+  putClaudeOnPath(posix, undefined, "linux");
+  assert.equal(posix.PATH, "/usr/bin:/a");
+  const none: Record<string, string | undefined> = {};
+  dropStaleClaudePath(none, { platform: "linux", cacheRoots: ["/x"] });
+  assert.deepEqual(none, {}, "no PATH stays no PATH");
 });
 
 test("install replaces a loaded agent and bootstraps; uninstall boots out and removes", (t) => {
