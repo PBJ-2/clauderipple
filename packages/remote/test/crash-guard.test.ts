@@ -5,10 +5,10 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { describeError, installCrashHandlers, syncLineWriter } from "../src/crash-guard.ts";
 
-const guard = fileURLToPath(new URL("../src/crash-guard.ts", import.meta.url));
+// A file URL, not a path: a Windows path such as D:\... in an import specifier is read as a "d:" URL.
+const guard = new URL("../src/crash-guard.ts", import.meta.url).href;
 
 function fixture() {
   const proc = new EventEmitter();

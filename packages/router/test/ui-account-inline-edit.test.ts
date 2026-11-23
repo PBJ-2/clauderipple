@@ -9,8 +9,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const uiDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "../../ui");
-const source = fs.readFileSync(path.join(uiDir, "app.js"), "utf8");
-const i18nSource = fs.readFileSync(path.join(uiDir, "i18n.js"), "utf8");
+// LF whatever the checkout did to line endings, or a marker spanning lines ("/**\n * ...") misses on Windows.
+const source = fs.readFileSync(path.join(uiDir, "app.js"), "utf8").replaceAll("\r\n", "\n");
+const i18nSource = fs.readFileSync(path.join(uiDir, "i18n.js"), "utf8").replaceAll("\r\n", "\n");
 const start = i18nSource.indexOf("const I18N = {");
 const end = i18nSource.indexOf("\n};", start);
 assert.ok(start > 0 && end > start, "i18n.js no longer contains the dictionary");
