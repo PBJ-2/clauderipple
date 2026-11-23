@@ -2,8 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { describeError, installCrashHandlers } from "../src/crash-guard.ts";
+import { describeError, installCrashHandlers, syncLineWriter } from "../src/crash-guard.ts";
 
 const guard = fileURLToPath(new URL("../src/crash-guard.ts", import.meta.url));
 
@@ -69,4 +72,49 @@ test("in a real process both a stray rejection and an uncaught exception log wit
   const thrown = spawnSync(process.execPath, ["--input-type=module", "-e", script(`setTimeout(() => { throw new Error("thrown"); }, 10); setTimeout(() => process.exit(0), 2000);`)], { encoding: "utf8", timeout: 20_000 });
   assert.equal(thrown.status, 1, thrown.stderr);
   assert.match(thrown.stderr, /uncaught exception .*Error: thrown/);
+});
+
+test("the crash line is written synchronously, before the process is asked to exit", () => {
+  const order: string[] = [];
+  const proc = new EventEmitter();
+  installCrashHandlers(proc as unknown as Parameters<typeof installCrashHandlers>[0], { log: line => order.push(`async:${line}`), logSync: line => order.push(`sync:${line}`), exit: code => order.push(`exit:${code}`), context: () => " [test]" });
+  proc.emit("unhandledRejection", new Error("backed up"), Promise.resolve());
+  assert.equal(order.length, 2, "the queued log is not used when the synchronous one worked");
+  assert.match(order[0]!, /^sync:\[host\] unhandled rejection \[test\]: Error: backed up \| +at /);
+  assert.equal(order[1], "exit:1");
+});
+
+test("when the synchronous write throws, the ordinary log is tried, and the exit still happens", () => {
+  const order: string[] = [];
+  const proc = new EventEmitter();
+  installCrashHandlers(proc as unknown as Parameters<typeof installCrashHandlers>[0], { log: line => order.push(`async:${line.slice(0, 45)}`), logSync: () => { throw Object.assign(new Error("EAGAIN"), { code: "EAGAIN" }); }, exit: code => order.push(`exit:${code}`) });
+  proc.emit("uncaughtException", new Error("z"), "uncaughtException");
+  assert.deepEqual(order, ["async:[host] uncaught exception (uncaughtException)", "exit:1"]);
+  const silent = new EventEmitter();
+  const exits: number[] = [];
+  installCrashHandlers(silent as unknown as Parameters<typeof installCrashHandlers>[0], { log: () => { throw new Error("closed"); }, logSync: () => { throw new Error("closed"); }, exit: code => exits.push(code) });
+  silent.emit("unhandledRejection", new Error("w"), Promise.resolve());
+  assert.deepEqual(exits, [1], "no log can be written and the process still ends");
+});
+
+test("syncLineWriter puts a stamped line in the file before it returns", t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-crash-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "log.txt");
+  const fd = fs.openSync(file, "w");
+  t.after(() => { try { fs.closeSync(fd); } catch { /* already closed */ } });
+  syncLineWriter(fd, () => new Date("2026-11-23T01:02:03.000Z"))("[host] boom | at x");
+  assert.equal(fs.readFileSync(file, "utf8"), "2026-11-23T01:02:03.000Z [host] boom | at x\n");
+});
+
+test("a real host process leaves the whole stack on a stderr pipe that already holds 200 kB, then exits 1", () => {
+  // The 200 kB write ahead of the crash keeps the pipe busy, so a queued write would still be pending at exit.
+  const script = `import { installCrashHandlers, syncLineWriter } from ${JSON.stringify(guard)};
+    installCrashHandlers(process, { log: l => process.stderr.write(l + "\\n"), logSync: syncLineWriter(2), exit: c => process.exit(c) });
+    process.stderr.write("x".repeat(200000) + "\\n");
+    function deep(n) { if (n === 0) throw new Error("deep failure"); deep(n - 1); }
+    setTimeout(() => deep(5), 10); setTimeout(() => process.exit(0), 3000);`;
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 20_000, maxBuffer: 10_000_000 });
+  assert.equal(r.status, 1, r.stderr.slice(-500));
+  assert.match(r.stderr, /\d{4}-\d\d-\d\dT[\d:.]+Z \[host\] uncaught exception \(uncaughtException\): Error: deep failure \| +at deep .*exiting with code 1/);
 });

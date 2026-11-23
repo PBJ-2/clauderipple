@@ -89,20 +89,20 @@ ${env}
 `;
 }
 
-/** PATH for the agent: launchd starts it with almost nothing, and the SDK spawns `claude`, which spawns git, rg, node… */
-export function agentPath(claudePath: string | undefined, nodePath: string, opts: { platform?: NodeJS.Platform; pathValue?: string; cacheRoots?: readonly string[]; rootOptions?: CacheRootOptions; log?: (line: string) => void } = {}): string {
+/**
+ * PATH for the agent: launchd starts it with almost nothing, and the SDK spawns `claude`, which spawns git, rg, node…
+ * Exactly what the installer has always baked, Claude Desktop's versioned CLI directories included: stripping
+ * them here removed the only launcher on a fresh install (two Windows Desktop profiles, #162). A stale one is
+ * dealt with when the host starts, by `resolveHostClaude`, which can still see what is on disk then.
+ */
+export function agentPath(claudePath: string | undefined, nodePath: string, opts: { platform?: NodeJS.Platform; pathValue?: string } = {}): string {
   const platform = opts.platform ?? process.platform;
-  const roots = opts.cacheRoots ?? cacheRootsOrNone(opts.log, opts.rootOptions);
   const delimiter = platform === "win32" ? ";" : ":";
   const dir = platform === "win32" ? path.win32.dirname : path.posix.dirname;
   const dirs = platform !== "darwin"
     ? [...(claudePath ? [dir(claudePath)] : []), dir(nodePath), ...((opts.pathValue ?? process.env.PATH ?? process.env.Path ?? "").split(delimiter))]
     : [...(claudePath ? [dir(claudePath)] : []), dir(nodePath), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
-  // Claude Desktop's CLI cache is versioned (claude-code/<version>/<hash>) and the app deletes the old
-  // version after an update. A directory baked here would outlive it, and findClaude scans PATH before
-  // the cache, so the host would keep looking for a launcher that is gone (#162). The host puts the
-  // directory of the launcher it finds at each start on its own PATH instead (main.ts).
-  return Array.from(new Set(dirs.filter(entry => !insideDesktopClaudeCache(entry, roots, platform)))).join(delimiter);
+  return Array.from(new Set(dirs)).join(delimiter);
 }
 
 type PathEnv = Record<string, string | undefined>;
@@ -156,7 +156,10 @@ export function dropStaleClaudePath(env: PathEnv = process.env, opts: { platform
  * PATH and discovery runs; if it then finds nothing, the original PATH is restored and discovery runs
  * again, so a host that found a launcher before this cleanup still finds it (ambiguous Windows
  * profiles list no cache directory to search, and the PATH entry may be the only launcher there is).
- * Which of these happened is logged. The launcher's directory then leads PATH.
+ * Which of these happened is logged. PATH is otherwise left in main's order: the launcher's directory is
+ * put first only when stale entries were dropped and discovery then found one (a configured CLI, a PATH with
+ * nothing stale, and the restored original PATH are not touched, so an older `node` that sits next to the
+ * launcher cannot start winning for hooks).
  */
 export function resolveHostClaude(configured: string | undefined, env: PathEnv = process.env, opts: { platform?: NodeJS.Platform; cacheRoots?: readonly string[]; rootOptions?: CacheRootOptions; find?: (pathValue: string) => string | undefined; log?: (line: string) => void } = {}): string | undefined {
   const platform = opts.platform ?? process.platform;
@@ -173,15 +176,18 @@ export function resolveHostClaude(configured: string | undefined, env: PathEnv =
   } else {
     try { claudePath = find(env[key] ?? ""); }
     catch (error) { log(`[host] looking for claude without the stale PATH entries failed (${errorText(error)})`); }
-    if (claudePath) log(`[host] dropped ${removed.length} stale Claude Desktop CLI directories from PATH (${listed}); using ${claudePath}`);
-    else {
+    if (claudePath) {
+      log(`[host] dropped ${removed.length} stale Claude Desktop CLI directories from PATH (${listed}); using ${claudePath}`);
+      // The one case that changes what PATH holds beyond the strip: the launcher that discovery found
+      // replaces the stale directory at the front.
+      putClaudeOnPath(env, claudePath, platform);
+    } else {
       env[key] = original;
       log(`[host] no claude found once ${removed.length} Claude Desktop CLI directories were dropped from PATH (${listed}); PATH restored as it was, looking again`);
       claudePath = find(original ?? "");
       log(`[host] ${claudePath ? `using ${claudePath} (found on the original PATH)` : "no claude found on the original PATH either"}`);
     }
   }
-  putClaudeOnPath(env, claudePath, platform);
   return claudePath;
 }
 
@@ -200,7 +206,7 @@ export function paths(home = os.homedir()): Paths {
   return { home, plist: path.join(home, "Library", "LaunchAgents", `${LABEL}.plist`), log: path.join(home, ".clauderipple", "logs", "host.log") };
 }
 
-export function specFor(opts: { script: string; claudePath: string | undefined; node?: string; home?: string; remoteHome?: string; log?: (line: string) => void }): PlistSpec {
+export function specFor(opts: { script: string; claudePath: string | undefined; node?: string; home?: string; remoteHome?: string }): PlistSpec {
   const node = opts.node ?? process.execPath;
   const p = paths(opts.home);
   return {
@@ -213,7 +219,7 @@ export function specFor(opts: { script: string; claudePath: string | undefined; 
     workingDir: path.resolve(path.dirname(opts.script), "..", "..", ".."),
     log: p.log,
     env: {
-      PATH: agentPath(opts.claudePath, node, opts.log ? { log: opts.log } : {}),
+      PATH: agentPath(opts.claudePath, node),
       HOME: p.home,
       ...(process.platform === "win32" ? { USERPROFILE: p.home } : {}),
       CLAUDERIPPLE_HOME: process.env.CLAUDERIPPLE_HOME ?? path.join(p.home, ".clauderipple"),

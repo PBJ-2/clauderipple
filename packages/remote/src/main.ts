@@ -39,7 +39,7 @@ import { installService, uninstallService, serviceStatus, servicePaths, renderSe
 import { Sessions } from "./sessions.ts";
 import { REMOTE_USAGE } from "./usage.ts";
 import { desktopHandoff } from "./handoff.ts";
-import { installCrashHandlers } from "./crash-guard.ts";
+import { installCrashHandlers, syncLineWriter } from "./crash-guard.ts";
 import { windowsSidebarRoot } from "./sidebar.ts";
 import type { QueryFn } from "./sessions.ts";
 import { claudeBinary, claudeCodeLogin } from "../../cli/src/claude-auth.ts";
@@ -137,7 +137,9 @@ async function runHost(): Promise<void> {
   const log = (line: string): void => { process.stderr.write(`${line}\n`); };
   // A rejection nobody awaited and an uncaught exception are both logged with their stack and exit
   // non-zero, so the supervisor relaunches the host (launchd KeepAlive, the Windows launcher loop).
-  installCrashHandlers(process, { log, exit: code => process.exit(code), context: () => ` [${VERSION}, up ${Math.round(process.uptime())}s]` });
+  // The stack goes out synchronously: a queued stream write is lost when process.exit follows it.
+  const logSync = syncLineWriter(2);
+  installCrashHandlers(process, { log, logSync, exit: code => process.exit(code), context: () => ` [${VERSION}, up ${Math.round(process.uptime())}s]` });
   applyProcessPriority(new ConfigStore(routerConfigPath()).get().processPriority, { log });
   // The desktop registry needs the process list to tell a live Claude app session from a closed one
   // (issue #70). Read it in the background while the rest of the setup runs; it is awaited, bounded,
@@ -333,7 +335,7 @@ async function installCmd(): Promise<void> {
 }
 
 function hostSpec(claudePath: string | undefined): ReturnType<typeof specFor> {
-  return specFor({ script: fileURLToPath(import.meta.url), claudePath, log: line => { process.stderr.write(`${line}\n`); }, ...(process.env.RIPPLE_REMOTE_HOME ? { remoteHome: process.env.RIPPLE_REMOTE_HOME } : {}) });
+  return specFor({ script: fileURLToPath(import.meta.url), claudePath, ...(process.env.RIPPLE_REMOTE_HOME ? { remoteHome: process.env.RIPPLE_REMOTE_HOME } : {}) });
 }
 
 /** Run from the new files. A busy/unknown host stays pending for the router's independent retry. */

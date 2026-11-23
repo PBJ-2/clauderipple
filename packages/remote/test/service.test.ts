@@ -59,13 +59,34 @@ test("agentPath has no duplicates and works without a claude", { skip: process.p
 const WIN_CACHE = ["C:\\Users\\me\\AppData\\Local\\Claude\\claude-code", "C:\\Users\\me\\AppData\\Local\\Claude-Data\\Claude_x\\claude-code"];
 const STALE_WIN = "C:\\Users\\me\\AppData\\Local\\Claude\\claude-code\\2.1.304\\0123456789ab";
 
-test("agentPath leaves Claude Desktop's versioned CLI cache out of the baked PATH on every platform", () => {
-  const baked = agentPath(`${STALE_WIN}\\claude.exe`, "C:\\Program Files\\nodejs\\node.exe", { platform: "win32", cacheRoots: WIN_CACHE, pathValue: `${STALE_WIN};C:\\Tools;c:\\users\\me\\appdata\\local\\claude\\claude-code\\2.1.310\\ffff;C:\\Tools;"C:\\Program Files\\Git\\cmd"` });
-  assert.equal(baked, 'C:\\Program Files\\nodejs;C:\\Tools;"C:\\Program Files\\Git\\cmd"');
-  assert.equal(agentPath("/usr/local/bin/claude", "/usr/bin/node", { platform: "linux", cacheRoots: ["/home/me/.config/Claude/claude-code"], pathValue: "/home/me/.config/Claude/claude-code/2.1.304:/home/me/bin:/usr/bin" }), "/usr/local/bin:/usr/bin:/home/me/bin");
-  // macOS bakes a fixed list; a launcher inside the app's cache is the one entry it must not keep.
+// What `main` baked before the #162 work (the code of agentPath on main, kept here as the oracle).
+function mainAgentPath(claudePath: string | undefined, nodePath: string): string {
+  if (process.platform !== "darwin") return [...new Set([...(claudePath ? [path.dirname(claudePath)] : []), path.dirname(nodePath), ...((process.env.PATH ?? process.env.Path ?? "").split(path.delimiter))])].join(path.delimiter);
+  const dirs = [...(claudePath ? [path.dirname(claudePath)] : []), path.dirname(nodePath), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+  return Array.from(new Set(dirs)).join(":");
+}
+
+test("agentPath bakes exactly what main bakes, Claude Desktop's CLI cache directories included (#162)", t => {
+  // A fresh Windows install with two Desktop profiles: the cache directory is the only launcher there is,
+  // so install must keep it (stripping it here left the host with nothing to start at all).
+  const before = process.env.PATH;
+  t.after(() => { if (before === undefined) delete process.env.PATH; else process.env.PATH = before; });
+  const cache = process.platform === "win32" ? "C:\\Users\\me\\AppData\\Local\\Claude\\claude-code" : "/Users/me/Library/Application Support/Claude/claude-code";
+  const staleDir = path.join(cache, "2.1.304", "0123456789ab");
+  const other = path.join(cache, "2.1.310", "ffff");
+  const tool = process.platform === "win32" ? "C:\\Tools" : "/home/me/bin";
+  for (const pathValue of [undefined, "", [staleDir, tool, other, tool].join(path.delimiter)]) {
+    if (pathValue === undefined) delete process.env.PATH; else process.env.PATH = pathValue;
+    for (const [claudePath, nodePath] of [[path.join(staleDir, "claude"), path.join(tool, "node")], [undefined, path.join(tool, "node")], [path.join(tool, "claude"), path.join(tool, "node")]] as const) {
+      assert.equal(agentPath(claudePath, nodePath), mainAgentPath(claudePath, nodePath), `${claudePath} ${pathValue}`);
+    }
+  }
+  assert.ok(agentPath(path.join(staleDir, "claude"), path.join(tool, "node")).split(path.delimiter).includes(staleDir), "the cache directory is baked");
+  // The explicit platform spellings give the same list without touching process.platform.
+  assert.equal(agentPath(`${STALE_WIN}\\claude.exe`, "C:\\Program Files\\nodejs\\node.exe", { platform: "win32", pathValue: `${STALE_WIN};C:\\Tools;"C:\\Program Files\\Git\\cmd";C:\\Tools` }), `${STALE_WIN};C:\\Program Files\\nodejs;C:\\Tools;"C:\\Program Files\\Git\\cmd"`);
+  assert.equal(agentPath("/usr/local/bin/claude", "/usr/bin/node", { platform: "linux", pathValue: "/home/me/.config/Claude/claude-code/2.1.304:/home/me/bin:/usr/bin" }), "/usr/local/bin:/usr/bin:/home/me/.config/Claude/claude-code/2.1.304:/home/me/bin");
   const mac = "/Users/me/Library/Application Support/Claude/claude-code";
-  assert.equal(agentPath(`${mac}/2.1.304/claude.app/Contents/MacOS/claude`, "/opt/node/bin/node", { platform: "darwin", cacheRoots: [mac] }), "/opt/node/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin");
+  assert.equal(agentPath(`${mac}/2.1.304/claude.app/Contents/MacOS/claude`, "/opt/node/bin/node", { platform: "darwin" }), `${mac}/2.1.304/claude.app/Contents/MacOS:/opt/node/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`);
 });
 
 test("only directories inside the cache are stale: lookalike names, other drives and relative entries stay", () => {
@@ -111,7 +132,7 @@ function unreadableProfiles(t: { after(fn: () => void): void }): { rootOptions: 
   return { localAppData, rootOptions: { platform: "win32", home: dir, env: { LOCALAPPDATA: localAppData, APPDATA: path.join(dir, "Roaming") }, windowsRoots: windowsDesktopRoots } };
 }
 
-test("an unreadable Claude Desktop profile directory never stops the PATH cleanup or the baked PATH (#162)", t => {
+test("an unreadable Claude Desktop profile directory never stops the start-up PATH cleanup (#162)", t => {
   const { rootOptions, localAppData } = unreadableProfiles(t);
   const lines: string[] = [];
   const roots = desktopClaudeCacheRoots({ ...rootOptions, onError: error => lines.push(`scan: ${(error as Error).message}`) });
@@ -120,10 +141,11 @@ test("an unreadable Claude Desktop profile directory never stops the PATH cleanu
   assert.ok(roots.every(root => root.endsWith("claude-code")));
   assert.ok(localAppData.length > 0);
 
-  // agentPath: no throw, the baked list is still built, and the log says why nothing was stripped for the profiles.
+  // The cleanup: no throw, and the log says why nothing was stripped for the profiles.
   const log: string[] = [];
-  const baked = agentPath("C:\\Tools\\claude.exe", "C:\\Program Files\\nodejs\\node.exe", { platform: "win32", pathValue: "C:\\Windows", rootOptions, log: line => log.push(line) });
-  assert.equal(baked, "C:\\Tools;C:\\Program Files\\nodejs;C:\\Windows");
+  const env: Record<string, string | undefined> = { Path: "C:\\Tools;C:\\Windows" };
+  assert.deepEqual(dropStaleClaudePath(env, { platform: "win32", rootOptions, log: line => log.push(line) }).removed, []);
+  assert.equal(env.Path, "C:\\Tools;C:\\Windows");
   assert.equal(log.length, 1);
   assert.match(log[0]!, /could not list Claude Desktop's CLI cache directories \(.*ENOTDIR.*\)/);
 });
@@ -137,18 +159,44 @@ test("the host still starts with the configured CLI, or finds one on PATH, when 
   // An explicitly configured CLI wins, without PATH discovery.
   const configured: Record<string, string | undefined> = { Path: `${stale};C:\\Tools` };
   assert.equal(resolveHostClaude("D:\\mine\\claude.exe", configured, { platform: "win32", rootOptions, find: () => { throw new Error("discovery must not run"); }, log: line => log.push(line) }), "D:\\mine\\claude.exe");
-  assert.match(configured.Path!, /^D:\\mine;/);
-  // Without one, PATH discovery still finds the launcher.
+  assert.equal(configured.Path, `${stale};C:\\Tools`, "nothing was stripped (the cache roots could not be listed), so PATH is as it was");
+  // Without one, PATH discovery still finds the launcher, and PATH keeps main's order.
   const discovered: Record<string, string | undefined> = { Path: "C:\\Windows;C:\\Tools" };
   assert.equal(resolveHostClaude(undefined, discovered, { platform: "win32", rootOptions, find, log: line => log.push(line) }), "C:\\Tools\\claude.exe");
-  assert.equal(discovered.Path, "C:\\Tools;C:\\Windows");
+  assert.equal(discovered.Path, "C:\\Windows;C:\\Tools");
   assert.ok(log.some(line => /could not list Claude Desktop's CLI cache directories/.test(line)), "nothing silent");
   // A PATH cleanup that itself fails leaves PATH exactly as it was and the host going.
   const hostile: Record<string, string | undefined> = { Path: `${stale};C:\\Tools` };
   const failing = resolveHostClaude(undefined, hostile, { platform: "win32", cacheRoots: new Proxy([], { get(target, key) { if (key === "some") throw new Error("boom"); return Reflect.get(target, key); } }), find, log: line => log.push(line) });
   assert.equal(failing, "C:\\Tools\\claude.exe");
   assert.ok(log.some(line => /could not clean Claude Desktop's stale CLI directories off PATH \(boom\)/.test(line)));
-  assert.match(hostile.Path!, /^C:\\Tools;/);
+  assert.equal(hostile.Path, `${stale};C:\\Tools`);
+});
+
+test("the launcher found at start-up goes first on PATH only after stale entries were dropped (#162)", () => {
+  const roots = ["/home/me/.config/Claude/claude-code"];
+  const stale = "/home/me/.config/Claude/claude-code/2.1.304";
+  const fresh = "/home/me/.config/Claude/claude-code/2.1.310";
+  // Nothing stale: PATH is exactly what the service was given, even though a launcher is found. An older node
+  // in that directory must not start winning over the ones earlier on PATH.
+  const clean: Record<string, string | undefined> = { PATH: "/opt/node/bin:/usr/bin:/home/me/bin" };
+  const log: string[] = [];
+  assert.equal(resolveHostClaude(undefined, clean, { platform: "linux", cacheRoots: roots, find: () => `${fresh}/claude`, log: line => log.push(line) }), `${fresh}/claude`);
+  assert.equal(clean.PATH, "/opt/node/bin:/usr/bin:/home/me/bin");
+  assert.equal(log.length, 0);
+  // A stale entry dropped and a launcher then found: its directory leads.
+  const stripped: Record<string, string | undefined> = { PATH: `${stale}:/opt/node/bin:/usr/bin` };
+  assert.equal(resolveHostClaude(undefined, stripped, { platform: "linux", cacheRoots: roots, find: () => `${fresh}/claude`, log: line => log.push(line) }), `${fresh}/claude`);
+  assert.equal(stripped.PATH, `${fresh}:/opt/node/bin:/usr/bin`);
+  assert.equal(log.length, 1);
+  // A stale entry dropped but nothing found: the original PATH comes back untouched, with no prepend.
+  const nothing: Record<string, string | undefined> = { PATH: `${stale}:/opt/node/bin` };
+  assert.equal(resolveHostClaude(undefined, nothing, { platform: "linux", cacheRoots: roots, find: () => undefined, log: () => {} }), undefined);
+  assert.equal(nothing.PATH, `${stale}:/opt/node/bin`);
+  // A configured CLI: the strip happens, the configured directory is not pushed to the front.
+  const configured: Record<string, string | undefined> = { PATH: `${stale}:/opt/node/bin` };
+  assert.equal(resolveHostClaude("/opt/mine/claude", configured, { platform: "linux", cacheRoots: roots, find: () => { throw new Error("no discovery"); }, log: () => {} }), "/opt/mine/claude");
+  assert.equal(configured.PATH, "/opt/node/bin");
 });
 
 test("ambiguous Windows profiles: when nothing is found without the cache entries, the original PATH is searched again (#162)", () => {
