@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { TASKS_KEPT, addTask, endTasks, endWithAgent, exitCode, settleTasks, settleWithAgent, taskEnds, taskStarted } from '../../packages/mod/hooks/tasks.ts'
-import type { BgTask } from '../../packages/mod/types/index.d.ts'
+import { TASKS_KEPT, addTask, agentsAfterNotice, endTasks, endWithAgent, exitCode, isWaitingSummary, ownRunning, settleTasks, settleWithAgent, taskEnds, taskStarted, waitOnOwn } from '../../packages/mod/hooks/tasks.ts'
+import type { AgentRec, BgTask } from '../../packages/mod/types/index.d.ts'
 
 const shell: BgTask = { id: 'b1', kind: 'shell', title: 'Start the dev server', command: 'npm run dev', state: 'running', startedAt: 1 }
 
@@ -36,15 +36,56 @@ test('a Stop settles what it no longer holds until the late notice says how; a s
   assert.deepEqual(endWithAgent([shell, bound], 'worker', 4), [shell, { ...bound, state: 'stopped', endedAt: 4 }])
 })
 
-test("a worker's command leaves the running list with its worker, as the Claude app's does", () => {
+test("a finished worker's command leaves the running list with it, as the Claude app's does; a waiting worker's does not", () => {
   const left: BgTask = { ...shell, id: 'b3', agentId: 'worker' }
   // Listed, but its worker is not: settled, as a Stop of 2026-11-01 should have.
   assert.deepEqual(settleTasks([shell, left], ['b1', 'b3'], 7), [shell, { ...left, state: 'done', endedAt: 7, settled: true }])
   assert.deepEqual(settleTasks([left], ['b3', 'worker'], 7), [left])
-  // The worker's own end settles every command it left running; a later notice still says how.
+  // A worker that ended its turn waiting on that command is one the app keeps running with it.
+  assert.deepEqual(settleTasks([left], ['b3'], 7, ['worker']), [left])
+  assert.deepEqual(settleTasks([left], [], 7, ['worker']), [{ ...left, state: 'done', endedAt: 7, settled: true }])
+  // A worker that ended for good (no command of its own left running) settles what remains; a later notice still says how.
   const ended = settleWithAgent([shell, left], 'worker', 5)
   assert.deepEqual(ended, [shell, { ...left, state: 'done', endedAt: 5, settled: true }])
   assert.deepEqual(endTasks(ended, [{ id: 'b3', status: 'failed' }], 9)[1], { ...left, state: 'failed', endedAt: 5 })
+})
+
+test('a command of its own keeps its agent from ending; one bound to its answer or ended does not', () => {
+  const own: BgTask = { ...shell, id: 'b3', agentId: 'worker' }
+  assert.deepEqual(ownRunning([shell, own], 'worker'), [own])
+  assert.deepEqual(ownRunning([{ ...own, endsWithAgent: true }, { ...own, id: 'b4', state: 'done', endedAt: 2 }, { ...own, id: 'b5', agentId: 'other' }], 'worker'), [])
+})
+
+test("an agent's end waits for its last own command, or for the engine's word that it finished", () => {
+  const card: AgentRec = { id: 'worker', state: 'running', startedAt: 1, cost: 0 }
+  const waiting = waitOnOwn({ ...card, state: 'done', endedAt: 4, now: 'Bash' })
+  assert.deepEqual(waiting, { ...card, state: 'running', waiting: true })
+  const a: BgTask = { ...shell, id: 'b3', agentId: 'worker' }
+  const b: BgTask = { ...shell, id: 'b4', agentId: 'worker' }
+  // One of two ends: it goes on waiting. The last ends: done, its wait counted.
+  const oneEnded = endTasks([a, b], [{ id: 'b3', status: 'completed' }], 6)
+  assert.deepEqual(agentsAfterNotice([waiting], [{ id: 'b3', status: 'completed' }], [a, b], oneEnded, 6), [waiting])
+  const bothEnded = endTasks(oneEnded, [{ id: 'b4', status: 'completed' }], 8)
+  assert.deepEqual(agentsAfterNotice([waiting], [{ id: 'b4', status: 'completed' }], oneEnded, bothEnded, 8), [{ ...card, state: 'done', endedAt: 8 }])
+  // A notification about an unrelated task, or one that ended long ago, ends nothing.
+  assert.deepEqual(agentsAfterNotice([waiting], [{ id: 'x', status: 'completed' }], [shell], [shell], 9), [waiting])
+  // The engine's own words: waiting keeps it, finished (or failed) ends it.
+  const says = (summary: string, status = 'completed') => [{ id: 'worker', status, summary }]
+  assert.deepEqual(agentsAfterNotice([waiting], says('Rename variable is waiting on its own background work'), [a], [a], 9), [waiting])
+  assert.deepEqual(agentsAfterNotice([waiting], says('Rename variable finished'), [a], [a], 9), [{ ...card, state: 'done', endedAt: 9 }])
+  assert.deepEqual(agentsAfterNotice([waiting], says('Rename variable failed', 'failed'), [a], [a], 9), [{ ...card, state: 'failed', endedAt: 9 }])
+  // A card shown done returns to running on the waiting word, its clock kept, unless every command it left already ended.
+  const done: AgentRec = { ...card, state: 'done', endedAt: 4 }
+  const back = says('Rename variable is waiting on its own background work')
+  assert.deepEqual(agentsAfterNotice([done], back, [], [], 9), [{ ...card, state: 'running', waiting: true }])
+  assert.deepEqual(agentsAfterNotice([done], back, [a], [a], 9), [{ ...card, state: 'running', waiting: true }])
+  assert.deepEqual(agentsAfterNotice([done], back, [{ ...a, state: 'done', endedAt: 3 }], [{ ...a, state: 'done', endedAt: 3 }], 9), [done])
+  // The words for an agent that is not waiting change nothing: done stays done, running (mid-turn or woken) stays running.
+  assert.deepEqual(agentsAfterNotice([done], says('Rename variable finished'), [], [], 9), [done])
+  assert.deepEqual(agentsAfterNotice([card], back, [a], [a], 9), [card])
+  assert.equal(isWaitingSummary('Rename variable is waiting on its own background work'), true)
+  assert.equal(isWaitingSummary('Rename variable finished'), false)
+  assert.equal(isWaitingSummary(undefined), false)
 })
 
 test('the list keeps every running task and drops the oldest ended past its bound', () => {

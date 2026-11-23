@@ -333,8 +333,13 @@ export type AgentRec = {
   /** When its current run started; a resumed agent's restarts. */
   startedAt: number
   endedAt?: number
-  /** Time its earlier runs took, set once a message resumed it; the card adds the current run's. */
+  /** Time its earlier runs took, set once a message or its own background work woke it; the card adds the current run's. */
   ranMs?: number
+  /**
+   * Its turn ended while commands of its own still run: it stays `running`, as the Claude app lists
+   * it, until the last of them ends or it wakes (a new run, tasks.ts agentsAfterNotice).
+   */
+  waiting?: true
   /** Weighted tokens (spec §5 stats weights). */
   cost: number
   /** The provider it runs on by config name (`anthropic` for Claude's own), for its card's dot. */

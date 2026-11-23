@@ -5,8 +5,12 @@
 // model (`<task-notification>` with the task's `<task-id>` and `<status>`, read 2026-10-24). A stop
 // the model asked for (TaskStop) ends it at once; a command bound to its agent's final response ends
 // with that agent; and a Stop that no longer lists one in flight settles it until a notice says how.
+//
+// An agent that ends its turn while its own commands still run is not finished: the Claude app lists
+// it as running, and it may wake by itself when one ends (read 2026-11-24, engine 2.1.330). The card
+// stays running, `waiting`, until its last command ends or a notification says it finished.
 
-import type { BgTask } from '../types'
+import type { AgentRec, BgTask } from '../types'
 
 /** Tasks kept: every running one, then the latest that ended. */
 export const TASKS_KEPT = 40
@@ -107,12 +111,13 @@ function settled(task: BgTask, now: number): BgTask {
 
 /**
  * Whether a Stop's `background_tasks` (the session's) leaves `task` running: listed itself, and, for
- * a worker's, its worker listed too. The Claude app drops a worker's commands from its list with the
- * worker; and a session kept four dead commands of a long-ended worker running for ten hours, no
- * notice of theirs ever arriving (2026-11-01).
+ * a worker's, its worker listed too, unless the worker is one waiting on its own commands (`waiting`:
+ * its ids), which the Claude app keeps running with them. The app drops a finished worker's commands
+ * from its list; and a session kept four dead commands of a long-ended worker running for ten hours,
+ * no notice of theirs ever arriving (2026-11-01).
  */
-export function stillRunning(task: BgTask, inFlight: readonly string[]): boolean {
-  return inFlight.includes(task.id) && (task.agentId === undefined || inFlight.includes(task.agentId))
+export function stillRunning(task: BgTask, inFlight: readonly string[], waiting: readonly string[] = []): boolean {
+  return inFlight.includes(task.id) && (task.agentId === undefined || inFlight.includes(task.agentId) || waiting.includes(task.agentId))
 }
 
 /**
@@ -120,13 +125,72 @@ export function stillRunning(task: BgTask, inFlight: readonly string[]): boolean
  * has not reached a hook. How it ended is not known yet, so it reads as done until a notice says
  * otherwise (endTasks).
  */
-export function settleTasks(list: readonly BgTask[], inFlight: readonly string[], now: number): BgTask[] {
-  return list.map(task => task.state === 'running' && !stillRunning(task, inFlight) ? settled(task, now) : task)
+export function settleTasks(list: readonly BgTask[], inFlight: readonly string[], now: number, waiting: readonly string[] = []): BgTask[] {
+  return list.map(task => task.state === 'running' && !stillRunning(task, inFlight, waiting) ? settled(task, now) : task)
 }
 
-/** The running tasks agent `agentId` leaves behind as it ends, settled: they leave the list with it. */
+/**
+ * The running tasks agent `agentId` leaves behind as it ends for good, settled: a notice that comes
+ * later says how each ended. An agent with commands of its own still running is not ended for good
+ * (ownRunning), so this is only for one with none that outlive its turn.
+ */
 export function settleWithAgent(list: readonly BgTask[], agentId: string, now: number): BgTask[] {
   return list.map(task => task.agentId === agentId && task.state === 'running' ? settled(task, now) : task)
+}
+
+/**
+ * The running commands of agent `agentId` that outlive its turn: the work it is still waiting on when
+ * it ends one. A command bound to its final response ends with that turn (endWithAgent), so it is not one.
+ */
+export function ownRunning(list: readonly BgTask[], agentId: string): BgTask[] {
+  return list.filter(task => task.agentId === agentId && task.state === 'running' && !task.endsWithAgent)
+}
+
+/**
+ * The engine's summary for an agent that ended its turn with its own background work still running
+ * ("<description> is waiting on its own background work"); a finished one reads "<description> finished".
+ * Read only where the task list cannot say (agentsAfterNotice).
+ */
+export function isWaitingSummary(summary: string | undefined): boolean {
+  return /is waiting on its own background work/i.test(summary ?? '')
+}
+
+/** The card of an agent whose turn ended with work of its own still running: running, as the Claude app shows it, its clock kept. */
+export function waitOnOwn(agent: AgentRec): AgentRec {
+  const { endedAt: _ended, now: _now, toolSince: _since, ...rest } = agent
+  return { ...rest, state: 'running', waiting: true }
+}
+
+/** A waiting agent's card ended, its wait counted in its time. */
+function endWaiting(agent: AgentRec, state: 'done' | 'failed', now: number): AgentRec {
+  const { waiting: _waiting, ...rest } = agent
+  return { ...rest, state, endedAt: now }
+}
+
+/**
+ * What a notification, and the change it made to the task list (`before` to `after`), leave of each
+ * agent that waits on work of its own. A waiting agent ends when its last command of its own ended,
+ * or when a notification says it finished (or failed). A notification that it is waiting returns
+ * an agent shown done to running: it comes a few milliseconds after the turn's end, and the list is
+ * the first word on it, this one only where the list knows no command of the agent's. A running
+ * agent that is not waiting has woken or is mid-turn, and the notice leaves it be.
+ */
+export function agentsAfterNotice(agents: readonly AgentRec[], ends: readonly TaskEnd[], before: readonly BgTask[], after: readonly BgTask[], now: number): AgentRec[] {
+  return agents.map(agent => {
+    const notice = ends.find(end => end.id === agent.id)
+    const how = notice ? endState(notice.status) : undefined
+    const waits = how === 'done' && isWaitingSummary(notice?.summary)
+    if (waits && !agent.waiting) {
+      if (agent.state !== 'done') return agent
+      const mine = after.filter(task => task.agentId === agent.id && !task.endsWithAgent)
+      // Every command it left has ended: it wakes on its own or is finished, either way not waiting.
+      if (mine.length && !mine.some(task => task.state === 'running')) return agent
+      return waitOnOwn(agent)
+    }
+    if (agent.waiting && how && !waits) return endWaiting(agent, how === 'done' ? 'done' : 'failed', now)
+    if (agent.waiting && ownRunning(before, agent.id).length && !ownRunning(after, agent.id).length) return endWaiting(agent, 'done', now)
+    return agent
+  })
 }
 
 /** The exit code a command's summary names ("… failed with exit code 1"), if any. */

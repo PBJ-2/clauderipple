@@ -2,7 +2,7 @@
 // Timers own background work; hooks only admit/rewrite a request and record its result.
 import { atom, read, update } from 'claude-code'
 import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, PermissionRequestDecision, Register, RenderElement, RenderInput, RenderNode, SessionCompactResult, SessionContextBreakdown, SessionContextUsage, SessionRateLimit, ToolCallInput, ToolCallResult, TurnStepInput, TurnUsage } from 'claude-code'
-import type { AgentRec, CacheMemory, CostSummary, Effort, JudgeInput, JudgeKind, JudgeRun, LimitItem, ModSettingsSnapshot, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
+import type { AgentRec, BgTask, CacheMemory, CostSummary, Effort, JudgeInput, JudgeKind, JudgeRun, LimitItem, ModSettingsSnapshot, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
 import { MOD_SETTINGS_SCHEMA_VERSION, RUNG_EFFORT, applySettingsChanges, normalizeSettings, settingsChanges } from './settings'
 import { rungOf, workerLadderLine } from './ladder'
 import { debugText, langFrom, t } from './i18n'
@@ -19,7 +19,7 @@ import type { ScopedLimit } from './session'
 import { QUICK_PROMPT, wrapForNewChat } from './handoff'
 import { APPROVAL_BODY_CAP, APPROVAL_FRESH_MARGIN_MS, APPROVAL_FRESH_MS, askId, decisionOf, heldReply, holdable } from './approval'
 import type { HeldReply, HostAnswer } from './approval'
-import { addTask, endTasks, endWithAgent, settleTasks, settleWithAgent, stillRunning, stopTask, taskEnds, taskStarted } from './tasks'
+import { addTask, agentsAfterNotice, endTasks, endWithAgent, ownRunning, settleTasks, settleWithAgent, stillRunning, stopTask, taskEnds, taskStarted, waitOnOwn, type TaskEnd } from './tasks'
 import { addAgentStep, addJudge, addPrompt, addRequest, addWarm, addWorker, emptyStats, formatStats, sentEffort } from './stats'
 import { besideBand, renderBand, renderFooter } from './ui/band'
 import { renderAlert } from './ui/alerts'
@@ -2037,7 +2037,9 @@ async function noteTask($: EngineInterface, e: ToolCallInput, answer: ToolCallRe
     const id = (answer.result as { task_id?: unknown } | undefined)?.task_id
     if (typeof id === 'string' && (await read($, bgTasks)).some(task => task.id === id && task.state === 'running')) {
       const now = await $.clock.now()
+      const before = await read($, bgTasks)
       await update($, bgTasks, list => stopTask(list, id, now))
+      await settleWaiting($, [], before, await read($, bgTasks), now)
     }
     return
   }
@@ -2053,6 +2055,21 @@ async function endBackground($: EngineInterface, text: string): Promise<void> {
   const list = await read($, bgTasks)
   const next = endTasks(list, ends, now)
   if (!same(next, list)) await update($, bgTasks, () => next)
+  await settleWaiting($, ends, list, next, now)
+}
+
+/**
+ * The agents that wait on commands of their own, after the task list went from `before` to `after`
+ * (tasks.ts agentsAfterNotice): one ends with its last command, or when a notification (`ends`)
+ * says it finished; one shown done returns to running when a notification says it is waiting.
+ * Written only when a card changes.
+ */
+async function settleWaiting($: EngineInterface, ends: readonly TaskEnd[], before: readonly BgTask[], after: readonly BgTask[], now: number): Promise<void> {
+  const list = await read($, agents)
+  const next = agentsAfterNotice(list, ends, before, after, now)
+  if (same(next, list)) return
+  await update($, agents, current => retainAgents(agentsAfterNotice(current, ends, before, after, now)))
+  await countAgents($)
 }
 
 /**
@@ -2079,11 +2096,16 @@ function retainAgents(list: AgentRec[]): AgentRec[] {
   const drop = new Set(ended.slice().sort((a, b) => (a.endedAt ?? a.startedAt) - (b.endedAt ?? b.startedAt)).slice(0, over).map(a => a.id))
   return list.filter(a => !drop.has(a.id))
 }
-/** An ended agent running again: the clock restarts, the time its earlier runs took is kept. */
+/**
+ * An ended agent running again, or a waiting one (its turn ended with work of its own running) whose
+ * next run starts: the clock restarts, the time its earlier runs took is kept. A message wakes one
+ * (wakeCard), and so does its own background work, as its next tool call or turn shows. A waiting
+ * agent's card ran all along, as the Claude app's does, so its wait counts in the time kept.
+ */
 export function wakeAgent(agent: AgentRec, now: number): AgentRec {
-  if (agent.state === 'running') return agent
-  const ran = Math.max(0, (agent.endedAt ?? agent.startedAt) - agent.startedAt)
-  const { endedAt: _ended, now: _now, toolSince: _since, ...rest } = agent
+  if (agent.state === 'running' && !agent.waiting) return agent
+  const ran = Math.max(0, (agent.waiting ? now : agent.endedAt ?? agent.startedAt) - agent.startedAt)
+  const { endedAt: _ended, now: _now, toolSince: _since, waiting: _waiting, ...rest } = agent
   return { ...rest, state: 'running', startedAt: now, ranMs: (agent.ranMs ?? 0) + ran }
 }
 /**
@@ -2095,7 +2117,7 @@ async function wakeCard($: EngineInterface, id: string): Promise<(() => Promise<
   const now = await $.clock.now()
   // An end kept in endedEarly belongs to a spawn not yet recorded; that spawn consumes it, not this.
   const before = (await read($, agents)).find(a => a.id === id)
-  if (before?.state === 'running') return undefined
+  if (before?.state === 'running' && !before.waiting) return undefined
   const info = before ? undefined : (await $.agent.list()).find(a => a.id === id)
   const woken: AgentRec = before ? wakeAgent(before, now) : { id, ...(info ? { description: info.description, type: info.type } : {}), state: 'running', startedAt: now, ranMs: 0, cost: 0 }
   await update($, agents, list => retainAgents([...list.filter(a => a.id !== id), woken]))
@@ -2109,6 +2131,20 @@ async function wakeCard($: EngineInterface, id: string): Promise<(() => Promise<
     })
     await countAgents($)
   }
+}
+/**
+ * An agent's turn or tool call starts while its card says done or waiting: it woke on its own, when
+ * background work of its own reported (no message, so no wakeCard). A new run starts on the card,
+ * its earlier time kept. A card that already runs, or no card, is left as it is.
+ */
+async function wakeOnRun($: EngineInterface, id: string): Promise<void> {
+  try {
+    const card = (await read($, agents)).find(a => a.id === id)
+    if (!card || (card.state === 'running' && !card.waiting)) return
+    const now = await $.clock.now()
+    await update($, agents, list => list.map(a => a.id === id ? wakeAgent(a, now) : a))
+    await countAgents($)
+  } catch (error) { await report($, 'agent wake', error) }
 }
 /** A woken card made anew learns the model its run started on. */
 async function wokenModel($: EngineInterface, id: string, model: string | undefined): Promise<void> {
@@ -2499,15 +2535,19 @@ export const register: Register = on => {
   })
   on('classic.Stop', async ($, e, next) => {
     // A task the session no longer holds in flight, or a worker's whose worker it no longer holds,
-    // has ended, though no notice of it reached us (yet). A Stop that carries no list (an older
-    // engine) settles nothing.
+    // has ended, though no notice of it reached us (yet). A worker waiting on its own commands is
+    // one the Claude app keeps running, so its commands need only be listed themselves. A Stop that
+    // carries no list (an older engine) settles nothing.
     try {
       if (e.background_tasks) {
         const inFlight = e.background_tasks.map(task => task.id)
         const list = await read($, bgTasks)
-        if (list.some(task => task.state === 'running' && !stillRunning(task, inFlight))) {
+        const waiting = (await read($, agents)).filter(a => a.waiting).map(a => a.id)
+        if (list.some(task => task.state === 'running' && !stillRunning(task, inFlight, waiting))) {
           const now = await $.clock.now()
-          await update($, bgTasks, tasks => settleTasks(tasks, inFlight, now))
+          await update($, bgTasks, tasks => settleTasks(tasks, inFlight, now, waiting))
+          // A waiting worker whose last command was settled has nothing left to wait on.
+          await settleWaiting($, [], list, await read($, bgTasks), now)
         }
       }
     } catch (error) { await report($, 'classic.Stop', error) }
@@ -2678,11 +2718,14 @@ export const register: Register = on => {
     } catch (error) { await report($, 'turn.step record', error) }
     return answer
   })
-  on('turn.start', ($, e, next) => {
+  on('turn.start', async ($, e, next) => {
     // The Compact press's tidy prompt becomes a turn of its own; its id is how its end is told from
     // every other turn's (a prompt queued before it, or one the person types next).
     if (tidy && tidy.turnId === null && !e.agentId && e.text.includes(tidy.text)) tidy.turnId = e.turnId
     if (!e.agentId) currentTurn = e.turnId
+    // A turn an ended or waiting agent starts is a run of its own (its background work woke it), whether
+    // or not it calls a tool: the card runs again before its own notice can end it (wakeAgent).
+    else await wakeOnRun($, e.agentId)
     return next(e)
   })
   on('turn.complete', async ($, e, next) => {
@@ -2707,13 +2750,18 @@ export const register: Register = on => {
           // Forks and other loops no spawn records end here too: only the latest few are kept.
           for (const id of endedEarly.keys()) if (endedEarly.size > 40) endedEarly.delete(id)
         }
-        await update($, agents, list => retainAgents(list.map(a => a.id === e.agentId ? { ...a, state, endedAt: now, now: undefined, toolSince: undefined } : a)))
-        await countAgents($)
         // Its commands bound to its final response end with it; no notification follows them.
         if ((await read($, bgTasks)).some(task => task.agentId === e.agentId && task.endsWithAgent && task.state === 'running')) await update($, bgTasks, list => endWithAgent(list, e.agentId!, now))
-        // The rest leave the list with it, as the Claude app's do; a notice that comes later says how
-        // each ended (settleWithAgent).
-        if ((await read($, bgTasks)).some(task => task.agentId === e.agentId && task.state === 'running')) await update($, bgTasks, list => settleWithAgent(list, e.agentId!, now))
+        // An answer that leaves commands of its own running is not the agent's end: the Claude app lists it
+        // as running while they do (read 2026-11-24), and it may wake by itself when one ends. The card
+        // keeps running with its clock, and its commands stay in the list until a notice says how each ended
+        // (agentsAfterNotice ends the card with the last). A failed or aborted turn ends it as before.
+        const waiting = !!before && state === 'done' && ownRunning(await read($, bgTasks), e.agentId).length > 0
+        await update($, agents, list => retainAgents(list.map(a => a.id !== e.agentId ? a : waiting ? waitOnOwn(a) : { ...a, state, endedAt: now, now: undefined, toolSince: undefined, waiting: undefined })))
+        await countAgents($)
+        // Otherwise what it left running leaves the list with it, as the Claude app's does; a notice that
+        // comes later says how each ended (settleWithAgent).
+        if (!waiting && (await read($, bgTasks)).some(task => task.agentId === e.agentId && task.state === 'running')) await update($, bgTasks, list => settleWithAgent(list, e.agentId!, now))
         // A picked worker's outcome, once, joined to its pick by id: whether the session's tier or
         // the named model was enough is read from these lines later (2026-10-24).
         // A resumed run's end is not a second outcome of the same pick.
@@ -2868,7 +2916,9 @@ export const register: Register = on => {
     try {
       started = await $.clock.now()
       const line = e.agentId ? await toolLine($, e) : ''
-      if (e.agentId) await update($, agents, list => list.map(a => a.id === e.agentId ? { ...a, now: line, toolSince: started, state: 'running', tools: (a.tools ?? 0) + 1 } : a))
+      // A call from an agent shown done or waiting is its own background work waking it (a message
+      // would have woken the card first): a new run, its earlier time kept (wakeAgent).
+      if (e.agentId) await update($, agents, list => list.map(a => a.id === e.agentId ? { ...wakeAgent(a, started), now: line, toolSince: started, state: 'running', tools: (a.tools ?? 0) + 1 } : a))
     } catch (error) { await report($, 'tool.call start', error) }
     let answer: ToolCallResult | undefined
     try { answer = await next(e); return answer }

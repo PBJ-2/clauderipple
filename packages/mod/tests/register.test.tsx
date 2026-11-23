@@ -826,6 +826,153 @@ test('a resumed run that ends or calls a tool before its spawn answers is settle
   expect(seen.counts()?.live).toBe(0)
 })
 
+// 2026-11-24: an agent that ends its turn while its own background command runs is "waiting on its
+// own background work" to the engine, and RUNNING in the Claude app (its clock counting from the
+// spawn); it may wake by itself when the command ends. The mod ended its card at the turn's end.
+const NOTICE = (id: string, status: string, summary: string) => `<task-notification>\n<task-id>${id}</task-id>\n<status>${status}</status>\n<summary>${summary}</summary>\n</task-notification>`
+/** A worker that has started `b-child`, a command left running in the background, at the clock's NOW + 1000. */
+async function workerWithChild($: Engine, on: On, background = true) {
+  const b = boundaries(on)
+  http(on)
+  judgeStub(on)
+  spawnStub(on)
+  const seen = agentWrites(on)
+  let tasks: BgTask[] = []
+  on('state.set', { plugin: 'ripple', key: 'bgTasks' }, async ($, e, next) => {
+    const result = await next(e)
+    tasks = e.value as BgTask[]
+    return result
+  })
+  // A `tail` is bound to its agent's final response (no notification follows it); any other command is its own.
+  on('tool.call', ($, e) => e.tool === 'Bash' ? { result: { stdout: '', stderr: '', interrupted: false, ...(e.run_in_background ? e.command.includes('tail') ? { backgroundTaskId: 'b-bound', backgroundEndsWithFinalResponse: true } : { backgroundTaskId: 'b-child' } : {}) } } : { result: {} })
+  on('classic.Stop', () => ({}))
+  await start($)
+  await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: standard]]\nWatch a build.' })
+  await b.clock.advance(1000)
+  if (background) await $.tool.call({ tool: 'Bash', command: 'npm run build', description: 'Build', run_in_background: true, agentId: 'worker-1' })
+  const card = () => seen.records().find(a => a.id === 'worker-1')!
+  const child = () => tasks.find(task => task.id === 'b-child')
+  const bound = () => tasks.find(task => task.id === 'b-bound')
+  const answered = (turnId = 'turn-1') => $.turn.complete({ turnId, answer: 'Started it.', reason: 'answer', durationMs: 1000, isAborted: false, agentId: 'worker-1' })
+  const notice = (text: string) => $.session.append({ message: { type: 'user', role: 'user', isMeta: true, content: [{ type: 'text', text }] }, door: 'delivery', origin: { kind: 'task-notification' }, uuid: 'u-' + text.length, agentId: 'worker-1' })
+  return { b, seen, card, child, bound, answered, notice }
+}
+
+test('an agent that ends its turn with its own command running stays running with that command, and ends when the command does', async ($, on) => {
+  const { b, seen, card, child, answered, notice } = await workerWithChild($, on)
+  await b.clock.advance(3000)
+  await answered()
+  // The Claude app lists it as running: its clock goes on from the spawn, the command stays listed.
+  expect(card()).toMatchObject({ state: 'running', waiting: true, startedAt: NOW })
+  expect(card().endedAt).toBeUndefined()
+  expect(child()).toMatchObject({ state: 'running', agentId: 'worker-1' })
+  expect(child()?.settled).toBeUndefined()
+  expect(seen.counts()?.live).toBe(1)
+  // The engine's own word, which comes a moment after the turn's end, changes nothing.
+  await $.prompt.submit({ text: NOTICE('worker-1', 'completed', 'Rename variable is waiting on its own background work'), origin: { kind: 'task-notification' }, wait: false })
+  expect(card()).toMatchObject({ state: 'running', waiting: true, startedAt: NOW })
+  // A Stop that lists the command but not its worker is no end of either.
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [{ id: 'b-child' }] } as never)
+  expect(child()?.state).toBe('running')
+  expect(card().state).toBe('running')
+  await b.clock.advance(20000)
+  await notice(NOTICE('b-child', 'completed', 'Background command "Build" completed (exit code 0)'))
+  expect(child()).toMatchObject({ state: 'done', endedAt: NOW + 24000 })
+  expect(card()).toMatchObject({ state: 'done', endedAt: NOW + 24000, startedAt: NOW })
+  expect(card().waiting).toBeUndefined()
+  expect(seen.counts()?.live).toBe(0)
+})
+
+test('a waiting agent whose command a Stop no longer holds, or a stop ended, has nothing left to wait on', async ($, on) => {
+  const { b, seen, card, child, answered } = await workerWithChild($, on)
+  await answered()
+  await b.clock.advance(5000)
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [] })
+  expect(child()).toMatchObject({ state: 'done', settled: true })
+  expect(card()).toMatchObject({ state: 'done', endedAt: NOW + 6000 })
+  expect(seen.counts()?.live).toBe(0)
+})
+
+test('a waiting agent whose command never reports stays running', async ($, on) => {
+  const { b, card, child, answered } = await workerWithChild($, on)
+  await answered()
+  await b.clock.advance(3_600_000)
+  await $.prompt.submit({ text: NOTICE('some-other-task', 'completed', 'Background command "x" completed (exit code 0)'), origin: { kind: 'task-notification' }, wait: false })
+  expect(card()).toMatchObject({ state: 'running', waiting: true })
+  expect(child()?.state).toBe('running')
+})
+
+test('a notification that an agent shown done is waiting returns it to running with its clock, and one that it finished ends it', async ($, on) => {
+  // No command of its own is known (one the mod never saw): the notification's words are all there is.
+  const { b, seen, card, answered } = await workerWithChild($, on, false)
+  await b.clock.advance(2000)
+  await answered()
+  expect(card()).toMatchObject({ state: 'done', endedAt: NOW + 3000 })
+  await b.clock.advance(30)
+  await $.prompt.submit({ text: NOTICE('worker-1', 'completed', 'Rename variable is waiting on its own background work'), origin: { kind: 'task-notification' }, wait: false })
+  expect(card()).toMatchObject({ state: 'running', waiting: true, startedAt: NOW })
+  expect(card().endedAt).toBeUndefined()
+  expect(seen.counts()?.live).toBe(1)
+  await b.clock.advance(60000)
+  await $.prompt.submit({ text: NOTICE('worker-1', 'completed', 'Rename variable finished'), origin: { kind: 'task-notification' }, wait: false })
+  expect(card()).toMatchObject({ state: 'done', endedAt: NOW + 63030, startedAt: NOW })
+  expect(card().waiting).toBeUndefined()
+  expect(seen.counts()?.live).toBe(0)
+  // A "finished" word for an agent already done changes nothing.
+  await $.prompt.submit({ text: NOTICE('worker-1', 'completed', 'Rename variable finished'), origin: { kind: 'task-notification' }, wait: false })
+  expect(card()).toMatchObject({ state: 'done', endedAt: NOW + 63030 })
+})
+
+test("a waiting agent's own call is a new run: its clock restarts and the time before it, the wait too, is kept", async ($, on) => {
+  const { b, seen, card, child, answered, notice } = await workerWithChild($, on)
+  await b.clock.advance(3000)
+  await answered()
+  await b.clock.advance(40000)
+  // The command ended and the engine woke the agent: a tool call, no message sent.
+  await $.tool.call({ tool: 'Read', file_path: '/x', agentId: 'worker-1' } as ToolCallInput)
+  const woke = NOW + 44000
+  expect(card()).toMatchObject({ state: 'running', startedAt: woke, ranMs: 44000, tools: 2 })
+  expect(card().waiting).toBeUndefined()
+  expect(seen.counts()?.live).toBe(1)
+  // Its command's end reaches the woken agent: it runs, so nothing ends.
+  await notice(NOTICE('b-child', 'completed', 'Background command "Build" completed (exit code 0)'))
+  expect(child()?.state).toBe('done')
+  expect(card()).toMatchObject({ state: 'running', startedAt: woke, ranMs: 44000 })
+  await b.clock.advance(5000)
+  await answered('turn-2')
+  expect(card()).toMatchObject({ state: 'done', startedAt: woke, endedAt: woke + 5000, ranMs: 44000 })
+  expect(card().waiting).toBeUndefined()
+})
+
+test('an agent that ended and calls a tool, or starts a turn, by itself runs again from that moment, its earlier time kept', async ($, on) => {
+  const { b, card, answered } = await workerWithChild($, on, false)
+  await b.clock.advance(4000)
+  await answered()
+  expect(card()).toMatchObject({ state: 'done', endedAt: NOW + 5000 })
+  await b.clock.advance(10000)
+  await $.turn.start({ turnId: 'turn-2', text: 'Background command completed', agentId: 'worker-1' } as never)
+  expect(card()).toMatchObject({ state: 'running', startedAt: NOW + 15000, ranMs: 5000 })
+  expect(card().endedAt).toBeUndefined()
+  await b.clock.advance(1000)
+  await $.tool.call({ tool: 'Read', file_path: '/x', agentId: 'worker-1' } as ToolCallInput)
+  expect(card()).toMatchObject({ state: 'running', startedAt: NOW + 15000, ranMs: 5000 })
+  await b.clock.advance(1000)
+  await answered('turn-2')
+  expect(card()).toMatchObject({ state: 'done', startedAt: NOW + 15000, endedAt: NOW + 17000, ranMs: 5000 })
+})
+
+test('an agent with no command of its own running ends with its turn, and what it left bound to its answer ends with it', async ($, on) => {
+  const { b, seen, card, bound, answered } = await workerWithChild($, on, false)
+  await $.tool.call({ tool: 'Bash', command: 'tail -f x', run_in_background: true, agentId: 'worker-1' })
+  expect(bound()).toMatchObject({ state: 'running', endsWithAgent: true })
+  await b.clock.advance(2000)
+  await answered()
+  expect(card()).toMatchObject({ state: 'done', endedAt: NOW + 3000 })
+  expect(card().waiting).toBeUndefined()
+  expect(bound()).toMatchObject({ state: 'stopped', endedAt: NOW + 3000 })
+  expect(seen.counts()?.live).toBe(0)
+})
+
 // 2026-10-25: a flat slice(-40) over every record dropped the oldest running worker the moment 41
 // ran at once: its card, the band's live count and every later step's tokens and effort vanished.
 test('workers all stay listed past forty, counted, and still take their steps during long tools', async ($, on) => {
