@@ -345,7 +345,7 @@ export class ChatGptAdapter {
   /** Cooldowns and conversation stickiness, shared with the proxy's other credential pools. */
   private readonly pool: CredentialPool;
   private readonly log: Logger;
-  /** What this adapter last noted per account (owner id), from response headers or `/wham/usage`; readers use `quotaOf`, which is the newest on the pool. */
+  /** What this adapter last noted per account (owner id), from response headers or `/wham/usage`; readers use `quotaOf`, which takes the pool's newest reading for an account with a usage cap. */
   private readonly rateLimitsByAccount = new Map<string, Record<string, unknown>>();
   /** The account that answered last: the one whose quota the single-number readers see. */
   private activeOwner: string | null = null;
@@ -383,12 +383,17 @@ export class ChatGptAdapter {
   }
 
   /**
-   * An account's newest quota reading from any provider on this pool. The meter and the cap notice read
-   * the same one: with a reading of this provider's own beside another's newer one, the meter would say
-   * 40% next to a notice that the account reached 80%.
+   * An account's quota as the meter shows it. An account with a stored usage cap shows its newest reading
+   * from any provider on this pool: the hold and the cap notice are judged on that one, and with a reading
+   * of this provider's own beside another's newer one the meter would say 40% next to a notice that the
+   * account reached 80%. Every other account (no cap, or the borrowed Codex login, whose one shared key
+   * would carry a previous login's reading over to a new one) shows what this provider itself last saw,
+   * exactly as before the cap existed.
    */
   private quotaOf(ownerId: string): Record<string, unknown> | null {
-    return this.readings.get(ownerId)?.snapshot ?? this.rateLimitsByAccount.get(ownerId) ?? null;
+    const own = this.rateLimitsByAccount.get(ownerId) ?? null;
+    if (!this.currentCap(ownerId)?.cap) return own;
+    return this.readings.get(ownerId)?.snapshot ?? own;
   }
 
   /** Record a snapshot for an account; a full window takes it out of rotation until that window resets. */

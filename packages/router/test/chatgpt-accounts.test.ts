@@ -704,6 +704,65 @@ test("usage cap: the meter and the cap notice both read the account's newest rea
   assert.equal(weekly(a.accountStatus()[0]!), 82);
 });
 
+test("usage cap: an account with no cap shows the provider's own reading, as before the cap existed, so one provider's 100% is not another's", async () => {
+  let clock = morning();
+  const r = rig(1, undefined, { now: () => clock });
+  const build = (name: string) => new ChatGptAdapter(name, { type: "chatgpt", auth: "own", url: backendUrl }, r.home, new Logger(r.logFile, 1e9, 0, false), r.pool, r.tokenEndpoint, r.now);
+  const a = adapter;
+  const b = build("chatgpt-b");
+  const weekly = (quota: Record<string, unknown> | null): number | undefined =>
+    ((quota?.rate_limits as { secondary?: { used_percent?: number } } | undefined)?.secondary)?.used_percent;
+  behaviour.set("tok-0", reading({ weekly: 40 }));
+  adapter = a;
+  await call("conv-a");
+  assert.equal(weekly(a.accountStatus()[0]!.quota), 40);
+  assert.equal(b.accountStatus()[0]!.quota, null, "B has read nothing of its own: it shows nothing, not A's reading");
+  assert.equal(b.lastRateLimits, null);
+  clock += 60_000;
+  behaviour.set("tok-0", usageLimit(3600));
+  adapter = a;
+  await call("conv-a2");
+  // A saw the account at its limit; B never asked, so its meter is as it was and its availability is its own pool's call.
+  assert.equal(b.accountStatus()[0]!.quota, null, "B's quota stays its own, which the mod-options availability reads");
+  assert.equal(exhaustedForMs(b.accountStatus()[0]!.quota, clock, true, b.accountStatus()[0]!.usageCap), undefined);
+
+  // The same account with a cap shares the newest reading (A's), so B follows A and the hold agrees with the meter.
+  updateChatGptAccount(r.home, r.ids[0]!, { usageCap: 90 });
+  b.usageCapChanged(r.ids[0]!);
+  const primary = (quota: Record<string, unknown> | null): number | undefined => ((quota?.rate_limits as { primary?: { used_percent?: number } } | undefined)?.primary)?.used_percent;
+  assert.equal(primary(b.accountStatus()[0]!.quota), 100, "with a cap the meter and the cap notice agree on the newest reading");
+  assert.equal(b.accountStatus()[0]!.capRest?.used, 100);
+  // And without it again, B is back to its own, which it has none of.
+  updateChatGptAccount(r.home, r.ids[0]!, { usageCap: null });
+  assert.equal(b.accountStatus()[0]!.quota, null);
+});
+
+test("usage cap: a provider that takes over the borrowed Codex login shows no quota the previous login had", async () => {
+  const r = rig(1);
+  const login = (id: string) => {
+    const token = jwt({ exp: Math.floor(Date.now() / 1000) + 3600, "https://api.openai.com/auth": { chatgpt_account_id: `ws-${id}` }, "https://api.openai.com/profile": { email: `${id}@example.test` } });
+    fs.writeFileSync(path.join(codexHome, "auth.json"), JSON.stringify({ tokens: { access_token: token, refresh_token: `rt-${id}`, account_id: `ws-${id}` } }));
+    return token;
+  };
+  const build = (name: string) => new ChatGptAdapter(name, { type: "chatgpt", auth: "borrow-codex", url: backendUrl }, r.home, new Logger(r.logFile, 1e9, 0, false), r.pool, r.tokenEndpoint, r.now);
+  try {
+    const first = login("one");
+    const old = build("codex-a");
+    behaviour.set(first, reading({ weekly: 95 }));
+    adapter = old;
+    await call("conv-codex");
+    const shown = (status: { quota: Record<string, unknown> | null }) => ((status.quota?.rate_limits as { secondary?: { used_percent?: number } } | undefined)?.secondary)?.used_percent;
+    assert.equal(shown(old.accountStatus().find((a) => a.id === "codex")!), 95);
+    // The user signs in to Codex as somebody else and the provider is rebuilt (or a new one added).
+    login("two");
+    const fresh = build("codex-b");
+    assert.equal(fresh.accountStatus().find((a) => a.id === "codex")!.quota, null, "the new login has no reading yet");
+    assert.equal(fresh.lastRateLimits, null);
+  } finally {
+    fs.rmSync(path.join(codexHome, "auth.json"), { force: true });
+  }
+});
+
 test("usage cap: when every account is held by its cap the answer says so, with the date, and is not retried", async () => {
   const clock = morning();
   rig(2, undefined, { now: () => clock, caps: { 0: 70, 1: 70 } });
