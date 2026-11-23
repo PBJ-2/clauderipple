@@ -90,6 +90,18 @@ test("inbox routes validate, forward only their own requests and preserve host r
   assert.equal(calls.length, 3);
 });
 
+test("the inbox poll forwards what the mod announced, and nothing else", async t => {
+  const calls: string[] = [];
+  const f = await admin(t, { fetch: async url => { calls.push(String(url)); return Response.json({ offers: [] }); } });
+  assert.equal((await fetch(`${f.base}/api/phone-inbox?session=s&caps=command`)).status, 200);
+  assert.equal((await fetch(`${f.base}/api/phone-inbox?session=s`)).status, 200);
+  assert.deepEqual(calls, ["http://127.0.0.1:18797/local/inbox?session=s&caps=command", "http://127.0.0.1:18797/local/inbox?session=s"]);
+  for (const caps of ["", "Command", "a&b=1", "command&caps=x", "a,b,c,d,e,f,g,h,i"]) assert.equal((await fetch(`${f.base}/api/phone-inbox?session=s&caps=${encodeURIComponent(caps)}`)).status, 400);
+  assert.equal((await fetch(`${f.base}/api/phone-inbox?session=s&caps=a&caps=b`)).status, 400);
+  assert.equal((await phoneRequest("inbox/claim", "POST", "{}", {}, undefined, undefined, "command")).status, 404);
+  assert.equal(calls.length, 2);
+});
+
 test("every inbox route reports an unreachable host", async t => {
   const f = await admin(t, { fetch: async () => { throw new Error("private"); } });
   for (const [route, init] of [["?session=a", {}], ["/claim", { method: "POST", body: '{"itemId":"a"}' }], ["/result", { method: "POST", body: '{"itemId":"a","outcome":"failed"}' }]] as const) {

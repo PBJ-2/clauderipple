@@ -50,6 +50,7 @@ import type { CertStore } from "./certs.ts";
 import { chatPickerModels, injectPickerModels, isBootstrapPath } from "./picker.ts";
 import { effortLevelsForModel } from "./admin.ts";
 import { CLAUDE_SMALL_MODEL, claudeLastResortProviders, effortLevels, isTargetProvider, runsServerTools } from "./targets.ts";
+import { attachModPhotos, hintModPhotos, modPhotosFolder, modPhotosRoot, PhotoBlocklist, REQUEST_LIMIT } from "./photo-blocks.ts";
 import { requestConversationKey, ResponseUsageTap, requestId, type RequestLog, type RequestRecord, type RequestUsage } from "./requestlog.ts";
 import { credentialHeaderValues, redactErrorText, redactHeaders } from "./redact.ts";
 import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
@@ -279,6 +280,8 @@ export type ProxyDeps = {
   upstreamPort?: number;
   /** While engaged (a network switch, tether.ts), new model calls wait here instead of starting. */
   hold?: HoldGate;
+  /** The folder the remote host keeps phone photos for app sessions in (`<host dir>/mod-photos`); tests inject a tmp dir. */
+  modPhotosRoot?: string;
 };
 
 export type Stats = {
@@ -342,6 +345,8 @@ export class Proxy {
   readonly providerHealth = new ProviderHealth();
   readonly modelHealth = new ModelHealth();
   readonly compactPicks = new CompactPicks();
+  /** Phone photos an upstream refused as images (a small file of the data dir): they stay text from then on. */
+  private photoBlocked: PhotoBlocklist | undefined;
   private readonly healthConfig = new Map<string, { config: string; credentials: string; keys: Record<string, string> }>();
   /** Agent/session-scoped spawn snapshots survive compaction, never shared by model id. */
   private readonly workerLadders = new Map<string, WorkerLadderRoute>();
@@ -1061,6 +1066,12 @@ export class Proxy {
       record.stream = json?.stream === true;
       json = null;
     }
+    // A phone photo for a Claude app session is named by a line of the person's message. Every such path holds
+    // the folder's name, so a request without it costs one scan. Here every target is told, in words, to open
+    // the file; a target that takes images is given the picture itself once it is routed (below).
+    const photosRoot = this.deps.modPhotosRoot ?? modPhotosRoot();
+    const hasPhotoLines = !!json && body.includes(modPhotosFolder(photosRoot));
+    if (json && hasPhotoLines && hintModPhotos(json, photosRoot)) body = Buffer.from(JSON.stringify(json));
     const kind: RequestKind = json && isApiHost && path.startsWith("/v1/messages") ? requestKind(json, pathname, method, requestClass) : "turn";
     // A WebSearch arrives as its own request aimed at ANTHROPIC_SMALL_FAST_MODEL, recognised by the
     // forced `web_search` server tool rather than by its model id. Recognise it whether or not a
@@ -1884,6 +1895,36 @@ export class Proxy {
         break;
       }
 
+      // A phone photo goes as an image only where the request is a native Claude Messages call: the route
+      // is Anthropic's own (or none, the app's login) and the model is a Claude id. Another provider, an
+      // Anthropic-shaped relay or a text-only model is left the line, which tells it to open the file. The
+      // photo must be this session's own. If the API still refuses an image, the turn is sent again below
+      // with the lines only, and those files stay text.
+      let photoRetry: { plain: Buffer; files: string[] } | undefined;
+      // The files of a turn sent again without its images: they become text for good only once that turn is
+      // answered 2xx, which proves the images were what the API refused.
+      let photoUnconfirmed: string[] | undefined;
+      if (json && hasPhotoLines && isApiHost && path.startsWith("/v1/messages") && !ownKey) {
+        const asked = route ? route.model : model;
+        const native = typeof asked === "string" && asked.startsWith("claude-") &&
+          (!route || (cfg.providers[route.provider] && providerFor(cfg.providers[route.provider]!, route.model).type === "anthropic"));
+        if (native) {
+          const blocked = (this.photoBlocked ??= new PhotoBlocklist(this.deps.home));
+          const plain = body;
+          const files = await attachModPhotos(json, photosRoot, { session: record.session, blocked, room: REQUEST_LIMIT - body.length });
+          // The client may have left during the disk reads. The close event came before the abort handler
+          // below exists, so nothing would stop this turn: end it here, as for a client gone before the call.
+          if (clientClosed || res.destroyed) {
+            finish("-", 0, "client closed", true, { upstreamCalled: false });
+            return;
+          }
+          if (files.length > 0) {
+            body = Buffer.from(JSON.stringify(json));
+            photoRetry = { plain, files };
+          }
+        }
+      }
+
       if (json && typeof json.service_tier === "string") record.requestedTier = json.service_tier;
 
       // Two kinds of response editing: the CLI bootstrap (api host) and the claude.ai bootstrap (picker mode).
@@ -2051,6 +2092,12 @@ export class Proxy {
       const onUpstreamResponse = (upRes: http.IncomingMessage): void => {
         if (target.host === cfg.upstream) this.deps.health.success();
         const status = upRes.statusCode ?? 0;
+        // The turn without its images was answered: the images were what the API refused, so those files
+        // stay text. A failure of the resend too proves nothing about them, and nothing is recorded.
+        if (photoUnconfirmed && status >= 200 && status < 300) {
+          this.photoBlocked?.add(photoUnconfirmed);
+          photoUnconfirmed = undefined;
+        }
         // Read body-dependent refusals before committing headers. A relay 403 can report its own
         // broken upstream, while the narrowly classified workspace-region 400 (#101) rests this key
         // and can be answered by another. Other 400s remain request errors and never walk the pool.
@@ -2156,6 +2203,26 @@ export class Proxy {
           this.claudeUsage.observeAnswer("current", upRes.headers);
         }
 
+        // The API refused an image (too big, unreadable, wrong type) in a turn that carried the phone's
+        // photos. Nothing has reached the client, so the turn is sent once more with the lines only, and the
+        // files are remembered as text so every later replay of the history is the same request.
+        if (status === 400 && photoRetry && !res.headersSent && /image/i.test(errBody)) {
+          const { plain, files } = photoRetry;
+          photoRetry = undefined;
+          photoUnconfirmed = files;
+          log.warn(`PHOTO ${files.length} photo(s) refused as image (${redactErrorText(errBody, [...errorSecrets], 200)}); sent again as text`);
+          body = plain;
+          const sized = (list: string[]): string[] => {
+            const out = [...list];
+            for (let i = 0; i < out.length; i += 2) if (out[i]!.toLowerCase() === "content-length") out[i + 1] = String(body.length);
+            return out;
+          };
+          sized(headers).forEach((value, i) => { headers[i] = value; });
+          upRes.resume();
+          upRes.destroy();
+          send(sized(lastAttemptHeaders));
+          return;
+        }
         // Nothing has been written to the client yet, so a refused credential can still be replaced
         // and the client answered on its first ask. Only here: once the answer starts flowing the
         // turn is committed, because replacing a half-sent stream splices two answers together.

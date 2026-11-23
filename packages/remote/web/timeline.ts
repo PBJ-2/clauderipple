@@ -105,6 +105,8 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
     lastSeq = e.seq;
     switch (e.kind) {
       case "user":
+        // A message the host took back without running it (its words wait in the queue) is an empty one: not drawn.
+        if (!e.text && !e.images?.length && !e.files?.length) break;
         finishStream();
         seenUser.add(e.clientMsgId);
         // The app counts "working for" from the person's message; Mac sessions have no turn event to say so.

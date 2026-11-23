@@ -91,3 +91,57 @@ test("a worker's model reaches the task list and survives an event that does not
   items[0] = { ...items[0]!, model: "gemini-3.8-flash" } as TimelineItem;
   assert.equal(activityOverview(items).active[0]?.model, "gemini-3.8-flash");
 });
+
+test("a TaskStop answered 'No task found' ends the task as unknown; other failed stops leave it running (#176)", () => {
+  const activity = new BackgroundActivity();
+  launch(activity, "m", "Monitor", { description: "Watch", command: "tail -f x" }, { taskId: "gone" });
+  launch(activity, "s", "Bash", { command: "sleep 1", run_in_background: true }, { backgroundTaskId: "other" });
+  activity.call("stop-other", "TaskStop", { task_id: "other" });
+  activity.result("stop-other", false, "<tool_use_error>Permission denied</tool_use_error>", 15);
+  assert.deepEqual(activity.active.map(task => task.id), ["gone", "other"]);
+  // The text Claude Code writes into the transcript (verified in real session records, 2026-10).
+  activity.call("stop-gone", "TaskStop", { task_id: "gone" });
+  activity.result("stop-gone", false, "<tool_use_error>No task found with ID: gone</tool_use_error>", 20);
+  assert.deepEqual(activity.active.map(task => task.id), ["other"]);
+  assert.deepEqual(activity.history.map(task => [task.id, task.state, task.endedAt]), [["gone", "unknown", 20]]);
+});
+
+test("a 'No task found' stop leaves a task that already ended with the state and time it ended with (#176)", () => {
+  const activity = new BackgroundActivity();
+  launch(activity, "m", "Monitor", { description: "Watch", command: "tail -f x" }, { taskId: "finished" });
+  launch(activity, "s", "Bash", { command: "sleep 1", run_in_background: true }, { backgroundTaskId: "stopped" });
+  activity.notice("<task-notification><task-id>finished</task-id><status>completed</status></task-notification>", 30);
+  activity.call("stop-s", "TaskStop", { task_id: "stopped" });
+  activity.result("stop-s", true, "{}", 40);
+  assert.deepEqual(activity.history.map(task => [task.id, task.state, task.endedAt]).sort(), [["finished", "done", 30], ["stopped", "stopped", 40]]);
+  for (const [call, task] of [["a", "finished"], ["b", "stopped"]] as const) {
+    activity.call(call, "TaskStop", { task_id: task });
+    activity.result(call, false, `<tool_use_error>No task found with ID: ${task}</tool_use_error>`, 99);
+  }
+  assert.deepEqual(activity.history.map(task => [task.id, task.state, task.endedAt]).sort(), [["finished", "done", 30], ["stopped", "stopped", 40]], "neither state nor end time is overwritten");
+});
+
+test("tasks the host moved to history as unknown render under Recent, not among the running work (#176)", () => {
+  const lost = { id: "gone", kind: "monitor" as const, label: "Old watch", startedAt: 1, state: "unknown" as const };
+  const live = { id: "live", kind: "shell" as const, label: "Running", startedAt: 5, state: "running" as const };
+  const view = activityOverview([], [live], [lost, { id: "ok", kind: "shell", label: "Done", startedAt: 2, state: "done", endedAt: 3 }]);
+  assert.deepEqual(view.active.map(task => task.id), ["live"]);
+  assert.deepEqual(view.recent.map(task => task.id).sort(), ["gone", "ok"]);
+  assert.equal(view.counts.unknown, 1, "the summary still counts it");
+  // An older host that still lists the task as active keeps it with the running work.
+  const older = activityOverview([], [{ ...lost }], [lost]);
+  assert.deepEqual(older.active.map(task => task.id), ["gone"]);
+  assert.deepEqual(older.recent, []);
+  // Tasks with no state and `running` tasks are unchanged.
+  assert.deepEqual(activityOverview([], [{ id: "x", kind: "agent", label: "x", startedAt: null }]).active.map(task => task.id), ["x"]);
+});
+
+test("a shell's output that quotes a worker's launch words launched nothing", () => {
+  const activity = new BackgroundActivity();
+  activity.call("sed", "Bash", { command: "sed -n 1,20p desktop.test.ts", description: "Read the tests" });
+  activity.result("sed", true, 'content: "Async agent launched"\n  agentId: worker }', 10, { stdout: "…", interrupted: false });
+  assert.equal(activity.active.length, 0);
+  activity.call("agent", "Agent", { description: "Review", run_in_background: true });
+  activity.result("agent", true, "Async agent launched successfully\nagentId: real-worker", 10, {});
+  assert.deepEqual(activity.active.map(task => [task.id, task.kind]), [["real-worker", "agent"]]);
+});

@@ -175,6 +175,11 @@ test("the status line is the recap's first sentence, and the list is sent only w
   assert.equal(f.listed().status, "Tests pass.");
 });
 
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let i = 0; i < 200 && !predicate(); i++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.ok(predicate(), "condition not reached");
+}
+
 test("a bridged session's status and question attention are cleared by the person's next message", async t => {
   const f = bridgeFixture(t);
   f.registry.get(bridgeId)!.status = "busy";
@@ -191,7 +196,12 @@ test("a bridged session's status and question attention are cleared by the perso
   const s = f.sessions.summaryOf(bridgeId)!;
   assert.equal(s.status, "Fixed it, tests pass.");
   assert.equal(s.attention?.reason, "question");
+  // The message runs through the app's ripple mod (a host post to the bridge is dropped by its CLI, #177).
+  f.sessions.modInbox.listen(bridgeId, f.now());
   await f.sessions.send(bridgeId, "m2", "Yes, open it.");
+  await waitFor(() => f.sessions.modInbox.pending(bridgeId).some(offer => offer.itemId === "m2"));
+  assert.equal(f.sessions.modInbox.claim("m2"), true);
+  assert.equal(f.sessions.modInbox.result("m2", "submitted"), true);
   const after = f.sessions.summaryOf(bridgeId)!;
   assert.equal(after.status, undefined, "a new turn is under way; its recap is not written yet");
   assert.equal(after.attention, null);

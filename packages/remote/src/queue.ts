@@ -64,8 +64,12 @@ export class SendQueue {
     return { queue: entry.items.map(item => ({ id: item.id, text: item.text, attachments: item.attachments.length, at: item.at, ...(item.error ? { error: item.error } : {}), ...(item.wait ? { wait: item.wait } : {}) })), ...(entry.held ? { queueHeld: true } : {}) };
   }
 
-  /** Adds to the end; false when this id is already queued (a resend after a lost ack). */
-  add(session: string, item: { id: string; text: string; attachments: { name: string; mediaType: string; data: string }[] }, at: number, desktopId?: string): boolean {
+  /**
+   * Adds to the end; false when this id is already queued (a resend after a lost ack). With `front` it
+   * goes to the head instead, so it is the next to run, but never ahead of an item the mod has claimed:
+   * that one is already being run. The size limit applies the same way.
+   */
+  add(session: string, item: { id: string; text: string; attachments: { name: string; mediaType: string; data: string }[] }, at: number, desktopId?: string, front = false): boolean {
     const entry = this.entry(session);
     if (entry.items.some(queued => queued.id === item.id)) return false;
     if (entry.items.length >= QUEUE_CAP) throw new Error(`The queue holds at most ${QUEUE_CAP} messages.`);
@@ -75,7 +79,12 @@ export class SendQueue {
       writeFileAtomic(path.join(this.blobs, file), a.data);
       return { name: a.name, mediaType: a.mediaType, file };
     });
-    entry.items.push({ id: item.id, text: item.text, attachments, at });
+    const row: QueueItem = { id: item.id, text: item.text, attachments, at };
+    if (front) {
+      let index = 0;
+      while (index < entry.items.length && entry.items[index]!.claimedBy) index++;
+      entry.items.splice(index, 0, row);
+    } else entry.items.push(row);
     if (desktopId && desktopId !== session) entry.desktopId = desktopId;
     this.save();
     return true;

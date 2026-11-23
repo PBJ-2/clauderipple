@@ -48,7 +48,7 @@ async function forwardedHeaders(providerHeaders: Record<string, string>): Promis
 async function roundTrip(
   providerHeaders: Record<string, string>,
   reply: ProviderReply,
-  options: { provider?: Partial<Provider>; system?: unknown; body?: Record<string, unknown>; exhausted?: boolean; userAgent?: string } = {},
+  options: { provider?: Partial<Provider>; system?: unknown; body?: Record<string, unknown>; exhausted?: boolean; userAgent?: string; modPhotosRoot?: string } = {},
 ): Promise<{ seen: http.IncomingHttpHeaders; seenBody: Record<string, unknown>; records: RequestRecord[]; clientStatus: number; clientBody: string; clientHeaders: http.IncomingHttpHeaders; providerCalls: number; health: Record<string, ProviderExhaustion>; models: Record<string, Record<string, { reason: string }>> }> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-proxy-headers-"));
   const ca = createCa({ cn: "clauderipple test" });
@@ -89,6 +89,7 @@ async function roundTrip(
     health: new UpstreamHealth(() => 100, () => {}),
     home,
     requests,
+    ...(options.modPhotosRoot ? { modPhotosRoot: options.modPhotosRoot } : {}),
   });
   if (options.exhausted) proxy.providerHealth.observe("p", 402, providerExhaustion(402, "Insufficient Balance"));
   await proxy.listen();
@@ -343,4 +344,17 @@ test("an OpenCode Go anthropic-wire request gets the preset's User-Agent only wh
 
   const other = await roundTrip({ "x-api-key": "provider-key" }, OK_REPLY, { provider: { preset: "deepseek" } as never });
   assert.equal(other.seen["user-agent"], undefined, "a preset without a declared User-Agent sends none");
+});
+
+// A phone photo for a Claude app session is named by a line of the person's message. A relay that is not
+// Anthropic's own, and may be a text-only model, is given no image: the line tells it to open the file.
+test("a photo line routed to a provider that is not native Claude stays text, and a short line says to open the file", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cr-photos-"));
+  const file = path.join(root, "11111111-2222-4333-8444-555555555555", "item-1-1.png");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.from("pixels")]));
+  try {
+    const { seenBody } = await roundTrip({}, OK_REPLY, { modPhotosRoot: root, body: { messages: [{ role: "user", content: [{ type: "text", text: `What is this?\n\n📷 Photo: ${file}` }] }] } });
+    assert.deepEqual((seenBody.messages as { content: unknown[] }[])[0]!.content, [{ type: "text", text: `What is this?\n\n📷 Photo (open with Read): ${file}` }]);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

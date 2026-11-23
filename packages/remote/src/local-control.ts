@@ -131,7 +131,8 @@ export class LocalControl {
         const session = url.searchParams.get("session");
         if (!session || session.length > 200 || url.searchParams.getAll("session").length !== 1) { json(res, 400, { error: "invalid session" }); return; }
         // Every poll is the mod's heartbeat: the host offers clear-in-place and abort only to a mod that reads.
-        this.opts.inbox.listen(session, Date.now());
+        // `caps` is what the mod says it can run beyond a prompt (an older mod, or a router that predates it, sends none).
+        this.opts.inbox.listen(session, Date.now(), (url.searchParams.get("caps") ?? "").split(",").filter(Boolean));
         json(res, 200, { offers: this.opts.inbox.pending(session) });
         return;
       }

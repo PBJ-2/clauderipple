@@ -11,7 +11,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { EventLog } from "./eventlog.ts";
 import { repairRefusedFiles } from "./file-repair.ts";
 import { narrationBody } from "./narration.ts";
-import { TaskPlan } from "./task-plan.ts";
+import { shownPlan, TaskPlan } from "./task-plan.ts";
 import { BackgroundActivity } from "./background-activity.ts";
 import { toolInput } from "./tool-details.ts";
 import type { PushContext } from "./push-content.ts";
@@ -22,7 +22,7 @@ import { artifactOf } from "./artifact.ts";
 import { DesktopSessions, type DesktopProcess, type TurnWrapUp } from "./desktop.ts";
 import { firstSentence, STATUS_CAP } from "./wrap-up.ts";
 import { DesktopSidebar, PHONE_GROUP, type SidebarOptions } from "./sidebar.ts";
-import { BridgeAuthError, BridgeClient, bridgeCreateNotCreated, bridgeWriteUnknown, CLI_NOT_LOGGED_IN, CodedError, DESKTOP_BLOCKED, DESKTOP_BUSY, DESKTOP_BUSY_NOW, DESKTOP_MOD_OFFLINE, DESKTOP_WAITING, DesktopBlockedError, DesktopBusyError, isLoginRefusal, object, permissionSuppression, slashCommands, type BridgeFrame } from "./bridge-client.ts";
+import { BridgeAuthError, BridgeClient, bridgeCreateNotCreated, bridgeWriteUnknown, CLI_NOT_LOGGED_IN, CodedError, DESKTOP_BLOCKED, DESKTOP_BUSY, DESKTOP_BUSY_NOW, DESKTOP_MOD_OFFLINE, DESKTOP_MOD_OFFLINE_SEND, DESKTOP_WAITING, DesktopBlockedError, DesktopBusyError, isLoginRefusal, object, permissionSuppression, slashCommands, type BridgeFrame } from "./bridge-client.ts";
 import { APPROVAL_LOCAL_REASON, APPROVAL_WAIT_MS, Approvals, type ApprovalAnswer, type ApprovalState } from "./mod-approval.ts";
 import type { HandoffRunner } from "./handoff.ts";
 import { isDirectory, macConsent, readableFolder } from "./folders.ts";
@@ -39,6 +39,7 @@ interface BridgePending {
 }
 import { SendQueue, type QueueItem } from "./queue.ts";
 import { ModInbox, type ModOffer, type ModOutcome } from "./mod-inbox.ts";
+import { modPhotoText, readModPhotoText, removeModPhotos, writeModPhotos } from "./mod-photos.ts";
 import { SettingsJobs, settingsEffort, settingsModel, type SettingsJob, type SettingsJobOutcome } from "./settings-jobs.ts";
 import { DesktopSettings, type AppSettings } from "./desktop-settings.ts";
 import type { Decision, PermissionQueue } from "./permissions.ts";
@@ -163,6 +164,8 @@ export interface SessionsOptions {
   environmentModeMs?: number;
   modOfferMs?: number;
   modResultMs?: number;
+  /** How long a claimed slash command may run before the host stops waiting for its result (default 15 minutes). */
+  modCommandResultMs?: number;
   settingsJobExpiryMs?: number;
   /** Optional file-notification boundary; polling remains authoritative when unavailable. */
   watchTranscript?: (id: string, changed: () => void, failed: (error: unknown) => void) => (() => void) | null;
@@ -296,6 +299,11 @@ const MOD_CLAIMED = "Claude 앱에서 메시지를 처리하고 있습니다. �
 /** A Claude Code CLI outside the app (a terminal, Paseo) holds the session: nothing may queue for it or resume it (#171). */
 const DESKTOP_EXTERNAL = "이 세션은 터미널 등 Claude 앱 외부에서 실행 중이어서 메시지를 보낼 수 없습니다. 해당 프로그램에서 실행 중인 Claude Code를 종료한 뒤 다시 시도해 주세요.";
 /** A /clear the mod ran in place failed before the app reported its new session. */
+const modCommandFailed = (name: string): string => `Claude 앱에서 /${name} 명령을 실행하지 못했습니다. 명령 이름이 맞는지 확인한 뒤 다시 보내 주세요.`;
+/** A photo the host could not hand to the app session as a file (not PNG/JPEG/GIF/WebP, or over 8 MB). */
+const MOD_PHOTO_FAILED = "사진을 Claude 앱에 전달하지 못했습니다. 사진이 PNG, JPEG, GIF, WebP 형식이고 8MB 이하인지 확인한 뒤 다시 보내 주세요.";
+/** A command whose result never reached the host: it may have run, so the message is not marked sent and a resend is the person's call. */
+const modCommandUnknown = (name: string): string => `/${name} 명령의 실행 결과를 확인하지 못했습니다. Claude 앱에서 명령이 실행됐는지 확인한 뒤, 실행되지 않았다면 다시 보내 주세요.`;
 const MOD_CLEAR_FAILED = "Claude 앱에서 대화를 비우지 못했습니다. Claude 앱 상태를 확인한 뒤 대기 중인 메시지를 다시 전송해 주세요.";
 /** The approval the phone can no longer give: the Mac answered it first. */
 const APPROVAL_LOCAL = "Claude 앱에서 이 승인 요청을 이미 처리했습니다. 휴대폰에서는 승인할 수 없습니다.";
@@ -306,8 +314,29 @@ const APPROVAL_DENIED = "The user denied this from their phone.";
 const CLI_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** The composer's fresh-conversation commands: /clear and /new are the same thing to the phone. */
 const CLEAR_TEXT = /^\/(clear|new)\s*$/;
-/** A queued message the mod can stop a turn for or send: plain text, no attachment, no slash command. */
-const plainText = (text: string, attachments: readonly unknown[]): boolean => !attachments.length && !text.trimStart().startsWith("/");
+/** `/name args`: a slash command the mod can run. A path ("/usr/bin x") is no command, and /exit is the host's own. */
+const COMMAND_TEXT = /^\/([^\s/]+)(?:\s+([\s\S]*))?$/;
+const HOST_COMMAND = /^\/exit\s*$/;
+const PHOTO_TYPES: readonly string[] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+/** How a queued message goes through the mod: its text (with photo lines for photos), a slash command, or an in-place /clear. */
+type ModItemKind = "prompt" | "command" | "clear";
+/** What a message is to the mod before asking whether this session has one; null: it does not go that way. */
+function modItemKind(text: string, attachments: readonly { mediaType?: string }[]): ModItemKind | null {
+  if (CLEAR_TEXT.test(text) && !attachments.length) return "clear";
+  const slash = text.trimStart().startsWith("/");
+  const command = slash && COMMAND_TEXT.test(text) && !HOST_COMMAND.test(text);
+  // A photo whose caption is a slash command runs that command with the photos' file lines after its
+  // arguments, as a command typed in the app with a pasted path would (2026-11-19: "/context" with a
+  // photo had no way in). Other "/" captions would run as commands the person did not mean.
+  if (attachments.length) return attachments.every(a => PHOTO_TYPES.includes(a?.mediaType ?? "")) ? !slash ? "prompt" : command ? "command" : null : null;
+  if (slash) return command ? "command" : null;
+  return text.trim() ? "prompt" : null;
+}
+/** The command's name and its arguments exactly as typed after the name (COMMAND_TEXT matched). */
+function commandOf(text: string): { name: string; args: string } {
+  const [, name = "", args = ""] = COMMAND_TEXT.exec(text) ?? [];
+  return { name, args };
+}
 
 /** What a phone's "always" may add to the session: a rule the app's own suggestion named, or a mode it suggested. */
 type AlwaysUpdate = ReturnType<typeof sessionPermissionRules>[number] | { type: "setMode"; mode: PermissionMode; destination: "session" };
@@ -341,7 +370,7 @@ function createFingerprint(req: { cwd: string; model: string; effort: Effort | n
   return digest({ cwd: req.cwd, model: req.model, effort: req.effort, text: req.text, mode: req.permissionMode ?? "auto", isolation: req.isolation ?? "local", branch: req.baseBranch ?? null });
 }
 /** A stable v4-shaped UUID for a phone message id. */
-function uuidFrom(text: string): string {
+export function uuidFrom(text: string): string {
   const h = createHash("sha256").update(text).digest("hex");
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-${((parseInt(h[16]!, 16) & 3) | 8).toString(16)}${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
@@ -391,7 +420,10 @@ export class Sessions {
   private live = new Map<string, Live>();
   /** A closed SDK may still be writing its transcript until its process exits. */
   private closing = new Map<string, Live>();
-  private modEchoes = new Map<string, { id: string; text: string; expires: number }>();
+  private modEchoes = new Map<string, { id: string; text: string; expires: number; photo?: true }>();
+  private modEchoFile: string;
+  /** Where the photos of messages the mod runs are written (never under a session's log folder: a rebase deletes that). */
+  private photoRoot: string;
   /** Slash commands per session (its init event), and the latest seen anywhere for sessions with none yet. */
   private commandLists = new Map<string, { at: number; list: string[] }>();
   private lastCommands: string[] = [];
@@ -461,7 +493,9 @@ export class Sessions {
   private unarmedLoggedMs = 0;
   /** The last state seen per non-bridged Mac session, for the away-alert transitions. The first
    * sight of a session only seeds it: a host start must not push for turns that ended before it. */
-  private macStates = new Map<string, { state: SessionState; permission: boolean }>();
+  private macStates = new Map<string, { state: SessionState; permission: boolean; background?: boolean }>();
+  /** Claude app conversation id → when the mod last submitted a phone message into it (modTurnUnseen). */
+  private modSubmitted = new Map<string, number>();
   /** Claude app sessions: the status line read from the transcript at `size`. Recomputed only when
    * that file grew, so a poll never rereads a transcript it has already read (a 256 KB window). */
   private statuses = new Map<string, { size: number; status: string }>();
@@ -479,7 +513,7 @@ export class Sessions {
   /** The registry says busy (it counts background work) while the main turn itself is not running. */
   private background(process: DesktopProcess): boolean {
     const state = this.bridgeState(process);
-    return (process.status === "busy" || process.status === "shell") && state !== "running" && state !== "waiting";
+    return (process.status === "busy" || process.status === "shell" || process.backgroundOnly === true) && state !== "running" && state !== "waiting";
   }
 
   private bridgeState(process: DesktopProcess, bridgeId = process.bridgeSessionId): SessionState {
@@ -488,6 +522,8 @@ export class Sessions {
     if (sent !== undefined && this.now() - sent < 9000) return "running";
     if (id) this.bridgeRunning.delete(id);
     const cached = id ? this.bridgeStates.get(id)?.state : undefined;
+    // The bridge's worker status follows the same busy the registry keeps for background agents.
+    if (process.backgroundOnly && cached !== "waiting") return "idle";
     return cached ?? (process.status === "waiting" ? "waiting" : process.status === "idle" ? "idle" : "running");
   }
 
@@ -580,6 +616,8 @@ export class Sessions {
   private bridgeEchoes = new Set<string>();
   /** Cap for bridgeEchoes: prompts are answered or superseded long before this many pile up. */
   private static readonly ECHO_CAP = 500;
+  private static readonly PHOTO_ECHO_MS = 7 * 24 * 3600_000;
+  private static readonly PHOTO_ECHO_CAP = 200;
   /** Bridge requestIds already answered or withdrawn (`${session}/${requestId}` → noted at),
    * so a replay that still lists them skips them instead of reviving the card. Never forgotten with
    * time: a Remote Control session can keep listing a request the desktop app answered (the answer
@@ -604,6 +642,9 @@ export class Sessions {
     try {
       for (const [model, window] of Object.entries(readJson<Record<string, unknown>>(this.windowsFile) ?? {})) if (typeof window === "number" && window > 0) this.windows.set(model, window);
     } catch { /* a damaged file only means the windows are learned again */ }
+    this.photoRoot = path.join(opts.dir, "mod-photos");
+    this.modEchoFile = path.join(opts.dir, "mod-photo-echoes.json");
+    this.loadModEchoes();
     this.receipts = MessageReceipts.open(path.join(opts.dir, "receipts.json"), this.now);
     this.settings = new SessionSettings(path.join(opts.dir, "settings-operations.json"));
     this.sendQueue = SendQueue.open(opts.dir);
@@ -614,11 +655,12 @@ export class Sessions {
       if (!id || this.shuttingDown || this.sendQueue.held(id)) return false;
       const claimed = this.sendQueue.claimMod(id, offer.itemId);
       if (claimed) {
-        if (offer.kind !== "clear") this.rememberModEcho(id, offer);
+        // A /clear and a slash command leave no user line to match (the transcript's command line is not a message).
+        if (offer.kind !== "clear" && offer.kind !== "command") this.rememberModEcho(id, offer);
         this.opts.onSessions();
       }
       return claimed;
-    }, (offer, outcome) => offer.kind === "abort" ? this.finishAbort(offer, outcome) : this.finishMod(offer, outcome), opts.modResultMs);
+    }, (offer, outcome) => offer.kind === "abort" ? this.finishAbort(offer, outcome) : this.finishMod(offer, outcome), opts.modResultMs, undefined, opts.modCommandResultMs);
     this.approvals = new Approvals(() => this.now());
     this.sendQueue.retryFailures("Claude 앱에서 열려 있는 세션에 지금은 보낼 수 없습니다.", "desktop_waiting");
     this.sendQueue.retryFailures(DESKTOP_BLOCKED, "desktop_waiting");
@@ -644,7 +686,7 @@ export class Sessions {
     }) : null;
     this.desktop = opts.desktopProjects === undefined ? null : new DesktopSessions({
       ...(this.sidebar ? { sidebarIds: () => new Set(this.sidebar!.read().sessions.keys()) } : {}),
-      projects: opts.desktopProjects, now: this.now, summarize, figures: id => this.desktopFigures.get(id), userId: (id, uuid, text) => this.appUserId(id, uuid, text), held: id => this.heldFor(id),
+      projects: opts.desktopProjects, now: this.now, summarize, figures: id => this.desktopFigures.get(id), userId: (id, uuid, text) => this.appUserId(id, uuid, text), userPhotos: (id, text) => readModPhotoText(this.photoRoot, id, text) ?? undefined, held: id => this.heldFor(id),
       ...(opts.desktopProcesses ? { processes: opts.desktopProcesses } : {}),
       ...(opts.desktopRegistry ? { registry: opts.desktopRegistry } : {}),
       ...(opts.desktopExternalRegistry ? { externalRegistry: opts.desktopExternalRegistry } : {}),
@@ -1055,6 +1097,9 @@ export class Sessions {
       }
       // Our own Remote Control echo: drop it from the bounded set and skip it, once.
       if (body.kind === "user" && (this.bridgeEchoes.delete(body.clientMsgId) || r.environmentBridgeId && body.clientMsgId === (UUID_RE.test(r.createdBy) ? r.createdBy : uuidFrom(r.createdBy)) && this.seen(r.id, r.createdBy))) return;
+      // A photo the mod passed on as a file is shown as the photo, with the person's own words.
+      const photos = body.kind === "user" && !body.images?.length && !body.files?.length ? readModPhotoText(this.photoRoot, desktopId, body.text) : null;
+      const shown = <T extends { text: string; images?: ImagePart[] }>(line: T): T => photos ? { ...line, text: photos.text, images: photos.photos.map(photo => ({ type: "image" as const, blob: log.image(photo.data), mediaType: photo.mediaType })) } : line;
       if (body.kind === "user" && !body.images?.length && !body.files?.length) {
         const echo = this.takeModEcho(r.id, body.text);
         if (echo) {
@@ -1068,12 +1113,12 @@ export class Sessions {
             // A Remote Control record persists it, as the bridge send does (`src`): the same user
             // event again (same clientMsgId, so the timeline item is replaced, not doubled) carries the uuid to disk.
             if (body.src && body.srcHash !== undefined) {
-              if (r.desktopBridge) this.append(r.id, { ...body, clientMsgId: echo });
+              if (r.desktopBridge) this.append(r.id, { ...shown(body), clientMsgId: echo });
               else log.remember(body.src, body.srcHash);
             }
           } else {
             this.personMessage(r.id);
-            this.append(r.id, { ...body, clientMsgId: echo });
+            this.append(r.id, { ...shown(body), clientMsgId: echo });
             this.rememberClientMsgId(r.id, echo);
           }
           return;
@@ -1081,7 +1126,7 @@ export class Sessions {
       }
       if (body.kind !== "user" || !this.seen(r.id, body.clientMsgId)) {
         if (body.kind === "user") this.rememberClientMsgId(r.id, body.clientMsgId);
-        this.append(r.id, body);
+        this.append(r.id, body.kind === "user" ? shown(body) : body);
       }
     }, data => log.image(data), (src, hash) => {
       const seen = log.lineSeen(src, hash);
@@ -1231,9 +1276,11 @@ export class Sessions {
       seen.add(s.id);
       // A mod approval the phone holds is pushed as its own permission event; reading it as waiting here would push twice.
       const permission = s.state === "waiting" && this.approvals.active(s.id).length === 0 || s.pending > 0;
-      if (permission || BUSY.has(s.state)) this.lastBusyAt = this.now();
+      // Background agents still run after the main turn ended: the computer is still working.
+      const background = s.state === "idle" && this.desktop.liveProcess(s.id)?.backgroundOnly === true;
+      if (permission || BUSY.has(s.state) || background) this.lastBusyAt = this.now();
       const previous = this.macStates.get(s.id);
-      this.macStates.set(s.id, { state: s.state, permission });
+      this.macStates.set(s.id, { state: s.state, permission, ...(background ? { background } : {}) });
       const current = this.attention.get(s.id) ?? null;
       // List-only desktop sessions have no record whose setState would retire the previous
       // turn's attention. Use the same transition contract without generating startup alerts.
@@ -1389,11 +1436,11 @@ export class Sessions {
       if (!r.desktopBridge && !this.canTailHandoff(r) && this.hasBackgroundWork(r.id)) return true;
       // A tailed or handed-off Claude app conversation keeps its state in the app's registry.
       const process = this.desktop?.liveProcess(r.sdkSessionId ?? r.id);
-      if (process && process.status !== "idle") return true;
+      if (process && (process.status !== "idle" || process.backgroundOnly)) return true;
       if (this.opts.permissions.pending(r.id).length > 0) return true;
     }
     // Claude app sessions the list only alerts on (pollMacAlerts): running, waiting for approval.
-    for (const state of this.macStates.values()) if (BUSY.has(state.state) || state.permission) return true;
+    for (const state of this.macStates.values()) if (BUSY.has(state.state) || state.permission || state.background) return true;
     // A question the Claude app's wrap_up left is a stopped turn that waits for the person (issue #82).
     // Read from the question's own pending state: a phone opening the session clears the attention
     // flag (markSeen), but the session still waits for that answer.
@@ -1485,7 +1532,7 @@ export class Sessions {
     const taskList = r.desktopBridge ? this.desktop?.backgroundTaskList(r.sdkSessionId ?? r.id) ?? [] : activity?.active ?? [];
     const taskHistory = r.desktopBridge ? this.desktop?.backgroundTaskHistory(r.sdkSessionId ?? r.id) ?? [] : activity?.history ?? [];
     const turnStartedAt = working ? this.desktop?.turnStartedAt(r.sdkSessionId ?? r.id) ?? null : null;
-    const plan = r.desktopBridge ? this.desktop?.plan(r.sdkSessionId ?? r.id) ?? [] : this.taskState(r.id).tracker.list;
+    const plan = r.desktopBridge ? this.desktop?.plan(r.sdkSessionId ?? r.id) ?? [] : shownPlan(this.taskState(r.id).tracker.list);
     // The desktop launcher confirms opening, not permissions. Retain the SDK choice for a
     // future host resume, but do not advertise it as the app's current mode after handoff.
     const hostMode = this.live.has(r.id) || r.desktopHandoff !== "attempted" && r.desktopHandoff !== "opening";
@@ -1655,7 +1702,7 @@ export class Sessions {
 
   /** Queue a message; a session that is not busy takes it at once. An id still being sent answers
    * with that send, so its failure reaches the phone rather than an "it is queued". */
-  enqueue(id0: string, clientMsgId: string, text: string, attachments: Attachment[] = []): Promise<void> | undefined {
+  enqueue(id0: string, clientMsgId: string, text: string, attachments: Attachment[] = [], front = false): Promise<void> | undefined {
     const id = this.followed(id0);
     if (!this.has(id)) throw new Error("no such session");
     if (!/^[\w-]{1,100}$/.test(clientMsgId)) throw new Error("Invalid message id.");
@@ -1683,7 +1730,7 @@ export class Sessions {
     // would wait there for good (#171). The phone's queue button comes here, not through send().
     const desktopId = this.records.get(id)?.sdkSessionId ?? id;
     if (!this.live.has(id) && this.desktop?.externalProcess(desktopId)) throw new CodedError("desktop_external", DESKTOP_EXTERNAL);
-    if (!this.sendQueue.add(id, { id: clientMsgId, text, attachments: files }, this.now(), desktopId)) return;
+    if (!this.sendQueue.add(id, { id: clientMsgId, text, attachments: files }, this.now(), desktopId, front)) return;
     this.noteQueued(id, clientMsgId);
     this.watchQueueRegistry();
     this.opts.onSessions();
@@ -1749,13 +1796,17 @@ export class Sessions {
       const desktopId = this.records.get(id)?.sdkSessionId ?? id;
       // A Remote Control session's plain text never rides a bridge steer (the server drops it), so an
       // interrupt stays on the mod path even when the mod has left since the message was queued.
-      const rcInterrupt = !!options.interrupt && plainText(item.text, item.attachments) && !!item.text.trim() && this.rcAppSession(id, desktopId);
+      // A photo or a slash command the mod would run rides the same path: the server drops them as well.
+      // A turn is stopped only for a message the mod can run now (an older mod cannot run a command).
+      const kind = modItemKind(item.text, item.attachments);
+      const runs = kind === "prompt" && !item.attachments.length || (kind === "prompt" || kind === "command") && this.modKind(id, desktopId, item.text, item.attachments) !== null;
+      const rcInterrupt = !!options.interrupt && runs && this.rcAppSession(id, desktopId);
       // An item with a send receipt (a bridge post whose answer was lost) is never offered to the mod.
       const receipted = this.receipts.status(`send:${id}:${itemId}`) !== null;
       // Even when the app went idle meanwhile: no mod, no run for a Remote Control session's plain text.
       if (rcInterrupt && !receipted && !this.modConnected(desktopId)) throw new CodedError("desktop_mod_offline", DESKTOP_MOD_OFFLINE);
       const busy = (this.modBound(id, desktopId, item) || rcInterrupt) && this.appBusy(desktopId);
-      if (busy && options.interrupt && plainText(item.text, item.attachments) && !receipted) {
+      if (busy && options.interrupt && runs && !receipted) {
         if (!this.modConnected(desktopId) || !await this.modAbort(desktopId)) throw new CodedError("desktop_mod_offline", DESKTOP_MOD_OFFLINE);
         mayGo();
         // The stopped turn ends as `aborted`; the mod submits this text as the turn after it.
@@ -1805,38 +1856,51 @@ export class Sessions {
   }
 
   /**
-   * A Claude app session with Remote Control on whose mod answers now. Anthropic's server no longer
-   * marks a message we post to its bridge as a person's (2026-11-18), so the CLI treats it as a peer
-   * message and never runs it: plain text goes through the mod instead. Without a mod (or while it
-   * is away) nothing here changes and the bridge send stands.
+   * A Claude app session with Remote Control on, whether or not its mod answers now. Anthropic's server
+   * no longer marks a message we post to its bridge as a person's (2026-11-18), so the CLI treats it as a
+   * peer message and never runs it: text, photos and slash commands go through the mod instead (modKind).
+   * Without a mod (or while it is away) nothing here changes and the bridge send stands.
    */
-  private rcModSession(id: string, desktopId: string): boolean {
-    return this.rcAppSession(id, desktopId) && this.modConnected(desktopId);
-  }
-
-  /** A Claude app session with Remote Control on, whether or not its mod answers now. */
   private rcAppSession(id: string, desktopId: string): boolean {
     const process = this.desktop?.liveProcess(desktopId);
     return !!process?.bridgeSessionId && !this.live.has(id) && !this.handingOff.has(id);
   }
 
+  /**
+   * How a message reaches this Claude app session through its mod, or null when it does not (the
+   * bridge send or the desktop wait stand). Plain text of a session without Remote Control waits for
+   * its mod (queued, offered when it answers); every other kind, and anything for a Remote Control
+   * session (whose bridge drops what the host posts), needs a mod that answers now. A slash command
+   * also needs a mod that announced it can run one: an older mod would submit the arguments as a prompt.
+   */
+  private modKind(id: string, desktopId: string, text: string, attachments: readonly { mediaType?: string }[]): ModItemKind | null {
+    const kind = modItemKind(text, attachments);
+    if (!kind) return null;
+    const app = this.appModSession(id, desktopId);
+    if (!app && !this.rcAppSession(id, desktopId)) return null;
+    if (kind === "command") return this.modInbox.supports(desktopId, "command", this.now()) ? kind : null;
+    if (kind === "prompt" && !attachments.length && app) return kind;
+    return this.modConnected(desktopId) ? kind : null;
+  }
+
   /** Whether this queued item reaches the Claude app session through its mod: any item of a session
-   * without Remote Control (the app owns the writer), plain text of one with it whose mod answers. */
+   * without Remote Control (the app owns the writer), what the mod can run of one with it. */
   private modBound(id: string, desktopId: string, item: QueueItem): boolean {
-    return this.appModSession(id, desktopId) || this.rcModText(id, desktopId, item.text, item.attachments);
+    return this.appModSession(id, desktopId) || this.modKind(id, desktopId, item.text, item.attachments) !== null;
   }
 
-  /** Plain text for a Remote Control session whose mod answers: no photo, no slash command. */
-  private rcModText(id: string, desktopId: string, text: string, attachments: readonly unknown[]): boolean {
-    return plainText(text, attachments) && !!text.trim() && this.rcModSession(id, desktopId);
+  /** Text, photos or a slash command for a Remote Control session whose mod answers now. */
+  private rcModItem(id: string, desktopId: string, text: string, attachments: readonly { mediaType?: string }[]): boolean {
+    const kind = this.modKind(id, desktopId, text, attachments);
+    return (kind === "prompt" || kind === "command") && this.rcAppSession(id, desktopId);
   }
 
-  /** An idle app session can receive plain text through its mod, with Remote Control on or off. */
+  /** An idle app session can receive text, photos and slash commands through its mod, with Remote Control on or off. */
   private modEligible(id: string, desktopId: string, item: QueueItem): boolean {
+    const kind = this.modKind(id, desktopId, item.text, item.attachments);
     // An item with a send receipt (a bridge post whose answer was lost) is not offered again: the
     // dispatch below answers it from the receipt, as the bridge path does.
-    return this.modBound(id, desktopId, item) && !this.appBusy(desktopId) && plainText(item.text, item.attachments) &&
-      this.receipts.status(`send:${id}:${item.id}`) === null;
+    return (kind === "prompt" || kind === "command") && !this.appBusy(desktopId) && this.receipts.status(`send:${id}:${item.id}`) === null;
   }
 
   resumeQueue(id0: string): void {
@@ -2016,13 +2080,39 @@ export class Sessions {
     }
   }
 
+  /**
+   * Offers the queued item to the mod as what it is: a prompt (the item's text; a photo's text carries one
+   * line per photo file, written here), a slash command (its name and arguments), or an in-place /clear.
+   * A photo that cannot be written fails the item with a visible error and throws.
+   */
   private offerMod(id: string, sessionId: string, item: QueueItem, kind?: "clear"): Promise<"claimed" | "withdrawn" | "expired"> | null {
     if (this.modOwners.has(item.id)) return null;
+    const what = kind ?? (modItemKind(item.text, item.attachments) === "command" ? "command" : "prompt");
+    let text = item.text;
+    let command: string | undefined;
+    if (what === "command") { const parsed = commandOf(item.text); command = parsed.name; text = item.attachments.length ? this.photoText(id, sessionId, item, parsed.args) : parsed.args; }
+    else if (item.attachments.length) text = this.photoText(id, sessionId, item, item.text);
     this.modOwners.set(item.id, id);
     if (kind === "clear") this.clearFrom.set(item.id, sessionId);
-    const offered = this.modInbox.offer({ sessionId, itemId: item.id, text: item.text, offeredAt: this.now(), ...(kind ? { kind } : {}) }, this.opts.modOfferMs ?? 6000);
+    const offered = this.modInbox.offer({ sessionId, itemId: item.id, text, offeredAt: this.now(), ...(what === "prompt" ? {} : { kind: what }), ...(command !== undefined ? { command } : {}) }, this.opts.modOfferMs ?? 6000);
     if (!offered) { this.modOwners.delete(item.id); this.clearFrom.delete(item.id); return null; }
     return offered.then(state => { if (state !== "claimed") { this.modOwners.delete(item.id); this.clearFrom.delete(item.id); } return state; });
+  }
+
+  /** The text the mod submits for a queued photo message (`base`: the person's words, or a command's arguments), then where each photo is. */
+  private photoText(id: string, sessionId: string, item: QueueItem, base: string): string {
+    try {
+      const photos = item.attachments.map(a => {
+        const data = this.sendQueue.data(a);
+        if (!data) throw new Error("Attachment missing.");
+        return data;
+      });
+      return modPhotoText(base, writeModPhotos(this.photoRoot, sessionId, item.id, photos));
+    } catch {
+      this.sendQueue.fail(id, item.id, MOD_PHOTO_FAILED);
+      this.opts.onSessions();
+      throw new Error(MOD_PHOTO_FAILED);
+    }
   }
 
   /** Whether the mod answers for this Claude app session now (it read its inbox a moment ago). */
@@ -2030,9 +2120,9 @@ export class Sessions {
     return this.modInbox.connected(desktopId, this.now());
   }
 
-  /** A queued /clear of a Claude app session the mod answers for: it runs in place, not as a new session. */
+  /** A queued /clear of a Claude app session the mod answers for, with Remote Control on or off: it runs in place, not as a new session. */
   private modClear(id: string, desktopId: string, item: QueueItem): boolean {
-    return CLEAR_TEXT.test(item.text) && !item.attachments.length && this.appModSession(id, desktopId) && this.modConnected(desktopId);
+    return this.modKind(id, desktopId, item.text, item.attachments) === "clear";
   }
 
   /**
@@ -2124,8 +2214,36 @@ export class Sessions {
   }
 
   private rememberModEcho(id: string, offer: ModOffer): void {
-    while (this.modEchoes.size >= Sessions.ECHO_CAP) this.modEchoes.delete(this.modEchoes.keys().next().value!);
-    this.modEchoes.set(offer.itemId, { id, text: offer.text, expires: this.now() + 60_000 });
+    // Photo matches have their own bound below; text echoes evict only each other.
+    const texts = [...this.modEchoes].filter(([, echo]) => !echo.photo).map(([itemId]) => itemId);
+    for (const itemId of texts.slice(0, Math.max(0, texts.length - Sessions.ECHO_CAP + 1))) this.dropModEcho(itemId);
+    // A photo message's match is kept on disk too, until its echo is consumed (bounded by count and a long age): a host
+    // stopped for longer than minutes between the app running it and reading its transcript line would otherwise show
+    // the message a second time (a photo line is no other text's echo).
+    const photo = readModPhotoText(this.photoRoot, offer.sessionId, offer.text) !== null;
+    this.modEchoes.set(offer.itemId, { id, text: offer.text, expires: this.now() + (photo ? Sessions.PHOTO_ECHO_MS : 60_000), ...(photo ? { photo } : {}) });
+    if (photo) {
+      const photos = [...this.modEchoes].filter(([, echo]) => echo.photo);
+      for (const [itemId] of photos.slice(0, Math.max(0, photos.length - Sessions.PHOTO_ECHO_CAP))) this.modEchoes.delete(itemId);
+      this.saveModEchoes();
+    }
+  }
+
+  private dropModEcho(itemId: string): void {
+    if (this.modEchoes.delete(itemId)) this.saveModEchoes();
+  }
+
+  private saveModEchoes(): void {
+    const photos = [...this.modEchoes].filter(([, echo]) => echo.photo).map(([itemId, echo]) => ({ itemId, id: echo.id, text: echo.text, expires: echo.expires }));
+    try { writeFileAtomic(this.modEchoFile, JSON.stringify(photos)); } catch { /* the match is then kept in memory only */ }
+  }
+
+  private loadModEchoes(): void {
+    for (const echo of (readJson<{ itemId?: unknown; id?: unknown; text?: unknown; expires?: unknown }[]>(this.modEchoFile) ?? []).slice(-Sessions.PHOTO_ECHO_CAP)) {
+      if (typeof echo?.itemId === "string" && typeof echo.id === "string" && typeof echo.text === "string" && typeof echo.expires === "number" && echo.expires >= this.now()) {
+        this.modEchoes.set(echo.itemId, { id: echo.id, text: echo.text, expires: echo.expires, photo: true });
+      }
+    }
   }
 
   /**
@@ -2147,8 +2265,8 @@ export class Sessions {
 
   private takeModEcho(id: string, text: string): string | undefined {
     for (const [itemId, echo] of this.modEchoes) {
-      if (echo.expires < this.now()) { this.modEchoes.delete(itemId); continue; }
-      if (echo.id === id && echo.text === text) { this.modEchoes.delete(itemId); return itemId; }
+      if (echo.expires < this.now()) { this.dropModEcho(itemId); continue; }
+      if (echo.id === id && echo.text === text) { this.dropModEcho(itemId); return itemId; }
     }
     return undefined;
   }
@@ -2157,15 +2275,32 @@ export class Sessions {
     const id = this.modOwners.get(offer.itemId);
     if (!id) throw new Error("Missing mod offer owner");
     if (offer.kind === "clear") return this.finishClear(id, offer, outcome);
-    if (outcome === "failed") { this.modEchoes.delete(offer.itemId); this.sendQueue.failMod(id, offer.itemId, MOD_UNKNOWN); }
-    else {
+    // What the person sent, as queued: a photo's text the mod submitted carries path lines, a command's offer only its arguments.
+    const queued = this.sendQueue.items(id).find(item => item.id === offer.itemId);
+    // A prompt's turn starts after the mod's answer; a command answers once it has run (a /compact starts no turn).
+    if (outcome === "submitted" && (offer.kind === undefined || offer.kind === "prompt")) this.modSubmitted.set(offer.sessionId, this.now());
+    if (offer.kind === "command" && outcome === "unknown") {
+      // It may have run: not held, not marked sent. The item leaves the queue and the timeline says so; a resend is the person's call.
+      this.dropModEcho(offer.itemId);
+      this.sendQueue.remove(id, offer.itemId);
+      this.append(id, { kind: "notice", code: "desktop_settings_failed", text: modCommandUnknown(offer.command ?? "") }, false);
+    } else if (outcome !== "submitted") {
+      this.dropModEcho(offer.itemId);
+      this.sendQueue.failMod(id, offer.itemId, offer.kind === "command" ? modCommandFailed(offer.command ?? "") : MOD_UNKNOWN);
+    } else {
       const key = `send:${id}:${offer.itemId}`;
-      if (this.receipts.status(key) === null) this.receipts.begin(key, id, sendFingerprint(offer.text, []));
+      // The fingerprint a resend of this id is compared with is the message as the phone sent it (a photo's blob ids are 36 long).
+      if (this.receipts.status(key) === null) this.receipts.begin(key, id, sendFingerprint(queued?.text ?? offer.text, (queued?.attachments ?? []).map(a => ({ blob: "x".repeat(36), name: a.name, mediaType: a.mediaType }))));
       this.personMessage(id);
       // A recordless session is a rebuilt transcript snapshot, not a host-owned event log.
       // Its user event must come from the app: appending here would duplicate it until rebuild.
       if (this.records.has(id) && !this.seen(id, offer.itemId)) {
-        this.append(id, { kind: "user", text: offer.text, clientMsgId: offer.itemId, images: [] });
+        // The phone shows the message as the person sent it: a photo's thumbnails, not the lines that name its files.
+        // A command shows as typed ("/name args"), with its photos' thumbnails when it carried any.
+        const sent = readModPhotoText(this.photoRoot, offer.sessionId, offer.text);
+        const log = sent ? this.log(id) : undefined;
+        const shown = offer.kind === "command" ? queued?.text ?? offer.text : sent ? sent.text : offer.text;
+        this.append(id, { kind: "user", text: shown, clientMsgId: offer.itemId, images: sent ? sent.photos.map(photo => ({ type: "image" as const, blob: log!.image(photo.data), mediaType: photo.mediaType })) : [] });
         this.rememberClientMsgId(id, offer.itemId);
       }
       if (!this.records.has(id)) {
@@ -2182,7 +2317,7 @@ export class Sessions {
     this.modOwners.delete(offer.itemId);
     this.opts.onSessions();
     // A message that came in behind this one waited in the queue for the next poll.
-    if (outcome !== "failed" && this.sendQueue.items(id).length) setImmediate(() => void this.drainQueue(id));
+    if ((outcome === "submitted" || (offer.kind === "command" && outcome === "unknown")) && this.sendQueue.items(id).length) setImmediate(() => void this.drainQueue(id));
   }
 
   /** The queued /clear is done (the move was reported before this result) or failed; the queue moves on. */
@@ -2191,7 +2326,7 @@ export class Sessions {
     this.clearFrom.delete(offer.itemId);
     this.modOwners.delete(offer.itemId);
     // Submitted without a reported move is not a clear this host can see: it stays a failure.
-    if (outcome === "failed" || !moved) this.sendQueue.failMod(id, offer.itemId, MOD_CLEAR_FAILED);
+    if (outcome !== "submitted" || !moved) this.sendQueue.failMod(id, offer.itemId, MOD_CLEAR_FAILED);
     else {
       const key = `send:${id}:${offer.itemId}`;
       if (this.receipts.status(key) === null) this.receipts.begin(key, id, sendFingerprint(offer.text, []));
@@ -2199,7 +2334,7 @@ export class Sessions {
       this.sendQueue.remove(id, offer.itemId);
     }
     this.opts.onSessions();
-    if (outcome !== "failed" && this.sendQueue.items(id).length) setImmediate(() => void this.drainQueue(id));
+    if (outcome === "submitted" && this.sendQueue.items(id).length) setImmediate(() => void this.drainQueue(id));
   }
 
   // ---- mod approvals: a permission request in a Claude app session with no Remote Control ----------
@@ -2327,7 +2462,7 @@ export class Sessions {
    * only until the sweep's next look.
    */
   private sweepApprovals(): void {
-    const stale = this.approvals.sweep(desktopId => this.appBusy(desktopId));
+    const stale = this.approvals.sweep(desktopId => this.appWorking(desktopId));
     for (const ask of stale) {
       if (!ask.recordId) continue;
       this.opts.permissions.expire(ask.recordId, "stale");
@@ -2544,28 +2679,35 @@ export class Sessions {
     // CLI exits and the row leaves the list, and resuming beside it would fork the conversation.
     if (!this.live.has(id) && this.desktop?.externalProcess(desktopId)) throw new CodedError("desktop_external", DESKTOP_EXTERNAL);
     const eligible = this.appModSession(id, desktopId);
+    // What the mod would do with this message now (null: it cannot, and the bridge or the wait stands).
+    const kind = this.modKind(id, desktopId, text, attachments);
+    const viaMod = kind === "prompt" || kind === "command";
+    const special = attachments.length > 0 || text.trimStart().startsWith("/");
     // A /clear to a Claude app session whose mod answers runs in place (the same session, its settings
-    // kept), queued like a message; without a mod the fresh-session fallback below stands.
-    if (eligible && behavior !== "interrupt" && CLEAR_TEXT.test(text) && !attachments.length && this.modConnected(desktopId) && !this.seen(id, clientMsgId)) {
+    // kept), with Remote Control on or off, queued like a message; without a mod the fresh-session fallback below stands.
+    if (kind === "clear" && behavior !== "interrupt" && !this.seen(id, clientMsgId)) {
+      // A Remote Control session may be waiting on a permission prompt: as for any message, the /clear supersedes it so the turn ends and it runs.
+      const prior = this.bridges.get(id);
       this.enqueue(id, clientMsgId, text, attachments);
+      if (prior?.bridgeId === this.desktop?.liveProcess(desktopId)?.bridgeSessionId && prior?.permissions.size) this.supersedeBridge(id, prior);
       return id;
     }
-    if (eligible && !this.handedOff(id) && (behavior === "interrupt" || attachments.length || text.trimStart().startsWith("/"))) throw new DesktopBlockedError();
+    if (eligible && !this.handedOff(id) && (behavior === "interrupt" || special && !viaMod)) throw new DesktopBlockedError();
     if (eligible && this.seen(id, clientMsgId)) return id;
     if (eligible && this.sendQueue.items(id).some(item => item.claimedBy || this.modOwners.get(item.id) === id)) {
       if (this.sendQueue.items(id).some(item => item.id === clientMsgId)) { this.noteQueued(id, clientMsgId); return id; }
-      if (behavior === "interrupt" || attachments.length || text.trimStart().startsWith("/")) throw new Error(MOD_CLAIMED);
+      if (behavior === "interrupt" || special && !viaMod) throw new Error(MOD_CLAIMED);
       this.enqueue(id, clientMsgId, text, attachments);
       return id;
     }
     // The phone sends "steer" on every send (composer.tsx); with nothing running here it is a plain send.
-    if (eligible && behavior !== "interrupt" && !attachments.length && text.trim() && !text.trimStart().startsWith("/") && !this.appBusy(desktopId)) {
+    if (eligible && behavior !== "interrupt" && viaMod && !this.appBusy(desktopId)) {
       this.enqueue(id, clientMsgId, text, attachments);
       return id;
     }
-    // A Remote Control session whose mod answers takes plain text through the mod, busy or not: the
-    // queue holds it while the app runs a turn. Photos and slash commands keep going over the bridge.
-    if (behavior !== "interrupt" && this.rcModText(id, desktopId, text, attachments) && !this.seen(id, clientMsgId)) {
+    // A Remote Control session whose mod answers takes text, photos and slash commands through the mod,
+    // busy or not: the queue holds them while the app runs a turn. Without a mod the bridge send stands.
+    if (behavior !== "interrupt" && this.rcModItem(id, desktopId, text, attachments) && !this.seen(id, clientMsgId)) {
       // As the bridge send did: a new message supersedes the open permission prompts, so the turn
       // that waits for approval goes on and the queued message runs after it.
       // Only once the queue took it: a full queue rejects the message and the prompts stay open.
@@ -2574,6 +2716,32 @@ export class Sessions {
       if (prior?.bridgeId === this.desktop?.liveProcess(desktopId)?.bridgeSessionId && prior?.permissions.size) this.supersedeBridge(id, prior);
       return id;
     }
+    // An interrupt-and-send to a Remote Control session whose mod answers (and can run this kind) is the
+    // send-now path of sendQueued: the mod stops the app's running turn (if it runs one), then the message
+    // goes in through the mod like any other. The bridge's interrupt/post pair is not used (#177).
+    if (behavior === "interrupt" && this.rcModItem(id, desktopId, text, attachments) && !this.seen(id, clientMsgId)) {
+      const prior = this.bridges.get(id);
+      // At the head of the queue: the person interrupted to send this now, so no older queued message runs first.
+      const submit = (): string => {
+        this.enqueue(id, clientMsgId, text, attachments, true);
+        if (prior?.bridgeId === this.desktop?.liveProcess(desktopId)?.bridgeSessionId && prior?.permissions.size) this.supersedeBridge(id, prior);
+        return id;
+      };
+      if (!this.appBusy(desktopId)) return submit();
+      return this.modAbort(desktopId).then(stopped => {
+        if (!stopped) throw new CodedError("desktop_mod_offline", DESKTOP_MOD_OFFLINE_SEND);
+        token?.check();
+        return submit();
+      });
+    }
+    // Without a mod that answers, a Remote Control session has no way in: the bridge accepts the post
+    // but the CLI drops it (rcAppSession), and the phone kept a message that never ran, which a resend
+    // then showed twice (#177, 2026-11-19). Refused, so the phone says so; a retry of a message already
+    // delivered keeps its plain answer. A /clear (/new) with no mod forks a fresh host session and /exit
+    // archives: neither posts to the bridge (deliver), so they are not refused. A session Ripple created
+    // itself in a Remote Control environment (environmentBridgeId) keeps its bridge send, unchanged.
+    const noPost = CLEAR_TEXT.test(text) && !attachments.length || /^\/exit\s*$/.test(text);
+    if (this.rcAppSession(id, desktopId) && !this.records.get(id)?.environmentBridgeId && !noPost && !this.seen(id, clientMsgId)) throw new CodedError("desktop_mod_offline", DESKTOP_MOD_OFFLINE_SEND);
     return this.deliver(id, clientMsgId, text, attachments, behavior ?? "steer", false, token);
   }
 
@@ -2666,18 +2834,15 @@ export class Sessions {
     const desktopId = existing?.sdkSessionId ?? id;
     if (this.desktop && !this.live.has(id) && !this.handingOff.has(id) && (existing?.sdkSessionId || this.desktop.has(id))) {
       const process = this.desktop.liveProcess(desktopId);
-      if (process?.bridgeSessionId) {
-        const key = `${id}/${clientMsgId}`;
-        const pending = this.bridgeSends.get(key);
-        if (pending) return pending;
-        const sending = this.sendBridge(id, clientMsgId, text, attachments, process.bridgeSessionId, token).finally(() => this.bridgeSends.delete(key));
-        this.bridgeSends.set(key, sending);
-        return sending;
-      }
+      // A Remote Control app session (rcAppSession): the bridge accepts a host post but the CLI drops it,
+      // so no path ends in a post here. Everything that reaches this point without the mod (a queued item
+      // the mod did not claim in time, a send-now, a photo or command without a mod) fails visibly instead,
+      // with no phone user event (#177, 2026-11-19). The queue shows the text on the item.
+      if (process?.bridgeSessionId) throw new CodedError("desktop_mod_offline", DESKTOP_MOD_OFFLINE_SEND);
       if (this.appModSession(id, desktopId)) {
         // Preserve the legacy handed-off fallback, but never adopt an app-created writer.
         if (!this.handedOff(id)) throw new DesktopBlockedError();
-        if (this.appBusy(desktopId)) throw new DesktopBusyError();
+        if (this.appWorking(desktopId)) throw new DesktopBusyError();
       }
       if (existing?.desktopBridge) { this.closeBridge(id); existing.desktopBridge = false; this.save(); }
     }
@@ -3451,7 +3616,7 @@ export class Sessions {
   private start(r: SessionRecord): Live {
     if (r.sdkSessionId && this.desktop?.isOpen(r.sdkSessionId)) {
       if (!this.handedOff(r.id)) throw new DesktopBlockedError();
-      if (this.appBusy(r.sdkSessionId)) throw new DesktopBusyError();
+      if (this.appWorking(r.sdkSessionId)) throw new DesktopBusyError();
     }
     this.invalidateActivity(r.id);
     const abort = new AbortController();
@@ -3750,7 +3915,24 @@ export class Sessions {
   private appBusy(desktopId: string): boolean {
     if (!this.desktop) return false;
     const process = this.desktop.liveProcess(desktopId, 0);
+    if (process?.backgroundOnly && this.modTurnUnseen(desktopId, process.turnEndedAt)) return true;
     return process ? process.status !== "idle" : this.desktop.isOpen(desktopId);
+  }
+
+  /** The mod submitted a message after the conversation's last turn end, and the transcript has not
+   * shown that turn yet: while background agents keep the registry busy, nothing else says it runs,
+   * so the next queued message would follow it in at once. A minute without the turn appearing frees it. */
+  private modTurnUnseen(desktopId: string, endedAt: number | undefined): boolean {
+    const at = this.modSubmitted.get(desktopId);
+    if (at === undefined) return false;
+    if (this.now() - at >= 60_000) { this.modSubmitted.delete(desktopId); return false; }
+    return endedAt === undefined || at > endedAt;
+  }
+
+  /** appBusy, or the app's background agents still run in this conversation after its turn ended: the
+   * host must not resume it beside them, and their approval prompts are not stale. */
+  private appWorking(desktopId: string): boolean {
+    return this.appBusy(desktopId) || this.desktop?.liveProcess(desktopId, 0)?.backgroundOnly === true;
   }
 
   private sdkIdle(r: SessionRecord, live = this.live.get(r.id)): boolean {
@@ -3823,11 +4005,27 @@ export class Sessions {
       this.desktop?.poll();
       const bridgeId = this.desktop?.liveProcess(r.sdkSessionId!)?.bridgeSessionId;
       if (bridgeId) {
-        // The app is now the writer. Use the existing send path, never resume a second SDK.
-        if (!r.desktopBridge) this.rebaseDesktop(r);
+        // The app is now the writer: never resume a second SDK. A post to its bridge would be dropped by
+        // its CLI (rcAppSession), so each input goes back to the send queue, the path a normal send takes:
+        // the mod runs it when it answers, otherwise the item fails visibly on its row (desktop_mod_offline)
+        // with its text kept. The user event its acceptance appended is voided, as the input has not run.
+        // Each input stands alone: one the queue cannot take (it is full) fails visibly by itself and
+        // never costs a later input its row.
+        const failures: string[] = [];
         for (const message of messages) {
-          const content = messageContent(message.message.content, data => this.log(r.id).image(data));
-          await this.sendBridge(r.id, message.uuid!, content.text, content.images.map(image => ({ blob: image.blob!, name: "photo", mediaType: image.mediaType })), bridgeId);
+          try { this.requeueTransferred(r, message); }
+          catch (error) {
+            const text = error instanceof Error ? error.message : String(error);
+            (this.opts.log ?? console.error)(`[desktop handoff ${r.id}] queued input refused: ${text}`);
+            this.append(r.id, { kind: "result", ok: false, error: text, ms: 0, turns: 0 });
+            failures.push(text);
+          }
+        }
+        // The writer that ran these inputs is gone; the queue waits for an idle session. With no input
+        // taken at all, nothing is left to run and the session shows the failure.
+        if (r.state === "running" || r.state === "waiting") {
+          if (failures.length === messages.length) this.setState(r, "error", failures.at(-1));
+          else this.setState(r, "idle");
         }
         return;
       }
@@ -3841,6 +4039,39 @@ export class Sessions {
       this.append(r.id, { kind: "result", ok: false, error: text, ms: 0, turns: 0 });
       this.setState(r, "error", text);
     }
+  }
+
+  /**
+   * An input the host's writer accepted (its user event is in the log, its receipt completed) and never
+   * ran, given back to the send queue under its own phone id. The user event is voided: it is
+   * replaced by an empty one under another id, which the timeline does not draw (the phone shows the
+   * message as a queue row, or as the user event the mod's run appends). A queue that cannot take it
+   * (full) throws after voiding it all the same, and the id stays known so a resend is not run twice.
+   */
+  private requeueTransferred(r: SessionRecord, message: SdkUserMessage): void {
+    const log = this.log(r.id);
+    let found: { seq: number; clientMsgId: string; text: string; images: ImagePart[] } | null = null;
+    for (let pages = 0, before = log.lastSeq + 1; !found && pages < 8 && before > 1; pages++) {
+      const page = log.before(before);
+      for (const e of page.events) {
+        if (e.kind === "user" && e.clientMsgId && uuidFrom(e.clientMsgId) === message.uuid) found = { seq: e.seq, clientMsgId: e.clientMsgId, text: e.text, images: e.images ?? [] };
+      }
+      if (!page.hasOlder || !page.events.length) break;
+      before = page.events[0]!.seq;
+    }
+    const content = found ? null : messageContent(message.message.content, data => log.image(data));
+    const clientMsgId = found?.clientMsgId ?? message.uuid!;
+    const text = found?.text ?? content!.text;
+    const attachments = (found?.images ?? content!.images).flatMap(image => image.blob ? [{ blob: image.blob, name: "photo", mediaType: image.mediaType }] : []);
+    const key = `send:${r.id}:${clientMsgId}`;
+    this.seenIds.get(r.id)?.delete(clientMsgId);
+    this.receipts.abandon(key);
+    const voidEvent = (): void => { if (found) log.substitute(found.seq, { kind: "user", text: "", clientMsgId: `unsent:${clientMsgId}` }); };
+    // A refused input (queue full) did not run either: its event is voided the same way, and it fails
+    // visibly in the caller. Its id stays known so a resend is not run twice.
+    try { this.enqueue(r.id, clientMsgId, text, attachments); }
+    catch (error) { this.rememberClientMsgId(r.id, clientMsgId); voidEvent(); throw error; }
+    voidEvent();
   }
 
   private subAssistant(r: SessionRecord, live: Live, parent: string, message: { id?: string; model?: string; content?: { type: string; text?: string; thinking?: string; signature?: string; id?: string; name?: string; input?: Record<string, unknown> }[] }): void {

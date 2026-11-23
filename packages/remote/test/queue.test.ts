@@ -46,6 +46,22 @@ test("the queue holds twenty; a failure records why and holds; resume clears bot
   assert.equal(q.held("s"), false);
 });
 
+test("a front insert goes to the head, never ahead of an item the mod claimed, and the size limit still applies", t => {
+  const d = dir(t);
+  const q = SendQueue.open(d);
+  for (const id of ["a", "b"]) q.add("s", { id, text: id, attachments: [] }, 1);
+  assert.equal(q.add("s", { id: "now", text: "now", attachments: [{ name: "p", mediaType: "image/png", data: "QQ==" }] }, 2, undefined, true), true);
+  assert.deepEqual(q.items("s").map(item => item.id), ["now", "a", "b"], "the head, so it runs next");
+  assert.equal(q.add("s", { id: "now", text: "now", attachments: [] }, 3, undefined, true), false, "a resend of a queued id adds nothing");
+  assert.equal(q.claimMod("s", "now"), true);
+  q.add("s", { id: "next", text: "next", attachments: [] }, 4, undefined, true);
+  assert.deepEqual(q.items("s").map(item => item.id), ["now", "next", "a", "b"], "behind the claimed item, ahead of the rest");
+  assert.deepEqual(SendQueue.open(d).items("s").map(item => item.id), ["now", "next", "a", "b"], "the order is saved");
+  for (let n = 4; n < QUEUE_CAP; n++) q.add("s", { id: `m${n}`, text: String(n), attachments: [] }, n);
+  assert.throws(() => q.add("s", { id: "over", text: "x", attachments: [] }, 99, undefined, true), /at most 20/);
+  assert.equal(q.items("s")[0]!.id, "now");
+});
+
 test("a temporary obstacle is a wait code, not an error, survives reopen without holding, and Stop still wins", t => {
   const d = dir(t);
   const q = SendQueue.open(d);

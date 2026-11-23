@@ -27,8 +27,15 @@ export function activityOverview(items: readonly TimelineItem[], background: rea
     tasks.set(worker.sub, { ...previous, id: previous?.id ?? worker.toolUseId, sub: worker.sub, kind: "agent", label: worker.description, startedAt: previous?.startedAt ?? null, state: worker.status === "running" && previous?.state && previous.state !== "running" ? previous.state : worker.status, ...(model ? { model } : {}), ...(modelLabel ? { modelLabel } : {}), ...(effort ? { effort } : {}) });
   }
   const all = [...tasks.values()];
-  const active = all.filter(task => !task.state || task.state === "running" || task.state === "unknown");
-  const recent = all.filter(task => task.state === "done" || task.state === "failed" || task.state === "stopped").reverse();
+  // The host moves work it can no longer confirm (a restarted app or CLI lost it) to its history as
+  // `unknown` (#176): that is where it belongs here too, not among what runs. The host's active list
+  // never holds such a task, so an `unknown` that only the history lists is past; one the active list
+  // still names (an older host) stays with the running work.
+  const listed = new Set(background.map(key));
+  const past = new Set(history.map(key));
+  const lost = (task: BackgroundTask): boolean => task.state === "unknown" && past.has(key(task)) && !listed.has(key(task));
+  const active = all.filter(task => !lost(task) && (!task.state || task.state === "running" || task.state === "unknown"));
+  const recent = all.filter(task => task.state === "done" || task.state === "failed" || task.state === "stopped" || lost(task)).reverse();
   const counts = { running: 0, unknown: 0, done: 0, failed: 0, stopped: 0 };
   for (const task of all) counts[task.state ?? "running"]++;
   return { active, recent, counts };

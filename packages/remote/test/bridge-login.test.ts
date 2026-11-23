@@ -11,6 +11,7 @@ import { AUTH_REREAD_MS, BridgeAuthError, BridgeClient, LOGIN_EXPIRED, LOGIN_REF
 import type { BridgeAuth } from "../src/bridge-client.ts";
 import { PermissionQueue } from "../src/permissions.ts";
 import type { DesktopProcess } from "../src/desktop.ts";
+import { environmentSession } from "./bridge-fixture.ts";
 
 const id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -145,7 +146,10 @@ test("an expired login is logged once and told to phones once, and its end too",
   assert.deepEqual(f.logs.filter(l => l.includes("로그인")), [`[desktop] Claude app sessions cannot be reached: ${LOGIN_EXPIRED}`]);
   assert.deepEqual(f.problems, [LOGIN_EXPIRED]);
   assert.equal(f.sessions.desktopProblem(), LOGIN_EXPIRED);
-  // A send into the Claude app session fails with that reason, which the phone shows.
+  // A send to a session Ripple created in a Remote Control environment (the one kind whose bridge post still
+  // runs) fails with that reason, which the phone shows.
+  f.sessions.log(id);
+  environmentSession(f, id);
   await assert.rejects(Promise.resolve(f.sessions.send(id, "phone-msg-1", "hello")), new RegExp(LOGIN_EXPIRED.slice(0, 20)));
   f.refresh();
   f.advance(31_000);

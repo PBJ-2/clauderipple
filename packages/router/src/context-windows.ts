@@ -52,7 +52,18 @@ export function contextWindowSnapshot(cfg: Config, natives: { id: string; contex
     windows[id] = Math.floor(value);
     if (live !== undefined && route?.contextWindow === undefined) catalogWindows[id] = Math.floor(live);
   };
-  for (const model of natives) put(model.id, model.contextWindow, true);
+  const storedAnthropicWindow = (id: string): number | undefined => {
+    const normalized = id.replace(/-\d{8}$/, "");
+    for (const provider of Object.values(cfg.providers)) {
+      if (provider.type !== "anthropic") continue;
+      for (const model of provider.models ?? []) {
+        if (model.id.replace(/-\d{8}$/, "") !== normalized) continue;
+        if (typeof model.contextWindow === "number" && Number.isFinite(model.contextWindow) && model.contextWindow > 0) return model.contextWindow;
+      }
+    }
+    return undefined;
+  };
+  for (const model of natives) put(model.id, model.contextWindow === undefined ? storedAnthropicWindow(model.id) : model.contextWindow, true);
   for (const model of cfg.cli.extraModels) put(model.model, model.contextWindow ?? cfg.cli.autoCompactWindow);
   for (const [name, provider] of Object.entries(cfg.providers)) {
     for (const model of provider.models ?? []) {

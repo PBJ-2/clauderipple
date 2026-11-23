@@ -26,7 +26,7 @@ export function npmBuildSteps(platform = process.platform, run = execFileSync) {
   run(npm, ["--workspace", "@clauderipple/app", "run", "build"], options);
 }
 
-function build() {
+async function build() {
   fs.rmSync(dist, { recursive: true, force: true });
   npmBuildSteps();
 
@@ -35,9 +35,11 @@ function build() {
   fs.copyFileSync(path.join(root, "packages", "remote", "package.json"), path.join(dist, "remote", "package.json"));
   const remoteWeb = path.join(root, "packages", "remote", "web");
   if (fs.existsSync(remoteWeb)) fs.cpSync(remoteWeb, path.join(dist, "remote", "web"), { recursive: true });
-  // SHARED keeps .ts browser URLs in both checkout and installed host layouts.
-  for (const name of ["protocol.ts", "tool-details.ts", "e2ee.ts"]) {
-    fs.copyFileSync(path.join(root, "packages", "remote", "src", name), path.join(dist, "remote", "src", name));
+  // SHARED keeps .ts browser URLs in both checkout and installed host layouts. The list is SHARED's own:
+  // a hand-kept copy here missed chunks.ts and wrap-up.ts, and the installed web page stayed blank (#174).
+  const { SHARED } = await import("../packages/remote/src/server.ts");
+  for (const rel of Object.keys(SHARED).filter(rel => rel.startsWith("src/"))) {
+    fs.copyFileSync(path.join(root, "packages", "remote", rel), path.join(dist, "remote", rel));
   }
   // The status mod is loaded by Claude Code itself, as TypeScript; the API types it writes beside the
   // manifest when it loads one are its own and are left out, as is the design preview (a dev tool).
@@ -66,4 +68,4 @@ function build() {
   console.log(`✓ built ${path.relative(root, entry)}`);
 }
 
-if (import.meta.main) build();
+if (import.meta.main) await build();

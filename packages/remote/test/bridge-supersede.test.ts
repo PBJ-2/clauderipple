@@ -1,10 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { approval, bridgeFixture, bridgeId, tick } from "./bridge-fixture.ts";
+import { approval, bridgeFixture, bridgeId, environmentSession, tick } from "./bridge-fixture.ts";
 
-test("a new phone message denies waiting Mac approvals like host sessions do", async t => {
+// The message reaches an app session the person opened through the ripple mod (the CLI drops a host post to its
+// bridge, #177), and a session Ripple created itself in a Remote Control environment over the bridge.
+for (const via of ["mod", "bridge"] as const) test(`a new phone message denies waiting Mac approvals like host sessions do (${via})`, async t => {
   const f = bridgeFixture(t);
   f.sessions.log(bridgeId);
+  if (via === "bridge") environmentSession(f);
+  else f.sessions.modInbox.listen(bridgeId, f.now());
   await tick(); await tick();
   f.emit(approval("req-1"));
   await tick(); await tick();
@@ -22,8 +26,11 @@ test("a new phone message denies waiting Mac approvals like host sessions do", a
   assert.equal(f.permissions.get(permId)?.state, "deny");
   assert.equal(f.permissions.pending(bridgeId).length, 0);
   assert.equal(f.sessions.summaryOf(bridgeId)?.attention?.reason ?? null, null);
-  // The user event itself still went out over the bridge.
-  assert.ok(f.posts.some(p => JSON.stringify(p).includes("second thought")));
+  if (via === "bridge") assert.ok(f.posts.some(p => JSON.stringify(p).includes("second thought")), "the user event itself went out over the bridge");
+  else {
+    assert.ok(!f.posts.some(p => JSON.stringify(p).includes("second thought")), "nothing but the deny was posted");
+    assert.ok(f.sessions.modInbox.pending(bridgeId).some(offer => offer.itemId === "phone-1"), "the message waits for the mod to run it");
+  }
 
   // And a lagging replay does not bring the superseded card back.
   f.history.push({ source: "worker", payload: approval("req-1") });

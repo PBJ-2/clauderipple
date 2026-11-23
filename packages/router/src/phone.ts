@@ -36,8 +36,9 @@ function execute(file: string, args: string[]): Promise<void> {
 /**
  * `query` is the one query value a route takes: a session id (inbox), an exclude id (settings-jobs) or an askId (mod approval).
  * `sentAt` is only the mod approval poll's: the time the hook sent it, whole milliseconds, forwarded as the host's `sentAt`.
+ * `caps` is only the inbox poll's: what the mod can run beyond a prompt (comma-separated names), forwarded as the host's `caps`.
  */
-export async function phoneRequest(route: string, method: string, body: string | undefined, deps: PhoneDeps = {}, query?: string, sentAt?: string): Promise<PhoneResponse> {
+export async function phoneRequest(route: string, method: string, body: string | undefined, deps: PhoneDeps = {}, query?: string, sentAt?: string, caps?: string): Promise<PhoneResponse> {
   if (route === "restart" && method === "POST") {
     const uid = deps.uid ?? process.getuid?.();
     const command = uid === undefined ? "npm run remote -- install" : `launchctl kickstart -k gui/${uid}/com.clauderipple.host`;
@@ -61,13 +62,14 @@ export async function phoneRequest(route: string, method: string, body: string |
   const queryKey = method === "GET" ? (route === "inbox" ? "session" : route === "settings-jobs" ? "exclude" : route === "mod/approval" ? "askId" : undefined) : undefined;
   const approvalPoll = route === "mod/approval" && method === "GET";
   const sentOk = sentAt === undefined || approvalPoll && /^\d{1,15}$/.test(sentAt);
-  if (!sentOk || !((method === "GET" && (route === "status" || route === "pairing" || (queryKey !== undefined && typeof query === "string" && query.length > 0 && query.length <= 200))) || (method === "POST" && (route === "settings" || route === "rotate" || route === "inbox/claim" || route === "inbox/result" || route === "settings-jobs/claim" || route === "settings-jobs/result" || route === "mod/approval" || route === "mod/approval/done" || route === "mod/moved")))) {
+  const capsOk = caps === undefined || route === "inbox" && method === "GET" && /^[a-z]{1,20}(,[a-z]{1,20}){0,7}$/.test(caps);
+  if (!sentOk || !capsOk ||!((method === "GET" && (route === "status" || route === "pairing" || (queryKey !== undefined && typeof query === "string" && query.length > 0 && query.length <= 200))) || (method === "POST" && (route === "settings" || route === "rotate" || route === "inbox/claim" || route === "inbox/result" || route === "settings-jobs/claim" || route === "settings-jobs/result" || route === "mod/approval" || route === "mod/approval/done" || route === "mod/moved")))) {
     return { status: 404, body: { error: "unknown phone endpoint or method" } };
   }
   let response: Response;
   try {
     const { port, secret } = target(deps.home ?? remoteHome());
-    const search = (queryKey !== undefined ? `?${queryKey}=${encodeURIComponent(query!)}` : "") + (approvalPoll && sentAt !== undefined ? `&sentAt=${sentAt}` : "");
+    const search = (queryKey !== undefined ? `?${queryKey}=${encodeURIComponent(query!)}` : "") + (approvalPoll && sentAt !== undefined ? `&sentAt=${sentAt}` : "") + (caps !== undefined ? `&caps=${caps}` : "");
     // 5 s is above the host's 3 s approval long-poll (APPROVAL_WAIT_MS), so a poll that answers in time is not cut.
     response = await (deps.fetch ?? fetch)(`http://127.0.0.1:${port}/local/${route}${search}`, {
       method, headers: { "x-ripple-local": secret, "content-type": "application/json" },

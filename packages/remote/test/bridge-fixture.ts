@@ -68,3 +68,15 @@ export const approval = (requestId: string, extra: Record<string, unknown> = {})
   type: "control_request", request_id: requestId,
   request: { subtype: "can_use_tool", tool_name: "Bash", tool_use_id: `tool-${requestId}`, input: { command: "true" }, ...extra },
 });
+
+/**
+ * Makes the fixture's session one Ripple created itself in a Remote Control environment. The phone's
+ * messages to it are still posted to the bridge; to an app session opened by the person they are not
+ * (the CLI drops a host post there, #177), so tests of the post itself use this kind of session.
+ */
+export function environmentSession(f: { sessions: Sessions }, id = bridgeId, on = true): void {
+  const record = (f.sessions as unknown as { records: Map<string, { environmentBridgeId?: string }> }).records.get(id);
+  if (!record) throw new Error("open the session (sessions.log) before making it an environment session");
+  if (on) record.environmentBridgeId = "bridge";
+  else delete record.environmentBridgeId;
+}

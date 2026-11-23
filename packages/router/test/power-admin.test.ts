@@ -182,6 +182,21 @@ test("persistPowerChange writes only what changed and nothing for a pin", () => 
   assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { awake: { batteryFloorPercent: 30, mode: "working" }, tether: { hotspotSsid: "PBJ" } });
 });
 
+test("persistPowerChange takes the config lock before changing the file", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cr-power-lock-"));
+  const file = path.join(dir, "config.json");
+  fs.writeFileSync(file, JSON.stringify({ awake: { mode: "off" } }, null, 2));
+  const before = fs.readFileSync(file);
+  fs.mkdirSync(`${file}.lock`);
+  try {
+    assert.throws(() => persistPowerChange(file, { awake: { mode: "on" } }), (error: NodeJS.ErrnoException) => error.code === "ELOCKED");
+    assert.deepEqual(fs.readFileSync(file), before);
+  } finally {
+    fs.rmSync(`${file}.lock`, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("config: off by default, validated when present", () => {
   assert.deepEqual(awakeSettings(DEFAULTS), { mode: "off", batteryFloorPercent: 20 });
   assert.deepEqual(tetherSettings(DEFAULTS), { enabled: false, hotspotSsid: "", probeEverySec: 10 });
