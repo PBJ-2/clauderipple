@@ -24,7 +24,7 @@ import { firstSentence, STATUS_CAP } from "./wrap-up.ts";
 import { DesktopSidebar, PHONE_GROUP, type SidebarOptions } from "./sidebar.ts";
 import { BridgeAuthError, BridgeClient, bridgeCreateNotCreated, bridgeWriteUnknown, CLI_NOT_LOGGED_IN, CodedError, DESKTOP_BLOCKED, DESKTOP_BUSY, DESKTOP_BUSY_NOW, DESKTOP_MOD_OFFLINE, DESKTOP_MOD_OFFLINE_SEND, DESKTOP_WAITING, DesktopBlockedError, DesktopBusyError, isLoginRefusal, object, permissionSuppression, slashCommands, type BridgeFrame } from "./bridge-client.ts";
 import { APPROVAL_LOCAL_REASON, APPROVAL_WAIT_MS, Approvals, type ApprovalAnswer, type ApprovalState } from "./mod-approval.ts";
-import type { HandoffRunner } from "./handoff.ts";
+import { resumeCommand, type HandoffRunner } from "./handoff.ts";
 import { isDirectory, macConsent, readableFolder } from "./folders.ts";
 import { readJson, writeFileAtomic } from "./fsutil.ts";
 import { createWorktree } from "./worktree.ts";
@@ -96,6 +96,8 @@ interface SessionRecord {
   desktopHandoffRetryAt?: number;
   desktopHandoffAttempts?: number;
   desktopHandoffError?: string;
+  /** The "not shown in the Claude app" notice was written; it is written once, restart or not. */
+  desktopHandoffUnavailableNoted?: boolean;
   desktopBridge?: boolean;
   /** Environment-created sessions have a bridge identity before Desktop assigns a CLI id. */
   environmentBridgeId?: string;
@@ -3717,6 +3719,7 @@ export class Sessions {
           this.save();
           this.opts.onSessions();
         }
+        if (msg.subtype === "init") this.noteHandoffUnavailable(r);
         if (msg.subtype === "api_retry" && !live.retried) { live.retried = true; this.append(r.id, { kind: "notice", code: "api_retry" }); }
         return;
       }
@@ -3937,6 +3940,18 @@ export class Sessions {
 
   private sdkIdle(r: SessionRecord, live = this.live.get(r.id)): boolean {
     return !this.handingOff.has(r.id) && !BUSY.has(r.state) && (!live || live.pendingMessages.length === 0) && this.taskState(r.id).activity.active.length === 0;
+  }
+
+  /**
+   * Without a handoff runner (Linux, or no Claude Code found) no Claude app on this machine will open
+   * the session, and the record stays "pending": "excluded" would show its transcript to the app's own
+   * list (see `excluded` above). The phone is told once, with the terminal command that continues it.
+   */
+  private noteHandoffUnavailable(r: SessionRecord): void {
+    if (this.opts.handoff || r.desktopHandoff !== "pending" || r.desktopHandoffUnavailableNoted || r.desktopBridge || r.environmentBridgeId || !r.sdkSessionId) return;
+    r.desktopHandoffUnavailableNoted = true;
+    this.save();
+    this.append(r.id, { kind: "notice", code: "desktop_handoff_unavailable", text: resumeCommand(r.cwd, r.sdkSessionId) }, false);
   }
 
   private handoff(r: SessionRecord, live = this.live.get(r.id)): void {

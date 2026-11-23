@@ -262,7 +262,7 @@ export type EventBody = MessageImages & {
   | { kind: "figures"; figures: Figures }
   | { kind: "notice"; code: NoticeCode; text?: string });
 
-export type NoticeCode = "host_restarted" | "interrupted" | "api_retry" | "router_down" | "model_changed" | "resumed" | "desktop_open" | "desktop_resumed" | "desktop_bridge" | "desktop_blocked" | "desktop_handoff" | "desktop_handoff_requested" | "desktop_handoff_retry" | "desktop_handoff_failed" | "desktop_settings_failed" | "desktop_approval";
+export type NoticeCode = "host_restarted" | "interrupted" | "api_retry" | "router_down" | "model_changed" | "resumed" | "desktop_open" | "desktop_resumed" | "desktop_bridge" | "desktop_blocked" | "desktop_handoff" | "desktop_handoff_unavailable" | "desktop_handoff_requested" | "desktop_handoff_retry" | "desktop_handoff_failed" | "desktop_settings_failed" | "desktop_approval";
 
 export type SessionEvent = EventBody & { seq: number; at: number };
 
@@ -453,7 +453,7 @@ export interface HostInfo { name: string; version: string; routerOk: boolean; ro
 // ---- client → host --------------------------------------------------------------------
 
 /** Per-connection opt-in. Missing/non-array lists mean no features; unknown entries are ignored. */
-export const CLIENT_FEATURES = ["settingsResult", "scopedAlways", "sessionFiles", "chunkedFrames", "folderFiles", "slowHeartbeat"] as const;
+export const CLIENT_FEATURES = ["settingsResult", "scopedAlways", "sessionFiles", "chunkedFrames", "folderFiles", "slowHeartbeat", "handoffUnavailableNotice"] as const;
 export type ClientFeature = typeof CLIENT_FEATURES[number];
 
 export type ClientMsg =

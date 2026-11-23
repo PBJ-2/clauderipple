@@ -1,4 +1,5 @@
 // Downgrade at the connection boundary only: logs and other clients retain the full truth.
+import { handoffUnavailableText } from "./handoff.ts";
 import { CLIENT_FEATURES, type ClientFeature, type HostMsg, type SessionEvent, type SettingsResult } from "./protocol.ts";
 
 export function clientFeatures(value: unknown): Set<ClientFeature> {
@@ -14,6 +15,10 @@ export function clientEvent(event: SessionEvent, features: ReadonlySet<ClientFea
     } else if (event.kind === "permission_decided" && event.decision === "allow_always") {
       next = { ...event, decision: "allow" };
     }
+  }
+  // An older app renders an unknown notice code as its key; "{text}" is the one code it can show.
+  if (event.kind === "notice" && event.code === "desktop_handoff_unavailable" && !features.has("handoffUnavailableNotice")) {
+    next = { ...event, code: "desktop_settings_failed", text: handoffUnavailableText(event.text ?? "") };
   }
   if (features.has("sessionFiles")) return next;
   // Message-level files come from image references, including ones without an extension or trusted MIME.

@@ -3357,3 +3357,31 @@ for background work left by a finished turn (its tail starting when that work en
 CLI-refusal path that feeds the login notice (including an unrelated failure between two refusals
 not resetting it); `test/wrap-up.test.ts` covers a blocked question keeping `workActive` true after
 `markSeen` clears its attention.
+
+## 10. Ripple Remote on Linux and SSH-remote hosts: no Claude app to hand off to (2026-11-23, issue #181)
+
+**Observed.** A user runs Claude Desktop on a laptop, every Code session over Desktop's SSH remote
+feature on a Linux server, and Ripple Remote on that same server. A session made from the phone
+stayed `desktopHandoff: "pending"` and never appeared in Desktop. `desktopHandoff()` (`src/handoff.ts`)
+returns no runner unless the platform is `darwin` (a `script` PTY around `claude --desktop --resume`)
+or `win32` (`conhost.exe --headless`); on Linux there is no Claude app to open, and on an SSH-remote
+server the app lives on another machine this host cannot reach.
+
+**What the host does instead.** With no runner, the record stays `"pending"` — never `"excluded"`,
+which would hand the transcript to the app's own list (`excluded` in `sessions.ts`). When the SDK's
+`init` arrives, `noteHandoffUnavailable` appends one `desktop_handoff_unavailable` notice whose `text`
+is the shell command that continues the session in a terminal on the host
+(`cd '<folder>' && claude --resume <id>`; `cd /d "<folder>" && …` for cmd.exe), and sets
+`desktopHandoffUnavailableNoted` so a later turn or a host restart does not write it again. The
+notice's wording is in three parts, in this order: this session is not in the Claude app on this
+computer; the command; do not send from the phone while it runs in a terminal (two writers on one
+transcript). Not written when a runner exists, for bridge sessions, or when the session has no SDK id.
+
+**Old apps.** The code is new, and an app that does not know a notice code prints its key. The app
+announces `handoffUnavailableNotice` in `hello.features`; without it `clientEvent` rewrites the event
+to `desktop_settings_failed` (whose dictionary entry is `{text}` alone) with the whole sentence built
+by `handoffUnavailableText`. The event log keeps the real code. The web client's words live in
+`web/i18n.ts` under `notice.desktop_handoff_unavailable` and must stay the same sentence.
+
+**Not done.** A helper on the machine that runs Desktop to pick the session up (the issue's other
+suggestion) needs a second process and a way to reach the SSH-remote host; it is not built.

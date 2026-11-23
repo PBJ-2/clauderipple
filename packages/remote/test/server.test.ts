@@ -164,7 +164,8 @@ async function fixture(t: TestContext, extra: Partial<ServerOptions> = {}, deskt
   };
   const auth = async () => {
     const peer = await connect();
-    peer.send({ t: "hello", token, clientId: "test-client" });
+    // Most tests compare the wire with the log, so this peer knows the one notice an older app cannot show.
+    peer.send({ t: "hello", token, clientId: "test-client", features: ["handoffUnavailableNotice"] });
     await peer.take("ready");
     return peer;
   };
@@ -632,7 +633,7 @@ test("scoped approvals are hidden and refused for legacy clients; sent is never 
   const denied = (await old.take("res", m => m.reqId === "unsafe-old")).msg;
   assert.ok(!denied.ok && /업데이트/.test(denied.error));
   const modern = await f.connect();
-  modern.ws.send(JSON.stringify({ t: "hello", token, clientId: "modern", features: ["scopedAlways"] }));
+  modern.ws.send(JSON.stringify({ t: "hello", token, clientId: "modern", features: ["scopedAlways", "handoffUnavailableNotice"] }));
   await modern.take("ready"); modern.send({ t: "attach", session: id });
   assert.deepEqual((await modern.take("events")).msg.events, log.tail().events);
   assert.equal(log.tail().events.find(e => e.kind === "permission")?.canAlways, true, "storage is never downgraded");
@@ -1159,6 +1160,31 @@ test("WebSocket upgrade refuses an evil Origin", { timeout: TEST_TIMEOUT }, asyn
     req.setTimeout(2000, () => req.destroy(new Error("Upgrade test timed out")));
     req.end();
   });
+});
+
+test("a phone session on a host with no Claude app handoff reaches an older app as a plain text notice (#181)", async t => {
+  const f = await fixture(t);
+  const id = await f.create();
+  const stored = f.sessions.log(id).tail().events.find(e => e.kind === "notice" && e.code === "desktop_handoff_unavailable");
+  assert.ok(stored?.kind === "notice" && stored.text?.endsWith("claude --resume sdk-1"), "the log keeps the real code");
+  const legacy = await f.connect();
+  legacy.send({ t: "hello", token, clientId: "legacy" });
+  await legacy.take("ready");
+  legacy.send({ t: "attach", session: id });
+  const seen = (await legacy.take("events")).msg.events.find(e => e.kind === "notice");
+  assert.ok(seen?.kind === "notice");
+  assert.equal(seen.code, "desktop_settings_failed");
+  // Not in the app on this computer, then the command, then the request not to send from the phone.
+  const lines = (seen.text ?? "").split("\n");
+  assert.equal(lines.length, 4);
+  assert.match(lines[0]!, /Claude 앱에 표시되지 않습니다\.$/);
+  assert.match(lines[2]!, /^cd '.*' && claude --resume sdk-1$/);
+  assert.match(lines[3]!, /휴대폰에서 메시지를 보내지 말아 주세요\.$/);
+  const modern = await f.auth();
+  modern.send({ t: "attach", session: id });
+  const current = (await modern.take("events")).msg.events.find(e => e.kind === "notice");
+  assert.ok(current?.kind === "notice");
+  assert.equal(current.code, "desktop_handoff_unavailable");
 });
 
 test("attach tails without a cursor, replays exactly after epoch/seq, and tails for a wrong epoch", { timeout: TEST_TIMEOUT }, async t => {

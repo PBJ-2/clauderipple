@@ -55,3 +55,24 @@ export function desktopHandoff(claudePath: string, timeoutMs = 30_000, platform 
     });
   });
 }
+
+/**
+ * What a person types in a terminal on the host to continue a phone-created session when no Claude
+ * app on that machine can take it over (Linux, or an app that lives on another machine over SSH).
+ * The folder is quoted for the shell: POSIX single quotes, or cmd.exe double quotes on Windows.
+ */
+export function resumeCommand(cwd: string, sessionId: string, platform = process.platform): string {
+  const id = /^[\w.-]+$/.test(sessionId) ? sessionId : `'${sessionId.replace(/'/g, "'\\''")}'`;
+  if (platform === "win32") return `cd /d "${cwd.replace(/"/g, "")}" && claude --resume ${id}`;
+  return `cd '${cwd.replace(/'/g, "'\\''")}' && claude --resume ${id}`;
+}
+
+/**
+ * `desktop_handoff_unavailable` as plain Korean text, for a client that does not know the code
+ * (web/i18n.ts carries the same words under "notice.desktop_handoff_unavailable"). Order: this
+ * session is not in the Claude app on this computer, how to continue it in a terminal (the command
+ * on its own line), then the request not to send from the phone meanwhile.
+ */
+export function handoffUnavailableText(command: string): string {
+  return `이 세션은 이 컴퓨터의 Claude 앱에 표시되지 않습니다.\n이 컴퓨터의 터미널에서 이어서 작업하려면 다음 명령을 실행해 주세요.\n${command}\n터미널에서 이어서 작업하는 동안에는 휴대폰에서 메시지를 보내지 말아 주세요.`;
+}

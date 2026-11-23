@@ -409,7 +409,8 @@ export function item(it: TimelineItem, ui: UI): string {
       return `<div class="notice control ${it.state}">${state}${esc(t(`control.${it.command}.${it.state}` as Key))}</div>`;
     }
     case "notice":
-      return `<div class="notice">${esc(t(`notice.${it.code}` as Key, { text: it.text ?? "", host: hostName(ui) }))}</div>`;
+      // The terminal-handoff notice is three lines (reason, command, request); the rest are one line.
+      return `<div class="notice${it.code === "desktop_handoff_unavailable" ? " lines" : ""}">${esc(t(`notice.${it.code}` as Key, { text: it.text ?? "", host: hostName(ui) }))}</div>`;
     case "chapter":
       return `<div class="start" title="${esc(it.summary)}">${esc(it.title)}</div>`;
     case "wrapUp":

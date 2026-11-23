@@ -931,7 +931,8 @@ for (const { model, effort, expected } of [
     assert.ok(!Object.hasOwn(env, "ANTHROPIC_BASE_URL"));
     assert.ok(!Object.hasOwn(options, "resume"));
     assert.deepEqual(eventLabels(f.events.filter(row => row.session === id).map(row => row.event)), [
-      "state starting", "user", "turn", "state running", "delta", "assistant", "result", "state idle",
+      // No handoff runner here, so the SDK's init also carries the one "continue in a terminal" notice.
+      "state starting", "user", "turn", "state running", "notice", "delta", "assistant", "result", "state idle",
     ]);
     const delta = f.events.find(row => row.event.kind === "delta")?.event;
     assert.ok(delta?.kind === "delta");
@@ -1432,6 +1433,40 @@ test("handoff does not reopen a conversation already owned by Desktop with RC of
   assert.equal(f.fake.spies.close, 1, "the idle SDK stops rather than remaining a second writer");
   await f.sessions.send(id, "after-adoption", "the phone keeps going while the app is idle");
   await waitFor(() => f.fake.users.length === 2);
+});
+
+test("without a handoff runner the phone is told once how to continue the session in a terminal (#181)", async t => {
+  const f = fixture(t);
+  const id = await f.create();
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  const notices = (sessions: Sessions) => sessions.log(id).tail().events.filter(e => e.kind === "notice" && e.code === "desktop_handoff_unavailable");
+  assert.equal(notices(f.sessions).length, 1);
+  const notice = notices(f.sessions)[0]!;
+  assert.equal(notice.kind === "notice" && notice.text, `cd '${f.cwd}' && claude --resume sdk-1`);
+  const records: { desktopHandoff: string }[] = JSON.parse(fs.readFileSync(path.join(f.dir, "sessions.json"), "utf8"));
+  assert.equal(records[0]!.desktopHandoff, "pending", "excluded would hand the transcript to the app's own list");
+  await f.sessions.send(id, "second", "again");
+  await waitFor(() => f.fake.users.length === 2);
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  assert.equal(notices(f.sessions).length, 1, "later turns do not repeat it");
+
+  // A host restart starts a new SDK query, which announces its init again.
+  f.sessions.shutdown();
+  const again = fixture(t);
+  const restarted = new Sessions({ dir: f.dir, router, permissions: again.permissions, queryFn: again.fake.queryFn, coalesceMs: 5, log() {}, onEvent() {}, onSessions() {} });
+  f.instances.push(restarted);
+  restarted.recover();
+  await restarted.send(id, "after-restart", "back again");
+  await waitFor(() => again.fake.users.length === 1);
+  await waitFor(() => restarted.summaryOf(id)?.state === "idle");
+  assert.equal(notices(restarted).length, 1, "a restart does not write it a second time");
+});
+
+test("with a handoff runner no unavailable notice is written", async t => {
+  const f = fixture(t, {}, { handoff: async () => "opened", log() {} });
+  const id = await f.create();
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  assert.equal(f.sessions.log(id).tail().events.some(e => e.kind === "notice" && e.code === "desktop_handoff_unavailable"), false);
 });
 
 for (const status of ["pending", "opening"]) test(`a ${status} Desktop handoff recovers and retries without a new phone turn`, async t => {
