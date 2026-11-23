@@ -635,6 +635,26 @@ test("admin mod-settings returns full defaults before storage, normalizes writes
   });
 });
 
+test("admin mod-settings preserves French in legacy saves but accepts a deliberate language change", async () => {
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const put = async (settings: unknown, revision: number, resetLanguage?: boolean) => {
+      const response = await putModSettings(port, { settings, revision, resetLanguage });
+      assert.equal(response.status, 200);
+      return (await response.json() as ModSettingsSnapshot).settings;
+    };
+    const french = await put({ language: "fr", keepWarm: true }, 0);
+    // An older mod normalizes the read snapshot to Auto before it saves an unrelated toggle.
+    const legacy = await put({ ...french, language: "auto", keepWarm: false }, 1);
+    assert.equal(legacy.language, "fr");
+    assert.equal(legacy.keepWarm, false);
+    assert.equal((await put({ language: "invalid" }, 2, true)).language, "fr");
+    assert.equal((await put({ keepWarm: true }, 3)).language, "fr");
+    assert.equal((await put({ language: "auto" }, 4, true)).language, "auto");
+    assert.equal((await put({ language: "fr" }, 5)).language, "fr");
+    assert.equal((await put({ language: "ko" }, 6)).language, "ko");
+  });
+});
+
 test("admin mod-settings save derives Claude Code's idleCompaction from the toggle alone", async () => {
   await withAdmin(makeCfg(), async ({ port }) => {
     const file = process.env.CLAUDE_SETTINGS_PATH!;

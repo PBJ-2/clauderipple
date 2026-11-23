@@ -439,6 +439,9 @@ increments the revision under the account stores' `withFileLock` and `writeJsonA
 helpers (0600), and returns `{settings, revision, stored:true}`. A stale supplied
 revision returns 409 with the same full current snapshot, including `stored`.
 Existing stored settings are normalized on reads as well; unknown fields are dropped.
+Pre-French clients send `language: "auto"` when they read `fr`. Such a snapshot
+keeps a stored `fr` unless the current client sends top-level `resetLanguage: true`
+with an explicit `settings.language: "auto"` choice. Other language choices still apply.
 Before normalization, the router refuses nonobjects, settings over 64 KiB of UTF-8
 JSON (413), and credential field names at any depth, including inside arrays (400).
 The final word of a field name decides (`apiKey`, `access_token`, `clientSecret`,

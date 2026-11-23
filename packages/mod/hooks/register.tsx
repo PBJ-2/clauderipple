@@ -5,7 +5,7 @@ import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkRe
 import type { AgentRec, CacheMemory, CostSummary, Effort, JudgeInput, JudgeKind, JudgeRun, LimitItem, ModSettingsSnapshot, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
 import { MOD_SETTINGS_SCHEMA_VERSION, RUNG_EFFORT, applySettingsChanges, normalizeSettings, settingsChanges } from './settings'
 import { rungOf, workerLadderLine } from './ladder'
-import { debugText, langFrom, t } from './i18n'
+import { debugText, langFrom, langFromEnv, t } from './i18n'
 import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, bounded, choosePick, isCacheSafeModel, jevEffortRequest, jevFailure, jevUsage, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, shouldJudge } from './judge'
 import { AUTO_DESCRIPTION, NATIVE_AGENTS, TIER_MARKERS, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderFallbackModels, ladderPick, liveProviders, markerDomain, modelReason, readMarker, routerModelOptions, resolveClaudeModel, pinnedAccountName, pinnedAccountNames, ruleReason, spawnModel, spawnTitle, titleName, takesOver, tierOf, userSaid, withoutReason, withoutRouting, workerRule, zenJev } from './workers'
@@ -323,7 +323,7 @@ async function resolveLanguage($: EngineInterface, s: Settings): Promise<Lang> {
       }
     } catch (error) { await report($, 'language locale', error) }
   }
-  return langFrom(await $.env.get('LANG')) ?? langFrom(await $.env.get('LC_ALL')) ?? 'en'
+  return langFromEnv(name => $.env.get(name))
 }
 async function registerAuto($: EngineInterface, s: Settings): Promise<void> {
   if (s.agentAuto === 'off') return
@@ -375,7 +375,9 @@ async function putSettings($: EngineInterface, admin: string, base: Settings): P
     // A migration that lost a CAS race is not a user edit: never retry it as a full save.
     if (!sync.pending.length && !sync.migration) return
     const count = sync.pending.length
-    const response = await $.http.fetch(`${admin}/api/mod-settings`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ schemaVersion: MOD_SETTINGS_SCHEMA_VERSION, settings: applySettingsChanges(base, sync.pending), revision: sync.revision }) })
+    const next = applySettingsChanges(base, sync.pending)
+    const resetLanguage = next.language === 'auto' && sync.pending.some(change => change.path.length === 1 && change.path[0] === 'language')
+    const response = await $.http.fetch(`${admin}/api/mod-settings`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ schemaVersion: MOD_SETTINGS_SCHEMA_VERSION, settings: next, revision: sync.revision, ...(resetLanguage ? { resetLanguage } : {}) }) })
     if (!response.ok && response.status !== 409) throw new Error(t(await read($, lang), 'commands.routerHttp', { status: response.status }))
     const snapshot = settingsSnapshot(response.text)
     await acceptSettings($, snapshot, response.ok ? count : 0)

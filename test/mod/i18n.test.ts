@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { STRINGS, debugText, langFrom, t } from '../../packages/mod/hooks/i18n.ts'
+import { STRINGS, debugText, langFrom, langFromEnv, t } from '../../packages/mod/hooks/i18n.ts'
 import type { Key, Lang } from '../../packages/mod/hooks/i18n.ts'
 import { formatStats, emptyStats } from '../../packages/mod/hooks/stats.ts'
 import { clip, displayWidth } from '../../packages/mod/hooks/ui/theme.ts'
@@ -17,6 +17,15 @@ test('langFrom recognizes supported locale tags and native language names', () =
   }
   for (const [lang, values] of Object.entries(cases)) for (const value of values) assert.equal(langFrom(value), lang, value)
   for (const value of [undefined, '', ' ', 'auto', 'C', 'C.UTF-8', 'POSIX', 'fra', 'frisian', 'french-ish', 'korean-ish', 'constructor']) assert.equal(langFrom(value), undefined)
+})
+
+test('auto language honors the first configured POSIX message locale', async () => {
+  const resolve = (env: Record<string, string>) => langFromEnv(async name => env[name])
+  assert.equal(await resolve({ LC_ALL: 'en_US.UTF-8', LANG: 'fr_FR.UTF-8' }), 'en')
+  assert.equal(await resolve({ LC_ALL: '', LC_MESSAGES: 'fr_CA.UTF-8', LANG: 'en_US.UTF-8' }), 'fr')
+  assert.equal(await resolve({ LC_ALL: 'C.UTF-8', LC_MESSAGES: 'fr_CA.UTF-8', LANG: 'fr_FR.UTF-8' }), 'en')
+  assert.equal(await resolve({ LANG: 'fr_FR.UTF-8' }), 'fr')
+  assert.equal(await resolve({}), 'en')
 })
 
 test('every table matches English in keys, placeholders and edge whitespace', () => {
@@ -67,6 +76,7 @@ test('time units are localized with their placeholders', () => {
 
 test('French keeps its typography, vocabulary and interpolation', () => {
   const NB = ' '
+  assert.equal(t('fr', 'band.hit', { percent: 12 }), `cache 12${NB}%`)
   assert.equal(t('fr', 'alerts.hotTitle', { window: '5 h', percent: 87 }), `Limite 5 h à 87${NB}%`)
   assert.equal(t('fr', 'band.limitCaption', { window: 'hebdomadaire', save: t('fr', 'band.saveCaption') }), 'limite hebdomadaire · ÉCONOMIE')
   assert.equal(t('fr', 'limits.date', { weekday: 'jeu.', month: 'oct.', day: 30, time: '15:35' }), 'jeu. 30 oct., 15:35')

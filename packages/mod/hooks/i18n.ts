@@ -3742,7 +3742,7 @@ const FR: Record<Key, string> = {
   'band.agents': 'Agents',
   'band.settings': 'Paramètres',
   'band.effortShort': 'Effort',
-  'band.hit': 'succès {percent} %',
+  'band.hit': 'cache {percent} %',
   'band.effortAutoAlt': 'Effort auto {state}',
   'band.warmAlt': 'Maintien du cache {state}',
   'band.warmHere': 'cette conversation seulement ; les nouvelles suivent les paramètres',
@@ -4324,6 +4324,15 @@ const NAMES: Readonly<Record<string, Lang>> = {
   korean: 'ko', '한국어': 'ko', english: 'en', chinese: 'zh', '简体中文': 'zh', '中文': 'zh',
   japanese: 'ja', '日本語': 'ja', spanish: 'es', 'español': 'es', portuguese: 'pt', 'português': 'pt',
   french: 'fr', 'français': 'fr', francais: 'fr',
+}
+
+/** The first nonempty POSIX locale wins, even when the mod has no translation for it. */
+export async function langFromEnv(get: (name: string) => Promise<string | undefined>): Promise<Lang> {
+  for (const name of ['LC_ALL', 'LC_MESSAGES', 'LANG']) {
+    const locale = await get(name)
+    if (locale?.trim()) return langFrom(locale) ?? 'en'
+  }
+  return 'en'
 }
 
 export function langFrom(value: string | undefined): Lang | undefined {

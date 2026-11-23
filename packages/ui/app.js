@@ -5555,7 +5555,8 @@ async function saveMod() {
       const sent = clone(modState.settings);
       let out;
       try {
-        out = await api("/api/mod-settings", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ schemaVersion: 2, settings: sent, revision: modState.revision }) });
+        const resetLanguage = sent.language === "auto" && modState.base?.language !== "auto";
+        out = await api("/api/mod-settings", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ schemaVersion: 2, settings: sent, revision: modState.revision, ...(resetLanguage ? { resetLanguage } : {}) }) });
       } catch (error) {
         if (error.status !== 409 || !error.body || !("settings" in error.body)) throw error;
         modWrites++;

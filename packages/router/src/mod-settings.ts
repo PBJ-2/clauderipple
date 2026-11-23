@@ -17,12 +17,11 @@ export const COMPACT_AT_MAX = 1_000_000;
 export type { ModSettingsSnapshot };
 
 /**
- * Settings a mod loaded before they existed saves without: normalization would read the absent key
- * as the default and undo the owner's choice, so a save that leaves one out keeps the stored value
- * (`idleCompact`, then `bandLimits` 2026-11-19). A present key, [] included, replaces it. The admin
- * PUT handler drops the same keys after it normalizes, so both halves see the absence.
+ * Normalization fills omitted settings with defaults. For these fields, an older or partial save
+ * that leaves one out keeps the stored value instead. The admin PUT handler keeps the same fields
+ * omitted when it normalizes the rest of the snapshot.
  */
-export const KEPT_WHEN_ABSENT = ["idleCompact", "bandLimits"] as const;
+export const KEPT_WHEN_ABSENT = ["idleCompact", "bandLimits", "language"] as const;
 
 export class ModSettingsInputError extends Error {
   readonly status: number;
@@ -276,6 +275,7 @@ export function writeModSettings(body: unknown, home = homeDir()): ModSettingsWr
   validateSettings(body.settings);
   if (body.revision !== undefined && !revision(body.revision)) throw new ModSettingsInputError("revision must be a non-negative safe integer");
   const settings = normalizeSettings(body.settings);
+  const resetLanguage = body.resetLanguage === true && body.settings.language === "auto";
   validateSettings(settings);
   const expected = body.revision;
   const file = path.join(home, "mod-settings.json");
@@ -288,6 +288,9 @@ export function writeModSettings(body: unknown, home = homeDir()): ModSettingsWr
     for (const key of KEPT_WHEN_ABSENT) {
       if (!Object.hasOwn(body.settings as Record<string, unknown>, key)) Object.assign(settings, { [key]: current.settings[key] });
     }
+    // A pre-French client normalizes fr to auto even when editing an unrelated field.
+    // An explicit reset disambiguates those old snapshots from a deliberate switch to Auto.
+    if (current.settings.language === "fr" && settings.language === "auto" && !resetLanguage) settings.language = current.settings.language;
     // `compactAt` is reported in the answer but never stored here: settings.json is its one home.
     const next: ModSettingsSnapshot = { settings, revision: current.revision + 1, stored: true, compactAt: readAutoCompactWindow() };
     if (current.stored) backupModSettings(file, current.revision);
