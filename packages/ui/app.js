@@ -3711,11 +3711,25 @@ function setAccountRows(target, rows) {
     live.refreshAccountEditor(fresh.accountEditorOptions);
     return liveRow;
   });
-  desired.forEach((row, index) => {
-    const current = target.children[index];
-    if (current !== row) target.insertBefore(row, current || null);
-  });
-  while (target.children.length > desired.length) target.children[target.children.length - 1].remove();
+  const wanted = new Set(desired);
+  for (const child of [...target.children]) if (!wanted.has(child)) child.remove();
+  // The row that holds the focus is never taken out and put back (a browser drops the focus, the selection
+  // and an input method's unfinished text from a node that is moved): the other rows are placed around it.
+  const held = desired.findIndex((row) => row.parentNode === target && row.contains(document.activeElement));
+  if (held < 0) {
+    desired.forEach((row, index) => {
+      const current = target.children[index];
+      if (current !== row) target.insertBefore(row, current || null);
+    });
+    return;
+  }
+  // Each row goes directly before the one placed after it (backwards), or directly after the one before it (forwards).
+  for (let index = held - 1; index >= 0; index--) {
+    if (desired[index].nextSibling !== desired[index + 1]) target.insertBefore(desired[index], desired[index + 1]);
+  }
+  for (let index = held + 1; index < desired.length; index++) {
+    if (desired[index - 1].nextSibling !== desired[index]) target.insertBefore(desired[index], desired[index - 1].nextSibling);
+  }
 }
 
 /**
@@ -3814,6 +3828,8 @@ function inlineAccountEditor(options) {
   return group;
 }
 function accountRowsFailed(target, error) {
+  // A failed poll is no news about the rows: with an editor open they, the editor and its pending request stay as they are.
+  if ([...accountEdits.values()].some((edit) => edit.node && target.contains(edit.node))) return;
   accountRowsDrawn.delete(target);
   target.replaceChildren(el("div", { class: "bad-text small", text: error.message }));
 }

@@ -20,7 +20,7 @@ const translate = (lang: string) => (key: string, vars: Record<string, unknown> 
 
 type Listener = (event: Record<string, unknown>) => void;
 /** The page's focus: a node taken out of the page while it holds the focus loses it, as in a browser. */
-const doc: { activeElement: Node | null } = { activeElement: null };
+const doc: { activeElement: Node | null; /** How many times a node holding the focus was taken out of the page: the caret goes to the end and an input method's text is cut. */ lost: number } = { activeElement: null, lost: 0 };
 class Node {
   readonly tag: string;
   readonly attrs: Record<string, unknown>;
@@ -40,6 +40,7 @@ class Node {
     if (typeof attrs.text === "string") this.textContent = attrs.text;
   }
   get childNodes(): Node[] { return this.children; }
+  get nextSibling(): Node | null { const siblings = this.parentNode?.children ?? []; return siblings[siblings.indexOf(this) + 1] ?? null; }
   get classList() { return { contains: (name: string) => this.className.split(/\s+/).includes(name) }; }
   addEventListener(type: string, listener: Listener) { this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]); }
   fire(type: string, event: Record<string, unknown> = {}): { defaultPrevented: boolean } {
@@ -57,10 +58,11 @@ class Node {
   }
   remove() {
     if (!this.parentNode) return;
-    if (this.contains(doc.activeElement)) doc.activeElement = null;
+    if (this.contains(doc.activeElement)) { doc.activeElement = null; doc.lost += 1; }
     this.parentNode.children = this.parentNode.children.filter((child) => child !== this);
     this.parentNode = null;
   }
+  replaceChildren(...nodes: Node[]) { for (const child of [...this.children]) child.remove(); for (const node of nodes) this.insertBefore(node, null); }
   replaceWith(other: Node) { const parent = this.parentNode!; parent.insertBefore(other, this); this.remove(); }
   /** Only the one-class selectors the page uses. */
   querySelector(selector: string): Node | null { return findAll(this, (n) => n !== this && n.classList.contains(selector.slice(1)))[0] ?? null; }
@@ -289,24 +291,23 @@ type Patch = { id: string; body: Record<string, unknown>; resolve: () => void; r
 
 function listRig(initial: { id: string; label: string; usageCap?: number }[]) {
   const row = (a: { id: string; label: string; usageCap?: number }): Row => ({ source: "own", state: "ready", quota: null, inUse: false, paused: false, preferred: false, ...a });
-  const server = { accounts: initial.map(row) };
+  const server = { accounts: initial.map(row), failing: false };
   const patches: Patch[] = [];
   const toasts: string[] = [];
   const target = el("div", { class: "account-card-list" });
   const api = (url: string, init?: { method?: string; body?: string }): Promise<unknown> => {
+    if (init?.method !== "PATCH" && server.failing) return Promise.reject(new Error("fetch failed"));
     if (init?.method !== "PATCH") return Promise.resolve(JSON.parse(JSON.stringify({ accounts: server.accounts })));
     return new Promise<void>((resolve, reject) => { patches.push({ id: decodeURIComponent(url.split("/").pop()!), body: JSON.parse(init.body!), resolve, reject }); });
   };
   const make = new Function("el", "t", "document", "api", "toast", "state", `
     let providerDetailGeneration = 0;
-    const confirm = () => true, $ = () => null, hint = (text) => el("p", { class: "hint", text }, []);
+    let selectedProviderName = "chatgpt", providerDetailTab = "accounts";
+    const confirm = () => true, $ = (selector) => selector === "#chatgpt-account-rows" ? state.target : null, hint = (text) => el("p", { class: "hint", text }, []);
     const accountPoolActions = () => [], startChatgptLogin = async () => {}, chatgptQuotaText = () => "", quotaMeters = () => null, quotaWindowName = () => "weekly";
     const accountPoolBadges = (account) => [el("span", { class: "badge", text: account.state + ":" + (account.cooldownSeconds || 0) }, [])];
-    ${block("const accountRowsDrawn = new WeakMap();", "function accountRowsFailed(")}
-    async function refreshChatgptAccountPanel(name) {
-      const data = await api("/api/chatgpt-accounts");
-      drawAccountRows(state.target, data, () => renderChatgptAccountRows(state.target, data, name, providerDetailGeneration));
-    }
+    ${block("const accountRowsDrawn = new WeakMap();", "async function refreshClaudeAccountPanel(")}
+    ${block("async function refreshChatgptAccountPanel(", "function chatgptAccountsPanel(")}
     ${block("async function patchChatgptAccount(", "let googleLoginBusy")}
     return { poll: () => refreshChatgptAccountPanel("chatgpt"), openAccountEdit, accountEditOf };
   `) as (...args: unknown[]) => { poll: () => Promise<void>; openAccountEdit: (target: Node, provider: string, kind: string, id: string, text: string) => void; accountEditOf: (p: string, k: string, id: string) => Edit | null };
@@ -450,4 +451,86 @@ test("list: an account that disappears takes its editor with it, and the others 
   await rig.page.poll();
   assert.equal(rig.target.children.length, 1);
   assert.equal(rig.editorIn(rig.rowAt(0)), editor, "the surviving row keeps its open editor at its new place");
+});
+
+test("list: a poll while the second row's editor has the cursor, with the first row still there, never moves that row", async () => {
+  const rig = listRig([{ id: "a1", label: "Work" }, { id: "a2", label: "Home" }]);
+  await rig.page.poll();
+  rig.page.openAccountEdit(rig.target, "chatgpt", "label", "a2", "Home");
+  const row = rig.rowAt(1);
+  const e = parts(rig.editorIn(row)!);
+  assert.equal(doc.activeElement, e.input);
+  e.type("집");
+  doc.lost = 0;
+  for (let tick = 1; tick <= 3; tick++) {
+    rig.server.accounts[0]!.cooldownSeconds = tick;
+    rig.server.accounts[1]!.cooldownSeconds = 100 + tick;
+    await rig.page.poll();
+    assert.equal(rig.rowAt(1), row, `tick ${tick}: the same row element, not taken out and put back`);
+    assert.equal(doc.lost, 0, "so the focus was never dropped (a moved node loses it, and the caret goes to the end)");
+    assert.equal(doc.activeElement, e.input);
+    assert.equal(e.input.value, "집");
+    assert.match(rig.text(rig.rowAt(0)), new RegExp(`ready:${tick}`));
+    assert.match(rig.text(rig.rowAt(1)), new RegExp(`ready:${100 + tick}`));
+  }
+  assert.equal(rig.target.children.length, 2);
+});
+
+test("list: rows that change order or come and go around the focused editor are placed around it", async () => {
+  const rig = listRig([{ id: "a1", label: "Work" }, { id: "a2", label: "Home" }, { id: "a3", label: "Spare" }]);
+  await rig.page.poll();
+  rig.page.openAccountEdit(rig.target, "chatgpt", "label", "a2", "Home");
+  const row = rig.rowAt(1);
+  const e = parts(rig.editorIn(row)!);
+  const order = () => rig.target.children.map((child) => ["Work", "Home", "Spare", "Fresh"].find((name) => rig.text(child).includes(name)));
+  doc.lost = 0;
+  const [a1, a2, a3] = rig.server.accounts;
+  rig.server.accounts = [a3!, a2!, a1!];
+  await rig.page.poll();
+  assert.deepEqual(order(), ["Spare", "Home", "Work"]);
+  assert.equal(rig.target.children.indexOf(row), 1);
+  assert.equal(doc.activeElement, e.input, "the first and the last swapped places around the editor");
+  rig.server.accounts = [a1!, a3!, a2!];
+  await rig.page.poll();
+  assert.deepEqual(order(), ["Work", "Spare", "Home"]);
+  assert.equal(doc.activeElement, e.input, "the editor's row moved down by the others moving up");
+  rig.server.accounts = [{ ...a2! }, { ...a3!, id: "a4", label: "Fresh" }, a1!];
+  await rig.page.poll();
+  assert.deepEqual(order(), ["Home", "Fresh", "Work"]);
+  assert.equal(rig.target.children[0], row);
+  assert.equal(doc.activeElement, e.input);
+  assert.equal(doc.lost, 0, "and at no step was the focused row taken out of the page");
+});
+
+test("list: a failed poll leaves the rows, the open editor and its pending request as they are", async () => {
+  const rig = listRig([{ id: "a1", label: "Work", usageCap: 70 }, { id: "a2", label: "Home" }]);
+  await rig.page.poll();
+  rig.page.openAccountEdit(rig.target, "chatgpt", "cap", "a1", "70");
+  const editor = rig.editorIn(rig.rowAt(0))!;
+  const e = parts(editor);
+  e.type("60");
+  e.press("Enter");
+  assert.equal(rig.patches.length, 1);
+  assert.equal(e.byText("저장")!.disabled, true);
+  const rows = [...rig.target.children];
+  rig.server.failing = true;
+  await rig.page.poll();
+  assert.deepEqual(rig.target.children, rows, "the rows are still the ones drawn");
+  assert.equal(rig.editorIn(rig.rowAt(0)), editor, "with the same editor");
+  assert.equal(e.byText("저장")!.disabled, true, "still waiting for the request");
+  assert.equal(rig.text(rig.target).includes("fetch failed"), false, "no error replaces the list while an editor is open");
+  rig.server.failing = false;
+  rig.server.accounts[0]!.cooldownSeconds = 5;
+  await rig.page.poll();
+  assert.equal(rig.editorIn(rig.rowAt(0)), editor);
+  assert.equal(e.byText("저장")!.disabled, true, "the next good answer does not make Save usable while the request is pending");
+  rig.server.accounts[0]!.usageCap = 60;
+  rig.patches[0]!.resolve();
+  await rig.settle();
+  assert.equal(rig.editorIn(rig.rowAt(0)), null, "the answer to the request closes it");
+
+  // With no editor open a failed poll shows its error, as before.
+  rig.server.failing = true;
+  await rig.page.poll();
+  assert.match(rig.text(rig.target), /fetch failed/);
 });
