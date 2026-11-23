@@ -78,6 +78,11 @@ export type Resolved = {
   fallbacks?: { provider: string; model: string; effort?: string; accountPin?: string }[];
   /** Spawn snapshot identity, for worker-only preflight and diagnostics. */
   ladderPick?: string;
+  /**
+   * The request's own `[[ripple: …@effort]]` marker chose `effort` (a slot, which ignores markers,
+   * never sets it). Read by the proxy for server-side thread continues.
+   */
+  effortFromMarker?: true;
 };
 
 export function requestKind(json: unknown, pathname: string, method = "POST", requestClass?: string): RequestKind {
@@ -233,6 +238,9 @@ export function decide(model: unknown, body: unknown, cfg: Config, kind: Request
   const ov = resolveMarker(marker, cfg.aliases);
   // The model the request names in the end: the marker's (through its alias), else the requested one.
   const effective = ov?.model ?? base;
+  // Set on a route whose effort the marker chose. A thread `continue` carries no marker, and the
+  // proxy repeats such an effort only when the marker's absence is all that changed (§5).
+  const byMarker = ov?.effort !== undefined ? { effortFromMarker: true as const } : {};
   const hasDirect = (id: string): boolean => cfg.direct.some((d) => id.startsWith(d.prefix));
 
   // With `claudePool` (set only by the proxy, for a live request), a bare Claude id that nothing
@@ -246,7 +254,7 @@ export function decide(model: unknown, body: unknown, cfg: Config, kind: Request
   const pooled = (id: string, finalEffort: string | undefined, marked: boolean): Decision | null => {
     const pool = claudePool ? claudePoolProvider(cfg) : null;
     if (!pool || !id.startsWith("claude-")) return null;
-    return routed({ provider: pool, model: id, effort: finalEffort, tag: `${model}->${id}${marked ? " (marker)" : ""}` });
+    return routed({ provider: pool, model: id, effort: finalEffort, ...(marked ? byMarker : {}), tag: `${model}->${id}${marked ? " (marker)" : ""}` });
   };
 
   // Every way below of finding no route ends here, so passing through and refusing are decided by
@@ -287,7 +295,7 @@ export function decide(model: unknown, body: unknown, cfg: Config, kind: Request
   if (qualified) {
     if (ov) {
       const target = decide(`${ov.model}@${ov.effort ?? effort ?? ""}`, {}, cfg, "turn", claudePool).route;
-      return target ? routed({ ...target, tag: `${model}->${target.model} (marker)` }) : noRoute();
+      return target ? routed({ ...target, ...byMarker, tag: `${model}->${target.model} (marker)` }) : noRoute();
     }
     if (ingressOnly(cfg, qualified.provider)) return noRoute();
     return routed({ ...qualified, effort, tag: `${model}->${qualified.model}` });
@@ -303,15 +311,15 @@ export function decide(model: unknown, body: unknown, cfg: Config, kind: Request
     // placed the way any requested model is: its own prefix rule, else its one declaring provider.
     if (effective !== base) {
       const qualified = qualifiedModel(effective, cfg);
-      if (qualified) return ingressOnly(cfg, qualified.provider) ? noRoute() : routed({ ...qualified, effort: finalEffort, tag: `${model}->${qualified.model} (marker)` });
+      if (qualified) return ingressOnly(cfg, qualified.provider) ? noRoute() : routed({ ...qualified, effort: finalEffort, ...byMarker, tag: `${model}->${qualified.model} (marker)` });
       const ownDirect = cfg.direct.find((d) => effective.startsWith(d.prefix));
       const provider = ownDirect ? ownDirect.provider : soleOwner(effective, cfg);
       if (!provider || ingressOnly(cfg, provider)) return pooled(effective, finalEffort, true) ?? noRoute();
-      return routed({ provider, model: effective, effort: finalEffort, tag: `${model}->${effective} (marker)` });
+      return routed({ provider, model: effective, effort: finalEffort, ...byMarker, tag: `${model}->${effective} (marker)` });
     }
     // The log says when a marker decided: `claude-sonnet-5->gpt-6-astra` with no hint of why cost a
     // reporter twenty minutes (issue #13).
-    return routed({ provider: direct.provider, model: effective, effort: finalEffort, tag: `${model}->${effective}${ov ? " (marker)" : ""}` });
+    return routed({ provider: direct.provider, model: effective, effort: finalEffort, ...byMarker, tag: `${model}->${effective}${ov ? " (marker)" : ""}` });
   }
 
   // The app sends some slots with a dated id (`claude-haiku-4-5-20251001`) and others without
@@ -336,13 +344,13 @@ export function decide(model: unknown, body: unknown, cfg: Config, kind: Request
   // eighteen are exactly this case). Rules keep their priority — this only fills the gap they
   // leave, so nothing that routes today routes differently.
   const markerTarget = qualifiedModel(effective, cfg);
-  if (markerTarget) return ingressOnly(cfg, markerTarget.provider) ? noRoute() : routed({ ...markerTarget, effort: ov?.effort ?? effort, tag: `${model}->${markerTarget.model} (marker)` });
+  if (markerTarget) return ingressOnly(cfg, markerTarget.provider) ? noRoute() : routed({ ...markerTarget, effort: ov?.effort ?? effort, ...byMarker, tag: `${model}->${markerTarget.model} (marker)` });
   // A marker's target takes its own prefix rule even when the incoming Claude model had no rule.
   // Prefixes deliberately cover models not declared yet, so ownership alone cannot place it.
   const ownDirect = ov ? cfg.direct.find((d) => effective.startsWith(d.prefix)) : undefined;
   if (ownDirect) {
     if (ingressOnly(cfg, ownDirect.provider)) return noRoute();
-    return routed({ provider: ownDirect.provider, model: effective, effort: ov?.effort ?? effort, tag: `${model}->${effective} (marker)` });
+    return routed({ provider: ownDirect.provider, model: effective, effort: ov?.effort ?? effort, ...byMarker, tag: `${model}->${effective} (marker)` });
   }
   // A metered provider stands back from a bare id another owner declares (targets.ts `bareOwners`).
   const owners = bareOwners(effective, cfg);
@@ -367,7 +375,7 @@ export function decide(model: unknown, body: unknown, cfg: Config, kind: Request
   // Claude traffic to a third party.
   if (ingressOnly(cfg, owner)) return pooled(effective, ov?.effort ?? effort, !!ov) ?? noRoute();
 
-  return routed({ provider: owner, model: effective, effort: ov?.effort ?? effort, tag: `${model}->${effective}${ov ? " (marker)" : ""}` });
+  return routed({ provider: owner, model: effective, effort: ov?.effort ?? effort, ...byMarker, tag: `${model}->${effective}${ov ? " (marker)" : ""}` });
 }
 
 /** `decide` for callers that have no path: agents, model scores, the OpenAI ingress. */

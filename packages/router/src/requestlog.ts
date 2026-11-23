@@ -285,9 +285,12 @@ export class ResponseUsageTap {
   private thinkingHeld = 0;
 
   private readonly onThinking: ((block: ThinkingBlock) => void) | undefined;
+  /** Called once a plain event stream's `message_stop` arrives, before the upstream's EOF. */
+  private readonly onMessageStop: ((messageId: string) => void) | undefined;
 
-  constructor(contentType: string | undefined, contentEncoding: string | undefined, onThinking?: (block: ThinkingBlock) => void) {
+  constructor(contentType: string | undefined, contentEncoding: string | undefined, onThinking?: (block: ThinkingBlock) => void, onMessageStop?: (messageId: string) => void) {
     this.onThinking = onThinking;
+    this.onMessageStop = onMessageStop;
     this.isSse = /^text\/event-stream\b/i.test(contentType ?? "");
     const enc = (contentEncoding ?? "").toLowerCase().trim();
     if (enc === "" || enc === "identity") this.encoding = null;
@@ -399,6 +402,10 @@ export class ResponseUsageTap {
         this.setUsage(body.usage);
         const delta = body.delta as { stop_reason?: unknown } | undefined;
         if (typeof delta?.stop_reason === "string") this.stopReason = delta.stop_reason;
+      } else if ((this.event === "message_stop" || body.type === "message_stop") && this.messageId !== undefined) {
+        // The answer is whole here; a client may act on it before the upstream closes the stream.
+        // A compressed stream is read only at its end, so it reports nothing early.
+        this.onMessageStop?.(this.messageId);
       }
     } catch {
       // A malformed upstream event is not a proxy error and must not affect delivery.
