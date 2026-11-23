@@ -638,6 +638,72 @@ test("usage cap: the hold is the account's, so every provider on it honours it, 
   assert.equal(capLines(r.logFile).length, 2);
 });
 
+test("usage cap: a provider on the borrowed Codex login keeps no store, so it never sets or releases a hold, whichever is configured first", async () => {
+  const clock = morning();
+  const r = rig(2, undefined, { now: () => clock, caps: { 0: 80 } });
+  const build = (name: string, auth: "own" | "borrow-codex") => new ChatGptAdapter(name, { type: "chatgpt", auth, url: backendUrl }, r.home, new Logger(r.logFile, 1e9, 0, false), r.pool, r.tokenEndpoint, r.now);
+  const own = adapter;
+  const codexOnly = build("codex-only", "borrow-codex");
+  behaviour.set("tok-0", reading({ weekly: 50 }));
+  await call("conv-a");
+  assert.equal(own.accountStatus()[0]!.state, "ready", "50% is under the cap of 80");
+
+  // The proxy tells every chatgpt provider, in config order: the Own one first, the Codex-only one after.
+  updateChatGptAccount(r.home, r.ids[0]!, { usageCap: 40 });
+  for (const a of [own, codexOnly]) a.usageCapChanged(r.ids[0]!);
+  assert.equal(own.accountStatus()[0]!.state, "cooling", "lowered below the known usage: held");
+  assert.ok(own.accountStatus()[0]!.capRest);
+  assert.equal(r.pool.heldAccount(r.ids[0]!)?.detail?.cap, 40, "the Codex-only provider did not read its missing record as 'no cap' and release it");
+
+  // The other order, and an unrelated account id: still not its business.
+  codexOnly.usageCapChanged(r.ids[0]!);
+  codexOnly.usageCapChanged(r.ids[1]!);
+  codexOnly.usageCapChanged("codex");
+  assert.ok(r.pool.heldAccount(r.ids[0]!), "still held");
+  hits.length = 0;
+  adapter = own;
+  await call("conv-b");
+  assert.equal(hits.at(-1)!.token, "tok-1", "and the turn goes to the other account");
+
+  // Clearing the cap, which the store can show, still releases it (through either provider).
+  updateChatGptAccount(r.home, r.ids[0]!, { usageCap: null });
+  for (const a of [codexOnly, own]) a.usageCapChanged(r.ids[0]!);
+  assert.equal(r.pool.heldAccount(r.ids[0]!), undefined);
+  assert.equal(own.accountStatus()[0]!.state, "ready");
+});
+
+test("usage cap: the meter and the cap notice both read the account's newest reading, whichever provider took it", async () => {
+  let clock = morning();
+  const r = rig(1, undefined, { now: () => clock, caps: { 0: 70 } });
+  const build = (name: string) => new ChatGptAdapter(name, { type: "chatgpt", auth: "own", url: backendUrl }, r.home, new Logger(r.logFile, 1e9, 0, false), r.pool, r.tokenEndpoint, r.now);
+  const a = adapter;
+  const b = build("chatgpt-b");
+  const weekly = (status: { quota: Record<string, unknown> | null }): number | undefined =>
+    ((status.quota?.rate_limits as { secondary?: { used_percent?: number } } | undefined)?.secondary)?.used_percent;
+  behaviour.set("tok-0", reading({ weekly: 40 }));
+  adapter = b;
+  await call("conv-b");
+  clock += 60_000;
+  behaviour.set("tok-0", reading({ weekly: 75 }));
+  adapter = a;
+  await call("conv-a");
+  for (const provider of [a, b]) {
+    const status = provider.accountStatus()[0]!;
+    assert.equal(weekly(status), 75, "B's older 40% is not shown beside A's newer reading");
+    assert.equal(status.capRest?.used, 75);
+  }
+  assert.equal((b.lastRateLimits?.rate_limits as { secondary?: { used_percent?: number } }).secondary?.used_percent, 75, "the single-number reader agrees");
+
+  // And the other way round: the newer reading is B's, and A shows it.
+  clock += 60_000;
+  updateChatGptAccount(r.home, r.ids[0]!, { usageCap: 90 });
+  a.usageCapChanged(r.ids[0]!);
+  behaviour.set("tok-0", reading({ weekly: 82 }));
+  adapter = b;
+  await call("conv-b2");
+  assert.equal(weekly(a.accountStatus()[0]!), 82);
+});
+
 test("usage cap: when every account is held by its cap the answer says so, with the date, and is not retried", async () => {
   const clock = morning();
   rig(2, undefined, { now: () => clock, caps: { 0: 70, 1: 70 } });
@@ -667,7 +733,8 @@ test("usage cap: when every account is held by its cap the answer says so, with 
   assert.match(JSON.parse(today.body).error.message, /usage cap set for it\. The first is usable again at \S+/);
   assert.doesNotMatch(JSON.parse(today.body).error.message, / on /);
 
-  // A cap beside a backend refusal: the cap is named too, and the answer is just as final.
+  // A cap beside a backend refusal: the cap is named too, but the answer is not final: the other
+  // account's short rest ends within the hour, so the client keeps main's headers and the wait.
   rig(2, undefined, { now: () => clock, caps: { 0: 70 } });
   behaviour.set("tok-0", reading({ weekly: 72 }));
   behaviour.set("tok-1", usageLimit(3600));
@@ -675,7 +742,8 @@ test("usage cap: when every account is held by its cap the answer says so, with 
   await call("conv-h");
   const mixed = await call("conv-i");
   assert.equal(mixed.status, 429);
-  assert.equal(mixed.headers["x-should-retry"], "false");
+  assert.equal(mixed.headers["x-should-retry"], undefined, "one account is only on a short backend rest: retrying is right");
+  assert.ok(Math.abs(Number(mixed.headers["retry-after"]) - 3600) <= 2, "the wait is that account's rest, not the cap's days");
   assert.match(JSON.parse(mixed.body).error.message, /usage limit or the usage cap/);
 
   // No cap anywhere: the old words and the old headers, nothing added.

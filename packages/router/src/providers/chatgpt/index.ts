@@ -345,7 +345,7 @@ export class ChatGptAdapter {
   /** Cooldowns and conversation stickiness, shared with the proxy's other credential pools. */
   private readonly pool: CredentialPool;
   private readonly log: Logger;
-  /** Latest quota per account (owner id), from response headers or `/wham/usage`. */
+  /** What this adapter last noted per account (owner id), from response headers or `/wham/usage`; readers use `quotaOf`, which is the newest on the pool. */
   private readonly rateLimitsByAccount = new Map<string, Record<string, unknown>>();
   /** The account that answered last: the one whose quota the single-number readers see. */
   private activeOwner: string | null = null;
@@ -375,11 +375,20 @@ export class ChatGptAdapter {
   get lastRateLimits(): Record<string, unknown> | null {
     const credentials = this.accounts.peekCredentials();
     const active = credentials.find((c) => c.ownerId === this.activeOwner);
-    if (active && this.pool.hasUsable(this.name, [active]) && this.rateLimitsByAccount.has(active.ownerId)) return this.rateLimitsByAccount.get(active.ownerId)!;
+    if (active && this.pool.hasUsable(this.name, [active]) && this.quotaOf(active.ownerId)) return this.quotaOf(active.ownerId)!;
     // Otherwise the account the next turn would go to: a spent account's 100% is not what is left.
-    const next = credentials.find((c) => this.pool.hasUsable(this.name, [c]) && this.rateLimitsByAccount.has(c.ownerId))
-      ?? credentials.find((c) => this.rateLimitsByAccount.has(c.ownerId));
-    return next ? this.rateLimitsByAccount.get(next.ownerId)! : null;
+    const next = credentials.find((c) => this.pool.hasUsable(this.name, [c]) && this.quotaOf(c.ownerId))
+      ?? credentials.find((c) => this.quotaOf(c.ownerId));
+    return next ? this.quotaOf(next.ownerId)! : null;
+  }
+
+  /**
+   * An account's newest quota reading from any provider on this pool. The meter and the cap notice read
+   * the same one: with a reading of this provider's own beside another's newer one, the meter would say
+   * 40% next to a notice that the account reached 80%.
+   */
+  private quotaOf(ownerId: string): Record<string, unknown> | null {
+    return this.readings.get(ownerId)?.snapshot ?? this.rateLimitsByAccount.get(ownerId) ?? null;
   }
 
   /** Record a snapshot for an account; a full window takes it out of rotation until that window resets. */
@@ -394,9 +403,15 @@ export class ChatGptAdapter {
     this.applyUsageCap(credential.ownerId);
   }
 
-  /** The account's usage cap as stored now, not as it was when a turn began: a turn can outlive the owner's change. */
-  private currentCap(ownerId: string): number | undefined {
-    return this.accounts.ownAccounts().find((account) => account.id === ownerId)?.usageCap;
+  /**
+   * The account's usage cap as stored now, not as it was when a turn began: a turn can outlive the owner's
+   * change. `null` when this adapter cannot read the account's record at all (a provider on the borrowed
+   * Codex login keeps no store, and an account may have been removed): that is not "no cap", only "not
+   * my business", so such an adapter neither sets nor releases a hold.
+   */
+  private currentCap(ownerId: string): { cap: number | undefined } | null {
+    const stored = this.accounts.ownAccounts().find((account) => account.id === ownerId);
+    return stored ? { cap: stored.usageCap } : null;
   }
 
   /**
@@ -407,7 +422,9 @@ export class ChatGptAdapter {
    * never one per reading. A genuine 429 rest is the pool's own and is not touched here.
    */
   private applyUsageCap(ownerId: string): void {
-    const cap = this.currentCap(ownerId);
+    const stored = this.currentCap(ownerId);
+    if (!stored) return;
+    const cap = stored.cap;
     const reading = this.readings.get(ownerId);
     const now = this.now();
     const spent = cap && reading ? windowsAtLeast(reading.snapshot, cap, reading.at, now, true)[0] : undefined;
@@ -462,7 +479,7 @@ export class ChatGptAdapter {
         ...(capRest ? { capRest } : {}),
         ...(report?.cooldownSeconds ? { cooldownSeconds: report.cooldownSeconds } : {}),
         ...(report?.restSeconds ? { restSeconds: report.restSeconds } : {}),
-        quota: this.rateLimitsByAccount.get(summary.id) ?? null,
+        quota: this.quotaOf(summary.id),
         active: summary.id === this.activeOwner,
         inUse: report?.inUse === true,
       };
@@ -830,7 +847,7 @@ export class ChatGptAdapter {
     // otherwise (2026-10-14: credits added at 15:50, still "cooling" until 21:42). Only this asked-for
     // figure does it, never the headers of the 429 that started the cooldown.
     // Under a usage cap "room" means room under the cap, so an account the owner capped stays out.
-    if (exhaustedForMs(parsed, this.now(), true, this.currentCap(tokens.ownerId)) === undefined && this.accounts.peekCredentials().some((c) => c.id === tokens.id && !this.pool.hasUsable(this.name, [c]))) {
+    if (exhaustedForMs(parsed, this.now(), true, this.currentCap(tokens.ownerId)?.cap) === undefined && this.accounts.peekCredentials().some((c) => c.id === tokens.id && !this.pool.hasUsable(this.name, [c]))) {
       this.pool.clear(this.name, tokens.id);
       this.log.info(`chatgpt ${this.name}: account ${tokens.ownerId.slice(0, 8)} has room again; back in rotation`);
     }
@@ -1133,7 +1150,9 @@ export class ChatGptAdapter {
             const message = sent.capped === "all"
               ? `Every ChatGPT account signed in to ClaudeRipple has reached the usage cap set for it.${when}`
               : `Every ChatGPT account signed in to ClaudeRipple has reached its usage limit or the usage cap set for it.${when}`;
-            return sendOpenAiError(res, 429, "usage_limit_reached", message, "all accounts at usage cap", seconds, { "x-should-retry": "false" });
+            // Only when every account waits on a cap is waiting pointless; with one on a short backend
+            // rest the client keeps main's headers and retries when that account is back.
+            return sendOpenAiError(res, 429, "usage_limit_reached", message, "all accounts at usage cap", seconds, sent.capped === "all" ? { "x-should-retry": "false" } : {});
           }
           return sendOpenAiError(res, 429, "usage_limit_reached", "Every ChatGPT account signed in to ClaudeRipple has reached its usage limit.", "all accounts resting", seconds);
         }
@@ -1308,12 +1327,13 @@ export class ChatGptAdapter {
       } else if (sent.kind === "all-resting") {
         if (sent.capped) {
           // An owner's usage cap is not a limit that clears on its own within the hour, so the answer
-          // says so, gives the date when it is not today, and tells the client not to retry.
+          // says so, gives the date when it is not today, and (when every account is held) tells the client not to retry.
           const when = sent.backMs ? ` The first is usable again ${backAtText(new Date(this.now() + sent.backMs), new Date(this.now()))}.` : "";
           err = anthropicError(429, "rate_limit_error", sent.capped === "all"
             ? `ChatGPT: every signed-in account has reached the usage cap set for it.${when}`
             : `ChatGPT: every signed-in account has reached its usage limit or the usage cap set for it.${when}`);
-          shouldRetry = false;
+          // Only when every account waits on a cap; a mixed wait ends with the short backend rest.
+          shouldRetry = sent.capped !== "all";
           note = "all accounts at usage cap";
         } else {
           const when = sent.backMs ? ` The first is usable again at ${new Date(Date.now() + sent.backMs).toLocaleTimeString()}.` : "";
