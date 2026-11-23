@@ -91,6 +91,7 @@ function limitsUi(api: (path: string) => Promise<unknown>, status: Record<string
     ${block("function accountPoolBadges(", "function renderClaudeAccountRows(")}
     ${block("function renderChatgptAccountRows(", "let googleLoginBusy")}
     const providerDetailGeneration = 0;
+    const setAccountRows = (target, rows) => target.replaceChildren(...rows);
     return { refreshHealth, renderHealthProviders, limitsAccountRow, limitsWindowRow, limitsUsageWindow, settleLimits: () => limitsRead ?? Promise.resolve(), providerLimits, limitsSnapshotPeek: () => limitsSnapshot, quotaMeters, quotaWindowsText, setQuotaRemaining, claudeQuotaNode, renderChatgptAccountRows, quotaLine, providersUsageTitle, selectProvider: (name) => { selectedProviderName = name; }, renderCount: () => providerDetailRenders };
   `) as (...args: unknown[]) => LimitsUi;
   const ui = build(async (path: string) => {

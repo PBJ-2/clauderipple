@@ -3640,7 +3640,7 @@ function renderClaudeAccountRows(target, data, name, generation) {
     ]));
     if (currentRow && rows.length === 1 && preferredIndex >= 0) rows.push(currentRow);
   }
-  target.replaceChildren(...(rows.length ? rows : [el("div", { class: "account-empty", text: t("providers.anthropicNoAccounts") })]));
+  setAccountRows(target, rows.length ? rows : [el("div", { class: "account-empty", text: t("providers.anthropicNoAccounts") })]);
   const preferNote = $("#claude-account-prefer");
   if (preferNote) preferNote.hidden = !choosable;
   const count = (data.current ? 1 : 0) + stored.length;
@@ -3656,9 +3656,11 @@ function renderClaudeAccountRows(target, data, name, generation) {
 const accountRowsDrawn = new WeakMap();
 /** How each list was last drawn, so a row's editor opening or closing redraws at once from the same answer. */
 const accountRowsDraw = new WeakMap();
+/** Which row editors were open when a list was last drawn: an editor that has closed is drawn away even when the answer is the same. */
+const accountRowsEdits = new WeakMap();
 function drawAccountRows(target, data, draw) {
   const json = JSON.stringify(data);
-  if (accountRowsDrawn.get(target) === json) return;
+  if (accountRowsDrawn.get(target) === json && accountRowsEdits.get(target) === openAccountEditsKey()) return;
   accountRowsDrawn.set(target, json);
   accountRowsDraw.set(target, draw);
   paintAccountRows(target, draw);
@@ -3667,36 +3669,80 @@ function redrawAccountRows(target) {
   const draw = accountRowsDraw.get(target);
   if (draw) paintAccountRows(target, draw);
 }
-/** Draws a list and keeps the cursor in an open row editor: the list is drawn again while someone types. */
+/** Draws a list. An open row editor is kept as it is (see `setAccountRows`); one just opened takes the cursor, selecting what is there. */
 function paintAccountRows(target, draw) {
   const active = document.activeElement;
-  const typing = Boolean(active && active.classList && active.classList.contains("account-inline-input") && target.contains(active));
+  const typing = active && active.classList && active.classList.contains("account-inline-input") && target.contains(active) && active.parentNode ? active.parentNode.accountEdit : null;
+  accountRowsEdits.set(target, openAccountEditsKey());
   draw();
-  const input = target.querySelector(".account-inline-input");
-  if (!input || !(typing || (accountEdit && accountEdit.focus))) return;
+  const opening = [...accountEdits.values()].find((edit) => edit.focus && edit.node && target.contains(edit.node));
+  const edit = opening || typing;
+  const input = edit && edit.node ? edit.node.querySelector(".account-inline-input") : null;
+  if (!input) return;
+  if (opening) { opening.focus = false; input.focus(); input.select(); return; }
+  // Only a row that had to be built again (its list changed order) loses the cursor; it goes back at the end.
+  if (document.activeElement === input) return;
   input.focus();
-  // Opening selects what is there, so typing replaces it; a redraw leaves the cursor at the end.
-  if (accountEdit && accountEdit.focus) { accountEdit.focus = false; input.select(); return; }
   try { const end = input.value.length; input.setSelectionRange(end, end); } catch { /* a number box has no selection to set */ }
 }
 
 /**
- * The account row being edited in place, if any: `{provider, kind, id, text, focus}`, where `kind` is
- * "cap" (a ChatGPT account's usage cap) or "label" (its display name) and `text` is what has been typed. It lives here, not in the row,
- * because the open list is fetched again every ten seconds and a cooldown counting down is a changed answer.
- * The dashboard also runs inside the desktop app, which has no browser input dialog, so a row never asks
- * for one.
+ * Puts the rows just built into a list. A row whose editor is open keeps the editor element it already
+ * has, and so its cursor, an input method's unfinished text and a request still running: the list is drawn
+ * again every ten seconds and a cooldown counting down is a changed answer, and a new input element would
+ * move the cursor and cut a Korean syllable in the middle. The rest of that row (name, quota, badges) is
+ * updated around the editor. Every other row is replaced by its new one.
  */
-let accountEdit = null;
+function setAccountRows(target, rows) {
+  const desired = rows.map((row) => {
+    const fresh = row.querySelector ? row.querySelector(".account-inline-edit") : null;
+    const edit = fresh && fresh.accountEdit;
+    if (!edit) return row;
+    const live = edit.node;
+    if (!live || live === fresh || !target.contains(live)) { edit.node = fresh; return row; }
+    const copy = live.parentNode;
+    const liveRow = copy.parentNode;
+    for (const child of [...copy.childNodes]) if (child !== live) child.remove();
+    for (const child of [...fresh.parentNode.childNodes]) if (child !== fresh) copy.insertBefore(child, live);
+    const badges = liveRow.querySelector(".account-card-badges");
+    const freshBadges = row.querySelector(".account-card-badges");
+    if (badges && freshBadges) badges.replaceWith(freshBadges);
+    liveRow.className = row.className;
+    live.refreshAccountEditor(fresh.accountEditorOptions);
+    return liveRow;
+  });
+  desired.forEach((row, index) => {
+    const current = target.children[index];
+    if (current !== row) target.insertBefore(row, current || null);
+  });
+  while (target.children.length > desired.length) target.children[target.children.length - 1].remove();
+}
+
+/**
+ * The account rows being edited in place, one per field of one account: `{provider, kind, id, text, focus, node}`,
+ * where `kind` is "cap" (a ChatGPT account's usage cap) or "label" (its display name), `text` is what has been
+ * typed, `focus` asks for the cursor once and `node` is the editor element on the page. They live here, not in
+ * the row, because the open list is fetched again every ten seconds and a cooldown counting down is a changed
+ * answer; and they are separate so that saving or cancelling one account's never discards another's draft.
+ * The dashboard also runs inside the desktop app, which has no browser input dialog, so a row never asks for one.
+ */
+const accountEdits = new Map();
+const accountEditKey = (provider, kind, id) => `${provider}\u0000${kind}\u0000${id}`;
+const openAccountEditsKey = () => [...accountEdits.keys()].join("\u0001");
 function accountEditOf(provider, kind, id) {
-  return accountEdit && accountEdit.provider === provider && accountEdit.kind === kind && accountEdit.id === id ? accountEdit : null;
+  return accountEdits.get(accountEditKey(provider, kind, id)) || null;
 }
 function openAccountEdit(target, provider, kind, id, text) {
-  accountEdit = { provider, kind, id, text, focus: true };
+  accountEdits.set(accountEditKey(provider, kind, id), { provider, kind, id, text, focus: true, node: null });
   redrawAccountRows(target);
 }
-function closeAccountEdit(target) {
-  accountEdit = null;
+/** Ends one edit, unless the same field has been opened again since (a request's answer must not close that one). */
+function endAccountEdit(edit) {
+  const key = accountEditKey(edit.provider, edit.kind, edit.id);
+  if (accountEdits.get(key) === edit) accountEdits.delete(key);
+}
+function closeAccountEdit(target, edit) {
+  endAccountEdit(edit);
   redrawAccountRows(target);
 }
 /**
@@ -3710,10 +3756,10 @@ function accountRenameEditor(target, provider, account, rename) {
     edit,
     label: t("providers.anthropicRenamePrompt"),
     save: async (label) => {
-      if (label === account.label) { closeAccountEdit(target); return; }
-      await rename(label, () => { accountEdit = null; });
+      if (label === account.label) { closeAccountEdit(target, edit); return; }
+      await rename(label, () => endAccountEdit(edit));
     },
-    cancel: () => closeAccountEdit(target),
+    cancel: () => closeAccountEdit(target, edit),
   });
 }
 
@@ -3721,7 +3767,8 @@ function accountRenameEditor(target, provider, account, rename) {
  * What a row shows in place of its buttons while one of its fields is edited: the field, Save, Clear
  * when there is something to clear, and Cancel. Enter saves and Escape cancels (not while an input
  * method is still composing, which uses Enter to commit its text). The field starts from, and keeps
- * writing to, `edit.text`.
+ * writing to, `edit.text`. The element is kept across redraws (`setAccountRows`), which hand a newer
+ * `options` to `refreshAccountEditor` so that what it acts on is the row as it is now.
  * @param {{edit: {text: string}, label: string, number?: boolean, check?: (text: string) => string,
  *   save: (text: string) => Promise<unknown>, clear?: () => Promise<unknown>, clearText?: string, cancel: () => void}} options
  */
@@ -3739,7 +3786,7 @@ function inlineAccountEditor(options) {
     if (clear) clear.disabled = busy;
   };
   sync();
-  // Once the request has been made the row is drawn again, so the buttons only need to hold still meanwhile.
+  // The element stays through the redraws a request's answer causes, so it holds still until the request ends.
   const run = async (action) => {
     if (busy) return;
     busy = true; sync();
@@ -3758,9 +3805,13 @@ function inlineAccountEditor(options) {
     else if (event.key === "Escape") { event.preventDefault(); options.cancel(); }
   });
   save.addEventListener("click", submit);
-  if (clear) clear.addEventListener("click", () => void run(options.clear));
+  if (clear) clear.addEventListener("click", () => { if (options.clear) void run(options.clear); });
   cancel.addEventListener("click", () => options.cancel());
-  return el("div", { class: "account-inline-edit", role: "group", "aria-label": options.label }, [input, save, clear, cancel, message]);
+  const group = el("div", { class: "account-inline-edit", role: "group", "aria-label": options.label }, [input, save, clear, cancel, message]);
+  group.accountEdit = edit;
+  group.accountEditorOptions = options;
+  group.refreshAccountEditor = (next) => { options = next; };
+  return group;
 }
 function accountRowsFailed(target, error) {
   accountRowsDrawn.delete(target);
@@ -3935,7 +3986,8 @@ function renderChatgptAccountRows(target, data, name, generation) {
       actions.push(cap, rename, remove);
     }
     const capEdit = own ? accountEditOf(name, "cap", account.id) : null;
-    const done = () => { accountEdit = null; };
+    // Ends this field's edit only: another account's draft, or this one opened again, is not what was saved.
+    const done = () => endAccountEdit(capEdit);
     const renameEditor = own ? accountRenameEditor(target, name, account, (label, applied) => patchChatgptAccount(name, account.id, { label }, applied)) : null;
     const capEditor = capEdit ? inlineAccountEditor({
       edit: capEdit,
@@ -3943,11 +3995,11 @@ function renderChatgptAccountRows(target, data, name, generation) {
       number: true,
       check: (text) => { const value = Number(text); return Number.isInteger(value) && value >= 1 && value <= 99 ? "" : t("providers.chatgptCapInvalid"); },
       save: async (text) => {
-        if (Number(text) === account.usageCap) { closeAccountEdit(target); return; }
+        if (Number(text) === account.usageCap) { closeAccountEdit(target, capEdit); return; }
         await patchChatgptAccount(name, account.id, { usageCap: Number(text) }, done);
       },
       ...(account.usageCap ? { clear: () => patchChatgptAccount(name, account.id, { usageCap: null }, done), clearText: t("providers.chatgptCapClear") } : {}),
-      cancel: () => closeAccountEdit(target),
+      cancel: () => closeAccountEdit(target, capEdit),
     }) : null;
     const quota = chatgptQuotaText(account.quota);
     const detail = [account.email && account.email !== account.label ? account.email : null, account.planType || null].filter(Boolean).join(" · ");
@@ -3971,7 +4023,7 @@ function renderChatgptAccountRows(target, data, name, generation) {
       el("div", { class: "account-card-badges" }, accountPoolBadges(account)),
     ]);
   });
-  target.replaceChildren(...(rows.length ? rows : [el("div", { class: "account-empty", text: t("providers.chatgptNoAccounts") })]));
+  setAccountRows(target, rows.length ? rows : [el("div", { class: "account-empty", text: t("providers.chatgptNoAccounts") })]);
   const countNode = $("#chatgpt-account-count");
   if (countNode) countNode.textContent = t("providers.chatgptAccountCount", { count: accounts.length });
 }
@@ -4081,7 +4133,7 @@ function renderGoogleAccountRows(target, data, name, generation) {
       el("div", { class: "account-card-badges" }, accountPoolBadges(account)),
     ]);
   });
-  target.replaceChildren(...(rows.length ? rows : [el("div", { class: "account-empty", text: t("providers.googleNoAccounts") })]));
+  setAccountRows(target, rows.length ? rows : [el("div", { class: "account-empty", text: t("providers.googleNoAccounts") })]);
   const countNode = $("#google-account-count");
   if (countNode) countNode.textContent = t("providers.chatgptAccountCount", { count: accounts.length });
 }

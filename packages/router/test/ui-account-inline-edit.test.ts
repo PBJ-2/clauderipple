@@ -19,29 +19,54 @@ const translate = (lang: string) => (key: string, vars: Record<string, unknown> 
   Object.entries(vars).reduce((text, [name, value]) => text.replaceAll(`{${name}}`, String(value)), dictionaries[lang]![key] ?? key);
 
 type Listener = (event: Record<string, unknown>) => void;
+/** The page's focus: a node taken out of the page while it holds the focus loses it, as in a browser. */
+const doc: { activeElement: Node | null } = { activeElement: null };
 class Node {
   readonly tag: string;
   readonly attrs: Record<string, unknown>;
-  children: Node[];
+  children: Node[] = [];
+  parentNode: Node | null = null;
   className = "";
   textContent = "";
   value = "";
   disabled = false;
+  [expando: string]: unknown;
   private readonly listeners = new Map<string, Listener[]>();
   constructor(tag: string, attrs: Record<string, unknown> = {}, children: (Node | null | undefined)[] = []) {
     this.tag = tag;
     this.attrs = attrs;
-    this.children = children.filter((child): child is Node => Boolean(child));
+    for (const child of children) if (child) this.insertBefore(child, null);
     if (typeof attrs.class === "string") this.className = attrs.class;
     if (typeof attrs.text === "string") this.textContent = attrs.text;
   }
+  get childNodes(): Node[] { return this.children; }
+  get classList() { return { contains: (name: string) => this.className.split(/\s+/).includes(name) }; }
   addEventListener(type: string, listener: Listener) { this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]); }
   fire(type: string, event: Record<string, unknown> = {}): { defaultPrevented: boolean } {
     const seen = { defaultPrevented: false };
     for (const listener of this.listeners.get(type) ?? []) listener({ ...event, preventDefault: () => { seen.defaultPrevented = true; } });
     return seen;
   }
-  focus() {}
+  contains(node: Node | null): boolean { for (let at = node; at; at = at.parentNode) if (at === this) return true; return false; }
+  insertBefore(node: Node, ref: Node | null): Node {
+    node.remove();
+    const index = ref ? this.children.indexOf(ref) : this.children.length;
+    this.children.splice(index < 0 ? this.children.length : index, 0, node);
+    node.parentNode = this;
+    return node;
+  }
+  remove() {
+    if (!this.parentNode) return;
+    if (this.contains(doc.activeElement)) doc.activeElement = null;
+    this.parentNode.children = this.parentNode.children.filter((child) => child !== this);
+    this.parentNode = null;
+  }
+  replaceWith(other: Node) { const parent = this.parentNode!; parent.insertBefore(other, this); this.remove(); }
+  /** Only the one-class selectors the page uses. */
+  querySelector(selector: string): Node | null { return findAll(this, (n) => n !== this && n.classList.contains(selector.slice(1)))[0] ?? null; }
+  focus() { doc.activeElement = this; }
+  select() {}
+  setSelectionRange() {}
 }
 const el = (tag: string, attrs: Record<string, unknown> = {}, children: (Node | null | undefined)[] = []) => new Node(tag, attrs, children);
 const findAll = (node: Node, predicate: (node: Node) => boolean): Node[] => [...(predicate(node) ? [node] : []), ...node.children.flatMap((child) => findAll(child, predicate))];
@@ -160,7 +185,7 @@ test("an editor drawn again (the list is fetched every ten seconds) starts from 
 });
 
 test("the cap editor opens in the row for its own account only, and the dashboard source never asks for a dialog for it", () => {
-  const accountEditOf = new Function(`${block("let accountEdit = null;", "function openAccountEdit(")}; return { accountEditOf, set: (v) => { accountEdit = v; } };`)() as { accountEditOf: (p: string, k: string, id: string) => Edit | null; set: (v: Edit | null) => void };
+  const accountEditOf = new Function(`${block("const accountEdits = new Map();", "function openAccountEdit(")}; return { accountEditOf, set: (edit) => { accountEdits.set(accountEditKey(edit.provider, edit.kind, edit.id), edit); } };`)() as { accountEditOf: (p: string, k: string, id: string) => Edit | null; set: (v: Edit) => void };
   const edit = { provider: "chatgpt", kind: "cap", id: "a1", text: "70", focus: true };
   accountEditOf.set(edit);
   assert.equal(accountEditOf.accountEditOf("chatgpt", "cap", "a1"), edit);
@@ -192,9 +217,8 @@ type Account2 = { id: string; label: string };
 function renameRig() {
   const redraws: unknown[] = [];
   const make = new Function("el", "t", "redrawAccountRows", `
-    ${block("let accountEdit = null;", "function openAccountEdit(")}
-    ${block("function closeAccountEdit(", "function accountRowsFailed(")}
-    return { accountRenameEditor, open: (provider, kind, id, text) => { accountEdit = { provider, kind, id, text, focus: true }; }, current: () => accountEdit };
+    ${block("const accountEdits = new Map();", "function accountRowsFailed(")}
+    return { accountRenameEditor, open: (provider, kind, id, text) => { accountEdits.set(accountEditKey(provider, kind, id), { provider, kind, id, text, focus: true, node: null }); }, current: () => accountEditOf("p", "label", "a1") };
   `) as (el: unknown, t: unknown, redraw: (target: unknown) => void) => {
     accountRenameEditor: (target: unknown, provider: string, account: Account2, rename: (label: string, applied: () => void) => Promise<boolean>) => Node | null;
     open: (provider: string, kind: string, id: string, text: string) => void;
@@ -256,4 +280,174 @@ test("no account row asks the browser for a dialog: the desktop app has no promp
   assert.doesNotMatch(source, /(?<![\w.$])prompt\(/);
   assert.doesNotMatch(source, /window\.prompt/);
   assert.equal(source.match(/renameEditor = (?:own \? )?accountRenameEditor\(target/g)?.length, 3, "Claude, ChatGPT and Google rows open the same rename box");
+});
+
+// ---- The list drawn again while an editor is open: the real ChatGPT rows, the real list code, a stand-in page
+
+type Row = { id: string; label: string; source: "own"; state: string; usageCap?: number; cooldownSeconds?: number; quota: null; inUse: boolean; paused: boolean; preferred: boolean };
+type Patch = { id: string; body: Record<string, unknown>; resolve: () => void; reject: (error: Error) => void };
+
+function listRig(initial: { id: string; label: string; usageCap?: number }[]) {
+  const row = (a: { id: string; label: string; usageCap?: number }): Row => ({ source: "own", state: "ready", quota: null, inUse: false, paused: false, preferred: false, ...a });
+  const server = { accounts: initial.map(row) };
+  const patches: Patch[] = [];
+  const toasts: string[] = [];
+  const target = el("div", { class: "account-card-list" });
+  const api = (url: string, init?: { method?: string; body?: string }): Promise<unknown> => {
+    if (init?.method !== "PATCH") return Promise.resolve(JSON.parse(JSON.stringify({ accounts: server.accounts })));
+    return new Promise<void>((resolve, reject) => { patches.push({ id: decodeURIComponent(url.split("/").pop()!), body: JSON.parse(init.body!), resolve, reject }); });
+  };
+  const make = new Function("el", "t", "document", "api", "toast", "state", `
+    let providerDetailGeneration = 0;
+    const confirm = () => true, $ = () => null, hint = (text) => el("p", { class: "hint", text }, []);
+    const accountPoolActions = () => [], startChatgptLogin = async () => {}, chatgptQuotaText = () => "", quotaMeters = () => null, quotaWindowName = () => "weekly";
+    const accountPoolBadges = (account) => [el("span", { class: "badge", text: account.state + ":" + (account.cooldownSeconds || 0) }, [])];
+    ${block("const accountRowsDrawn = new WeakMap();", "function accountRowsFailed(")}
+    async function refreshChatgptAccountPanel(name) {
+      const data = await api("/api/chatgpt-accounts");
+      drawAccountRows(state.target, data, () => renderChatgptAccountRows(state.target, data, name, providerDetailGeneration));
+    }
+    ${block("async function patchChatgptAccount(", "let googleLoginBusy")}
+    return { poll: () => refreshChatgptAccountPanel("chatgpt"), openAccountEdit, accountEditOf };
+  `) as (...args: unknown[]) => { poll: () => Promise<void>; openAccountEdit: (target: Node, provider: string, kind: string, id: string, text: string) => void; accountEditOf: (p: string, k: string, id: string) => Edit | null };
+  const page = make(el, translate("ko"), doc, api, (message: string) => { toasts.push(message); }, { target });
+  const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+  const rowAt = (index: number): Node => target.children[index]!;
+  const editorIn = (row: Node): Node | null => row.querySelector(".account-inline-edit");
+  const text = (node: Node): string => [node.textContent, ...node.children.map(text)].join(" ");
+  return { server, patches, toasts, target, page, settle, rowAt, editorIn, text };
+}
+
+test("list: an editor open on one account survives another account's save, and its draft is the one that was typed", async () => {
+  const rig = listRig([{ id: "a1", label: "Work", usageCap: 70 }, { id: "a2", label: "Home" }]);
+  await rig.page.poll();
+  rig.page.openAccountEdit(rig.target, "chatgpt", "cap", "a1", "70");
+  rig.page.openAccountEdit(rig.target, "chatgpt", "label", "a2", "Home");
+  const capInput = parts(rig.editorIn(rig.rowAt(0))!);
+  const nameInput = parts(rig.editorIn(rig.rowAt(1))!);
+  capInput.type("65");
+  nameInput.type("Holiday");
+  nameInput.press("Enter");
+  assert.equal(rig.patches.length, 1);
+  rig.server.accounts[1]!.label = "Holiday";
+  rig.patches[0]!.resolve();
+  await rig.settle();
+  assert.equal(rig.editorIn(rig.rowAt(1)), null, "the saved row is a plain row again");
+  assert.equal(rig.text(rig.rowAt(1)).includes("Holiday"), true, "and shows the new name");
+  const still = rig.editorIn(rig.rowAt(0));
+  assert.ok(still, "the other account's editor is still open");
+  assert.equal(parts(still!).input, capInput.input, "on the same input element");
+  assert.equal(capInput.input.value, "65");
+  assert.equal(rig.page.accountEditOf("chatgpt", "cap", "a1")!.text, "65", "and its draft is kept");
+});
+
+test("list: a request's answer closes the edit it was made for, not the same field opened again meanwhile", async () => {
+  const rig = listRig([{ id: "a1", label: "Work", usageCap: 70 }]);
+  await rig.page.poll();
+  rig.page.openAccountEdit(rig.target, "chatgpt", "cap", "a1", "70");
+  const first = parts(rig.editorIn(rig.rowAt(0))!);
+  first.type("60");
+  first.press("Enter");
+  first.press("Escape");
+  assert.equal(rig.editorIn(rig.rowAt(0)), null, "cancelled while the request runs");
+  rig.page.openAccountEdit(rig.target, "chatgpt", "cap", "a1", "70");
+  const again = parts(rig.editorIn(rig.rowAt(0))!);
+  again.type("55");
+  rig.server.accounts[0]!.usageCap = 60;
+  rig.patches[0]!.resolve();
+  await rig.settle();
+  assert.ok(rig.editorIn(rig.rowAt(0)), "the new edit is still open");
+  assert.equal(rig.page.accountEditOf("chatgpt", "cap", "a1")!.text, "55");
+});
+
+test("list: while a request runs the buttons stay disabled through a redraw, and come back when it is refused", async () => {
+  const rig = listRig([{ id: "a1", label: "Work", usageCap: 70 }]);
+  await rig.page.poll();
+  rig.page.openAccountEdit(rig.target, "chatgpt", "cap", "a1", "70");
+  const editor = rig.editorIn(rig.rowAt(0))!;
+  const e = parts(editor);
+  e.type("60");
+  e.press("Enter");
+  assert.equal(e.byText("저장")!.disabled, true);
+  rig.server.accounts[0]!.state = "cooling";
+  rig.server.accounts[0]!.cooldownSeconds = 600;
+  await rig.page.poll();
+  const after = rig.editorIn(rig.rowAt(0))!;
+  assert.equal(after, editor, "the redraw leaves the editor element alone");
+  assert.equal(parts(after).byText("저장")!.disabled, true, "still waiting for the request");
+  assert.equal(parts(after).byText("상한 해제")!.disabled, true);
+  assert.match(rig.text(rig.rowAt(0)), /cooling:600/, "the rest of the row is drawn from the new answer");
+  rig.patches[0]!.reject(new Error("refused"));
+  await rig.settle();
+  assert.equal(parts(after).byText("저장")!.disabled, false, "refused: the row can be tried again");
+  assert.ok(rig.toasts.length > 0);
+  assert.ok(rig.editorIn(rig.rowAt(0)), "and the box is still open");
+});
+
+test("list: a poll while typing keeps the input element, the cursor and what is half typed", async () => {
+  const rig = listRig([{ id: "a1", label: "Work" }, { id: "a2", label: "Home" }]);
+  await rig.page.poll();
+  rig.page.openAccountEdit(rig.target, "chatgpt", "label", "a1", "Work");
+  const editor = rig.editorIn(rig.rowAt(0))!;
+  const e = parts(editor);
+  assert.equal(doc.activeElement, e.input, "opening puts the cursor in the box");
+  e.type("업"); // an input method's text not yet committed is in the box too
+  for (let tick = 1; tick <= 3; tick++) {
+    rig.server.accounts[0]!.state = "cooling";
+    rig.server.accounts[0]!.cooldownSeconds = 600 - tick;
+    rig.server.accounts[1]!.cooldownSeconds = tick;
+    await rig.page.poll();
+    assert.equal(rig.editorIn(rig.rowAt(0)), editor, `tick ${tick}: the same editor`);
+    assert.equal(parts(rig.editorIn(rig.rowAt(0))!).input, e.input);
+    assert.equal(doc.activeElement, e.input, "which still has the cursor");
+    assert.equal(e.input.value, "업");
+    assert.match(rig.text(rig.rowAt(0)), new RegExp(`cooling:${600 - tick}`), "the row around it counts down");
+    assert.match(rig.text(rig.rowAt(1)), new RegExp(`ready:${tick}`), "and other rows are drawn again");
+  }
+  assert.equal(rig.target.children.length, 2);
+  // Escape: the box goes and the row is drawn plain from the latest answer.
+  e.press("Escape");
+  assert.equal(rig.editorIn(rig.rowAt(0)), null);
+  assert.equal(rig.target.children.length, 2);
+});
+
+test("list: the editor acts on the row as the last answer drew it, not as it was when the box opened", async () => {
+  const rig = listRig([{ id: "a1", label: "Work", usageCap: 70 }]);
+  await rig.page.poll();
+  rig.page.openAccountEdit(rig.target, "chatgpt", "cap", "a1", "70");
+  const e = parts(rig.editorIn(rig.rowAt(0))!);
+  rig.server.accounts[0]!.usageCap = 80; // changed elsewhere meanwhile
+  await rig.page.poll();
+  e.press("Enter");
+  assert.equal(rig.patches.length, 1, "70 is no longer the cap in force, so it is a change, not 'unchanged'");
+  assert.deepEqual(rig.patches[0]!.body, { usageCap: 70 });
+});
+
+test("list: after a save the box is drawn away even when the answer fetched next is the same as the last", async () => {
+  const rig = listRig([{ id: "a1", label: "Work" }]);
+  await rig.page.poll();
+  rig.page.openAccountEdit(rig.target, "chatgpt", "label", "a1", "Work");
+  const e = parts(rig.editorIn(rig.rowAt(0))!);
+  e.type("Office");
+  e.press("Enter");
+  // The new name has already reached the list through a poll while the request ran.
+  rig.server.accounts[0]!.label = "Office";
+  await rig.page.poll();
+  assert.ok(rig.editorIn(rig.rowAt(0)), "the box stays while the request runs");
+  rig.patches[0]!.resolve();
+  await rig.settle();
+  assert.equal(rig.editorIn(rig.rowAt(0)), null, "the follow-up answer is identical, and the row is still redrawn");
+  assert.equal(rig.target.children.length, 1);
+  assert.equal(rig.text(rig.rowAt(0)).includes("Office"), true);
+});
+
+test("list: an account that disappears takes its editor with it, and the others stay as they are", async () => {
+  const rig = listRig([{ id: "a1", label: "Work" }, { id: "a2", label: "Home", usageCap: 70 }]);
+  await rig.page.poll();
+  rig.page.openAccountEdit(rig.target, "chatgpt", "cap", "a2", "70");
+  const editor = rig.editorIn(rig.rowAt(1))!;
+  rig.server.accounts.splice(0, 1);
+  await rig.page.poll();
+  assert.equal(rig.target.children.length, 1);
+  assert.equal(rig.editorIn(rig.rowAt(0)), editor, "the surviving row keeps its open editor at its new place");
 });
