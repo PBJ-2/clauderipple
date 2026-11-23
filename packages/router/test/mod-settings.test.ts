@@ -10,6 +10,7 @@ import path from "node:path";
 import {
   COMPACT_AT_MAX,
   COMPACT_AT_MIN,
+  KEPT_WHEN_ABSENT,
   ModSettingsInputError,
   claudeSettingsPath,
   idleCompactionWanted,
@@ -219,5 +220,22 @@ test("a save without idleCompact (a mod from before it existed) keeps the stored
     assert.equal(save({ idleCompact: true }), true, "explicit key still wins");
     assert.equal(save({ keepWarm: true }), true, "absent key: stored true survives");
     assert.equal(save({ idleCompact: "no" }), true, "a present but invalid value still normalizes to the default");
+  } finally { t.restore(); }
+});
+
+test("a save without bandLimits (a mod from before it existed) keeps the stored choice; one that names it, [] included, replaces it", () => {
+  const t = withSettingsFile({ model: "opus" });
+  try {
+    assert.deepEqual(KEPT_WHEN_ABSENT, ["idleCompact", "bandLimits"]);
+    const chosen = [{ provider: "chatgpt", show: "accounts", accounts: ["fa928bf4"] }, { provider: "opencode-go", show: "off" }];
+    const save = (settings: Record<string, unknown>) => writeModSettings({ schemaVersion: MOD_SETTINGS_SCHEMA_VERSION, settings }, t.dir).current.settings;
+    assert.deepEqual(save({ bandLimits: chosen, idleCompact: false }).bandLimits, chosen);
+    const older = save({ keepWarm: true });
+    assert.deepEqual(older.bandLimits, chosen, "absent key: the stored choice survives");
+    assert.equal(older.idleCompact, false, "idleCompact is still kept beside it");
+    assert.deepEqual(readModSettings(t.dir).settings.bandLimits, chosen, "and it is what the store holds");
+    assert.deepEqual(save({ bandLimits: [{ provider: "chatgpt", show: "all" }] }).bandLimits, [{ provider: "chatgpt", show: "all" }], "a present key replaces");
+    assert.deepEqual(save({ bandLimits: [] }).bandLimits, [], "a present [] clears");
+    assert.deepEqual(save({ keepWarm: false }).bandLimits, [], "and a cleared choice stays cleared");
   } finally { t.restore(); }
 });

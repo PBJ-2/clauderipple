@@ -2,7 +2,7 @@
 // callbacks it hands in. Every renderer in ./ is a pure function of (elements, view, actions);
 // none of them calls the engine, so they can be drawn and tested anywhere.
 
-import type { AgentRec, BgTask, CostBucket, CostSummary, Effort, JudgeKind, JudgeRun, LadderOptions, LimitItem, Pick as EffortPick, Settings, Skin, StatusRequest, TierTarget } from '../../types'
+import type { AgentRec, BandLimit, BgTask, CostBucket, CostSummary, Effort, JudgeKind, JudgeRun, LadderOptions, LimitItem, Pick as EffortPick, Settings, Skin, StatusRequest, TierTarget } from '../../types'
 import type { Appearance } from './theme'
 import { t } from '../i18n'
 import { DISPLAY, displayText } from './display'
@@ -79,6 +79,14 @@ export type DashboardView = {
   limit: { kind: string; percent: number; resetsAt?: string; save: boolean } | null
   /** Every plan window for the second row, Claude's own first. Absent until read. */
   limits?: LimitItem[]
+  /** Which providers and accounts the second row draws (Settings.bandLimits); absent or [] is the default row. */
+  bandLimits?: readonly BandLimit[]
+  /**
+   * The router's Claude plan providers by config name, as the mod has read them (register.tsx
+   * limitsClaude): kept after `limits` stops listing one, so a bandLimits choice for it still reads as
+   * Claude's (claudeProvider). Absent: the limits' own rows and the default names alone say which.
+   */
+  claudeProviders?: readonly string[]
   route: RouteView | null
   /** A line from the router side ("router not answering"), shown in place of the route. */
   notice: string | null
@@ -546,9 +554,9 @@ export function limitItemName(item: Pick<LimitItem, 'kind' | 'label' | 'windowMi
 
 /**
  * One limits group as the row heads it: a provider's own, or one of its accounts ("GPT", "GPT 1", …),
- * with the account's label and in-use mark when the router gave them.
+ * with the account's owner id, label and in-use mark when the router gave them.
  */
-export type LimitGroup = { key: string; provider: string; type?: string; title?: string; account: number; accountLabel?: string; inUse?: true; items: LimitItem[] }
+export type LimitGroup = { key: string; provider: string; type?: string; title?: string; account: number; accountId?: string; accountAliases?: string[]; accountLabel?: string; inUse?: true; items: LimitItem[] }
 
 /** Whether a group is Claude's own plan. */
 const isClaude = (g: Pick<LimitGroup, 'provider' | 'type'>): boolean => g.type === 'anthropic' || g.provider === 'claude'
@@ -570,6 +578,8 @@ export function limitGroups(items: readonly LimitItem[]): LimitGroup[] {
         ...(item.type ? { type: item.type } : {}),
         ...(item.title ? { title: item.title } : {}),
         account: item.account,
+        ...(item.accountId ? { accountId: item.accountId } : {}),
+        ...(item.accountAliases?.length ? { accountAliases: item.accountAliases } : {}),
         ...(item.accountLabel ? { accountLabel: item.accountLabel } : {}),
         ...(item.inUse ? { inUse: true as const } : {}),
         items: [],
@@ -585,19 +595,152 @@ export function limitGroups(items: readonly LimitItem[]): LimitGroup[] {
 }
 
 /**
- * The groups the band's limits row draws: of each provider's accounts only the one the router serves
- * new turns with (the first when none is marked: an older router, or the in-use account's usage not
- * known yet), so the narrow row reads one "Claude", one "GPT", one "Gemini"; the pane lists them all.
- * Until 2026-11-05 only Claude was narrowed: a second Gemini account in use left the row showing the
- * first, spent one, because the narrow row dropped later accounts first.
+ * The owner's choice for each provider `bandLimits` names, the first entry for a provider winning as
+ * the settings' normalization keeps it. An entry of a shape this build does not know is no choice:
+ * its provider keeps the default row.
  */
-export function bandLimitGroups(groups: readonly LimitGroup[]): LimitGroup[] {
+function bandChoices(choices: readonly BandLimit[]): Map<string, BandLimit> {
+  const out = new Map<string, BandLimit>()
+  for (const c of choices) {
+    const known = c.show === 'off' || c.show === 'all' || (c.show === 'accounts' && Array.isArray(c.accounts))
+    if (known && !out.has(c.provider)) out.set(c.provider, c)
+  }
+  return out
+}
+
+/**
+ * The groups the band's limits row draws. A provider `choices` (Settings.bandLimits, picked in the
+ * dashboard) does not name keeps one account: the one the router serves new turns with (the first
+ * when none is marked: an older router, or the in-use account's usage not known yet), so the narrow
+ * row reads one "Claude", one "GPT", one "Gemini"; the pane lists them all. Until 2026-11-05 only
+ * Claude was narrowed: a second Gemini account in use left the row showing the first, spent one,
+ * because the narrow row dropped later accounts first.
+ * A provider it names (2026-11-19) shows nothing ('off'), every account the router answered for
+ * ('all'), or only the accounts whose owner id is listed ('accounts'). A listed account the router
+ * did not answer for (paused, not read yet, removed) is never stood in for by another account's
+ * figures: when none of them answered, the provider is left out. Within a named provider the
+ * account in use comes first and the rest keep their order, so the narrow row, which drops a
+ * provider's later accounts first, keeps the one spending. Providers keep their order.
+ */
+export function bandLimitGroups(groups: readonly LimitGroup[], choices: readonly BandLimit[] = []): LimitGroup[] {
+  const chosen = bandChoices(choices)
   const kept = new Map<string, LimitGroup>()
   for (const g of groups) {
+    if (chosen.has(g.provider)) continue
     const held = kept.get(g.provider)
     if (!held || (g.inUse && !held.inUse)) kept.set(g.provider, g)
   }
-  return groups.filter(g => kept.get(g.provider) === g)
+  const shown = (g: LimitGroup): boolean => {
+    const choice = chosen.get(g.provider)
+    if (!choice) return kept.get(g.provider) === g
+    if (choice.show === 'off') return false
+    // By its owner id or one it answers to: Claude's login row stands for the stored copies of it the router hides.
+    return choice.show === 'all' || (choice.show === 'accounts' && [g.accountId, ...(g.accountAliases ?? [])].some(id => id !== undefined && choice.accounts.includes(id)))
+  }
+  const drawn = groups.filter(shown)
+  // A named provider's accounts together, at the place of its first, the one in use leading.
+  const out: LimitGroup[] = []
+  for (const g of drawn) {
+    if (!chosen.has(g.provider)) out.push(g)
+    else if (!out.some(o => o.provider === g.provider)) {
+      const mine = drawn.filter(o => o.provider === g.provider)
+      out.push(...mine.filter(o => o.inUse), ...mine.filter(o => !o.inUse))
+    }
+  }
+  return out
+}
+
+/**
+ * Which of the band's groups carry their account's number. A provider `choices` does not name reads
+ * as the band always has: by limitGroupNumbered on the band's own groups, one account and so
+ * unnumbered. A provider shown 'all' or by chosen accounts numbers its accounts as the pane does
+ * (the router's index + 1) when the router answered more than one account for it (`full`, before any
+ * choice), when the account is not the router's first, or when the choice lists more than one: a
+ * chosen account then never reads as a bare "GPT" another could be taken for.
+ */
+export function bandLimitNumbered(full: readonly LimitGroup[], band: readonly LimitGroup[], choices: readonly BandLimit[] = []): (group: LimitGroup) => boolean {
+  const chosen = bandChoices(choices)
+  const plain = limitGroupNumbered(band)
+  const several = limitGroupNumbered(full)
+  return group => {
+    const choice = chosen.get(group.provider)
+    if (!choice || choice.show === 'off') return plain(group)
+    return several(group) || group.account > 0 || (choice.show === 'accounts' && choice.accounts.length > 1)
+  }
+}
+
+/**
+ * Whether a group is its provider's first in `groups`, compared by key since the narrow row draws
+ * copies: save mode's word follows Claude's windows once, not after each Claude account the row shows.
+ */
+export function firstOfProvider(groups: readonly LimitGroup[]): (group: LimitGroup) => boolean {
+  const first = new Map<string, string>()
+  for (const g of groups) if (!first.has(g.provider)) first.set(g.provider, g.key)
+  return group => first.get(group.provider) === group.key
+}
+
+/**
+ * Whether `provider` is one of Claude's own plan providers, for the owner's bandLimits choice. One the
+ * limits read lists is judged by its rows' type, as its groups are (isClaude). One it lists nothing of
+ * (its only account paused, its usage not read yet, the router just restarted) is judged by the names
+ * the mod remembers the router listing as Claude (`claudeProviders`), else by the names Claude's
+ * provider has by default, 'anthropic' on the router and 'claude' on the fallback path: a Hide stopped
+ * hiding the first row's chip once the limits had no Claude row (2026-11-20 review).
+ */
+function claudeProvider(view: Pick<DashboardView, 'limits' | 'claudeProviders'>, provider: string): boolean {
+  const rows = (view.limits ?? []).filter(item => item.provider === provider)
+  if (rows.length) return rows.some(isClaude)
+  return (view.claudeProviders ?? []).includes(provider) || provider === 'anthropic' || provider === 'claude'
+}
+
+/** An account's 5-hour or weekly window, the fuller one (the first on a tie), as the host's own reading is picked (register.tsx refreshUsage). */
+function mainWindow(group: LimitGroup): LimitItem | undefined {
+  return group.items.reduce<LimitItem | undefined>((top, item) => (item.kind === 'five_hour' || item.kind === 'seven_day') && (!top || item.percent > top.percent) ? item : top, undefined)
+}
+
+/**
+ * The Claude limit the first row shows (the desktop's chip, the terminal's fact, the minimal footer)
+ * under the owner's bandLimits choice. The host's reading (`limit`) is Claude Code's own for this
+ * session and says nothing of whose account it is: with stored account B chosen and the app logged
+ * into A, the chip that stands in when the second row does not fit showed A's figure, and with Claude
+ * hidden and no Claude row in the limits (its only account paused) the chip came back (2026-11-20
+ * review). So once a Claude provider is set to 'off' or to chosen accounts, the host's reading is
+ * never shown: 'off' shows none; chosen accounts show the reading of the one in use among them, else
+ * of the first with a 5-hour or weekly window, its fuller window, save mode as the host's reading has
+ * it; none when no chosen account was read (one paused or removed matches nothing, and no other
+ * account stands in for it). A Claude provider the limits list with no choice, one set to 'all', and
+ * no choice for Claude at all keep the host's reading as before, and so show none while the host has
+ * none. A chosen account's reading shows whether or not the host has one (second review, 2026-11-20:
+ * a session on a routed non-Claude model has none, and the chosen account's figure is the router's
+ * anyway); save mode's word comes with the host's reading, which is where its state is kept.
+ */
+export function bandClaudeLimit(view: Pick<DashboardView, 'limit' | 'limits' | 'bandLimits' | 'claudeProviders'>): DashboardView['limit'] {
+  const limit = view.limit
+  const choices = view.bandLimits ?? []
+  const chosen = [...bandChoices(choices).values()].filter(c => claudeProvider(view, c.provider))
+  const items = view.limits ?? []
+  // A Claude provider read with no choice draws its account in use, which the host's reading has
+  // always stood for; 'all' draws every account, the host's among them.
+  const listed = new Set(items.filter(isClaude).map(item => item.provider))
+  const open = chosen.some(c => c.show === 'all') || [...listed].some(provider => !chosen.some(c => c.provider === provider))
+  if (!chosen.length || open) return limit
+  const named = new Set(chosen.filter(c => c.show === 'accounts').map(c => c.provider))
+  const readable = bandLimitGroups(limitGroups(items), choices).filter(g => named.has(g.provider) && mainWindow(g))
+  const group = readable.find(g => g.inUse) ?? readable[0]
+  const top = group && mainWindow(group)
+  return top ? { kind: top.kind, percent: top.percent, ...(top.resetsAt ? { resetsAt: top.resetsAt } : {}), save: limit?.save ?? false } : null
+}
+
+/**
+ * Whether the owner's bandLimits choice, not a lack of readings, leaves the limits row nothing to
+ * draw: the limits extra on and windows read, none of them chosen. The row was the band's way into
+ * the limits pane, and on a Claude-only install with Claude hidden nothing on the band opened it any
+ * more (2026-11-20 review), so the first row then keeps that way (band.tsx limitDrawn). Never with no
+ * choice, which always draws a window when there is one.
+ */
+export function bandLimitsHidden(view: Pick<DashboardView, 'limits' | 'bandLimits' | 'extras'>): boolean {
+  const items = view.limits ?? []
+  return view.extras.includes('limits') && items.length > 0 && !bandLimitGroups(limitGroups(items), view.bandLimits).length
 }
 
 /**

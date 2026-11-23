@@ -268,8 +268,9 @@ export function rippleStatus(limitsJson: unknown, modSettingsJson: unknown, now:
     if (!provider || !Array.isArray(p.accounts)) continue;
     const title = typeof p.title === "string" && p.title ? p.title : LABELS[provider] ?? provider;
     const listed = p.accounts.map(obj).filter((a) => Array.isArray(a.windows));
-    // The router lists every Claude account (2026-11-04); the band's row, and so this, shows only the
-    // one in use (the first when none is marked), unnumbered, as it did when that was all it listed.
+    // The router lists every Claude account (2026-11-04); the phone shows only the one in use (the
+    // first when none is marked), unnumbered, as it did when that was all it listed. It does not
+    // follow the band's bandLimits choice.
     const accounts = p.type === "anthropic" && listed.length > 1 ? [listed.find((a) => a.inUse === true) ?? listed[0]!] : listed;
     const into = p.type === "anthropic" ? claude : limits;
     accounts.forEach((a, index) => {

@@ -427,6 +427,9 @@ let limitsSnapshot = null;
 let limitsSnapshotStale = false;
 // The read in flight, so a poll never starts another behind a slow provider.
 let limitsRead = null;
+// Run after every limits read, landed or failed. The mod page sets it to redraw its limits-row
+// picker (modBandLimitsRedraw), so the Status code names nothing of the mod page's.
+let limitsReadDone = () => {};
 // The mod's EXHAUST_URGENT_MS: an exhaust forecast this close is red.
 const LIMITS_EXHAUST_URGENT_MS = 60 * 60_000;
 
@@ -700,7 +703,8 @@ function providerLimits(name) {
 /**
  * Reads /api/limits beside the status read, never ahead of it. A read still running is not doubled behind
  * a slow provider, and a failed read keeps the last reading on screen, marked stale, instead of dropping
- * its gauges. The screen is redrawn when the read lands.
+ * its gauges. The screen is redrawn when the read lands, and so is the mod's limits-row picker when
+ * the providers and accounts it lists have changed.
  */
 function refreshLimits() {
   if (limitsRead) return limitsRead;
@@ -713,6 +717,7 @@ function refreshLimits() {
     limitsRead = null;
     if (status) renderHealthProviders();
     if (status) refreshProviderUsage();
+    limitsReadDone();
   });
   return limitsRead;
 }
@@ -5335,7 +5340,7 @@ const MOD_DEFAULTS = {
   keepWarm: false, keepWarmHours: 2, keepWarmMinTokens: 30000,
   idleCompact: true,
   compactModel: "claude-haiku-5-5", compactModels: [],
-  swampAlert: false, layout: "dashboard", appearance: "auto", skin: "deep", language: "auto", hide: ["reason"], extras: [], setupDone: false,
+  swampAlert: false, layout: "dashboard", appearance: "auto", skin: "deep", language: "auto", hide: ["reason"], extras: [], bandLimits: [], setupDone: false,
 };
 
 // The compaction point presets, in tokens (Claude Code's own `autoCompactWindow`), and its range.
@@ -5368,34 +5373,56 @@ function modNormalize(raw) {
     modes: Array.isArray(value.modes) ? value.modes : [],
     providers: { ...(value.providers || {}) },
     hide: Array.isArray(value.hide) ? value.hide : clone(MOD_DEFAULTS.hide),
+    bandLimits: Array.isArray(value.bandLimits) ? value.bandLimits : [],
   };
 }
 
 /**
  * The fields changed from `before` to `after`, found as the mod's settingsChanges finds them: values
- * and arrays whole except keyed lists (modes by default), objects field by field, and a rule whose
- * mode changed replaced whole. Config saves reuse this with their own list identities.
+ * and arrays whole except keyed lists (modes by id and bandLimits by provider by default), objects
+ * field by field, and a rule whose mode changed replaced whole. Config saves reuse this with their
+ * own list identities. bandLimits is keyed so two tabs that each change a different provider's
+ * choice both keep theirs through a 409's re-apply (2026-11-19).
  * @param {Object} before
  * @param {Object} after
  * @param {string[]} path
  * @param {Record<string, string>} arrayKeys Identity fields for lists that merge entry by entry.
  */
-function modChanges(before, after, path = [], arrayKeys = { modes: "id" }) {
+function modChanges(before, after, path = [], arrayKeys = { modes: "id", bandLimits: "provider" }) {
   if (JSON.stringify(before) === JSON.stringify(after)) return [];
   if (after === undefined) return [{ path, remove: true }];
-  const arrayKey = arrayKeys[path.at(-1)];
+  const arrayKey = modOwn(arrayKeys, path.at(-1));
   if (arrayKey && Array.isArray(before) && Array.isArray(after) && [...before, ...after].every((entry) => entry && typeof entry[arrayKey] === "string")) {
-    const byId = (entries) => Object.fromEntries(entries.map((entry) => [entry[arrayKey], entry]));
-    return modChanges(byId(before), byId(after), path, arrayKeys);
+    // Keyed by Map, not by a plain object: a provider named "constructor" or "__proto__" read the
+    // object's prototype where it had no entry, and a reset of it then sent a function (2026-11-20 review).
+    const byId = (entries) => new Map(entries.map((entry) => [entry[arrayKey], entry]));
+    const [was, now] = [byId(before), byId(after)];
+    const ids = [...new Set([...was.keys(), ...now.keys()])];
+    // A provider's band choice is one unit: merged field by field, a re-apply over a copy where the
+    // other tab had reset that provider rebuilt it without `show`, which normalization drops, and a
+    // provider named "mode" went through the rule branch below (2026-11-19 review).
+    if (path.at(-1) === "bandLimits") {
+      return ids.flatMap((id) => JSON.stringify(was.get(id)) === JSON.stringify(now.get(id)) ? []
+        : [now.has(id) ? { path: [...path, id], value: now.get(id) } : { path: [...path, id], remove: true }]);
+    }
+    // Entry by entry, so a list whose entries are a rule's shape ("mode") is never compared as one rule.
+    return ids.flatMap((id) => modChanges(was.get(id), now.get(id), [...path, id], arrayKeys));
   }
   const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
-  if (isObject(before) && isObject(after) && before.mode === after.mode) {
-    return [...new Set([...Object.keys(before), ...Object.keys(after)])].flatMap((key) => modChanges(before[key], after[key], [...path, key], arrayKeys));
+  // A rule's `mode` is a string ("ladder"); a provider named "mode" in the providers switches holds a
+  // boolean, which once made the whole switch map one change and undid another tab's (2026-11-20 review).
+  const ruleMode = (value) => typeof modOwn(value, "mode") === "string" ? modOwn(value, "mode") : undefined;
+  if (isObject(before) && isObject(after) && ruleMode(before) === ruleMode(after)) {
+    return [...new Set([...Object.keys(before), ...Object.keys(after)])].flatMap((key) => modChanges(modOwn(before, key), modOwn(after, key), [...path, key], arrayKeys));
   }
   return [{ path, value: after }];
 }
+/** A field the object holds itself, never one its prototype answers for ("constructor", "toString"). */
+function modOwn(object, key) { return object !== null && typeof object === "object" && Object.hasOwn(object, key) ? object[key] : undefined; }
+/** Sets a field as the object's own, so a key named "__proto__" is stored and not taken as the prototype. */
+function modSetOwn(object, key, value) { Object.defineProperty(object, key, { value, writable: true, enumerable: true, configurable: true }); }
 /** Apply changed paths, resolving keyed-list path segments by their stable identity, not position. */
-function modApply(base, changes, arrayKeys = { modes: "id" }) {
+function modApply(base, changes, arrayKeys = { modes: "id", bandLimits: "provider" }) {
   const result = clone(base);
   for (const change of changes) {
     const key = change.path.at(-1);
@@ -5404,22 +5431,23 @@ function modApply(base, changes, arrayKeys = { modes: "id" }) {
     let arrayKey;
     for (const step of change.path.slice(0, -1)) {
       if (Array.isArray(parent)) {
-        let entry = parent.find((item) => item[arrayKey] === step);
-        if (!entry) { entry = { [arrayKey]: step }; parent.push(entry); }
+        let entry = parent.find((item) => item && item[arrayKey] === step);
+        if (!entry) { entry = {}; modSetOwn(entry, arrayKey, step); parent.push(entry); }
         parent = entry;
       } else {
-        arrayKey = arrayKeys[step];
-        if (!parent[step] || typeof parent[step] !== "object") parent[step] = arrayKey ? [] : {};
-        parent = parent[step];
+        arrayKey = modOwn(arrayKeys, step);
+        let next = modOwn(parent, step);
+        if (!next || typeof next !== "object") { next = arrayKey ? [] : {}; modSetOwn(parent, step, next); }
+        parent = next;
       }
     }
     if (Array.isArray(parent)) {
-      const index = parent.findIndex((entry) => entry[arrayKey] === key);
+      const index = parent.findIndex((entry) => entry && entry[arrayKey] === key);
       if (change.remove) { if (index >= 0) parent.splice(index, 1); }
       else if (index >= 0) parent[index] = clone(change.value);
       else parent.push(clone(change.value));
-    } else if (change.remove) delete parent[key];
-    else parent[key] = clone(change.value);
+    } else if (change.remove) { if (Object.hasOwn(parent, key)) delete parent[key]; }
+    else modSetOwn(parent, key, clone(change.value));
   }
   return result;
 }
@@ -5428,6 +5456,8 @@ function modAdopt(snapshot, drop) {
   const changes = !drop && modState.base && modState.settings ? modChanges(modState.base, modState.settings) : [];
   modState.base = modNormalize(snapshot.settings);
   modState.settings = modApply(modState.base, changes);
+  // Only this tab's own band choices can add a provider over the router's copy.
+  if (changes.some((change) => change.path[0] === "bandLimits")) modBandLimitsFit();
   modState.revision = Number(snapshot.revision) || 0;
   modState.compactAt = typeof snapshot.compactAt === "number" && Number.isFinite(snapshot.compactAt) ? snapshot.compactAt : null;
 }
@@ -6284,6 +6314,216 @@ function modCompactCard() {
   ])]);
 }
 
+// ---- Look: the band's limits row
+//
+// Which providers and accounts the band's limits row draws (settings `bandLimits`, 2026-11-19). The
+// providers and accounts listed are the ones /api/limits answered, the read the Status screen keeps
+// in limitsSnapshot and the mod draws the row from, so nothing here fetches. A choice is stored by
+// the provider's config name and each account's owner id, never its number: a number moves when an
+// account before it pauses. A provider with no entry keeps the band's own rule (its account in use,
+// else its first). The page never drops a stored id by itself: a paused account, one not read yet
+// since a restart and a removed one look the same from here, so an id goes only when it is unticked.
+
+/** The most accounts one choice keeps; the mod's normalization drops an entry's accounts past this. */
+const MOD_BAND_ACCOUNTS_MAX = 8;
+/**
+ * The most providers with a stored choice, and the longest provider name one can hold: the mod's
+ * normalization drops what is past them (settings.ts bandLimits), so the picker does not offer a
+ * choice that would save and then quietly fall back to the default.
+ */
+const MOD_BAND_PROVIDERS_MAX = 16;
+const MOD_BAND_PROVIDER_NAME_MAX = 64;
+/** Each stored choice's name; the default's depends on the provider's accounts (modBandLimitsChoices). */
+const MOD_BAND_LABELS = { all: "mod.bandLimitsAll", accounts: "mod.bandLimitsChoose", off: "mod.bandLimitsOff" };
+
+/**
+ * After this tab's unsaved choices are laid over the router's copy (modAdopt): two tabs that each
+ * added a different provider at fifteen stored would send seventeen, and the router's normalization
+ * would drop the last one without a word (2026-11-20 review). The router's own entries stay; this
+ * tab's additions past the cap are taken back before the PUT, and the owner is told which.
+ */
+function modBandLimitsFit() {
+  const list = Array.isArray(modState.settings.bandLimits) ? modState.settings.bandLimits : [];
+  if (list.length <= MOD_BAND_PROVIDERS_MAX) return;
+  const saved = new Set((Array.isArray(modState.base.bandLimits) ? modState.base.bandLimits : []).map((item) => item && item.provider));
+  const dropped = new Set();
+  for (let at = list.length - 1; at >= 0 && list.length - dropped.size > MOD_BAND_PROVIDERS_MAX; at--) {
+    const provider = list[at] && list[at].provider;
+    if (typeof provider === "string" && !saved.has(provider)) dropped.add(provider);
+  }
+  if (!dropped.size) return;
+  modState.settings = { ...modState.settings, bandLimits: list.filter((item) => !(item && dropped.has(item.provider))) };
+  toast(t("mod.bandLimitsFull", { max: MOD_BAND_PROVIDERS_MAX, providers: [...dropped].reverse().map((provider) => providerDisplayName(provider)).join(", ") }), true);
+}
+
+/** Whether the read gave an account an owner id: only those can be picked one by one (OpenCode Go and MiniMax keys have none). */
+function modBandLimitsHasId(account) { return Boolean(account) && typeof account.id === "string" && account.id !== ""; }
+
+/**
+ * What the picker draws from, so a read that brings the same providers and accounts redraws nothing.
+ * The number and `sameAs` are in it too: a name falls back to the number, and a stored copy leaving
+ * the login's row changes which boxes are ticked (2026-11-19 review).
+ */
+function modBandLimitsSig() {
+  if (!limitsSnapshot || !Array.isArray(limitsSnapshot.providers)) return "none";
+  return JSON.stringify(limitsSnapshot.providers.map((entry) => [entry.provider, entry.type, entry.title,
+    (Array.isArray(entry.accounts) ? entry.accounts : []).map((account) => [modBandLimitsHasId(account) ? account.id : null, account.account,
+      Array.isArray(account.sameAs) ? account.sameAs : [], account.label || account.email || "", account.inUse === true])]));
+}
+
+/** The providers the read listed, in its order; two that share a title take their config name after it ("GPT · work"). */
+function modBandLimitsProviders() {
+  const listed = limitsSnapshot && Array.isArray(limitsSnapshot.providers) ? limitsSnapshot.providers.filter((entry) => entry && typeof entry.provider === "string") : [];
+  const titleOf = (entry) => entry.title || providerDisplayName(entry.provider);
+  return listed.map((entry) => {
+    const title = titleOf(entry);
+    const twin = listed.some((other) => other !== entry && titleOf(other) === title);
+    return { ...entry, accounts: Array.isArray(entry.accounts) ? entry.accounts : [], name: twin ? `${title} · ${entry.provider}` : title };
+  });
+}
+
+/**
+ * The choices a provider offers, by what the read gave it: accounts with owner ids can be picked one
+ * by one, several keys without ids only show all or the first, and a lone account shows or hides. A
+ * provider the read no longer lists offers only the default. A stored choice that is not offered (a
+ * provider down to one account) is listed too, marked, so the setting on file always shows.
+ */
+function modBandLimitsChoices(entry, shown) {
+  const ids = entry.accounts.filter(modBandLimitsHasId).length;
+  const several = entry.accounts.length >= 2;
+  const stored = Array.isArray(modState.settings.bandLimits) ? modState.settings.bandLimits : [];
+  const full = shown === "default" && stored.length >= MOD_BAND_PROVIDERS_MAX;
+  const values = entry.orphan || full || entry.provider.length > MOD_BAND_PROVIDER_NAME_MAX ? ["default"] : ids >= 2 ? ["default", "all", "accounts", "off"] : several ? ["default", "all", "off"] : ["default", "off"];
+  // The band's own rule picks among several accounts: the one in use, else the first with a reading
+  // (bandLimitGroups), whose figures may be a second key's. "Auto" claims neither, and the section's
+  // hint says the rule (2026-11-20 review: "First key" could show the second key's quota).
+  const first = several ? "mod.bandLimitsAuto" : "mod.bandLimitsShow";
+  const label = (value) => value === "default" ? t(first) : Object.hasOwn(MOD_BAND_LABELS, value) ? t(MOD_BAND_LABELS[value]) : String(value);
+  const choices = values.map((value) => ({ value, label: label(value) }));
+  if (!values.includes(shown)) choices.push({ value: shown, label: `${label(shown)}${t("mod.unavailable")}` });
+  return choices;
+}
+
+/** Stores one provider's choice in place, or with null takes its entry out: the default is no entry at all. */
+function modBandLimitsPut(provider, choice) {
+  const list = Array.isArray(modState.settings.bandLimits) ? modState.settings.bandLimits : [];
+  const rest = list.filter((item) => item.provider !== provider);
+  if (!choice) { modPatch({ bandLimits: rest }); return; }
+  modPatch({ bandLimits: rest.length < list.length ? list.map((item) => item.provider === provider ? choice : item) : [...list, choice] });
+}
+
+/**
+ * The checklist's account names: the Status screen's (limitsAccountName), and where two read the
+ * same (two keys labelled alike), each leads with its number as the model picker's account names do
+ * (modAccountNames), the pane's number (index + 1), so no two boxes read the same (2026-11-20 review).
+ */
+function modBandLimitsNames(entry, accounts) {
+  let names = accounts.map((account) => limitsAccountName(entry, account));
+  for (let pass = 0; pass <= accounts.length; pass += 1) {
+    const seen = new Map();
+    for (const name of names) seen.set(name.toLowerCase(), (seen.get(name.toLowerCase()) || 0) + 1);
+    const clash = (name, at) => seen.get(name.toLowerCase()) > 1 && Number.isInteger(accounts[at].account);
+    if (!names.some(clash)) break;
+    names = names.map((name, at) => clash(name, at) ? `${accounts[at].account + 1} · ${name}` : name);
+  }
+  return names;
+}
+
+/** A pick on a provider's row. Choosing accounts starts from the account in use, else the first, so the row is never empty the moment it is picked. */
+function modBandLimitsPick(entry, value) {
+  if (value === "default") { modBandLimitsPut(entry.provider, null); return; }
+  if (value !== "accounts") { modBandLimitsPut(entry.provider, { provider: entry.provider, show: value }); return; }
+  const seed = entry.accounts.find((account) => account.inUse === true && modBandLimitsHasId(account)) || entry.accounts.find(modBandLimitsHasId);
+  if (seed) modBandLimitsPut(entry.provider, { provider: entry.provider, show: "accounts", accounts: [seed.id] });
+}
+
+/**
+ * The accounts of a provider whose row is set to chosen ones, as the models list ticks its models:
+ * every account the read gave an id, then each stored id it did not list, still ticked and marked
+ * unavailable. The last tick cannot go off (no accounts would be the provider hidden, which has its
+ * own choice), nor can the last tick of an account the read listed while unavailable ones stay
+ * ticked: those draw nothing, so the row would be as good as hidden. No more than
+ * MOD_BAND_ACCOUNTS_MAX go on.
+ */
+function modBandLimitsChecklist(entry, chosen) {
+  const picked = Array.isArray(chosen.accounts) ? chosen.accounts : [];
+  const listed = entry.accounts.filter(modBandLimitsHasId);
+  // An account answers to its own id and, on Claude's login row, to the stored copies of it the
+  // router hides there (`sameAs`): a stored account picked before the app logged into it stays ticked.
+  const idsOf = (account) => [account.id, ...(Array.isArray(account.sameAs) ? account.sameAs.filter((id) => typeof id === "string") : [])];
+  const names = modBandLimitsNames(entry, listed);
+  const rows = [
+    ...listed.map((account, at) => ({ id: account.id, ids: idsOf(account), name: names[at], inUse: account.inUse === true, listed: true })),
+    // A stored id the read does not list (paused, removed, not read since a restart) stays on file and
+    // ticked, but never counts as an account the row can draw.
+    ...picked.filter((id) => !listed.some((account) => idsOf(account).includes(id))).map((id) => ({
+      id, ids: [id], name: `${id === "current" ? t("providers.anthropicCurrentLogin") : id.slice(0, 8)}${t("mod.unavailable")}`, inUse: false, listed: false,
+    })),
+  ];
+  const isOn = (row) => row.ids.some((id) => picked.includes(id));
+  const ticked = rows.filter(isOn).length;
+  const tickedListed = rows.filter((row) => row.listed && isOn(row)).length;
+  const box = (row) => {
+    const on = isOn(row);
+    const input = el("input", { type: "checkbox", "data-key": `band-account:${entry.provider}:${row.id}`, "aria-label": `${row.name} · ${entry.name}`, checked: on });
+    if (on ? ticked === 1 || (row.listed && tickedListed === 1) : picked.length >= MOD_BAND_ACCOUNTS_MAX) input.disabled = true;
+    const others = picked.filter((id) => !row.ids.includes(id));
+    input.addEventListener("change", () => modBandLimitsPut(entry.provider, {
+      provider: entry.provider, show: "accounts", accounts: input.checked ? [...others, row.id] : others,
+    }));
+    return el("label", { class: "model-check" }, [input, el("span", { text: row.name }), row.inUse ? el("span", { class: "model-effort-tag", text: t("limits.active") }) : null]);
+  };
+  return el("div", { class: "tick-group" }, [el("div", { class: "model-checklist" }, rows.map(box))]);
+}
+
+/**
+ * One row per provider the read listed, then one per stored provider it did not (renamed, limits off,
+ * not read yet), so that choice can still be put back. Before any read has landed, or when none
+ * could, the stored choices are drawn that way under the note (2026-11-20 review: they could not be
+ * reset until a read came in).
+ */
+function modBandLimitsRows() {
+  const none = el("div", { class: "cell-note", text: t("mod.bandLimitsNone") });
+  const stored = Array.isArray(modState.settings.bandLimits) ? modState.settings.bandLimits.filter((item) => item && typeof item.provider === "string") : [];
+  const providers = modBandLimitsProviders();
+  const orphans = stored.filter((item) => !providers.some((entry) => entry.provider === item.provider))
+    .map((item) => ({ provider: item.provider, accounts: [], orphan: true, name: `${providerDisplayName(item.provider)}${t("mod.unavailable")}` }));
+  const rows = providers.length ? [] : [none];
+  for (const entry of [...providers, ...orphans]) {
+    const chosen = stored.find((item) => item.provider === entry.provider);
+    const shown = chosen ? chosen.show : "default";
+    const head = el("span", { class: "cell-label tick-name" }, [vendorDot(entry.provider, providerEntry(entry.provider)), el("span", { text: entry.name })]);
+    rows.push(cell(head, modSegmented(`band-limits:${entry.provider}`, modBandLimitsChoices(entry, shown), shown, entry.name, (value) => modBandLimitsPick(entry, value)), null, "wide"));
+    if (shown === "accounts") rows.push(modBandLimitsChecklist(entry, chosen));
+  }
+  return rows;
+}
+
+/**
+ * The Look card's section for the limits row. It carries what it was drawn from, so a limits read
+ * that lands every few seconds redraws it only when that changed (modBandLimitsRedraw).
+ */
+function modBandLimitsSection() {
+  // What the choice reaches and what it does not (2026-11-20 review): the row and its compact Claude
+  // figure; the whole row goes with the Look card's Limits switch, one provider's figures with its own.
+  const hint = t("mod.bandLimitsHint", { auto: t("mod.bandLimitsAuto"), off: t("mod.bandLimitsOff"), limits: t("mod.part.limits"), show: t("mod.show"), switch: t("providers.limits"), providers: t("nav.providers") });
+  const section = modSection(t("mod.bandLimits"), modBandLimitsRows(), [hint]);
+  section.setAttribute("id", "mod-band-limits");
+  section.setAttribute("data-sig", modBandLimitsSig());
+  return section;
+}
+
+/** After a limits read: redraws the picker alone, and only when the providers or accounts it lists changed, keeping focus on the control that had it. */
+function modBandLimitsRedraw() {
+  const box = modState.settings ? $("#mod-band-limits") : null;
+  if (!box) return;
+  const sig = modBandLimitsSig();
+  if (box.getAttribute("data-sig") === sig) return;
+  box.setAttribute("data-sig", sig);
+  modRedraw(box, [...modBandLimitsSection().children]);
+}
+limitsReadDone = modBandLimitsRedraw;
+
 function modLookCard() {
   const s = modState.settings;
   const languages = [{ value: "auto", label: t("mod.auto") }, ...MOD_LANGUAGES.map(([value, label]) => ({ value, label }))];
@@ -6305,6 +6545,8 @@ function modLookCard() {
         return cell(t(`mod.part.${part}`), modSwitch(`part:${part}`, shown, t(`mod.part.${part}`), (on) => modPatch({ extras: on ? [...extras, part] : extras.filter((entry) => entry !== part) })));
       }),
     ]),
+    // Only while the band shows limits at all; switching them off keeps the stored choice for when they are back.
+    (s.extras || []).includes("limits") ? modBandLimitsSection() : null,
   ]);
 }
 

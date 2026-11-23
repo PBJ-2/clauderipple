@@ -14,7 +14,7 @@ import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom,
 import type { QuotaWindow } from './modes'
 import type { Spawn, WorkerFix } from './worker'
 import { afterPing, cacheMemoryKey, CACHE_MEMORY_PREFIX, laterMemo, liveContextTokens, nextMemo, restoreFromResume, savedMemory, shouldPing, staleMemory, warmWillHold } from './cache'
-import { HEAVY_PERCENT, bandPriority, claudeLimitsFrom, claudeScopedFrom, coldAlert, contextWindow, countsPrecisely, modelCompactWindow, hotAlert, hottest, hotWindowMoved, keptAlert, costFromSummary, localMidnight, routerLimitItems, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
+import { CLAUDE_PROVIDERS_MAX, HEAVY_PERCENT, bandPriority, claudeLimitsFrom, claudeProvidersFrom, claudeScopedFrom, coldAlert, contextWindow, countsPrecisely, modelCompactWindow, hotAlert, hottest, hotWindowMoved, keptAlert, costFromSummary, localMidnight, routerLimitItems, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
 import type { ScopedLimit } from './session'
 import { QUICK_PROMPT, wrapForNewChat } from './handoff'
 import { APPROVAL_BODY_CAP, APPROVAL_FRESH_MARGIN_MS, APPROVAL_FRESH_MS, askId, decisionOf, heldReply, holdable } from './approval'
@@ -71,6 +71,8 @@ const compactAt = atom({ plugin: 'ripple', key: 'compactAt' } as const, null as 
 const hot = atom({ plugin: 'ripple', key: 'hot' } as const, null)
 const limit = atom({ plugin: 'ripple', key: 'limit' } as const, null)
 const limits = atom({ plugin: 'ripple', key: 'limits' } as const, null)
+/** The router's Claude providers by config name, every one its answers have listed (noteClaudeProviders). */
+const limitsClaude = atom({ plugin: 'ripple', key: 'limitsClaude' } as const, [] as string[])
 /** What requests cost at API prices, today and over the last seven days, as the router last answered (refreshCost). */
 const cost = atom({ plugin: 'ripple', key: 'cost' } as const, null as { today: CostSummary | null; week: CostSummary | null } | null)
 const hotHidden = atom({ plugin: 'ripple', key: 'hotHidden' } as const, null)
@@ -785,7 +787,10 @@ async function workerFix($: EngineInterface, spawn: Spawn): Promise<WorkerFix | 
 async function availability($: EngineInterface): Promise<boolean> {
   try {
     const status = await $.http.fetch(`${await adminUrl($)}/api/status`)
-    return status.ok ? chatgptUsable(JSON.parse(status.text)) : true
+    if (!status.ok) return true
+    const body: unknown = JSON.parse(status.text)
+    await noteClaudeProviders($, body)
+    return chatgptUsable(body)
   } catch (error) { await report($, 'availability unknown', error); return true }
 }
 async function refreshModels($: EngineInterface): Promise<void> {
@@ -1382,8 +1387,24 @@ async function openClear($: EngineInterface): Promise<void> {
 async function routerClaudeLimits($: EngineInterface): Promise<SessionRateLimit[]> {
   try {
     const status = await $.http.fetch(`${await adminUrl($)}/api/status`)
-    return status.ok ? claudeLimitsFrom(JSON.parse(status.text), await $.clock.now()) : []
+    if (!status.ok) return []
+    const body: unknown = JSON.parse(status.text)
+    await noteClaudeProviders($, body)
+    return claudeLimitsFrom(body, await $.clock.now())
   } catch (error) { await report($, 'claude limits', error); return [] }
+}
+/**
+ * Keeps the names of the router's Claude providers an answer lists (session.ts claudeProvidersFrom)
+ * with those already kept: the limits stop listing a provider once none of its accounts is read (its
+ * only account paused), and a bandLimits choice for it must still hide the host's Claude reading
+ * (view.ts bandClaudeLimit, 2026-11-20). A name is never dropped; one that only repeats what is kept
+ * writes nothing, so a poll that learns nothing redraws nothing.
+ */
+async function noteClaudeProviders($: EngineInterface, body: unknown): Promise<void> {
+  const seen = claudeProvidersFrom(body)
+  const held = await read($, limitsClaude)
+  if (seen.every(name => held.includes(name))) return
+  await update($, limitsClaude, () => [...seen, ...held.filter(name => !seen.includes(name))].slice(0, CLAUDE_PROVIDERS_MAX))
 }
 /** The router's figures for the Claude login (5-hour, weekly, per-model weeklies), at most one
  * status lookup a minute and only while the limits row can show them; a failure keeps the last
@@ -1448,6 +1469,32 @@ async function fallbackLimits($: EngineInterface): Promise<LimitItem[]> {
  * limits row for that minute (2026-10-22).
  */
 let limitsAt = 0
+/** The bandLimits provider names this process has already looked up in `/api/status` (learnChosenProviders). */
+const statusAsked = new Set<string>()
+/**
+ * A bandLimits choice can name a provider the limits do not list (its only account paused) and no
+ * answer has named as Claude's yet: in a fresh process nothing has, and a Claude provider with a name
+ * of its own then let the host's Claude reading through under Hide (second review, 2026-11-20). One
+ * `/api/status` read, which lists every configured provider with its type, settles each such name;
+ * a name is asked about once per process, so a non-Claude one costs one read, not one a minute.
+ */
+async function learnChosenProviders($: EngineInterface, admin: string, items: readonly LimitItem[]): Promise<void> {
+  const listed = new Set(items.map(item => item.provider))
+  const held = await read($, limitsClaude)
+  const unknown = (await currentSettings($)).bandLimits.map(choice => choice.provider)
+    .filter(name => !listed.has(name) && !held.includes(name) && !statusAsked.has(name))
+  if (!unknown.length) return
+  for (const name of unknown) statusAsked.add(name)
+  try {
+    const status = await $.http.fetch(`${admin}/api/status`)
+    if (!status.ok) throw new Error(`HTTP ${status.status}`)
+    await noteClaudeProviders($, JSON.parse(status.text))
+  } catch (error) {
+    // A read that failed settled nothing: the next minute's refresh asks again.
+    for (const name of unknown) statusAsked.delete(name)
+    await report($, 'claude providers', error)
+  }
+}
 async function refreshLimits($: EngineInterface): Promise<void> {
   if (!(await currentSettings($)).extras.includes('limits')) return
   const now = await $.clock.now()
@@ -1456,8 +1503,12 @@ async function refreshLimits($: EngineInterface): Promise<void> {
     const admin = await adminUrl($)
     const response = await $.http.fetch(`${admin}/api/limits`)
     let items: LimitItem[] | null = null
-    if (response.ok) items = routerLimitItems(JSON.parse(response.text), now)
-    else if (response.status === 404) items = await fallbackLimits($)
+    if (response.ok) {
+      const body: unknown = JSON.parse(response.text)
+      items = routerLimitItems(body, now)
+      await noteClaudeProviders($, body)
+      await learnChosenProviders($, admin, items)
+    } else if (response.status === 404) items = await fallbackLimits($)
     if (!items) return
     limitsAt = now
     if (!same(items, await read($, limits))) await update($, limits, () => items)
@@ -2083,11 +2134,12 @@ async function dashboard($: EngineInterface, working: boolean): Promise<Dashboar
     context: await read($, context), cache: await read($, cache), warm: { ...w, on: await keepWarmOn($, s), ...(await read($, warmHere) !== null ? { here: true } : {}) },
     limit: l ? { ...l, save: saving } : null, route: record ? routeOf(record) : null, notice: await read($, line),
     limits: await read($, limits) ?? [],
+    claudeProviders: await read($, limitsClaude),
     auto: s.effortAuto,
     agents: counts,
     compactions: await read($, compactions),
     logOpen: await read($, logOpen), agentsOpen: await read($, agentsOpen), effortMenu: await read($, effortMenuOpen),
-    hide: s.hide, extras: s.extras, isWorking: working,
+    hide: s.hide, extras: s.extras, bandLimits: s.bandLimits, isWorking: working,
     ...(activeModeOf(s) ? { mode: activeModeOf(s)!.name } : {}),
     ...(pinned ? { delegationPin: titleName(pinned.model, await read($, routerModels)), ...(pinned.said ? { delegationSaid: pinned.said } : {}) } : {}),
   }

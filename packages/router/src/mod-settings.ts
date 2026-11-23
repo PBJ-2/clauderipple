@@ -16,6 +16,14 @@ export const COMPACT_AT_MIN = 100_000;
 export const COMPACT_AT_MAX = 1_000_000;
 export type { ModSettingsSnapshot };
 
+/**
+ * Settings a mod loaded before they existed saves without: normalization would read the absent key
+ * as the default and undo the owner's choice, so a save that leaves one out keeps the stored value
+ * (`idleCompact`, then `bandLimits` 2026-11-19). A present key, [] included, replaces it. The admin
+ * PUT handler drops the same keys after it normalizes, so both halves see the absence.
+ */
+export const KEPT_WHEN_ABSENT = ["idleCompact", "bandLimits"] as const;
+
 export class ModSettingsInputError extends Error {
   readonly status: number;
   constructor(message: string, status = 400) { super(message); this.status = status; }
@@ -275,9 +283,11 @@ export function writeModSettings(body: unknown, home = homeDir()): ModSettingsWr
     const current = readModSettings(home);
     if (expected !== undefined && expected !== current.revision) return { stale: true, current };
     if (current.revision === Number.MAX_SAFE_INTEGER) throw new Error("mod settings revision exhausted");
-    // A mod loaded before `idleCompact` existed saves without the key; normalization would read that
-    // as the default (true) and undo the user's choice, so an absent key keeps the stored value.
-    if (!Object.hasOwn(body.settings as Record<string, unknown>, "idleCompact")) settings.idleCompact = current.settings.idleCompact;
+    // A mod loaded before one of these existed saves without the key; normalization would read that
+    // as the default and undo the user's choice, so an absent key keeps the stored value.
+    for (const key of KEPT_WHEN_ABSENT) {
+      if (!Object.hasOwn(body.settings as Record<string, unknown>, key)) Object.assign(settings, { [key]: current.settings[key] });
+    }
     // `compactAt` is reported in the answer but never stored here: settings.json is its one home.
     const next: ModSettingsSnapshot = { settings, revision: current.revision + 1, stored: true, compactAt: readAutoCompactWindow() };
     if (current.stored) backupModSettings(file, current.revision);

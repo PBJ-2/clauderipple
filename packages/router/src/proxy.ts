@@ -667,6 +667,8 @@ export class Proxy {
     this.claudeUsage = new ClaudeUsage(this.claudeAccounts, {
       upstream: () => this.deps.config().upstream,
       warn: (message) => deps.log.warn(message),
+      // Called only once an answer arrives, by when the identity lookup below exists.
+      loginOf: (key) => this.claudeIdentity.cachedFor(key)?.subjectHash ?? null,
     });
     this.claudeModels = new ClaudeModelCatalog(this.claudeAccounts, {
       upstream: () => this.deps.config().upstream,
@@ -2194,13 +2196,14 @@ export class Proxy {
             // (issue #123, 2026-11-05). A message answer also states its window usage in the
             // unified limit headers, the only reading available while the usage endpoint refuses.
             this.claudeAccounts.noteAnswer(penalised.id, status);
-            this.claudeUsage.observeAnswer(penalised.id.split(":", 1)[0]!, upRes.headers);
+            // The headers it went out with say which login the reading is (the limits' `sameAs`, 2026-11-20).
+            this.claudeUsage.observeAnswer(penalised.id.split(":", 1)[0]!, upRes.headers, chosen?.headers);
           }
         } else if (ownLogin) {
           // No pool credential answered: the app's own login did. Its unified limit headers are the
           // only fresh reading of that account while GET /api/oauth/usage refuses; without them the
           // current login's card kept an old number through the whole backoff (2026-11-05).
-          this.claudeUsage.observeAnswer("current", upRes.headers);
+          this.claudeUsage.observeAnswer("current", upRes.headers, loginHeaders(req.headers));
         }
 
         // The API refused an image (too big, unreadable, wrong type) in a turn that carried the phone's
