@@ -301,11 +301,11 @@ function holdingQuery(users: string[]) {
 }
 
 /** No listener, real SDK, router, credentials or desktop sessions; only owned temporary storage. */
-async function memoryHost(t: TestContext, queryFn: QueryFn = scriptedQuery().queryFn, status = router.status) {
+async function memoryHost(t: TestContext, queryFn: QueryFn = scriptedQuery().queryFn, status = router.status, log?: (line: string) => void) {
   t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1_000_000 });
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-memory-host-"));
   const sessions = new Sessions({ dir, router: { ...router, status }, permissions: PermissionQueue.open(path.join(dir, "permissions.json")), queryFn,
-    onEvent: () => {}, onSessions: () => {} });
+    ...(log ? { log } : {}), onEvent: () => {}, onSessions: () => {} });
   const server = new HostServer({ listen: "127.0.0.1", port: 0, token, webDir, sessions, router,
     hostName: "test", version: "test", recentCli: async () => [] });
   const peer = new MemoryPeer();
@@ -445,10 +445,12 @@ test("a send racing Stop receives a correlated error, then its retry is acknowle
   assert.deepEqual(users, ["first", "keep this"]);
 });
 
-for (const mode of ["rejects", "never answers"] as const) test(`Stop ends the turn and the phone stays connected when the CLI's interrupt ${mode} (#162)`, async t => {
+for (const mode of ["rejects", "never answers"] as const) test(`Stop waits for the CLI itself and the phone stays connected when the CLI's interrupt ${mode} (#162)`, async t => {
   const endTurn = Promise.withResolvers<void>();
+  const answer = Promise.withResolvers<void>();
   const users: string[] = [];
   const closed: number[] = [];
+  const lines: string[] = [];
   let interrupts = 0, queries = 0;
   const f = await memoryHost(t, params => {
     const generation = ++queries;
@@ -460,24 +462,38 @@ for (const mode of ["rejects", "never answers"] as const) test(`Stop ends the tu
           yield { type: "result", subtype: "success" };
         }
       },
-      interrupt: () => { interrupts++; return mode === "rejects" ? Promise.reject(new Error("CLI is gone")) : new Promise<void>(() => {}); },
+      interrupt: () => { interrupts++; return mode === "rejects" ? Promise.reject(new Error("CLI is gone")) : answer.promise; },
       setModel: async () => {}, setPermissionMode: async () => {},
       close: () => { closed.push(generation); endTurn.resolve(); },
     };
-  });
+  }, undefined, line => lines.push(line));
   await f.sessions.send(f.id, "first", "first");
   await nextTick();
   assert.equal(f.sessions.summaryOf(f.id)?.state, "running");
   f.peer.receive({ t: "interrupt", session: f.id, reqId: "stop" });
-  // A silent CLI is given its bound (the clock is mocked); a refusing one answers at once.
-  for (let i = 0; i < 50 && !f.peer.frames.some(frame => frame.t === "res"); i++) { await nextTick(); t.mock.timers.tick(10_000); }
+  await nextTick();
+  assert.ok(lines.some(line => /stop: asking the CLI to interrupt/.test(line)));
+  if (mode === "never answers") {
+    // A CLI that is slow to answer is waited for, however long: closing it early would let the next send
+    // start a second writer on the same transcript. The log says so after 10 s.
+    t.mock.timers.tick(10_000);
+    assert.ok(lines.some(line => /the CLI has not answered the interrupt after 10000 ms; still waiting for it/.test(line)));
+    t.mock.timers.tick(600_000);
+    await nextTick();
+    assert.equal(f.peer.frames.some(frame => frame.t === "res"), false, "Stop is still pending");
+    assert.deepEqual(closed, [], "the CLI was not dropped");
+    assert.equal(queries, 1, "and no second query was started");
+    assert.equal(f.sessions.summaryOf(f.id)?.state, "running");
+    answer.resolve();
+  }
   const stopped = await f.peer.take("res");
   assert.equal(stopped.reqId, "stop");
-  // A refusal still reaches the phone as the error it is; silence past the bound counts as stopped.
+  // A refusal still reaches the phone as the error it is; an answer is a stop.
   assert.equal(stopped.ok, mode !== "rejects");
   if (!stopped.ok) assert.equal(stopped.error, "CLI is gone");
   assert.equal(interrupts, 1);
-  assert.deepEqual(closed, [1], "the CLI that would not answer is closed");
+  assert.ok(lines.some(line => mode === "rejects" ? /stop: the CLI refused the interrupt \(CLI is gone\); closing it/.test(line) : /stop: interrupted after \d+ ms/.test(line)));
+  assert.deepEqual(closed, [1], "the CLI is closed once its interrupt has been answered or refused");
   assert.equal(f.sessions.summaryOf(f.id)?.state, "idle");
   assert.equal(f.sessions.log(f.id).tail().events.some(e => e.kind === "notice" && e.code === "interrupted"), mode !== "rejects");
   // The connection survived, and the session takes its next message on a fresh query.
@@ -486,6 +502,7 @@ for (const mode of ["rejects", "never answers"] as const) test(`Stop ends the tu
   await f.sessions.send(f.id, "second", "second");
   for (let i = 0; i < 50 && users.length < 2; i++) await nextTick();
   assert.deepEqual(users, ["first", "second"]);
+  assert.equal(queries, 2);
 });
 
 test("attachment upload is chunked, checks offsets, and sends image blocks", async t => {

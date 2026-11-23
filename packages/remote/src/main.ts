@@ -135,8 +135,8 @@ async function runHost(): Promise<void> {
   if (!process.stdout.isTTY) stampLines(process.stdout);
   if (!process.stderr.isTTY) stampLines(process.stderr);
   const log = (line: string): void => { process.stderr.write(`${line}\n`); };
-  // A rejection nobody awaited is logged and the host keeps running; an uncaught exception is logged
-  // and exits non-zero so the supervisor relaunches it (launchd KeepAlive, the Windows launcher loop).
+  // A rejection nobody awaited and an uncaught exception are both logged with their stack and exit
+  // non-zero, so the supervisor relaunches the host (launchd KeepAlive, the Windows launcher loop).
   installCrashHandlers(process, { log, exit: code => process.exit(code), context: () => ` [${VERSION}, up ${Math.round(process.uptime())}s]` });
   applyProcessPriority(new ConfigStore(routerConfigPath()).get().processPriority, { log });
   // The desktop registry needs the process list to tell a live Claude app session from a closed one

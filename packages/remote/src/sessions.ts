@@ -164,8 +164,6 @@ export interface SessionsOptions {
   environmentWaitMs?: number;
   environmentPollMs?: number;
   environmentModeMs?: number;
-  /** Test boundary: how long Stop waits for the CLI's interrupt answer (default 10 s). */
-  interruptMs?: number;
   modOfferMs?: number;
   modResultMs?: number;
   /** How long a claimed slash command may run before the host stops waiting for its result (default 15 minutes). */
@@ -366,8 +364,8 @@ function alwaysSummary(updates: readonly AlwaysUpdate[]): string {
 type LaneToken = { check(): void };
 /** How long one lane item may hold the items behind it, counted from when it starts. */
 const LANE_ITEM_MS = 15_000;
-/** How long Stop waits for the CLI to answer an interrupt before it closes the CLI instead. */
-const INTERRUPT_MS = 10_000;
+/** After this long without the CLI's answer to an interrupt, Stop writes a "still waiting" log line (it never gives up). */
+const STOP_SLOW_MS = 10_000;
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 function sendFingerprint(text: string, attachments: Attachment[]): string {
   return digest({ text, attachments: attachments.map(a => [a.name, a.mediaType, a.blob.length]) });
@@ -3383,30 +3381,25 @@ export class Sessions {
   }
 
   /**
-   * The CLI's answer to an interrupt, bounded. A CLI that died or hung never answers, and Stop must
-   * still end the turn: silence past the bound is logged and treated as stopped, a refusal is logged
-   * and still reaches the caller, and either way the caller closes the query (#162, Stop
-   * disconnected the phone on a Windows host).
+   * The CLI's answer to an interrupt, logged, never cut short. Stop waits for the CLI itself: dropping
+   * the query before the CLI has exited lets the next send start a second writer on the same
+   * transcript. A CLI that has not answered after STOP_SLOW_MS is named in the log (still waiting), so
+   * a Stop that hangs is visible; a refusal is logged and still reaches the caller (#162).
    */
   private async interruptQuery(id: string, live: Live): Promise<void> {
     const log = this.opts.log ?? console.error;
     const label = `[session ${id.slice(0, 8)}]`;
-    const limit = this.opts.interruptMs ?? INTERRUPT_MS;
     const startedAt = this.now();
     log(`${label} stop: asking the CLI to interrupt`);
-    const timer = Promise.withResolvers<"silent">();
-    const handle = setTimeout(() => timer.resolve("silent"), limit);
+    const slow = setTimeout(() => log(`${label} stop: the CLI has not answered the interrupt after ${STOP_SLOW_MS} ms; still waiting for it`), STOP_SLOW_MS);
+    slow.unref?.();
     try {
-      const outcome = await Promise.race([
-        Promise.resolve().then(() => live.query.interrupt()).then(() => "answered" as const),
-        timer.promise,
-      ]);
-      if (outcome === "silent") log(`${label} stop: the CLI did not answer an interrupt within ${limit} ms; closing it`);
-      else log(`${label} stop: interrupted after ${this.now() - startedAt} ms`);
+      await live.query.interrupt();
+      log(`${label} stop: interrupted after ${this.now() - startedAt} ms`);
     } catch (error) {
       log(`${label} stop: the CLI refused the interrupt (${error instanceof Error ? error.message : String(error)}); closing it`);
       throw error;
-    } finally { clearTimeout(handle); }
+    } finally { clearTimeout(slow); }
   }
 
   private sessionLanes = new Map<string, Promise<void>>();
