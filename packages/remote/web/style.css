@@ -255,7 +255,6 @@ button.sec:active { background: var(--surface-2); }
 .foot { font-size: 12.5px; color: var(--muted); display: flex; align-items: center; gap: 6px; margin-top: -6px; }
 .foot.bad { color: var(--bad); }
 .notice { align-self: center; font-size: 13px; color: var(--muted); background: var(--surface-2); padding: 5px 12px; border-radius: 99px; text-align: center; max-width: 92%; }
-.notice.lines { white-space: pre-line; border-radius: 14px; padding: 8px 14px; overflow-wrap: anywhere; user-select: text; }
 /* A session command: what happened to the conversation, not what somebody said. */
 .notice.control { display: inline-flex; align-items: center; gap: 6px; }
 .notice.control .ic { color: var(--muted); }

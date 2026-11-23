@@ -76,8 +76,9 @@ router's observed login. Sending through the bridge from the VM put the message 
 session's transcript under its uuid and the session answered. Ported: the live-session check and the
 bridge login (`desktop.ts`, `bridge-client.ts`, `processes.ts`'s cached snapshot). Ported since: handoff
 (`conhost.exe --headless`, `src/handoff.ts`) and the desktop sidebar (`windowsSidebarRoot`, `src/sidebar.ts`).
-Still macOS-only: away detection (`src/away.ts`). Linux has no Claude app to hand off to; see
-ARCHITECTURE.md section 10.
+Still macOS-only: away detection (`src/away.ts`). Linux has no Claude app to hand off to: the phone
+is told once that the session is not in the desktop app and keeps working (no `claude --resume`
+command, which would be a second writer); see ARCHITECTURE.md section 10.
 Verify in the Parallels VM (prlctl exec).
 
 ## Acceptance

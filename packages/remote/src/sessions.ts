@@ -24,7 +24,7 @@ import { firstSentence, STATUS_CAP } from "./wrap-up.ts";
 import { DesktopSidebar, PHONE_GROUP, type SidebarOptions } from "./sidebar.ts";
 import { BridgeAuthError, BridgeClient, bridgeCreateNotCreated, bridgeWriteUnknown, CLI_NOT_LOGGED_IN, CodedError, DESKTOP_BLOCKED, DESKTOP_BUSY, DESKTOP_BUSY_NOW, DESKTOP_MOD_OFFLINE, DESKTOP_MOD_OFFLINE_SEND, DESKTOP_WAITING, DesktopBlockedError, DesktopBusyError, isLoginRefusal, object, permissionSuppression, slashCommands, type BridgeFrame } from "./bridge-client.ts";
 import { APPROVAL_LOCAL_REASON, APPROVAL_WAIT_MS, Approvals, type ApprovalAnswer, type ApprovalState } from "./mod-approval.ts";
-import { resumeCommand, type HandoffRunner } from "./handoff.ts";
+import type { HandoffRunner } from "./handoff.ts";
 import { isDirectory, macConsent, readableFolder } from "./folders.ts";
 import { readJson, writeFileAtomic } from "./fsutil.ts";
 import { createWorktree } from "./worktree.ts";
@@ -3976,13 +3976,21 @@ export class Sessions {
   /**
    * Without a handoff runner (Linux, or no Claude Code found) no Claude app on this machine will open
    * the session, and the record stays "pending": "excluded" would show its transcript to the app's own
-   * list (see `excluded` above). The phone is told once, with the terminal command that continues it.
+   * list (see `excluded` above). The phone is told once that the session is not in the app. The notice
+   * names no terminal command: this host keeps its own query alive, so a `claude --resume` beside it
+   * would be a second writer on the transcript. The flag is saved only after the notice is in the
+   * log, so an append that fails is tried again at the next init instead of being lost for good.
    */
   private noteHandoffUnavailable(r: SessionRecord): void {
     if (this.opts.handoff || r.desktopHandoff !== "pending" || r.desktopHandoffUnavailableNoted || r.desktopBridge || r.environmentBridgeId || !r.sdkSessionId) return;
-    r.desktopHandoffUnavailableNoted = true;
-    this.save();
-    this.append(r.id, { kind: "notice", code: "desktop_handoff_unavailable", text: resumeCommand(r.cwd, r.sdkSessionId) }, false);
+    try {
+      this.append(r.id, { kind: "notice", code: "desktop_handoff_unavailable" }, false);
+      r.desktopHandoffUnavailableNoted = true;
+      this.save();
+    } catch (error) {
+      // A notice that cannot be written must not end the turn it rides on; it is tried again at the next init.
+      (this.opts.log ?? console.error)(`[session ${r.id.slice(0, 8)}] could not record the "not in the Claude app" notice: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   private handoff(r: SessionRecord, live = this.live.get(r.id)): void {

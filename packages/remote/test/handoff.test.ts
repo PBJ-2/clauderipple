@@ -6,7 +6,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { sdkQuery } from "../src/sdk-launcher.ts";
-import { desktopHandoff, handoffUnavailableText, resumeCommand } from "../src/handoff.ts";
+import { desktopHandoff, handoffUnavailableText } from "../src/handoff.ts";
 import { clientEvent } from "../src/client-compat.ts";
 import { dictionaries, setLang, t as say } from "../web/i18n.ts";
 import type { ClientFeature, SessionEvent } from "../src/protocol.ts";
@@ -17,25 +17,22 @@ test("handoff selection leaves unsupported hosts off", () => {
   assert.equal(typeof desktopHandoff("unused", 100, "win32"), "function");
 });
 
-test("the terminal command quotes the folder for the shell and keeps the session id plain (#181)", () => {
-  assert.equal(resumeCommand("/srv/my project", "0b2e7a9c-1111-4222-8333-444455556666", "linux"), "cd '/srv/my project' && claude --resume 0b2e7a9c-1111-4222-8333-444455556666");
-  assert.equal(resumeCommand("/srv/it's $HOME;rm", "sdk-1", "linux"), `cd '/srv/it'\\''s $HOME;rm' && claude --resume sdk-1`);
-  assert.equal(resumeCommand("C:\\Users\\me\\my project", "sdk-1", "win32"), `cd /d "C:\\Users\\me\\my project" && claude --resume sdk-1`);
-});
-
 test("an app without the handoffUnavailableNotice feature reads the notice as a plain text line (#181)", () => {
-  const command = "cd '/srv/app' && claude --resume sdk-1";
-  const event = { kind: "notice", code: "desktop_handoff_unavailable", text: command, seq: 1, at: 1 } as SessionEvent;
+  const event = { kind: "notice", code: "desktop_handoff_unavailable", seq: 1, at: 1 } as SessionEvent;
   const old = clientEvent(event, new Set<ClientFeature>(["scopedAlways"]));
   assert.ok(old.kind === "notice");
   assert.equal(old.code, "desktop_settings_failed");
-  assert.equal(old.text, handoffUnavailableText(command));
+  // Hello carries no language, so an older app gets Korean.
+  assert.equal(old.text, "이 세션은 Claude 데스크톱 앱에 표시되지 않습니다. 이 컴퓨터에서는 데스크톱 앱으로 세션을 옮길 수 없지만, 휴대폰에서는 계속 사용할 수 있습니다.");
+  assert.equal(old.text, handoffUnavailableText());
   assert.equal(clientEvent(event, new Set<ClientFeature>(["handoffUnavailableNotice"])), event, "a new app gets the notice as written");
-  // The text an old app shows and the words a new app builds from its dictionary are the same sentence.
+  // The text an old app shows and the words a new app builds from its dictionary are the same sentences, in both languages.
   setLang("ko");
-  assert.equal(say("notice.desktop_handoff_unavailable", { text: command }), old.text);
+  assert.equal(say("notice.desktop_handoff_unavailable"), handoffUnavailableText("ko"));
   assert.equal(say("notice.desktop_settings_failed", { text: old.text! }), old.text);
-  assert.ok(dictionaries.en["notice.desktop_handoff_unavailable"]);
+  assert.equal(dictionaries.en["notice.desktop_handoff_unavailable"], handoffUnavailableText("en"));
+  // The notice names no terminal command: a `claude --resume` beside the host's own query is a second writer.
+  for (const words of [handoffUnavailableText("ko"), handoffUnavailableText("en")]) assert.doesNotMatch(words, /resume|\{text\}|\n/);
 });
 
 for (const mode of ["success", "failure", "timeout"] as const) {

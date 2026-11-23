@@ -1209,7 +1209,7 @@ test("a phone session on a host with no Claude app handoff reaches an older app 
   const f = await fixture(t);
   const id = await f.create();
   const stored = f.sessions.log(id).tail().events.find(e => e.kind === "notice" && e.code === "desktop_handoff_unavailable");
-  assert.ok(stored?.kind === "notice" && stored.text?.endsWith("claude --resume sdk-1"), "the log keeps the real code");
+  assert.ok(stored?.kind === "notice" && stored.text === undefined, "the log keeps the real code, and the notice carries no command");
   const legacy = await f.connect();
   legacy.send({ t: "hello", token, clientId: "legacy" });
   await legacy.take("ready");
@@ -1217,12 +1217,8 @@ test("a phone session on a host with no Claude app handoff reaches an older app 
   const seen = (await legacy.take("events")).msg.events.find(e => e.kind === "notice");
   assert.ok(seen?.kind === "notice");
   assert.equal(seen.code, "desktop_settings_failed");
-  // Not in the app on this computer, then the command, then the request not to send from the phone.
-  const lines = (seen.text ?? "").split("\n");
-  assert.equal(lines.length, 4);
-  assert.match(lines[0]!, /Claude 앱에 표시되지 않습니다\.$/);
-  assert.match(lines[2]!, /^cd '.*' && claude --resume sdk-1$/);
-  assert.match(lines[3]!, /휴대폰에서 메시지를 보내지 말아 주세요\.$/);
+  // Two sentences: not in the desktop app, and the phone keeps working. No command to run.
+  assert.equal(seen.text, "이 세션은 Claude 데스크톱 앱에 표시되지 않습니다. 이 컴퓨터에서는 데스크톱 앱으로 세션을 옮길 수 없지만, 휴대폰에서는 계속 사용할 수 있습니다.");
   const modern = await f.auth();
   modern.send({ t: "attach", session: id });
   const current = (await modern.take("events")).msg.events.find(e => e.kind === "notice");

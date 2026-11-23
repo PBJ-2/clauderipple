@@ -3371,19 +3371,27 @@ server the app lives on another machine this host cannot reach.
 
 **What the host does instead.** With no runner, the record stays `"pending"` — never `"excluded"`,
 which would hand the transcript to the app's own list (`excluded` in `sessions.ts`). When the SDK's
-`init` arrives, `noteHandoffUnavailable` appends one `desktop_handoff_unavailable` notice whose `text`
-is the shell command that continues the session in a terminal on the host
-(`cd '<folder>' && claude --resume <id>`; `cd /d "<folder>" && …` for cmd.exe), and sets
-`desktopHandoffUnavailableNoted` so a later turn or a host restart does not write it again. The
-notice's wording is in three parts, in this order: this session is not in the Claude app on this
-computer; the command; do not send from the phone while it runs in a terminal (two writers on one
-transcript). Not written when a runner exists, for bridge sessions, or when the session has no SDK id.
+`init` arrives, `noteHandoffUnavailable` appends one `desktop_handoff_unavailable` notice with no
+variables, and only after that append succeeds sets and saves `desktopHandoffUnavailableNoted`, so a
+later turn or a host restart does not write it again while a failed append (logged, the turn goes on)
+is tried again at the next init. The wording is two sentences: this session is not shown in the Claude
+desktop app; this computer cannot move sessions to the desktop app (Linux, or Claude Code on a server
+over SSH), but the phone keeps working. Korean: "이 세션은 Claude 데스크톱 앱에 표시되지 않습니다.
+이 컴퓨터에서는 데스크톱 앱으로 세션을 옮길 수 없지만, 휴대폰에서는 계속 사용할 수 있습니다."
+
+**The notice names no terminal command on purpose.** The host keeps its own query alive, so a
+`claude --resume` run beside it forks the conversation and the next phone message runs on stale
+context (red team, 2026-11-23). Not written when a runner exists, for bridge sessions, or when the
+session has no SDK id.
 
 **Old apps.** The code is new, and an app that does not know a notice code prints its key. The app
 announces `handoffUnavailableNotice` in `hello.features`; without it `clientEvent` rewrites the event
-to `desktop_settings_failed` (whose dictionary entry is `{text}` alone) with the whole sentence built
-by `handoffUnavailableText`. The event log keeps the real code. The web client's words live in
-`web/i18n.ts` under `notice.desktop_handoff_unavailable` and must stay the same sentence.
+to `desktop_settings_failed` (whose dictionary entry is `{text}` alone) with the same two sentences
+from `handoffUnavailableText`. `hello`, `attach` and the settings messages carry no language (only
+the push subscription does, per client id), so an old app always gets Korean, the language of most
+users; `handoffUnavailableText("en")` exists for the day the host learns the language. The event log
+keeps the real code. The web client's words live in `web/i18n.ts` under
+`notice.desktop_handoff_unavailable` and must stay the same sentences.
 
 **Not done.** A helper on the machine that runs Desktop to pick the session up (the issue's other
 suggestion) needs a second process and a way to reach the SSH-remote host; it is not built.

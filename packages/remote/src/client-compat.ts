@@ -18,7 +18,7 @@ export function clientEvent(event: SessionEvent, features: ReadonlySet<ClientFea
   }
   // An older app renders an unknown notice code as its key; "{text}" is the one code it can show.
   if (event.kind === "notice" && event.code === "desktop_handoff_unavailable" && !features.has("handoffUnavailableNotice")) {
-    next = { ...event, code: "desktop_settings_failed", text: handoffUnavailableText(event.text ?? "") };
+    next = { ...event, code: "desktop_settings_failed", text: handoffUnavailableText() };
   }
   if (features.has("sessionFiles")) return next;
   // Message-level files come from image references, including ones without an extension or trusted MIME.

@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay, setImmediate as nextTick } from "node:timers/promises";
 import { PermissionQueue } from "../src/permissions.ts";
+import { EventLog } from "../src/eventlog.ts";
 import { MessageReceipts } from "../src/receipts.ts";
 import { reduce, timelineItems } from "../web/timeline.ts";
 import { sessionGroup, sidebarState } from "../web/sidebar.ts";
@@ -1435,16 +1436,17 @@ test("handoff does not reopen a conversation already owned by Desktop with RC of
   await waitFor(() => f.fake.users.length === 2);
 });
 
-test("without a handoff runner the phone is told once how to continue the session in a terminal (#181)", async t => {
+test("without a handoff runner the phone is told once that the session is not in the Claude app (#181)", async t => {
   const f = fixture(t);
   const id = await f.create();
   await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
   const notices = (sessions: Sessions) => sessions.log(id).tail().events.filter(e => e.kind === "notice" && e.code === "desktop_handoff_unavailable");
   assert.equal(notices(f.sessions).length, 1);
   const notice = notices(f.sessions)[0]!;
-  assert.equal(notice.kind === "notice" && notice.text, `cd '${f.cwd}' && claude --resume sdk-1`);
-  const records: { desktopHandoff: string }[] = JSON.parse(fs.readFileSync(path.join(f.dir, "sessions.json"), "utf8"));
+  assert.equal(notice.kind === "notice" && notice.text, undefined, "no terminal command: a second writer would fork the conversation");
+  const records: { desktopHandoff: string; desktopHandoffUnavailableNoted?: boolean }[] = JSON.parse(fs.readFileSync(path.join(f.dir, "sessions.json"), "utf8"));
   assert.equal(records[0]!.desktopHandoff, "pending", "excluded would hand the transcript to the app's own list");
+  assert.equal(records[0]!.desktopHandoffUnavailableNoted, true);
   await f.sessions.send(id, "second", "again");
   await waitFor(() => f.fake.users.length === 2);
   await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
@@ -1460,6 +1462,36 @@ test("without a handoff runner the phone is told once how to continue the sessio
   await waitFor(() => again.fake.users.length === 1);
   await waitFor(() => restarted.summaryOf(id)?.state === "idle");
   assert.equal(notices(restarted).length, 1, "a restart does not write it a second time");
+});
+
+test("the unavailable-notice flag is saved only after the notice is in the log (#181)", async t => {
+  const lines: string[] = [];
+  const f = fixture(t, {}, { log: line => lines.push(line) });
+  const real = EventLog.prototype.append;
+  let failures = 1;
+  t.mock.method(EventLog.prototype, "append", function (this: EventLog, body: Parameters<EventLog["append"]>[0], at?: number) {
+    if (body.kind === "notice" && body.code === "desktop_handoff_unavailable" && failures-- > 0) throw new Error("disk full");
+    return real.call(this, body, at);
+  });
+  const id = await f.create();
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  const noticeCount = (sessions: Sessions) => sessions.log(id).tail().events.filter(e => e.kind === "notice" && e.code === "desktop_handoff_unavailable").length;
+  const flag = () => (JSON.parse(fs.readFileSync(path.join(f.dir, "sessions.json"), "utf8")) as { desktopHandoffUnavailableNoted?: boolean }[])[0]!.desktopHandoffUnavailableNoted;
+  assert.equal(noticeCount(f.sessions), 0, "the append failed");
+  assert.equal(flag(), undefined, "so the flag was not saved, and the notice is not lost for good");
+  assert.equal(f.sessions.summaryOf(id)?.state, "idle", "a notice that fails does not end the turn");
+  assert.ok(lines.some(line => /could not record the "not in the Claude app" notice: disk full/.test(line)), "nothing silent");
+
+  // The next query's init tries again, and this time the notice and then the flag land.
+  f.sessions.shutdown();
+  const again = fixture(t);
+  const restarted = new Sessions({ dir: f.dir, router, permissions: again.permissions, queryFn: again.fake.queryFn, coalesceMs: 5, log() {}, onEvent() {}, onSessions() {} });
+  f.instances.push(restarted);
+  restarted.recover();
+  await restarted.send(id, "after-restart", "back again");
+  await waitFor(() => restarted.summaryOf(id)?.state === "idle");
+  assert.equal(noticeCount(restarted), 1);
+  assert.equal(flag(), true);
 });
 
 test("with a handoff runner no unavailable notice is written", async t => {
