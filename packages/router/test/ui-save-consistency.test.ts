@@ -507,10 +507,10 @@ test('reset availability is read before opening, and a use needs explicit confir
   const toasts: string[] = [];
   let modal: DomNode | null = null;
   const modalContent = () => { assert.ok(modal); return modal; };
-  const grant = (id: string, extra: Record<string, unknown> = {}) => ({ id, label: `Reset ${id}`, left: 1, total: 1, endsAt: '2026-12-10T22:00:00+00:00', clears: ['five_hour', 'seven_day'], paused: false, usableNow: true, ...extra });
-  const status = { grants: [grant('usable', { percentUsed: { five_hour: 42 } }), grant('spent', { left: 0, usableNow: false })] };
+  const grant = (id: string, extra: Record<string, unknown> = {}) => ({ id, label: `Reset ${id}`, left: 1, total: 1, endsAt: '2099-12-10T22:00:00+00:00', clears: ['five_hour', 'seven_day'], paused: false, usableNow: true, ...extra });
+  const status = { previewId: 'a'.repeat(64), grants: [grant('usable', { percentUsed: { five_hour: 42 } }), grant('spent', { left: 0, usableNow: false })] };
   const fableOnly = { grants: [grant('fable', {
-    clears: ['seven_day_overage_included'], givesBackWeekly: true, percentUsed: { seven_day_overage_included: 94, seven_day: 72.5 },
+    clears: ['seven_day_overage_included', 'seven_day_cowork'], givesBackWeekly: true, percentUsed: { seven_day_overage_included: 94, seven_day: 72.5 },
   })] };
   const after = { grants: [grant('usable', { left: 0, usableNow: false })] };
   const api = async (url: string, options?: { method?: string; body?: string }) => {
@@ -522,6 +522,7 @@ test('reset availability is read before opening, and a use needs explicit confir
     ] } };
     if (url.includes('/spent/')) return { status: after };
     if (url.includes('/fable/')) return { status: fableOnly };
+    if (url.includes('/lost/') && options?.method === 'POST') throw new Error('connection closed');
     return options?.method === 'POST' ? { claim: { result: 'reset', resetsLeft: 0 }, status: after } : { status };
   };
   const make = new Function('document', 'Node', 'api', 'refreshClaudeAccountPanel', 'showModal', 'closeModal', 'toast', `
@@ -567,7 +568,7 @@ test('reset availability is read before opening, and a use needs explicit confir
   uses[0]!.emit('click');
   modalContent().querySelectorAll('button').find(node => node.textContent === 'resets.use')!.emit('click'); await flush();
   const posts = calls.filter(call => call.method === 'POST');
-  assert.deepEqual(posts, [{ url: '/api/claude-accounts/acct/resets', method: 'POST', body: JSON.stringify({ grantId: 'usable', confirm: true }) }]);
+  assert.deepEqual(posts, [{ url: '/api/claude-accounts/acct/resets', method: 'POST', body: JSON.stringify({ grantId: 'usable', previewId: status.previewId, confirm: true }) }]);
   assert.equal(refreshed, 1, 'the account list is read again after a reset');
   assert.deepEqual(toasts, ['resets.result.reset{"left":0}']);
   assert.deepEqual(panel.querySelectorAll('button').filter(node => node.textContent === 'resets.use').map(node => node.disabled), [], 'the used grant leaves the list');
@@ -597,9 +598,10 @@ test('reset availability is read before opening, and a use needs explicit confir
   readable.button.click();
   readable.panel.querySelectorAll('button').find(node => node.textContent === 'resets.refresh')!.click();
   await flush();
-  assert.equal(readable.button.disabled, true, 'a failed refresh invalidates a previous good result');
+  assert.equal(readable.button.disabled, false, 'the open panel remains recoverable after a failed refresh');
   assert.equal(readable.button.attrs.title, 'resets.unavailable');
-  assert.equal(readable.panel.hidden, true);
+  assert.equal(readable.panel.hidden, false);
+  assert.equal(readable.panel.querySelectorAll('button').some(node => node.textContent === 'resets.use'), false);
 
   const fable = claudeResetsControl('claude', 'fable', 'Fable');
   target.append(fable.button, fable.panel);
@@ -610,9 +612,23 @@ test('reset availability is read before opening, and a use needs explicit confir
   fable.panel.querySelectorAll('button').find(node => node.textContent === 'resets.use')!.click();
   assert.deepEqual(modalContent().querySelectorAll('li').map(node => node.textContent), [
     'resets.window.seven_day_fable: 94% → 0%',
+    'seven_day_cowork: common.notAvailable → 0%',
     'resets.window.seven_day: 72.5% · resets.fableGiveback',
   ]);
   assert.deepEqual(calls.filter(call => call.method === 'POST'), posts, 'previewing Fable does not redeem it');
+
+  const lost = claudeResetsControl('claude', 'lost', 'Lost response');
+  target.append(lost.button, lost.panel);
+  refreshClaudeResetsControls(target);
+  await flush();
+  lost.button.click();
+  lost.panel.querySelectorAll('button').find(node => node.textContent === 'resets.use')!.click();
+  modalContent().querySelectorAll('button').find(node => node.textContent === 'resets.use')!.click();
+  await flush();
+  assert.equal(lost.panel.hidden, false);
+  assert.equal(toasts.at(-1), 'resets.result.unconfirmed');
+  assert.ok(lost.panel.querySelectorAll('button').some(node => node.textContent === 'resets.refresh' && !node.disabled));
+  assert.equal(calls.filter(call => call.url.includes('/lost/')).length, 2, 'no automatic retry');
 });
 
 test('the dashboard recognises Ollama so an empty ladder there is measured, not a decision', () => {

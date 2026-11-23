@@ -188,7 +188,7 @@ export type AdminDeps = {
   /** Optional: the limit resets Anthropic granted to a Claude account, and using one (see anthropic-resets.ts). */
   claudeResets?: {
     status: (id: string, force: boolean) => Promise<ClaudeResetsOutcome<ClaudeResetStatus>>;
-    claim: (id: string, grantId: string) => Promise<ClaudeResetsOutcome<{ claim: ClaudeResetClaim; status: ClaudeResetStatus | null }>>;
+    claim: (id: string, grantId: string, previewId: string) => Promise<ClaudeResetsOutcome<{ claim: ClaudeResetClaim; status: ClaudeResetStatus | null }>>;
   };
   /** Optional: picker-mode state and the last bootstrap injection. */
   picker?: () => { enabled: boolean; hosts: string[]; last: unknown };
@@ -2996,7 +2996,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           return;
         }
         const failed = (error: ClaudeResetsError): void => {
-          const status = error.kind === "unknown-account" ? 404 : error.kind === "needs-login" ? 409 : error.kind === "http" && error.status === 429 ? 429 : 502;
+          const status = error.kind === "unknown-account" ? 404 : (error.kind === "needs-login" || error.kind === "account-changed") ? 409 : error.kind === "http" && error.status === 429 ? 429 : 502;
           sendJson(res, status, { error: error.kind, ...(error.status !== undefined ? { upstreamStatus: error.status } : {}), ...(error.retryAfterSeconds !== undefined ? { retryAfterSeconds: error.retryAfterSeconds } : {}) });
         };
         if (method === "GET") {
@@ -3006,18 +3006,18 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           else sendJson(res, 200, { status: outcome.value });
           return;
         }
-        let input: { grantId?: unknown; confirm?: unknown };
+        let input: { grantId?: unknown; previewId?: unknown; confirm?: unknown };
         try {
           input = JSON.parse((await readBody(req, 4096)).toString("utf8")) as typeof input;
         } catch {
           sendJson(res, 400, { error: "invalid JSON" });
           return;
         }
-        if (!input || typeof input.grantId !== "string" || !/^[a-z0-9_-]{1,40}$/.test(input.grantId) || input.confirm !== true) {
-          sendJson(res, 400, { error: "expected {grantId: string, confirm: true}" });
+        if (!input || typeof input.grantId !== "string" || !/^[a-z0-9_-]{1,40}$/.test(input.grantId) || typeof input.previewId !== "string" || !/^[a-f0-9]{64}$/.test(input.previewId) || input.confirm !== true) {
+          sendJson(res, 400, { error: "expected {grantId: string, previewId: string, confirm: true}" });
           return;
         }
-        const outcome = await deps.claudeResets.claim(id, input.grantId);
+        const outcome = await deps.claudeResets.claim(id, input.grantId, input.previewId);
         if (!outcome.ok) {
           failed(outcome.error);
           return;

@@ -15,6 +15,7 @@
 
 import crypto from "node:crypto";
 import { retryAfterMs, type Credential } from "../pool.ts";
+import { ClaudeUsageBackoff } from "./anthropic-usage.ts";
 
 const PROGRAM = "cedar_ember";
 const GRANT_ID = /^[a-z0-9_-]{1,40}$/;
@@ -54,6 +55,8 @@ export type ClaudeResetGrant = {
 };
 
 export type ClaudeResetStatus = {
+  /** Opaque confirmation binding to the exact login used to read this row. */
+  previewId?: string;
   eligible: boolean;
   ineligibleReason: string | null;
   atLimit: boolean;
@@ -76,7 +79,7 @@ export type ClaudeResetClaim = {
 };
 
 export type ClaudeResetsError = {
-  kind: "unknown-account" | "needs-login" | "no-organization" | "http" | "network" | "unreadable";
+  kind: "account-changed" | "unknown-account" | "needs-login" | "no-organization" | "http" | "network" | "unreadable";
   status?: number;
   retryAfterSeconds?: number;
 };
@@ -97,6 +100,9 @@ export type ClaudeResetsOptions = {
   warn?: (message: string) => void;
   /** Test seam for the request id. */
   requestId?: () => string;
+  backoff?: ClaudeUsageBackoff;
+  onReset?: (credential: Credential, cleared: readonly string[]) => void;
+  onRefreshedUsage?: (credential: Credential, body: unknown) => void;
 };
 
 function object(value: unknown): Record<string, unknown> | null {
@@ -200,13 +206,16 @@ export class ClaudeLimitResets {
   private readonly source: ClaudeResetsSource;
   private readonly opts: ClaudeResetsOptions;
   private readonly statuses = new Map<string, { at: number; value: ClaudeResetStatus }>();
-  private readonly blockedUntil = new Map<string, number>();
+  private readonly backoff: ClaudeUsageBackoff;
   private readonly organizations = new Map<string, { at: number; id: string }>();
+  private readonly previewKey = crypto.randomBytes(32);
+  private readonly statusReads = new Map<string, symbol>();
   private readonly claiming = new Set<string>();
 
   constructor(source: ClaudeResetsSource, opts: ClaudeResetsOptions) {
     this.source = source;
     this.opts = opts;
+    this.backoff = opts.backoff ?? new ClaudeUsageBackoff();
   }
 
   private now(): number {
@@ -218,14 +227,26 @@ export class ClaudeLimitResets {
    * Anthropic is not asked again before its `retry-after`, even when forced.
    */
   async status(ownerId: string, options: { force?: boolean } = {}): Promise<ClaudeResetsOutcome<ClaudeResetStatus>> {
-    const cached = this.statuses.get(ownerId);
-    const now = this.now();
-    if (!options.force && cached && now - cached.at < STATUS_TTL_MS) return { ok: true, value: cached.value };
-    const blocked = this.blockedUntil.get(ownerId) ?? 0;
-    if (blocked > now) return { ok: false, error: { kind: "http", status: 429, retryAfterSeconds: Math.ceil((blocked - now) / 1000) } };
     const credential = await this.source.credential(ownerId);
     if (credential === "needs-login") return { ok: false, error: { kind: "needs-login" } };
     if (!credential) return { ok: false, error: { kind: "unknown-account" } };
+    return this.readStatus(ownerId, credential, options.force === true);
+  }
+
+  private previewId(ownerId: string, credential: Credential): string {
+    return crypto.createHmac("sha256", this.previewKey).update(ownerId).update("\0").update(authKey(credential.headers)).digest("hex");
+  }
+
+  private async readStatus(ownerId: string, credential: Credential, force: boolean, afterReset = false): Promise<ClaudeResetsOutcome<ClaudeResetStatus>> {
+    const previewId = this.previewId(ownerId, credential);
+    const cached = this.statuses.get(ownerId);
+    const now = this.now();
+    if (!force && cached?.value.previewId === previewId && now - cached.at < STATUS_TTL_MS) return { ok: true, value: cached.value };
+    const wait = this.backoff.remaining(ownerId, now);
+    if (wait > 0) return { ok: false, error: { kind: "http", status: 429, retryAfterSeconds: Math.ceil(wait / 1000) } };
+    const read = Symbol();
+    this.statusReads.set(ownerId, read);
+    this.statuses.delete(ownerId);
     let response: Response;
     try {
       response = await (this.opts.fetch ?? fetch)(`https://${this.opts.upstream()}/api/oauth/usage?cedar_ember=1&skip_spend=1`, {
@@ -240,20 +261,22 @@ export class ClaudeLimitResets {
     if (!response.ok) {
       // The status alone: a failure body is not worth the risk of echoing.
       const retry = retryAfterMs(Object.fromEntries(response.headers.entries()));
-      if (response.status === 429) this.blockedUntil.set(ownerId, now + (retry ?? DEFAULT_BLOCK_MS));
+      if (response.status === 429) this.backoff.block(ownerId, this.now() + (retry ?? DEFAULT_BLOCK_MS));
       this.opts.warn?.(`claude resets ${ownerId.slice(0, 8)}: HTTP ${response.status}`);
       return { ok: false, error: { kind: "http", status: response.status, ...(retry !== undefined ? { retryAfterSeconds: Math.ceil(retry / 1000) } : {}) } };
     }
     let status: ClaudeResetStatus | null = null;
     try {
-      status = claudeResetsFromBody(await response.json());
+      const body: unknown = await response.json();
+      status = claudeResetsFromBody(body);
+      if (afterReset) this.opts.onRefreshedUsage?.(credential, body);
     } catch {
       status = null;
     }
     if (!status) return { ok: false, error: { kind: "unreadable" } };
-    this.blockedUntil.delete(ownerId);
-    this.statuses.set(ownerId, { at: now, value: status });
-    return { ok: true, value: status };
+    const value = { ...status, previewId };
+    if (this.statusReads.get(ownerId) === read) this.statuses.set(ownerId, { at: now, value });
+    return { ok: true, value };
   }
 
   private async organization(ownerId: string, credential: Credential): Promise<string | null> {
@@ -284,32 +307,38 @@ export class ClaudeLimitResets {
    * time; the request is never retried. When no answer comes back the result is `unconfirmed` and
    * the caller shows a fresh status so the person can see whether the use counted.
    */
-  async claim(ownerId: string, grantId: string): Promise<ClaudeResetsOutcome<{ claim: ClaudeResetClaim; status: ClaudeResetStatus | null }>> {
+  async claim(ownerId: string, grantId: string, previewId: string): Promise<ClaudeResetsOutcome<{ claim: ClaudeResetClaim; status: ClaudeResetStatus | null }>> {
     if (!GRANT_ID.test(grantId)) return { ok: false, error: { kind: "unreadable" } };
-    if (this.claiming.has(ownerId)) return { ok: true, value: { claim: this.refused("busy", null), status: null } };
-    this.claiming.add(ownerId);
+    const credential = await this.source.credential(ownerId);
+    if (credential === "needs-login") return { ok: false, error: { kind: "needs-login" } };
+    if (!credential) return { ok: false, error: { kind: "unknown-account" } };
+    if (this.previewId(ownerId, credential) !== previewId) return { ok: false, error: { kind: "account-changed" } };
+    const organization = await this.organization(ownerId, credential);
+    if (!organization) return { ok: false, error: { kind: "no-organization" } };
+    // The upstream action is scoped to the organization, not the dashboard row or token.
+    if (this.claiming.has(organization)) return { ok: true, value: { claim: this.refused("busy", null), status: null } };
+    this.claiming.add(organization);
     try {
-      const fresh = await this.status(ownerId, { force: true });
+      const fresh = await this.readStatus(ownerId, credential, true);
       if (!fresh.ok) return fresh;
       const grant = fresh.value.grants.find((candidate) => candidate.id === grantId);
       if (!grant) return { ok: true, value: { claim: this.refused("not_usable", "unknown_grant"), status: fresh.value } };
-      if (grant.left < 1 || grant.paused || !grant.usableNow) {
+      if (grant.left < 1 || grant.paused || !grant.usableNow || (grant.endsAt !== null && Date.parse(grant.endsAt) <= this.now())) {
         return { ok: true, value: { claim: this.refused("not_usable", grant.unavailableReason ?? (grant.left < 1 ? "already_used" : grant.paused ? "paused" : "not_usable")), status: fresh.value } };
       }
-      const credential = await this.source.credential(ownerId);
-      if (credential === "needs-login") return { ok: false, error: { kind: "needs-login" } };
-      if (!credential) return { ok: false, error: { kind: "unknown-account" } };
-      const organization = await this.organization(ownerId, credential);
-      if (!organization) return { ok: false, error: { kind: "no-organization" } };
+      const current = await this.source.credential(ownerId);
+      if (!current || current === "needs-login" || this.previewId(ownerId, current) !== previewId) return { ok: false, error: { kind: "account-changed" } };
       const requestId = this.opts.requestId?.() ?? crypto.randomBytes(18).toString("base64url");
       if (!REQUEST_ID.test(requestId)) return { ok: false, error: { kind: "unreadable" } };
       const claim = await this.post(credential, organization, grantId, requestId);
+      if (claim.result === "reset") this.opts.onReset?.(credential, claim.cleared);
       this.statuses.delete(ownerId);
-      // A reset that went through, or one nobody could confirm, leaves a status that is worth reading again right away.
-      const after = claim.result === "reset" || claim.result === "unconfirmed" ? await this.status(ownerId, { force: true }) : null;
+      this.statusReads.delete(ownerId);
+      // Read the same account after an applied or uncertain reset, not whichever login is current now.
+      const after = claim.result === "reset" || claim.result === "unconfirmed" ? await this.readStatus(ownerId, credential, true, claim.result === "reset") : null;
       return { ok: true, value: { claim, status: after && after.ok ? after.value : null } };
     } finally {
-      this.claiming.delete(ownerId);
+      this.claiming.delete(organization);
     }
   }
 

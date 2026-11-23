@@ -1771,13 +1771,16 @@ tight, and nothing at 100 or more.
   resets, and a paused account or the paused current login can still be read and used
   (a pause only keeps it out of routing). **The use path was not exercised** (it
   spends a grant that cannot be given back); it follows the client's request shape.
-  Guards: only a grant a fresh status shows usable now is sent, one use per account
-  at a time, `confirm: true` on the admin call, never retried (an unanswered use is
-  `unconfirmed` and followed by a fresh status), the status shares the usage
-  endpoint's rate limit so it is read on request and kept 30 s, and the organization
-  uuid lives in memory only. A use that returns `reset` lifts the router's rest on
-  that account. Admin: `GET /api/claude-accounts/<id|current>/resets[?refresh=1]` and
-  `POST` the same path with `{grantId, confirm: true}`. The dashboard checks the
+  Guards: a preview carries an opaque binding to the login that was read. The
+  claim checks that binding before and after the fresh eligibility read and sends
+  the same credential throughout. Only one claim per upstream organization can
+  run at a time, even across duplicate dashboard rows. A claim is never retried;
+  an unanswered claim is `unconfirmed` and followed by a fresh status. Status is
+  kept 30 s and shares the ordinary usage lookup's 429 backoff. On success only
+  rests attributable to refilled windows are lifted; pre-reset scoped usage for
+  those windows is retired and the post-reset reading updates the usage cache.
+  Admin: `GET /api/claude-accounts/<id|current>/resets[?refresh=1]` and `POST` the
+  same path with `{grantId, previewId, confirm: true}`. The dashboard checks the
   visible accounts on the Accounts tab, no more than once per account every five
   minutes automatically, and enables "Resets" only when a grant can be used.
   Claude Code 2.1.326 treats `gives_back_weekly` as returning Fable's share to the

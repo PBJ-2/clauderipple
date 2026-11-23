@@ -6,6 +6,24 @@ import { ProviderHealth, providerExhaustion } from "../src/health.ts";
 
 const creds = (...ids: string[]): Credential[] => ids.map((id) => ({ id, headers: { "x-api-key": id } }));
 
+test("a selective refill preserves other windows, scopes and quarantine", () => {
+  const pool = new CredentialPool({ now: () => 1_000_000 });
+  const [credential] = creds("account");
+  assert.ok(credential);
+  pool.restScope("claude", credential, "fable", 30_000);
+  pool.restScope("claude", credential, "opus", 30_000);
+  pool.penalise("claude", credential.id, 429, 60_000, "", undefined, ["five_hour", "seven_day"]);
+  pool.refillWindows("claude", credential, ["five_hour", "seven_day_overage_included"], ["fable"]);
+  assert.equal(pool.hasUsable("claude", [credential]), false);
+  assert.deepEqual(pool.scopeCooldowns("claude", credential.id), { opus: 30 });
+  pool.refillWindows("claude", credential, ["seven_day"], []);
+  assert.equal(pool.hasUsable("claude", [credential]), true);
+  assert.equal(pool.hasUsable("claude", [credential], "opus"), false);
+  pool.penalise("claude", credential.id, 401);
+  pool.refillWindows("claude", credential, ["five_hour", "seven_day"], ["opus"]);
+  assert.equal(pool.hasUsable("claude", [credential]), false);
+});
+
 test("provider exhaustion is remembered with a reason, expires, and a successful request clears it", () => {
   const health = new ProviderHealth();
   const now = 1_000_000;

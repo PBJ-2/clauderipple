@@ -57,7 +57,7 @@ import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
 import { nativeAnthropicHeaders, type ClaudeCodeCredentialReaders } from "./providers/anthropic.ts";
 import { ClaudeAccountAuthPool } from "./providers/anthropic-account-pool.ts";
 import { ClaudeModelCatalog } from "./providers/anthropic-models.ts";
-import { ClaudeUsage, claudeLimitResetMs, claudeModelFamily } from "./providers/anthropic-usage.ts";
+import { ClaudeUsage, ClaudeUsageBackoff, claudeRejectedWindows, claudeModelFamily } from "./providers/anthropic-usage.ts";
 import { ClaudeCurrentIdentity, LoginEmailWatch, PendingRowWrites } from "./providers/anthropic-identity.ts";
 import { ClaudeLimitResets } from "./providers/anthropic-resets.ts";
 import { dropForeignThinking, ThinkingOrigins } from "./thinking.ts";
@@ -654,7 +654,9 @@ export class Proxy {
       ...(deps.claudeCodeCredentialReaders ? { credentialReaders: deps.claudeCodeCredentialReaders } : {}),
       ...(deps.claudeLoginKey ? { loginKey: deps.claudeLoginKey } : {}),
     });
+    const claudeUsageBackoff = new ClaudeUsageBackoff();
     this.claudeUsage = new ClaudeUsage(this.claudeAccounts, {
+      backoff: claudeUsageBackoff,
       upstream: () => this.deps.config().upstream,
       warn: (message) => deps.log.warn(message),
     });
@@ -668,6 +670,9 @@ export class Proxy {
       warn: (message) => deps.log.warn(message),
     });
     this.claudeResets = new ClaudeLimitResets({ credential: (ownerId) => this.claudeAccounts.accountCredential(ownerId) }, {
+      backoff: claudeUsageBackoff,
+      onReset: (credential, cleared) => this.claudeLimitsRefilled(credential, cleared),
+      onRefreshedUsage: (credential, body) => this.claudeUsage.observeUsageBody(credential, body),
       upstream: () => this.deps.config().upstream,
       warn: (message) => deps.log.warn(message),
     });
@@ -2132,8 +2137,9 @@ export class Proxy {
         // account rests until the later of the two. The same value is what the caller gets if no
         // account can take the turn.
         const statedRetryMs = retryAfterMs(upRes.headers);
-        const claudeLimitMs = status === 429 && isApiHost && (!route || cfg.providers[route.provider]?.type === "anthropic")
-          ? claudeLimitResetMs(upRes.headers) : undefined;
+        const rejectedWindows = status === 429 && isApiHost && (!route || cfg.providers[route.provider]?.type === "anthropic")
+          ? claudeRejectedWindows(upRes.headers) : [];
+        const claudeLimitMs = rejectedWindows.length ? Math.min(...rejectedWindows.map(({ wait }) => wait)) : undefined;
         // A pool 429 that is not the account's 5h/7d window being spent (`claudeLimitMs` undefined) is
         // the model family's own limit — Fable has a weekly window of its own — so it rests that
         // family on this account and leaves the account's other models, and the conversations
@@ -2155,7 +2161,7 @@ export class Proxy {
         // A 400 is our own request and is charged to nobody (see `classify`).
         if (penalised) {
           if (status >= 400) {
-            this.pool.penalise(penalised.provider, penalised.id, status, restMs, errBody, scope);
+            this.pool.penalise(penalised.provider, penalised.id, status, restMs, errBody, scope, rejectedWindows.map(({ window }) => window));
             if (status === 401 && cfg.providers[penalised.provider]?.type === "anthropic") this.claudeAccounts.reject(penalised.id);
           } else this.pool.succeed(penalised.provider, penalised.id, poolScope);
           if (cfg.providers[penalised.provider]?.type === "anthropic") {
@@ -2731,6 +2737,16 @@ export class Proxy {
 
   clearCredentialCooldown(provider: string, id: string): void {
     this.pool.clear(provider, id);
+  }
+
+  private claudeLimitsRefilled(credential: Credential, windows: readonly string[]): void {
+    const scopes = ([
+      ["seven_day_overage_included", "fable"], ["seven_day_opus", "opus"], ["seven_day_sonnet", "sonnet"],
+    ] as const).filter(([window]) => windows.includes(window)).map(([, scope]) => scope);
+    this.claudeUsage.invalidateRefilledUsage(credential, scopes);
+    for (const [name, provider] of Object.entries(this.deps.config().providers)) {
+      if (provider.type === "anthropic" && provider.auth === "claude-code") this.pool.refillWindows(name, credential, windows, scopes);
+    }
   }
 
   claudeClearCooldown(ownerId: string): void {

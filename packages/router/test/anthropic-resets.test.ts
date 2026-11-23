@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { ClaudeAccountAuthPool } from "../src/providers/anthropic-account-pool.ts";
 import { ClaudeLimitResets, claudeResetsFromBody, type ClaudeResetsSource } from "../src/providers/anthropic-resets.ts";
+import { ClaudeUsage, ClaudeUsageBackoff } from "../src/providers/anthropic-usage.ts";
 import { saveClaudeOAuthAccount, setCurrentClaudeAccountPaused, updateClaudeAccount, markClaudeAccountNeedsReauth, readClaudeAccountsFile } from "../src/providers/anthropic-accounts.ts";
 import { ClaudeCodeAuthStore, ClaudeCodeCredentialStore } from "../src/providers/anthropic.ts";
 
@@ -70,6 +71,16 @@ const source: ClaudeResetsSource = {
 
 function resets(fetchImpl: (url: string, init: RequestInit) => Promise<Response>, now: () => number = () => 1_000_000) {
   return new ClaudeLimitResets(source, { upstream: () => "api.example.test", fetch: fetchImpl, now, requestId: () => "req_test_1" });
+}
+
+async function preview(client: ClaudeLimitResets, owner = "acct"): Promise<string> {
+  const result = await client.status(owner);
+  assert.ok(result.ok && result.value.previewId);
+  return result.value.previewId;
+}
+
+async function claimPreview(client: ClaudeLimitResets, grant = "full-reset-2611") {
+  return client.claim("acct", grant, await preview(client));
 }
 
 function router(call: Call): Response {
@@ -159,9 +170,47 @@ test("a 429 is not asked again before its retry-after, even for a forced read", 
   assert.equal(calls.length, 2);
 });
 
+test("usage and resets honor the same OAuth backoff", async () => {
+  const backoff = new ClaudeUsageBackoff();
+  const credential = await source.credential("acct");
+  assert.ok(credential && credential !== "needs-login");
+  const { calls, fetchImpl } = harness(() => json({}, 429, { "retry-after": "120" }));
+  const options = { upstream: () => "api.example.test", fetch: fetchImpl, backoff, now: () => 1_000_000 };
+  const usage = new ClaudeUsage({ credentials: async () => [credential] }, options);
+  const limitResets = new ClaudeLimitResets(source, options);
+  await usage.snapshot();
+  assert.deepEqual(await limitResets.status("acct", { force: true }), { ok: false, error: { kind: "http", status: 429, retryAfterSeconds: 120 } });
+  assert.equal(calls.length, 1);
+});
+
+test("an older status response cannot replace the status read after a claim", async () => {
+  let completeOld!: (response: Response) => void;
+  const old = new Promise<Response>(resolve => { completeOld = resolve; });
+  let requestedOld!: () => void;
+  const requested = new Promise<void>(resolve => { requestedOld = resolve; });
+  let reads = 0;
+  const { fetchImpl } = harness(call => {
+    if (!call.url.includes("/api/oauth/usage")) return router(call);
+    if (++reads === 2) { requestedOld(); return old; }
+    return json(usageBody(reads === 4 ? { grants: [] } : {}));
+  });
+  const client = resets(fetchImpl);
+  const binding = await preview(client);
+  const stale = client.status("acct", { force: true });
+  await requested;
+  const claim = await client.claim("acct", "full-reset-2611", binding);
+  assert.ok(claim.ok);
+  assert.equal(claim.value.status?.grants.length, 0);
+  completeOld(json(usageBody()));
+  await stale;
+  const cached = await client.status("acct");
+  assert.ok(cached.ok);
+  assert.equal(cached.value.grants.length, 0);
+});
+
 test("using a reset reads the status again, names the account's organization, sends the one grant once, and reads the status afterwards", async () => {
   const { calls, fetchImpl } = harness(router);
-  const outcome = await resets(fetchImpl).claim("acct", "full-reset-2611");
+  const outcome = await claimPreview(resets(fetchImpl));
   assert.ok(outcome.ok);
   assert.equal(outcome.value.claim.result, "reset");
   assert.equal(outcome.value.claim.resetsLeft, 0);
@@ -173,7 +222,7 @@ test("using a reset reads the status again, names the account's organization, se
   assert.equal(posts[0]!.headers.authorization, "Bearer own-token");
   assert.equal(posts[0]!.headers["content-type"], "application/json");
   // A fresh status before (to check the grant) and one after (to show the new count).
-  assert.equal(calls.filter((call) => call.url.includes("/api/oauth/usage")).length, 2);
+  assert.equal(calls.filter((call) => call.url.includes("/api/oauth/usage")).length, 3);
   assert.ok(outcome.value.status);
 });
 
@@ -181,12 +230,12 @@ test("a grant that is unknown, spent or not usable now is refused without sendin
   const { calls, fetchImpl } = harness(router);
   const client = resets(fetchImpl);
   for (const [grant, reason] of [["ghost", "unknown_grant"], ["used-up", "already_used"]] as const) {
-    const outcome = await client.claim("acct", grant);
+    const outcome = await claimPreview(client, grant);
     assert.ok(outcome.ok);
     assert.equal(outcome.value.claim.result, "not_usable");
     assert.equal(outcome.value.claim.reason, reason);
   }
-  const malformed = await client.claim("acct", "Not A Grant!");
+  const malformed = await client.claim("acct", "Not A Grant!", "");
   assert.equal(malformed.ok, false);
   assert.equal(calls.filter((call) => call.method === "POST").length, 0);
 });
@@ -200,39 +249,61 @@ test("a use nobody could confirm is never retried and is followed by a fresh sta
     }
     return router(call);
   });
-  const outcome = await resets(fetchImpl).claim("acct", "full-reset-2611");
+  const outcome = await claimPreview(resets(fetchImpl));
   assert.ok(outcome.ok);
   assert.equal(outcome.value.claim.result, "unconfirmed");
   assert.equal(posts, 1);
   assert.ok(outcome.value.status, "the person is shown the status to see whether the use counted");
-  assert.equal(calls.filter((call) => call.url.includes("/api/oauth/usage")).length, 2);
+  assert.equal(calls.filter((call) => call.url.includes("/api/oauth/usage")).length, 3);
 });
 
 test("Anthropic's own refusals are passed on and spend nothing here", async () => {
   for (const [status, expected] of [[429, "rate_limited"], [401, "auth_error"], [403, "auth_error"], [400, "error"], [503, "unconfirmed"]] as const) {
     const { fetchImpl } = harness((call) => call.method === "POST" ? json({ error: "x" }, status) : router(call));
-    const outcome = await resets(fetchImpl).claim("acct", "full-reset-2611");
+    const outcome = await claimPreview(resets(fetchImpl));
     assert.ok(outcome.ok);
     assert.equal(outcome.value.claim.result, expected, `HTTP ${status}`);
   }
   const { fetchImpl } = harness((call) => call.method === "POST" ? json({ result: "not_limited", reason: "not_limited" }) : router(call));
-  const outcome = await resets(fetchImpl).claim("acct", "full-reset-2611");
+  const outcome = await claimPreview(resets(fetchImpl));
   assert.ok(outcome.ok);
   assert.deepEqual({ result: outcome.value.claim.result, reason: outcome.value.claim.reason }, { result: "not_limited", reason: "not_limited" });
 });
 
-test("only one use per account runs at a time", async () => {
+test("a login switch before or during eligibility never sends a claim", async () => {
+  for (const switchDuringRead of [false, true]) {
+    let token = "first";
+    let reads = 0;
+    const { calls, fetchImpl } = harness((call) => {
+      if (switchDuringRead && call.url.includes("/api/oauth/usage") && ++reads === 2) token = "second";
+      return router(call);
+    });
+    const client = new ClaudeLimitResets({ credential: async () => ({ id: token, headers: { authorization: `Bearer ${token}` } }) }, {
+      upstream: () => "api.example.test", fetch: fetchImpl,
+    });
+    const binding = await preview(client, "current");
+    if (!switchDuringRead) token = "second";
+    assert.deepEqual(await client.claim("current", "full-reset-2611", binding), { ok: false, error: { kind: "account-changed" } });
+    assert.equal(calls.some((call) => call.method === "POST"), false);
+  }
+});
+
+test("only one use runs at a time across rows for the same organization", async () => {
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
   const { calls, fetchImpl } = harness(async (call) => {
     if (call.method === "POST") await gate;
     return router(call);
   });
-  const client = resets(fetchImpl);
-  const first = client.claim("acct", "full-reset-2611");
+  const client = new ClaudeLimitResets({ credential: async (owner) => ({ id: owner, headers: { authorization: `Bearer ${owner}` } }) }, {
+    upstream: () => "api.example.test", fetch: fetchImpl,
+  });
+  const firstBinding = await preview(client, "current");
+  const secondBinding = await preview(client, "stored");
+  const first = client.claim("current", "full-reset-2611", firstBinding);
   // Let the first claim reach its POST.
   while (!calls.some((call) => call.method === "POST")) await new Promise((resolve) => setImmediate(resolve));
-  const second = await client.claim("acct", "full-reset-2611");
+  const second = await client.claim("stored", "full-reset-2611", secondBinding);
   assert.ok(second.ok);
   assert.equal(second.value.claim.result, "busy");
   release();
@@ -243,7 +314,7 @@ test("only one use per account runs at a time", async () => {
 
 test("an organization that is not a plain id is never put in a URL", async () => {
   const { calls, fetchImpl } = harness((call) => call.url.endsWith("/api/oauth/profile") ? json({ organization: { uuid: "../../evil" } }) : router(call));
-  const outcome = await resets(fetchImpl).claim("acct", "full-reset-2611");
+  const outcome = await claimPreview(resets(fetchImpl));
   assert.deepEqual(outcome, { ok: false, error: { kind: "no-organization" } });
   assert.equal(calls.filter((call) => call.method === "POST").length, 0);
 });

@@ -4298,11 +4298,11 @@ test("a Claude account's limit resets are read on request, and a use needs a con
     assert.equal((await post("acct", { confirm: true })).status, 400);
     assert.deepEqual(claimed, []);
 
-    const used = await post("acct", { grantId: "full-reset-2611", confirm: true });
+    const used = await post("acct", { grantId: "full-reset-2611", previewId: "a".repeat(64), confirm: true });
     assert.equal(used.status, 200);
     assert.deepEqual(await used.json(), { claim: { result: "reset", reason: null, resetsLeft: 0, cleared: ["five_hour"], weeklyResetsAt: null }, status });
     assert.deepEqual(claimed, ["acct:full-reset-2611"]);
-    assert.equal((await post("ghost", { grantId: "full-reset-2611", confirm: true })).status, 404);
+    assert.equal((await post("ghost", { grantId: "full-reset-2611", previewId: "a".repeat(64), confirm: true })).status, 404);
   }, {
     claudeResets: {
       status: async (id, force) => {

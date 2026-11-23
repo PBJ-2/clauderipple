@@ -352,12 +352,7 @@ proxy
       claudeClearCooldown: (id) => proxy.claudeClearCooldown(id),
       claudeResets: {
         status: (id, force) => proxy.claudeResets.status(id, { force }),
-        claim: async (id, grantId) => {
-          const outcome = await proxy.claudeResets.claim(id, grantId);
-          // A refilled account is usable again: lift the rest that an earlier limit put on it.
-          if (outcome.ok && outcome.value.claim.result === "reset") proxy.claudeClearCooldown(id);
-          return outcome;
-        },
+        claim: (id, grantId, previewId) => proxy.claudeResets.claim(id, grantId, previewId),
       },
       picker: () => ({ enabled: !!store.get().picker?.enabled, hosts: terminateHosts(store.get()).slice(1), last: proxy.lastPickerInjection }),
       observedClaudeCodeAuth,
