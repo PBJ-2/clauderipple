@@ -185,3 +185,75 @@ test("'use now' is offered for a backend refusal, not for an account only the us
   assert.ok(actionsFor({ state: "cooling", cooldownSeconds: 259_200, restSeconds: 600, capRest: cap }).includes(useNow), "a cap beside a real refusal: the refusal can still be ended");
   assert.equal(actionsFor({ state: "ready" }).includes(useNow), false);
 });
+
+// ---- Renaming an account: the same box, for every kind of account row
+
+type Account2 = { id: string; label: string };
+function renameRig() {
+  const redraws: unknown[] = [];
+  const make = new Function("el", "t", "redrawAccountRows", `
+    ${block("let accountEdit = null;", "function openAccountEdit(")}
+    ${block("function closeAccountEdit(", "function accountRowsFailed(")}
+    return { accountRenameEditor, open: (provider, kind, id, text) => { accountEdit = { provider, kind, id, text, focus: true }; }, current: () => accountEdit };
+  `) as (el: unknown, t: unknown, redraw: (target: unknown) => void) => {
+    accountRenameEditor: (target: unknown, provider: string, account: Account2, rename: (label: string, applied: () => void) => Promise<boolean>) => Node | null;
+    open: (provider: string, kind: string, id: string, text: string) => void;
+    current: () => Edit | null;
+  };
+  return { ...make(el, translate("ko"), (target) => { redraws.push(target); }), redraws };
+}
+
+test("rename: the box opens on the account's name, saves the trimmed name through the request, and closes only once it was taken", async () => {
+  const rig = renameRig();
+  const account = { id: "a1", label: "개인 계정" };
+  const requests: string[] = [];
+  let outcome = false;
+  const rename = async (label: string, applied: () => void) => { requests.push(label); if (outcome) applied(); return outcome; };
+  assert.equal(rig.accountRenameEditor("rows", "p", account, rename), null, "closed unless this account's rename is open");
+  rig.open("p", "label", "a1", account.label);
+  const root = rig.accountRenameEditor("rows", "p", account, rename)!;
+  const e = parts(root);
+  assert.equal(e.input.value, "개인 계정");
+  assert.equal(e.input.attrs.type, "text");
+  assert.equal(e.input.attrs.maxlength, "80", "the store keeps 80 characters");
+  assert.equal(e.byText("상한 해제"), undefined, "a name has nothing to clear");
+  const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+  e.type("  업무용  ");
+  e.press("Enter");
+  await settle();
+  assert.deepEqual(requests, ["업무용"]);
+  assert.ok(rig.current(), "a refused request leaves the box open to try again");
+  outcome = true;
+  e.press("Enter");
+  await settle();
+  assert.deepEqual(requests, ["업무용", "업무용"]);
+  assert.equal(rig.current(), null, "taken: the edit is over before the list is drawn from the new answer");
+});
+
+test("rename: an unchanged name or Cancel closes the box without a request; a blank name cannot be saved", async () => {
+  const rig = renameRig();
+  const account = { id: "a1", label: "Work" };
+  const requests: string[] = [];
+  const rename = async (label: string) => { requests.push(label); return true; };
+  rig.open("p", "label", "a1", "Work");
+  const same = parts(rig.accountRenameEditor("rows", "p", account, rename)!);
+  same.press("Enter");
+  await Promise.resolve();
+  assert.deepEqual(requests, []);
+  assert.equal(rig.current(), null);
+  assert.deepEqual(rig.redraws, ["rows"], "the row is drawn again without the box");
+  rig.open("p", "label", "a1", "Work");
+  const blank = parts(rig.accountRenameEditor("rows", "p", account, rename)!);
+  blank.type("   ");
+  assert.equal(blank.byText("저장")!.disabled, true);
+  blank.press("Enter");
+  assert.deepEqual(requests, []);
+  blank.press("Escape");
+  assert.equal(rig.current(), null);
+});
+
+test("no account row asks the browser for a dialog: the desktop app has no prompt()", () => {
+  assert.doesNotMatch(source, /(?<![\w.$])prompt\(/);
+  assert.doesNotMatch(source, /window\.prompt/);
+  assert.equal(source.match(/renameEditor = (?:own \? )?accountRenameEditor\(target/g)?.length, 3, "Claude, ChatGPT and Google rows open the same rename box");
+});

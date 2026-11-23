@@ -473,6 +473,8 @@ test('the current Claude card uses the pool pause controls without rename, remov
     const hint = text => el('span', {text});
     ${block('function $(', '// Inside the ClaudeRipple app')}
     ${block('function claudeAccountLabel(', 'const accountRowsDrawn =')}
+    const redrawAccountRows = () => {};
+    ${block('let accountEdit = null;', 'function accountRowsFailed(')}
     ${block('function durationText(', 'async function patchChatgptAccount(')}
     return renderClaudeAccountRows;
   `)(

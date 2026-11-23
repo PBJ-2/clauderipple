@@ -3608,11 +3608,13 @@ function renderClaudeAccountRows(target, data, name, generation) {
   for (const account of stored) {
     const unavailable = account.needsReauth || account.expiresAt <= Date.now();
     const rename = el("button", { class: "btn secondary compact", type: "button", text: t("common.edit") });
-    rename.addEventListener("click", async () => {
-      const label = prompt(t("providers.anthropicRenamePrompt"), account.label);
-      if (!label || !label.trim() || label.trim() === account.label) return;
-      try { await api(`/api/claude-accounts/${encodeURIComponent(account.id)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ label }) }); await refreshClaudeAccountPanel(name); }
-      catch (error) { toast(t("common.actionFailed"), true, error.message); }
+    rename.addEventListener("click", () => openAccountEdit(target, name, "label", account.id, account.label));
+    const renameEditor = accountRenameEditor(target, name, account, async (label, applied) => {
+      try { await api(`/api/claude-accounts/${encodeURIComponent(account.id)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ label }) }); }
+      catch (error) { toast(t("common.actionFailed"), true, error.message); return false; }
+      applied();
+      await refreshClaudeAccountPanel(name);
+      return true;
     });
     const remove = el("button", { class: "btn danger compact", type: "button", text: t("common.remove") });
     remove.addEventListener("click", async () => {
@@ -3632,7 +3634,7 @@ function renderClaudeAccountRows(target, data, name, generation) {
     rows.push(el("article", { class: "cell account-card" }, [
       el("div", { class: "cell-text account-card-copy" }, [
         el("strong", { text: claudeAccountLabel(account) }), account.email && account.email !== account.label ? el("span", { class: "small", text: account.email }) : null, claudeQuotaNode(account),
-        el("div", { class: "account-card-actions" }, actions),
+        renameEditor || el("div", { class: "account-card-actions" }, actions),
       ]),
       el("div", { class: "account-card-badges" }, accountPoolBadges({ ...account, state: account.state || (unavailable ? "needs-login" : "ready"), preferred: account.preferred || (choosable && account.id === leader) })),
     ]));
@@ -3680,10 +3682,10 @@ function paintAccountRows(target, draw) {
 
 /**
  * The account row being edited in place, if any: `{provider, kind, id, text, focus}`, where `kind` is
- * "cap" (a ChatGPT account's usage cap) and `text` is what has been typed. It lives here, not in the row,
+ * "cap" (a ChatGPT account's usage cap) or "label" (its display name) and `text` is what has been typed. It lives here, not in the row,
  * because the open list is fetched again every ten seconds and a cooldown counting down is a changed answer.
- * The dashboard also runs inside the desktop app, where `prompt()` is not available, so a row never asks
- * the browser for a dialog.
+ * The dashboard also runs inside the desktop app, which has no browser input dialog, so a row never asks
+ * for one.
  */
 let accountEdit = null;
 function accountEditOf(provider, kind, id) {
@@ -3696,6 +3698,23 @@ function openAccountEdit(target, provider, kind, id, text) {
 function closeAccountEdit(target) {
   accountEdit = null;
   redrawAccountRows(target);
+}
+/**
+ * A row's rename box while it is open, else null. `rename(label, applied)` makes the request and returns
+ * true when it was taken, after calling `applied` and before the list is drawn again from the answer.
+ */
+function accountRenameEditor(target, provider, account, rename) {
+  const edit = accountEditOf(provider, "label", account.id);
+  if (!edit) return null;
+  return inlineAccountEditor({
+    edit,
+    label: t("providers.anthropicRenamePrompt"),
+    save: async (label) => {
+      if (label === account.label) { closeAccountEdit(target); return; }
+      await rename(label, () => { accountEdit = null; });
+    },
+    cancel: () => closeAccountEdit(target),
+  });
 }
 
 /**
@@ -3903,11 +3922,7 @@ function renderChatgptAccountRows(target, data, name, generation) {
     if (own) {
       actions.push(...accountPoolActions(account, (change) => patchChatgptAccount(name, account.id, change)));
       const rename = el("button", { class: "btn secondary compact", type: "button", text: t("common.edit") });
-      rename.addEventListener("click", () => {
-        const label = prompt(t("providers.anthropicRenamePrompt"), account.label);
-        if (!label || !label.trim() || label.trim() === account.label) return;
-        void patchChatgptAccount(name, account.id, { label });
-      });
+      rename.addEventListener("click", () => openAccountEdit(target, name, "label", account.id, account.label));
       const remove = el("button", { class: "btn danger compact", type: "button", text: t("common.remove") });
       remove.addEventListener("click", async () => {
         if (!confirm(t("providers.chatgptRemoveConfirm", { name: account.label }))) return;
@@ -3921,6 +3936,7 @@ function renderChatgptAccountRows(target, data, name, generation) {
     }
     const capEdit = own ? accountEditOf(name, "cap", account.id) : null;
     const done = () => { accountEdit = null; };
+    const renameEditor = own ? accountRenameEditor(target, name, account, (label, applied) => patchChatgptAccount(name, account.id, { label }, applied)) : null;
     const capEditor = capEdit ? inlineAccountEditor({
       edit: capEdit,
       label: t("providers.chatgptCapInputLabel"),
@@ -3950,7 +3966,7 @@ function renderChatgptAccountRows(target, data, name, generation) {
         quota ? quotaMeters([account.quota.rate_limits.primary, account.quota.rate_limits.secondary], account.quota.at) : null,
         capText ? hint(capText) : null,
         help ? hint(help) : null,
-        capEditor || (actions.length ? el("div", { class: "account-card-actions" }, actions) : null),
+        capEditor || renameEditor || (actions.length ? el("div", { class: "account-card-actions" }, actions) : null),
       ]),
       el("div", { class: "account-card-badges" }, accountPoolBadges(account)),
     ]);
@@ -3990,11 +4006,14 @@ async function startGoogleLogin(onChange) {
   }
 }
 
-async function patchGoogleAccount(name, id, change) {
+/** True once the router has taken the change; `applied` runs just before the list is drawn again from the router's answer. */
+async function patchGoogleAccount(name, id, change, applied) {
   try {
     await api(`/api/google-accounts/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(change) });
-    await refreshGoogleAccountPanel(name);
-  } catch (error) { toast(t("common.actionFailed"), true, error.message); }
+  } catch (error) { toast(t("common.actionFailed"), true, error.message); return false; }
+  if (applied) applied();
+  await refreshGoogleAccountPanel(name);
+  return true;
 }
 async function recheckGoogleVerification(name, id) {
   try {
@@ -4041,11 +4060,8 @@ function renderGoogleAccountRows(target, data, name, generation) {
       actions.push(clear);
     }
     const rename = el("button", { class: "btn secondary compact", type: "button", text: t("common.edit") });
-    rename.addEventListener("click", () => {
-      const label = prompt(t("providers.anthropicRenamePrompt"), account.label);
-      if (!label || !label.trim() || label.trim() === account.label) return;
-      void patchGoogleAccount(name, account.id, { label });
-    });
+    rename.addEventListener("click", () => openAccountEdit(target, name, "label", account.id, account.label));
+    const renameEditor = accountRenameEditor(target, name, account, (label, applied) => patchGoogleAccount(name, account.id, { label }, applied));
     const remove = el("button", { class: "btn danger compact", type: "button", text: t("common.remove") });
     remove.addEventListener("click", async () => {
       if (!confirm(t("providers.googleRemoveConfirm", { name: account.label }))) return;
@@ -4060,7 +4076,7 @@ function renderGoogleAccountRows(target, data, name, generation) {
         detail ? el("span", { class: "small", text: detail }) : null,
         // How an account is kept is said once under the list (googleAccountsPanel); a row says only what it needs.
         account.state === "needs-login" || account.state === "quarantined" ? hint(t("providers.chatgptReauthHelp")) : account.state === "needs-verification" ? hint(t("providers.googleVerifyHelp")) : null,
-        el("div", { class: "account-card-actions" }, actions),
+        renameEditor || el("div", { class: "account-card-actions" }, actions),
       ]),
       el("div", { class: "account-card-badges" }, accountPoolBadges(account)),
     ]);
