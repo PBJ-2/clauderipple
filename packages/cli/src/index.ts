@@ -22,7 +22,7 @@ import { installTrayAgent, removeTrayAgent, trayLoginItemDecision, trayPlistPath
 import { nativeSupervisor, registration, writePaths } from "./registration.ts";
 import { installLauncher, uninstallLauncher } from "./launcher.ts";
 import type { RecoveryDeps } from "./doctor.ts";
-import { applyAppProxy, assertDesktopPresent, caTrusted, CA_NAME, currentAppProxy, migrateLegacyAppProxy, nssDb, removeAppProxy, trustCa, untrustCa } from "./picker.ts";
+import { applyAppProxy, caTrusted, CA_NAME, claudeDesktopPresent, currentAppProxy, DESKTOP_ABSENT_WARNING, migrateLegacyAppProxy, nssDb, removeAppProxy, trustCa, untrustCa } from "./picker.ts";
 import { removeClientIntegrations, setPickerEnabled } from "./integrations.ts";
 import { withCommandHelp } from "./help-gate.ts";
 import { runtime } from "./runtime.ts";
@@ -43,13 +43,15 @@ async function pickerOn(): Promise<void> {
   const cfg = new ConfigStore(configPath()).get();
   const caPem = certPaths(home).caPem;
   if (!fs.existsSync(path.join(home, "ca.key"))) throw new Error("ca.key missing; run `clauderipple install` first");
-  // Before the CA is trusted: that changes the user's trust store, and a computer that has never had
-  // the desktop app (a headless server, #183) would be left trusting it with nothing to use it.
-  assertDesktopPresent();
+  // Advice only (#183): the probe is a guess (an app in ~/Applications, a renamed or never-started one,
+  // a virtualized profile), so what follows is the same on every computer. Said first, so the line
+  // that ends a failed run is the failure's own.
+  if (!claudeDesktopPresent()) console.warn(`warning: ${DESKTOP_ABSENT_WARNING}`);
   // With picker mode on, every byte Claude Desktop sends goes through the router (ARCHITECTURE §5):
   // pointing the app at one that is not answering leaves it a blank page, so check first.
   const ready = await probe({ host: cfg.listen.host, port: cfg.listen.port, caPem, upstream: cfg.upstream });
-  if (!ready.ok) throw new Error(`the router is not answering (${ready.detail}); picker mode not enabled. Start it with \`clauderipple start\` and try again.`);
+  // The action first: a long reason is cut at its end by whoever shows this line.
+  if (!ready.ok) throw new Error(`picker mode not enabled: start the router with \`clauderipple start\` and try again (the router is not answering: ${ready.detail})`);
   console.log("Picker mode makes Claude Desktop's own claude.ai traffic go through ClaudeRipple so the model picker can list your GPT models.");
   console.log(
     isWindows

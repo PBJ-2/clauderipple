@@ -4,7 +4,9 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { applyAppProxy, assertDesktopPresent, caTrusted, claudeDesktopPresent, DESKTOP_ABSENT_MESSAGE, nssNickname, nssTrust, nssTrusted, nssUntrust, untrustCa } from "../src/picker.ts";
+import { stripTypeScriptTypes } from "node:module";
+import vm from "node:vm";
+import { applyAppProxy, caTrusted, claudeDesktopPresent, configLibraryDir, DESKTOP_ABSENT_WARNING, nativeCommandError, nativeReason, nssNickname, nssTrust, nssTrusted, nssUntrust, untrustCa } from "../src/picker.ts";
 import { X509Certificate } from "node:crypto";
 import { createCa } from "../../router/src/x509.ts";
 
@@ -231,26 +233,28 @@ test("the real certutil accepts the same calls", { skip: process.env.CLAUDERIPPL
   }));
 
 // ---- Is the Claude desktop app on this computer? (#183) --------------------------------------
+// Advice only: the probe feeds the dashboard's note and one CLI warning, and never refuses a command.
 
 /** Restricts the real filesystem to a temp root: /Applications/Claude.app on the developer's Mac must not count. */
 const insideOnly = (root: string) => (file: string): boolean => file.startsWith(root) && fs.existsSync(file);
 
+/** The platform's own app-data parent for a temp root, and the env that points the code at it. */
+function sandbox(root: string) {
+  const home = path.join(root, "home");
+  const env = { LOCALAPPDATA: path.join(root, "local"), XDG_CONFIG_HOME: path.join(root, "xdg") };
+  const parent = process.platform === "win32" ? env.LOCALAPPDATA
+    : process.platform === "linux" ? env.XDG_CONFIG_HOME
+      : path.join(home, "Library", "Application Support");
+  fs.mkdirSync(home, { recursive: true });
+  return { home, env, parent };
+}
+
 test("the desktop app counts as present from its data folder, and not from an empty home", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cr-desktop-"));
   try {
-    const home = path.join(root, "home");
-    const env = { LOCALAPPDATA: path.join(root, "local"), XDG_CONFIG_HOME: path.join(root, "xdg") };
-    // The platform's own app-data parent, and the folder names the app uses under it.
-    const parent = process.platform === "win32" ? env.LOCALAPPDATA
-      : process.platform === "linux" ? env.XDG_CONFIG_HOME
-        : path.join(home, "Library", "Application Support");
+    const { home, env, parent } = sandbox(root);
     const present = () => claudeDesktopPresent({ home, env, exists: insideOnly(root) });
-    fs.mkdirSync(home, { recursive: true });
     assert.equal(present(), false, "nothing installed");
-    fs.mkdirSync(path.join(parent, "Claude-3p"), { recursive: true });
-    assert.equal(present(), true, "the folder picker mode itself uses");
-    fs.rmSync(path.join(parent, "Claude-3p"), { recursive: true });
-    assert.equal(present(), false);
     fs.mkdirSync(path.join(parent, "Claude"), { recursive: true });
     assert.equal(present(), true, "the app's own data folder");
     fs.rmSync(path.join(parent, "Claude"), { recursive: true });
@@ -262,18 +266,46 @@ test("the desktop app counts as present from its data folder, and not from an em
   }
 });
 
+test("a Claude-3p folder holding only what ClaudeRipple makes is not the app; anything else in it is", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cr-desktop-3p-"));
+  try {
+    const { home, env, parent } = sandbox(root);
+    const present = () => claudeDesktopPresent({ home, env, exists: insideOnly(root) });
+    const own = path.join(parent, "Claude-3p");
+    // `picker off` on a computer that never had the app makes the Config Library (and its lock) anyway.
+    fs.mkdirSync(path.join(own, "configLibrary", "_meta.json.lock"), { recursive: true });
+    fs.writeFileSync(path.join(own, "configLibrary", "_meta.json"), "{}");
+    assert.equal(present(), false, "configLibrary and its lock files are ours");
+    fs.mkdirSync(path.join(own, "x.lock"));
+    assert.equal(present(), false, "a lock directory beside it is ours too");
+    fs.rmSync(path.join(own, "configLibrary"), { recursive: true });
+    assert.equal(present(), false, "an empty folder shows nothing either");
+    // Whatever the app writes into its own profile folder is evidence.
+    fs.writeFileSync(path.join(own, "config.json"), "{}");
+    assert.equal(present(), true, "a file of the app's own");
+    fs.rmSync(path.join(own, "config.json"));
+    fs.mkdirSync(path.join(own, "Local Storage"));
+    assert.equal(present(), true, "a folder of the app's own");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("each platform looks where its own desktop app keeps its data and its install", () => {
-  const paths = (platform: NodeJS.Platform, home: string, env: NodeJS.ProcessEnv, present: string[]): boolean =>
-    claudeDesktopPresent({ platform, home, env, exists: (file) => present.includes(file) });
-  // macOS: Application Support, and the application bundle.
+  const paths = (platform: NodeJS.Platform, home: string, env: NodeJS.ProcessEnv, present: string[], listing: string[] = ["Cache"]): boolean =>
+    claudeDesktopPresent({ platform, home, env, exists: (file) => present.includes(file), readdir: () => listing });
+  // macOS: Application Support, and the application bundle, in either Applications folder.
   assert.equal(paths("darwin", "/Users/u", {}, []), false);
   assert.equal(paths("darwin", "/Users/u", {}, ["/Users/u/Library/Application Support/Claude"]), true);
   assert.equal(paths("darwin", "/Users/u", {}, ["/Users/u/Library/Application Support/Claude-3p"]), true);
+  assert.equal(paths("darwin", "/Users/u", {}, ["/Users/u/Library/Application Support/Claude-3p"], ["configLibrary"]), false);
   assert.equal(paths("darwin", "/Users/u", {}, ["/Applications/Claude.app"]), true);
+  assert.equal(paths("darwin", "/Users/u", {}, ["/Users/u/Applications/Claude.app"]), true);
   assert.equal(paths("darwin", "/Users/u", {}, ["/Users/u/.config/Claude"]), false, "another platform's place does not count");
   // Windows: under %LOCALAPPDATA%, which falls back to AppData\Local; the installer's folder counts.
   assert.equal(paths("win32", "C:\\Users\\u", { LOCALAPPDATA: "D:\\Local" }, ["C:\\Users\\u\\AppData\\Local\\Claude"]), false);
   assert.equal(paths("win32", "C:\\Users\\u", { LOCALAPPDATA: "D:\\Local" }, ["D:\\Local\\Claude-3p"]), true);
+  assert.equal(paths("win32", "C:\\Users\\u", { LOCALAPPDATA: "D:\\Local" }, ["D:\\Local\\Claude-3p"], ["configLibrary", "_meta.json.lock"]), false);
   assert.equal(paths("win32", "C:\\Users\\u", {}, ["C:\\Users\\u\\AppData\\Local\\Claude"]), true);
   assert.equal(paths("win32", "C:\\Users\\u", { LOCALAPPDATA: "D:\\Local" }, ["D:\\Local\\AnthropicClaude"]), true);
   // Linux: $XDG_CONFIG_HOME, or ~/.config; ~/.config/Claude counts either way.
@@ -282,28 +314,122 @@ test("each platform looks where its own desktop app keeps its data and its insta
   assert.equal(paths("linux", "/home/u", { XDG_CONFIG_HOME: "/x" }, ["/x/Claude-3p"]), true);
   assert.equal(paths("linux", "/home/u", { XDG_CONFIG_HOME: "/x" }, ["/home/u/.config/Claude"]), true);
   assert.equal(paths("linux", "/home/u", { XDG_CONFIG_HOME: "/x" }, ["/home/u/.config/Other"]), false);
-  assert.throws(() => assertDesktopPresent({ platform: "linux", home: "/home/u", env: {}, exists: () => false }), (error: Error) => error.message === DESKTOP_ABSENT_MESSAGE && /model mapping/.test(error.message) && /computer that runs the Claude desktop app/.test(error.message));
-  assert.doesNotThrow(() => assertDesktopPresent({ platform: "linux", home: "/home/u", env: {}, exists: () => true }));
+  // A folder that exists but cannot be listed is not shown to be ours alone.
+  assert.equal(claudeDesktopPresent({ platform: "linux", home: "/home/u", env: {}, exists: (file) => file === "/home/u/.config/Claude-3p", readdir: () => { throw new Error("EACCES"); } }), true);
 });
 
-test("applying the app's proxy entry on a computer without the desktop app explains itself and creates no folder", () => {
+test("applying the app's proxy entry on a computer without the desktop app works as before, and does not make the app look present", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cr-desktop-absent-"));
   const keys = ["HOME", "USERPROFILE", "LOCALAPPDATA", "XDG_CONFIG_HOME", "CLAUDE_APP_SUPPORT", "CLAUDE_SETTINGS_PATH"] as const;
   const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
   try {
-    const home = path.join(root, "home");
-    fs.mkdirSync(home);
-    Object.assign(process.env, { HOME: home, USERPROFILE: home, LOCALAPPDATA: path.join(root, "local"), XDG_CONFIG_HOME: path.join(root, "xdg"), CLAUDE_SETTINGS_PATH: path.join(root, "settings.json") });
+    const { home, env } = sandbox(root);
+    Object.assign(process.env, { HOME: home, USERPROFILE: home, ...env, CLAUDE_SETTINGS_PATH: path.join(root, "settings.json") });
     delete process.env.CLAUDE_APP_SUPPORT;
-    // The real filesystem under a temp home, except that a developer's own /Applications/Claude.app does not count.
-    const desktop = { exists: insideOnly(root) };
-    assert.throws(() => applyAppProxy("http://127.0.0.1:18791", path.join(root, "clauderipple"), undefined, undefined, desktop), (error: Error) => error.message === DESKTOP_ABSENT_MESSAGE);
-    assert.deepEqual(fs.readdirSync(home), [], "no app folder was made under the home");
-    assert.equal(fs.existsSync(path.join(root, "local")) || fs.existsSync(path.join(root, "xdg")), false);
-    // With the app's data folder named explicitly the entry is written as before.
-    process.env.CLAUDE_APP_SUPPORT = path.join(root, "desktop-3p");
-    const applied = applyAppProxy("http://127.0.0.1:18791", path.join(root, "clauderipple"), undefined, undefined, desktop);
-    assert.ok(fs.existsSync(path.join(root, "desktop-3p", "configLibrary", `${applied.id}.json`)));
+    const present = () => claudeDesktopPresent({ home, env: process.env, exists: insideOnly(root) });
+    assert.equal(present(), false, "no app here");
+    // No refusal: the entry is written where the app would read it.
+    const applied = applyAppProxy("http://127.0.0.1:18791", path.join(root, "clauderipple"));
+    assert.ok(applied.id);
+    assert.ok(fs.existsSync(path.join(configLibraryDir(), `${applied.id}.json`)), "the entry was written");
+    // And what it made (the Config Library, its lock) is not taken for the app having been there.
+    assert.equal(present(), false, "ClaudeRipple's own folder is not the app");
+  } finally {
+    for (const k of keys) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** `picker on` run from the CLI's source with its boundaries stubbed; the entry point itself is never run. */
+function pickerOnCommand(opts: { desktop: boolean; router: { ok: boolean; detail?: string } }) {
+  const source = fs.readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+  const body = source.slice(source.indexOf("async function pickerOn(): Promise<void> {"), source.indexOf("/** After a direct start"));
+  const warnings: string[] = [];
+  const logs: string[] = [];
+  const calls: string[] = [];
+  const run = () => vm.runInNewContext(stripTypeScriptTypes(`${body}\npickerOn();`), {
+    homeDir: () => "/stub-home",
+    configPath: () => "/stub-home/config.json",
+    ConfigStore: class { get() { return { listen: { host: "127.0.0.1", port: 18791 }, upstream: {} }; } },
+    certPaths: () => ({ caPem: "/stub-home/ca.pem" }),
+    fs: { existsSync: () => true },
+    path: { join: (...parts: string[]) => parts.join("/") },
+    claudeDesktopPresent: () => opts.desktop,
+    DESKTOP_ABSENT_WARNING,
+    probe: async () => opts.router,
+    isWindows: false, isLinux: false,
+    nssDb: () => "/stub-nss",
+    trustCa: () => { calls.push("trustCa"); },
+    caTrusted: () => true,
+    proxyUrlFor: (port: number) => `http://127.0.0.1:${port}`,
+    applyAppProxy: () => { calls.push("applyAppProxy"); return { id: "entry", replaced: null }; },
+    setPickerEnabled: (enabled: boolean) => { calls.push(`setPickerEnabled(${enabled})`); },
+    console: { log: (message: string) => logs.push(message), warn: (message: string) => warnings.push(message) },
+  }) as Promise<void>;
+  return { run, warnings, logs, calls };
+}
+
+test("picker on with no desktop app found warns once and goes on exactly as it does with one", async () => {
+  const absent = pickerOnCommand({ desktop: false, router: { ok: true } });
+  await absent.run();
+  assert.equal(absent.warnings.length, 1);
+  assert.equal(absent.warnings[0], `warning: ${DESKTOP_ABSENT_WARNING}`);
+  assert.match(absent.warnings[0]!, /^warning: Set up picker mode on the computer that runs the Claude desktop app/, "the action comes first");
+  assert.ok(absent.warnings[0]!.length < 300, "short enough that a cut cannot drop it");
+  assert.deepEqual(absent.calls, ["trustCa", "applyAppProxy", "setPickerEnabled(true)"], "nothing is refused or skipped");
+  const present = pickerOnCommand({ desktop: true, router: { ok: true } });
+  await present.run();
+  assert.deepEqual(present.warnings, []);
+  assert.deepEqual(present.calls, absent.calls);
+  assert.deepEqual(present.logs, absent.logs);
+});
+
+test("picker on that stops because the router is silent leads with what to do", async () => {
+  const stuck = pickerOnCommand({ desktop: false, router: { ok: false, detail: "x".repeat(400) } });
+  await assert.rejects(stuck.run, (error: Error) => /^picker mode not enabled: start the router with `clauderipple start` and try again/.test(error.message));
+  assert.deepEqual(stuck.calls, [], "the trust store is untouched");
+});
+
+// ---- A failed native command names its own reason (#183) --------------------------------------
+
+test("a native command's failure ends on its own stderr line, not on the Command failed wrapper", () => {
+  let thrown: unknown;
+  try {
+    execFileSync(process.execPath, ["-e", "process.stderr.write('first line\\nSecTrustSettingsSetTrustSettings: The authorization was denied.\\n'); process.exit(3)"], { stdio: ["ignore", "ignore", "pipe"] });
+  } catch (error) {
+    thrown = error;
+  }
+  assert.match((thrown as Error).message, /^Command failed:/, "what execFileSync says on its own");
+  const error = nativeCommandError("security add-trusted-cert", thrown);
+  assert.equal(error.message, "security add-trusted-cert failed: SecTrustSettingsSetTrustSettings: The authorization was denied.");
+  assert.equal(error.message.split("\n").length, 1);
+  assert.equal((error.cause as Error), thrown);
+  // No stderr: the exit status, never the command line.
+  assert.equal(nativeReason({ stderr: "", status: 1 }), "it exited with status 1 and printed nothing");
+  assert.equal(nativeReason({ stderr: Buffer.from("  \n"), signal: "SIGTERM", status: null }), "it was stopped by SIGTERM");
+  assert.equal(nativeReason({ code: "ENOENT" }), "ENOENT");
+  assert.equal(nativeReason({ stderr: `${"y".repeat(300)}\n` }).length, 241);
+});
+
+test("a failed certutil run reports its own reason; a missing one tells how to install it, first", { skip: process.platform === "win32" }, () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cr-nss-fail-"));
+  const keys = ["CLAUDERIPPLE_NSS_DB", "PATH"] as const;
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  try {
+    const caPem = path.join(root, "ca.pem");
+    fs.writeFileSync(caPem, createCa({ cn: "ClaudeRipple local CA" }).certPem);
+    const bin = path.join(root, "bin");
+    fs.mkdirSync(bin);
+    // A certutil that refuses, the way a locked or read-only database does.
+    fs.writeFileSync(path.join(bin, "certutil"), "#!/bin/sh\necho 'certutil: function failed: SEC_ERROR_READ_ONLY: attempt to write a read-only database' >&2\nexit 255\n", { mode: 0o755 });
+    process.env.CLAUDERIPPLE_NSS_DB = path.join(root, "nssdb");
+    process.env.PATH = bin;
+    assert.throws(() => nssTrust(caPem), (error: Error) => error.message === "certutil failed: certutil: function failed: SEC_ERROR_READ_ONLY: attempt to write a read-only database");
+    fs.rmSync(path.join(bin, "certutil"));
+    assert.throws(() => nssTrust(caPem), (error: Error) => /^certutil not found\. Install it \(Ubuntu\/Debian: `sudo apt install libnss3-tools`/.test(error.message));
   } finally {
     for (const k of keys) {
       if (saved[k] === undefined) delete process.env[k];

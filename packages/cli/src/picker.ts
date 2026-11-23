@@ -49,48 +49,73 @@ export type DesktopProbe = {
   home?: string;
   env?: NodeJS.ProcessEnv;
   exists?: (file: string) => boolean;
+  /** Names inside a directory; a directory that cannot be listed throws. */
+  readdir?: (dir: string) => string[];
 };
 
 /**
+ * What ClaudeRipple itself puts in the `Claude-3p` folder: the Config Library, and the lock
+ * directories taken beside its files. `picker off` creates the library on a computer that never had
+ * the app, so a folder holding only these is ours, not evidence of the app.
+ */
+function ownedByUs(name: string): boolean {
+  return name === "configLibrary" || name.endsWith(".lock");
+}
+
+/**
  * Whether the Claude desktop app has been on this computer: its data directory (`Claude`, or the
- * `Claude-3p` one picker mode uses) under the platform's app-data parent, or its install location
- * (macOS /Applications/Claude.app, Windows %LOCALAPPDATA%\AnthropicClaude). A heuristic: a copy
- * installed somewhere unusual and never started reads as absent, so callers only advise or explain,
- * they never decide for the user. An explicit CLAUDE_APP_SUPPORT is the user saying where the app
- * keeps its data, so it counts as present. The probe is injectable for tests; the platform is never
- * faked for code that spawns a child.
+ * `Claude-3p` one picker mode uses, once the app wrote anything of its own into it) under the
+ * platform's app-data parent, or its install location (macOS /Applications/Claude.app or
+ * ~/Applications/Claude.app, Windows %LOCALAPPDATA%\AnthropicClaude). A heuristic: a copy installed
+ * somewhere unusual and never started reads as absent, so callers only advise, they never refuse or
+ * decide for the user. An explicit CLAUDE_APP_SUPPORT is the user saying where the app keeps its
+ * data, so it counts as present. The probe is injectable for tests; the platform is never faked for
+ * code that spawns a child.
  */
 export function claudeDesktopPresent(probe: DesktopProbe = {}): boolean {
   const platform = probe.platform ?? process.platform;
   const home = probe.home ?? os.homedir();
   const env = probe.env ?? process.env;
   const exists = probe.exists ?? ((file: string) => fs.existsSync(file));
+  const readdir = probe.readdir ?? ((dir: string) => fs.readdirSync(dir));
   if (env.CLAUDE_APP_SUPPORT) return true;
   const p = platform === "win32" ? path.win32 : path.posix;
-  let candidates: string[];
+  let data: string[];
+  let own: string;
+  let installs: string[];
   if (platform === "win32") {
     const local = env.LOCALAPPDATA || p.join(home, "AppData", "Local");
-    candidates = [p.join(local, "Claude"), p.join(local, "Claude-3p"), p.join(local, "AnthropicClaude")];
+    data = [p.join(local, "Claude")];
+    own = p.join(local, "Claude-3p");
+    installs = [p.join(local, "AnthropicClaude")];
   } else if (platform === "linux") {
     const config = env.XDG_CONFIG_HOME || p.join(home, ".config");
-    candidates = [p.join(config, "Claude"), p.join(config, "Claude-3p"), p.join(home, ".config", "Claude")];
+    data = [p.join(config, "Claude"), p.join(home, ".config", "Claude")];
+    own = p.join(config, "Claude-3p");
+    installs = [];
   } else {
     const support = p.join(home, "Library", "Application Support");
-    candidates = [p.join(support, "Claude"), p.join(support, "Claude-3p"), "/Applications/Claude.app"];
+    data = [p.join(support, "Claude")];
+    own = p.join(support, "Claude-3p");
+    installs = ["/Applications/Claude.app", p.join(home, "Applications", "Claude.app")];
   }
-  return candidates.some((candidate) => exists(candidate));
+  if ([...data, ...installs].some((candidate) => exists(candidate))) return true;
+  if (!exists(own)) return false;
+  try {
+    return readdir(own).some((name) => !ownedByUs(name));
+  } catch {
+    // Present but unreadable: nothing shows it is only ours.
+    return true;
+  }
 }
 
-/** Why picker mode cannot be set up here; the dashboard words the same advice in its own language. */
-export const DESKTOP_ABSENT_MESSAGE =
-  "Claude Desktop does not seem to be installed on this computer (no Claude app data folder was found), so picker mode was not enabled. "
-  + "Model picker mode has to be set up on the computer that runs the Claude desktop app; on this computer, model mapping works without it. "
-  + "If the app is installed here, start it once and try again.";
-
-/** Refuses before anything is changed on a computer that has never had the desktop app. */
-export function assertDesktopPresent(probe: DesktopProbe = {}): void {
-  if (!claudeDesktopPresent(probe)) throw new Error(DESKTOP_ABSENT_MESSAGE);
-}
+/**
+ * The CLI's one-line advice when no desktop app was found. A warning, never a refusal: the check is a
+ * guess (an app in an unusual place, a profile that was reset, a sandboxed install), so the command
+ * goes on. The action comes first because a long message is cut at its end.
+ */
+export const DESKTOP_ABSENT_WARNING =
+  "Set up picker mode on the computer that runs the Claude desktop app; none was found on this one (if it is installed here, start it once). Model mapping works without picker mode.";
 
 function loginKeychain(): string {
   return path.join(os.homedir(), "Library", "Keychains", "login.keychain-db");
@@ -116,6 +141,26 @@ export function nssDb(): string {
  */
 export function nssNickname(caPem: string): string {
   return `${CA_NAME} ${new X509Certificate(fs.readFileSync(caPem)).fingerprint256.replace(/:/g, "").slice(0, 24)}`;
+}
+
+/**
+ * The reason a native command gave, from its own stderr: the last non-empty line, bounded. Never the
+ * `Command failed: <argv>` wrapper that execFileSync puts first, which names the command line and
+ * hides why it failed. Without stderr (inherited or empty) it falls back to the exit status.
+ */
+export function nativeReason(error: unknown): string {
+  const failure = error as { stderr?: Buffer | string | null; status?: number | null; signal?: string | null; code?: string | number };
+  const lines = String(failure.stderr ?? "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const last = lines[lines.length - 1];
+  if (last) return last.length > 240 ? `${last.slice(0, 240)}…` : last;
+  if (typeof failure.status === "number") return `it exited with status ${failure.status} and printed nothing`;
+  if (failure.signal) return `it was stopped by ${failure.signal}`;
+  return typeof failure.code === "string" ? failure.code : "it failed without saying why";
+}
+
+/** An error whose message ends on the native command's own reason, so a log's or toast's last line says what failed. */
+export function nativeCommandError(what: string, error: unknown): Error {
+  return new Error(`${what} failed: ${nativeReason(error)}`, { cause: error });
 }
 
 function certutil(args: string[]): string {
@@ -155,7 +200,8 @@ export function nssTrust(caPem: string): void {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") {
       throw new Error("certutil not found. Install it (Ubuntu/Debian: `sudo apt install libnss3-tools`, Fedora: `sudo dnf install nss-tools`), then run `clauderipple picker on` again");
     }
-    throw e;
+    // A failed certutil run says why on its stderr; a folder that could not be made keeps its own message.
+    throw typeof (e as { status?: unknown }).status === "number" ? nativeCommandError("certutil", e) : e;
   }
 }
 
@@ -183,12 +229,13 @@ function ps(value: string): string {
  * and under -NonInteractive the call fails outright with "this operation cannot use the UI"
  * (observed 2026-09-14 — the dialog never appeared and picker mode stopped there).
  */
-function powershell(script: string, opts: { stdio?: "ignore" | "inherit" | "pipe"; interactive?: boolean } = {}): string {
+function powershell(script: string, opts: { stdio?: "ignore" | "inherit" | "inherit-out" | "pipe"; interactive?: boolean } = {}): string {
   const stdio = opts.stdio ?? "pipe";
   const args = ["-NoProfile", ...(opts.interactive ? [] : ["-NonInteractive"]), "-Command", script];
   return execFileSync("powershell.exe", args, {
     env: windowsPowerShellEnv(),
-    stdio: stdio === "pipe" ? ["ignore", "pipe", "pipe"] : stdio,
+    // inherit-out: the console stays the user's, but stderr is read, so a failure can name its reason.
+    stdio: stdio === "pipe" ? ["ignore", "pipe", "pipe"] : stdio === "inherit-out" ? ["inherit", "inherit", "pipe"] : stdio,
     windowsHide: !opts.interactive,
   })?.toString() ?? "";
 }
@@ -275,11 +322,22 @@ export function trustCa(caPem: string): void {
   if (isLinux) return nssTrust(caPem);
   if (caTrusted(caPem)) return;
   if (isWindows) {
-    // stdio inherit: the confirmation dialog is the OS's, but errors should reach the user's terminal.
-    powershell(`Import-Certificate -FilePath ${ps(caPem)} -CertStoreLocation Cert:\\CurrentUser\\Root -ErrorAction Stop | Out-Null`, { stdio: "inherit", interactive: true });
+    // The confirmation dialog is the OS's. stderr is read rather than inherited, and the script
+    // writes its failure as one plain line (not PowerShell's CLIXML), so the error names its reason.
+    try {
+      powershell(`try { Import-Certificate -FilePath ${ps(caPem)} -CertStoreLocation Cert:\\CurrentUser\\Root -ErrorAction Stop | Out-Null } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }`, { stdio: "inherit-out", interactive: true });
+    } catch (e) {
+      throw nativeCommandError("Import-Certificate", e);
+    }
     return;
   }
-  execFileSync("security", ["add-trusted-cert", "-r", "trustRoot", "-k", loginKeychain(), caPem], { stdio: "inherit" });
+  // stdin and stdout stay the user's (the keychain's own prompt); stderr is read, so a refusal such as
+  // "authorization was denied" reaches the error instead of a bare `Command failed: security ...`.
+  try {
+    execFileSync("security", ["add-trusted-cert", "-r", "trustRoot", "-k", loginKeychain(), caPem], { stdio: ["inherit", "inherit", "pipe"] });
+  } catch (e) {
+    throw nativeCommandError("security add-trusted-cert", e);
+  }
 }
 
 /**
@@ -459,11 +517,7 @@ function migrateLegacyAppProxyLocked(proxyUrl: string, installationHome: string,
 }
 
 /** Writes our Config Library entry and applies it. Remembers what was applied before so `off` can restore it. */
-export function applyAppProxy(proxyUrl: string, installationHome = homeDir(), expected?: ReturnType<typeof currentAppProxy>, deps: DesktopServiceDeps = {}, desktop: DesktopProbe = {}): { id: string; replaced: string | null } {
-  // Before the lock: taking it creates the app's data folder, and on a computer that has never had
-  // the app (a headless server whose desktop app is on another machine, #183) that folder is one
-  // nothing reads.
-  assertDesktopPresent(desktop);
+export function applyAppProxy(proxyUrl: string, installationHome = homeDir(), expected?: ReturnType<typeof currentAppProxy>, deps: DesktopServiceDeps = {}): { id: string; replaced: string | null } {
   return withFileLock(path.join(configLibraryDir(), "_meta.json"), () => applyAppProxyLocked(proxyUrl, installationHome, expected, deps));
 }
 
@@ -472,7 +526,7 @@ function applyAppProxyLocked(proxyUrl: string, installationHome: string, expecte
   fs.mkdirSync(dir, { recursive: true });
   const meta = readMeta();
   const cur = currentAppProxy();
-  if (expected &&JSON.stringify(cur) !== JSON.stringify(expected)) throw new Error("Desktop proxy changed before restoration; left untouched");
+  if (expected && JSON.stringify(cur) !== JSON.stringify(expected)) throw new Error("Desktop proxy changed before restoration; left untouched");
   if (cur.ours && cur.appliedId) {
     let owner = appProxyOwner(cur, installationHome, proxyUrl);
     if (owner === "unknown" && migrateLegacyAppProxyLocked(proxyUrl, installationHome, deps)) owner = "ours";
