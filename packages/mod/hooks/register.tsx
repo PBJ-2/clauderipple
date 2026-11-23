@@ -19,7 +19,7 @@ import type { ScopedLimit } from './session'
 import { QUICK_PROMPT, wrapForNewChat } from './handoff'
 import { APPROVAL_BODY_CAP, APPROVAL_FRESH_MARGIN_MS, APPROVAL_FRESH_MS, askId, decisionOf, heldReply, holdable } from './approval'
 import type { HeldReply, HostAnswer } from './approval'
-import { addTask, agentsAfterNotice, endTasks, endWithAgent, ownRunning, settleTasks, settleWithAgent, stillRunning, stopTask, taskEnds, taskStarted, waitOnOwn, type TaskEnd } from './tasks'
+import { addTask, agentsAfterNotice, agentsAfterStop, endTasks, endWaiting, endWithAgent, finishedByNotice, ownRunning, settleTasks, settleWithAgent, stillRunning, stopTask, taskEnds, taskStarted, waitOnOwn, type TaskEnd } from './tasks'
 import { addAgentStep, addJudge, addPrompt, addRequest, addWarm, addWorker, emptyStats, formatStats, sentEffort } from './stats'
 import { besideBand, renderBand, renderFooter } from './ui/band'
 import { renderAlert } from './ui/alerts'
@@ -2066,6 +2066,11 @@ async function endBackground($: EngineInterface, text: string): Promise<void> {
  */
 async function settleWaiting($: EngineInterface, ends: readonly TaskEnd[], before: readonly BgTask[], after: readonly BgTask[], now: number): Promise<void> {
   const list = await read($, agents)
+  // The engine says "finished" only when the agent has no live background work of its own: whatever
+  // commands of its own the list still holds running leave it with the agent, as at a turn's end for good.
+  for (const id of finishedByNotice(list, ends)) {
+    if ((await read($, bgTasks)).some(task => task.agentId === id && task.state === 'running')) await update($, bgTasks, tasks => settleWithAgent(tasks, id, now))
+  }
   const next = agentsAfterNotice(list, ends, before, after, now)
   if (same(next, list)) return
   await update($, agents, current => retainAgents(agentsAfterNotice(current, ends, before, after, now)))
@@ -2122,6 +2127,8 @@ async function wakeCard($: EngineInterface, id: string): Promise<(() => Promise<
   const woken: AgentRec = before ? wakeAgent(before, now) : { id, ...(info ? { description: info.description, type: info.type } : {}), state: 'running', startedAt: now, ranMs: 0, cost: 0 }
   await update($, agents, list => retainAgents([...list.filter(a => a.id !== id), woken]))
   await countAgents($)
+  // A waiting card knew a command of its own that kept it waiting (none known: its wait came on the engine's word alone).
+  const hadOwn = ownRunning(await read($, bgTasks), id).length > 0
   // Only a card still as written goes back: nothing of a run ran on it.
   return async () => {
     await update($, agents, list => {
@@ -2130,7 +2137,21 @@ async function wakeCard($: EngineInterface, id: string): Promise<(() => Promise<
       return before ? list.map(a => a.id === id ? before : a) : list.filter(a => a.id !== id)
     })
     await countAgents($)
+    // A waiting card goes back waiting only if a command of its own still runs: the last may have ended
+    // while the resume was pending, and the wake it was waiting for is the one just refused.
+    if (before?.waiting && hadOwn) await endIdleWait($, id)
   }
+}
+/**
+ * A waiting card whose own commands the task list no longer holds running ends, done: the list is read
+ * after the card was written, so a command that ended before the write (when no waiting card was there
+ * to end) is seen here, and one that ends after finds the card waiting (settleWaiting).
+ */
+async function endIdleWait($: EngineInterface, id: string): Promise<void> {
+  if (ownRunning(await read($, bgTasks), id).length) return
+  const now = await $.clock.now()
+  await update($, agents, list => list.map(a => a.id === id && a.waiting ? endWaiting(a, 'done', now) : a))
+  await countAgents($)
 }
 /**
  * An agent's turn or tool call starts while its card says done or waiting: it woke on its own, when
@@ -2549,6 +2570,18 @@ export const register: Register = on => {
           // A waiting worker whose last command was settled has nothing left to wait on.
           await settleWaiting($, [], list, await read($, bgTasks), now)
         }
+        // A wait the Stop leaves nothing of (neither the agent nor a command of its own listed) has
+        // nothing to end it: one the engine's notice alone opened, with no command of ours to end, or
+        // one a hot reload left behind. It ends here, done.
+        const cards = await read($, agents)
+        if (cards.some(a => a.waiting)) {
+          const now = await $.clock.now()
+          const tasks = await read($, bgTasks)
+          if (!same(agentsAfterStop(cards, inFlight, tasks, now), cards)) {
+            await update($, agents, current => retainAgents(agentsAfterStop(current, inFlight, tasks, now)))
+            await countAgents($)
+          }
+        }
       }
     } catch (error) { await report($, 'classic.Stop', error) }
     return next(e)
@@ -2759,6 +2792,11 @@ export const register: Register = on => {
         const waiting = !!before && state === 'done' && ownRunning(await read($, bgTasks), e.agentId).length > 0
         await update($, agents, list => retainAgents(list.map(a => a.id !== e.agentId ? a : waiting ? waitOnOwn(a) : { ...a, state, endedAt: now, now: undefined, toolSince: undefined, waiting: undefined })))
         await countAgents($)
+        // The read above can be stale by the write: a notice or TaskStop may have ended its last command
+        // meanwhile, and a card not yet waiting was no one's to end then (agentsAfterNotice). Decided
+        // again on the list as it is once the card is written: a notice from here on finds a waiting
+        // card, and one before it is seen here. A child that already ended means done.
+        if (waiting) await endIdleWait($, e.agentId)
         // Otherwise what it left running leaves the list with it, as the Claude app's does; a notice that
         // comes later says how each ended (settleWithAgent).
         if (!waiting && (await read($, bgTasks)).some(task => task.agentId === e.agentId && task.state === 'running')) await update($, bgTasks, list => settleWithAgent(list, e.agentId!, now))

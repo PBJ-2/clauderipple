@@ -149,10 +149,12 @@ export function ownRunning(list: readonly BgTask[], agentId: string): BgTask[] {
 /**
  * The engine's summary for an agent that ended its turn with its own background work still running
  * ("<description> is waiting on its own background work"); a finished one reads "<description> finished".
- * Read only where the task list cannot say (agentsAfterNotice).
+ * Only that suffix form counts, at the very end: a description that merely mentions the words
+ * ("Fix the agent waiting on its own background work") is the agent's own, and a finished agent whose
+ * description says so must not come back to life. Read only where the task list cannot say (agentsAfterNotice).
  */
 export function isWaitingSummary(summary: string | undefined): boolean {
-  return /is waiting on its own background work/i.test(summary ?? '')
+  return /(^|\s)is waiting on its own background work$/i.test((summary ?? '').trim())
 }
 
 /** The card of an agent whose turn ended with work of its own still running: running, as the Claude app shows it, its clock kept. */
@@ -162,7 +164,7 @@ export function waitOnOwn(agent: AgentRec): AgentRec {
 }
 
 /** A waiting agent's card ended, its wait counted in its time. */
-function endWaiting(agent: AgentRec, state: 'done' | 'failed', now: number): AgentRec {
+export function endWaiting(agent: AgentRec, state: 'done' | 'failed', now: number): AgentRec {
   const { waiting: _waiting, ...rest } = agent
   return { ...rest, state, endedAt: now }
 }
@@ -190,6 +192,33 @@ export function agentsAfterNotice(agents: readonly AgentRec[], ends: readonly Ta
     if (agent.waiting && how && !waits) return endWaiting(agent, how === 'done' ? 'done' : 'failed', now)
     if (agent.waiting && ownRunning(before, agent.id).length && !ownRunning(after, agent.id).length) return endWaiting(agent, 'done', now)
     return agent
+  })
+}
+
+/**
+ * The waiting agents a notification says finished (or failed): their own commands still running leave
+ * the list with them, as they did when a turn ended for good (settleWithAgent). The engine says
+ * "finished" only when the agent has no live background work of its own left.
+ */
+export function finishedByNotice(agents: readonly AgentRec[], ends: readonly TaskEnd[]): string[] {
+  return agents.filter(agent => {
+    if (!agent.waiting) return false
+    const notice = ends.find(end => end.id === agent.id)
+    return !!notice && !!endState(notice.status) && !isWaitingSummary(notice.summary)
+  }).map(agent => agent.id)
+}
+
+/**
+ * The waiting agents a Stop's `background_tasks` (ids `inFlight`) leaves nothing of: neither the agent
+ * nor any command of its own (in `tasks`) is listed, so nothing is left to wake it or to say it ended.
+ * A wait opened only by the engine's notice (no command of its own known) ends this way, and so does
+ * one a hot reload left behind. They end done, the wait counted in their time.
+ */
+export function agentsAfterStop(agents: readonly AgentRec[], inFlight: readonly string[], tasks: readonly BgTask[], now: number): AgentRec[] {
+  return agents.map(agent => {
+    if (!agent.waiting || inFlight.includes(agent.id)) return agent
+    if (tasks.some(task => task.agentId === agent.id && !task.endsWithAgent && inFlight.includes(task.id))) return agent
+    return endWaiting(agent, 'done', now)
   })
 }
 

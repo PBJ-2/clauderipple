@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { TASKS_KEPT, addTask, agentsAfterNotice, endTasks, endWithAgent, exitCode, isWaitingSummary, ownRunning, settleTasks, settleWithAgent, taskEnds, taskStarted, waitOnOwn } from '../../packages/mod/hooks/tasks.ts'
+import { TASKS_KEPT, addTask, agentsAfterNotice, agentsAfterStop, endTasks, endWithAgent, exitCode, finishedByNotice, isWaitingSummary, ownRunning, settleTasks, settleWithAgent, taskEnds, taskStarted, waitOnOwn } from '../../packages/mod/hooks/tasks.ts'
 import type { AgentRec, BgTask } from '../../packages/mod/types/index.d.ts'
 
 const shell: BgTask = { id: 'b1', kind: 'shell', title: 'Start the dev server', command: 'npm run dev', state: 'running', startedAt: 1 }
@@ -86,6 +86,46 @@ test("an agent's end waits for its last own command, or for the engine's word th
   assert.equal(isWaitingSummary('Rename variable is waiting on its own background work'), true)
   assert.equal(isWaitingSummary('Rename variable finished'), false)
   assert.equal(isWaitingSummary(undefined), false)
+})
+
+test("only the engine's suffix form is the waiting word, at the very end", () => {
+  assert.equal(isWaitingSummary('Rename variable is waiting on its own background work  '), true)
+  assert.equal(isWaitingSummary('is waiting on its own background work'), true)
+  // A description that merely holds the words, or a finished agent whose description ends in them, is not waiting.
+  assert.equal(isWaitingSummary('Fix an agent is waiting on its own background work finished'), false)
+  assert.equal(isWaitingSummary('Fix an agent is waiting on its own background work in CI'), false)
+  assert.equal(isWaitingSummary('Agent waiting on its own background work'), false)
+  const card: AgentRec = { id: 'worker', state: 'done', startedAt: 1, endedAt: 4, cost: 0 }
+  assert.deepEqual(agentsAfterNotice([card], [{ id: 'worker', status: 'completed', summary: 'Fix an agent is waiting on its own background work finished' }], [], [], 9), [card])
+})
+
+test('the agents a "finished" word ends are named, so their own commands can leave with them', () => {
+  const waiting: AgentRec = { id: 'worker', state: 'running', startedAt: 1, cost: 0, waiting: true }
+  const done: AgentRec = { id: 'other', state: 'done', startedAt: 1, endedAt: 2, cost: 0 }
+  const says = (id: string, summary: string, status = 'completed') => [{ id, status, summary }]
+  assert.deepEqual(finishedByNotice([waiting, done], says('worker', 'Rename variable finished')), ['worker'])
+  assert.deepEqual(finishedByNotice([waiting, done], says('worker', 'Rename variable failed', 'failed')), ['worker'])
+  assert.deepEqual(finishedByNotice([waiting, done], says('worker', 'Rename variable is waiting on its own background work')), [])
+  assert.deepEqual(finishedByNotice([waiting, done], says('other', 'Rename variable finished')), [])
+  assert.deepEqual(finishedByNotice([waiting, done], says('worker', 'Still going', 'running')), [])
+})
+
+test('a Stop that holds neither a waiting agent nor a command of its own ends its wait', () => {
+  const card: AgentRec = { id: 'worker', state: 'running', startedAt: 1, cost: 0, waiting: true }
+  const own: BgTask = { ...shell, id: 'b3', agentId: 'worker' }
+  const bound: BgTask = { ...shell, id: 'b4', agentId: 'worker', endsWithAgent: true }
+  const ended: AgentRec = { id: 'worker', state: 'done', startedAt: 1, cost: 0, endedAt: 6 }
+  assert.deepEqual(agentsAfterStop([card], [], [], 6), [ended])
+  // No command of its own known (the notice alone opened the wait): another task listed is not the agent's.
+  assert.deepEqual(agentsAfterStop([card], ['b1'], [shell], 6), [ended])
+  // Its command listed, or the agent itself: the Stop holds it.
+  assert.deepEqual(agentsAfterStop([card], ['b3'], [own], 6), [card])
+  assert.deepEqual(agentsAfterStop([card], ['worker'], [], 6), [card])
+  // A command bound to its final response is not what it waits on.
+  assert.deepEqual(agentsAfterStop([card], ['b4'], [bound], 6), [ended])
+  // An agent that is not waiting is none of this.
+  const running: AgentRec = { id: 'worker', state: 'running', startedAt: 1, cost: 0 }
+  assert.deepEqual(agentsAfterStop([running], [], [], 6), [running])
 })
 
 test('the list keeps every running task and drops the oldest ended past its bound', () => {
