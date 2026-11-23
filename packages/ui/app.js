@@ -1498,6 +1498,10 @@ function renderClients() {
   // only the rows after the switch are rebuilt.
   const pickerGroup = $("#client-picker-rows");
   while (pickerGroup.children.length > 1) pickerGroup.lastElementChild.remove();
+  // A router on a computer that has never had the desktop app (a headless server whose app runs on
+  // another machine): the switch stays usable, since the check is a guess, but the reason it will not
+  // work here is named where the person looks, and so is what to use instead (#183).
+  if (picker.desktopPresent === false) pickerGroup.append(el("div", { class: "cell-note", text: t("picker.noDesktop") }));
   if (picker.enabled) {
     pickerGroup.append(
       el("div", { class: "cell-note", text: t("picker.models", { count: names.length, names: names.join(", ") || "—" }) }),

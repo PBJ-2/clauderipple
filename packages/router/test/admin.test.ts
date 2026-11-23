@@ -69,6 +69,7 @@ async function withAdmin(
     googleOAuthFetch?: (url: string, init?: RequestInit) => Promise<Response>;
     googleOAuthPort?: number;
     agentsChanged?: () => void;
+    picker?: NonNullable<AdminDeps["picker"]>;
   } = {},
 ): Promise<void> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-admin-"));
@@ -2181,6 +2182,63 @@ test("Codex and Claude subscription endpoints invoke the matching CLI command", 
     admin.close();
     fs.rmSync(home, { recursive: true, force: true });
   }
+});
+
+test("CLI-backed routes answer a failure with its reason in `error`, and log it (#183)", async (t) => {
+  const lines: string[] = [];
+  t.mock.method(Logger.prototype, "info", (msg: string) => { lines.push(msg); });
+  const calls: string[][] = [];
+  // What a headless Linux box without libnss3-tools produces: progress lines, then the CLI's own
+  // `error:` line, then blank lines (which are not the reason). A key-shaped value must not be logged.
+  // The dashboard's api() reads `error`, so this is what reaches its toast instead of "HTTP 500".
+  const output = "Step 1/3: trusting the ClaudeRipple CA in your NSS database\nerror: certutil not found. Install it (Ubuntu/Debian: `sudo apt install libnss3-tools`), then run `clauderipple picker on` again, token=abc123secret\n\n";
+  const reason = "error: certutil not found. Install it (Ubuntu/Debian: `sudo apt install libnss3-tools`), then run `clauderipple picker on` again, token=[REDACTED]";
+  const runCli = async (args: string[]) => { calls.push(args); return { ok: false, output }; };
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const routes: [string, unknown, string[]][] = [
+      ["/api/picker", { enabled: true }, ["picker", "on"]],
+      ["/api/codex", { enabled: false }, ["codex", "off"]],
+      ["/api/agent-title", { enabled: true }, ["agent-title", "on"]],
+      ["/api/status-mod", { enabled: true }, ["mod", "on"]],
+      ["/api/claude-login", {}, ["claude-login"]],
+      ["/api/claude-logout", {}, ["claude-logout"]],
+      ["/api/google-logout", {}, ["google-logout"]],
+    ];
+    for (const [route, body, args] of routes) {
+      const res = await fetch(`${base()}:${port}${route}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      assert.equal(res.status, 500, route);
+      const answer = await res.json() as { ok: boolean; output: string; error?: string };
+      assert.equal(answer.ok, false, route);
+      assert.equal(answer.output, output, `${route} keeps the whole output`);
+      assert.equal(answer.error, reason, `${route} names the last line, redacted`);
+      assert.deepEqual(calls.at(-1), args, route);
+      assert.ok(lines.some((line) => line.startsWith("admin: ") && line.endsWith(`failed: ${reason}`)), `${route} logs the reason`);
+    }
+    assert.equal(lines.some((line) => line.includes("abc123secret")), false, "no secret reaches the log");
+  }, { runCli });
+  // Success is unchanged: no `error` key.
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const res = await fetch(`${base()}:${port}/api/picker`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: true }) });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true, output: "fine" });
+  }, { runCli: async () => ({ ok: true, output: "fine" }) });
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const res = await fetch(`${base()}:${port}/api/picker`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: true }) });
+    const answer = await res.json() as { error?: string };
+    assert.equal(answer.error, "the command ended without any output");
+  }, { runCli: async () => ({ ok: false, output: "" }) });
+});
+
+test("status says whether the Claude desktop app has been on this computer (#183)", async () => {
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const status = await (await fetch(`${base()}:${port}/api/status`)).json() as { picker: { enabled: boolean; desktopPresent: boolean } };
+    assert.equal(status.picker.desktopPresent, true, "unknown is not reported as absent");
+  });
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const status = await (await fetch(`${base()}:${port}/api/status`)).json() as { picker: { enabled: boolean; hosts: string[]; desktopPresent: boolean } };
+    assert.equal(status.picker.desktopPresent, false);
+    assert.equal(status.picker.enabled, false);
+  }, { picker: () => ({ enabled: false, hosts: [], last: null, desktopPresent: false }) });
 });
 
 test("ChatGPT login starts without waiting and reports its eventual result", async () => {

@@ -184,8 +184,12 @@ export type AdminDeps = {
   credentials?: () => Record<string, CredentialRow[]>;
   clearCredentialCooldown?: (provider: string, id: string) => void;
   claudeClearCooldown?: (id: string) => void;
-  /** Optional: picker-mode state and the last bootstrap injection. */
-  picker?: () => { enabled: boolean; hosts: string[]; last: unknown };
+  /**
+   * Optional: picker-mode state and the last bootstrap injection. `desktopPresent` says whether the
+   * Claude desktop app has been on this computer (a heuristic); a router on a headless server whose
+   * desktop is elsewhere reads false, and the dashboard says where picker mode has to be set up.
+   */
+  picker?: () => { enabled: boolean; hosts: string[]; last: unknown; desktopPresent?: boolean };
   /** Optional: observed CLI credentials held by the live proxy, never serialized directly. */
   observedClaudeCodeAuth?: ObservedClaudeCodeAuth;
   /** Test seam for Claude Code's keychain and credential-file readers. */
@@ -1200,7 +1204,7 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
   const chatgpt = await chatgptStatus(deps, opts);
   const env = readSettingsEnv();
   const wantProxy = `http://127.0.0.1:${cfg.listen.port}`;
-  const picker = deps.picker?.() ?? { enabled: false, hosts: [], last: null };
+  const picker = { desktopPresent: true, ...(deps.picker?.() ?? { enabled: false, hosts: [], last: null }) };
   // Readiness is not liveness: this process answering says nothing about whether a Claude request
   // can go through. In picker mode a missing certificate trust or app proxy entry looks, from the
   // app, exactly like a dead router. Each problem is a code the tray and the GUI can name.
@@ -1365,6 +1369,30 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
   const out = JSON.stringify(body);
   res.writeHead(status, { "content-type": "application/json; charset=utf-8", "content-length": String(Buffer.byteLength(out)) });
   res.end(out);
+}
+
+/**
+ * Why a CLI run failed, for the dashboard and the router log: the last non-empty output line, which
+ * the CLI ends on (`error: <message>`). Redacted and bounded, because the output of a login command
+ * may echo what it was given.
+ */
+export function cliFailureReason(output: string): string {
+  const lines = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const last = lines[lines.length - 1];
+  return last ? redactErrorText(last, [], 300) : "the command ended without any output";
+}
+
+/**
+ * The body of an admin route that ran the CLI. A failure carries `error` next to `ok`/`output`: the
+ * dashboard's `api()` shows only `errors`, `error` or `raw`, so without it the user saw "HTTP 500".
+ */
+function cliReply(result: { ok: boolean; output: string }): { ok: boolean; output: string; error?: string } {
+  return result.ok ? { ok: true, output: result.output } : { ok: false, output: result.output, error: cliFailureReason(result.output) };
+}
+
+/** The log line for such a route, with the reason when it failed. */
+function cliLogLine(what: string, result: { ok: boolean; output: string }): string {
+  return `admin: ${what} via GUI -> ${result.ok ? "ok" : `failed: ${cliFailureReason(result.output)}`}`;
 }
 
 /** Write the config file atomically. Callers hold its lock and read the file inside that lock. */
@@ -2851,8 +2879,8 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           return;
         }
         const r = await (deps.runCli ?? runCli)(["codex", enabled ? "on" : "off"]);
-        deps.log.info(`admin: codex ${enabled ? "on" : "off"} via GUI -> ${r.ok ? "ok" : "failed"}`);
-        sendJson(res, r.ok ? 200 : 500, { ok: r.ok, output: r.output });
+        deps.log.info(cliLogLine(`codex ${enabled ? "on" : "off"}`, r));
+        sendJson(res, r.ok ? 200 : 500, cliReply(r));
         return;
       }
       if (pathname === "/api/chatgpt-login" && method === "GET") {
@@ -3181,15 +3209,15 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
       }
       if (pathname === "/api/claude-login" && method === "POST") {
         const r = await (deps.runCli ?? runCli)(["claude-login"], 200_000);
-        deps.log.info(`admin: claude-login via GUI -> ${r.ok ? "ok" : "failed"}`);
-        sendJson(res, r.ok ? 200 : 500, { ok: r.ok, output: r.output });
+        deps.log.info(cliLogLine("claude-login", r));
+        sendJson(res, r.ok ? 200 : 500, cliReply(r));
         return;
       }
       if (pathname === "/api/claude-logout" && method === "POST") {
         const r = await (deps.runCli ?? runCli)(["claude-logout"]);
-        deps.log.info(`admin: claude-logout via GUI -> ${r.ok ? "ok" : "failed"}`);
+        deps.log.info(cliLogLine("claude-logout", r));
         if (r.ok) deps.agentsChanged?.();
-        sendJson(res, r.ok ? 200 : 500, { ok: r.ok, output: r.output });
+        sendJson(res, r.ok ? 200 : 500, cliReply(r));
         return;
       }
       // Google (Antigravity) sign-in of our own (browser, PKCE, loopback callback). The GUI starts it
@@ -3251,9 +3279,9 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
       }
       if (pathname === "/api/google-logout" && method === "POST") {
         const r = await (deps.runCli ?? runCli)(["google-logout"]);
-        deps.log.info(`admin: google-logout via GUI -> ${r.ok ? "ok" : "failed"}`);
+        deps.log.info(cliLogLine("google-logout", r));
         if (r.ok) deps.agentsChanged?.();
-        sendJson(res, r.ok ? 200 : 500, { ok: r.ok, output: r.output });
+        sendJson(res, r.ok ? 200 : 500, cliReply(r));
         return;
       }
       // Safe account metadata only: labels, emails, project ids and rotation state. Tokens stay in
@@ -3342,9 +3370,9 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           sendJson(res, 400, { error: "expected {enabled: boolean}" });
           return;
         }
-        const r = await runCli(["picker", enabled ? "on" : "off"]);
-        deps.log.info(`admin: picker ${enabled ? "on" : "off"} via GUI -> ${r.ok ? "ok" : "failed"}`);
-        sendJson(res, r.ok ? 200 : 500, { ok: r.ok, output: r.output });
+        const r = await (deps.runCli ?? runCli)(["picker", enabled ? "on" : "off"]);
+        deps.log.info(cliLogLine(`picker ${enabled ? "on" : "off"}`, r));
+        sendJson(res, r.ok ? 200 : 500, cliReply(r));
         return;
       }
       if (pathname === "/api/update" && (method === "GET" || method === "POST")) {
@@ -3434,9 +3462,9 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           sendJson(res, 400, { error: "expected {enabled: boolean}" });
           return;
         }
-        const r = await runCli(["agent-title", enabled ? "on" : "off"]);
-        deps.log.info(`admin: agent-title ${enabled ? "on" : "off"} via GUI -> ${r.ok ? "ok" : "failed"}`);
-        sendJson(res, r.ok ? 200 : 500, { ok: r.ok, output: r.output });
+        const r = await (deps.runCli ?? runCli)(["agent-title", enabled ? "on" : "off"]);
+        deps.log.info(cliLogLine(`agent-title ${enabled ? "on" : "off"}`, r));
+        sendJson(res, r.ok ? 200 : 500, cliReply(r));
         return;
       }
       if (pathname === "/api/status-mod" && method === "POST") {
@@ -3452,9 +3480,9 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           sendJson(res, 400, { error: "expected {enabled: boolean}" });
           return;
         }
-        const r = await runCli(["mod", enabled ? "on" : "off"]);
-        deps.log.info(`admin: status mod ${enabled ? "on" : "off"} via GUI -> ${r.ok ? "ok" : "failed"}`);
-        sendJson(res, r.ok ? 200 : 500, { ok: r.ok, output: r.output });
+        const r = await (deps.runCli ?? runCli)(["mod", enabled ? "on" : "off"]);
+        deps.log.info(cliLogLine(`status mod ${enabled ? "on" : "off"}`, r));
+        sendJson(res, r.ok ? 200 : 500, cliReply(r));
         return;
       }
       if (pathname === "/api/requests" && method === "GET") {

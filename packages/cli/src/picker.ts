@@ -44,6 +44,54 @@ export function configLibraryDir(): string {
   return path.join(appSupport(), "configLibrary");
 }
 
+export type DesktopProbe = {
+  platform?: NodeJS.Platform;
+  home?: string;
+  env?: NodeJS.ProcessEnv;
+  exists?: (file: string) => boolean;
+};
+
+/**
+ * Whether the Claude desktop app has been on this computer: its data directory (`Claude`, or the
+ * `Claude-3p` one picker mode uses) under the platform's app-data parent, or its install location
+ * (macOS /Applications/Claude.app, Windows %LOCALAPPDATA%\AnthropicClaude). A heuristic: a copy
+ * installed somewhere unusual and never started reads as absent, so callers only advise or explain,
+ * they never decide for the user. An explicit CLAUDE_APP_SUPPORT is the user saying where the app
+ * keeps its data, so it counts as present. The probe is injectable for tests; the platform is never
+ * faked for code that spawns a child.
+ */
+export function claudeDesktopPresent(probe: DesktopProbe = {}): boolean {
+  const platform = probe.platform ?? process.platform;
+  const home = probe.home ?? os.homedir();
+  const env = probe.env ?? process.env;
+  const exists = probe.exists ?? ((file: string) => fs.existsSync(file));
+  if (env.CLAUDE_APP_SUPPORT) return true;
+  const p = platform === "win32" ? path.win32 : path.posix;
+  let candidates: string[];
+  if (platform === "win32") {
+    const local = env.LOCALAPPDATA || p.join(home, "AppData", "Local");
+    candidates = [p.join(local, "Claude"), p.join(local, "Claude-3p"), p.join(local, "AnthropicClaude")];
+  } else if (platform === "linux") {
+    const config = env.XDG_CONFIG_HOME || p.join(home, ".config");
+    candidates = [p.join(config, "Claude"), p.join(config, "Claude-3p"), p.join(home, ".config", "Claude")];
+  } else {
+    const support = p.join(home, "Library", "Application Support");
+    candidates = [p.join(support, "Claude"), p.join(support, "Claude-3p"), "/Applications/Claude.app"];
+  }
+  return candidates.some((candidate) => exists(candidate));
+}
+
+/** Why picker mode cannot be set up here; the dashboard words the same advice in its own language. */
+export const DESKTOP_ABSENT_MESSAGE =
+  "Claude Desktop does not seem to be installed on this computer (no Claude app data folder was found), so picker mode was not enabled. "
+  + "Model picker mode has to be set up on the computer that runs the Claude desktop app; on this computer, model mapping works without it. "
+  + "If the app is installed here, start it once and try again.";
+
+/** Refuses before anything is changed on a computer that has never had the desktop app. */
+export function assertDesktopPresent(probe: DesktopProbe = {}): void {
+  if (!claudeDesktopPresent(probe)) throw new Error(DESKTOP_ABSENT_MESSAGE);
+}
+
 function loginKeychain(): string {
   return path.join(os.homedir(), "Library", "Keychains", "login.keychain-db");
 }
@@ -411,7 +459,11 @@ function migrateLegacyAppProxyLocked(proxyUrl: string, installationHome: string,
 }
 
 /** Writes our Config Library entry and applies it. Remembers what was applied before so `off` can restore it. */
-export function applyAppProxy(proxyUrl: string, installationHome = homeDir(), expected?: ReturnType<typeof currentAppProxy>, deps: DesktopServiceDeps = {}): { id: string; replaced: string | null } {
+export function applyAppProxy(proxyUrl: string, installationHome = homeDir(), expected?: ReturnType<typeof currentAppProxy>, deps: DesktopServiceDeps = {}, desktop: DesktopProbe = {}): { id: string; replaced: string | null } {
+  // Before the lock: taking it creates the app's data folder, and on a computer that has never had
+  // the app (a headless server whose desktop app is on another machine, #183) that folder is one
+  // nothing reads.
+  assertDesktopPresent(desktop);
   return withFileLock(path.join(configLibraryDir(), "_meta.json"), () => applyAppProxyLocked(proxyUrl, installationHome, expected, deps));
 }
 
@@ -420,7 +472,7 @@ function applyAppProxyLocked(proxyUrl: string, installationHome: string, expecte
   fs.mkdirSync(dir, { recursive: true });
   const meta = readMeta();
   const cur = currentAppProxy();
-  if (expected && JSON.stringify(cur) !== JSON.stringify(expected)) throw new Error("Desktop proxy changed before restoration; left untouched");
+  if (expected &&JSON.stringify(cur) !== JSON.stringify(expected)) throw new Error("Desktop proxy changed before restoration; left untouched");
   if (cur.ours && cur.appliedId) {
     let owner = appProxyOwner(cur, installationHome, proxyUrl);
     if (owner === "unknown" && migrateLegacyAppProxyLocked(proxyUrl, installationHome, deps)) owner = "ours";

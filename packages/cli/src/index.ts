@@ -22,7 +22,7 @@ import { installTrayAgent, removeTrayAgent, trayLoginItemDecision, trayPlistPath
 import { nativeSupervisor, registration, writePaths } from "./registration.ts";
 import { installLauncher, uninstallLauncher } from "./launcher.ts";
 import type { RecoveryDeps } from "./doctor.ts";
-import { applyAppProxy, caTrusted, CA_NAME, currentAppProxy, migrateLegacyAppProxy, nssDb, removeAppProxy, trustCa, untrustCa } from "./picker.ts";
+import { applyAppProxy, assertDesktopPresent, caTrusted, CA_NAME, currentAppProxy, migrateLegacyAppProxy, nssDb, removeAppProxy, trustCa, untrustCa } from "./picker.ts";
 import { removeClientIntegrations, setPickerEnabled } from "./integrations.ts";
 import { withCommandHelp } from "./help-gate.ts";
 import { runtime } from "./runtime.ts";
@@ -43,6 +43,9 @@ async function pickerOn(): Promise<void> {
   const cfg = new ConfigStore(configPath()).get();
   const caPem = certPaths(home).caPem;
   if (!fs.existsSync(path.join(home, "ca.key"))) throw new Error("ca.key missing; run `clauderipple install` first");
+  // Before the CA is trusted: that changes the user's trust store, and a computer that has never had
+  // the desktop app (a headless server, #183) would be left trusting it with nothing to use it.
+  assertDesktopPresent();
   // With picker mode on, every byte Claude Desktop sends goes through the router (ARCHITECTURE §5):
   // pointing the app at one that is not answering leaves it a blank page, so check first.
   const ready = await probe({ host: cfg.listen.host, port: cfg.listen.port, caPem, upstream: cfg.upstream });

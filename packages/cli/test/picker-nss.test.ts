@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { caTrusted, nssNickname, nssTrust, nssTrusted, nssUntrust, untrustCa } from "../src/picker.ts";
+import { applyAppProxy, assertDesktopPresent, caTrusted, claudeDesktopPresent, DESKTOP_ABSENT_MESSAGE, nssNickname, nssTrust, nssTrusted, nssUntrust, untrustCa } from "../src/picker.ts";
 import { X509Certificate } from "node:crypto";
 import { createCa } from "../../router/src/x509.ts";
 
@@ -229,3 +229,86 @@ test("the real certutil accepts the same calls", { skip: process.env.CLAUDERIPPL
     assert.equal(nssUntrust(), true);
     assert.equal(nssTrusted(pem), false);
   }));
+
+// ---- Is the Claude desktop app on this computer? (#183) --------------------------------------
+
+/** Restricts the real filesystem to a temp root: /Applications/Claude.app on the developer's Mac must not count. */
+const insideOnly = (root: string) => (file: string): boolean => file.startsWith(root) && fs.existsSync(file);
+
+test("the desktop app counts as present from its data folder, and not from an empty home", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cr-desktop-"));
+  try {
+    const home = path.join(root, "home");
+    const env = { LOCALAPPDATA: path.join(root, "local"), XDG_CONFIG_HOME: path.join(root, "xdg") };
+    // The platform's own app-data parent, and the folder names the app uses under it.
+    const parent = process.platform === "win32" ? env.LOCALAPPDATA
+      : process.platform === "linux" ? env.XDG_CONFIG_HOME
+        : path.join(home, "Library", "Application Support");
+    const present = () => claudeDesktopPresent({ home, env, exists: insideOnly(root) });
+    fs.mkdirSync(home, { recursive: true });
+    assert.equal(present(), false, "nothing installed");
+    fs.mkdirSync(path.join(parent, "Claude-3p"), { recursive: true });
+    assert.equal(present(), true, "the folder picker mode itself uses");
+    fs.rmSync(path.join(parent, "Claude-3p"), { recursive: true });
+    assert.equal(present(), false);
+    fs.mkdirSync(path.join(parent, "Claude"), { recursive: true });
+    assert.equal(present(), true, "the app's own data folder");
+    fs.rmSync(path.join(parent, "Claude"), { recursive: true });
+    assert.equal(present(), false);
+    // An explicit CLAUDE_APP_SUPPORT is the user saying where the app lives.
+    assert.equal(claudeDesktopPresent({ home, env: { ...env, CLAUDE_APP_SUPPORT: path.join(root, "anywhere") }, exists: insideOnly(root) }), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("each platform looks where its own desktop app keeps its data and its install", () => {
+  const paths = (platform: NodeJS.Platform, home: string, env: NodeJS.ProcessEnv, present: string[]): boolean =>
+    claudeDesktopPresent({ platform, home, env, exists: (file) => present.includes(file) });
+  // macOS: Application Support, and the application bundle.
+  assert.equal(paths("darwin", "/Users/u", {}, []), false);
+  assert.equal(paths("darwin", "/Users/u", {}, ["/Users/u/Library/Application Support/Claude"]), true);
+  assert.equal(paths("darwin", "/Users/u", {}, ["/Users/u/Library/Application Support/Claude-3p"]), true);
+  assert.equal(paths("darwin", "/Users/u", {}, ["/Applications/Claude.app"]), true);
+  assert.equal(paths("darwin", "/Users/u", {}, ["/Users/u/.config/Claude"]), false, "another platform's place does not count");
+  // Windows: under %LOCALAPPDATA%, which falls back to AppData\Local; the installer's folder counts.
+  assert.equal(paths("win32", "C:\\Users\\u", { LOCALAPPDATA: "D:\\Local" }, ["C:\\Users\\u\\AppData\\Local\\Claude"]), false);
+  assert.equal(paths("win32", "C:\\Users\\u", { LOCALAPPDATA: "D:\\Local" }, ["D:\\Local\\Claude-3p"]), true);
+  assert.equal(paths("win32", "C:\\Users\\u", {}, ["C:\\Users\\u\\AppData\\Local\\Claude"]), true);
+  assert.equal(paths("win32", "C:\\Users\\u", { LOCALAPPDATA: "D:\\Local" }, ["D:\\Local\\AnthropicClaude"]), true);
+  // Linux: $XDG_CONFIG_HOME, or ~/.config; ~/.config/Claude counts either way.
+  assert.equal(paths("linux", "/home/u", {}, []), false);
+  assert.equal(paths("linux", "/home/u", {}, ["/home/u/.config/Claude"]), true);
+  assert.equal(paths("linux", "/home/u", { XDG_CONFIG_HOME: "/x" }, ["/x/Claude-3p"]), true);
+  assert.equal(paths("linux", "/home/u", { XDG_CONFIG_HOME: "/x" }, ["/home/u/.config/Claude"]), true);
+  assert.equal(paths("linux", "/home/u", { XDG_CONFIG_HOME: "/x" }, ["/home/u/.config/Other"]), false);
+  assert.throws(() => assertDesktopPresent({ platform: "linux", home: "/home/u", env: {}, exists: () => false }), (error: Error) => error.message === DESKTOP_ABSENT_MESSAGE && /model mapping/.test(error.message) && /computer that runs the Claude desktop app/.test(error.message));
+  assert.doesNotThrow(() => assertDesktopPresent({ platform: "linux", home: "/home/u", env: {}, exists: () => true }));
+});
+
+test("applying the app's proxy entry on a computer without the desktop app explains itself and creates no folder", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cr-desktop-absent-"));
+  const keys = ["HOME", "USERPROFILE", "LOCALAPPDATA", "XDG_CONFIG_HOME", "CLAUDE_APP_SUPPORT", "CLAUDE_SETTINGS_PATH"] as const;
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  try {
+    const home = path.join(root, "home");
+    fs.mkdirSync(home);
+    Object.assign(process.env, { HOME: home, USERPROFILE: home, LOCALAPPDATA: path.join(root, "local"), XDG_CONFIG_HOME: path.join(root, "xdg"), CLAUDE_SETTINGS_PATH: path.join(root, "settings.json") });
+    delete process.env.CLAUDE_APP_SUPPORT;
+    // The real filesystem under a temp home, except that a developer's own /Applications/Claude.app does not count.
+    const desktop = { exists: insideOnly(root) };
+    assert.throws(() => applyAppProxy("http://127.0.0.1:18791", path.join(root, "clauderipple"), undefined, undefined, desktop), (error: Error) => error.message === DESKTOP_ABSENT_MESSAGE);
+    assert.deepEqual(fs.readdirSync(home), [], "no app folder was made under the home");
+    assert.equal(fs.existsSync(path.join(root, "local")) || fs.existsSync(path.join(root, "xdg")), false);
+    // With the app's data folder named explicitly the entry is written as before.
+    process.env.CLAUDE_APP_SUPPORT = path.join(root, "desktop-3p");
+    const applied = applyAppProxy("http://127.0.0.1:18791", path.join(root, "clauderipple"), undefined, undefined, desktop);
+    assert.ok(fs.existsSync(path.join(root, "desktop-3p", "configLibrary", `${applied.id}.json`)));
+  } finally {
+    for (const k of keys) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

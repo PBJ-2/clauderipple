@@ -8,6 +8,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { codexEnabled, followCodexCache, writeCodexCatalog } from "../../cli/src/codex.ts";
+import { claudeDesktopPresent } from "../../cli/src/picker.ts";
 import { ingressModels } from "./ingress/models.ts";
 import { ConfigStore, awakeSettings, configPath, homeDir, terminateHosts, tetherSettings } from "./config.ts";
 import { targetWarnings } from "./targets.ts";
@@ -350,7 +351,7 @@ proxy
       credentials: () => proxy.credentialHealth(),
       clearCredentialCooldown: (provider, id) => proxy.clearCredentialCooldown(provider, id),
       claudeClearCooldown: (id) => proxy.claudeClearCooldown(id),
-      picker: () => ({ enabled: !!store.get().picker?.enabled, hosts: terminateHosts(store.get()).slice(1), last: proxy.lastPickerInjection }),
+      picker: () => ({ enabled: !!store.get().picker?.enabled, hosts: terminateHosts(store.get()).slice(1), last: proxy.lastPickerInjection, desktopPresent: claudeDesktopPresent() }),
       observedClaudeCodeAuth,
       claudeUsage: () => proxy.claudeUsage.snapshot(),
       claudeModels: () => proxy.claudeModels.list(),
