@@ -2946,7 +2946,9 @@ spaces — nothing sudoers, fnmatch or a shell reads specially — and never ent
 after ours is in place does the same script clear Insomnia's bit and delete `/etc/sudoers.d/insomnia`;
 then, unprivileged: `launchctl bootout gui/<uid>/com.insomnia.backstop`, its plist and
 `~/Applications/Insomnia.app` to the Trash (`/usr/bin/trash`, else `~/.Trash`), `killall Insomnia`,
-`security delete-generic-password -s insomnia-hotspot`. `awake setup --remove` turns both features
+`security delete-generic-password -s insomnia-hotspot`. The app is quit and trashed only when its
+`CFBundleIdentifier` (read with `plutil`) is `com.kgarg.insomnia`: Kong's API client is also
+`Insomnia.app`, with a process named `Insomnia`, and is left alone, with a line saying why. `awake setup --remove` turns both features
 off and removes the rule. The router only ever runs `sudo -n` (never prompts); a refusal reads
 `setup: needs-setup`. A Developer ID–signed privileged helper (SMAppService) would be the cleaner
 boundary but needs a stable signature the ad-hoc app does not have (WakeBee README; research §3.2).

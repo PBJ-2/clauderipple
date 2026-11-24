@@ -39,6 +39,9 @@ const STAGED = "/etc/sudoers.d/.clauderipple.new"; // sudo ignores names contain
 const INSOMNIA_SUDOERS = "/etc/sudoers.d/insomnia";
 const INSOMNIA_LABEL = "com.insomnia.backstop";
 const INSOMNIA_KEYCHAIN_SERVICE = "insomnia-hotspot";
+/** Insomnia's CFBundleIdentifier (its Resources/Info.plist and install.sh BUNDLE_ID). Kong's API client is also "Insomnia.app", with a process also named Insomnia. */
+const INSOMNIA_BUNDLE_ID = "com.kgarg.insomnia";
+const PLUTIL = "/usr/bin/plutil";
 
 /** POSIX single quotes: the only character that needs care inside them is the quote itself. */
 export function shQuote(s: string): string {
@@ -121,20 +124,32 @@ export function insomniaPaths(home: string): { plist: string; app: string } {
   };
 }
 
-/** Insomnia's unprivileged leftovers, in order. Failures are reported, not fatal. */
-export function insomniaCleanupSteps(o: { uid: number; home: string; exists: (p: string) => boolean }): CleanupStep[] {
+/**
+ * Insomnia's unprivileged leftovers, in order. Failures are reported, not fatal. The app is quit
+ * and trashed only when `insomniaApp` (~/Applications/Insomnia.app is that Insomnia, by bundle id).
+ */
+export function insomniaCleanupSteps(o: { uid: number; home: string; exists: (p: string) => boolean; insomniaApp: boolean }): CleanupStep[] {
   const p = insomniaPaths(o.home);
   const steps: CleanupStep[] = [{ label: "stop Insomnia's backstop agent", kind: "run", file: "/bin/launchctl", args: ["bootout", `gui/${o.uid}/${INSOMNIA_LABEL}`] }];
   if (o.exists(p.plist)) steps.push({ label: "move the backstop agent's plist to the Trash", kind: "trash", path: p.plist });
-  steps.push({ label: "quit Insomnia", kind: "run", file: "/usr/bin/killall", args: ["-TERM", "Insomnia"] });
-  if (o.exists(p.app)) steps.push({ label: "move Insomnia.app to the Trash", kind: "trash", path: p.app });
+  if (o.insomniaApp) {
+    steps.push({ label: "quit Insomnia", kind: "run", file: "/usr/bin/killall", args: ["-TERM", "Insomnia"] });
+    steps.push({ label: "move Insomnia.app to the Trash", kind: "trash", path: p.app });
+  }
   steps.push({ label: "delete Insomnia's hotspot password from the keychain", kind: "run", file: "/usr/bin/security", args: ["delete-generic-password", "-s", INSOMNIA_KEYCHAIN_SERVICE] });
   return steps;
 }
 
-export function insomniaPresent(home: string, exists: (p: string) => boolean): boolean {
-  const p = insomniaPaths(home);
-  return exists(INSOMNIA_SUDOERS) || exists(p.plist) || exists(p.app);
+export function insomniaPresent(home: string, exists: (p: string) => boolean, insomniaApp: boolean): boolean {
+  return exists(INSOMNIA_SUDOERS) || exists(insomniaPaths(home).plist) || insomniaApp;
+}
+
+/** CFBundleIdentifier of ~/Applications/Insomnia.app: null when there is no such app, "" when it cannot be read. */
+async function insomniaAppId(d: SetupDeps): Promise<string | null> {
+  const app = insomniaPaths(d.home).app;
+  if (!d.exists(app)) return null;
+  const r = await d.run(PLUTIL, ["-extract", "CFBundleIdentifier", "raw", "-o", "-", path.join(app, "Contents", "Info.plist")]);
+  return r.code === 0 ? r.stdout.trim() : "";
 }
 
 // ---- Orchestration ------------------------------------------------------------------------------
@@ -234,7 +249,9 @@ export async function awakeSetup(o: { ssid?: string }, d: SetupDeps): Promise<Se
     if (!wifiDevice) return { ok: false, detail: "no Wi-Fi interface found (networksetup -listallhardwareports)" };
   }
   const rule = sudoersRule({ user: d.user, ...(o.ssid !== undefined ? { ssid: o.ssid, wifiDevice: wifiDevice! } : {}) });
-  const removeInsomnia = insomniaPresent(d.home, d.exists);
+  const appId = await insomniaAppId(d);
+  const insomniaApp = appId === INSOMNIA_BUNDLE_ID;
+  const removeInsomnia = insomniaPresent(d.home, d.exists, insomniaApp);
   const temp = d.writeTemp(rule);
   let r;
   try {
@@ -253,7 +270,10 @@ export async function awakeSetup(o: { ssid?: string }, d: SetupDeps): Promise<Se
   d.print(`✓ installed ${SUDOERS_FILE}${o.ssid !== undefined ? ` (pmset, and joining "${o.ssid}" on ${wifiDevice})` : " (pmset)"}`);
   if (removeInsomnia) {
     d.print("✓ cleared Insomnia's sleep setting and its sudoers rule");
-    for (const step of insomniaCleanupSteps({ uid: d.uid, home: d.home, exists: d.exists })) d.print(`${(await runCleanupStep(step, d)) ? "✓" : "·"} ${step.label}`);
+    for (const step of insomniaCleanupSteps({ uid: d.uid, home: d.home, exists: d.exists, insomniaApp })) d.print(`${(await runCleanupStep(step, d)) ? "✓" : "·"} ${step.label}`);
+  }
+  if (appId !== null && !insomniaApp) {
+    d.print(`· left ${insomniaPaths(d.home).app} alone (neither quit nor trashed): its bundle id is ${appId || "unreadable"}, not ${INSOMNIA_BUNDLE_ID}, the keep-awake Insomnia`);
   }
   return { ok: true, detail: "setup complete", ...(wifiDevice ? { wifiDevice } : {}) };
 }
