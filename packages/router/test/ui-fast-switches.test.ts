@@ -36,5 +36,22 @@ test("the ChatGPT provider form shows both switches and saves them", () => {
   assert.match(source, /existing\.fast && existing\.fast\.subagent === true/);
   assert.match(source, /fast: \{ main: chat\.fastMain\.checked, subagent: chat\.fastSubagent\.checked \}/);
   // The form owns the field, so the saved one is not merged over it (and not dropped either).
-  assert.match(source, /"instructionsAppend", "fast", "models"/);
+  assert.match(source, /"instructionsAppend", "fast", "ultrafast", "models"/);
+});
+
+test("every language the dashboard speaks has the ChatGPT Ultrafast switches", () => {
+  const i18n = loadI18n();
+  for (const [lang, dict] of Object.entries(i18n)) {
+    for (const key of ["providers.ultrafastMain", "providers.ultrafastSubagent", "providers.ultrafastHelp", "logs.ultrafastHelp"]) assert.ok(dict[key], `${lang}: ${key}`);
+  }
+  assert.equal(i18n.en!["providers.ultrafastMain"], "Use Ultrafast for the main session");
+  assert.equal(i18n.en!["providers.ultrafastSubagent"], "Use Ultrafast for subagents");
+});
+
+test("the ChatGPT provider form shows both Ultrafast switches and saves them beside the Fast ones", () => {
+  const source = fs.readFileSync(path.join(uiDir, "app.js"), "utf8");
+  assert.match(source, /existing\.ultrafast && existing\.ultrafast\.main === true/);
+  assert.match(source, /existing\.ultrafast && existing\.ultrafast\.subagent === true/);
+  assert.match(source, /ultrafast: \{ main: chat\.ultrafastMain\.checked, subagent: chat\.ultrafastSubagent\.checked \}/);
+  assert.match(source, /fast: \{ main: chat\.fastMain\.checked, subagent: chat\.fastSubagent\.checked \}/);
 });

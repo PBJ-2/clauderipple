@@ -5288,6 +5288,9 @@ function openProviderForm(options) {
     // The Codex fast tier, one switch for the session's own turns and one for a subagent's.
     const fastMain = el("input", { type: "checkbox", checked: Boolean(existing && existing.fast && existing.fast.main === true) });
     const fastSubagent = el("input", { type: "checkbox", checked: Boolean(existing && existing.fast && existing.fast.subagent === true) });
+    // The Codex ultrafast tier, with the same two scopes; the router asks for it only on a model the catalogue advertises it for.
+    const ultrafastMain = el("input", { type: "checkbox", checked: Boolean(existing && existing.ultrafast && existing.ultrafast.main === true) });
+    const ultrafastSubagent = el("input", { type: "checkbox", checked: Boolean(existing && existing.ultrafast && existing.ultrafast.subagent === true) });
     chatgptFields = [
       inputRow(t("providers.credentials"), auth, t("providers.credentialsHelp")),
       el("div", { class: "form-field" }, [el("span", { text: t("providers.login") }), login, loginHelp]),
@@ -5296,6 +5299,9 @@ function openProviderForm(options) {
         el("label", { class: "check" }, [fastMain, el("span", { text: t("providers.fastMain") })]),
         el("label", { class: "check" }, [fastSubagent, el("span", { text: t("providers.fastSubagent") })]),
         el("small", { text: t("providers.fastHelp") }),
+        el("label", { class: "check" }, [ultrafastMain, el("span", { text: t("providers.ultrafastMain") })]),
+        el("label", { class: "check" }, [ultrafastSubagent, el("span", { text: t("providers.ultrafastSubagent") })]),
+        el("small", { text: t("providers.ultrafastHelp") }),
       ]),
     ];
     advancedContent.append(
@@ -5303,7 +5309,7 @@ function openProviderForm(options) {
       el("div", { class: "form-field" }, [el("label", { class: "check" }, [limitsInput, el("span", { text: t("providers.limits") })]), el("small", { text: t("providers.limitsHelp") })]),
       inputRow(t("providers.append"), append, t("providers.appendHelp")),
     );
-    advancedContent._chatgpt = { auth, effort, identity, limits: limitsInput, append, fastMain, fastSubagent };
+    advancedContent._chatgpt = { auth, effort, identity, limits: limitsInput, append, fastMain, fastSubagent, ultrafastMain, ultrafastSubagent };
   }
   advanced.appendChild(advancedContent);
   const customUrlRow = isCustom ? inputRow(t("providers.url"), urlInput, t("providers.urlHelp")) : null;
@@ -5344,7 +5350,7 @@ function openProviderForm(options) {
   function draftProvider() {
     if (isChatgpt) {
       const chat = advancedContent._chatgpt;
-      return { type: "chatgpt", auth: chat.auth.value, defaultEffort: chat.effort.value, identity: chat.identity.checked, limits: chat.limits.checked, fast: { main: chat.fastMain.checked, subagent: chat.fastSubagent.checked }, ...(chat.append.value.trim() ? { instructionsAppend: chat.append.value.trim() } : {}) };
+      return { type: "chatgpt", auth: chat.auth.value, defaultEffort: chat.effort.value, identity: chat.identity.checked, limits: chat.limits.checked, fast: { main: chat.fastMain.checked, subagent: chat.fastSubagent.checked }, ultrafast: { main: chat.ultrafastMain.checked, subagent: chat.ultrafastSubagent.checked }, ...(chat.append.value.trim() ? { instructionsAppend: chat.append.value.trim() } : {}) };
     }
     const prompt = advancedContent._prompt;
     return {
@@ -5465,7 +5471,7 @@ function openProviderForm(options) {
     // (debugDump, a hand-written setting) is carried over from the saved one rather than dropped.
     // A field the form owns is left to the draft, so clearing it in the form still clears it.
     const formKeys = new Set(isChatgpt
-      ? ["type", "auth", "defaultEffort", "identity", "limits", "instructionsAppend", "fast", "models"]
+      ? ["type", "auth", "defaultEffort", "identity", "limits", "instructionsAppend", "fast", "ultrafast", "models"]
       : ["type", "url", "identity", "limits", "instructionsAppend", "preset", "sessionHeader", "wire", "headers", "models"]);
     const kept = saved ? Object.fromEntries(Object.entries(saved).filter(([key]) => !formKeys.has(key))) : {};
     next.providers[providerName] = applyProviderLabel({ ...kept, ...provider }, providerName, existing ? typedProviderName(typedName, options.name, existing) : typedName);
@@ -7154,6 +7160,7 @@ function requestRow(record) {
     providerBadge(record.provider, account || providerDisplayName(record.provider), account ? providerDisplayName(record.provider) : undefined),
     // The requested tier, not the served one: the ChatGPT sign-in answers `default` to a Fast request (#54).
     record.requestedTier === "priority" ? el("span", { class: "fast-tag", text: "FAST", title: t("logs.fastHelp") }) : null,
+    record.requestedTier === "ultrafast" ? el("span", { class: "ultrafast-tag", text: "ULTRAFAST", title: t("logs.ultrafastHelp") }) : null,
   ].filter(Boolean));
   // The whole input, not the uncached remainder: a fully cached Anthropic turn reports `input: 2`,
   // which read as a two-token request (2026-09-23). The split is in the detail row.
