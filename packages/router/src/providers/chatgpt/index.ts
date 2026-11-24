@@ -11,17 +11,18 @@ import { SseParser } from "./sse.ts";
 import { fetchWithRetry } from "../retry.ts";
 import { StartInputs } from "../start-input.ts";
 import { looksLikeAuth } from "../openai/index.ts";
-import { StreamMapper, conversationKey, estimateTokens, formatSse, serverToolNames, toResponsesRequest, toolNameRestoreMap, type AnthropicRequest, type TranslateOptions } from "./translate.ts";
+import { StreamMapper, conversationId, conversationKey, estimateTokens, formatSse, serverToolNames, toResponsesRequest, toolNameRestoreMap, type AnthropicRequest, type TranslateOptions } from "./translate.ts";
 import { refusesReplayedReasoning } from "../../reasoning.ts";
 import type { RequestUsage } from "../../requestlog.ts";
 import { exhaustionHeaders, providerExhaustion, type ProviderExhaustion } from "../../health.ts";
 import type { SearchBackend, SearchHit, SearchOutcome, WebSearchQuery } from "../../websearch.ts";
 import { credentialHeaderValues, redactErrorText } from "../../redact.ts";
-import { codexClientVersion, latestCodexVersion, parseCodexCatalog } from "./catalog.ts";
+import { codexClientVersion, latestCodexVersion, parseCodexCatalog, parseCodexServiceTiers } from "./catalog.ts";
+import { ULTRAFAST_TIER, refusesServiceTier, tierNote } from "./tiers.ts";
 import { noteChatgptModelWindows } from "./windows.ts";
 import fs from "node:fs";
 import path from "node:path";
-import { homeDir, fastSwitches } from "../../config.ts";
+import { homeDir, fastSwitches, ultrafastSwitches } from "../../config.ts";
 import { promptAdditions } from "../../identity.ts";
 import type { RequestKind } from "../../routing.ts";
 
@@ -862,6 +863,38 @@ export class ChatGptAdapter {
   /** One in-flight catalogue lookup shared by every caller, and the last good list for an hour. */
   private modelsInFlight: Promise<ProviderModel[] | null> | null = null;
   private modelsCache: { at: number; models: ProviderModel[] } | null = null;
+  /**
+   * The service tiers the catalogue advertises for each model (catalog.ts), from the same read as
+   * `modelsCache`; null until one read has succeeded, and a failed read keeps the last map. It is
+   * the one thing that says whether Ultrafast can be asked for: the answer differs by plan and by
+   * model, and the Codex CLI decides the same way. Read with whichever account `anyCredential`
+   * picks, so with accounts on different plans it can be wrong for one of them; the refusal retry
+   * in `handle` is what covers that.
+   */
+  private tiersByModel: Map<string, string[]> | null = null;
+  /** When a turn last started a catalogue read for the tiers, so a read that keeps failing is not asked for on every turn. */
+  private tiersWarmAt = 0;
+  /** Models already reported as not advertising Ultrafast, since the last catalogue read: the line is written once. */
+  private readonly ultrafastUnadvertised = new Set<string>();
+  /** Conversations the backend refused the Ultrafast tier to; they stop asking for it (see `handle`). */
+  private readonly ultrafastRefusedByKey = new Set<string>();
+
+  /**
+   * Take the tiers the adapter this one replaces read from the catalogue. Saving any setting of
+   * the provider rebuilds its adapter (proxy.ts), and without this the first turn after a save
+   * went out on Fast while the new adapter's own read was on its way (measured 2026-11-24). The
+   * tiers alone are taken, not the cache they came with, so this adapter still reads the catalogue
+   * on its first turn; and only for the same backend and the same login mode, which are what the
+   * answer depends on.
+   */
+  inheritTiers(previous: ChatGptAdapter): void {
+    if (previous.cfg.url === this.cfg.url && previous.cfg.auth === this.cfg.auth) this.tiersByModel = previous.tiersByModel;
+  }
+
+  private rememberUltrafastRefusal(conversation: string): void {
+    this.ultrafastRefusedByKey.add(conversation);
+    if (this.ultrafastRefusedByKey.size > 500) this.ultrafastRefusedByKey.delete(this.ultrafastRefusedByKey.values().next().value!);
+  }
 
   /**
    * The models this subscription can actually reach, from the backend's own catalogue. Without it
@@ -922,6 +955,13 @@ export class ChatGptAdapter {
       return null;
     }
     this.modelsCache = { at: Date.now(), models };
+    this.tiersByModel = parseCodexServiceTiers(body);
+    this.ultrafastUnadvertised.clear();
+    const ultrafastModels = [...this.tiersByModel].filter(([, tiers]) => tiers.includes(ULTRAFAST_TIER)).map(([slug]) => slug);
+    // Every tier id seen is named too: with no Ultrafast model, that is what tells a plan without
+    // the tier (`priority` alone) from a catalogue whose shape changed (none).
+    const tiersSeen = [...new Set([...this.tiersByModel.values()].flat())];
+    this.log.info(`chatgpt ${this.name}: the catalogue advertises ultrafast for ${ultrafastModels.length > 0 ? ultrafastModels.join(", ") : "no model"} (tiers seen: ${tiersSeen.length > 0 ? tiersSeen.join(", ") : "none"})`);
     // The windows ClaudeRipple reports to Claude Code follow the catalogue from here (windows.ts).
     noteChatgptModelWindows(models);
     return models;
@@ -981,6 +1021,11 @@ export class ChatGptAdapter {
     signal: AbortSignal;
     /** The request's own headers for this account; the account's credential is laid over them. */
     headers: (credential: ChatGptCredential) => Record<string, string>;
+    /**
+     * Says a refusal is the request's own doing (a service tier the backend will not serve), not
+     * the account's: it is handed back at once, and the account is neither rested nor passed over.
+     */
+    requestFault?: (status: number, text: string) => boolean;
   }): Promise<SendResult> {
     const tried = new Set<string>();
     const replayed = new Set<string>();
@@ -1030,6 +1075,7 @@ export class ChatGptAdapter {
       const safeText = redactErrorText(text, [...credentialHeaderValues(Object.entries(upstreamHeaders)), credential.accountId]);
       const status = upstream.status;
       this.log.warn(`chatgpt ${this.name}: account ${credential.ownerId.slice(0, 8)} answered ${status}: ${safeText.slice(0, 400)}`);
+      if (spec.requestFault?.(status, text)) return { kind: "refused", status, text: safeText, headers: upstream.headers, account: credential.ownerId, ...(borrowedLabelOf(credential) ?? {}) };
       const credentialRefused = status === 401 || (status === 403 && looksLikeAuth(text));
 
       if (credentialRefused) {
@@ -1230,7 +1276,11 @@ export class ChatGptAdapter {
    * `subagent` is the one bit about the caller the tier needs: Claude Code names the agent in the
    * `x-claude-code-agent-id` header, and only a subagent's request carries it.
    */
-  private responsesOptions(carried: { replayed: number; undecodable: number }, model: string, effort: string | undefined, replay = true, options?: { subagent?: boolean; imageHint?: string; kind?: RequestKind }): TranslateOptions {
+  private responsesOptions(carried: { replayed: number; undecodable: number }, model: string, effort: string | undefined, replay = true, options?: { subagent?: boolean; imageHint?: string; kind?: RequestKind; noUltrafast?: boolean }): TranslateOptions {
+    // The tiers the catalogue advertises for this model; none at all for a conversation the backend
+    // already refused Ultrafast to, which is what keeps the tier off its later turns. `ultrafastForce`
+    // (config.ts) stands in for a catalogue that does not list the tier.
+    const modelTiers = options?.noUltrafast === true ? [] : this.cfg.ultrafastForce === true ? [ULTRAFAST_TIER] : this.tiersByModel?.get(model);
     return {
       model,
       effort: effort ?? this.cfg.defaultEffort ?? "high",
@@ -1242,6 +1292,8 @@ export class ChatGptAdapter {
       env: { p: this.name, m: model },
       // The Fast switches are the provider's own, so the tier is the same however the turn arrived.
       fast: fastSwitches(this.cfg),
+      ultrafast: ultrafastSwitches(this.cfg),
+      ...(modelTiers ? { modelTiers } : {}),
       subagent: options?.subagent === true,
       carried,
       log: (line) => this.log.info(`chatgpt ${this.name}: ${line} (${model})`),
@@ -1266,10 +1318,27 @@ export class ChatGptAdapter {
     const serverTools = serverToolNames(json.tools);
     if (serverTools.size > 0) this.log.warn(`chatgpt ${this.name}: dropped server tools for ${model}: ${[...serverTools].join(", ")} (Anthropic runs these; this provider cannot)`);
 
+    // Ultrafast is asked for only on a model the catalogue advertises it for. The router reads the
+    // catalogue at startup and every two hours (index.ts); this is the net for a read that failed
+    // or has not come back yet. Never awaited: a turn does not wait on the catalogue.
+    const ultrafast = ultrafastSwitches(this.cfg);
+    if ((ultrafast.main || ultrafast.subagent) && (!this.modelsCache || Date.now() - this.modelsCache.at >= MODELS_CACHE_MS) && Date.now() - this.tiersWarmAt >= 60_000) {
+      this.tiersWarmAt = Date.now();
+      void this.fetchModels().catch(() => undefined);
+    }
+    // A conversation the backend refused the tier to stops asking: it stays on its account, so the
+    // answer would be the same on every turn.
+    let noUltrafast = this.ultrafastRefusedByKey.has(conversationId(json));
+    let replay = true;
+
     const carried = { replayed: 0, undecodable: 0 };
-    let upstreamReq = toResponsesRequest(json, this.responsesOptions(carried, model, effort, true, options));
+    let upstreamReq = toResponsesRequest(json, this.responsesOptions(carried, model, effort, replay, { ...options, noUltrafast }));
     let body = JSON.stringify(upstreamReq);
     const cacheKey = upstreamReq.prompt_cache_key;
+    if ((options?.subagent === true ? ultrafast.subagent : ultrafast.main) && upstreamReq.service_tier !== ULTRAFAST_TIER && !noUltrafast && !this.ultrafastUnadvertised.has(model)) {
+      this.ultrafastUnadvertised.add(model);
+      this.log.info(`chatgpt ${this.name}: ultrafast is on but ${this.tiersByModel ? `${model} does not advertise it` : "the catalogue has not been read yet"}; sent ${upstreamReq.service_tier ? "fast" : "standard"}`);
+    }
     const startInput = this.startInputs.start(cacheKey, estimateTokens(json));
     const ac = new AbortController();
     const onClose = (): void => ac.abort();
@@ -1284,6 +1353,8 @@ export class ChatGptAdapter {
       path: "/codex/responses",
       body,
       signal: ac.signal,
+      // A refusal of the tier is the request's doing: the account is left alone and the turn is asked again below.
+      requestFault: (status, text) => upstreamReq.service_tier === ULTRAFAST_TIER && refusesServiceTier(status, text),
       headers: (credential) => {
         // Turn state is issued per account; another account's would be meaningless to the backend.
         const turnState = this.turnStateByKey.get(`${credential.ownerId}\0${cacheKey}`);
@@ -1303,16 +1374,35 @@ export class ChatGptAdapter {
       },
     });
     let sent = await ask();
+    // A 4xx that names the service tier is the backend refusing Ultrafast: the catalogue was read
+    // with another account, or changed since. The tier is an optimisation and must never be the
+    // reason a turn fails, so the turn is asked once more without it (Fast if that switch is on),
+    // and this conversation stops asking. Checked again after the reasoning retry, since the first
+    // refusal names only one of the two.
+    const withoutUltrafast = async (): Promise<void> => {
+      if (upstreamReq.service_tier !== ULTRAFAST_TIER || sent.kind !== "refused" || !refusesServiceTier(sent.status, sent.text)) return;
+      this.log.warn(`chatgpt ${this.name}: upstream ${sent.status} refused the ultrafast tier for ${model}; asking again without it: ${sent.text.slice(0, 200)}`);
+      this.rememberUltrafastRefusal(cacheKey);
+      noUltrafast = true;
+      carried.replayed = 0;
+      carried.undecodable = 0;
+      upstreamReq = toResponsesRequest(json, this.responsesOptions(replay ? carried : { replayed: 0, undecodable: 0 }, model, effort, replay, { ...options, noUltrafast }));
+      body = JSON.stringify(upstreamReq);
+      sent = await ask();
+    };
+    await withoutUltrafast();
     // A 4xx that names reasoning is the backend refusing the sealed reasoning we replayed — the blob
     // was minted by the model that is no longer answering, or by another account. The summary is
     // worth nothing without it, so the turn is asked once without: replaying is an optimisation and
     // must never be the reason a user's turn fails (reasoning.ts).
     if (carried.replayed > 0 && sent.kind === "refused" && refusesReplayedReasoning(sent.status, sent.text)) {
       this.log.warn(`chatgpt ${this.name}: upstream ${sent.status} refused ${carried.replayed} replayed reasoning item(s) for ${model}; asking again without them: ${sent.text.slice(0, 200)}`);
-      upstreamReq = toResponsesRequest(json, this.responsesOptions({ replayed: 0, undecodable: 0 }, model, effort, false, options));
+      replay = false;
+      upstreamReq = toResponsesRequest(json, this.responsesOptions({ replayed: 0, undecodable: 0 }, model, effort, false, { ...options, noUltrafast }));
       body = JSON.stringify(upstreamReq);
       carried.replayed = 0;
       sent = await ask();
+      await withoutUltrafast();
     }
     if (sent.kind !== "ok") {
       res.off("close", onClose);
@@ -1480,7 +1570,7 @@ export class ChatGptAdapter {
       bytes,
       note: failure
         ? `${wantStream ? "mid-stream " : ""}${failure.type}: ${failure.message} (in=${u.input_tokens} cached=${u.cache_read_input_tokens} out=${u.output_tokens} replayed=${carried.replayed} reasoning=${mapper.reasoningCount})`
-        : `in=${u.input_tokens} cached=${u.cache_read_input_tokens} out=${u.output_tokens} stop=${mapper.stopReason} replayed=${carried.replayed} reasoning=${mapper.reasoningCount}${upstreamReq.service_tier ? " fast" : ""}`,
+        : `in=${u.input_tokens} cached=${u.cache_read_input_tokens} out=${u.output_tokens} stop=${mapper.stopReason} replayed=${carried.replayed} reasoning=${mapper.reasoningCount}${tierNote(upstreamReq.service_tier)}`,
       usage: {
         input: u.input_tokens,
         cached: u.cache_read_input_tokens,
