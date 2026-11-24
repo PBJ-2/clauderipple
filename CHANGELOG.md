@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.12.47 — 2026-11-24
+
+### Fixed
+
+- **An agent waiting on its own background work stays running in the Agents pane.** When a
+  subagent ended its turn while a background command it started was still running, the Claude app
+  kept it listed as running but the band's Agents pane marked it done, and when the command ended
+  and the agent woke by itself the pane counted on from its first start. Such an agent now stays
+  running until its own work ends, the engine reports it finished, or a Stop no longer lists any of
+  its work; a self-wake starts a new run while the card keeps the agent's total time.
+
 ## 0.12.46 — 2026-11-23
 
 ### Added
