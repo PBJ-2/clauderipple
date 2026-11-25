@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Hotspot failover no longer mistakes the office Wi-Fi for the phone's hotspot, and no longer
+  keeps a Mac offline by asking for a hotspot that is not there.** When joining the hotspot took
+  minutes, macOS could join a known Wi-Fi meanwhile, and its network was remembered as the
+  hotspot's; from then on the way back disassociated that Wi-Fi at every return point (seven times
+  in one day), and the once-a-minute join of the absent hotspot cancelled macOS's own auto-join
+  until the Mac had been offline for 52 minutes. The router now asks a fresh directed scan whether
+  the hotspot is in range: a new network is not remembered when it is not (nor when the address
+  moves during that scan); a remembered network the Mac
+  is on while the hotspot is out of range is forgotten (before every return, and once after the Mac
+  lands on it) and read as Wi-Fi, with nothing left; and an out-of-range hotspot is not joined,
+  with the same retry timing as a failed join. When the scan cannot tell (cache, error, Location,
+  an empty list), everything behaves as before. Mac and Windows.
+
 ## 0.12.47 — 2026-11-24
 
 ### Fixed

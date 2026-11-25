@@ -5,10 +5,10 @@ import type os from "node:os";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
-  FIND_WIFI_PS, WIN_HINTS, autoProfiles, classifyNetshConnect, hotspotProfile, listWifiProfiles, needsLocation, parseAdapterName, parseProfileNames,
+  FIND_WIFI_PS, WIN_HINTS, WinTetherBackend, autoProfiles, classifyNetshConnect, hotspotProfile, listWifiProfiles, needsLocation, parseAdapterName, parseProfileNames,
   parseProfileXml, parseVisibleSsids, quotable,
 } from "../src/tether-win.ts";
-import { TetherController, isHotspotAddress } from "../src/tether.ts";
+import { TetherController, isHotspotAddress, readLearnedHotspot, writeLearnedHotspot } from "../src/tether.ts";
 import { HoldGate } from "../src/hold.ts";
 import type { Activity, RunOptions, RunResult } from "../src/awake.ts";
 import { TETHER_DEFAULTS, type TetherSettings } from "../src/config.ts";
@@ -102,6 +102,8 @@ type Net = {
   autoJoin: string | null;
   connectCode: number;
   visible: string[];
+  /** What the scan lists once a `netsh wlan connect` has landed (the phone left range, or the OS joined another network meanwhile). */
+  visibleAfterConnect?: string[];
   scan: RunResult | Error | null;
   profileError: "show" | "export" | null;
 };
@@ -158,6 +160,7 @@ function rig(o: { net?: Partial<Net>; settings?: Partial<TetherSettings>; activi
       if (net.connectCode !== 0) return { code: net.connectCode, stdout: "There is no profile assigned\n", stderr: "" };
       const to = net.lands[connect[1]!];
       if (to !== undefined) net.ip = to;
+      if (net.visibleAfterConnect) net.visible = net.visibleAfterConnect;
       return ok("Connection request was completed successfully.\n");
     }
     if (line === 'netsh.exe wlan disconnect interface="Wi-Fi"') {
@@ -330,6 +333,7 @@ test("Windows, Android hotspot: our connect lands on a new subnet, it is remembe
     const net = {
       profiles: [{ name: "Home", ssid: "Home", mode: "auto" as const }, pixel],
       lands: { "Pixel 9": "10.42.17.5", Home: "192.168.1.4" },
+      visible: ["Home", "Pixel 9"], // the phone is in range: a hotspot that is not would not be joined (2026-11-25)
       probeOk: (ip: string) => ip.startsWith("10.42.17."),
     };
     const r = rig({ stateFile: file, settings: { hotspotSsid: "Pixel 9" }, net });
@@ -463,3 +467,133 @@ test("Windows: losing the Wi-Fi address fails over on the timing it had before t
   assert.ok(loss, r.lines.join("\n"));
   assert.match(loss, /; probe window reset$/, "a lost address gets no settle");
 });
+
+// ---- 2026-11-25: the hotspot's range decides what is learned, forgotten and joined ---------------
+
+const PBJ = "PBJ’s iPhone";
+const SEEDED_WIN = { ssid: PBJ, network: "192.168.219.0/24", learnedAt: "2026-11-24T09:25:56.000Z" };
+
+function withDir(fn: (file: string) => Promise<void>): () => Promise<void> {
+  return async () => {
+    const dir = fs.mkdtempSync(path.join(tmpdir(), "cr-tether-win-range-"));
+    try {
+      await fn(path.join(dir, "tether.json"));
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  };
+}
+
+test("Windows failover: a hotspot that is not in the netsh list is not connected to; the state says why", async () => {
+  const r = rig({ net: { probeOk: () => false, visible: ["Home", "Stranger"] } });
+  await r.ticks(3);
+  assert.equal(r.count(/wlan connect/), 0);
+  assert.equal(r.c.status().state, "hotspot-not-visible");
+  assert.equal(r.c.status().hint, WIN_HINTS["hotspot-not-visible"]);
+  assert.equal(r.c.status().lastSwitch?.ok, false);
+  const scans = () => r.count(/wlan show networks/);
+  assert.equal(scans(), 1);
+  await r.ticks(1); // 10 s after the first failure, as for a failed connect
+  assert.equal(scans(), 2);
+  await r.ticks(1);
+  assert.equal(scans(), 2, "the second failure waits 20 s");
+  r.net.visible = ["Home", PBJ];
+  await r.ticks(2);
+  assert.equal(r.count(/wlan connect/), 1, "in range now: connected");
+});
+
+test("Windows failover: the saved profile's own SSID is looked for when the configured name is the profile's name", async () => {
+  const profiles: Profile[] = [{ name: "Home", ssid: "Home", mode: "auto" }, { name: "Hotspot alias", ssid: PBJ, mode: "manual" }];
+  const lands = { "Hotspot alias": "172.20.10.3", Home: "192.168.1.4" };
+  const there = rig({ settings: { hotspotSsid: "Hotspot alias" }, net: { probeOk: (ip) => isHotspotAddress(ip), profiles, lands, visible: ["Home", PBJ] } });
+  await there.ticks(3);
+  assert.equal(there.count(/wlan connect name="Hotspot alias"/), 1, "its SSID is listed: in range");
+  const gone = rig({ settings: { hotspotSsid: "Hotspot alias" }, net: { probeOk: () => false, profiles, lands, visible: ["Home"] } });
+  await gone.ticks(3);
+  assert.equal(gone.count(/wlan connect/), 0);
+  assert.equal(gone.c.status().state, "hotspot-not-visible");
+});
+
+for (const [name, net] of [
+  ["Location refused during the scan", { scan: { code: 0, stdout: LOCATION, stderr: "" } }],
+  ["scan error", { scan: { code: 1, stdout: "", stderr: "scan failed" } }],
+  ["scan runner throws", { scan: new Error("scan timeout") }],
+  ["empty, redacted or unsupported list", { visible: [] as string[] }],
+  ["unsupported scan", { scan: { code: 0, stdout: "command is not supported", stderr: "" } }],
+] as [string, Partial<Net>][]) {
+  test(`Windows failover: unknown whether the hotspot is in range (${name}) connects as before`, async () => {
+    const r = rig({ net: { probeOk: (ip) => isHotspotAddress(ip), ...net } });
+    await r.ticks(3);
+    assert.equal(r.count(/wlan connect/), 1);
+    assert.equal(r.c.status().state, "on-hotspot");
+  });
+}
+
+test("Windows 11-24 equivalent: connect accepted, another network's address appears and the phone is not in range → nothing learned, read as Wi-Fi", withDir(async (file) => {
+  const r = rig({
+    stateFile: file,
+    net: { ip: null, lands: { [PBJ]: "192.168.219.7", Home: "192.168.1.4" }, visibleAfterConnect: ["Home"] },
+  });
+  await r.ticks(3);
+  assert.equal(r.count(/wlan connect/), 1);
+  assert.equal(fs.existsSync(file), false, "nothing written");
+  assert.ok(r.lines.some((l) => new RegExp(`joined "${PBJ}" by request, but ${PBJ} is not in range; the new address 192\\.168\\.219\\.7 came from another network; not remembering it`).test(l)), r.lines.join("\n"));
+  assert.equal(r.c.status().network, "wifi");
+  await r.ticks(5);
+  assert.equal(r.c.status().state, "watching");
+  assert.equal(r.count(/wlan disconnect/), 0);
+}));
+
+test("Windows hotspotVisible: other SSIDs plus an unnamed entry leave the hotspot unknown, not absent; failover connects as before", async () => {
+  // netsh lists a hidden network as an SSID with no name. The configured hotspot is not among the named
+  // ones, but that empty entry could be it: a name that is not listed is not proof it is out of range
+  // (2026-11-25), so the answer is unknown and the saved profile is still connected.
+  const shown = [
+    "",
+    "Interface name : Wi-Fi",
+    "There are 3 networks currently visible.",
+    "",
+    "SSID 1 : Home",
+    "    Network type : Infrastructure",
+    "    Authentication : WPA2-Personal",
+    "SSID 2 : ",
+    "    Network type : Infrastructure",
+    "SSID 3 : Stranger",
+    "    Network type : Infrastructure",
+    "",
+  ].join("\r\n");
+  const r = rig({ net: { probeOk: (ip) => isHotspotAddress(ip), scan: { code: 0, stdout: shown, stderr: "" } } });
+  const backend = new WinTetherBackend(r.run, { info: () => {}, warn: () => {} });
+  assert.equal(await backend.findWifi(), "Wi-Fi");
+  assert.equal(await backend.hotspotVisible(PBJ), null, "an unnamed SSID could be the hidden hotspot: unknown");
+  await r.ticks(3);
+  assert.equal(r.count(/wlan connect name="PBJ’s iPhone"/), 1, "unknown is not 'not in range': the saved profile is still connected");
+  assert.equal(r.c.status().state, "on-hotspot");
+});
+
+test("Windows: a learned network with the phone out of range is forgotten and nothing is disconnected", withDir(async (file) => {
+  writeLearnedHotspot(file, SEEDED_WIN);
+  const r = rig({ stateFile: file, net: { ip: "192.168.219.9", visible: ["Home"] } });
+  await r.ticks(40);
+  assert.equal(readLearnedHotspot(file), null);
+  assert.equal(r.count(/wlan disconnect/), 0);
+  assert.equal(r.c.status().network, "wifi");
+  assert.equal(r.c.status().state, "watching");
+  assert.ok(r.lines.some((l) => l.includes(`forgetting 192.168.219.0/24 as hotspot "${PBJ}"'s network: on that network but "${PBJ}" is not in range`)), r.lines.join("\n"));
+  assert.equal(r.count(/wlan show networks/), 1, "asked once");
+}));
+
+test("Windows: a learned network and an unknown scan keep the memory and attempt no return; a visible phone returns as before", withDir(async (file) => {
+  writeLearnedHotspot(file, SEEDED_WIN);
+  const unknown = rig({ stateFile: file, net: { ip: "192.168.219.9", scan: { code: 0, stdout: LOCATION, stderr: "" } } });
+  await unknown.ticks(31);
+  assert.equal(readLearnedHotspot(file)?.network, "192.168.219.0/24");
+  assert.equal(unknown.count(/wlan disconnect/), 0);
+  assert.equal(unknown.c.status().network, "hotspot");
+  assert.ok(unknown.lines.some((l) => /staying on the hotspot: could not confirm that "PBJ’s iPhone" is in range/.test(l)), unknown.lines.join("\n"));
+  const there = rig({ stateFile: file, net: { ip: "192.168.219.9", autoJoin: "192.168.1.4" } });
+  await there.ticks(31);
+  assert.equal(there.count(/wlan disconnect/), 1);
+  assert.equal(there.c.status().network, "wifi");
+  assert.equal(readLearnedHotspot(file)?.network, "192.168.219.0/24", "the memory was right");
+}));

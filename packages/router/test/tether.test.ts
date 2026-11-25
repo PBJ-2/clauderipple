@@ -135,18 +135,31 @@ test("a config that still carries tether.returnEverySec loads without error and 
 
 // ---- Controller with a fake Mac and a fake network ----------------------------------------------
 
-type Net = { ip: string | null; netmask: string; probeOk: (ip: string) => boolean; joinOutput: RunResult; joinLandsOn: string | null; disassociateLandsOn: string | null; preferred: RunResult; scan: RunResult | Error };
+type Net = {
+  ip: string | null; netmask: string; probeOk: (ip: string) => boolean; joinOutput: RunResult; joinLandsOn: string | null; disassociateLandsOn: string | null; preferred: RunResult; scan: RunResult | Error;
+  /** The directed scan for the hotspot's own name (hotspotVisible), by its number: 0 is the first. */
+  hotspotScan: (n: number) => RunResult | Error;
+};
+
+/** A directed scan answer for the hotspot "PBJ"/"Pixel": the radio really scanned (seconds) and it is there / is not. */
+const hotspotAnswer = (found: string | null, freshMs = 9_500): RunResult => ({
+  code: 0,
+  stdout: JSON.stringify({ freshMs, nets: found ? [{ ssid: found, rssi: -55 }] : [], found: found ? [{ name: found, rssi: -55 }] : [] }),
+  stderr: "",
+});
 
 /** A scan answer the Mac backend trusts: a real radio scan (seconds) that saw `Home` at -40 dBm. */
 const FRESH_HOME = { code: 0, stdout: JSON.stringify({ freshMs: 9_500, nets: [{ ssid: "Home", rssi: -40 }], found: [{ name: "Home", rssi: -40 }] }), stderr: "" };
 /** A scan answer from airportd's cache (measured 2026-11-06: ~25ms); not evidence by itself. */
 const CACHED_HOME = { code: 0, stdout: JSON.stringify({ freshMs: 25, nets: [{ ssid: "Home", rssi: -40 }], found: [] }), stderr: "" };
 
-function rig(o: { settings?: Partial<TetherSettings>; net?: Partial<Net>; activity?: () => Activity; platform?: NodeJS.Platform; hold?: HoldGate; onLeave?: () => void; onJoin?: () => void; onScan?: () => void; onSleep?: () => void; stateFile?: string } = {}) {
+function rig(o: { settings?: Partial<TetherSettings>; net?: Partial<Net>; activity?: () => Activity; platform?: NodeJS.Platform; hold?: HoldGate; onLeave?: () => void; onJoin?: () => void; onScan?: () => void; onHotspotScan?: (n: number) => void; onSleep?: () => void; stateFile?: string } = {}) {
   const clock = { t: 1_000_000 };
   const calls: string[] = [];
   const lines: string[] = [];
+  let hotspotScans = 0;
   const net: Net = {
+    hotspotScan: () => hotspotAnswer(settings.hotspotSsid),
     ip: "192.168.1.4",
     netmask: "255.255.255.0",
     probeOk: () => true,
@@ -171,6 +184,14 @@ function rig(o: { settings?: Partial<TetherSettings>; net?: Partial<Net>; activi
     if (file === "/usr/bin/osascript" && args[3] === SCAN_KNOWN_JS) {
       assert.equal(args[4], "en0");
       const names: string[] = JSON.parse(args[5]!);
+      if (names.length === 1 && names[0] === settings.hotspotSsid) {
+        // hotspotVisible: a directed scan for the hotspot alone, never mixed with the saved Wi-Fi names.
+        const n = hotspotScans++;
+        o.onHotspotScan?.(n);
+        const answer = net.hotspotScan(n);
+        if (answer instanceof Error) throw answer;
+        return answer;
+      }
       assert.ok(!names.includes(settings.hotspotSsid), "the hotspot cannot make the scan positive");
       o.onScan?.();
       if (net.scan instanceof Error) throw net.scan;
@@ -206,7 +227,8 @@ function rig(o: { settings?: Partial<TetherSettings>; net?: Partial<Net>; activi
   };
   const joins = () => calls.filter((l) => l.includes("-setairportnetwork")).length;
   const returns = () => calls.filter((l) => l === `/usr/bin/osascript -l JavaScript -e ${DISASSOCIATE_JS}`).length;
-  return { c, clock, calls, lines, net, ticks, joins, returns, set: (s: Partial<TetherSettings>) => (settings = { ...settings, ...s }) };
+  const hotspotScanCount = () => hotspotScans;
+  return { c, clock, calls, lines, net, ticks, joins, returns, hotspotScanCount, set:(s: Partial<TetherSettings>) => (settings = { ...settings, ...s }) };
 }
 
 test("on Linux, or disabled: no command and no probe", async () => {
@@ -684,6 +706,251 @@ test("after a join, a self-assigned (169.254) address or an unchanged one is no 
   assert.ok(noMask.lines.some((l) => /joined "Pixel" at 192\.168\.43\.17, but its netmask could not be read/.test(l)), noMask.lines.join("\n"));
   assert.equal(fs.existsSync(file), false);
 }));
+
+// ---- 2026-11-24/25: a learned network that was never the hotspot's, and a join that cancels macOS's own ----
+
+const SEEDED = { ssid: "PBJ", network: "192.168.219.0/24", learnedAt: "2026-11-24T09:25:56.000Z" };
+
+test("11-24: our own join of PBJ took minutes, macOS joined the office Wi-Fi meanwhile; PBJ is not in range → nothing learned, nothing written, read as Wi-Fi", withDir(async (file) => {
+  // No address; past macOS's 60s grace our join of PBJ is accepted, and what appears is 192.168.219.x.
+  const r = rig({
+    stateFile: file,
+    net: { ip: null, joinLandsOn: "192.168.219.7", hotspotScan: (n) => hotspotAnswer(n === 0 ? "PBJ" : null) },
+  });
+  await r.ticks(7);
+  assert.equal(r.joins(), 1, "the join was requested: the first scan (before it) still saw PBJ");
+  assert.equal(r.hotspotScanCount(), 2, "one scan before the join, one when the new address appeared");
+  assert.equal(fs.existsSync(file), false, "nothing was written to the state file");
+  assert.ok(r.lines.some((l) => /joined "PBJ" by request, but PBJ is not in range; the new address 192\.168\.219\.7 came from another network; not remembering it/.test(l)), r.lines.join("\n"));
+  assert.ok(!r.lines.some((l) => /remembering 192\.168/.test(l) && !/not remembering/.test(l)), r.lines.join("\n"));
+  let s = r.c.status();
+  assert.equal(s.network, "wifi", "the office Wi-Fi is Wi-Fi");
+  assert.equal(s.state, "hotspot-not-visible");
+  assert.equal(s.lastSwitch?.ok, false);
+  await r.ticks(8);
+  s = r.c.status();
+  assert.equal(s.state, "watching");
+  assert.equal(s.network, "wifi");
+  assert.equal(r.returns(), 0, "nothing is ever disassociated");
+  assert.equal(r.joins(), 1);
+  assert.equal(fs.existsSync(file), false);
+}));
+
+test("11-25: the address moves again while the hotspot's range is checked after our join → nothing learned, nothing written, read as join-failed", withDir(async (file) => {
+  // No address; past macOS's 60s grace our join of PBJ is accepted and 192.168.43.9 appears. While the
+  // in-range check runs, another network takes over (192.168.20.9): the answer belongs to neither.
+  const r: ReturnType<typeof rig> = rig({
+    stateFile: file,
+    net: { ip: null, joinLandsOn: "192.168.43.9", hotspotScan: () => hotspotAnswer("PBJ") },
+    onHotspotScan: (n) => {
+      if (n === 1) r.net.ip = "192.168.20.9"; // during the check that follows the new address
+    },
+  });
+  await r.ticks(7);
+  assert.equal(r.joins(), 1, "the join was requested: the first scan (before it) saw PBJ");
+  assert.equal(r.hotspotScanCount(), 2, "one scan before the join, one when the new address appeared");
+  assert.equal(fs.existsSync(file), false, "nothing was written to the state file");
+  assert.ok(!r.lines.some((l) => l.startsWith("tether: remembering")), r.lines.join("\n"));
+  assert.ok(
+    r.lines.some((l) => /joined "PBJ" by request, but the address moved from 192\.168\.43\.9 while checking that PBJ is in range; not remembering either network/.test(l)),
+    r.lines.join("\n"),
+  );
+  const s = r.c.status();
+  assert.equal(s.state, "join-failed", "the backend's noAddressOutcome");
+  assert.equal(s.network, "wifi", "the address that arrived last reads as Wi-Fi");
+}));
+
+test("a learned network the Mac is on while the hotspot is not in range is forgotten at once after a start: memory and file, nothing disassociated", withDir(async (file) => {
+  writeLearnedHotspot(file, SEEDED);
+  const r = rig({ stateFile: file, net: { ip: "192.168.219.9", hotspotScan: () => hotspotAnswer(null) } });
+  await r.ticks(1);
+  assert.ok(r.lines.includes(`tether: forgetting 192.168.219.0/24 as hotspot "PBJ"'s network: on that network but "PBJ" is not in range`), r.lines.join("\n"));
+  assert.equal(readLearnedHotspot(file), null, "the state file no longer names it");
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), {}, "the hotspot key is gone, written atomically (no temp file left)");
+  assert.deepEqual(fs.readdirSync(path.dirname(file)), ["tether.json"]);
+  let s = r.c.status();
+  assert.equal(s.network, "wifi");
+  assert.equal(s.state, "watching");
+  assert.ok(r.lines.some((l) => /network changed \(hotspot 192\.168\.219\.9 → wifi 192\.168\.219\.9\); probe window reset, 30s settle$/.test(l)), r.lines.join("\n"));
+  await r.ticks(40);
+  s = r.c.status();
+  assert.equal(r.returns(), 0);
+  assert.equal(s.network, "wifi");
+  assert.equal(r.hotspotScanCount(), 1, "asked once, not on every tick");
+  // The memory is gone in this controller (it still reads Wi-Fi) and in a new one reading the file.
+  const again = rig({ stateFile: file, net: { ip: "192.168.219.9" } });
+  await again.ticks(3);
+  assert.equal(again.c.status().network, "wifi");
+  assert.equal(again.hotspotScanCount(), 0);
+}));
+
+test("at the return point: PBJ in range at first, then not → the learned network is forgotten and nothing is left", withDir(async (file) => {
+  writeLearnedHotspot(file, SEEDED);
+  const r = rig({ stateFile: file, net: { ip: "192.168.219.9", hotspotScan: (n) => hotspotAnswer(n === 0 ? "PBJ" : null) } });
+  await r.ticks(1);
+  assert.equal(r.c.status().network, "hotspot", "in range the first time: kept");
+  assert.equal(readLearnedHotspot(file)?.network, "192.168.219.0/24");
+  await r.ticks(29); // 290s: not yet
+  assert.equal(r.hotspotScanCount(), 1);
+  await r.ticks(1); // the 5 min point
+  assert.equal(r.hotspotScanCount(), 2, "asked again before the return decision");
+  assert.equal(r.returns(), 0, "the real Wi-Fi is not disassociated");
+  assert.ok(!r.calls.some((l) => l.includes(DISASSOCIATE_JS)));
+  assert.equal(r.calls.filter((l) => l.includes("-listpreferredwirelessnetworks")).length, 0, "the return's own scan is never reached");
+  assert.equal(readLearnedHotspot(file), null);
+  assert.equal(r.c.status().network, "wifi");
+  assert.equal(r.c.status().state, "watching");
+  assert.equal(r.c.status().lastSwitch, null);
+}));
+
+for (const how of ["scan answered from cache twice", "scan failed"] as const) {
+  test(`unknown whether the hotspot is in range (${how}): the learned network is kept and no return is attempted`, withDir(async (file) => {
+    writeLearnedHotspot(file, SEEDED);
+    const r = rig({ stateFile: file, net: { ip: "192.168.219.9", hotspotScan: () => (how === "scan failed" ? new Error("CoreWLAN broke") : hotspotAnswer("PBJ", 25)) } });
+    await r.ticks(31);
+    assert.equal(r.returns(), 0);
+    assert.equal(r.joins(), 0);
+    assert.equal(readLearnedHotspot(file)?.network, "192.168.219.0/24", "nothing forgotten");
+    const s = r.c.status();
+    assert.equal(s.network, "hotspot");
+    assert.equal(s.state, "on-hotspot");
+    assert.equal(s.lastSwitch, null);
+    assert.ok(r.lines.some((l) => /could not tell whether "PBJ" is in range; not forgetting it/.test(l)), r.lines.join("\n"));
+    assert.ok(r.lines.some((l) => /staying on the hotspot: could not confirm that "PBJ" is in range.*next try in/.test(l)), r.lines.join("\n"));
+    assert.equal(r.calls.filter((l) => l.includes("-listpreferredwirelessnetworks")).length, 0, "no return scan either");
+  }));
+}
+
+for (const cancel of ["pin", "stop", "disable", "rename", "OS joined Wi-Fi"] as const) {
+  test(`a hotspot scan that completes after ${cancel} forgets nothing and leaves nothing`, withDir(async (file) => {
+    writeLearnedHotspot(file, SEEDED);
+    const r: ReturnType<typeof rig> = rig({
+      stateFile: file,
+      net: { ip: "192.168.219.9", hotspotScan: () => hotspotAnswer(null) },
+      onHotspotScan: () => {
+        if (cancel === "pin") r.c.setPin(true);
+        if (cancel === "stop") r.c.stop();
+        if (cancel === "disable") r.set({ enabled: false });
+        if (cancel === "rename") r.set({ hotspotSsid: "Other phone" });
+        if (cancel === "OS joined Wi-Fi") r.net.ip = "192.168.1.4";
+      },
+    });
+    await r.ticks(1);
+    assert.equal(readLearnedHotspot(file)?.network, "192.168.219.0/24", "the answer arrived too late to act on");
+    assert.ok(!r.lines.some((l) => /forgetting/.test(l)), r.lines.join("\n"));
+    assert.equal(r.returns(), 0);
+  }));
+}
+
+test("failover: the hotspot is not in range → networksetup is never run, the state says why, the retry timing is a failed join's", async () => {
+  let visible = false;
+  const r = rig({ net: { probeOk: () => false, hotspotScan: () => hotspotAnswer(visible ? "PBJ" : null) } });
+  await r.ticks(3);
+  assert.equal(r.joins(), 0, "no -setairportnetwork: it would cancel macOS's own auto-join");
+  assert.equal(r.hotspotScanCount(), 1);
+  let s = r.c.status();
+  assert.equal(s.state, "hotspot-not-visible");
+  assert.match(s.hint ?? "", /On an iPhone, open Settings → Personal Hotspot/);
+  assert.equal(s.lastSwitch?.ok, false);
+  assert.ok(r.lines.some((l) => /not joining it, so macOS's own auto-join is not cancelled/.test(l)), r.lines.join("\n"));
+  await r.ticks(1); // 10 s after the first failure, like a failed join
+  assert.equal(r.hotspotScanCount(), 2);
+  await r.ticks(1); // the second failure waits 20 s
+  assert.equal(r.hotspotScanCount(), 2);
+  assert.equal(r.c.status().state, "hotspot-not-visible", "the reason stays until the next attempt");
+  await r.ticks(1);
+  assert.equal(r.hotspotScanCount(), 3);
+  assert.equal(r.joins(), 0);
+  // The phone comes into range: the next try joins it.
+  visible = true;
+  await r.ticks(4);
+  assert.equal(r.joins(), 1);
+  assert.equal(r.c.status().state, "on-hotspot");
+});
+
+test("macOS, no address, hotspot not in range: macOS keeps the first minute, then one scan a minute and no networksetup call", async () => {
+  let visible = false;
+  const r = rig({ net: { ip: null, probeOk: () => false, hotspotScan: () => hotspotAnswer(visible ? "PBJ" : null) } });
+  await r.ticks(6);
+  assert.equal(r.hotspotScanCount(), 0, "the grace is untouched: not even a scan");
+  await r.ticks(1); // 60s
+  assert.equal(r.hotspotScanCount(), 1);
+  assert.equal(r.c.status().state, "hotspot-not-visible");
+  await r.ticks(5); // 70..110s: a failed join here gets no 10 s ladder
+  assert.equal(r.hotspotScanCount(), 1);
+  await r.ticks(1); // 120s
+  assert.equal(r.hotspotScanCount(), 2);
+  assert.equal(r.joins(), 0);
+  visible = true;
+  await r.ticks(5); // 130..170s
+  assert.equal(r.joins(), 0);
+  await r.ticks(1); // 180s
+  assert.equal(r.joins(), 1);
+  assert.equal(r.c.status().state, "on-hotspot");
+});
+
+test("failover: unknown whether the hotspot is in range (scan failed or cached) joins as before", async () => {
+  for (const scan of [new Error("CoreWLAN broke"), hotspotAnswer("PBJ", 25)]) {
+    const r = rig({ net: { probeOk: (ip) => isHotspotAddress(ip), hotspotScan: () => scan } });
+    await r.ticks(3);
+    assert.equal(r.joins(), 1);
+    assert.equal(r.c.status().state, "on-hotspot");
+  }
+});
+
+for (const cancel of ["pin", "stop", "disable", "rename", "OS joined Wi-Fi"] as const) {
+  test(`failover: a hotspot scan that completes after ${cancel} cannot join`, async () => {
+    const r: ReturnType<typeof rig> = rig({
+      net: { probeOk: () => false },
+      onHotspotScan: () => {
+        if (cancel === "pin") r.c.setPin(true);
+        if (cancel === "stop") r.c.stop();
+        if (cancel === "disable") r.set({ enabled: false });
+        if (cancel === "rename") r.set({ hotspotSsid: "Other phone" });
+        if (cancel === "OS joined Wi-Fi") { r.net.ip = "10.0.0.50"; r.net.probeOk = () => true; }
+      },
+    });
+    await r.ticks(3);
+    assert.equal(r.hotspotScanCount(), 1);
+    assert.equal(r.joins(), 0, "no hotspot join was requested");
+    assert.equal(r.c.status().lastSwitch, null, "no switch was recorded");
+    assert.ok(!r.lines.some((line) => /joining hotspot|^WARN /.test(line)), r.lines.join("\n"));
+  });
+}
+
+for (const how of ["in range", "scan answered from cache twice"] as const) {
+  test(`a hotspot that is in range or unknown (${how}) is still learned from our own join`, withDir(async (file) => {
+    const r = androidRig(file, { net: { hotspotScan: () => hotspotAnswer("Pixel", how === "in range" ? 9_500 : 25) } });
+    await r.ticks(3);
+    assert.equal(r.joins(), 1);
+    assert.equal(r.hotspotScanCount(), how === "in range" ? 2 : 4, "before the join and when the new address appeared (cache is asked twice each)");
+    assert.equal(r.c.status().state, "on-hotspot");
+    assert.equal(readLearnedHotspot(file)?.network, "192.168.43.0/24");
+    assert.ok(r.lines.includes('tether: remembering 192.168.43.0/24 as hotspot "Pixel"\'s network'), r.lines.join("\n"));
+    await r.ticks(10);
+    assert.equal(r.c.status().state, "on-hotspot");
+    if (how === "in range") assert.equal(r.hotspotScanCount(), 2, "the scan that just proved it is trusted: no rescan when the settle ends");
+  }));
+}
+
+test("a genuine return from a learned hotspot (it is in range, a known Wi-Fi is too) still leaves", withDir(async (file) => {
+  writeLearnedHotspot(file, { ssid: "Pixel", network: "192.168.43.0/24", learnedAt: "2026-11-20T00:00:00.000Z" });
+  const r = androidRig(file, { home: "192.168.43.30", net: { disassociateLandsOn: "192.168.1.4", probeOk: () => true } });
+  await r.ticks(31);
+  assert.equal(r.returns(), 1);
+  assert.equal(r.c.status().network, "wifi");
+  assert.equal(r.c.status().lastSwitch?.ok, true);
+  assert.equal(r.hotspotScanCount(), 2, "once after the start, once at the return point");
+  assert.equal(readLearnedHotspot(file)?.network, "192.168.43.0/24", "the memory stays: it was right");
+}));
+
+test("the iPhone range is read from the address alone: no hotspot scan, whatever it would say", async () => {
+  const r = rig({ net: { ip: "172.20.10.2", disassociateLandsOn: "192.168.1.4", hotspotScan: () => new Error("must not be asked") } });
+  await r.ticks(31);
+  assert.equal(r.hotspotScanCount(), 0);
+  assert.equal(r.returns(), 1);
+  assert.equal(r.c.status().network, "wifi");
+});
 
 // ---- Making a gap when calls never stop (2026-10-20: postponed from 19:22:54 until the hotspot went) ----
 

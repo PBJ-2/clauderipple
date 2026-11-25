@@ -220,6 +220,34 @@ export class WinTetherBackend implements TetherBackend {
     return known.some((p) => visible.includes(p.ssid)) ? null : "no known Wi-Fi in range";
   }
 
+  /**
+   * Whether the hotspot's SSID is in `netsh wlan show networks mode=ssid`, as returnBlocked reads it.
+   * The saved profile may carry another name than its SSID, so a name not listed is looked up in the
+   * profile's own SSID before it counts as absent. Location denial, a command error, an empty list
+   * (empty, redacted or unsupported output) or a hotspot with no saved profile to match are unknown
+   * (null), never "not in range".
+   */
+  async hotspotVisible(ssid: string): Promise<boolean | null> {
+    try {
+      if (!this.adapter) return null;
+      const shown = await this.run(NETSH, ["wlan", "show", "networks", "mode=ssid", `interface="${this.adapter}"`], { verbatim: true, timeoutMs: 20_000 });
+      if (needsLocation(shown) || shown.code !== 0) return null;
+      const visible = parseVisibleSsids(shown.stdout);
+      if (!visible.length) return null;
+      if (visible.includes(ssid)) return true;
+      const list = await listWifiProfiles(this.run);
+      if (list.location || list.error) return null;
+      const p = hotspotProfile(list.profiles, ssid);
+      if (!p) return null;
+      if (visible.includes(p.ssid)) return true;
+      // A hidden network is listed with an empty SSID: a saved hidden hotspot may be that entry.
+      return /^\s*SSID\s+\d+\s*:\s*$/m.test(shown.stdout) ? null : false;
+    } catch (e) {
+      this.log.warn(`tether: could not scan for "${ssid}": ${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    }
+  }
+
   async leave(): Promise<string | null> {
     if (!this.adapter) return "no Wi-Fi adapter";
     const r = await this.run(NETSH, ["wlan", "disconnect", `interface="${this.adapter}"`], { verbatim: true, timeoutMs: 15_000 });

@@ -50,6 +50,22 @@
 // (PrivateAddressCoordinator) — so after our own join of the hotspot SSID succeeds, the subnet the
 // Wi-Fi interface then has (os.networkInterfaces(): address + netmask, no process, no privilege) is
 // remembered as the hotspot's network and kept in <home>/tether.json.
+//
+// Whether the phone's hotspot is in range is asked by a directed scan (TetherBackend.hotspotVisible:
+// true / false / null = unknown; null always falls back to the behaviour from before the scan existed)
+// in four places (2026-11-25; on 11-24 a 3-minute networksetup join let macOS auto-join the office
+// Wi-Fi, whose subnet was learned as the hotspot's and then left behind seven times, §5):
+//   learn     a new address after our own join is remembered only if the hotspot is not known to be out
+//             of range; otherwise it came from another network: nothing is learned or written, and the
+//             join reads hotspot-not-visible (join()).
+//   forget    a learned network the Mac is on, while the hotspot is not in range, was never the
+//             hotspot: it is forgotten (memory and tether.json) and the network reads as Wi-Fi, with
+//             nothing left or disassociated in that tick. Asked before any return decision and once
+//             after such a network settles; unknown → no forget, and the return waits (checkLearned()).
+//   failover  a hotspot that is not in range is not joined: a networksetup call cancels macOS's own
+//             auto-join (§5, 2026-11-06) and could only fail; it counts as a failed join with the
+//             same retry timing (failover()).
+// Every answer is asked again after an await: pin, stop, settings and the network can change meanwhile.
 
 import fs from "node:fs";
 import http from "node:http";
@@ -347,6 +363,22 @@ export function writeLearnedHotspot(file: string, h: LearnedHotspot): void {
   fs.renameSync(tmp, file);
 }
 
+/** Forgets the learned hotspot network in the state file: drops the `hotspot` key, atomically. */
+export function clearLearnedHotspot(file: string): void {
+  let kept: Record<string, unknown> = {};
+  try {
+    const j: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (j && typeof j === "object" && !Array.isArray(j)) kept = { ...(j as Record<string, unknown>) };
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return; // nothing was ever written
+    // unreadable content is no memory either: replaced by an empty object
+  }
+  delete kept.hotspot;
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify(kept) + "\n", { mode: 0o600 });
+  fs.renameSync(tmp, file);
+}
+
 /**
  * The next scheduled return time at or after `now + minGapMs`, on the fixed schedule counted from
  * `landedAt` (5, 10, 20, 30, 40, 50, 60 min, then every 10). A point already passed is skipped, so a
@@ -460,6 +492,13 @@ export interface TetherBackend {
   readonly rejoinHotspotIfUnassociated?: boolean;
   /** Read-only check before holding calls or leaving: null ONLY if another known Wi-Fi is visible. */
   returnBlocked(ssid: string): Promise<string | null>;
+  /**
+   * Whether the hotspot is in range right now, by a fresh directed scan for that one name (any
+   * signal strength). true: found. false: a fresh scan did not find it. null: unknown (the scan
+   * failed, was only airportd's cache, or the OS gave no usable list) — every caller then does what
+   * it did before this question existed.
+   */
+  hotspotVisible(ssid: string): Promise<boolean | null>;
   readonly hints: Partial<Record<TetherState, string>>;
 }
 
@@ -556,6 +595,28 @@ class MacTetherBackend implements TetherBackend {
     return "no known Wi-Fi in range";
   }
 
+  /**
+   * A directed CoreWLAN scan for the hotspot alone, with the same freshness rule as returnBlocked: an
+   * answer faster than SCAN_FRESH_MIN_MS is airportd's cache (it can still list a network that is
+   * gone, 2026-11-06), so it is asked once more after SCAN_CACHE_TTL_MS; cache twice, or a scan that
+   * failed, is unknown (null).
+   */
+  async hotspotVisible(ssid: string): Promise<boolean | null> {
+    try {
+      let scan = await this.scanKnown([ssid]);
+      if (scan.freshMs < SCAN_FRESH_MIN_MS) {
+        this.log.info(`tether: the scan for "${ssid}" was answered from cache after ${scan.freshMs}ms; scanning again once it expires`);
+        await this.sleep(SCAN_CACHE_TTL_MS);
+        scan = await this.scanKnown([ssid]);
+        if (scan.freshMs < SCAN_FRESH_MIN_MS) return null;
+      }
+      return this.bestKnown(scan, [ssid]) !== null;
+    } catch (e) {
+      this.log.warn(`tether: could not scan for "${ssid}": ${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    }
+  }
+
   /** One full scan plus directed queries; throws on anything that is not an answer this module can read. */
   private async scanKnown(names: string[]): Promise<KnownWifiScan> {
     const r = await this.run(OSASCRIPT, ["-l", "JavaScript", "-e", SCAN_KNOWN_JS, this.device!, JSON.stringify(names)], { timeoutMs: 30_000 });
@@ -628,6 +689,10 @@ export class TetherController {
   private seenOnce = false;
   /** Until this time the new network's failed probes do not count toward an outage (NETWORK_SETTLE_MS). */
   private settleUntil = 0;
+  /** A learned-network hotspot was entered (or the router started on one): ask once, after the settle, whether the hotspot is in range. */
+  private learnedCheckPending = false;
+  /** The address at which the hotspot was last seen in range, and when: a return postponed for busy calls does not rescan every tick. */
+  private learnedVerified: { ip: string; at: number } | null = null;
 
   constructor(deps: TetherDeps) {
     this.deps = deps;
@@ -730,6 +795,70 @@ export class TetherController {
     return classifyNetwork(ip, this.learnedNetwork()) === "hotspot";
   }
 
+  /** On the hotspot only because of the learned network, not the iPhone range: the one reading that can be wrong. */
+  private learnedOnly(ip: string | null): boolean {
+    return ip !== null && !isHotspotAddress(ip) && inNetwork(ip, this.learnedNetwork());
+  }
+
+  /** The backend's answer, with an error read as unknown (null) like every other failure to tell. */
+  private async hotspotVisible(ssid: string): Promise<boolean | null> {
+    try {
+      return await this.backend!.hotspotVisible(ssid);
+    } catch (e) {
+      this.deps.log.warn(`tether: could not tell whether "${ssid}" is in range: ${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    }
+  }
+
+  /**
+   * The Mac sits on the network learned for the hotspot: is the hotspot in range? Not in range means
+   * that network was never the hotspot's (2026-11-24: the office Wi-Fi learned during a 3 minute
+   * join, then left seven times), so it is forgotten and the network reads as Wi-Fi — the caller
+   * must leave nothing in this tick. "keep": it is in range (or was seen a minute ago at this
+   * address). "unknown": no answer; nothing is forgotten, and a return must not go on. "stop":
+   * forgotten, or something changed during the scan (pin, stop, settings, the network): the next
+   * tick judges it.
+   */
+  private async checkLearned(settings: TetherSettings): Promise<"keep" | "unknown" | "stop"> {
+    this.learnedCheckPending = false;
+    const learned = this.learned;
+    const here = this.currentIp();
+    const seen = this.learnedVerified;
+    if (!learned || !here || (seen && seen.ip === here && this.now() - seen.at < KNOWN_VISIBLE_TRUST_MS)) return "keep";
+    const visible = await this.hotspotVisible(learned.ssid);
+    const current = this.deps.settings();
+    if (this.stopped || this.pinned || !current.enabled || current.hotspotSsid !== settings.hotspotSsid) return "stop";
+    const s = this.sampleNetwork(this.now());
+    if (s.changed || !this.learnedOnly(s.ip)) return "stop";
+    if (visible === true) {
+      this.learnedVerified = { ip: s.ip!, at: this.now() };
+      return "keep";
+    }
+    if (visible === null) {
+      this.step(`on ${learned.network}, learned as hotspot "${learned.ssid}"'s network, but could not tell whether "${learned.ssid}" is in range; not forgetting it`);
+      return "unknown";
+    }
+    this.forgetLearned(learned);
+    return "stop";
+  }
+
+  /** Drops the learned network (memory and state file) and reads the current one as Wi-Fi, with the usual change handling. */
+  private forgetLearned(was: LearnedHotspot): void {
+    this.learned = null;
+    this.learnedVerified = null;
+    this.step(`forgetting ${was.network} as hotspot "${was.ssid}"'s network: on that network but "${was.ssid}" is not in range`);
+    if (this.deps.stateFile) {
+      try {
+        clearLearnedHotspot(this.deps.stateFile);
+      } catch (e) {
+        this.deps.log.warn(`tether: could not clear the hotspot's network from the state file: ${(e as Error).message}`);
+      }
+    }
+    this.landedOnHotspotAt = null;
+    this.sampleNetwork(this.now()); // hotspot → wifi: probe window reset and settle (noteNetwork)
+    this.state = "watching";
+  }
+
   private idle(): boolean {
     const a = this.deps.activity();
     return a.inFlight === 0 && (a.lastStartedAt === undefined || this.now() - a.lastStartedAt >= RETURN_QUIET_MS);
@@ -746,6 +875,7 @@ export class TetherController {
       this.seenIp = ip;
       this.seenSubnet = subnet;
       this.seenNetwork = this.network;
+      this.learnedCheckPending = this.learnedOnly(ip);
       return false;
     }
     if (ip === this.seenIp && this.network === this.seenNetwork && (this.network === "none" || subnet === this.seenSubnet)) return false;
@@ -757,6 +887,8 @@ export class TetherController {
     this.window.reset();
     this.joinFailures = 0;
     this.knownVisibleAt = -Infinity;
+    // A new learned-network "hotspot" is asked about once, when its settle is over (checkLearned).
+    this.learnedCheckPending = this.learnedOnly(ip);
     // Only a network that just arrived settles: the switch's own probes fail until it is up, and
     // they are not its failures. A lost address has no new network to protect — a settle there
     // pushed Windows' first hotspot join from ~20s to ~50s after the loss (2026-11-06).
@@ -842,6 +974,11 @@ export class TetherController {
       }
       if (this.state !== "on-hotspot") this.decide(`on the hotspot; next try for Wi-Fi in ${Math.round((this.nextReturnAt - this.now()) / 1000)}s`);
       this.state = "on-hotspot";
+      // A learned network the Mac just landed on (or started on) is asked about once, after its
+      // settle: the OS may have joined an ordinary Wi-Fi that was learned by mistake (2026-11-24).
+      if (this.learnedCheckPending && this.now() >= this.settleUntil && this.learnedOnly(this.currentIp())) {
+        if ((await this.checkLearned(settings)) === "stop") return;
+      }
       if (this.now() >= this.nextReturnAt) await this.tryReturn(settings);
       return;
     }
@@ -893,15 +1030,22 @@ export class TetherController {
     // A call in flight on a dead network cannot finish anyway; give it a short chance, no more.
     const waitUntil = this.now() + FAILOVER_IDLE_WAIT_MS;
     while (this.deps.activity().inFlight > 0 && this.now() < waitUntil) await this.sleep(1_000);
-    // A pin/stop/settings change during the wait cancels the join, just as it cancels a return.
-    const current = this.deps.settings();
-    if (this.stopped || this.pinned || !current.enabled || current.hotspotSsid !== settings.hotspotSsid) return;
-    // Waiting that long gives the OS or the person time to join another network; joining the
-    // hotspot now would evict it. The change is handled (reset, settle) and the next tick judges
-    // the network that arrived. A lost address has nothing to evict: the hotspot join stays right.
-    if (this.sampleNetwork(this.now()).changed && this.network !== "none") return;
-    // …but a loss during that wait gives macOS its own grace from the moment it happened.
-    if (this.leaveJoinToOs()) return;
+    if (this.joinMoved(settings)) return;
+    // A hotspot that is not in range cannot be joined, and trying cancels macOS's own auto-join
+    // (§5, 2026-11-06: each networksetup call, once a minute, kept the Mac offline for 52 minutes on
+    // 2026-11-25). A fresh scan that does not find it skips the call: same state, same retry timing
+    // as a join that failed with hotspot-not-visible. Unknown (null) joins as before.
+    const visible = await this.hotspotVisible(settings.hotspotSsid);
+    // The scan is an await too: everything above is checked again.
+    if (this.joinMoved(settings)) return;
+    if (visible === false) {
+      this.lastSwitchAt = this.now();
+      this.joinFailures += 1;
+      this.state = "hotspot-not-visible";
+      this.recordSwitch("hotspot", false, "hotspot-not-visible (join skipped: not in range)");
+      this.decide(`${why}, but "${settings.hotspotSsid}" is not in range (a fresh scan did not find it); not joining it, so ${this.deps.platform === "win32" ? "Windows" : "macOS"}'s own auto-join is not cancelled`);
+      return;
+    }
     this.state = "joining-hotspot";
     this.lastSwitchAt = this.now();
     this.decide(`${why}: joining hotspot "${settings.hotspotSsid}"`);
@@ -924,7 +1068,25 @@ export class TetherController {
     } else {
       this.state = outcome;
       this.decide(`could not join the hotspot: ${outcome}`);
+      // A join that failed may still have left another network behind it (join(): the OS auto-joined
+      // one while the request ran): read it now, so it settles and is judged as Wi-Fi.
+      this.sampleNetwork(this.now());
     }
+  }
+
+  /**
+   * After an await in failover, before the hotspot is asked for: false when the join must not go
+   * ahead — a pin/stop/settings change cancels it just as it cancels a return; waiting that long
+   * gives the OS or the person time to join another network, and joining the hotspot would evict it
+   * (the change is handled — reset, settle — and the next tick judges the network that arrived);
+   * a lost address has nothing to evict, so the join stays right, but gives macOS its own grace
+   * from the moment of the loss.
+   */
+  private joinMoved(settings: TetherSettings): boolean {
+    const current = this.deps.settings();
+    if (this.stopped || this.pinned || !current.enabled || current.hotspotSsid !== settings.hotspotSsid) return true;
+    if (this.sampleNetwork(this.now()).changed && this.network !== "none") return true;
+    return this.leaveJoinToOs();
   }
 
   /**
@@ -940,11 +1102,32 @@ export class TetherController {
     const failed = await this.backend!.join(ssid);
     if (failed) return failed;
     const deadline = this.now() + JOIN_SETTLE_MS;
+    /** Asked once per join: undefined until a new address has made it necessary. */
+    let visible: boolean | null | undefined;
     for (;;) {
       const ip = this.currentIp();
       if (this.onHotspot(ip)) return "joined";
       if (ip && ip !== before && !isLinkLocal(ip)) {
+        // A new address after an accepted join is not necessarily the hotspot's: networksetup can
+        // take minutes (3 on 2026-11-24) and macOS auto-joins a known Wi-Fi meanwhile. If the hotspot
+        // is not in range, that address came from another network — never learn it.
+        if (visible === undefined) {
+          visible = await this.hotspotVisible(ssid);
+          // The scan is an await: the address may have moved again (or turned out to be the hotspot's).
+          if (this.onHotspot(this.currentIp())) return "joined";
+          // Moved during the scan: the answer belongs to neither address for sure (the person may have
+          // joined a saved Wi-Fi with the phone still in range), so nothing is learned from this join.
+          if (this.currentIp() !== ip) {
+            this.step(`joined "${ssid}" by request, but the address moved from ${ip} while checking that ${ssid} is in range; not remembering either network`);
+            return this.backend!.noAddressOutcome;
+          }
+        }
+        if (visible === false) {
+          this.step(`joined "${ssid}" by request, but ${ssid} is not in range; the new address ${ip} came from another network; not remembering it`);
+          return "hotspot-not-visible";
+        }
         this.learn(ssid, ip, wifiBefore);
+        if (visible === true && this.onHotspot(ip)) this.learnedVerified = { ip, at: this.now() };
         return "joined";
       }
       if (this.now() >= deadline) return this.backend!.noAddressOutcome;
@@ -980,6 +1163,16 @@ export class TetherController {
 
   private async tryReturn(settings: TetherSettings): Promise<void> {
     if (this.now() - this.lastSwitchAt < MIN_SWITCH_INTERVAL_MS) return;
+    // Before any decision to leave: if the "hotspot" is only a learned network and the hotspot is
+    // not in range, the Mac is on ordinary Wi-Fi and leaving would disassociate it (2026-11-24).
+    if (this.learnedOnly(this.currentIp())) {
+      const learned = await this.checkLearned(settings);
+      if (learned === "stop") return;
+      if (learned === "unknown") {
+        this.backOff(`could not confirm that "${settings.hotspotSsid}" is in range, so this network may not be the hotspot's`);
+        return;
+      }
+    }
     // A return postponed for busy calls comes back every tick; one scan that saw a known Wi-Fi is
     // trusted for a minute rather than repeated each time (a scan takes seconds on the radio).
     if (this.now() - this.knownVisibleAt >= KNOWN_VISIBLE_TRUST_MS) {
