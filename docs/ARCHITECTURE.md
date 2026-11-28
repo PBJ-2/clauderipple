@@ -1970,8 +1970,16 @@ tight, and nothing at 100 or more.
   `instructions` plus message/input items become Anthropic `system` plus
   `messages`; text, base64/URL images, function calls, and function outputs are
   preserved; reasoning items are dropped. Function tools and tool choice map to
-  Anthropic tools/tool_choice. `max_output_tokens` → `max_tokens`, and
-  `temperature` is preserved. `reasoning.effort` → `output_config.effort`; this
+  Anthropic tools/tool_choice. `max_output_tokens` → `max_tokens` (Chat:
+  `max_completion_tokens`/`max_tokens`), and `temperature` is preserved. A caller's
+  ceiling is always kept. When it is omitted (Codex omits it, meaning "the model's own
+  limit"; issue #191: answers stopped at 16,384), a native Claude target gets its
+  `max_tokens` from the cached `GET /v1/models` list (never waited for; List Models
+  reference, 2026-11-28), else 32000 (the smallest active Claude max output is 64K,
+  models overview 2026-11-28); other targets keep 16384. Streaming and non-streaming
+  alike: the "stream beyond ~10 minutes" error is the SDKs', not the API's. The request
+  log records Anthropic's own `stop_reason` (`max_tokens` included), inferring
+  `tool_use`/`end_turn` only when none arrived. `reasoning.effort` → `output_config.effort`; this
   ingress does not invent a thinking-token budget because that would change
   the caller's requested output ceiling. Codex's remote compaction control item
   `{"type":"compaction_trigger"}` (last in the transcript, a request control

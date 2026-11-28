@@ -9,6 +9,8 @@ import type { ProviderModel } from "../config.ts";
 import { retryAfterMs as parseRetryAfterMs, type Credential } from "../pool.ts";
 
 export type ClaudeModel = ProviderModel & {
+  /** The most output tokens one answer may have (`max_tokens` in the API entry). */
+  maxOutputTokens?: number;
   /** The family (`opus`, `sonnet`, `haiku`, `fable`, `mythos`), as the API names it. */
   line?: string;
   /** Release time, epoch ms. Newest first is how the API sorts them. */
@@ -30,7 +32,7 @@ export function claudeModelsFromBody(body: unknown): ClaudeModel[] {
     if (!raw || typeof raw !== "object") continue;
     const m = raw as {
       id?: unknown; display_name?: unknown; created_at?: unknown; line?: unknown; lifecycle?: unknown;
-      max_input_tokens?: unknown; capabilities?: { effort?: Record<string, unknown> };
+      max_input_tokens?: unknown; max_tokens?: unknown; capabilities?: { effort?: Record<string, unknown> };
     };
     if (typeof m.id !== "string" || !m.id.startsWith("claude-")) continue;
     if (m.lifecycle !== undefined && m.lifecycle !== "active") continue;
@@ -46,6 +48,8 @@ export function claudeModelsFromBody(body: unknown): ClaudeModel[] {
     // Haiku 4.5 reports the effort block with every level unsupported: it takes no effort at all.
     if (effort && typeof effort === "object") entry.effortLevels = (effort as { supported?: unknown }).supported === true ? EFFORT_ORDER.filter(supported) : [];
     if (typeof m.max_input_tokens === "number" && m.max_input_tokens > 0) entry.contextWindow = m.max_input_tokens;
+    // `max_tokens`: "Maximum value for the `max_tokens` parameter when using this model" (List Models reference, 2026-11-28).
+    if (typeof m.max_tokens === "number" && Number.isFinite(m.max_tokens) && m.max_tokens > 0) entry.maxOutputTokens = Math.floor(m.max_tokens);
     if (typeof m.line === "string") entry.line = m.line;
     const created = typeof m.created_at === "string" ? Date.parse(m.created_at) : NaN;
     if (Number.isFinite(created)) entry.createdAt = created;
@@ -104,6 +108,15 @@ export class ClaudeModelCatalog {
       timer.unref();
     });
     return Promise.race([inFlight, timeout]).finally(() => clearTimeout(timer));
+  }
+
+  /**
+   * The list already had, never waited for: a request path that must not stall on a cold start reads
+   * this. It starts the lookup when one is due, so a later call finds the list.
+   */
+  cached(): ClaudeModel[] | null {
+    if ((this.opts.now ?? Date.now)() >= this.nextAt) this.inFlight ??= this.refresh();
+    return this.last;
   }
 
   /** Call `listener` once, right after the first lookup that gets a list; never once a list is had. */

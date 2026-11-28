@@ -7,8 +7,25 @@
 import crypto from "node:crypto";
 import { ToolTranslation } from "./tools.ts";
 
-// Anthropic requires max_tokens; OpenAI clients (Codex included) usually omit it. 16k is safe for every current Claude model.
+// Anthropic requires max_tokens; OpenAI clients (Codex included) usually omit it, and for them omission
+// means "the model's own limit" (issue #191: Codex answers stopped at exactly 16,384 tokens).
+// A caller's ceiling is always kept. Otherwise the ingress passes `defaultMaxTokens`: the target Claude
+// model's `max_tokens` from `GET /v1/models` (https://platform.claude.com/docs/en/api/models/list, read
+// 2026-11-28), or CLAUDE_FALLBACK_MAX_TOKENS while that list is not there. DEFAULT_MAX_TOKENS stays for
+// targets that are not Claude: their providers translate max_tokens on their own.
 export const DEFAULT_MAX_TOKENS = 16384;
+// The smallest max output among the active Claude models is 64K (Haiku 4.5, Sonnet 4.5, Opus 4.5); the
+// rest are 128K (https://platform.claude.com/docs/en/models/overview, 2026-11-28). 32000 is under all of
+// them. Non-streaming requests get the same ceiling: the "over about 10 minutes, stream instead" error
+// that the docs describe is raised by the Anthropic SDKs, not by the API (Python SDK page, 2026-11-28),
+// and the ingress calls the API directly.
+export const CLAUDE_FALLBACK_MAX_TOKENS = 32000;
+
+/** The ceiling the caller asked for, or undefined when it left it out. */
+export function requestedMaxTokens(body: Json, chat: boolean): number | undefined {
+  const value = chat ? body.max_completion_tokens ?? body.max_tokens : body.max_output_tokens;
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(1, Math.floor(value)) : undefined;
+}
 
 export type Json = Record<string, unknown>;
 
@@ -325,14 +342,14 @@ function placeInstructions(prefix: string | undefined, instructions: string[], m
   return text ? [{ type: "text", text, cache_control: EPHEMERAL }] : undefined;
 }
 
-export function responsesToAnthropic(body: Json, targetModel: string, systemPrefix?: string, onIgnoredCompaction: () => void = () => {}, translation = new ToolTranslation(body, !!systemPrefix), nativeImages = false): AnthropicIngressRequest {
+export function responsesToAnthropic(body: Json, targetModel: string, systemPrefix?: string, onIgnoredCompaction: () => void = () => {}, translation = new ToolTranslation(body, !!systemPrefix), nativeImages = false, defaultMaxTokens?: number): AnthropicIngressRequest {
   const instructions: string[] = typeof body.instructions === "string" ? [body.instructions] : [];
   const messages = responseItems(body.input, instructions, onIgnoredCompaction, translation, nativeImages);
   endWithUserTurn(messages);
   const system = placeInstructions(systemPrefix, instructions, messages);
   applyMessageCache(messages);
   const tools = translation.tools;
-  const maxTokens = typeof body.max_output_tokens === "number" && Number.isFinite(body.max_output_tokens) ? Math.max(1, Math.floor(body.max_output_tokens)) : undefined;
+  const maxTokens = requestedMaxTokens(body, false);
   const temperature = typeof body.temperature === "number" && Number.isFinite(body.temperature) ? body.temperature : undefined;
   const effort = effortFromRequest(body.reasoning);
   const toolChoice = translation.choice;
@@ -342,7 +359,7 @@ export function responsesToAnthropic(body: Json, targetModel: string, systemPref
     messages,
     ...(tools.length ? { tools } : {}),
     ...(toolChoice ? { tool_choice: toolChoice } : {}),
-    max_tokens: maxTokens ?? DEFAULT_MAX_TOKENS,
+    max_tokens: maxTokens ?? defaultMaxTokens ?? DEFAULT_MAX_TOKENS,
     ...(temperature !== undefined ? { temperature } : {}),
     ...(effort && claudeSupportsEffort(targetModel) ? { output_config: { effort } } : {}),
     stream: body.stream === true,
@@ -375,7 +392,7 @@ function chatMessageToAnthropic(raw: unknown, translation: ToolTranslation): Ant
 }
 
 /** Convert OpenAI Chat Completions request to an Anthropic Messages request. */
-export function chatToAnthropic(body: Json, targetModel: string, systemPrefix?: string, translation = new ToolTranslation(body, !!systemPrefix)): AnthropicIngressRequest {
+export function chatToAnthropic(body: Json, targetModel: string, systemPrefix?: string, translation = new ToolTranslation(body, !!systemPrefix), defaultMaxTokens?: number): AnthropicIngressRequest {
   const rawMessages = Array.isArray(body.messages) ? body.messages : [];
   const systems: string[] = [];
   const messages: AnthropicMessage[] = [];
@@ -393,8 +410,7 @@ export function chatToAnthropic(body: Json, targetModel: string, systemPrefix?: 
   const system = placeInstructions(systemPrefix, systems, messages);
   applyMessageCache(messages);
   const tools = translation.tools;
-  const maxTokensValue = body.max_completion_tokens ?? body.max_tokens;
-  const maxTokens = typeof maxTokensValue === "number" && Number.isFinite(maxTokensValue) ? Math.max(1, Math.floor(maxTokensValue)) : undefined;
+  const maxTokens = requestedMaxTokens(body, true);
   const temperature = typeof body.temperature === "number" && Number.isFinite(body.temperature) ? body.temperature : undefined;
   const toolChoice = translation.choice;
   return {
@@ -403,7 +419,7 @@ export function chatToAnthropic(body: Json, targetModel: string, systemPrefix?: 
     messages,
     ...(tools.length ? { tools } : {}),
     ...(toolChoice ? { tool_choice: toolChoice } : {}),
-    max_tokens: maxTokens ?? DEFAULT_MAX_TOKENS,
+    max_tokens: maxTokens ?? defaultMaxTokens ?? DEFAULT_MAX_TOKENS,
     ...(temperature !== undefined ? { temperature } : {}),
     stream: body.stream === true,
   };

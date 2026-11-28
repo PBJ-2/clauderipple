@@ -91,6 +91,17 @@ test("Responses request becomes cache-friendly Anthropic Messages request", () =
   assert.equal(out.max_tokens, 123);
 });
 
+test("the ceiling: a caller's is kept, an omitted one takes the ingress default, then 16384 (issue #191)", () => {
+  const bare = { input: "test", stream: true };
+  assert.equal(responsesToAnthropic({ ...bare, max_output_tokens: 32768 }, "claude-opus-5-5", undefined, undefined, undefined, true, 128000).max_tokens, 32768);
+  assert.equal(responsesToAnthropic(bare, "claude-opus-5-5", undefined, undefined, undefined, true, 128000).max_tokens, 128000);
+  assert.equal(responsesToAnthropic(bare, "claude-opus-5-5").max_tokens, 16384);
+  const chat = { messages: [{ role: "user", content: "go" }] };
+  assert.equal(chatToAnthropic({ ...chat, max_tokens: 99 }, "claude-opus-5-5", undefined, undefined, 128000).max_tokens, 99);
+  assert.equal(chatToAnthropic(chat, "claude-opus-5-5", undefined, undefined, 128000).max_tokens, 128000);
+  assert.equal(chatToAnthropic(chat, "claude-opus-5-5").max_tokens, 16384);
+});
+
 // Issue #104: Codex's remote compaction appends the control item `{"type":"compaction_trigger"}`
 // after the whole transcript, so the transcript itself still ends with the assistant's last turn.
 // Anthropic rejects that shape ("This model does not support assistant message prefill").

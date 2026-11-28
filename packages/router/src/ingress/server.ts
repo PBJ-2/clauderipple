@@ -26,12 +26,15 @@ import { ObservedClaudeCodeAuth } from "../providers/anthropic-observed.ts";
 import { LoginEmailWatch, PendingRowWrites } from "../providers/anthropic-identity.ts";
 import type { ChatGptAdapter } from "../providers/chatgpt/index.ts";
 import type { Credential } from "../pool.ts";
+import type { ClaudeModel } from "../providers/anthropic-models.ts";
 import {
+  CLAUDE_FALLBACK_MAX_TOKENS,
   ResponsesEventMapper,
   chatToAnthropic,
   formatDataSse,
   formatSse,
   hasCompactionTrigger,
+  requestedMaxTokens,
   responsesEventsToChatChunks,
   responsesToAnthropic,
   responsesToChatCompletion,
@@ -63,6 +66,8 @@ type IngressDeps = {
    * Called with the headers of the credential that answered, so the email is that token's.
    */
   claudeIdentity?: (headers: Record<string, string>) => Promise<{ email: string } | null>;
+  /** The Claude model list already loaded (the catalog the admin page reads), never waited for; null before it loads. */
+  claudeModels?: () => ClaudeModel[] | null;
   /** While engaged (a network switch, tether.ts), new model calls wait here instead of starting. */
   hold?: HoldGate;
 };
@@ -178,6 +183,11 @@ function anthropicJsonEvents(value: Json): Json[] {
   out.push({ type: "message_delta", delta: { stop_reason: value.stop_reason ?? "end_turn" }, usage: value.usage ?? {} });
   out.push({ type: "message_stop" });
   return out;
+}
+
+/** The stop reason Anthropic gave (`max_tokens` included); the tool-call check only when it gave none. */
+function stopReasonOf(mapper: ResponsesEventMapper): string {
+  return mapper.stopReason ?? (mapper.output.some((item) => item.type === "function_call" || item.type === "custom_tool_call") ? "tool_use" : "end_turn");
 }
 
 export function openaiPort(cfg: Config): number {
@@ -433,9 +443,17 @@ export class OpenAiIngress {
       const translation = new ToolTranslation(body, !!prefix, (diagnostic) => {
         this.deps.log.warn(`OPENAI ingress tool omitted: ${JSON.stringify(diagnostic)}`);
       });
+      // A caller that left the ceiling out gets the Claude model's own maximum (issue #191), not 16k.
+      // The list is read without waiting: a cold start gets the fallback rather than a delayed request.
+      let defaultMaxTokens: number | undefined;
+      if (native && requestedMaxTokens(body, path !== "/v1/responses") === undefined) {
+        let models: ClaudeModel[] | null = null;
+        try { models = this.deps.claudeModels?.() ?? null; } catch { /* the fallback below */ }
+        defaultMaxTokens = models?.find((entry) => entry.id === route.model)?.maxOutputTokens ?? CLAUDE_FALLBACK_MAX_TOKENS;
+      }
       const anthropic = path === "/v1/responses" ? responsesToAnthropic(body, route.model, prefix, () => {
         this.deps.log.warn("OPENAI ingress: ignored foreign compaction item; encrypted_content is not a ClaudeRipple summary");
-      }, translation, native) : chatToAnthropic(body, route.model, prefix, translation);
+      }, translation, native, defaultMaxTokens) : chatToAnthropic(body, route.model, prefix, translation, defaultMaxTokens);
       const wire: Json = native ? anthropic : sanitizeForCompatible(anthropic, resolveCompatibleCaps(
         provider.preset ? (() => { const preset = PRESETS.find((entry) => entry.id === provider.preset); return preset ? { effortLevels: preset.effortLevels, thinking: preset.thinking } : undefined; })() : undefined,
         provider.caps,
@@ -539,7 +557,7 @@ export class OpenAiIngress {
               if (stream) write(mapped);
               if (stream && mapped.some((e) => e.type === "response.completed" || e.type === "response.incomplete")) {
                 if (chat) { bytes += Buffer.byteLength("data: [DONE]\n\n"); res.write("data: [DONE]\n\n"); }
-                onTerminal?.({ status: 200, bytes, ...(poolCredential?.ownerId ? { account: poolCredential.ownerId } : {}), usage: usage(mapper), stopReason: mapper.output.some((item) => item.type === "function_call" || item.type === "custom_tool_call") ? "tool_use" : "end_turn" });
+                onTerminal?.({ status: 200, bytes, ...(poolCredential?.ownerId ? { account: poolCredential.ownerId } : {}), usage: usage(mapper), stopReason: stopReasonOf(mapper) });
               }
             }
           } catch (error) {
@@ -573,6 +591,6 @@ export class OpenAiIngress {
       const result = chat ? responsesToChatCompletion(mapper) : mapper.response("completed");
       bytes = sendJson(res, 200, result);
     }
-    return { status: 200, bytes, ...(poolCredential?.ownerId ? { account: poolCredential.ownerId } : {}), usage: usage(mapper), stopReason: mapper.output.some((item) => item.type === "function_call" || item.type === "custom_tool_call") ? "tool_use" : "end_turn" };
+    return { status: 200, bytes, ...(poolCredential?.ownerId ? { account: poolCredential.ownerId } : {}), usage: usage(mapper), stopReason: stopReasonOf(mapper) };
   }
 }

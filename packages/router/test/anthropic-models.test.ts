@@ -33,6 +33,32 @@ test("claudeModelsFromBody keeps active models, folds a dated id to its alias, a
   assert.deepEqual(models.at(-1)!.effortLevels, [], "Haiku 4.5 takes no effort");
 });
 
+test("claudeModelsFromBody reads max_tokens as maxOutputTokens: present, absent, invalid (issue #191)", () => {
+  const entry = (id: string, extra: Record<string, unknown>) => ({ type: "model", id, display_name: id, lifecycle: "active", ...extra });
+  const models = claudeModelsFromBody({ data: [
+    entry("claude-opus-5-5", { max_tokens: 128000 }),
+    entry("claude-sonnet-5", {}),
+    entry("claude-haiku-5", { max_tokens: null }),
+    entry("claude-fable-5", { max_tokens: "128000" }),
+    entry("claude-mythos-5", { max_tokens: 0 }),
+    entry("claude-opus-4-8", { max_tokens: -5 }),
+  ] });
+  assert.deepEqual(models.map((model) => model.maxOutputTokens), [128000, undefined, undefined, undefined, undefined, undefined]);
+});
+
+test("ClaudeModelCatalog.cached() never waits: null on a cold start, the list once it has loaded", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const catalog = new ClaudeModelCatalog(
+    { credentials: async () => [{ id: "current", headers: { authorization: "Bearer t" } } as never] },
+    { upstream: () => "api.anthropic.com", fetch: async () => { await gate; return new Response(JSON.stringify({ data: [{ type: "model", id: "claude-opus-5-5", display_name: "Claude Opus 5.5", lifecycle: "active", max_tokens: 128000 }] }), { status: 200 }); } },
+  );
+  assert.equal(catalog.cached(), null, "the lookup is under way, not waited for");
+  release();
+  await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  assert.equal(catalog.cached()?.[0]?.maxOutputTokens, 128000);
+});
+
 test("newClaudeReleases offers each family's newer models once, and never a family nobody declared", () => {
   const live = claudeModelsFromBody(BODY);
   const declared = ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"];

@@ -234,11 +234,85 @@ for (const chat of [false, true]) for (const stream of [false, true]) {
         }
       }
       assert.equal(requests.list(1)[0]?.status, 200);
+      // Issue #191: the log names what Anthropic said, not an inference from the output.
+      assert.equal(requests.list(1)[0]?.stopReason, "max_tokens");
     } finally {
       upstreamStopReason = "end_turn";
     }
   });
 }
+
+for (const chat of [false, true]) for (const stream of [false, true]) {
+  test(`a finished answer is logged end_turn (${chat ? "Chat" : "Responses"}, ${stream ? "stream" : "JSON"})`, async () => {
+    const response = await call(chat ? "/v1/chat/completions" : "/v1/responses", chat
+      ? { model: "claude-sonnet-5", messages: [{ role: "user", content: "go" }], stream }
+      : { ...input, stream });
+    assert.equal(response.status, 200);
+    assert.equal(requests.list(1)[0]?.stopReason, "end_turn");
+  });
+}
+
+test("a stop reason the upstream names is logged as it is, tool_use included", async () => {
+  for (const reason of ["tool_use", "stop_sequence"]) {
+    upstreamStopReason = reason;
+    try {
+      for (const stream of [false, true]) {
+        const response = await call("/v1/responses", { ...input, stream });
+        assert.equal(response.status, 200);
+        assert.equal(requests.list(1)[0]?.stopReason, reason);
+      }
+    } finally {
+      upstreamStopReason = "end_turn";
+    }
+  }
+});
+
+test("a native Claude turn without a ceiling gets the model's own maximum, else 32000; a given ceiling is kept (issue #191)", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-ingress-ceiling-"));
+  const sent: Record<string, unknown>[] = [];
+  const native = http.createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      sent.push(JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>);
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ id: "msg_native", type: "message", role: "assistant", content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } }));
+    });
+  });
+  const nativePort = await listen(native);
+  const observed = new ObservedClaudeCodeAuth();
+  observed.observe(["authorization", "Bearer ingress-login", "anthropic-version", "2023-06-01"]);
+  const nativeConfig: Config = {
+    ...config,
+    providers: { claude: { type: "anthropic", auth: "claude-code", accountPool: true, models: [{ id: "claude-sonnet-5" }] } },
+    routes: { "claude-sonnet-5": { provider: "claude", model: "claude-sonnet-5" } },
+  };
+  let catalog: { id: string; maxOutputTokens?: number }[] | null = [{ id: "claude-sonnet-5", maxOutputTokens: 128000 }];
+  const nativeIngress = new OpenAiIngress({ config: () => nativeConfig, log, requests, home, observedClaudeCodeAuth: observed, claudeCodeCredentialReaders: noClaudeCodeCredentialReaders, nativeUpstream: `http://127.0.0.1:${nativePort}`, claudeModels: () => catalog });
+  const nativeIngressPort = await nativeIngress.listen();
+  try {
+    const omitted = { model: "claude-sonnet-5", instructions: "system", input: "say ok" };
+    await call("/v1/responses", omitted, nativeIngressPort);
+    assert.equal(sent.at(-1)!.max_tokens, 128000, "catalog value");
+    await call("/v1/responses", { ...omitted, stream: true }, nativeIngressPort);
+    assert.equal(sent.at(-1)!.max_tokens, 128000, "streaming alike");
+    await call("/v1/chat/completions", { model: "claude-sonnet-5", messages: [{ role: "user", content: "go" }] }, nativeIngressPort);
+    assert.equal(sent.at(-1)!.max_tokens, 128000, "Chat Completions alike");
+    await call("/v1/responses", { ...omitted, max_output_tokens: 32768 }, nativeIngressPort);
+    assert.equal(sent.at(-1)!.max_tokens, 32768, "a given ceiling is kept");
+    catalog = null;
+    await call("/v1/responses", omitted, nativeIngressPort);
+    assert.equal(sent.at(-1)!.max_tokens, 32000, "catalog not loaded yet");
+    catalog = [{ id: "claude-sonnet-5" }];
+    await call("/v1/responses", omitted, nativeIngressPort);
+    assert.equal(sent.at(-1)!.max_tokens, 32000, "field absent");
+    await call("/v1/responses", omitted, ingressPort);
+    assert.equal(seen.at(-1)!.body.max_tokens, 16384, "a non-Claude target keeps 16384");
+  } finally {
+    await nativeIngress.drain(1);
+    await new Promise<void>((resolve) => native.close(() => resolve()));
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
 
 for (const chat of [false, true]) {
   test(`closing after the incomplete terminal event is not an abort (${chat ? "Chat" : "Responses"})`, { timeout: 5000 }, async () => {
