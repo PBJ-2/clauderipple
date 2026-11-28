@@ -456,6 +456,7 @@ export class ResponsesEventMapper {
     return this.stopReason === "max_tokens" || this.stopReason === "model_context_window_exceeded";
   }
   private blocks = new Map<number, { kind: "text" | "tool"; item: OutputItem; arguments: string }>();
+  private pendingTool: { kind: "text" | "tool"; item: OutputItem; arguments: string } | null = null;
   private emittedCreated = false;
   private completed = false;
   private outputIndex = 0;
@@ -528,6 +529,7 @@ export class ResponsesEventMapper {
       const index = typeof event.index === "number" ? event.index : -1;
       const block = object(event.content_block);
       if (index < 0 || !block) return out;
+      out.push(...this.settleTool());
       const blockType = string(block.type);
       if (blockType === "text") {
         const item: OutputItem = { id: id("msg"), type: "message", role: "assistant", status: "in_progress", content: [] };
@@ -576,28 +578,59 @@ export class ResponsesEventMapper {
       const index = typeof event.index === "number" ? event.index : -1;
       const state = this.blocks.get(index);
       if (!state) return out;
-      if (state.kind === "tool" && state.item.type === "custom_tool_call") {
-        const input = customInputFromArguments(state.arguments);
-        state.item.input = input;
-        out.push({ type: "response.custom_tool_call_input.delta", item_id: state.item.id, output_index: this.output.indexOf(state.item), delta: input });
-        out.push({ type: "response.custom_tool_call_input.done", item_id: state.item.id, output_index: this.output.indexOf(state.item), input });
-      } else if (state.kind === "tool") out.push({ type: "response.function_call_arguments.done", item_id: state.item.id, output_index: this.output.indexOf(state.item), arguments: state.arguments });
+      this.blocks.delete(index);
+      if (state.kind === "tool") {
+        // Anthropic closes the block before message_delta says why the turn ended, so a tool call
+        // cut off by the output ceiling looks closed here. Hold its closing events until the stop
+        // reason is known (the next block, message_delta, message_stop or an error).
+        out.push(...this.settleTool());
+        this.pendingTool = state;
+        return out;
+      }
       state.item.status = "completed";
       out.push({ type: "response.output_item.done", output_index: this.output.indexOf(state.item), item: state.item });
-      this.blocks.delete(index);
       return out;
     }
     if (type === "message_delta") {
       const stopReason = string(object(event.delta)?.stop_reason);
       if (stopReason) this.stopReason = stopReason;
       this.updateUsage(event.usage);
+      if (stopReason) out.push(...this.settleTool());
       return out;
     }
     if (type === "message_stop") return [...out, ...this.finish(true)];
     if (type === "error") {
       const error = object(event.error);
-      return [...out, { type: "error", error: { message: string(error?.message) ?? "Anthropic upstream error", type: string(error?.type) ?? "api_error", code: null } }];
+      return [...out, ...this.settleTool(), { type: "error", error: { message: string(error?.message) ?? "Anthropic upstream error", type: string(error?.type) ?? "api_error", code: null } }];
     }
+    return out;
+  }
+
+  /**
+   * Close the tool call held back at its content_block_stop. Cut short (`truncated`), its
+   * arguments are partial: the item is marked `incomplete` and neither `*.done` event is sent, so
+   * Codex, which runs a function_call on `response.output_item.done`, never gets a runnable call
+   * (the item still reaches the client inside `response.incomplete`). Otherwise the events are the
+   * same as when the block closed.
+   */
+  private settleTool(): Json[] {
+    const state = this.pendingTool;
+    if (!state) return [];
+    this.pendingTool = null;
+    const outputIndex = this.output.indexOf(state.item);
+    if (this.truncated) {
+      state.item.status = "incomplete";
+      return [];
+    }
+    const out: Json[] = [];
+    if (state.item.type === "custom_tool_call") {
+      const input = customInputFromArguments(state.arguments);
+      state.item.input = input;
+      out.push({ type: "response.custom_tool_call_input.delta", item_id: state.item.id, output_index: outputIndex, delta: input });
+      out.push({ type: "response.custom_tool_call_input.done", item_id: state.item.id, output_index: outputIndex, input });
+    } else out.push({ type: "response.function_call_arguments.done", item_id: state.item.id, output_index: outputIndex, arguments: state.arguments });
+    state.item.status = "completed";
+    out.push({ type: "response.output_item.done", output_index: outputIndex, item: state.item });
     return out;
   }
 
@@ -624,11 +657,12 @@ export class ResponsesEventMapper {
     if ([...this.blocks.values()].some((state) => state.item.type === "custom_tool_call")) throw new Error("Custom tool response ended before its input was complete");
     if (!upstreamCompleted) throw new Error("Anthropic upstream ended before message_stop");
     this.completed = true;
+    const settled = this.settleTool();
     for (const state of this.blocks.values()) {
       state.item.status = this.truncated ? "incomplete" : "completed";
     }
     this.blocks.clear();
-    return [{ type: this.truncated ? "response.incomplete" : "response.completed", response: this.response("completed") }];
+    return [...settled, { type: this.truncated ? "response.incomplete" : "response.completed", response: this.response("completed") }];
   }
 }
 
@@ -643,7 +677,8 @@ function firstText(item: OutputItem): string | null {
 
 export function responsesToChatCompletion(mapper: ResponsesEventMapper): Json {
   const toolCalls = mapper.output
-    .filter((item) => item.type === "function_call")
+    // A call cut off mid-arguments is not a call: only the finish_reason "length" says so.
+    .filter((item) => item.type === "function_call" && item.status !== "incomplete")
     .map((item, index) => ({ id: string(item.call_id) ?? item.id, type: "function", function: { name: string(item.name) ?? "tool", arguments: string(item.arguments) ?? "" }, index }));
   const text = mapper.output.filter((item) => item.type === "message").map(firstText).filter((x): x is string => x !== null).join("");
   return {

@@ -16,6 +16,7 @@ import type { Config } from "../src/config.ts";
 const noClaudeCodeCredentialReaders = { keychain: () => null, credentialsFile: () => null };
 const seen: { headers: http.IncomingHttpHeaders; body: Record<string, unknown> }[] = [];
 let upstreamStopReason = "end_turn";
+let upstreamTool: "function" | "custom" | null = null;
 let upstreamInterrupted = false;
 let onTerminalUpstreamClose: (() => void) | undefined;
 const upstream = http.createServer((req, res) => {
@@ -24,12 +25,23 @@ const upstream = http.createServer((req, res) => {
   req.on("end", () => {
     seen.push({ headers: req.headers, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown> });
     const body = seen.at(-1)!.body;
+    // A tool block instead of the text one: its arguments are whole, or (when the turn is cut) end mid-string.
+    const toolBlock = upstreamTool === null ? null : upstreamTool === "custom" ? { name: "apply_patch", whole: { input: "patch" }, partial: '{"input":"*** Begin' } : { name: "Read", whole: { path: "a.ts" }, partial: '{"path":' };
+    const cut = upstreamStopReason === "max_tokens" || upstreamStopReason === "model_context_window_exceeded";
     if (body.stream === true || upstreamInterrupted) {
       res.writeHead(200, { "content-type": "text/event-stream" });
+      const blockEvents = toolBlock
+        ? [
+          `event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "toolu_1", name: toolBlock.name, input: {} } })}\n\n`,
+          `event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: cut ? toolBlock.partial : JSON.stringify(toolBlock.whole) } })}\n\n`,
+        ]
+        : [
+          'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
+          'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}\n\n',
+        ];
       const payload = [
         'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":12,"cache_read_input_tokens":8,"output_tokens":0}}}\n\n',
-        'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
-        'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}\n\n',
+        ...blockEvents,
         'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
         `event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: upstreamStopReason }, usage: { input_tokens: 12, cache_read_input_tokens: 8, output_tokens: 2 } })}\n\n`,
         ...(upstreamInterrupted ? [] : ['event: message_stop\ndata: {"type":"message_stop"}\n\n']),
@@ -41,7 +53,7 @@ const upstream = http.createServer((req, res) => {
       } else res.end(payload);
       return;
     }
-    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ id: "msg_1", type: "message", role: "assistant", content: [{ type: "text", text: "ok" }], stop_reason: upstreamStopReason, usage: { input_tokens: 12, cache_read_input_tokens: 8, output_tokens: 2 } }));
+    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ id: "msg_1", type: "message", role: "assistant", content: [toolBlock ? { type: "tool_use", id: "toolu_1", name: toolBlock.name, input: toolBlock.whole } : { type: "text", text: "ok" }], stop_reason: upstreamStopReason, usage: { input_tokens: 12, cache_read_input_tokens: 8, output_tokens: 2 } }));
   });
 });
 
@@ -238,6 +250,63 @@ for (const reason of ["max_tokens", "model_context_window_exceeded"]) for (const
       assert.equal(requests.list(1)[0]?.stopReason, reason, "the log keeps the real reason");
     } finally {
       upstreamStopReason = "end_turn";
+    }
+  });
+}
+
+const toolDeclarations = [{ type: "function", name: "Read", parameters: { type: "object" } }, { type: "custom", name: "apply_patch" }];
+const sseEvents = (text: string): Record<string, any>[] => text.split("\n").filter((line) => line.startsWith("data: ") && line !== "data: [DONE]").map((line) => JSON.parse(line.slice(6)));
+
+for (const reason of ["max_tokens", "model_context_window_exceeded", "tool_use"]) for (const kind of ["function", "custom"] as const) for (const stream of [false, true]) {
+  test(`a tool call ${reason === "tool_use" ? "that finished stays a completed call" : `cut by ${reason} is never a completed call`} (Responses ${kind}, ${stream ? "stream" : "JSON"})`, async () => {
+    upstreamStopReason = reason;
+    upstreamTool = kind;
+    try {
+      const response = await call("/v1/responses", { ...input, tools: toolDeclarations, stream });
+      assert.equal(response.status, 200);
+      const cut = reason !== "tool_use";
+      const terminal = stream ? sseEvents(response.text).at(-1)!.response : JSON.parse(response.text);
+      assert.equal(terminal.status, cut ? "incomplete" : "completed");
+      assert.equal(terminal.output.length, 1);
+      assert.equal(terminal.output[0].type, kind === "custom" ? "custom_tool_call" : "function_call");
+      assert.equal(terminal.output[0].status, cut ? "incomplete" : "completed");
+      if (stream) {
+        const types = sseEvents(response.text).map((event) => event.type);
+        assert.equal(types.at(-1), cut ? "response.incomplete" : "response.completed");
+        for (const done of ["response.output_item.done", kind === "custom" ? "response.custom_tool_call_input.done" : "response.function_call_arguments.done"]) {
+          assert.equal(types.includes(done), !cut, `${done} is sent only for a finished call`);
+        }
+        if (!cut) assert.equal(sseEvents(response.text).find((event) => event.type === "response.output_item.done")!.item.status, "completed");
+      }
+      assert.equal(requests.list(1)[0]?.status, 200);
+    } finally {
+      upstreamStopReason = "end_turn";
+      upstreamTool = null;
+    }
+  });
+}
+
+for (const reason of ["max_tokens", "model_context_window_exceeded", "tool_use"]) for (const stream of [false, true]) {
+  test(`Chat: a tool call ${reason === "tool_use" ? "that finished is a tool_call" : `cut by ${reason} keeps finish_reason length`} (${stream ? "stream" : "JSON"})`, async () => {
+    upstreamStopReason = reason;
+    upstreamTool = "function";
+    try {
+      const cut = reason !== "tool_use";
+      const response = await call("/v1/chat/completions", { model: "claude-sonnet-5", messages: [{ role: "user", content: "go" }], tools: [{ type: "function", function: { name: "Read", parameters: { type: "object" } } }], stream });
+      assert.equal(response.status, 200);
+      if (stream) {
+        const chunks = sseEvents(response.text);
+        assert.equal(chunks.at(-1)!.choices[0].finish_reason, cut ? "length" : "tool_calls");
+        assert.equal(response.text.match(/data: \[DONE\]/g)?.length, 1);
+      } else {
+        const choice = JSON.parse(response.text).choices[0];
+        assert.equal(choice.finish_reason, cut ? "length" : "tool_calls");
+        if (cut) assert.equal(choice.message.tool_calls, undefined, "partial arguments are not offered as a call");
+        else assert.equal(choice.message.tool_calls.length, 1);
+      }
+    } finally {
+      upstreamStopReason = "end_turn";
+      upstreamTool = null;
     }
   });
 }

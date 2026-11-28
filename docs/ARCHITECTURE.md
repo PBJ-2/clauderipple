@@ -1987,7 +1987,14 @@ tight, and nothing at 100 or more.
   with `stop_reason: "model_context_window_exceeded"` (context windows page, "context
   window overflow behavior"); the mapper treats it like `max_tokens` for the client
   (`response.incomplete` with `max_output_tokens`, Chat `length`) so an overflow never
-  looks complete, while the log keeps the real reason. `reasoning.effort` → `output_config.effort`; this
+  looks complete, while the log keeps the real reason. A tool call cut off that way
+  (Anthropic closes its block before `message_delta` names the reason, so the mapper holds
+  the last tool block's closing events until the reason is known) is never presented as a
+  runnable call: its item is `status: "incomplete"` inside `response.incomplete`, with no
+  `response.function_call_arguments.done`, `response.custom_tool_call_input.*` or
+  `response.output_item.done` (Codex runs a function_call on `output_item.done`), and
+  non-streaming Chat leaves it out of `tool_calls` (finish_reason `length`; streaming Chat has
+  already sent its argument deltas, so only `length` marks the cut). `reasoning.effort` → `output_config.effort`; this
   ingress does not invent a thinking-token budget because that would change
   the caller's requested output ceiling. Codex's remote compaction control item
   `{"type":"compaction_trigger"}` (last in the transcript, a request control

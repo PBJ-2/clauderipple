@@ -9,6 +9,7 @@ import {
   responsesToAnthropic,
   type Json,
 } from "../src/ingress/translate.ts";
+import { ToolTranslation } from "../src/ingress/tools.ts";
 
 const request = {
   model: "claude-sonnet-5",
@@ -383,6 +384,64 @@ for (const tool of [false, true]) for (const reason of ["max_tokens", "model_con
     assert.deepEqual(mapper.finish(), [], "EOF after a terminal message emits nothing else");
   });
 }
+
+const customTranslation = () => new ToolTranslation({ tools: [{ type: "function", name: "Read", parameters: { type: "object" } }, { type: "custom", name: "apply_patch" }] });
+
+for (const custom of [false, true]) for (const reason of ["max_tokens", "model_context_window_exceeded"]) {
+  test(`a ${custom ? "custom tool" : "function"} call cut by ${reason} never throws and is never a completed call`, () => {
+    const mapper = new ResponsesEventMapper("claude-sonnet-5", customTranslation());
+    const events = [
+      { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "call_x", name: custom ? "apply_patch" : "Read", input: {} } },
+      { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: custom ? '{"input":"*** Begin' : '{"path":' } },
+      { type: "content_block_stop", index: 0 },
+      { type: "message_delta", delta: { stop_reason: reason } },
+      { type: "message_stop" },
+    ].flatMap((event) => mapper.feed(event));
+    const types = events.map((event) => event.type);
+    for (const done of ["response.output_item.done", "response.function_call_arguments.done", "response.custom_tool_call_input.done", "response.custom_tool_call_input.delta", "response.completed"]) assert.ok(!types.includes(done), done);
+    assert.equal(types.at(-1), "response.incomplete");
+    const terminal = events.at(-1)!.response as Json;
+    const item = (terminal.output as Json[])[0]!;
+    assert.equal(item.status, "incomplete");
+    assert.equal(item.type, custom ? "custom_tool_call" : "function_call");
+    assert.deepEqual(mapper.response("completed"), terminal);
+    const completion = responsesToChatCompletion(mapper);
+    const choice = (completion.choices as Json[])[0]!;
+    assert.equal(choice.finish_reason, "length");
+    assert.equal((choice.message as Json).tool_calls, undefined);
+    assert.equal((responsesEventsToChatChunks(events, mapper).at(-1)!.choices as Json[])[0]!.finish_reason, "length");
+  });
+}
+
+test("a finished tool call keeps its closing events in order, whether a block, message_delta or an error follows", () => {
+  const run = (after: Json[]) => {
+    const mapper = new ResponsesEventMapper("claude-sonnet-5", customTranslation());
+    return [
+      { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "call_a", name: "Read", input: {} } },
+      { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"path":"a"}' } },
+      { type: "content_block_stop", index: 0 },
+      ...after,
+    ].flatMap((event) => mapper.feed(event)).map((event) => event.type);
+  };
+  const closing = ["response.function_call_arguments.done", "response.output_item.done"];
+  assert.deepEqual(run([{ type: "message_delta", delta: { stop_reason: "tool_use" } }, { type: "message_stop" }]), ["response.created", "response.output_item.added", "response.function_call_arguments.delta", ...closing, "response.completed"]);
+  assert.deepEqual(run([{ type: "content_block_start", index: 1, content_block: { type: "text", text: "" } }]).slice(3), [...closing, "response.output_item.added"], "a later block proves the call was whole");
+  assert.deepEqual(run([{ type: "error", error: { type: "api_error", message: "x" } }]).slice(3), [...closing, "error"]);
+  // The cut can fall on a later block: the call before it was closed whole.
+  const mapper = new ResponsesEventMapper("claude-sonnet-5", customTranslation());
+  const events = [
+    { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "call_a", name: "Read", input: {} } },
+    { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"path":"a"}' } },
+    { type: "content_block_stop", index: 0 },
+    { type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "call_b", name: "Read", input: {} } },
+    { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: '{"path":' } },
+    { type: "content_block_stop", index: 1 },
+    { type: "message_delta", delta: { stop_reason: "max_tokens" } },
+    { type: "message_stop" },
+  ].flatMap((event) => mapper.feed(event));
+  assert.deepEqual(events.filter((event) => event.type === "response.output_item.done").map((event) => (event.item as Json).call_id), ["call_a"]);
+  assert.deepEqual((events.at(-1)!.response as { output: Json[] }).output.map((item) => item.status), ["completed", "incomplete"]);
+});
 
 for (const kind of ["empty", "text", "function_call", "error"]) {
   test(`EOF without message_stop never becomes a successful response (${kind})`, () => {
