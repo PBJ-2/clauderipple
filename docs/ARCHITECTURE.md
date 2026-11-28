@@ -2000,7 +2000,9 @@ tight, and nothing at 100 or more.
   (`response.incomplete` with `max_output_tokens`, Chat `length`) so an overflow never
   looks complete, while the log keeps the real reason. A tool call cut off that way
   (Anthropic closes its block before `message_delta` names the reason, so the mapper holds
-  the last tool block's closing events until the reason is known) is never presented as a
+  the last tool block's closing events until the reason is known, unless its arguments
+  already parse as whole JSON, which closes it at once; in a JSON answer, a cut turn's last
+  tool_use block counts as cut, per Anthropic's stop-reason guidance) is never presented as a
   runnable call: its item is `status: "incomplete"` inside `response.incomplete`, with no
   `response.function_call_arguments.done`, `response.custom_tool_call_input.*` or
   `response.output_item.done` (Codex runs a function_call on `output_item.done`), and

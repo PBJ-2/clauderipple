@@ -413,6 +413,23 @@ for (const custom of [false, true]) for (const reason of ["max_tokens", "model_c
   });
 }
 
+test("a tool call whose arguments arrived whole closes at its block stop, even if the turn then hits a limit or the stream drops", () => {
+  const start = (mapper: ResponsesEventMapper) => [
+    { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "call_a", name: "Read", input: {} } },
+    { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"path":"a"}' } },
+    { type: "content_block_stop", index: 0 },
+  ].flatMap((event) => mapper.feed(event)).map((event) => event.type);
+  const closing = ["response.function_call_arguments.done", "response.output_item.done"];
+  const dropped = new ResponsesEventMapper("claude-sonnet-5", customTranslation());
+  assert.deepEqual(start(dropped).slice(-2), closing, "closed before the stream can drop");
+  assert.throws(() => dropped.finish(), /before message_stop/);
+  const limited = new ResponsesEventMapper("claude-sonnet-5", customTranslation());
+  assert.deepEqual(start(limited).slice(-2), closing);
+  const tail = [{ type: "message_delta", delta: { stop_reason: "max_tokens" } }, { type: "message_stop" }].flatMap((event) => limited.feed(event));
+  assert.deepEqual(tail.map((event) => event.type), ["response.incomplete"]);
+  assert.equal(limited.output[0]?.status, "completed");
+});
+
 test("a finished tool call keeps its closing events in order, whether a block, message_delta or an error follows", () => {
   const run = (after: Json[]) => {
     const mapper = new ResponsesEventMapper("claude-sonnet-5", customTranslation());

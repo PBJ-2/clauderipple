@@ -171,13 +171,17 @@ function usage(mapper: ResponsesEventMapper): RequestUsage {
 function anthropicJsonEvents(value: Json): Json[] {
   const out: Json[] = [{ type: "message_start", message: { usage: value.usage ?? {} } }];
   const content = Array.isArray(value.content) ? value.content : [];
+  // A JSON answer gives a cut tool call's input already parsed, so it cannot show the cut. Anthropic
+  // states that a max_tokens stop whose last block is tool_use means that call is incomplete
+  // (platform.claude.com, "Handling stop reasons"); its input is left out so the mapper holds it as cut.
+  const cut = value.stop_reason === "max_tokens" || value.stop_reason === "model_context_window_exceeded";
   for (let index = 0; index < content.length; index++) {
     const raw = content[index];
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
     const block = raw as Json;
     out.push({ type: "content_block_start", index, content_block: block });
     if (block.type === "text" && typeof block.text === "string") out.push({ type: "content_block_delta", index, delta: { type: "text_delta", text: block.text } });
-    if (block.type === "tool_use") out.push({ type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: JSON.stringify(block.input ?? {}) } });
+    if (block.type === "tool_use" && !(cut && index === content.length - 1)) out.push({ type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: JSON.stringify(block.input ?? {}) } });
     out.push({ type: "content_block_stop", index });
   }
   out.push({ type: "message_delta", delta: { stop_reason: value.stop_reason ?? "end_turn" }, usage: value.usage ?? {} });

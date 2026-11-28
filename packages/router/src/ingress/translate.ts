@@ -183,6 +183,17 @@ function customInputFromArguments(value: string): string {
   return input;
 }
 
+/** Tool arguments that parse as JSON are whole: a cut can only leave them unparseable (or empty). */
+function wholeJson(value: string): boolean {
+  if (!value.trim()) return false;
+  try {
+    JSON.parse(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function parseArguments(value: unknown): unknown {
   if (typeof value !== "string" || value === "") return {};
   try {
@@ -581,10 +592,12 @@ export class ResponsesEventMapper {
       this.blocks.delete(index);
       if (state.kind === "tool") {
         // Anthropic closes the block before message_delta says why the turn ended, so a tool call
-        // cut off by the output ceiling looks closed here. Hold its closing events until the stop
-        // reason is known (the next block, message_delta, message_stop or an error).
+        // cut off by the output ceiling looks closed here. Arguments that parse as whole JSON are a
+        // finished call whatever ends the turn, and close now as before. Others are held until the
+        // stop reason is known (the next block, message_delta, message_stop or an error).
         out.push(...this.settleTool());
         this.pendingTool = state;
+        if (wholeJson(state.arguments)) out.push(...this.settleTool(true));
         return out;
       }
       state.item.status = "completed";
@@ -613,12 +626,12 @@ export class ResponsesEventMapper {
    * (the item still reaches the client inside `response.incomplete`). Otherwise the events are the
    * same as when the block closed.
    */
-  private settleTool(): Json[] {
+  private settleTool(whole = false): Json[] {
     const state = this.pendingTool;
     if (!state) return [];
     this.pendingTool = null;
     const outputIndex = this.output.indexOf(state.item);
-    if (this.truncated) {
+    if (!whole && this.truncated) {
       state.item.status = "incomplete";
       return [];
     }
