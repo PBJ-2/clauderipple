@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ConfigStore, DEFAULTS, PROCESS_PRIORITIES, fastSwitches, providerFor, validate, webSearchBackend, webSearchNative } from "../src/config.ts";
+import { ConfigStore, DEFAULTS, PROCESS_PRIORITIES, fastSwitches, ultrafastSwitches, providerFor, validate, webSearchBackend, webSearchNative } from "../src/config.ts";
 import type { AnthropicCompatibleProvider, Config, GoogleProvider, OpenAiCompatibleProvider, ProcessPriority, Provider } from "../src/config.ts";
 import { Logger } from "../src/log.ts";
 import { buildModelScores } from "../src/model-scores.ts";
@@ -308,6 +308,29 @@ test("validate accepts a chatgpt provider's Fast switches and refuses a fast tha
   assert.deepEqual(validate({ ...DEFAULTS, providers: { gpt: { type: "chatgpt", fast: { main: true, subagent: false } } } }), []);
   assert.deepEqual(validate({ ...DEFAULTS, providers: { gpt: { type: "chatgpt", fast: {} } } }), []);
   assert.ok(validate({ ...DEFAULTS, providers: { gpt: { type: "chatgpt", fast: "yes" as unknown as { main: boolean } } } }).some((error) => error.includes("fast must be an object")));
+});
+
+test("validate accepts a chatgpt provider's Ultrafast switches and refuses an ultrafast that is not an object", () => {
+  assert.deepEqual(validate({ ...DEFAULTS, providers: { gpt: { type: "chatgpt", ultrafast: { main: true, subagent: false } } } }), []);
+  assert.deepEqual(validate({ ...DEFAULTS, providers: { gpt: { type: "chatgpt", fast: { main: true }, ultrafast: {} } } }), []);
+  for (const bad of ["yes", [], null]) {
+    assert.ok(validate({ ...DEFAULTS, providers: { gpt: { type: "chatgpt", ultrafast: bad as unknown as { main: boolean } } } }).some((error) => error.includes("ultrafast must be an object")), String(bad));
+  }
+});
+
+test("validate accepts ultrafastForce only as a boolean", () => {
+  assert.deepEqual(validate({ ...DEFAULTS, providers: { gpt: { type: "chatgpt", ultrafast: { main: true }, ultrafastForce: true } } }), []);
+  assert.deepEqual(validate({ ...DEFAULTS, providers: { gpt: { type: "chatgpt", ultrafastForce: false } } }), []);
+  assert.ok(validate({ ...DEFAULTS, providers: { gpt: { type: "chatgpt", ultrafastForce: "yes" as unknown as boolean } } }).some((error) => error.includes("ultrafastForce must be true or false")));
+});
+
+test("an Ultrafast switch that is not a boolean reads as off, and leaves the Fast switches alone", () => {
+  assert.deepEqual(ultrafastSwitches({ ultrafast: { main: true, subagent: true } }), { main: true, subagent: true });
+  assert.deepEqual(ultrafastSwitches({ ultrafast: { main: "yes" as unknown as boolean, subagent: 1 as unknown as boolean } }), { main: false, subagent: false });
+  assert.deepEqual(ultrafastSwitches({ ultrafast: null as unknown as { main: boolean } }), { main: false, subagent: false });
+  assert.deepEqual(ultrafastSwitches({}), { main: false, subagent: false });
+  assert.deepEqual(ultrafastSwitches(undefined), { main: false, subagent: false });
+  assert.deepEqual(fastSwitches({ fast: { main: true } }), { main: true, subagent: false });
 });
 
 test("a Fast switch that is not a boolean reads as off", () => {

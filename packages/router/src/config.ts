@@ -135,6 +135,20 @@ export type ChatGptProvider = ProviderLabel & {
    * the plan faster.
    */
   fast?: { main?: boolean; subagent?: boolean };
+  /**
+   * The Ultrafast (Codex `ultrafast` tier) switches, with the same two scopes as `fast`. Both off
+   * by default: Ultrafast uses the plan several times faster than Fast. It outranks `fast` where
+   * the model's catalogue entry advertises the tier, and falls back to `fast`, then to standard,
+   * where it does not (providers/chatgpt/tiers.ts).
+   */
+  ultrafast?: { main?: boolean; subagent?: boolean };
+  /**
+   * JSON only. Ask for Ultrafast on the scopes whose `ultrafast` switch is on even when the
+   * catalogue does not advertise the tier for the model: the catalogue an account is served has
+   * been seen to drop the tier from one read to the next (openai/codex#52726). A refusal is still
+   * asked again without the tier, once per conversation. Default false.
+   */
+  ultrafastForce?: boolean;
   /** Models offered in the GUI (the Codex backend has no listing endpoint). */
   models?: ProviderModel[];
 };
@@ -273,6 +287,13 @@ export function fastSwitches(provider: { fast?: { main?: unknown; subagent?: unk
   const fast = provider?.fast;
   if (!fast || typeof fast !== "object") return { main: false, subagent: false };
   return { main: fast.main === true, subagent: fast.subagent === true };
+}
+
+/** A provider's Ultrafast switches as two plain booleans, read by the same rule as `fastSwitches`. */
+export function ultrafastSwitches(provider: { ultrafast?: { main?: unknown; subagent?: unknown } } | undefined): { main: boolean; subagent: boolean } {
+  const ultrafast = provider?.ultrafast;
+  if (!ultrafast || typeof ultrafast !== "object") return { main: false, subagent: false };
+  return { main: ultrafast.main === true, subagent: ultrafast.subagent === true };
 }
 
 /**
@@ -972,6 +993,10 @@ export function validate(c: Config): string[] {
       if (p.fast !== undefined && (!p.fast || typeof p.fast !== "object" || Array.isArray(p.fast))) {
         errors.push(`provider ${name}: fast must be an object with main and subagent booleans`);
       }
+      if (p.ultrafast !== undefined && (!p.ultrafast || typeof p.ultrafast !== "object" || Array.isArray(p.ultrafast))) {
+        errors.push(`provider ${name}: ultrafast must be an object with main and subagent booleans`);
+      }
+      if (p.ultrafastForce !== undefined && typeof p.ultrafastForce !== "boolean") errors.push(`provider ${name}: ultrafastForce must be true or false`);
     } else if (p.type === "openai-compatible") {
       if (!/^https?:\/\//.test(p.url)) errors.push(`provider ${name}: url must start with http:// or https://`);
       if (p.wire !== undefined && p.wire !== "chat" && p.wire !== "responses") errors.push(`provider ${name}: wire must be "chat" or "responses"`);

@@ -77,6 +77,11 @@ function tags(node: FakeNode): FakeNode[] {
   walk(node, (n) => { if (n.className === "fast-tag") out.push(n); });
   return out;
 }
+function ultraTags(node: FakeNode): FakeNode[] {
+  const out: FakeNode[] = [];
+  walk(node, (n) => { if (n.className === "ultrafast-tag") out.push(n); });
+  return out;
+}
 
 const BASE: Record_ = { id: "req-1", at: "2026-10-26T00:00:00Z", ms: 1200, kind: "messages", source: "gpt-6.1-sol", target: "gpt-6.1-sol", provider: "chatgpt", ok: true, status: 200, effort: "high" };
 
@@ -189,4 +194,16 @@ test("every dashboard language words the badge's tooltip and the tier line", () 
     assert.ok(dict["logs.detail.account"], `${lang}: logs.detail.account`);
   }
   assert.equal(i18n.ko!["logs.detail.tier"], "요청 등급 / 실제 등급");
+});
+
+test("a request made on the ultrafast tier carries an ULTRAFAST badge and no FAST badge", () => {
+  const { requestRow, requestDetail } = load();
+  const row = requestRow({ ...BASE, requestedTier: "ultrafast", servedTier: "default" });
+  assert.equal(ultraTags(row).length, 1);
+  assert.equal(ultraTags(row)[0]!.textContent, "ULTRAFAST");
+  assert.ok(ultraTags(row)[0]!.attrs.title);
+  assert.equal(tags(row).length, 0);
+  assert.equal(ultraTags(requestRow({ ...BASE, requestedTier: "priority" })).length, 0);
+  assert.equal(ultraTags(requestRow({ ...BASE, servedTier: "ultrafast" })).length, 0, "the badge follows the requested tier");
+  assert.ok(texts(requestDetail({ ...BASE, requestedTier: "ultrafast", servedTier: "default" })).includes("ultrafast / default"));
 });

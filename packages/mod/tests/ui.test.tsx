@@ -1122,6 +1122,25 @@ test('a request made on the Fast tier shows FAST beside its effort, and no other
   }
 })
 
+test('a request made on the Ultrafast tier shows ULTRAFAST beside its effort, and a Fast one still shows FAST', async ($, on) => {
+  const base = { source: 'gpt-6-2-astra@high', target: 'gpt-6.2-astra', provider: 'chatgpt', status: 200, ok: true, ms: 2140, effort: 'high', mine: true }
+  const rows: StatusRequest[] = [
+    { ...base, at: '2026-11-24T13:19:10', requestedTier: 'ultrafast', servedTier: 'default' } as StatusRequest,
+    { ...base, at: '2026-11-24T13:18:55', requestedTier: 'priority' },
+    { ...base, at: '2026-11-24T13:18:40' },
+  ]
+  drawPane(on, 'log-ultrafast', (el, surface) => renderLog(el, frameOf(surface, 64), { rows, mineOnly: true }, { toggleScope: () => undefined }))
+  for (const surface of SURFACES) {
+    const ui = await mount($, 'log-ultrafast', surface, 64)
+    expect((await ui.findAll({ type: 'Text', text: 'ULTRAFAST' })).length, surface).toBe(1)
+    // The finder takes ULTRAFAST for FAST as well (it found 2), so FAST is counted on the rows
+    // below, where each child's text is compared whole.
+    const efforts: string[][] = []
+    walk(await ui.drawn(), n => { if (n.type === 'Box' && (n.children ?? []).some(c => (c as Drawn).type === 'Text' && ((c as Drawn).children ?? []).join('') === 'high')) efforts.push(((n.children ?? []) as Drawn[]).map(c => (c.children ?? []).join(''))) })
+    expect(efforts.map(line => [line.includes('ULTRAFAST'), line.includes('FAST')]), surface).toEqual([[true, false], [false, true], [false, false]])
+  }
+})
+
 // ---- Nothing cut, nothing reloaded (2026-10-10) -------------------------------------------------
 
 type Drawn = { type?: string; props?: Record<string, unknown>; children?: unknown[] }

@@ -523,6 +523,9 @@ export class Proxy {
     const cur = this.chatgptAdapters.get(name);
     if (cur && cur.key === key) return cur.adapter;
     const adapter = new ChatGptAdapter(name, cfg, this.deps.home, this.deps.log, this.pool);
+    // A rebuilt adapter keeps the service tiers the one it replaces read from the catalogue, so
+    // saving a setting does not cost a turn of Ultrafast (the google adapter below does the same).
+    if (cur) adapter.inheritTiers(cur.adapter);
     this.chatgptAdapters.set(name, { key, adapter });
     return adapter;
   }

@@ -63,6 +63,7 @@ function entry(el: Els, frame: Frame, record: StatusRequest, mineOnly: boolean):
         <Text dimColor>{record.effort ? effortLabel(record.effort, frame.lang) : '-'}</Text>
         {/* The tier asked for, not the one served: the ChatGPT sign-in answers `default` to a Fast request (#54). */}
         {record.requestedTier === 'priority' ? <Text color={tone.accent} bold>FAST</Text> : null}
+        {record.requestedTier === 'ultrafast' ? <Text color={tone.accent} bold>ULTRAFAST</Text> : null}
         {record.usage ? <Text dimColor>{t(frame.lang, 'log.input', { tokens: tokens(promptTokens(record.usage)) })}</Text> : null}
         {cache !== undefined ? <Text color={tone[cacheTone(cache)]}>{t(frame.lang, 'band.cachePercent', { percent: cache })}</Text> : null}
         {record.usage ? <Text dimColor>{t(frame.lang, 'log.output', { tokens: tokens(record.usage.output) })}</Text> : null}

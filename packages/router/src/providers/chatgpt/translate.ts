@@ -13,6 +13,7 @@
 import crypto from "node:crypto";
 import { deferredToolDefinitions } from "../../compat.ts";
 import { identityLine } from "../../identity.ts";
+import { chooseServiceTier, type TierSwitches, type WireTier } from "./tiers.ts";
 import { encodeEnvelope, envelopeFor, isOurSignature, replayableReasoning, type Envelope, type ReplayedReasoning } from "../../reasoning.ts";
 
 // ---- Anthropic side -----------------------------------------------------------------
@@ -75,8 +76,11 @@ export type ResponsesRequest = {
   store: false;
   stream: true;
   prompt_cache_key: string;
-  /** Fast mode. "priority" is the wire value the Codex CLI sends for it (codex-rs `ServiceTier::Fast`). */
-  service_tier?: "priority";
+  /**
+   * Fast mode or Ultrafast. "priority" is the wire value the Codex CLI sends for Fast (codex-rs
+   * `ServiceTier::Fast`); "ultrafast" is sent as that string (see tiers.ts).
+   */
+  service_tier?: WireTier;
   /** Who this turn belongs to, in the shape the Codex CLI sends — see `conversationId`. */
   client_metadata: { session_id: string; thread_id: string; turn_id: string; "x-codex-window-id": string };
 };
@@ -110,6 +114,13 @@ export type TranslateOptions = {
    * request, so this is where the tier is chosen.
    */
   fast?: { main?: boolean; subagent?: boolean };
+  /** The provider's Ultrafast switches (config.json `ultrafast`), with the same two scopes as `fast`. */
+  ultrafast?: TierSwitches;
+  /**
+   * The tier ids the Codex catalogue advertises for `model` (`service_tiers[].id`). Absent when the
+   * catalogue has not been read or does not list the model, and then Ultrafast is not asked for.
+   */
+  modelTiers?: readonly string[];
   /**
    * Whether this turn was made inside a subagent. Claude Code names the agent in the
    * `x-claude-code-agent-id` header (CLI 2.1.304), and only a subagent's request carries it.
@@ -515,9 +526,10 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
   // equivalent is the Codex CLI's Fast mode, which bills the plan at a higher rate (Codex docs, Speed).
   // The CLI never sends `speed` for a GPT model, so the provider's own switches choose the tier:
   // `fast.subagent` for a turn made inside a subagent, `fast.main` for the session's own turns.
-  const fast = opts.fast;
-  const fastOn = fast ? (opts.subagent === true ? fast.subagent === true : fast.main === true) : false;
-  if (req.speed === "fast" || fastOn) out.service_tier = "priority";
+  // The `ultrafast` switches work the same way and outrank them, but only on a model whose
+  // catalogue entry advertises that tier (tiers.ts).
+  const tier = chooseServiceTier({ speedFast: req.speed === "fast", subagent: opts.subagent === true, fast: opts.fast, ultrafast: opts.ultrafast, modelTiers: opts.modelTiers });
+  if (tier) out.service_tier = tier;
   return out;
 }
 

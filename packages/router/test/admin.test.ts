@@ -1764,6 +1764,22 @@ test("PUT /api/config carries a chatgpt provider's Fast switches through to the 
   });
 });
 
+test("PUT /api/config carries a chatgpt provider's Ultrafast switches through to the file and back", async () => {
+  await withAdmin(makeCfg(), async ({ port, configFile, setCfg }) => {
+    const next = makeCfg({
+      providers: { gpt: { type: "chatgpt", auth: "own", fast: { main: true, subagent: false }, ultrafast: { main: false, subagent: true } } },
+    });
+    const res = await fetch(`${base()}:${port}/api/config`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(next) });
+    assert.equal(res.status, 200);
+    const onDisk = JSON.parse(fs.readFileSync(configFile, "utf8")) as Config;
+    assert.deepEqual((onDisk.providers.gpt as { fast?: unknown }).fast, { main: true, subagent: false });
+    assert.deepEqual((onDisk.providers.gpt as { ultrafast?: unknown }).ultrafast, { main: false, subagent: true });
+    setCfg(next);
+    const read = (await (await fetch(`${base()}:${port}/api/config`)).json()) as Config;
+    assert.deepEqual((read.providers.gpt as { ultrafast?: unknown }).ultrafast, { main: false, subagent: true });
+  });
+});
+
 test("PUT /api/config rejects an invalid config with 400 and does not touch the file", async () => {
   const cfg = makeCfg();
   await withAdmin(cfg, async ({ port, configFile }) => {

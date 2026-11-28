@@ -91,6 +91,34 @@ export function parseCodexCatalog(json: unknown): ProviderModel[] {
   return out;
 }
 
+/**
+ * The service tiers each catalogue entry advertises: slug → the ids in `service_tiers` (`priority`
+ * is Fast, `ultrafast` is Ultrafast), in the catalogue's order and without repeats.
+ *
+ * Shape from codex-rs `ModelServiceTier { id, name, description }` (protocol/src/openai_models.rs,
+ * read 2026-11-24). The catalogue bundled with the Codex CLI lists `priority` alone; `ultrafast`
+ * arrives only in the live answer for a signed-in account, which is why it is read from here and
+ * never written into a table. Hidden entries are kept: visibility decides the picker, not the tier.
+ * An entry with no readable `service_tiers` maps to []; anything unrecognisable yields an empty map.
+ */
+export function parseCodexServiceTiers(json: unknown): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  const entries = (json as { models?: unknown } | null | undefined)?.models;
+  if (!Array.isArray(entries)) return out;
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object") continue;
+    const e = entry as { slug?: unknown; service_tiers?: unknown };
+    if (typeof e.slug !== "string" || e.slug === "") continue;
+    const ids = Array.isArray(e.service_tiers)
+      ? e.service_tiers
+        .map((tier) => (tier && typeof tier === "object" ? (tier as { id?: unknown }).id : undefined))
+        .filter((id): id is string => typeof id === "string" && id !== "")
+      : [];
+    out.set(e.slug, [...new Set(ids)]);
+  }
+  return out;
+}
+
 /** Numeric major.minor.patch comparison; the prerelease suffix is not part of the version. */
 function compareVersions(a: string, b: string): number {
   const segments = (v: string): number[] => v.split(".").map((part) => Number.parseInt(part, 10) || 0);

@@ -14,6 +14,7 @@ import { Logger } from "../src/log.ts";
 import { Proxy } from "../src/proxy.ts";
 import { ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
 import { saveChatGptAccount } from "../src/providers/chatgpt/accounts.ts";
+import { latestCodexVersion } from "../src/providers/chatgpt/catalog.ts";
 import { saveGoogleAccount } from "../src/providers/google/accounts.ts";
 import { setCurrentClaudeAccountPaused } from "../src/providers/anthropic-accounts.ts";
 import { RequestLog, type RequestRecord } from "../src/requestlog.ts";
@@ -21,7 +22,7 @@ import { createCa, createLeaf } from "../src/x509.ts";
 
 const noClaudeCodeCredentialReaders = { keychain: () => null, credentialsFile: () => null };
 
-async function rig(options: { respond?: (res: http.ServerResponse, req: http.IncomingMessage) => void; healthLimit?: number; profiles?: Record<string, string>; profileWait?: Promise<void>; refuse?: (req: http.IncomingMessage) => number | undefined; noPool?: boolean } = {}) {
+async function rig(options: { respond?: (res: http.ServerResponse, req: http.IncomingMessage) => void; healthLimit?: number; profiles?: Record<string, string>; profileWait?: Promise<void>; refuse?: (req: http.IncomingMessage) => number | undefined; noPool?: boolean; catalogue?: unknown } = {}) {
   // The current login's email per bearer token, as `/api/oauth/profile` would name it. `profileWait`
   // holds each answer until it resolves, to show what a slow lookup does to the turn and its row.
   const profiles = options.profiles ?? {};
@@ -35,7 +36,14 @@ async function rig(options: { respond?: (res: http.ServerResponse, req: http.Inc
   const seenAuth: (string | undefined)[] = [];
   let responseStatus = 200;
   let imageStatus = 200;
+  let catalogueReads = 0;
   const respond = (req: http.IncomingMessage, res: http.ServerResponse): void => {
+    // The Codex model catalogue (`options.catalogue`), answered before a body is looked for: a GET has none.
+    if (req.method === "GET" && req.url?.includes("/codex/models")) {
+      catalogueReads++;
+      res.writeHead(options.catalogue === undefined ? 404 : 200, { "content-type": "application/json" }).end(JSON.stringify(options.catalogue ?? {}));
+      return;
+    }
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => {
@@ -141,7 +149,7 @@ async function rig(options: { respond?: (res: http.ServerResponse, req: http.Inc
     secure.destroy();
     return { text, record: requests.list(1)[0]! };
   };
-  return { cfg, seen, seenAuth, home, requests, proxy, observed, profiles, send, health, trips, failBackend: () => { responseStatus = 400; }, failImage: () => { imageStatus = 500; }, stop: async () => {
+  return { cfg, seen, seenAuth, home, requests, proxy, observed, profiles, send, health, trips, catalogueReads: () => catalogueReads, failBackend: () => { responseStatus = 400; }, failImage: () => { imageStatus = 500; }, stop: async () => {
     proxy.close(); agent.destroy();
     await Promise.all([backend, native].map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
     fs.rmSync(home, { recursive: true, force: true });
@@ -657,5 +665,113 @@ test("proxy early exits name their actual provider, target and refusal without c
     assert.equal(attemptedSearch.refusal, "web-search-unsupported");
     assert.equal(attemptedSearch.upstreamCalled, undefined);
     assert.equal(r.seen.length, 1);
+  } finally { await r.stop(); }
+});
+
+// ---- Ultrafast (the provider's `ultrafast` switches) --------------------------------------------
+
+// The catalogue read asks the npm registry for the newest Codex version; its one-day cache is
+// seeded here so no test touches the network.
+await latestCodexVersion((async () => new Response('{"version":"0.170.0"}')) as unknown as typeof fetch);
+
+const CATALOGUE = { models: [{ slug: "gpt-test", display_name: "GPT Test", visibility: "list", context_window: 272000, service_tiers: [{ id: "priority" }, { id: "ultrafast" }] }] };
+
+test("the Ultrafast switch asks for the tier only once the catalogue advertises it, main and subagent apart", async () => {
+  const r = await rig({ catalogue: CATALOGUE });
+  try {
+    r.cfg.providers.gpt = { ...(r.cfg.providers.gpt as object), fast: { main: true }, ultrafast: { subagent: true } } as Config["providers"][string];
+    // No catalogue in memory yet (the rig does not run the router's startup read): the subagent's turn is not eligible, and Fast is off for subagents.
+    const cold = await r.send("gpt-test", {}, "/v1/messages", undefined, { "x-claude-code-agent-id": "agent_1" });
+    assert.equal(cold.record.requestedTier, undefined);
+    // That turn started the read by itself; nothing here asks for it.
+    for (let i = 0; i < 100 && r.catalogueReads() === 0; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(r.catalogueReads(), 1);
+    await r.proxy.chatgptFetchModels("gpt");
+    const warm = await r.send("gpt-test", {}, "/v1/messages", undefined, { "x-claude-code-agent-id": "agent_1" });
+    assert.equal(r.seen.at(-1)!.service_tier, "ultrafast");
+    assert.equal(warm.record.requestedTier, "ultrafast");
+    assert.match(warm.record.note!, / ultrafast$/);
+    // The main session has only Fast on.
+    const main = await r.send("gpt-test");
+    assert.equal(r.seen.at(-1)!.service_tier, "priority");
+    assert.match(main.record.note!, / fast$/);
+  } finally { await r.stop(); }
+});
+
+test("a provider setting saved after the catalogue was read does not cost a turn of Ultrafast", async () => {
+  const r = await rig({ catalogue: CATALOGUE });
+  try {
+    r.cfg.providers.gpt = { ...(r.cfg.providers.gpt as object), fast: { main: true }, ultrafast: { main: true } } as Config["providers"][string];
+    await r.proxy.chatgptFetchModels("gpt");
+    await r.send("gpt-test");
+    assert.equal(r.seen.at(-1)!.service_tier, "ultrafast");
+    // Saving any setting of the provider rebuilds its adapter: the proxy keys it on the whole entry.
+    r.cfg.providers.gpt = { ...(r.cfg.providers.gpt as object), fast: { main: true, subagent: true } } as Config["providers"][string];
+    const reads = r.catalogueReads();
+    const after = await r.send("gpt-test");
+    assert.equal(r.seen.at(-1)!.service_tier, "ultrafast", "the rebuilt adapter still knows what the catalogue advertised");
+    assert.equal(after.record.requestedTier, "ultrafast");
+    // What it was handed is the last word read, not a fresh one: it still reads the catalogue for itself.
+    for (let i = 0; i < 100 && r.catalogueReads() === reads; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(r.catalogueReads(), reads + 1);
+  } finally { await r.stop(); }
+});
+
+test("the tiers one backend advertised to one login are not carried to another", async () => {
+  for (const change of [(url: string) => ({ url: `${url}/other` }), () => ({ auth: "auto" as const })]) {
+    const r = await rig({ catalogue: CATALOGUE });
+    try {
+      const gpt = r.cfg.providers.gpt as Extract<Config["providers"][string], { type: "chatgpt" }>;
+      r.cfg.providers.gpt = { ...gpt, fast: { main: true }, ultrafast: { main: true } };
+      await r.proxy.chatgptFetchModels("gpt");
+      await r.send("gpt-test");
+      assert.equal(r.seen.at(-1)!.service_tier, "ultrafast");
+      r.cfg.providers.gpt = { ...gpt, fast: { main: true }, ultrafast: { main: true }, ...change(gpt.url!) };
+      await r.send("gpt-test");
+      assert.equal(r.seen.at(-1)!.service_tier, "priority", "this adapter has read nothing of its own yet");
+    } finally { await r.stop(); }
+  }
+});
+
+for (const [status, refusal] of [[400, '{"error":{"message":"Unsupported service_tier: ultrafast"}}'], [403, '{"detail":"Ultrafast is not available on your plan"}']] as const) {
+  test(`a backend that refuses the ultrafast tier with a ${status} is asked again without it, and that conversation stops asking`, async () => {
+    let r!: Awaited<ReturnType<typeof rig>>;
+    r = await rig({ catalogue: CATALOGUE, respond: (res) => {
+      // The rig has already pushed the parsed body when this hook runs.
+      if (r.seen.at(-1)!.service_tier === "ultrafast") { res.writeHead(status, { "content-type": "application/json" }).end(refusal); return; }
+      res.writeHead(200, { "content-type": "text/event-stream" }).end([{ type: "response.output_text.delta", delta: "answer" }, { type: "response.completed", response: { service_tier: "default", usage: { input_tokens: 10, output_tokens: 2 } } }].map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""));
+    } });
+    try {
+      r.cfg.providers.gpt = { ...(r.cfg.providers.gpt as object), fast: { main: true }, ultrafast: { main: true } } as Config["providers"][string];
+      await r.proxy.chatgptFetchModels("gpt");
+      const before = r.seen.length;
+      const first = await r.send("gpt-test");
+      assert.match(first.text, /^HTTP\/1\.1 200/);
+      assert.deepEqual(r.seen.slice(before).map((body) => body.service_tier), ["ultrafast", "priority"]);
+      assert.equal(first.record.ok, true);
+      assert.equal(first.record.requestedTier, "priority", "the tier recorded is the tier of the request that was answered");
+      const again = r.seen.length;
+      const second = await r.send("gpt-test");
+      assert.deepEqual(r.seen.slice(again).map((body) => body.service_tier), ["priority"], "the same conversation does not ask twice");
+      assert.equal(second.record.ok, true, "the account was not put to rest over a tier refusal");
+    } finally { await r.stop(); }
+  });
+}
+
+test("ultrafastForce asks for the tier without the catalogue's word, only for a scope whose switch is on", async () => {
+  // No catalogue at all (the rig answers 404): only the override can make the turn eligible.
+  const r = await rig();
+  try {
+    r.cfg.providers.gpt = { ...(r.cfg.providers.gpt as object), fast: { subagent: true }, ultrafast: { main: true }, ultrafastForce: true } as Config["providers"][string];
+    const main = await r.send("gpt-test");
+    assert.equal(r.seen.at(-1)!.service_tier, "ultrafast");
+    assert.equal(main.record.requestedTier, "ultrafast");
+    // The override does not turn a switch on: a subagent's turn has only Fast.
+    await r.send("gpt-test", {}, "/v1/messages", undefined, { "x-claude-code-agent-id": "agent_1" });
+    assert.equal(r.seen.at(-1)!.service_tier, "priority");
+    // Without the override the same turn is not eligible.
+    r.cfg.providers.gpt = { ...(r.cfg.providers.gpt as object), ultrafastForce: false } as Config["providers"][string];
+    await r.send("gpt-test");
+    assert.equal(r.seen.at(-1)!.service_tier, undefined);
   } finally { await r.stop(); }
 });

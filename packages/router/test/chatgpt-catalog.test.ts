@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { CHATGPT_FALLBACK_MODELS, CODEX_CLIENT_VERSION_FLOOR, codexClientVersion, parseCodexCatalog } from "../src/providers/chatgpt/catalog.ts";
+import { CHATGPT_FALLBACK_MODELS, CODEX_CLIENT_VERSION_FLOOR, codexClientVersion, parseCodexCatalog, parseCodexServiceTiers } from "../src/providers/chatgpt/catalog.ts";
 
 function withCodexHome(fn: (home: string) => void): void {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-codex-home-"));
@@ -113,4 +113,23 @@ test("the fallback catalogue carries the measured ladders", () => {
   assert.deepEqual(byId.get("gpt-6-luna")!.effortLevels, ["low", "medium", "high", "xhigh", "max"], "Luna takes no ultra");
   assert.equal(byId.get("gpt-5.6-luna")!.contextWindow, 272000);
   assert.equal(byId.get("gpt-6.1-sol")!.contextWindow, 475000, "the effective window measured 2026-10-23");
+});
+
+test("parseCodexServiceTiers reads each model's advertised tier ids and tolerates any other shape", () => {
+  const tiers = parseCodexServiceTiers({ models: [
+    { slug: "gpt-6.2-sol", visibility: "list", service_tiers: [{ id: "priority", name: "Fast", description: "" }, { id: "ultrafast", name: "Ultrafast", description: "" }] },
+    { slug: "gpt-6-luna", visibility: "list", service_tiers: [{ id: "priority" }, { id: "priority" }, { name: "no id" }, null, { id: 7 }, { id: "" }] },
+    { slug: "gpt-5.5", visibility: "list" },
+    { slug: "codex-auto-review", visibility: "hide", service_tiers: [{ id: "priority" }] },
+    { slug: "odd", service_tiers: "ultrafast" },
+    { service_tiers: [{ id: "ultrafast" }] },
+    null,
+  ] });
+  assert.deepEqual(tiers.get("gpt-6.2-sol"), ["priority", "ultrafast"]);
+  assert.deepEqual(tiers.get("gpt-6-luna"), ["priority"]);
+  assert.deepEqual(tiers.get("gpt-5.5"), []);
+  assert.deepEqual(tiers.get("codex-auto-review"), ["priority"]);
+  assert.deepEqual(tiers.get("odd"), []);
+  assert.equal(tiers.size, 5);
+  for (const bad of [null, undefined, {}, { models: "x" }, []]) assert.equal(parseCodexServiceTiers(bad).size, 0);
 });

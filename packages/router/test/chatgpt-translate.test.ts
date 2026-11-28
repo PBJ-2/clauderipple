@@ -404,6 +404,15 @@ test("`speed: fast` still asks for the fast tier whichever switch is on", () => 
   assert.equal(toResponsesRequest({ ...turn1, speed: "standard" }, { ...opts, fast: { main: false, subagent: false } }).service_tier, undefined);
 });
 
+test("the provider's Ultrafast switches ask for the ultrafast tier only on a model that advertises it", () => {
+  const tiers = { modelTiers: ["priority", "ultrafast"] };
+  assert.equal(toResponsesRequest(turn1, { ...opts, ...tiers, ultrafast: { main: true } }).service_tier, "ultrafast");
+  assert.equal(toResponsesRequest(turn1, { ...opts, ...tiers, ultrafast: { subagent: true }, subagent: true }).service_tier, "ultrafast");
+  assert.equal(toResponsesRequest(turn1, { ...opts, ultrafast: { main: true } }).service_tier, undefined);
+  assert.equal(toResponsesRequest(turn1, { ...opts, modelTiers: ["priority"], fast: { main: true }, ultrafast: { main: true } }).service_tier, "priority");
+  assert.equal(toResponsesRequest({ ...turn1, speed: "fast" }, { ...opts, ...tiers, ultrafast: { main: true } }).service_tier, "ultrafast");
+});
+
 // ---- reasoning replay (reasoning.ts) -----------------------------------------------------------
 
 const codexEnv = { p: "chatgpt", m: "gpt-5.6-terra" };

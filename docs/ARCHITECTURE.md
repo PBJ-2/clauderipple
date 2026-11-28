@@ -1346,9 +1346,67 @@ text is added. Source: `requestlog.ts`, `proxy.ts`, provider adapter outcomes.
 - `upstreamCalled`: `false` only for a known pre-model-API exit; omitted when a search backend was attempted or the call state is unknown.
 - `refusal`: `thread-continue`, `drain`, `unroutable`, `no-account`, `unknown-provider`, `web-search-unsupported` or `prompt-incompatible`, from the actual exit branch. `prompt-incompatible` follows an upstream request; it does not set `upstreamCalled: false`.
 - `purpose`: `auto-mode-classifier` from the security-monitor request shape regardless of routing settings, or `web-search` for router-served searches.
-- `requestedTier`: the service tier actually sent upstream, including ChatGPT's `speed: "fast"` → `priority`; omitted when no tier was sent. Claude Code never puts `speed` on a GPT request (its client gate allows fast only for model ids it knows, CLI 2.1.304), so a ChatGPT provider's `fast: {main, subagent}` switches (both off by default; issue #69, 2026-10-22) send `priority` themselves: `subagent` for requests carrying `x-claude-code-agent-id`, which the CLI adds only inside a subagent, `main` for the rest.
+- `requestedTier`: the service tier actually sent upstream, including ChatGPT's `speed: "fast"` → `priority`; omitted when no tier was sent. Claude Code never puts `speed` on a GPT request (its client gate allows fast only for model ids it knows, CLI 2.1.304), so a ChatGPT provider's `fast: {main, subagent}` switches (both off by default; issue #69, 2026-10-22) send `priority` themselves: `subagent` for requests carrying `x-claude-code-agent-id`, which the CLI adds only inside a subagent, `main` for the rest. The `ultrafast: {main, subagent}` switches send `ultrafast` the same way, where the catalogue offers it ("ChatGPT Ultrafast" below).
 - `subagent`: `true` when the request carried `x-claude-code-agent-id`, for every provider; omitted on a main session's own turns.
 - `servedTier`: the response-reported tier (Responses/Chat `service_tier` or Anthropic `usage.service_tier`); never inferred from the request.
+
+**ChatGPT Ultrafast (`ultrafast: {main, subagent}`, 2026-11-24).** A second pair of switches
+beside `fast`, both off by default, with the same scope rule. What is known, and what the code
+does with it:
+
+- **Wire value.** Ultrafast is `service_tier: "ultrafast"`, as Fast is `priority` (`openai/codex`
+  at `8b096dc`: `codex-rs/protocol/src/config_types.rs:528-553`, `core/src/config/mod.rs:4451-4466`).
+- **Eligibility comes from the catalogue; no plan and no model is named in the code.** The Codex
+  CLI puts a tier on a request only when the model's entry in `GET /codex/models` lists it in
+  `service_tiers[].id` (`codex-rs/protocol/src/openai_models.rs:1141-1157`,
+  `core/src/client.rs:1354-1358`). The list bundled with the CLI names `priority` alone
+  (`codex-rs/models-manager/models.json`), so `ultrafast` exists only in the live answer for the
+  signed-in account. `parseCodexServiceTiers` (catalog.ts) keeps slug → tier ids from the read
+  the adapter already makes, and a turn asks for Ultrafast only when its model lists it. Measured
+  2026-11-24 on a Pro $500 account: the catalogue listed `ultrafast` for gpt-6.2-sol,
+  gpt-6.2-astra, gpt-6.1-sol and gpt-6-astra. OpenAI's help pages that day: Pro $500 for those
+  four models, Pro $200 for GPT-6.2 Sol in Codex only, not on Plus, Pro $100 or Business
+  ("ChatGPT Work and Codex", "About ChatGPT Pro tiers").
+- **One tier per turn** (`chooseServiceTier`, tiers.ts). Ultrafast when its switch is on for the
+  scope and the model lists it; else `priority` when the request says `speed: "fast"` or the Fast
+  switch is on for the scope; else none. So Ultrafast on a model or plan without it falls back to
+  Fast, then to standard, and both pairs of switches can be on together.
+- **A turn never waits on the catalogue.** With a switch on and no read younger than an hour, a
+  turn starts one in the background (at most once a minute) and goes out on what is known; the log
+  says once per model why Ultrafast was not sent. Saving any setting of the provider rebuilds its
+  adapter (`proxy.ts`), and the new one takes the tiers of the one it replaces (`inheritTiers`,
+  same `url` and `auth` only) while still reading the catalogue itself on its first turn. Without
+  that the first turn after a save went out on Fast (measured 2026-11-24).
+- **A refused tier costs one retry, not an account.** The catalogue is read with whichever account
+  `anyCredential` picks, so with accounts on different plans a turn can land on one without the
+  tier. A 4xx other than 401 and 429 whose body names the service tier or Ultrafast
+  (`refusesServiceTier`) is retried once without the tier, that conversation stops asking (the last
+  500 conversations, per adapter), and the account is not rested (`requestFault` in
+  `sendToAnAccount`). NOT measured: what the backend really answers to an account without the
+  tier. No turn was refused in 230 on an eligible account, so the statuses and words matched are
+  an assumption; a refusal worded otherwise fails the turn like any other 4xx.
+- **`ultrafastForce: true`** (config.json only, no switch in the dashboard) asks for the tier
+  without the catalogue's word, for a scope whose switch is on: the way out if the catalogue stops
+  listing a tier the backend still serves. The refusal retry still applies.
+- **What the answer says.** `servedTier` was `default` on every `priority` and every `ultrafast`
+  turn measured, so the FAST and ULTRAFAST badges and the note's ` fast` / ` ultrafast` suffix
+  come from `requestedTier`. Speed is the only evidence that a tier was served.
+- **Measured speed (2026-11-24: one Pro $500 account, gpt-6.2-astra at xhigh, one Claude Code
+  session carrying about 185k tokens of context, over HTTP SSE).** Least-squares fit of a turn's
+  time on its output tokens: Fast, 318 turns, 3691 ms + 13.89 ms per token; Ultrafast, 230 turns,
+  5291 ms + 4.16 ms per token. Generation is 3.3 times faster (about 72 → 240 tokens/s), which
+  agrees with the 1.5× and 4.5× over Standard that OpenAI states for the two modes. The fixed part
+  is 1.6 s longer, so a turn under about 165 output tokens is slower on Ultrafast, and that
+  session of short tool turns spent about 21% less time waiting on the model. Why the fixed part
+  is longer is not established.
+- **Cost.** Ultrafast draws the plan's included allowance at 6× the Standard rate on GPT-6.2 Astra
+  and Sol and at 8× on GPT-6 Astra and GPT-6.1 Sol; Fast at 2× to 2.5×, the two OpenAI pages read
+  disagreeing (help "ChatGPT Work and Codex" and the rate card; Codex "Speed" page; all read
+  2026-11-24). The cost estimate (`prices.ts`) knows no tier, as for Fast.
+
+Sources: `packages/router/src/providers/chatgpt/tiers.ts`, `catalog.ts`, `translate.ts`,
+`index.ts`; `config.ts`; `proxy.ts`; tests `chatgpt-tiers.test.ts`, `chatgpt-catalog.test.ts`,
+`chatgpt-translate.test.ts`, `proxy-requestlog.test.ts`.
 
 **Hourly usage history (`usage-hourly.jsonl`, 2026-10-20).** `requests.jsonl` is
 bounded (2,000 records in memory, 20 MB plus one `.1` backup), so the GUI could only

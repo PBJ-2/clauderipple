@@ -19,7 +19,7 @@ export type StatusRequest = {
   ok: boolean
   ms: number
   effort?: string
-  /** The service tier the request asked for ('priority' is Fast); the tier served often differs. */
+  /** The service tier the request asked for ('priority' is Fast, 'ultrafast' is Ultrafast); the tier served often differs. */
   requestedTier?: string
   usage?: { input: number; cached: number; cacheWrite?: number; output: number }
   /** 'messages' for a model call; the log polls only those. */
