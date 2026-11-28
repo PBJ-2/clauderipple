@@ -589,17 +589,19 @@ export class ResponsesEventMapper {
       const index = typeof event.index === "number" ? event.index : -1;
       const state = this.blocks.get(index);
       if (!state) return out;
-      this.blocks.delete(index);
       if (state.kind === "tool") {
         // Anthropic closes the block before message_delta says why the turn ended, so a tool call
         // cut off by the output ceiling looks closed here. Arguments that parse as whole JSON are a
-        // finished call whatever ends the turn, and close now as before. Others are held until the
-        // stop reason is known (the next block, message_delta, message_stop or an error).
+        // finished call whatever ends the turn, and close now as before (the block is dropped only
+        // after, so a custom input that fails to decode still counts as unfinished). Others are
+        // held until the stop reason is known (the next block, message_delta, message_stop or an error).
         out.push(...this.settleTool());
         this.pendingTool = state;
         if (wholeJson(state.arguments)) out.push(...this.settleTool(true));
+        this.blocks.delete(index);
         return out;
       }
+      this.blocks.delete(index);
       state.item.status = "completed";
       out.push({ type: "response.output_item.done", output_index: this.output.indexOf(state.item), item: state.item });
       return out;

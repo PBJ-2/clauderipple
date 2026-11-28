@@ -341,7 +341,10 @@ test("malformed custom wrappers and unknown upstream names never become executab
   const malformed = new ResponsesEventMapper("claude-sonnet-5", table);
   malformed.feed({ type: "content_block_start", index: 0, content_block: { type: "tool_use", name: table.toWire(identities[1]!) } });
   malformed.feed({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "private malformed input" } });
-  assert.throws(() => malformed.feed({ type: "content_block_stop", index: 0 }), { message: "Custom tool response contains invalid JSON" });
+  // Unparseable input could be a cut-off call, so it waits for the stop reason; a turn that did not
+  // hit a limit then rejects it, still without quoting the private input.
+  assert.deepEqual(malformed.feed({ type: "content_block_stop", index: 0 }), []);
+  assert.throws(() => malformed.feed({ type: "message_delta", delta: { stop_reason: "tool_use" } }), { message: "Custom tool response contains invalid JSON" });
 });
 
 async function listen(server: http.Server): Promise<number> {
