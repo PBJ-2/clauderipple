@@ -26,7 +26,7 @@ import { ObservedClaudeCodeAuth } from "../providers/anthropic-observed.ts";
 import { LoginEmailWatch, PendingRowWrites } from "../providers/anthropic-identity.ts";
 import type { ChatGptAdapter } from "../providers/chatgpt/index.ts";
 import type { Credential } from "../pool.ts";
-import type { ClaudeModel } from "../providers/anthropic-models.ts";
+import { undatedClaudeId, type ClaudeModel } from "../providers/anthropic-models.ts";
 import {
   CLAUDE_FALLBACK_MAX_TOKENS,
   ResponsesEventMapper,
@@ -66,7 +66,7 @@ type IngressDeps = {
    * Called with the headers of the credential that answered, so the email is that token's.
    */
   claudeIdentity?: (headers: Record<string, string>) => Promise<{ email: string } | null>;
-  /** The Claude model list already loaded (the catalog the admin page reads), never waited for; null before it loads. */
+  /** The Claude model list as last loaded (the catalog the admin page reads): a pure read that starts no refresh; null before it loads. */
   claudeModels?: () => ClaudeModel[] | null;
   /** While engaged (a network switch, tether.ts), new model calls wait here instead of starting. */
   hold?: HoldGate;
@@ -443,13 +443,18 @@ export class OpenAiIngress {
       const translation = new ToolTranslation(body, !!prefix, (diagnostic) => {
         this.deps.log.warn(`OPENAI ingress tool omitted: ${JSON.stringify(diagnostic)}`);
       });
-      // A caller that left the ceiling out gets the Claude model's own maximum (issue #191), not 16k.
-      // The list is read without waiting: a cold start gets the fallback rather than a delayed request.
+      // A caller that left the ceiling out gets the Claude model's own maximum (issue #191), not 16k:
+      // the routed provider's own model entry (its API-key probe stored it), else the login's list as
+      // last loaded (a pure read: nothing is fetched or waited for here), else the fallback.
       let defaultMaxTokens: number | undefined;
       if (native && requestedMaxTokens(body, path !== "/v1/responses") === undefined) {
+        const wanted = undatedClaudeId(route.model);
+        // The exact id first: a provider can hold both a dated entry and its alias, and only one may carry the limit.
+        const entries = "models" in configured && configured.models ? configured.models : [];
+        const own = (entries.find((entry) => entry.id === route.model) ?? entries.find((entry) => undatedClaudeId(entry.id) === wanted))?.maxOutputTokens;
         let models: ClaudeModel[] | null = null;
         try { models = this.deps.claudeModels?.() ?? null; } catch { /* the fallback below */ }
-        defaultMaxTokens = models?.find((entry) => entry.id === route.model)?.maxOutputTokens ?? CLAUDE_FALLBACK_MAX_TOKENS;
+        defaultMaxTokens = own ?? models?.find((entry) => undatedClaudeId(entry.id) === wanted)?.maxOutputTokens ?? CLAUDE_FALLBACK_MAX_TOKENS;
       }
       const anthropic = path === "/v1/responses" ? responsesToAnthropic(body, route.model, prefix, () => {
         this.deps.log.warn("OPENAI ingress: ignored foreign compaction item; encrypted_content is not a ClaudeRipple summary");

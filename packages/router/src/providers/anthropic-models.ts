@@ -9,13 +9,16 @@ import type { ProviderModel } from "../config.ts";
 import { retryAfterMs as parseRetryAfterMs, type Credential } from "../pool.ts";
 
 export type ClaudeModel = ProviderModel & {
-  /** The most output tokens one answer may have (`max_tokens` in the API entry). */
-  maxOutputTokens?: number;
   /** The family (`opus`, `sonnet`, `haiku`, `fable`, `mythos`), as the API names it. */
   line?: string;
   /** Release time, epoch ms. Newest first is how the API sorts them. */
   createdAt?: number;
 };
+
+/** `claude-haiku-4-5-20251001` as `claude-haiku-4-5`: the id the catalog and Claude Code's aliases use. */
+export function undatedClaudeId(id: string): string {
+  return id.replace(/-\d{8}$/, "");
+}
 
 const EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max"];
 
@@ -36,7 +39,7 @@ export function claudeModelsFromBody(body: unknown): ClaudeModel[] {
     };
     if (typeof m.id !== "string" || !m.id.startsWith("claude-")) continue;
     if (m.lifecycle !== undefined && m.lifecycle !== "active") continue;
-    const id = m.id.replace(/-\d{8}$/, "");
+    const id = undatedClaudeId(m.id);
     if (out.some((entry) => entry.id === id)) continue;
     const name = typeof m.display_name === "string" ? m.display_name.replace(/^Claude\s+/, "") : id;
     const effort = m.capabilities?.effort;
@@ -111,11 +114,11 @@ export class ClaudeModelCatalog {
   }
 
   /**
-   * The list already had, never waited for: a request path that must not stall on a cold start reads
-   * this. It starts the lookup when one is due, so a later call finds the list.
+   * The last list had, and nothing else: no lookup is started and nothing is waited for. A request
+   * path reads this because a refresh can reach the Keychain (a synchronous read of up to 5 s on macOS).
+   * The list is kept fresh by the callers of list().
    */
-  cached(): ClaudeModel[] | null {
-    if ((this.opts.now ?? Date.now)() >= this.nextAt) this.inFlight ??= this.refresh();
+  peek(): ClaudeModel[] | null {
     return this.last;
   }
 
@@ -207,11 +210,11 @@ export function newClaudeReleases(live: ClaudeModel[], declared: string[], offer
   const byId = new Map(live.map((model) => [model.id, model]));
   const newest = new Map<string, number>();
   for (const id of declared) {
-    const model = byId.get(id.replace(/-\d{8}$/, ""));
+    const model = byId.get(undatedClaudeId(id));
     if (!model?.line || model.createdAt === undefined) continue;
     newest.set(model.line, Math.max(newest.get(model.line) ?? Number.NEGATIVE_INFINITY, model.createdAt));
   }
-  const declaredIds = new Set(declared.map((id) => id.replace(/-\d{8}$/, "")));
+  const declaredIds = new Set(declared.map(undatedClaudeId));
   return live.filter((model) => {
     if (declaredIds.has(model.id) || offered.has(model.id) || !model.line || model.createdAt === undefined) return false;
     const floor = newest.get(model.line);

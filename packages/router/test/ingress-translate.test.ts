@@ -357,17 +357,17 @@ for (const batched of [false, true]) {
   });
 }
 
-for (const tool of [false, true]) for (const reason of ["max_tokens", "end_turn", "tool_use", "stop_sequence"]) {
+for (const tool of [false, true]) for (const reason of ["max_tokens", "model_context_window_exceeded", "end_turn", "tool_use", "stop_sequence"]) {
   test(`stop reason ${reason} maps consistently to Responses and Chat (${tool ? "tool" : "text"})`, () => {
     const mapper = new ResponsesEventMapper("claude-sonnet-5");
     const events = [
       { type: "content_block_start", index: 0, content_block: tool ? { type: "tool_use", id: "call_x", name: "Read", input: {} } : { type: "text", text: "" } },
-      { type: "content_block_delta", index: 0, delta: tool ? { type: "input_json_delta", partial_json: reason === "max_tokens" ? '{"path":' : "{}" } : { type: "text_delta", text: "partial" } },
+      { type: "content_block_delta", index: 0, delta: tool ? { type: "input_json_delta", partial_json: reason === "max_tokens" || reason === "model_context_window_exceeded" ? '{"path":' : "{}" } : { type: "text_delta", text: "partial" } },
       { type: "content_block_stop", index: 0 },
       { type: "message_delta", delta: { stop_reason: reason } },
       { type: "message_stop" },
     ].flatMap((event) => mapper.feed(event));
-    const truncated = reason === "max_tokens";
+    const truncated = reason === "max_tokens" || reason === "model_context_window_exceeded";
     const terminal = events.at(-1)!;
     assert.equal(terminal.type, truncated ? "response.incomplete" : "response.completed");
     const response = terminal.response as Json;

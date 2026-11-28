@@ -4776,6 +4776,7 @@ function modelOverrideFields(model) {
   return {
     ...(Array.isArray(model.effortLevels) ? { effortLevels: [...model.effortLevels] } : {}),
     ...(typeof model.contextWindow === "number" ? { contextWindow: model.contextWindow } : {}),
+    ...(typeof model.maxOutputTokens === "number" ? { maxOutputTokens: model.maxOutputTokens } : {}),
     ...(model.wire ? { wire: model.wire } : {}),
     ...(model.url ? { url: model.url } : {}),
     ...(model.authHeader ? { authHeader: model.authHeader } : {}),

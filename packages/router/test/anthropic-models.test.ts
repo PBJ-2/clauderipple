@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { ClaudeModelCatalog, claudeModelsFromBody, newClaudeReleases } from "../src/providers/anthropic-models.ts";
+import { ClaudeModelCatalog, claudeModelsFromBody, newClaudeReleases, undatedClaudeId } from "../src/providers/anthropic-models.ts";
 
 // Trimmed from the live answer (2026-10-08): newest first, effort per level, a dated id for 4.5.
 const BODY = {
@@ -46,17 +46,25 @@ test("claudeModelsFromBody reads max_tokens as maxOutputTokens: present, absent,
   assert.deepEqual(models.map((model) => model.maxOutputTokens), [128000, undefined, undefined, undefined, undefined, undefined]);
 });
 
-test("ClaudeModelCatalog.cached() never waits: null on a cold start, the list once it has loaded", async () => {
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => { release = resolve; });
+test("ClaudeModelCatalog.peek() is a pure read: it never starts a lookup, and returns the list once list() has loaded it", async () => {
+  let fetches = 0;
   const catalog = new ClaudeModelCatalog(
     { credentials: async () => [{ id: "current", headers: { authorization: "Bearer t" } } as never] },
-    { upstream: () => "api.anthropic.com", fetch: async () => { await gate; return new Response(JSON.stringify({ data: [{ type: "model", id: "claude-opus-5-5", display_name: "Claude Opus 5.5", lifecycle: "active", max_tokens: 128000 }] }), { status: 200 }); } },
+    { upstream: () => "api.anthropic.com", fetch: async () => { fetches++; return new Response(JSON.stringify({ data: [{ type: "model", id: "claude-opus-5-5", display_name: "Claude Opus 5.5", lifecycle: "active", max_tokens: 128000 }] }), { status: 200 }); } },
   );
-  assert.equal(catalog.cached(), null, "the lookup is under way, not waited for");
-  release();
+  assert.equal(catalog.peek(), null);
   await new Promise<void>((resolve) => setTimeout(resolve, 20));
-  assert.equal(catalog.cached()?.[0]?.maxOutputTokens, 128000);
+  assert.equal(fetches, 0, "peek started no refresh");
+  assert.equal(catalog.peek(), null);
+  await catalog.list();
+  assert.equal(fetches, 1);
+  assert.equal(catalog.peek()?.[0]?.maxOutputTokens, 128000);
+  assert.equal(fetches, 1, "peek after a load fetches nothing either");
+});
+
+test("undatedClaudeId strips a trailing eight-digit date only", () => {
+  assert.equal(undatedClaudeId("claude-haiku-4-5-20251001"), "claude-haiku-4-5");
+  assert.equal(undatedClaudeId("claude-opus-5-5"), "claude-opus-5-5");
 });
 
 test("newClaudeReleases offers each family's newer models once, and never a family nobody declared", () => {

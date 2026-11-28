@@ -1841,6 +1841,27 @@ test("POST /api/providers/probe sends Anthropic API-key headers and treats a mod
   } finally { admin.close(); fs.rmSync(home, { recursive: true, force: true }); }
 });
 
+test("POST /api/providers/probe keeps the key's own max_tokens as the model's maxOutputTokens (issue #191)", async () => {
+  const cfg = makeCfg();
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-admin-native-probe-max-"));
+  const configFile = path.join(home, "config.json");
+  fs.writeFileSync(configFile, JSON.stringify(cfg));
+  const admin = await startAdmin({
+    config: () => cfg, configFile, log: new Logger(null, 1_000_000, 1, false),
+    stats: () => ({ inFlight: 0, messagesInFlight: 0, started: 0, completed: 0, failed: 0 }), health: () => 0, version: "test",
+    requests: new RequestLog(path.join(home, "logs", "requests.jsonl")),
+    probeFetch: async (url) => new URL(url).pathname === "/v1/models"
+      ? new Response(JSON.stringify({ data: [{ type: "model", id: "claude-haiku-4-5-20251001", display_name: "Claude Haiku 4.5", lifecycle: "active", max_tokens: 64000 }] }), { status: 200 })
+      : new Response("{}", { status: 200 }),
+  });
+  try {
+    const res = await fetch(`${base()}:${admin.port}/api/providers/probe`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "anthropic", auth: "api-key", apiKey: "secret-key" }) });
+    const body = await res.json() as { models: { id: string; maxOutputTokens?: number }[] };
+    assert.equal(body.models[0]?.id, "claude-haiku-4-5");
+    assert.equal(body.models[0]?.maxOutputTokens, 64000);
+  } finally { admin.close(); fs.rmSync(home, { recursive: true, force: true }); }
+});
+
 test("POST /api/providers/probe rejects an incomplete native Anthropic request", async () => {
   await withAdmin(makeCfg(), async ({ port }) => {
     const res = await fetch(`${base()}:${port}/api/providers/probe`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "anthropic", auth: "api-key" }) });

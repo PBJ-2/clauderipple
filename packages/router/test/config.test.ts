@@ -555,6 +555,12 @@ test("validate refuses a credential pool with duplicate ids or non-string header
   assert.ok(cfg([{ id: "a", headers: {}, label: 7 }])[0]?.includes("label must be a string"));
 });
 
+test("validate keeps a model's maxOutputTokens and refuses one that is not a positive number", () => {
+  const withModel = (model: Record<string, unknown>) => validate({ ...DEFAULTS, providers: { claude: { type: "anthropic", auth: "api-key", apiKey: "k", models: [{ id: "claude-opus-5-5", ...model }] } } } as never);
+  assert.deepEqual(withModel({ maxOutputTokens: 128000 }), []);
+  for (const bad of [0, -1, "128000", null, Infinity]) assert.ok(withModel({ maxOutputTokens: bad }).some((e) => e.includes("models must be entries")), String(bad));
+});
+
 test("validate accepts a grok provider and refuses a model that would leave its session headers behind", () => {
   const ok = validate({ ...DEFAULTS, providers: { grok: { type: "grok", models: [{ id: "grok-4.7", name: "Grok 4.7", contextWindow: 256000, effortLevels: ["low", "high"] }] } } });
   assert.deepEqual(ok, []);

@@ -24,6 +24,12 @@ export type ProviderModel = {
   /** The model's context window, as the vendor's `/models` reported it (`context_length`). */
   contextWindow?: number;
   /**
+   * The most output tokens one answer may have, as the vendor's model list reported it (`max_tokens`
+   * in Anthropic's `GET /v1/models`). The OpenAI ingress uses it as the ceiling when a Codex request
+   * leaves `max_output_tokens` out; absent on a provider saved before it was recorded.
+   */
+  maxOutputTokens?: number;
+  /**
    * The protocol this model speaks, when it is not the provider's own.
    *
    * One subscription can serve several on one key and one catalog: OpenCode Go answers Responses,
@@ -716,7 +722,7 @@ export function headerValueProblem(value: string): string | null {
 }
 
 /** Named once because three provider kinds report it, and a drifting copy would describe the wrong shape. */
-const MODELS_SHAPE = 'models must be entries with a string id and optional name, effortLevels, url, wire ("chat" | "responses" | "anthropic" | "google") and authHeader ("x-api-key" | "authorization-bearer")';
+const MODELS_SHAPE = 'models must be entries with a string id and optional name, effortLevels, maxOutputTokens (a positive number), url, wire ("chat" | "responses" | "anthropic" | "google") and authHeader ("x-api-key" | "authorization-bearer")';
 
 function validModels(models: unknown): boolean {
   return Array.isArray(models) && models.every((model) => {
@@ -725,6 +731,7 @@ function validModels(models: unknown): boolean {
     if (typeof m.id !== "string") return false;
     if (m.name !== undefined && typeof m.name !== "string") return false;
     if (m.effortLevels !== undefined && (!Array.isArray(m.effortLevels) || m.effortLevels.some((level) => typeof level !== "string"))) return false;
+    if (m.maxOutputTokens !== undefined && !(typeof m.maxOutputTokens === "number" && Number.isFinite(m.maxOutputTokens) && m.maxOutputTokens > 0)) return false;
     // A model's own wire, endpoint and auth convention: wrong here and the request goes out in the
     // wrong shape to the wrong path, which reads as a provider that rejects a working key.
     if (m.wire !== undefined && m.wire !== "chat" && m.wire !== "responses" && m.wire !== "anthropic" && m.wire !== "google") return false;

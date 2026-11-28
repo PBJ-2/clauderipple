@@ -446,6 +446,15 @@ export class ResponsesEventMapper {
   readonly output: OutputItem[] = [];
   usage: OpenAiUsage = { input_tokens: 0, input_tokens_details: { cached_tokens: 0 }, output_tokens: 0, total_tokens: 0 };
   stopReason: string | null = null;
+  /**
+   * The answer was cut short, so the client must not read it as finished: the output ceiling was hit
+   * (`max_tokens`) or the context window ran out (`model_context_window_exceeded`, which a larger
+   * ceiling makes reachable; https://platform.claude.com/docs/en/build-with-claude/context-windows).
+   * One place, so the Responses and Chat paths cannot drift.
+   */
+  get truncated(): boolean {
+    return this.stopReason === "max_tokens" || this.stopReason === "model_context_window_exceeded";
+  }
   private blocks = new Map<number, { kind: "text" | "tool"; item: OutputItem; arguments: string }>();
   private emittedCreated = false;
   private completed = false;
@@ -462,7 +471,7 @@ export class ResponsesEventMapper {
   }
 
   response(status: "in_progress" | "completed" = "in_progress"): Json {
-    const incomplete = status === "completed" && this.stopReason === "max_tokens";
+    const incomplete = status === "completed" && this.truncated;
     return { id: this.responseId, object: "response", created_at: this.created, status: incomplete ? "incomplete" : status, model: this.model, output: this.output, usage: this.usage, ...(incomplete ? { incomplete_details: { reason: "max_output_tokens" } } : {}) };
   }
 
@@ -616,10 +625,10 @@ export class ResponsesEventMapper {
     if (!upstreamCompleted) throw new Error("Anthropic upstream ended before message_stop");
     this.completed = true;
     for (const state of this.blocks.values()) {
-      state.item.status = this.stopReason === "max_tokens" ? "incomplete" : "completed";
+      state.item.status = this.truncated ? "incomplete" : "completed";
     }
     this.blocks.clear();
-    return [{ type: this.stopReason === "max_tokens" ? "response.incomplete" : "response.completed", response: this.response("completed") }];
+    return [{ type: this.truncated ? "response.incomplete" : "response.completed", response: this.response("completed") }];
   }
 }
 
@@ -642,7 +651,7 @@ export function responsesToChatCompletion(mapper: ResponsesEventMapper): Json {
     object: "chat.completion",
     created: mapper.created,
     model: mapper.model,
-    choices: [{ index: 0, message: { role: "assistant", content: text || null, ...(toolCalls.length ? { tool_calls: toolCalls.map(({ index: _index, ...call }) => call) } : {}) }, finish_reason: mapper.stopReason === "max_tokens" ? "length" : toolCalls.length ? "tool_calls" : "stop" }],
+    choices: [{ index: 0, message: { role: "assistant", content: text || null, ...(toolCalls.length ? { tool_calls: toolCalls.map(({ index: _index, ...call }) => call) } : {}) }, finish_reason: mapper.truncated ? "length" : toolCalls.length ? "tool_calls" : "stop" }],
     usage: { prompt_tokens: mapper.usage.input_tokens, prompt_tokens_details: mapper.usage.input_tokens_details, completion_tokens: mapper.usage.output_tokens, total_tokens: mapper.usage.total_tokens },
   };
 }
@@ -667,7 +676,7 @@ export function responsesEventsToChatChunks(events: Json[], mapper: ResponsesEve
       if (index !== undefined) chunks.push({ ...base, choices: [{ index: 0, delta: { tool_calls: [{ index, function: { arguments: string(event.delta) ?? "" } }] }, finish_reason: null }] });
     } else if (type === "response.completed" || type === "response.incomplete") {
       const hasTools = mapper.output.some((item) => item.type === "function_call");
-      chunks.push({ ...base, choices: [{ index: 0, delta: {}, finish_reason: mapper.stopReason === "max_tokens" ? "length" : hasTools ? "tool_calls" : "stop" }], usage: { prompt_tokens: mapper.usage.input_tokens, prompt_tokens_details: mapper.usage.input_tokens_details, completion_tokens: mapper.usage.output_tokens, total_tokens: mapper.usage.total_tokens } });
+      chunks.push({ ...base, choices: [{ index: 0, delta: {}, finish_reason: mapper.truncated ? "length" : hasTools ? "tool_calls" : "stop" }], usage: { prompt_tokens: mapper.usage.input_tokens, prompt_tokens_details: mapper.usage.input_tokens_details, completion_tokens: mapper.usage.output_tokens, total_tokens: mapper.usage.total_tokens } });
     }
   }
   return chunks;

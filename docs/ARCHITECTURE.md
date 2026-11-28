@@ -1974,12 +1974,20 @@ tight, and nothing at 100 or more.
   `max_completion_tokens`/`max_tokens`), and `temperature` is preserved. A caller's
   ceiling is always kept. When it is omitted (Codex omits it, meaning "the model's own
   limit"; issue #191: answers stopped at 16,384), a native Claude target gets its
-  `max_tokens` from the cached `GET /v1/models` list (never waited for; List Models
-  reference, 2026-11-28), else 32000 (the smallest active Claude max output is 64K,
-  models overview 2026-11-28); other targets keep 16384. Streaming and non-streaming
+  `max_tokens` (List Models reference, 2026-11-28) in this order: the routed provider's
+  own model entry `maxOutputTokens` (the dashboard's API-key probe stores it from the
+  key's own `GET /v1/models`; ids compared with a trailing `-YYYYMMDD` stripped), then
+  the login catalog's last list read with `ClaudeModelCatalog.peek()` (a pure read: no
+  refresh, no wait, because a refresh can do a synchronous Keychain read on the request
+  path), else 32000 (the smallest active Claude max output is 64K, models overview
+  2026-11-28); other targets keep 16384. Streaming and non-streaming
   alike: the "stream beyond ~10 minutes" error is the SDKs', not the API's. The request
   log records Anthropic's own `stop_reason` (`max_tokens` included), inferring
-  `tool_use`/`end_turn` only when none arrived. `reasoning.effort` → `output_config.effort`; this
+  `tool_use`/`end_turn` only when none arrived. With the larger ceiling a turn can end
+  with `stop_reason: "model_context_window_exceeded"` (context windows page, "context
+  window overflow behavior"); the mapper treats it like `max_tokens` for the client
+  (`response.incomplete` with `max_output_tokens`, Chat `length`) so an overflow never
+  looks complete, while the log keeps the real reason. `reasoning.effort` → `output_config.effort`; this
   ingress does not invent a thinking-token budget because that would change
   the caller's requested output ceiling. Codex's remote compaction control item
   `{"type":"compaction_trigger"}` (last in the transcript, a request control

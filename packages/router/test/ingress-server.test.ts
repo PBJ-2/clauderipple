@@ -209,9 +209,9 @@ test("Chat Completions non-stream and stream traverse same provider", async () =
   assert.equal(requests.list(10)[0]?.note, "openai-ingress chat");
 });
 
-for (const chat of [false, true]) for (const stream of [false, true]) {
-  test(`max_tokens is incomplete without changing HTTP success (${chat ? "Chat" : "Responses"}, ${stream ? "stream" : "JSON"})`, async () => {
-    upstreamStopReason = "max_tokens";
+for (const reason of ["max_tokens", "model_context_window_exceeded"]) for (const chat of [false, true]) for (const stream of [false, true]) {
+  test(`${reason} is incomplete without changing HTTP success (${chat ? "Chat" : "Responses"}, ${stream ? "stream" : "JSON"})`, async () => {
+    upstreamStopReason = reason;
     try {
       const response = await call(chat ? "/v1/chat/completions" : "/v1/responses", chat
         ? { model: "claude-sonnet-5", messages: [{ role: "user", content: "go" }], stream }
@@ -235,7 +235,7 @@ for (const chat of [false, true]) for (const stream of [false, true]) {
       }
       assert.equal(requests.list(1)[0]?.status, 200);
       // Issue #191: the log names what Anthropic said, not an inference from the output.
-      assert.equal(requests.list(1)[0]?.stopReason, "max_tokens");
+      assert.equal(requests.list(1)[0]?.stopReason, reason, "the log keeps the real reason");
     } finally {
       upstreamStopReason = "end_turn";
     }
@@ -305,6 +305,18 @@ test("a native Claude turn without a ceiling gets the model's own maximum, else 
     catalog = [{ id: "claude-sonnet-5" }];
     await call("/v1/responses", omitted, nativeIngressPort);
     assert.equal(sent.at(-1)!.max_tokens, 32000, "field absent");
+    // The provider's own model entry (stored by its API-key probe) wins over the login's list.
+    nativeConfig.providers.claude = { type: "anthropic", auth: "claude-code", accountPool: true, models: [{ id: "claude-sonnet-5", maxOutputTokens: 64000 }] };
+    catalog = [{ id: "claude-sonnet-5", maxOutputTokens: 128000 }];
+    await call("/v1/responses", omitted, nativeIngressPort);
+    assert.equal(sent.at(-1)!.max_tokens, 64000, "the provider's own entry first");
+    // A dated id finds the entry stored undated, and the other way round.
+    await call("/v1/responses", { ...omitted, model: "claude-sonnet-5-20260101" }, nativeIngressPort);
+    assert.equal(sent.at(-1)!.max_tokens, 64000, "dated request id, undated entry");
+    nativeConfig.providers.claude = { type: "anthropic", auth: "claude-code", accountPool: true, models: [{ id: "claude-sonnet-5-20260101" }] };
+    nativeConfig.routes["claude-sonnet-5"] = { provider: "claude", model: "claude-sonnet-5-20260101" };
+    await call("/v1/responses", omitted, nativeIngressPort);
+    assert.equal(sent.at(-1)!.max_tokens, 128000, "dated route id finds the undated catalog entry");
     await call("/v1/responses", omitted, ingressPort);
     assert.equal(seen.at(-1)!.body.max_tokens, 16384, "a non-Claude target keeps 16384");
   } finally {
