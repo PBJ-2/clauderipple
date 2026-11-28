@@ -49,9 +49,9 @@ test('the skin is deep unless a stored one is deep or flat', () => {
   assert.equal(normalizeSettings({ skin: 2 }).skin, 'deep')
 })
 
-test('language accepts only auto and the six supported choices', () => {
-  for (const language of ['auto', 'ko', 'en', 'zh', 'ja', 'es', 'pt']) assert.equal(normalizeSettings({ language }).language, language)
-  for (const language of [undefined, null, '', 'Korean', 'ko_KR', 'fr', true, 1]) assert.equal(normalizeSettings({ language }).language, 'auto')
+test('language accepts only auto and supported language codes', () => {
+  for (const language of ['auto', 'ko', 'en', 'zh', 'ja', 'es', 'pt', 'fr']) assert.equal(normalizeSettings({ language }).language, language)
+  for (const language of [undefined, null, '', 'Korean', 'ko_KR', 'fr-CA', true, 1]) assert.equal(normalizeSettings({ language }).language, 'auto')
 })
 test('defaults are deeply independent after normalization', () => {
   for (const value of [undefined, null, false, 'bad', 7, [], {}]) assert.deepEqual(normalizeSettings(value), DEFAULTS)

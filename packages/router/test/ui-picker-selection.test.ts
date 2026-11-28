@@ -1047,6 +1047,25 @@ test('a mode conflict retries only that mode, preserving another window\'s edit,
   assert.deepEqual(h.writes[1]!.settings.modes, [{ id: 'b', name: 'Remote B' }, { id: 'a', name: 'Local A' }, { id: 'remote', name: 'Remote' }, { id: 'new', name: 'New' }]);
 });
 
+test('dashboard marks an intentional switch to Auto, not another setting saved in Auto', async () => {
+  for (const language of ['fr', 'auto']) {
+    const state = { base: { language, keepWarm: true }, settings: { language: 'auto', keepWarm: false }, revision: 4 };
+    const writes: unknown[] = [];
+    await new Function('modState', 'writes', `
+      const clone = value => JSON.parse(JSON.stringify(value));
+      let modSaving = false, modSaveAgain = false, modSaveTimer = null, modWrites = 0;
+      const modRefresh = () => {}, modAdopt = () => {}, modStatus = () => {}, t = key => key;
+      const api = async (_url, options) => {
+        const sent = JSON.parse(options.body); writes.push(sent);
+        return { settings: sent.settings, revision: 5 };
+      };
+      ${dashboardBlock('async function saveMod(', 'async function loadMod(')}
+      return saveMod();
+    `)(state, writes);
+    assert.deepEqual(writes, [{ schemaVersion: 2, settings: state.settings, revision: 4, ...(language === 'fr' ? { resetLanguage: true } : {}) }]);
+  }
+});
+
 test('config revision conflicts re-read and reapply only this save; legacy routers keep raw PUTs', async () => {
   for (const versioned of [true, false]) {
     const original = saveFixture(); if (versioned) original.configRevision = 'revision-1';

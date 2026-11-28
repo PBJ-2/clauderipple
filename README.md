@@ -356,9 +356,10 @@ you map go to your provider, everything else goes to Anthropic byte for byte.
   worker's first request fell from 33k to 9k tokens.
 - **Made for people who don't want a terminal.** Provider presets with one-click
   connection tests and model discovery, drop-down model mapping, auto-save, a UI in
-  English, Korean, Chinese, Japanese, Spanish and Portuguese. A menu-bar app that carries its own runtime and sets itself up on
-  first launch, with no administrator rights. When something breaks, Status names the
-  problem and its fix, and the repair screen works while the router is down.
+  English, Korean, Chinese, Japanese, Spanish, Portuguese and French. A menu-bar app that
+  carries its own runtime and sets itself up on first launch, with no administrator rights.
+  When something breaks, Status names the problem and its fix, and the repair screen works
+  while the router is down.
 
 <p align="center">
   <img src="docs/media/mapping.png" width="880" alt="Model mapping: which model answers for each Claude name, with per-model reasoning effort">

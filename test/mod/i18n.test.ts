@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { STRINGS, debugText, langFrom, t } from '../../packages/mod/hooks/i18n.ts'
+import { STRINGS, debugText, langFrom, langFromEnv, t } from '../../packages/mod/hooks/i18n.ts'
 import type { Key, Lang } from '../../packages/mod/hooks/i18n.ts'
 import { formatStats, emptyStats } from '../../packages/mod/hooks/stats.ts'
 import { clip, displayWidth } from '../../packages/mod/hooks/ui/theme.ts'
@@ -13,16 +13,26 @@ test('langFrom recognizes supported locale tags and native language names', () =
     ja: ['ja', 'ja_JP', 'Japanese', '日本語'],
     es: ['es', 'es_ES', 'Spanish', 'Español'],
     pt: ['pt', 'pt_BR', 'Portuguese', 'Português'],
+    fr: ['fr', 'fr_FR', 'fr-CA', 'fr_BE.UTF-8', 'fr@euro', 'FR_ch', 'French', 'Français', 'francais', ' fr_FR.UTF-8 '],
   }
   for (const [lang, values] of Object.entries(cases)) for (const value of values) assert.equal(langFrom(value), lang, value)
-  for (const value of [undefined, '', ' ', 'auto', 'C', 'C.UTF-8', 'POSIX', 'fr_FR', 'korean-ish', 'constructor']) assert.equal(langFrom(value), undefined)
+  for (const value of [undefined, '', ' ', 'auto', 'C', 'C.UTF-8', 'POSIX', 'fra', 'frisian', 'french-ish', 'korean-ish', 'constructor']) assert.equal(langFrom(value), undefined)
+})
+
+test('auto language honors the first configured POSIX message locale', async () => {
+  const resolve = (env: Record<string, string>) => langFromEnv(async name => env[name])
+  assert.equal(await resolve({ LC_ALL: 'en_US.UTF-8', LANG: 'fr_FR.UTF-8' }), 'en')
+  assert.equal(await resolve({ LC_ALL: '', LC_MESSAGES: 'fr_CA.UTF-8', LANG: 'en_US.UTF-8' }), 'fr')
+  assert.equal(await resolve({ LC_ALL: 'C.UTF-8', LC_MESSAGES: 'fr_CA.UTF-8', LANG: 'fr_FR.UTF-8' }), 'en')
+  assert.equal(await resolve({ LANG: 'fr_FR.UTF-8' }), 'fr')
+  assert.equal(await resolve({}), 'en')
 })
 
 test('every table matches English in keys, placeholders and edge whitespace', () => {
   const english = STRINGS.en
   const placeholders = (text: string) => (text.match(/\{\w+\}/g) ?? []).sort()
   const edges = (text: string) => [/^\s*/.exec(text)![0], /\s*$/.exec(text)![0]]
-  for (const lang of ['ko', 'zh', 'ja', 'es', 'pt'] as const) {
+  for (const lang of ['ko', 'zh', 'ja', 'es', 'pt', 'fr'] as const) {
     const table = STRINGS[lang]
     assert.notEqual(table, english, lang)
     assert.deepEqual(Object.keys(table).sort(), Object.keys(english).sort(), lang)
@@ -57,6 +67,29 @@ test('time units are localized with their placeholders', () => {
   assert.equal(t('ja', 'units.minSec', { m: 4, s: '05' }), '4分05秒')
   assert.equal(t('zh', 'units.hourMin', { h: 1, m: '02' }), '1小时02分')
   assert.equal(t('es', 'units.seconds', { n: '2.1' }), '2.1 s')
+  assert.equal(t('fr', 'units.minutes', { n: 41 }), '41 min')
+  assert.equal(t('fr', 'units.days', { n: 3 }), '3 j')
+  assert.equal(t('fr', 'units.hourMin', { h: 1, m: '02' }), '1 h 02 min')
+  assert.equal(t('fr', 'units.dayHour', { d: 2, h: 5 }), '2 j 5 h')
+  assert.equal(t('fr', 'units.clockHours'), '24')
+})
+
+test('French keeps its typography, vocabulary and interpolation', () => {
+  const NB = ' '
+  assert.equal(t('fr', 'band.hit', { percent: 12 }), `cache 12${NB}%`)
+  assert.equal(t('fr', 'alerts.hotTitle', { window: '5 h', percent: 87 }), `Limite 5 h à 87${NB}%`)
+  assert.equal(t('fr', 'band.limitCaption', { window: 'hebdomadaire', save: t('fr', 'band.saveCaption') }), 'limite hebdomadaire · ÉCONOMIE')
+  assert.equal(t('fr', 'limits.date', { weekday: 'jeu.', month: 'oct.', day: 30, time: '15:35' }), 'jeu. 30 oct., 15:35')
+  assert.equal(t('fr', 'band.modeTip', { name: 'Rapide' }), `Le mode «${NB}Rapide${NB}» est actif${NB}: les workers le suivent. Modifiez-le dans les paramètres rapides.`)
+  assert.match(t('fr', 'alerts.coldBody', { minutes: 7, tokens: '120k' }), /7 min d’inactivité, les 120k jetons/)
+  assert.equal(t('fr', 'settings.haikuFallback'), 'bascule sur Haiku')
+  assert.equal(t('fr', 'agents.fallback', { reason: 'quota' }), `▲ modèle de secours utilisé${NB}: quota`)
+  // A model-facing contract keeps its literal tokens whatever the language around it.
+  assert.ok(t('fr', 'workers.noReason', { name: 'x' }).includes('"Model reason: rule <fichier> — <la règle>"'))
+  for (const [key, text] of Object.entries(STRINGS.fr)) {
+    assert.ok(!text.includes("'"), 'straight apostrophe in ' + key)
+    assert.ok(!/ [:;?!%]/.test(text), 'breakable space before punctuation in ' + key)
+  }
 })
 
 test('the mod carries no affiliation line', () => {
@@ -81,7 +114,7 @@ test('t falls back to English then the key, preserves missing variables and subs
 
 test('debug localizes nested labels without changing diagnostic values', () => {
   const value = { pick: { effort: 'high', why: 'model reason' }, lastRequest: { model: 'gpt-6.1-sol', sentEffort: 'high' }, unknown: 'unchanged' }
-  for (const lang of ['ko', 'zh', 'ja', 'es', 'pt'] as const) {
+  for (const lang of ['ko', 'zh', 'ja', 'es', 'pt', 'fr'] as const) {
     const label = (key: Key) => STRINGS[lang][key]
     assert.deepEqual(JSON.parse(debugText(lang, value)), {
       [label('commands.debugPick')]: { [label('commands.debugEffort')]: 'high', [label('commands.debugWhy')]: 'model reason' },

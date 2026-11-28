@@ -226,7 +226,7 @@ test("a save without idleCompact (a mod from before it existed) keeps the stored
 test("a save without bandLimits (a mod from before it existed) keeps the stored choice; one that names it, [] included, replaces it", () => {
   const t = withSettingsFile({ model: "opus" });
   try {
-    assert.deepEqual(KEPT_WHEN_ABSENT, ["idleCompact", "bandLimits"]);
+    assert.deepEqual(KEPT_WHEN_ABSENT, ["idleCompact", "bandLimits", "language"]);
     const chosen = [{ provider: "chatgpt", show: "accounts", accounts: ["fa928bf4"] }, { provider: "opencode-go", show: "off" }];
     const save = (settings: Record<string, unknown>) => writeModSettings({ schemaVersion: MOD_SETTINGS_SCHEMA_VERSION, settings }, t.dir).current.settings;
     assert.deepEqual(save({ bandLimits: chosen, idleCompact: false }).bandLimits, chosen);

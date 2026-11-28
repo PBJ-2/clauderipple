@@ -2610,7 +2610,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         try { parsed = JSON.parse(bytes.toString("utf8")); }
         catch { throw new ModSettingsInputError("invalid JSON"); }
         validateSettingsSchema(parsed);
-        const body = parsed as { settings?: unknown; compactAt?: unknown };
+        const body = parsed as { settings?: unknown; compactAt?: unknown; resetLanguage?: unknown };
         // The compaction point lives in Claude Code's own settings.json, not the mod's store: a
         // dashboard save writes the same key `/autocompact` does, or removes it for the default.
         if (body && typeof body === "object" && body.compactAt !== undefined) {
@@ -2621,8 +2621,9 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         if (body && typeof body === "object" && body.settings && typeof body.settings === "object" && !Array.isArray(body.settings)) {
           // Checked before normalizing, which would drop a credential field the check is there to refuse.
           validateSettings(body.settings);
-          // Normalizing fills a missing `idleCompact` or `bandLimits` with the default; an older mod's
-          // save leaves it out, and writeModSettings keeps the stored value only while the key stays absent.
+          // Keep omitted fields omitted so the store can preserve them for older writers.
+          // Do not turn an invalid or omitted language into a deliberate reset by normalizing it.
+          if (body.settings.language !== "auto") delete body.resetLanguage;
           const absent = KEPT_WHEN_ABSENT.filter(key => !Object.hasOwn(body.settings as object, key));
           const normalized: Partial<Settings> = await withFilledLadder(deps, scores, normalizeSettings(body.settings));
           for (const key of absent) delete normalized[key];

@@ -684,8 +684,32 @@ test("admin mod-settings returns full defaults before storage, normalizes writes
     const file = path.join(home, "mod-settings.json");
     assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { settings, revision: 1, stored: true });
     if (process.platform !== "win32") assert.equal(fs.statSync(file).mode & 0o777, 0o600);
-    assert.equal((await (await putModSettings(port, { settings })).json() as ModSettingsSnapshot).revision, 2);
+    const french = await putModSettings(port, { settings: { ...settings, language: "fr" }, revision: 1 });
+    assert.equal(french.status, 200);
+    const updated = { ...snapshot, revision: 2, settings: { ...settings, language: "fr" } };
+    assert.deepEqual(await french.json(), updated);
+    assert.deepEqual(await (await fetch(`${base()}:${port}/api/mod-settings`)).json(), updated);
     assert.deepEqual(fs.readdirSync(home).filter(name => /mod-settings.*(tmp|lock)/.test(name)), []);
+  });
+});
+
+test("admin mod-settings preserves French in legacy saves but accepts a deliberate language change", async () => {
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const put = async (settings: unknown, revision: number, resetLanguage?: boolean) => {
+      const response = await putModSettings(port, { settings, revision, resetLanguage });
+      assert.equal(response.status, 200);
+      return (await response.json() as ModSettingsSnapshot).settings;
+    };
+    const french = await put({ language: "fr", keepWarm: true }, 0);
+    // An older mod normalizes the read snapshot to Auto before it saves an unrelated toggle.
+    const legacy = await put({ ...french, language: "auto", keepWarm: false }, 1);
+    assert.equal(legacy.language, "fr");
+    assert.equal(legacy.keepWarm, false);
+    assert.equal((await put({ language: "invalid" }, 2, true)).language, "fr");
+    assert.equal((await put({ keepWarm: true }, 3)).language, "fr");
+    assert.equal((await put({ language: "auto" }, 4, true)).language, "auto");
+    assert.equal((await put({ language: "fr" }, 5)).language, "fr");
+    assert.equal((await put({ language: "ko" }, 6)).language, "ko");
   });
 });
 
