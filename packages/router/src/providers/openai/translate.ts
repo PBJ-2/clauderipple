@@ -583,16 +583,19 @@ export class OpenAiStreamMapper {
   }
 
   private toolFor(index: number, delta: { id?: unknown; function?: { name?: unknown; arguments?: unknown } }): ToolOutputBlock {
+    // Later deltas for the same call may repeat the id and name as "" (OpenCode Go's DeepSeek does,
+    // #187). An empty value is no value: it must not replace the one already seen, because Anthropic
+    // refuses a tool_use whose name or id is empty and Claude Code cannot run a nameless tool.
+    const id = typeof delta.id === "string" && delta.id.length > 0 ? delta.id : undefined;
+    const name = typeof delta.function?.name === "string" && delta.function.name.length > 0 ? this.restore(delta.function.name) : undefined;
     let tool = this.content.find((block): block is ToolOutputBlock => block.type === "tool_use" && block.index === index);
     if (!tool) {
-      const id = typeof delta.id === "string" ? delta.id : `call_${crypto.randomBytes(8).toString("hex")}`;
-      const name = typeof delta.function?.name === "string" ? this.restore(delta.function.name) : "tool";
-      tool = { type: "tool_use", id, name, input: {}, args: "", index };
+      tool = { type: "tool_use", id: id ?? `call_${crypto.randomBytes(8).toString("hex")}`, name: name ?? "tool", input: {}, args: "", index };
       this.content.push(tool);
       this.sawTool = true;
     }
-    if (typeof delta.id === "string") tool.id = delta.id;
-    if (typeof delta.function?.name === "string") tool.name = this.restore(delta.function.name);
+    if (id !== undefined) tool.id = id;
+    if (name !== undefined) tool.name = name;
     return tool;
   }
 

@@ -748,6 +748,24 @@ test("Chat interleaved parallel call fragments emit one complete block per index
   assert.deepEqual((mapper.message().content as { id: string; input: unknown }[]).map(({ id, input }) => ({ id, input })), expected);
 });
 
+test("Chat tool deltas with an empty name or id never replace the ones already seen (#187)", () => {
+  const sequences = [
+    // The real name and id first, then repeated as "" (OpenCode Go's DeepSeek).
+    [{ index: 0, id: "call_1", function: { name: "Read", arguments: '{"path":' } }, { index: 0, id: "", function: { name: "", arguments: '"a"}' } }],
+    // An empty name and id first, the real ones after.
+    [{ index: 0, id: "", function: { name: "", arguments: '{"path":' } }, { index: 0, id: "call_1", function: { name: "Read", arguments: '"a"}' } }],
+  ];
+  for (const calls of sequences) {
+    const mapper = new OpenAiStreamMapper("deepseek");
+    const events = calls.flatMap((call) => mapper.feed({ choices: [{ delta: { tool_calls: [call] } }] }, "chat"));
+    events.push(...mapper.feed({ choices: [{ finish_reason: "tool_calls" }] }, "chat"), ...mapper.finish());
+    const started = events.filter((e) => e.event === "content_block_start").map((e) => e.data.content_block as { type: string; id: string; name: string });
+    assert.deepEqual(started.map(({ type, id, name }) => ({ type, id, name })), [{ type: "tool_use", id: "call_1", name: "Read" }]);
+    const block = (mapper.message().content as { type: string; id: string; name: string; input: unknown }[])[0];
+    assert.deepEqual({ id: block?.id, name: block?.name, input: block?.input }, { id: "call_1", name: "Read", input: { path: "a" } });
+  }
+});
+
 test("token-limited tool calls finish as max_tokens on both OpenAI wires", () => {
   for (const wire of ["chat", "responses"] as const) {
     const mapper = new OpenAiStreamMapper("test");
