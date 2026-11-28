@@ -108,7 +108,18 @@ The host name is validated and only ever passed as its own argv element.
 
 `autoModeClassifier: { provider, model, effort }` selects the inference target for
 Claude Code's tool-free security-monitor system requests. It is opt-in: without
-this setting, native routing remains unchanged. For example:
+this setting, native routing remains unchanged.
+
+When those separate requests start: newer Claude Code asks Anthropic's server to
+review auto-mode actions inside the session's own model requests, and falls back to
+its own classifier requests for the rest of the session once a response completes
+with no review results (code.claude.com/docs/en/permission-modes, "Server-side
+classifier review", read 2026-11-28). A translated provider cannot return those
+results, so the first non-Claude subagent turn very likely flips the session (#190:
+measured 0 → 1 classifier request right after a DeepSeek subagent, none after an
+Anthropic one; the cause itself is inferred, not measured). The router must not
+fabricate review results: that would report actions Anthropic never saw as reviewed.
+This setting only chooses where the fallback requests go. For example:
 
 ```json
 "autoModeClassifier": {"provider": "codex", "model": "gpt-6-luna", "effort": "low"}
